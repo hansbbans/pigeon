@@ -1,0 +1,17 @@
+name = "pigeon"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- D1 Database ---
+# After creating the database with `wrangler d1 create pigeon-db`,
+# paste the database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "pigeon-db"
+database_id = "YOUR_DATABASE_ID_HERE"
+
+# --- Environment Variables ---
+[vars]
+BASE_URL = "https://feeds.yourdomain.com"
+ITEMS_PER_FEED = "50"
