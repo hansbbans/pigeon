@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS feeds (
   last_item_at TEXT,
   item_count INTEGER DEFAULT 0,
   is_active INTEGER DEFAULT 1,
-  custom_title TEXT
+  custom_title TEXT,
+  category TEXT
 );
 
 -- Newsletter items
@@ -33,12 +34,15 @@ CREATE TABLE IF NOT EXISTS items (
   received_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   content_size INTEGER,
+  is_read INTEGER DEFAULT 0,
+  is_starred INTEGER DEFAULT 0,
   FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_feed_key_date ON items(feed_key, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_received_at ON items(received_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
+CREATE INDEX IF NOT EXISTS idx_items_unread ON items(is_read, feed_key);
 
 -- Custom parsing rules (Phase 4)
 CREATE TABLE IF NOT EXISTS parsing_rules (
@@ -53,3 +57,21 @@ CREATE TABLE IF NOT EXISTS parsing_rules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_feed_key ON parsing_rules(feed_key, priority DESC);
+
+-- Routing rules: override feed key based on subject/sender patterns
+CREATE TABLE IF NOT EXISTS routing_rules (
+  id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  source_feed_key TEXT NOT NULL,
+  match_field TEXT NOT NULL DEFAULT 'subject',    -- 'subject', 'from_name', 'from_email'
+  match_type TEXT NOT NULL DEFAULT 'contains',    -- 'contains', 'starts_with', 'ends_with', 'regex'
+  match_pattern TEXT NOT NULL,
+  target_feed_key TEXT NOT NULL,
+  target_display_name TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (match_field IN ('subject', 'from_name', 'from_email')),
+  CHECK (match_type IN ('contains', 'starts_with', 'ends_with', 'regex'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_routing_rules_source ON routing_rules(source_feed_key, is_active, priority DESC);

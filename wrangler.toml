@@ -9,9 +9,11 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "pigeon-db"
-database_id = "YOUR_DATABASE_ID_HERE"
+database_id = "65ec27b1-54fa-4c5f-ba3c-577ea5e334ad"
 
 # --- Environment Variables ---
 [vars]
-BASE_URL = "https://feeds.yourdomain.com"
+BASE_URL = "https://hanscho.com"
 ITEMS_PER_FEED = "50"
+TRUSTED_FORWARDER = "hans.cho@gmail.com"
+# API_PASSWORD set via `wrangler secret put API_PASSWORD`

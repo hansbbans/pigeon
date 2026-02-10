@@ -77,11 +77,14 @@ Newsletter ESP ──► MX Records ──► Cloudflare Email Routing
 - **Deliverable:** Production-grade reliability
 
 ### Phase 6: Future (Backlog)
+- [ ] Forwarded email unwrapping — detect emails forwarded from a trusted sender (e.g. `hans.cho@gmail.com`), parse the original sender/subject/content from the forwarded body, and key the feed to the original sender instead
 - [ ] Web UI for feed management
 - [ ] Readability-mode toggle per feed
 - [ ] Email forwarding rules (filter out promos)
 - [ ] Webhook notifications on new items
 - [ ] Full-text search across all newsletters
+- [ ] Combined feeds — single Atom endpoint merging multiple feed keys into one Reeder source
+- [ ] RSS polling — ingest traditional RSS/Atom feeds via Cron Trigger, store items in D1, mix with newsletters in combined feeds
 
 ---
 

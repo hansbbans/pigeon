@@ -71,4 +71,20 @@
 
 ---
 
+## ADR-006: Subject-based routing rules for same-sender newsletters
+
+**Decision:** Add a `routing_rules` D1 table that overrides feed key resolution when an email field matches a pattern.
+
+**Rationale:**
+- TLDR sends multiple newsletters (TLDR, TLDR AI, TLDR Web Dev) from the same sender address
+- ADR-002 anticipated this: "Can be handled later with subject-line rules"
+- Rules are checked after `resolveFeedKey()` — zero impact on emails without matching rules
+- Supports contains, starts_with, ends_with, and regex match types
+- Priority ordering with first-match-wins semantics
+- Rules reference source feed key, not sender email, keeping the abstraction consistent
+
+**Tradeoff:** Extra D1 query per email (one SELECT on routing_rules). Negligible for our volume. Rules are evaluated in-Worker, no external service needed.
+
+---
+
 *Append new ADRs here as decisions are made during development.*
