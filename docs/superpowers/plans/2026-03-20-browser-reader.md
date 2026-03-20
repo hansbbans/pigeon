@@ -14,10 +14,14 @@
 
 - Create: `src/browser-app.ts`
   - Serves the browser app shell and any inline CSS/JS helpers.
+- Create: `src/browser-app-client.ts`
+  - Holds pure browser-reader helper logic that can be tested without a DOM harness.
 - Create: `src/status.ts`
   - Authenticates `/app/status` and returns aggregate JSON status.
 - Create: `test/browser-app.test.ts`
   - Covers `/app` and `/app/status` route behavior plus status aggregation.
+- Create: `test/browser-app-client.test.ts`
+  - Covers auth parsing, feed sorting, paging, chunking, and preview selection logic.
 - Modify: `src/index.ts`
   - Adds `/app` and `/app/status` routes.
 - Modify: `docs/superpowers/specs/2026-03-20-browser-reader-design.md`
@@ -146,7 +150,9 @@ git commit -m "feat: add browser app status endpoint"
 
 **Files:**
 - Modify: `test/browser-app.test.ts`
+- Create: `test/browser-app-client.test.ts`
 - Modify: `src/browser-app.ts`
+- Create: `src/browser-app-client.ts`
 
 - [ ] **Step 1: Write failing shell tests**
 
@@ -159,6 +165,13 @@ Add tests that assert the HTML shell includes:
 - reader panel marker
 - settings/status panel marker
 - a client config payload containing `baseUrl`
+
+Add pure helper tests covering:
+
+- parsing a successful `ClientLogin` response into the auth token
+- rejecting malformed `ClientLogin` responses
+- clearing auth state on logout
+- returning to login state when a `401` is encountered
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
@@ -188,6 +201,10 @@ In `src/browser-app.ts`:
 
 Keep all app chrome rendered as plain text content. Do not render article HTML in the app shell.
 
+In `src/browser-app-client.ts`:
+
+- add pure helpers for auth token parsing and auth-state transitions so the privacy-critical flow is testable without a browser harness
+
 - [ ] **Step 4: Run the targeted tests and verify they pass**
 
 Run:
@@ -203,7 +220,7 @@ Expected:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/browser-app.ts test/browser-app.test.ts
+git add src/browser-app.ts src/browser-app-client.ts test/browser-app.test.ts test/browser-app-client.test.ts
 git commit -m "feat: add browser reader shell"
 ```
 
@@ -211,19 +228,26 @@ git commit -m "feat: add browser reader shell"
 
 **Files:**
 - Modify: `src/browser-app.ts`
+- Modify: `src/browser-app-client.ts`
 - Modify: `test/browser-app.test.ts`
+- Modify: `test/browser-app-client.test.ts`
 
-- [ ] **Step 1: Write failing behavior tests for client wiring markers**
+- [ ] **Step 1: Write failing behavior tests for browser reader helpers**
 
-Because there is no browser test harness in this repo, test the generated HTML/script contract. Cover:
+Add pure helper tests covering:
 
-- script contains the `/reader/api/0/subscription/list` path
-- script contains the `/reader/api/0/unread-count` path
-- script contains the `/reader/api/0/stream/items/ids` path
-- script contains the `/reader/api/0/stream/items/contents` path
-- script contains chunk sizes `50` for ids and `20` for content loads
-- script renders article HTML via iframe `srcdoc`
-- script uses `sandbox=""`
+- sorting subscriptions alphabetically by title
+- building the `All items`, `Unread`, and single-feed views
+- limiting initial id fetches to 50
+- selecting content loads in chunks of 20
+- not duplicating already loaded content ids
+- rendering list previews only from content that has already been loaded
+
+Keep one light shell-contract test in `test/browser-app.test.ts` for:
+
+- script references the reused API routes
+- iframe rendering uses `srcdoc`
+- iframe uses `sandbox=""`
 
 - [ ] **Step 2: Run the targeted tests and verify they fail**
 
@@ -235,7 +259,7 @@ npm test -- test/browser-app.test.ts
 
 Expected:
 
-- contract tests fail because the shell does not yet include the reader logic
+- helper and shell-contract tests fail because the reader logic does not exist yet
 
 - [ ] **Step 3: Implement the browser reader logic**
 
@@ -250,6 +274,15 @@ In `src/browser-app.ts`, add client-side behavior that:
 - loads full article content into a sandboxed iframe with `sandbox=""`
 - loads status JSON for the Settings view
 
+In `src/browser-app-client.ts`, add pure helpers that the inline script calls for:
+
+- auth parsing and invalidation
+- feed sorting
+- view selection
+- incremental id paging
+- content chunk selection
+- preview extraction from loaded items
+
 V1 remains read-only:
 
 - do not call mark-read or star routes
@@ -260,12 +293,12 @@ V1 remains read-only:
 Run:
 
 ```bash
-npm test -- test/browser-app.test.ts
+npm test -- test/browser-app.test.ts test/browser-app-client.test.ts
 ```
 
 Expected:
 
-- all browser app contract tests pass
+- all browser app helper and shell-contract tests pass
 
 - [ ] **Step 5: Run the full suite**
 
@@ -284,7 +317,7 @@ Expected:
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/browser-app.ts test/browser-app.test.ts
+git add src/browser-app.ts src/browser-app-client.ts test/browser-app.test.ts test/browser-app-client.test.ts
 git commit -m "feat: add browser reader experience"
 ```
 
@@ -323,10 +356,15 @@ Then manually check:
 
 - `/app`
 - login flow
+- bad password rejection
+- logout
+- forced `401` recovery back to login if practical
 - feeds list
 - article list
 - article reader
 - settings status panel
+- desktop width layout
+- narrow mobile-sized viewport layout
 
 - [ ] **Step 3: Commit any final spec or polish changes**
 
