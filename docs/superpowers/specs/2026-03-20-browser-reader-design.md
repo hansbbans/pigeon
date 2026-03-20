@@ -306,8 +306,10 @@ For V1, full article rendering should be isolated from the app shell. A sandboxe
 
 Required rules for V1:
 
-- render article HTML only inside an iframe with a restrictive sandbox and no script permissions
+- render article HTML only inside an iframe with `sandbox=""`
+- do not grant `allow-scripts`
 - do not grant `allow-same-origin`
+- do not grant top-navigation, popups, or form submission capabilities
 - render feed titles, timestamps, previews, and other app chrome with text insertion, not raw HTML insertion
 
 V1 will not rewrite article HTML to remove remote images or tracking pixels. That is an accepted limitation for the first version and should be documented in implementation notes.
