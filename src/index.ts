@@ -3,6 +3,8 @@ import { handleIncomingEmail } from './email-handler';
 import { generateAtomFeed } from './feed';
 import { generateOpml } from './opml';
 import { handleGreaderRequest } from './greader';
+import { handleCronTrigger } from './cron-handler';
+import { handleSubscribe } from './subscribe';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -15,6 +17,10 @@ export default {
 
 		if (path === '/feeds/opml') {
 			return handleOpml(env);
+		}
+
+		if (path === '/feeds/subscribe' && request.method === 'POST') {
+			return handleSubscribe(request, env);
 		}
 
 		if (path === '/feeds') {
@@ -43,6 +49,10 @@ export default {
 
 	async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
 		await handleIncomingEmail(message, env);
+	},
+
+	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+		await handleCronTrigger(env);
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -83,13 +93,14 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	);
 
 	const { results: items } = await env.DB.prepare(
-		'SELECT id, subject, html_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
+		'SELECT id, subject, html_content, text_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
 	)
 		.bind(feedKey, limit)
 		.all<{
 			id: string;
 			subject: string;
 			html_content: string;
+			text_content: string | null;
 			from_name: string | null;
 			from_email: string | null;
 			received_at: string;
@@ -109,12 +120,15 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 async function handleFeedList(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
-		`SELECT feed_key, display_name, from_email, item_count, last_item_at, custom_title, category
+		`SELECT feed_key, display_name, from_email, source_type, source_url, icon_url, item_count, last_item_at, custom_title, category
 		 FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC`,
 	).all<{
 		feed_key: string;
 		display_name: string;
 		from_email: string | null;
+		source_type: string;
+		source_url: string | null;
+		icon_url: string | null;
 		item_count: number;
 		last_item_at: string | null;
 		custom_title: string | null;
@@ -124,7 +138,10 @@ async function handleFeedList(env: Env): Promise<Response> {
 	const feeds = results.map((f) => ({
 		feed_key: f.feed_key,
 		title: f.custom_title || f.display_name,
+		source_type: f.source_type,
+		source_url: f.source_url,
 		from_email: f.from_email,
+		icon_url: f.icon_url,
 		item_count: f.item_count,
 		last_item_at: f.last_item_at,
 		category: f.category,

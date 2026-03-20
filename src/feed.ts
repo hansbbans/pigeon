@@ -1,3 +1,5 @@
+import { createPreviewText } from './preview-text';
+
 interface FeedMeta {
 	feed_key: string;
 	display_name: string;
@@ -9,6 +11,7 @@ interface FeedItem {
 	id: string;
 	subject: string;
 	html_content: string;
+	text_content?: string | null;
 	from_name: string | null;
 	from_email: string | null;
 	received_at: string;
@@ -37,8 +40,13 @@ export function generateAtomFeed(
 	const title = feed.custom_title || feed.display_name;
 
 	const entries = items
-		.map(
-			(item) => `  <entry>
+		.map((item) => {
+			const summary = createPreviewText({
+				textContent: item.text_content,
+				htmlContent: item.html_content,
+			});
+
+			return `  <entry>
     <title>${escapeXml(item.subject)}</title>
     <id>urn:uuid:${item.id}</id>
     <updated>${item.received_at}</updated>
@@ -46,9 +54,10 @@ export function generateAtomFeed(
     <author>
       <name>${escapeXml(item.from_name || feed.display_name)}</name>
     </author>
+    ${summary ? `<summary type="text">${escapeXml(summary)}</summary>` : ''}
     <content type="html">${wrapCDATA(item.html_content)}</content>
-  </entry>`,
-		)
+  </entry>`;
+		})
 		.join('\n');
 
 	return `<?xml version="1.0" encoding="UTF-8"?>

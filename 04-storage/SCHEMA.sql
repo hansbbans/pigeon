@@ -1,24 +1,32 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v1
+-- D1 Schema v3
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '3');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
   feed_key TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   from_email TEXT,
+  source_type TEXT NOT NULL DEFAULT 'email',
+  source_url TEXT,
+  fetch_interval_minutes INTEGER DEFAULT 60,
+  last_fetched_at TEXT,
+  fetch_error TEXT,
+  etag TEXT,
+  last_modified TEXT,
   first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_item_at TEXT,
   item_count INTEGER DEFAULT 0,
   is_active INTEGER DEFAULT 1,
   custom_title TEXT,
-  category TEXT
+  category TEXT,
+  icon_url TEXT
 );
 
 -- Newsletter items
@@ -43,6 +51,9 @@ CREATE INDEX IF NOT EXISTS idx_items_feed_key_date ON items(feed_key, received_a
 CREATE INDEX IF NOT EXISTS idx_items_received_at ON items(received_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
 CREATE INDEX IF NOT EXISTS idx_items_unread ON items(is_read, feed_key);
+CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch
+  ON feeds(source_type, last_fetched_at)
+  WHERE source_type = 'rss' AND is_active = 1;
 
 -- Custom parsing rules (Phase 4)
 CREATE TABLE IF NOT EXISTS parsing_rules (

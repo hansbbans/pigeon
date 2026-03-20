@@ -17,3 +17,8 @@ BASE_URL = "https://hanscho.com"
 ITEMS_PER_FEED = "50"
 TRUSTED_FORWARDER = "hans.cho@gmail.com"
 # API_PASSWORD set via `wrangler secret put API_PASSWORD`
+
+# --- Cron Triggers ---
+# Hourly RSS feed refresh
+[triggers]
+crons = ["0 * * * *"]

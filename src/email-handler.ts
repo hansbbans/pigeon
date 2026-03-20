@@ -2,6 +2,7 @@ import PostalMime from 'postal-mime';
 import type { Env } from './types';
 import { resolveFeedKey, resolveFeedDisplayName } from './normalize';
 import { applyRoutingRules } from './routing-rules';
+import { getFaviconForEmail } from './favicon';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
 
@@ -145,11 +146,12 @@ export async function handleIncomingEmail(
 		// 6. D1 batch: upsert feed + insert item
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
+	const iconUrl = getFaviconForEmail(fromAddress);
 
 		await env.DB.batch([
 			env.DB.prepare(
-				`INSERT INTO feeds (feed_key, display_name, from_email, first_seen_at, last_item_at, item_count)
-				 VALUES (?, ?, ?, ?, ?, 1)
+				`INSERT INTO feeds (feed_key, display_name, from_email, icon_url, first_seen_at, last_item_at, item_count)
+				 VALUES (?, ?, ?, ?, ?, ?, 1)
 				 ON CONFLICT(feed_key) DO UPDATE SET
 				   last_item_at = excluded.last_item_at,
 				   item_count = item_count + 1,
@@ -157,8 +159,9 @@ export async function handleIncomingEmail(
 				     WHEN excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%'
 				       THEN excluded.display_name
 				     ELSE feeds.display_name
-				   END`,
-			).bind(feedKey, displayName, fromAddress, now, receivedAt),
+			   END,
+			   icon_url = COALESCE(feeds.icon_url, excluded.icon_url)`,
+			).bind(feedKey, displayName, fromAddress, iconUrl, now, receivedAt),
 
 			env.DB.prepare(
 				`INSERT OR IGNORE INTO items (id, feed_key, from_name, from_email, subject, html_content, text_content, message_id, received_at, content_size)
