@@ -186,7 +186,15 @@ test('GET /app returns an HTML shell', async () => {
 
 	assert.equal(response.status, 200);
 	assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
-	assert.match(await response.text(), /id="app"/);
+	const html = await response.text();
+	assert.match(html, /id="app"/);
+	assert.match(html, /id="login-form"/);
+	assert.match(html, /id="logout-button"/);
+	assert.match(html, /id="feeds-panel"/);
+	assert.match(html, /id="articles-panel"/);
+	assert.match(html, /id="reader-panel"/);
+	assert.match(html, /id="settings-panel"/);
+	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
 });
 
 test('GET /app/ returns the same HTML shell as /app', async () => {
@@ -197,7 +205,10 @@ test('GET /app/ returns the same HTML shell as /app', async () => {
 
 	assert.equal(response.status, 200);
 	assert.equal(response.headers.get('Content-Type'), 'text/html; charset=utf-8');
-	assert.match(await response.text(), /id="app"/);
+	const html = await response.text();
+	assert.match(html, /id="app"/);
+	assert.match(html, /id="login-form"/);
+	assert.match(html, /id="logout-button"/);
 });
 
 test('GET /app/status requires auth', async () => {
