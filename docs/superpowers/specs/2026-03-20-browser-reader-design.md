@@ -65,7 +65,6 @@ Show:
 - feed title
 - optional favicon
 - unread count
-- last updated time
 
 Support:
 
@@ -73,16 +72,20 @@ Support:
 - showing an "All items" view
 - showing an "Unread" view
 
+Feed order in V1 should be alphabetical by title on the client side. The reused subscription endpoint does not provide a dependable display order, so the browser UI should not depend on database row order.
+
 ### Article List
 
 Show:
 
 - article title
 - short preview text
-- source name
+- feed title
 - timestamp
 
 Selecting an article loads its full content in the reader pane.
+
+In V1, the browser app is a passive viewer. Opening an article does not mark it read, star it, or otherwise change server-side state.
 
 ### Reader Pane
 
@@ -101,8 +104,9 @@ Add a Settings view or drawer inside the app.
 
 The Settings area should include a Status section showing:
 
-- current public base URL
-- health endpoint URL
+- configured `BASE_URL`
+- current app origin
+- health endpoint URL for the current app origin
 - schema version
 - total active feeds
 - email feed count
@@ -113,7 +117,7 @@ The Settings area should include a Status section showing:
 - newest item timestamp
 - newest email item timestamp
 - newest RSS item timestamp
-- most recent RSS fetch timestamp
+- most recent RSS fetch attempt timestamp
 - count of RSS feeds with current fetch errors
 - short list of failing RSS feeds with their last error
 
@@ -134,6 +138,11 @@ The browser app stores that token in `sessionStorage`.
 All authenticated browser requests send:
 
 - `Authorization: GoogleLogin auth=pigeon/<token>`
+
+The browser app should also provide:
+
+- a logout action that clears `sessionStorage`
+- automatic recovery on `401` responses by clearing the stored token and returning to the login screen
 
 ### Why This Approach
 
@@ -207,7 +216,7 @@ The system does not currently store exact heartbeat records for:
 
 So V1 status should use the best existing signals instead:
 
-- newest `last_fetched_at` for RSS activity
+- newest `last_fetched_at` for RSS fetch attempts
 - newest email-backed item timestamp for email activity
 
 If exact operator heartbeat is needed later, that should be a separate follow-up with explicit run tracking.
@@ -255,10 +264,22 @@ The client script should:
 - submit password to `ClientLogin`
 - store the token in `sessionStorage`
 - load subscriptions and unread counts
+- sort feeds alphabetically by title in the browser
 - load article ids for the selected view
-- batch-load article contents
+- fetch article contents in chunks instead of pulling everything at once
 - render the article list and article content
 - load the status JSON for Settings
+
+### Loading Rules
+
+To keep the first version low-risk and responsive:
+
+- fetch at most 50 item ids for the current view on initial load
+- fetch full contents for the first 20 visible items
+- fetch more item contents in chunks of 20 as the user scrolls or selects an unloaded item
+- render list previews only from content that has already been loaded
+
+This avoids loading a large number of full article bodies for the "All items" view up front.
 
 ## Security And Safety
 
@@ -282,6 +303,14 @@ Stored article HTML can include:
 - layout-breaking markup
 
 For V1, full article rendering should be isolated from the app shell. A sandboxed iframe is the safest default.
+
+Required rules for V1:
+
+- render article HTML only inside an iframe with a restrictive sandbox and no script permissions
+- do not grant `allow-same-origin`
+- render feed titles, timestamps, previews, and other app chrome with text insertion, not raw HTML insertion
+
+V1 will not rewrite article HTML to remove remote images or tracking pixels. That is an accepted limitation for the first version and should be documented in implementation notes.
 
 ### Token Storage
 
@@ -325,7 +354,7 @@ The current reader-compatible API is usable, but article list loading is two-ste
 1. request item ids
 2. request item contents
 
-That is acceptable for V1. If performance becomes a problem later, add a dedicated browser endpoint rather than overloading the current compatibility surface.
+That is acceptable for V1 as long as the browser only loads item contents in small chunks. If performance becomes a problem later, add a dedicated browser endpoint rather than overloading the current compatibility surface.
 
 ### Status Is Operationally Useful But Not Perfect
 
