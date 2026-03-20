@@ -29,7 +29,7 @@ export default {
 			return handleFeedList(env);
 		}
 
-		if (path === '/app') {
+		if (path === '/app' || path === '/app/') {
 			return new Response(renderBrowserAppHtml(env.BASE_URL), {
 				headers: { 'Content-Type': 'text/html; charset=utf-8' },
 			});
