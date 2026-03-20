@@ -1,5 +1,8 @@
+import { renderBrowserAppClientScript } from './browser-app-client';
+
 export function renderBrowserAppHtml(baseUrl: string): string {
 	const config = JSON.stringify({ baseUrl });
+	const sharedClientScript = renderBrowserAppClientScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -123,7 +126,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       .reader-grid {
         display: grid;
         gap: 1rem;
-        grid-template-columns: minmax(15rem, 18rem) minmax(18rem, 22rem) minmax(0, 1fr) minmax(15rem, 18rem);
+        grid-template-columns: minmax(15rem, 18rem) minmax(18rem, 22rem) minmax(0, 1fr);
       }
 
       .panel {
@@ -156,11 +159,27 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         background: var(--panel-strong);
       }
 
-      pre#settings-status {
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.82rem;
+      #settings-panel {
+        position: fixed;
+        top: 1.5rem;
+        right: 1.5rem;
+        width: min(22rem, calc(100vw - 3rem));
+        min-height: auto;
+        max-height: calc(100vh - 3rem);
+        overflow: auto;
+      }
+
+      #settings-panel h2 {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .secondary-button {
+        background: transparent;
+        color: var(--accent-strong);
+        border: 1px solid var(--border);
       }
 
       @media (max-width: 960px) {
@@ -177,6 +196,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
   <body>
     <script>
       window.__PIGEON_CONFIG__ = ${escapeScript(config)};
+    </script>
+    <script>
+      ${sharedClientScript}
     </script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
@@ -200,7 +222,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
             <p>Private browser reader</p>
             <h1>Pigeon</h1>
           </div>
-          <button id="logout-button" type="button">Log Out</button>
+          <div>
+            <button class="secondary-button" id="settings-button" type="button">Settings</button>
+            <button id="logout-button" type="button">Log Out</button>
+          </div>
         </header>
 
         <div class="reader-grid">
@@ -222,26 +247,32 @@ export function renderBrowserAppHtml(baseUrl: string): string {
             <h2>Reader</h2>
             <p class="panel-note">The full article reader is wired in the next task.</p>
           </article>
-
-          <aside class="panel" id="settings-panel">
-            <h2>Settings &amp; Status</h2>
-            <p class="status-meta">Status data will load after login.</p>
-            <pre id="settings-status">{}</pre>
-          </aside>
         </div>
       </section>
+
+      <aside class="panel hidden" id="settings-panel">
+        <h2>
+          <span>Settings</span>
+          <button class="secondary-button" id="close-settings-button" type="button">Close</button>
+        </h2>
+        <p class="status-meta">Status details and live settings data arrive in the next task.</p>
+      </aside>
     </div>
     <script>
       (() => {
         const config = window.__PIGEON_CONFIG__ || {};
-        const storageKey = 'pigeon.browser.auth';
+        const client = window.__PIGEON_BROWSER_CLIENT__;
+        const storageKey = client.AUTH_STORAGE_KEY;
         const loginScreen = document.getElementById('login-screen');
         const readerShell = document.getElementById('reader-shell');
         const loginForm = document.getElementById('login-form');
         const loginError = document.getElementById('login-error');
         const passwordInput = document.getElementById('password-input');
         const logoutButton = document.getElementById('logout-button');
-        const statusOutput = document.getElementById('settings-status');
+        const settingsButton = document.getElementById('settings-button');
+        const settingsPanel = document.getElementById('settings-panel');
+        const closeSettingsButton = document.getElementById('close-settings-button');
+        let session = client.createLoggedOutSession();
 
         function getStoredToken() {
           return window.sessionStorage.getItem(storageKey);
@@ -256,9 +287,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         }
 
         function setLoggedOut(message) {
+          session = client.createLoggedOutSession();
           clearStoredToken();
           loginScreen.classList.remove('hidden');
           readerShell.classList.add('hidden');
+          settingsPanel.classList.add('hidden');
           loginError.textContent = message || '';
         }
 
@@ -266,11 +299,6 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           loginError.textContent = '';
           loginScreen.classList.add('hidden');
           readerShell.classList.remove('hidden');
-        }
-
-        function extractToken(responseText) {
-          const match = responseText.match(/^Auth=pigeon\\/(.+)$/m);
-          return match ? match[1] : null;
         }
 
         async function login(password) {
@@ -288,37 +316,16 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           }
 
           const text = await response.text();
-          const token = extractToken(text);
+          const token = client.extractAuthToken(text);
           if (!token) {
             setLoggedOut('Could not start a session.');
             return false;
           }
 
+          session = client.createSessionFromToken(token);
           setStoredToken(token);
           setLoggedIn();
           return true;
-        }
-
-        async function loadStatus() {
-          const token = getStoredToken();
-          if (!token) {
-            setLoggedOut('');
-            return;
-          }
-
-          const response = await fetch('/app/status', {
-            headers: {
-              Authorization: 'GoogleLogin auth=pigeon/' + token,
-            },
-          });
-
-          if (response.status === 401) {
-            setLoggedOut('Session expired. Please sign in again.');
-            return;
-          }
-
-          const payload = await response.json();
-          statusOutput.textContent = JSON.stringify(payload, null, 2);
         }
 
         loginForm.addEventListener('submit', async (event) => {
@@ -326,7 +333,6 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           const ok = await login(passwordInput.value);
           if (ok) {
             passwordInput.value = '';
-            await loadStatus();
           }
         });
 
@@ -334,14 +340,24 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           setLoggedOut('');
         });
 
+        settingsButton.addEventListener('click', () => {
+          settingsPanel.classList.toggle('hidden');
+        });
+
+        closeSettingsButton.addEventListener('click', () => {
+          settingsPanel.classList.add('hidden');
+        });
+
         if (config.baseUrl) {
           document.documentElement.setAttribute('data-base-url', config.baseUrl);
         }
 
-        if (getStoredToken()) {
+        const existingToken = getStoredToken();
+        if (existingToken) {
+          session = client.createSessionFromToken(existingToken);
           setLoggedIn();
-          loadStatus().catch(() => setLoggedOut('Session expired. Please sign in again.'));
         } else {
+          session = client.applyUnauthorizedState(session);
           setLoggedOut('');
         }
       })();

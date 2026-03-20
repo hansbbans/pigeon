@@ -2,10 +2,12 @@ import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+	AUTH_STORAGE_KEY,
 	applyUnauthorizedState,
 	createLoggedOutSession,
 	createSessionFromToken,
 	extractAuthToken,
+	renderBrowserAppClientScript,
 } from '../src/browser-app-client';
 
 test('extractAuthToken parses the Auth token from a ClientLogin response', () => {
@@ -32,4 +34,12 @@ test('applyUnauthorizedState returns the login state on 401', () => {
 		applyUnauthorizedState(createSessionFromToken('secret-token')),
 		createLoggedOutSession(),
 	);
+});
+
+test('renderBrowserAppClientScript exposes the shared auth helpers for the shell', () => {
+	const script = renderBrowserAppClientScript();
+
+	assert.match(script, /window\.__PIGEON_BROWSER_CLIENT__/);
+	assert.match(script, /extractAuthToken/);
+	assert.match(script, new RegExp(AUTH_STORAGE_KEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });

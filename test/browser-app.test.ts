@@ -195,6 +195,9 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="reader-panel"/);
 	assert.match(html, /id="settings-panel"/);
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
+	assert.match(html, /grid-template-columns:\s*minmax\(15rem, 18rem\) minmax\(18rem, 22rem\) minmax\(0, 1fr\);/);
+	assert.doesNotMatch(html, /\/app\/status/);
+	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);
 });
 
 test('GET /app/ returns the same HTML shell as /app', async () => {

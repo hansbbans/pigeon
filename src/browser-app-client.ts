@@ -27,3 +27,15 @@ export function createSessionFromToken(token: string): BrowserAppSession {
 export function applyUnauthorizedState(_session: BrowserAppSession): BrowserAppSession {
 	return createLoggedOutSession();
 }
+
+export function renderBrowserAppClientScript(): string {
+	return `
+window.__PIGEON_BROWSER_CLIENT__ = {
+  AUTH_STORAGE_KEY: ${JSON.stringify(AUTH_STORAGE_KEY)},
+  extractAuthToken: ${extractAuthToken.toString()},
+  createLoggedOutSession: ${createLoggedOutSession.toString()},
+  createSessionFromToken: ${createSessionFromToken.toString()},
+  applyUnauthorizedState: ${applyUnauthorizedState.toString()},
+};
+`.trim();
+}
