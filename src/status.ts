@@ -30,6 +30,18 @@ function asCount(value: number | null | undefined): number {
 	return value ?? 0;
 }
 
+async function getSchemaVersion(env: Env): Promise<string> {
+	try {
+		const schemaVersion = await env.DB.prepare(
+			"SELECT value FROM _meta WHERE key = 'schema_version'",
+		).first<ValueRow>();
+
+		return schemaVersion?.value ?? 'unknown';
+	} catch {
+		return 'unknown';
+	}
+}
+
 export async function handleStatusRequest(
 	request: Request,
 	env: Env,
@@ -40,10 +52,7 @@ export async function handleStatusRequest(
 	}
 
 	const currentOrigin = new URL(request.url).origin;
-
-	const schemaVersion = await env.DB.prepare(
-		"SELECT value FROM _meta WHERE key = 'schema_version'",
-	).first<ValueRow>();
+	const schemaVersion = await getSchemaVersion(env);
 
 	const { results: feedCountsResults } = await env.DB.prepare(
 		`SELECT COUNT(*) AS active_feed_count,
@@ -100,7 +109,7 @@ export async function handleStatusRequest(
 		configuredBaseUrl: env.BASE_URL,
 		currentOrigin,
 		healthUrl: `${currentOrigin}/health`,
-		schemaVersion: schemaVersion?.value ?? 'unknown',
+		schemaVersion,
 		feeds: {
 			activeCount: asCount(feedCounts?.active_feed_count),
 			emailCount: asCount(feedCounts?.email_feed_count),
