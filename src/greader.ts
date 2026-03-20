@@ -1,4 +1,7 @@
 import type { Env } from './types';
+import { subscribeToFeed } from './subscribe';
+import { createPreviewText } from './preview-text';
+import { generateApiToken, requireApiAuth } from './api-auth';
 
 // --- ID conversion utilities ---
 
@@ -20,34 +23,6 @@ function isoToUnix(iso: string): number {
 	return Math.floor(new Date(iso).getTime() / 1000);
 }
 
-// --- Auth ---
-
-async function generateToken(password: string): Promise<string> {
-	const data = new TextEncoder().encode(password);
-	const hash = await crypto.subtle.digest('SHA-256', data);
-	return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function validateAuth(request: Request, env: Env): Promise<Response | null> {
-	const auth = request.headers.get('Authorization');
-	if (!auth) {
-		return new Response('Unauthorized', { status: 401 });
-	}
-
-	const match = auth.match(/^GoogleLogin auth=pigeon\/(.+)$/);
-	if (!match) {
-		return new Response('Unauthorized', { status: 401 });
-	}
-
-	const token = match[1];
-	const expected = await generateToken(env.API_PASSWORD);
-	if (token !== expected) {
-		return new Response('Unauthorized', { status: 401 });
-	}
-
-	return null; // auth OK
-}
-
 // --- Route handler ---
 
 export async function handleGreaderRequest(request: Request, env: Env): Promise<Response> {
@@ -60,7 +35,7 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 	}
 
 	// All /reader/api/0/* routes require auth
-	const authErr = await validateAuth(request, env);
+	const authErr = await requireApiAuth(request, env.API_PASSWORD);
 	if (authErr) return authErr;
 
 	if (path === '/reader/api/0/token') {
@@ -74,6 +49,9 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 	}
 	if (path === '/reader/api/0/subscription/list') {
 		return handleSubscriptionList(env);
+	}
+	if (path === '/reader/api/0/subscription/quickadd') {
+		return handleQuickAdd(request, env);
 	}
 	if (path === '/reader/api/0/unread-count') {
 		return handleUnreadCount(env);
@@ -107,13 +85,13 @@ async function handleClientLogin(request: Request, env: Env): Promise<Response> 
 		return new Response('Error=BadAuthentication', { status: 401, headers: { 'Content-Type': 'text/plain' } });
 	}
 
-	const token = await generateToken(env.API_PASSWORD);
+	const token = await generateApiToken(env.API_PASSWORD);
 	const result = `SID=pigeon/${token}\nLSID=null\nAuth=pigeon/${token}`;
 	return new Response(result, { headers: { 'Content-Type': 'text/plain' } });
 }
 
 async function handleToken(env: Env): Promise<Response> {
-	const token = await generateToken(env.API_PASSWORD);
+	const token = await generateApiToken(env.API_PASSWORD);
 	return new Response(token, { headers: { 'Content-Type': 'text/plain' } });
 }
 
@@ -146,7 +124,7 @@ async function handleTagList(env: Env): Promise<Response> {
 
 async function handleSubscriptionList(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
-		'SELECT rowid, feed_key, display_name, from_email, custom_title, category FROM feeds WHERE is_active = 1',
+		'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url FROM feeds WHERE is_active = 1',
 	).all<{
 		rowid: number;
 		feed_key: string;
@@ -154,6 +132,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		from_email: string | null;
 		custom_title: string | null;
 		category: string | null;
+		icon_url: string | null;
 	}>();
 
 	const subscriptions = results.map((f) => ({
@@ -164,7 +143,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 			: [],
 		url: `${env.BASE_URL}/feed/${f.feed_key}`,
 		htmlUrl: env.BASE_URL,
-		iconUrl: '',
+		iconUrl: f.icon_url || '',
 	}));
 
 	return Response.json({ subscriptions });
@@ -252,7 +231,7 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 	const placeholders = rowids.map(() => '?').join(',');
 
 	const { results: items } = await env.DB.prepare(
-		`SELECT i.rowid, i.id, i.feed_key, i.from_name, i.subject, i.html_content, i.received_at, i.is_read, i.is_starred
+		`SELECT i.rowid, i.id, i.feed_key, i.from_name, i.subject, i.html_content, i.text_content, i.received_at, i.is_read, i.is_starred
 		 FROM items i WHERE i.rowid IN (${placeholders})`,
 	)
 		.bind(...rowids)
@@ -263,6 +242,7 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 			from_name: string | null;
 			subject: string;
 			html_content: string;
+			text_content: string | null;
 			received_at: string;
 			is_read: number;
 			is_starred: number;
@@ -288,6 +268,10 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 		const feed = feedMap.get(item.feed_key);
 		const ts = isoToUnix(item.received_at);
 		const categories = ['user/-/state/com.google/reading-list'];
+		const previewText = createPreviewText({
+			textContent: item.text_content,
+			htmlContent: item.html_content,
+		});
 		if (item.is_read) categories.push('user/-/state/com.google/read');
 		if (item.is_starred) categories.push('user/-/state/com.google/starred');
 
@@ -300,7 +284,8 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 			crawlTimeMsec: (ts * 1000).toString(),
 			timestampUsec: (ts * 1_000_000).toString(),
 			author: item.from_name || '',
-			summary: { direction: 'ltr', content: item.html_content },
+			summary: { direction: 'ltr', content: previewText },
+			content: { direction: 'ltr', content: item.html_content },
 			origin: {
 				streamId: feed ? `feed/${feed.rowid}` : `feed/0`,
 				title: feed ? (feed.custom_title || feed.display_name) : '',
@@ -320,43 +305,107 @@ async function handleSubscriptionEdit(request: Request, env: Env): Promise<Respo
 	const removeLabel = body.get('r') as string | null;
 	const title = body.get('t') as string | null;
 
-	if (ac !== 'edit' || !streamId) {
+	// Log ALL subscription/edit requests
+	console.log('[GReader] subscription/edit called:', {
+		ac,
+		streamId,
+		addLabel,
+		removeLabel,
+		title,
+		allParams: Array.from(body.entries())
+	});
+
+	if (!ac || !streamId) {
+		console.log('[GReader] Bad request - missing ac or streamId');
 		return new Response('Bad request', { status: 400 });
 	}
 
-	const feedMatch = streamId.match(/^feed\/(\d+)$/);
-	if (!feedMatch) {
-		return new Response('Bad request', { status: 400 });
-	}
-	const rowid = parseInt(feedMatch[1], 10);
+	// Handle subscribe action
+	if (ac === 'subscribe') {
+		console.log('[GReader] Subscribe request received:', { streamId, addLabel });
+		// Extract feed URL from streamId
+		// Format can be: "feed/http://example.com/feed.xml" or just "http://example.com/feed.xml"
+		let feedUrl = streamId;
+		if (streamId.startsWith('feed/')) {
+			feedUrl = streamId.slice(5); // Remove "feed/" prefix
+		}
 
-	const stmts: D1PreparedStatement[] = [];
+		console.log('[GReader] Extracted feed URL:', feedUrl);
 
-	if (addLabel) {
-		const labelMatch = addLabel.match(/^user\/-\/label\/(.+)$/);
-		if (labelMatch) {
-			stmts.push(env.DB.prepare('UPDATE feeds SET category = ? WHERE rowid = ?').bind(labelMatch[1], rowid));
+		try {
+			// Extract category from addLabel if provided
+			let category: string | null = null;
+			if (addLabel) {
+				const labelMatch = addLabel.match(/^user\/-\/label\/(.+)$/);
+				if (labelMatch) {
+					category = labelMatch[1];
+				}
+			}
+
+			console.log('[GReader] Calling subscribeToFeed with category:', category);
+			const result = await subscribeToFeed(env, feedUrl, category);
+			console.log('[GReader] Subscribe successful:', result);
+			return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error('[GReader] Subscribe failed:', message);
+			return new Response(`Failed to subscribe: ${message}`, { status: 400 });
 		}
 	}
 
-	if (removeLabel) {
-		const labelMatch = removeLabel.match(/^user\/-\/label\/(.+)$/);
-		if (labelMatch) {
-			stmts.push(
-				env.DB.prepare('UPDATE feeds SET category = NULL WHERE rowid = ? AND category = ?').bind(rowid, labelMatch[1]),
-			);
+	// Handle unsubscribe action
+	if (ac === 'unsubscribe') {
+		const feedMatch = streamId.match(/^feed\/(\d+)$/);
+		if (!feedMatch) {
+			return new Response('Bad request: invalid feed ID', { status: 400 });
 		}
+		const rowid = parseInt(feedMatch[1], 10);
+
+		await env.DB.prepare('UPDATE feeds SET is_active = 0 WHERE rowid = ?')
+			.bind(rowid)
+			.run();
+
+		return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
 	}
 
-	if (title) {
-		stmts.push(env.DB.prepare('UPDATE feeds SET custom_title = ? WHERE rowid = ?').bind(title, rowid));
+	// Handle edit action (existing functionality)
+	if (ac === 'edit') {
+		const feedMatch = streamId.match(/^feed\/(\d+)$/);
+		if (!feedMatch) {
+			return new Response('Bad request: invalid feed ID', { status: 400 });
+		}
+		const rowid = parseInt(feedMatch[1], 10);
+
+		const stmts: D1PreparedStatement[] = [];
+
+		if (addLabel) {
+			const labelMatch = addLabel.match(/^user\/-\/label\/(.+)$/);
+			if (labelMatch) {
+				stmts.push(env.DB.prepare('UPDATE feeds SET category = ? WHERE rowid = ?').bind(labelMatch[1], rowid));
+			}
+		}
+
+		if (removeLabel) {
+			const labelMatch = removeLabel.match(/^user\/-\/label\/(.+)$/);
+			if (labelMatch) {
+				stmts.push(
+					env.DB.prepare('UPDATE feeds SET category = NULL WHERE rowid = ? AND category = ?').bind(rowid, labelMatch[1]),
+				);
+			}
+		}
+
+		if (title) {
+			stmts.push(env.DB.prepare('UPDATE feeds SET custom_title = ? WHERE rowid = ?').bind(title, rowid));
+		}
+
+		if (stmts.length > 0) {
+			await env.DB.batch(stmts);
+		}
+
+		return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
 	}
 
-	if (stmts.length > 0) {
-		await env.DB.batch(stmts);
-	}
-
-	return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
+	return new Response('Bad request: unsupported action', { status: 400 });
 }
 
 async function handleEditTag(request: Request, env: Env): Promise<Response> {
@@ -391,6 +440,34 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 	}
 
 	return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
+}
+
+async function handleQuickAdd(request: Request, env: Env): Promise<Response> {
+	const url = new URL(request.url);
+	const quickaddUrl = url.searchParams.get('quickadd');
+
+	console.log('[GReader] quickadd called with URL:', quickaddUrl);
+
+	if (!quickaddUrl) {
+		return Response.json({ error: 'Missing quickadd parameter' }, { status: 400 });
+	}
+
+	try {
+		const result = await subscribeToFeed(env, quickaddUrl, null);
+		console.log('[GReader] quickadd successful:', result);
+
+		// Return GReader-compatible response
+		return Response.json({
+			query: quickaddUrl,
+			numResults: 1,
+			streamId: `feed/${result.rowid}`,
+			streamName: result.display_name,
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error('[GReader] quickadd failed:', message);
+		return Response.json({ error: message }, { status: 400 });
+	}
 }
 
 async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response> {
