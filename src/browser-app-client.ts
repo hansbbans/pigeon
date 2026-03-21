@@ -188,19 +188,82 @@ export function selectArticleHeroImageUrl(articleHtml: string | undefined): stri
 		return null;
 	}
 
+	function decodeHtmlAttribute(value: string): string {
+		return value.replace(/&(#x?[0-9a-f]+|amp|apos|quot|lt|gt);/gi, (match, entity: string) => {
+			const normalizedEntity = entity.toLowerCase();
+			switch (normalizedEntity) {
+				case 'amp':
+					return '&';
+				case 'apos':
+					return "'";
+				case 'quot':
+					return '"';
+				case 'lt':
+					return '<';
+				case 'gt':
+					return '>';
+				default: {
+					const isHex = normalizedEntity.startsWith('#x');
+					const isNumeric = normalizedEntity.startsWith('#');
+					if (!isNumeric) {
+						return match;
+					}
+
+					const codePoint = Number.parseInt(
+						normalizedEntity.slice(isHex ? 2 : 1),
+						isHex ? 16 : 10,
+					);
+					return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+				}
+			}
+		});
+	}
+
+	function readImageAttributes(imageTag: string): Record<string, string> {
+		const attributes: Record<string, string> = {};
+		const attributePattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g;
+		for (const match of imageTag.matchAll(attributePattern)) {
+			const attributeName = match[1].toLowerCase();
+			if (attributeName === 'img') {
+				continue;
+			}
+			attributes[attributeName] = decodeHtmlAttribute((match[2] ?? match[3] ?? match[4] ?? '').trim());
+		}
+		return attributes;
+	}
+
+	function isTrackerSized(value: string | undefined): boolean {
+		if (!value) {
+			return false;
+		}
+		const numeric = Number.parseFloat(value);
+		return Number.isFinite(numeric) && numeric <= 1;
+	}
+
+	function isHiddenStyle(style: string | undefined): boolean {
+		if (!style) {
+			return false;
+		}
+		return /(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?|(?:width|max-width|height|max-height)\s*:\s*0(?:px)?)/i.test(
+			style,
+		);
+	}
 	const imageTagPattern = /<img\b[^>]*>/gi;
-	const imageSourcePattern = /\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i;
-	const onePixelPattern = /\b(?:width|height)\s*=\s*(?:"?1"?|'?1'?)\b/i;
 
 	for (const tagMatch of articleHtml.matchAll(imageTagPattern)) {
 		const imageTag = tagMatch[0];
-		if (onePixelPattern.test(imageTag)) {
+		const attributes = readImageAttributes(imageTag);
+		if (
+			'hidden' in attributes ||
+			isTrackerSized(attributes.width) ||
+			isTrackerSized(attributes.height) ||
+			isHiddenStyle(attributes.style)
+		) {
 			continue;
 		}
 
-		const sourceMatch = imageTag.match(imageSourcePattern);
-		const candidate = (sourceMatch?.[1] ?? sourceMatch?.[2] ?? sourceMatch?.[3] ?? '').trim();
-		if (/^https?:\/\//i.test(candidate)) {
+		const candidate = attributes.src?.trim() ?? '';
+		if (/^(https?:)?\/\//i.test(candidate)) {
 			return candidate;
 		}
 	}
@@ -218,6 +281,7 @@ export function normalizeBrowserItemId(itemId: string): string {
 
 export function renderBrowserAppClientScript(): string {
 	return `
+function __name(target) { return target; }
 ${extractAuthToken.toString()}
 ${createLoggedOutSession.toString()}
 ${createSessionFromToken.toString()}

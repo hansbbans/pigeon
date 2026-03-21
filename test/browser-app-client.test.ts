@@ -181,6 +181,28 @@ test('selectArticleHeroImageUrl returns the first usable absolute image URL from
 	assert.equal(selectArticleHeroImageUrl('<p>No hero here.</p>'), null);
 });
 
+test('selectArticleHeroImageUrl decodes HTML-escaped query strings and accepts protocol-relative URLs', () => {
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="//cdn.example/hero.jpg?utm=reader&amp;id=42" />'),
+		'//cdn.example/hero.jpg?utm=reader&id=42',
+	);
+});
+
+test('selectArticleHeroImageUrl skips obviously hidden tracker-style images and continues to a real image', () => {
+	assert.equal(
+		selectArticleHeroImageUrl(
+			'<img src="https://cdn.example/tracker.gif" style="display:none" /><img src="https://cdn.example/hero.jpg" />',
+		),
+		'https://cdn.example/hero.jpg',
+	);
+	assert.equal(
+		selectArticleHeroImageUrl(
+			'<img src="https://cdn.example/tracker.gif" style="visibility:hidden;opacity:0" /><img src="//cdn.example/hero-2.jpg" />',
+		),
+		'//cdn.example/hero-2.jpg',
+	);
+});
+
 test('renderBrowserAppClientScript exposes the shared auth helpers for the shell', () => {
 	const script = renderBrowserAppClientScript();
 
