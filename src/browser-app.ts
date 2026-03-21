@@ -20,6 +20,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         --window-edge: #becada;
         --panel: #f8fafc;
         --panel-strong: #eef3f8;
+        --reader-surface: #f4f7fb;
+        --reader-paper: #fcfdfd;
+        --reader-toolbar: rgba(248, 250, 253, 0.94);
         --border: #d4dde8;
         --text: #1f2937;
         --muted: #66758b;
@@ -206,7 +209,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         justify-content: space-between;
         gap: 1rem;
         align-items: center;
-        padding: 1rem 1rem 0.95rem;
+        padding: 0.9rem 1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.56);
+        border-bottom: 1px solid rgba(210, 220, 233, 0.72);
+        background: rgba(246, 249, 252, 0.78);
       }
 
       .reader-brand {
@@ -226,7 +232,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .toolbar-actions,
-      .toolbar-cluster {
+      .reader-pane-actions {
         display: flex;
         gap: 0.65rem;
         align-items: center;
@@ -247,6 +253,17 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       .toolbar-pill[data-presentational-control="true"] {
         color: var(--muted);
+      }
+
+      .toolbar-pill[data-control-tone="subtle"] {
+        background: rgba(239, 243, 249, 0.96);
+        color: #66758b;
+        border-color: rgba(206, 216, 229, 0.96);
+        box-shadow: none;
+      }
+
+      .toolbar-pill[data-control-tone="subtle"][disabled] {
+        opacity: 1;
       }
 
       .reader-grid {
@@ -283,6 +300,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       #reader-panel {
         grid-area: reader;
         border-radius: 0 0 1.15rem 0;
+        background:
+          linear-gradient(180deg, rgba(247, 249, 253, 0.98), rgba(239, 244, 249, 0.96)),
+          var(--panel);
       }
 
       .panel h2,
@@ -489,26 +509,96 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       #reader-panel {
         display: grid;
+      }
+
+      .reader-pane-surface {
+        display: grid;
         gap: 1rem;
+        min-height: 100%;
+        padding: 0.6rem;
+        border: 1px solid rgba(219, 227, 238, 0.95);
+        border-radius: 1.2rem;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 248, 252, 0.98)),
+          var(--reader-surface);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.88),
+          0 20px 45px rgba(31, 41, 55, 0.05);
+      }
+
+      #reader-pane-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.85rem;
+        align-items: center;
+        padding: 0.8rem 0.95rem;
+        border: 1px solid rgba(216, 225, 236, 0.94);
+        border-radius: 1rem;
+        background: var(--reader-toolbar);
+      }
+
+      .reader-pane-toolbar-copy {
+        display: grid;
+        gap: 0.2rem;
+      }
+
+      .reader-pane-label {
+        margin: 0;
+        font-size: 0.74rem;
+        color: var(--muted);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .reader-pane-note {
+        margin: 0;
+        color: #7a8799;
+        font-size: 0.84rem;
+        line-height: 1.4;
       }
 
       .reader-copy {
         display: grid;
-        gap: 0.45rem;
+        gap: 0.55rem;
+        padding: 0.15rem 0.35rem 0;
       }
 
       .reader-copy strong {
-        font-size: clamp(1.15rem, 1.5vw, 1.55rem);
-        letter-spacing: -0.03em;
+        font-size: clamp(1.45rem, 2.2vw, 2.15rem);
+        line-height: 1.08;
+        letter-spacing: -0.045em;
+      }
+
+      .reader-copy h2 {
+        margin-bottom: 0;
+      }
+
+      #reader-meta {
+        margin: 0;
+        font-size: 0.9rem;
+        line-height: 1.55;
+        letter-spacing: 0.01em;
+      }
+
+      .reader-frame-shell {
+        padding: 0.35rem;
+        border: 1px solid rgba(215, 224, 236, 0.94);
+        border-radius: 1.2rem;
+        background:
+          linear-gradient(180deg, rgba(252, 253, 255, 0.92), rgba(241, 245, 250, 0.96)),
+          var(--reader-surface);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.92),
+          0 18px 38px rgba(31, 41, 55, 0.06);
       }
 
       #reader-frame {
         width: 100%;
-        min-height: 55vh;
-        border: 1px solid var(--border);
-        border-radius: 1rem;
-        background: #fff;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+        min-height: 58vh;
+        border: 0;
+        border-radius: 0.95rem;
+        background: var(--reader-paper);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
       }
 
       #settings-panel {
@@ -557,6 +647,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         }
 
         #reader-toolbar {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        #reader-pane-toolbar {
           flex-direction: column;
           align-items: flex-start;
         }
@@ -630,10 +725,6 @@ export function renderBrowserAppHtml(baseUrl: string): string {
               <h1>Pigeon</h1>
             </div>
             <div class="toolbar-actions">
-              <div class="toolbar-cluster" aria-label="Future actions">
-                <button class="toolbar-pill" type="button" data-presentational-control="true" disabled>Mark</button>
-                <button class="toolbar-pill" type="button" data-presentational-control="true" disabled>Save</button>
-              </div>
               <button class="secondary-button" id="settings-button" type="button">Settings</button>
               <button id="logout-button" type="button">Log Out</button>
             </div>
@@ -679,13 +770,29 @@ export function renderBrowserAppHtml(baseUrl: string): string {
             </section>
 
             <article class="panel" id="reader-panel">
-              <div class="reader-copy">
-                <span class="section-kicker">Reader</span>
-                <h2>Selected article</h2>
-                <strong id="reader-title">Select an article</strong>
-                <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
+              <div class="reader-pane-surface">
+                <div id="reader-pane-toolbar">
+                  <div class="reader-pane-toolbar-copy">
+                    <p class="reader-pane-label">Reading surface</p>
+                    <p class="reader-pane-note">Visual-only controls stay muted until article actions are wired up.</p>
+                  </div>
+                  <div class="reader-pane-actions" aria-label="Reader future actions">
+                    <!-- Visual-only today: Mark unread, Save, and Open original. Follow-up: wire supported reader actions, then add stateful icons and enabled states once the mutation and outbound-link flows exist. -->
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Mark unread</button>
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Save</button>
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Open original</button>
+                  </div>
+                </div>
+                <div class="reader-copy">
+                  <span class="section-kicker">Reader</span>
+                  <h2>Selected article</h2>
+                  <strong id="reader-title">Select an article</strong>
+                  <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
+                </div>
+                <div class="reader-frame-shell">
+                  <iframe id="reader-frame" title="Article content" sandbox="" srcdoc=""></iframe>
+                </div>
               </div>
-              <iframe id="reader-frame" title="Article content" sandbox="" srcdoc=""></iframe>
             </article>
           </div>
         </div>

@@ -1181,3 +1181,59 @@ test('switching views during an in-flight content load still fetches bodies for 
 	assert.match(elements.get('articles-list')?.textContent ?? '', /Article 301/);
 	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Article 101/);
 });
+
+test('runtime script keeps the active article title and metadata outside the iframe while the iframe holds the full body', async () => {
+	const articleBody = '<article><p>Full body copy that belongs in the frame.</p><p>Second paragraph.</p></article>';
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Alpha' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [{ id: 'feed/1', count: 1 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '101' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'Reader polish story',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Short summary' },
+							content: { content: articleBody },
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '') === articleBody);
+
+	assert.match(elements.get('reader-title')?.textContent ?? '', /Reader polish story/);
+	assert.match(elements.get('reader-meta')?.textContent ?? '', /Alpha/);
+	assert.match(elements.get('reader-meta')?.textContent ?? '', /2025/);
+	assert.equal(elements.get('reader-frame')?.srcdoc, articleBody);
+	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Full body copy that belongs in the frame/);
+	assert.doesNotMatch(elements.get('reader-meta')?.textContent ?? '', /Full body copy that belongs in the frame/);
+});

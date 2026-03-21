@@ -195,6 +195,7 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="feeds-panel"/);
 	assert.match(html, /id="articles-panel"/);
 	assert.match(html, /id="reader-panel"/);
+	assert.match(html, /id="reader-pane-toolbar"/);
 	assert.match(html, /id="real-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);
 	assert.match(html, /id="views-list"/);
@@ -214,6 +215,10 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /srcdoc/);
 	assert.match(html, /sandbox=""/);
 	assert.match(html, /data-presentational-control="true"/);
+	assert.match(
+		html,
+		/<button[^>]+data-presentational-control="true"[^>]+data-control-tone="subtle"[^>]+disabled[^>]*>/,
+	);
 	assert.doesNotMatch(html, /feedsList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /articlesList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /settingsContent\.innerHTML\s*=/);
