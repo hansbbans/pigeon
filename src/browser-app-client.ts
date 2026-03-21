@@ -48,6 +48,7 @@ export interface BrowserArticleListEntry {
 	feedTitle: string;
 	published: number;
 	preview: string;
+	heroImageUrl: string | null;
 	isLoaded: boolean;
 }
 
@@ -165,6 +166,7 @@ export function buildArticleListEntries(options: {
 				feedTitle: '',
 				published: 0,
 				preview: '',
+				heroImageUrl: null,
 				isLoaded: false,
 			};
 		}
@@ -175,9 +177,35 @@ export function buildArticleListEntries(options: {
 			feedTitle: loadedItem.origin?.title ?? '',
 			published: loadedItem.published,
 			preview: loadedItem.summary?.content ?? '',
+			heroImageUrl: selectArticleHeroImageUrl(loadedItem.content?.content),
 			isLoaded: true,
 		};
 	});
+}
+
+export function selectArticleHeroImageUrl(articleHtml: string | undefined): string | null {
+	if (!articleHtml) {
+		return null;
+	}
+
+	const imageTagPattern = /<img\b[^>]*>/gi;
+	const imageSourcePattern = /\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i;
+	const onePixelPattern = /\b(?:width|height)\s*=\s*(?:"?1"?|'?1'?)\b/i;
+
+	for (const tagMatch of articleHtml.matchAll(imageTagPattern)) {
+		const imageTag = tagMatch[0];
+		if (onePixelPattern.test(imageTag)) {
+			continue;
+		}
+
+		const sourceMatch = imageTag.match(imageSourcePattern);
+		const candidate = (sourceMatch?.[1] ?? sourceMatch?.[2] ?? sourceMatch?.[3] ?? '').trim();
+		if (/^https?:\/\//i.test(candidate)) {
+			return candidate;
+		}
+	}
+
+	return null;
 }
 
 export function normalizeBrowserItemId(itemId: string): string {
@@ -199,6 +227,7 @@ ${buildFeedViews.toString()}
 ${limitInitialItemIds.toString()}
 ${createContentLoadPlan.toString()}
 ${buildArticleListEntries.toString()}
+${selectArticleHeroImageUrl.toString()}
 ${normalizeBrowserItemId.toString()}
 
 window.__PIGEON_BROWSER_CLIENT__ = {
@@ -214,6 +243,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   limitInitialItemIds,
   createContentLoadPlan,
   buildArticleListEntries,
+  selectArticleHeroImageUrl,
   normalizeBrowserItemId,
 };
 `.trim();

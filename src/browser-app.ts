@@ -270,6 +270,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       #feeds-panel {
         grid-area: sidebar;
+        background:
+          linear-gradient(180deg, rgba(241, 246, 252, 0.98), rgba(233, 240, 248, 0.94)),
+          var(--panel);
         border-radius: 0 0 0 1.15rem;
       }
 
@@ -309,20 +312,27 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         gap: 0.25rem;
       }
 
+      .sidebar-section {
+        padding: 0.9rem;
+        border: 1px solid rgba(206, 216, 229, 0.9);
+        border-radius: 1rem;
+        background: rgba(255, 255, 255, 0.58);
+      }
+
       .sidebar-divider {
         height: 1px;
-        margin: 0.95rem 0;
+        margin: 0.8rem 0;
         background: var(--border);
       }
 
       .list-shell {
         display: grid;
-        gap: 0.75rem;
+        gap: 0.85rem;
       }
 
       .list-reset {
         display: grid;
-        gap: 0.75rem;
+        gap: 0.6rem;
         padding: 0;
         margin: 0;
         list-style: none;
@@ -330,18 +340,24 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       .list-button {
         width: 100%;
-        border-radius: 0.9rem;
+        border-radius: 1rem;
         border: 1px solid var(--border);
-        background: var(--panel-strong);
+        background: rgba(255, 255, 255, 0.78);
         color: var(--text);
-        padding: 0.85rem 0.9rem;
+        padding: 0.8rem 0.9rem;
         text-align: left;
+      }
+
+      .list-button:hover {
+        background: rgba(255, 255, 255, 0.98);
+        color: var(--text);
+        border-color: #c3d0e2;
       }
 
       .list-button.is-active {
         border-color: var(--accent);
-        background: rgba(47, 111, 237, 0.12);
-        box-shadow: inset 0 0 0 1px rgba(47, 111, 237, 0.18);
+        background: rgba(47, 111, 237, 0.15);
+        box-shadow: inset 0 0 0 1px rgba(47, 111, 237, 0.2), 0 10px 24px rgba(47, 111, 237, 0.08);
       }
 
       .feed-row {
@@ -351,6 +367,13 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         align-items: center;
       }
 
+      .feed-title-line {
+        display: inline-flex;
+        gap: 0.55rem;
+        align-items: center;
+        min-width: 0;
+      }
+
       .feed-title,
       .article-title {
         display: block;
@@ -358,11 +381,110 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         letter-spacing: -0.01em;
       }
 
+      .feed-title {
+        font-size: 0.95rem;
+      }
+
+      .feed-count {
+        min-width: 2rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(47, 111, 237, 0.09);
+        color: var(--accent-strong);
+        font-size: 0.79rem;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .feed-kind {
+        display: block;
+        margin-top: 0.28rem;
+        color: var(--muted);
+        font-size: 0.76rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
       .feed-meta,
       .article-preview,
       .article-meta {
         display: block;
         margin-top: 0.25rem;
+      }
+
+      .article-card {
+        width: 100%;
+        display: grid;
+        gap: 0.85rem;
+        border-radius: 1.15rem;
+        border: 1px solid rgba(209, 218, 231, 0.95);
+        background: rgba(255, 255, 255, 0.92);
+        color: var(--text);
+        padding: 0.95rem;
+        text-align: left;
+        box-shadow: 0 10px 30px rgba(31, 41, 55, 0.04);
+      }
+
+      .article-card:hover {
+        background: #ffffff;
+        color: var(--text);
+        border-color: #c6d4e4;
+      }
+
+      .article-card.is-active {
+        border-color: rgba(47, 111, 237, 0.92);
+        background:
+          linear-gradient(180deg, rgba(238, 245, 255, 0.98), rgba(231, 241, 255, 0.98)),
+          #fff;
+        box-shadow:
+          0 16px 36px rgba(47, 111, 237, 0.14),
+          inset 0 0 0 1px rgba(47, 111, 237, 0.18);
+      }
+
+      .article-card-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.9rem;
+        align-items: start;
+      }
+
+      .article-card.has-hero-image .article-card-grid {
+        grid-template-columns: minmax(0, 1fr) 7.5rem;
+      }
+
+      .article-card-copy {
+        display: grid;
+        gap: 0.48rem;
+        min-width: 0;
+      }
+
+      .article-title {
+        font-size: 1rem;
+        line-height: 1.3;
+        letter-spacing: -0.02em;
+      }
+
+      .article-preview {
+        margin-top: 0;
+        color: #526176;
+        font-size: 0.92rem;
+        line-height: 1.45;
+      }
+
+      .article-meta {
+        margin-top: 0;
+        color: #7a8799;
+        font-size: 0.77rem;
+        letter-spacing: 0.02em;
+      }
+
+      .article-hero {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        border-radius: 0.95rem;
+        border: 1px solid rgba(210, 220, 232, 0.95);
+        background: var(--panel-strong);
+        object-fit: cover;
       }
 
       #reader-panel {
@@ -443,6 +565,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           grid-template-columns: 1fr;
           grid-template-areas: "sidebar" "stream" "reader";
           padding: 0 0.75rem 0.75rem;
+        }
+
+        .article-card.has-hero-image .article-card-grid {
+          grid-template-columns: 1fr;
         }
 
         #feeds-panel,
@@ -821,7 +947,7 @@ export function renderBrowserAppRuntimeScript(): string {
       });
 
       const row = createNode('span', { classNames: ['feed-row'] });
-      const titleGroup = createNode('span');
+      const titleGroup = createNode('span', { classNames: ['feed-title-line'] });
       if (view.iconUrl) {
         const icon = createNode('img', {
           attributes: {
@@ -835,11 +961,11 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
       row.appendChild(titleGroup);
-      row.appendChild(createNode('span', { classNames: ['feed-meta'], text: String(view.unreadCount) }));
+      row.appendChild(createNode('span', { classNames: ['feed-count'], text: String(view.unreadCount) }));
       button.appendChild(row);
       button.appendChild(
         createNode('span', {
-          classNames: ['feed-meta'],
+          classNames: ['feed-kind'],
           text: view.kind === 'feed' ? 'Feed' : 'View',
         }),
       );
@@ -883,7 +1009,11 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const entry of entries) {
       const listItem = createNode('li');
       const button = createNode('button', {
-        classNames: ['list-button', entry.id === selectedItemId ? 'is-active' : ''],
+        classNames: [
+          'article-card',
+          entry.id === selectedItemId ? 'is-active' : '',
+          entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+        ],
         attributes: {
           type: 'button',
           'data-item-id': entry.id,
@@ -892,14 +1022,32 @@ export function renderBrowserAppRuntimeScript(): string {
       button.addEventListener('click', () => {
         void selectArticle(entry.id);
       });
-      button.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
+
+      const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
+      const copy = createNode('span', { classNames: ['article-card-copy'] });
+      copy.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
       if (entry.preview) {
-        button.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
+        copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       const metaParts = [entry.feedTitle, formatTimestamp(entry.published)].filter(Boolean);
       if (metaParts.length > 0) {
-        button.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
+        copy.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
       }
+      cardGrid.appendChild(copy);
+      if (entry.heroImageUrl) {
+        cardGrid.appendChild(
+          createNode('img', {
+            classNames: ['article-hero'],
+            attributes: {
+              src: entry.heroImageUrl,
+              alt: '',
+              loading: 'lazy',
+              'data-card-hero': 'true',
+            },
+          }),
+        );
+      }
+      button.appendChild(cardGrid);
       listItem.appendChild(button);
       articlesList.appendChild(listItem);
     }
