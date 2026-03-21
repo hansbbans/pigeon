@@ -5,10 +5,15 @@ import vm from 'node:vm';
 import {
 	AUTH_STORAGE_KEY,
 	applyUnauthorizedState,
+	buildArticleListEntries,
+	buildFeedViews,
+	createContentLoadPlan,
 	createLoggedOutSession,
 	createSessionFromToken,
 	extractAuthToken,
+	limitInitialItemIds,
 	renderBrowserAppClientScript,
+	sortSubscriptionsByTitle,
 } from '../src/browser-app-client';
 import { renderBrowserAppRuntimeScript } from '../src/browser-app';
 
@@ -38,6 +43,131 @@ test('applyUnauthorizedState returns the login state on 401', () => {
 	);
 });
 
+test('sortSubscriptionsByTitle orders subscriptions alphabetically by title', () => {
+	assert.deepEqual(
+		sortSubscriptionsByTitle([
+			{ id: 'feed/3', title: 'zebra' },
+			{ id: 'feed/1', title: 'Alpha' },
+			{ id: 'feed/2', title: 'mango' },
+		]),
+		[
+			{ id: 'feed/1', title: 'Alpha' },
+			{ id: 'feed/2', title: 'mango' },
+			{ id: 'feed/3', title: 'zebra' },
+		],
+	);
+});
+
+test('buildFeedViews returns All items, Unread, and sorted single-feed views', () => {
+	assert.deepEqual(
+		buildFeedViews(
+			[
+				{ id: 'feed/2', title: 'Bravo' },
+				{ id: 'feed/1', title: 'Alpha' },
+			],
+			[
+				{ id: 'feed/2', count: 4 },
+				{ id: 'feed/1', count: 1 },
+			],
+		),
+		[
+			{
+				id: 'all',
+				title: 'All items',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 5,
+				kind: 'all',
+			},
+			{
+				id: 'unread',
+				title: 'Unread',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 5,
+				kind: 'unread',
+			},
+			{
+				id: 'feed/1',
+				title: 'Alpha',
+				streamId: 'feed/1',
+				unreadCount: 1,
+				kind: 'feed',
+			},
+			{
+				id: 'feed/2',
+				title: 'Bravo',
+				streamId: 'feed/2',
+				unreadCount: 4,
+				kind: 'feed',
+			},
+		],
+	);
+});
+
+test('limitInitialItemIds caps the first fetch at 50 ids', () => {
+	const ids = Array.from({ length: 75 }, (_, index) => String(index + 1));
+
+	assert.deepEqual(limitInitialItemIds(ids), Array.from({ length: 50 }, (_, index) => String(index + 1)));
+});
+
+test('createContentLoadPlan loads contents in chunks of 20 without duplicates', () => {
+	const itemIds = Array.from({ length: 30 }, (_, index) => String(index + 1));
+
+	assert.deepEqual(
+		createContentLoadPlan({
+			itemIds,
+			loadedItemIds: ['1', '2', '3', '4'],
+		}),
+		Array.from({ length: 20 }, (_, index) => String(index + 5)),
+	);
+});
+
+test('createContentLoadPlan prioritizes the selected item and does not duplicate ids', () => {
+	assert.deepEqual(
+		createContentLoadPlan({
+			itemIds: ['1', '2', '3', '4', '5'],
+			loadedItemIds: ['2', '4'],
+			selectedItemId: '5',
+		}),
+		['5', '1', '3'],
+	);
+});
+
+test('buildArticleListEntries only renders previews from already-loaded content', () => {
+	assert.deepEqual(
+		buildArticleListEntries({
+			itemIds: ['loaded-item', 'pending-item'],
+			loadedItemsById: {
+				'loaded-item': {
+					id: 'loaded-item',
+					title: 'Loaded title',
+					published: 1_742_460_800,
+					origin: { title: 'Alpha Feed' },
+					summary: { content: 'Loaded preview' },
+					content: { content: '<p>Loaded article</p>' },
+				},
+			},
+		}),
+		[
+			{
+				id: 'loaded-item',
+				title: 'Loaded title',
+				feedTitle: 'Alpha Feed',
+				published: 1_742_460_800,
+				preview: 'Loaded preview',
+				isLoaded: true,
+			},
+			{
+				id: 'pending-item',
+				title: 'Loading article…',
+				feedTitle: '',
+				published: 0,
+				preview: '',
+				isLoaded: false,
+			},
+		],
+	);
+});
+
 test('renderBrowserAppClientScript exposes the shared auth helpers for the shell', () => {
 	const script = renderBrowserAppClientScript();
 
@@ -52,6 +182,8 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 	return {
 		value: initialValue,
 		textContent: '',
+		innerHTML: '',
+		srcdoc: '',
 		hidden: false,
 		classList: {
 			add(...names: string[]) {
@@ -119,6 +251,15 @@ async function createBrowserHarness(options?: {
 		['settings-button', createElement()],
 		['settings-panel', createElement('', ['hidden'])],
 		['close-settings-button', createElement()],
+		['feeds-status', createElement()],
+		['feeds-list', createElement()],
+		['articles-status', createElement()],
+		['articles-list', createElement()],
+		['load-more-button', createElement('', ['hidden'])],
+		['reader-title', createElement()],
+		['reader-meta', createElement()],
+		['reader-frame', createElement()],
+		['settings-content', createElement()],
 	]);
 	const storage = new Map<string, string>();
 	if (options?.storedToken) {
@@ -155,6 +296,7 @@ async function createBrowserHarness(options?: {
 		},
 		FormData,
 		Response,
+		URLSearchParams,
 		console,
 		fetch: options?.fetchImpl ?? (async () => new Response('Error=BadAuthentication', { status: 401 })),
 	};

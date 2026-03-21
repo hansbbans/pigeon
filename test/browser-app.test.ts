@@ -197,6 +197,13 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
 	assert.match(html, /grid-template-columns:\s*minmax\(15rem, 18rem\) minmax\(18rem, 22rem\) minmax\(0, 1fr\);/);
 	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);
+	assert.match(html, /\/reader\/api\/0\/subscription\/list/);
+	assert.match(html, /\/reader\/api\/0\/unread-count/);
+	assert.match(html, /\/reader\/api\/0\/stream\/items\/ids/);
+	assert.match(html, /\/reader\/api\/0\/stream\/items\/contents/);
+	assert.match(html, /\/app\/status/);
+	assert.match(html, /srcdoc/);
+	assert.match(html, /sandbox=""/);
 });
 
 test('GET /app/ returns the same HTML shell as /app', async () => {

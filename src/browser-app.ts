@@ -22,6 +22,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         --muted: #6f6559;
         --accent: #1e6b52;
         --accent-strong: #184f3d;
+        --danger: #b24732;
       }
 
       * {
@@ -97,7 +98,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       .login-card p,
       .reader-header p,
       .panel-note,
-      .status-meta {
+      .status-meta,
+      .article-meta,
+      .feed-meta {
         color: var(--muted);
       }
 
@@ -109,7 +112,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       #login-error {
         min-height: 1.2rem;
-        color: #b24732;
+        color: var(--danger);
       }
 
       .reader-shell {
@@ -139,14 +142,20 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         box-shadow: 0 10px 30px rgba(64, 42, 12, 0.08);
       }
 
-      .panel h2 {
+      .panel h2,
+      .reader-copy h2 {
         margin: 0 0 0.75rem;
         font-size: 1rem;
         letter-spacing: 0.06em;
         text-transform: uppercase;
       }
 
-      .placeholder-list {
+      .list-shell {
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .list-reset {
         display: grid;
         gap: 0.75rem;
         padding: 0;
@@ -154,17 +163,64 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         list-style: none;
       }
 
-      .placeholder-list li {
-        padding: 0.8rem;
+      .list-button {
+        width: 100%;
         border-radius: 1rem;
+        border: 1px solid transparent;
         background: var(--panel-strong);
+        color: var(--text);
+        padding: 0.8rem;
+        text-align: left;
+      }
+
+      .list-button.is-active {
+        border-color: var(--accent);
+        background: rgba(30, 107, 82, 0.12);
+      }
+
+      .feed-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.75rem;
+        align-items: center;
+      }
+
+      .feed-title,
+      .article-title {
+        display: block;
+        font-weight: 700;
+      }
+
+      .feed-meta,
+      .article-preview,
+      .article-meta {
+        display: block;
+        margin-top: 0.25rem;
+      }
+
+      #reader-panel {
+        display: grid;
+        gap: 0.9rem;
+      }
+
+      .reader-copy {
+        display: grid;
+        gap: 0.4rem;
+      }
+
+      #reader-frame {
+        width: 100%;
+        min-height: 55vh;
+        border: 1px solid var(--border);
+        border-radius: 1rem;
+        background: #fff;
       }
 
       #settings-panel {
         position: fixed;
         top: 1.5rem;
         right: 1.5rem;
-        width: min(22rem, calc(100vw - 3rem));
+        width: min(24rem, calc(100vw - 3rem));
         min-height: auto;
         max-height: calc(100vh - 3rem);
         overflow: auto;
@@ -175,6 +231,21 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         justify-content: space-between;
         align-items: center;
         gap: 0.75rem;
+      }
+
+      #settings-content dl {
+        display: grid;
+        gap: 0.5rem;
+        margin: 0;
+      }
+
+      #settings-content dt {
+        font-weight: 700;
+      }
+
+      #settings-content dd {
+        margin: 0;
+        color: var(--muted);
       }
 
       .secondary-button {
@@ -232,21 +303,28 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         <div class="reader-grid">
           <aside class="panel" id="feeds-panel">
             <h2>Feeds</h2>
-            <ul class="placeholder-list">
-              <li>Feed list loads after login.</li>
-            </ul>
+            <div class="list-shell">
+              <p class="status-meta" id="feeds-status">Feed list loads after login.</p>
+              <ul class="list-reset" id="feeds-list"></ul>
+            </div>
           </aside>
 
           <section class="panel" id="articles-panel">
             <h2>Articles</h2>
-            <ul class="placeholder-list">
-              <li>Choose a feed to load article previews.</li>
-            </ul>
+            <div class="list-shell">
+              <p class="status-meta" id="articles-status">Choose a feed to load article previews.</p>
+              <ul class="list-reset" id="articles-list"></ul>
+              <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
+            </div>
           </section>
 
           <article class="panel" id="reader-panel">
-            <h2>Reader</h2>
-            <p class="panel-note">The full article reader is wired in the next task.</p>
+            <div class="reader-copy">
+              <h2>Reader</h2>
+              <strong id="reader-title">Select an article</strong>
+              <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
+            </div>
+            <iframe id="reader-frame" title="Article content" sandbox="" srcdoc=""></iframe>
           </article>
         </div>
       </section>
@@ -256,7 +334,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           <span>Settings</span>
           <button class="secondary-button" id="close-settings-button" type="button">Close</button>
         </h2>
-        <p class="status-meta">Status details and live settings data arrive in the next task.</p>
+        <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
     </div>
     <script>
@@ -281,8 +359,24 @@ export function renderBrowserAppRuntimeScript(): string {
   const settingsButton = document.getElementById('settings-button');
   const settingsPanel = document.getElementById('settings-panel');
   const closeSettingsButton = document.getElementById('close-settings-button');
+  const feedsStatus = document.getElementById('feeds-status');
+  const feedsList = document.getElementById('feeds-list');
+  const articlesStatus = document.getElementById('articles-status');
+  const articlesList = document.getElementById('articles-list');
+  const loadMoreButton = document.getElementById('load-more-button');
+  const readerTitle = document.getElementById('reader-title');
+  const readerMeta = document.getElementById('reader-meta');
+  const readerFrame = document.getElementById('reader-frame');
+  const settingsContent = document.getElementById('settings-content');
   let session = client.createLoggedOutSession();
   let activeValidationId = 0;
+  let activeViewRequestId = 0;
+  let views = [];
+  let activeViewId = 'all';
+  let itemIds = [];
+  let loadedItemsById = {};
+  let selectedItemId = null;
+  let statusLoaded = false;
 
   function getStoredToken() {
     return window.sessionStorage.getItem(storageKey);
@@ -309,12 +403,85 @@ export function renderBrowserAppRuntimeScript(): string {
     return validationId === activeValidationId;
   }
 
+  function cancelViewLoads() {
+    activeViewRequestId += 1;
+  }
+
+  function getAuthorizationHeader() {
+    return session.token ? { Authorization: 'GoogleLogin auth=pigeon/' + session.token } : {};
+  }
+
+  async function authenticatedFetch(input, init) {
+    if (!session.token) {
+      setLoggedOut('Session expired.');
+      throw new Error('Missing session token');
+    }
+
+    const response = await fetch(input, {
+      ...init,
+      headers: {
+        ...(init && init.headers ? init.headers : {}),
+        ...getAuthorizationHeader(),
+      },
+    });
+
+    if (response.status === 401) {
+      setLoggedOut('Session expired.');
+      throw new Error('Unauthorized');
+    }
+
+    return response;
+  }
+
+  async function authenticatedJson(input, init) {
+    const response = await authenticatedFetch(input, init);
+    return response.json();
+  }
+
+  function formatTimestamp(timestampSeconds) {
+    if (!timestampSeconds) {
+      return '';
+    }
+
+    return new Date(timestampSeconds * 1000).toLocaleString();
+  }
+
+  function escapeMarkup(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function getActiveView() {
+    return views.find((view) => view.id === activeViewId) || views[0] || null;
+  }
+
+  function resetReaderState() {
+    cancelViewLoads();
+    itemIds = [];
+    loadedItemsById = {};
+    selectedItemId = null;
+    articlesList.innerHTML = '';
+    loadMoreButton.classList.add('hidden');
+    renderArticles();
+    renderReader();
+  }
+
   function setLoggedOut(message) {
     session = client.applyUnauthorizedState(session);
     clearStoredToken();
+    cancelPendingValidation();
+    resetReaderState();
+    views = [];
+    feedsList.innerHTML = '';
+    feedsStatus.textContent = 'Feed list loads after login.';
+    settingsPanel.classList.add('hidden');
+    settingsContent.textContent = 'Open settings to load status.';
+    statusLoaded = false;
     loginScreen.classList.remove('hidden');
     readerShell.classList.add('hidden');
-    settingsPanel.classList.add('hidden');
     loginError.textContent = message || '';
   }
 
@@ -332,6 +499,241 @@ export function renderBrowserAppRuntimeScript(): string {
     });
 
     return response.status === 200;
+  }
+
+  function renderFeeds() {
+    if (views.length === 0) {
+      feedsStatus.textContent = 'Feed list loads after login.';
+      feedsList.innerHTML = '';
+      return;
+    }
+
+    feedsStatus.textContent = 'Choose a view.';
+    feedsList.innerHTML = views.map((view) => {
+      const unreadSuffix = view.unreadCount > 0 ? ' (' + view.unreadCount + ')' : '';
+      const activeClass = view.id === activeViewId ? ' is-active' : '';
+      const meta = view.kind === 'feed' ? 'Feed' : 'View';
+      return '<li><button class="list-button' + activeClass + '" data-view-id="' + escapeMarkup(view.id) + '" type="button"><span class="feed-row"><span class="feed-title">' + escapeMarkup(view.title) + unreadSuffix + '</span></span><span class="feed-meta">' + meta + '</span></button></li>';
+    }).join('');
+  }
+
+  function renderArticles() {
+    const entries = client.buildArticleListEntries({
+      itemIds,
+      loadedItemsById,
+    });
+
+    if (entries.length === 0) {
+      articlesStatus.textContent = 'Choose a feed to load article previews.';
+      articlesList.innerHTML = '';
+      loadMoreButton.classList.add('hidden');
+      return;
+    }
+
+    articlesStatus.textContent = entries.length + ' article' + (entries.length === 1 ? '' : 's');
+    articlesList.innerHTML = entries.map((entry) => {
+      const activeClass = entry.id === selectedItemId ? ' is-active' : '';
+      const preview = entry.preview ? '<span class="article-preview">' + escapeMarkup(entry.preview) + '</span>' : '';
+      const metaParts = [entry.feedTitle, formatTimestamp(entry.published)].filter(Boolean);
+      const meta = metaParts.length ? '<span class="article-meta">' + escapeMarkup(metaParts.join(' · ')) + '</span>' : '';
+      return '<li><button class="list-button' + activeClass + '" data-item-id="' + escapeMarkup(entry.id) + '" type="button"><span class="article-title">' + escapeMarkup(entry.title) + '</span>' + preview + meta + '</button></li>';
+    }).join('');
+    loadMoreButton.classList.toggle('hidden', client.createContentLoadPlan({
+      itemIds,
+      loadedItemIds: Object.keys(loadedItemsById),
+      selectedItemId,
+    }).length === 0);
+  }
+
+  function renderReader() {
+    if (!selectedItemId) {
+      readerTitle.textContent = 'Select an article';
+      readerMeta.textContent = 'Full article content stays isolated inside the reader frame.';
+      readerFrame.srcdoc = '';
+      return;
+    }
+
+    const item = loadedItemsById[selectedItemId];
+    if (!item) {
+      readerTitle.textContent = 'Loading article…';
+      readerMeta.textContent = 'Loading the full article body.';
+      readerFrame.srcdoc = '';
+      return;
+    }
+
+    readerTitle.textContent = item.title || 'Untitled article';
+    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
+      .filter(Boolean)
+      .join(' · ');
+    readerFrame.srcdoc = item.content && item.content.content ? item.content.content : '';
+  }
+
+  async function loadStatus() {
+    settingsContent.textContent = 'Loading status…';
+    try {
+      const status = await authenticatedJson('/app/status');
+      statusLoaded = true;
+      const failingFeeds = status.feeds.failing.length
+        ? '<dt>Failing RSS feeds</dt><dd>' + escapeMarkup(status.feeds.failing.map((feed) => feed.title + ': ' + feed.error).join(' | ')) + '</dd>'
+        : '<dt>Failing RSS feeds</dt><dd>None</dd>';
+      settingsContent.innerHTML = '<dl>'
+        + '<dt>Configured BASE_URL</dt><dd>' + escapeMarkup(status.configuredBaseUrl) + '</dd>'
+        + '<dt>Current origin</dt><dd>' + escapeMarkup(status.currentOrigin) + '</dd>'
+        + '<dt>Health URL</dt><dd>' + escapeMarkup(status.healthUrl) + '</dd>'
+        + '<dt>Schema version</dt><dd>' + escapeMarkup(status.schemaVersion) + '</dd>'
+        + '<dt>Active feeds</dt><dd>' + escapeMarkup(status.feeds.activeCount) + '</dd>'
+        + '<dt>Email feeds</dt><dd>' + escapeMarkup(status.feeds.emailCount) + '</dd>'
+        + '<dt>RSS feeds</dt><dd>' + escapeMarkup(status.feeds.rssCount) + '</dd>'
+        + '<dt>Total items</dt><dd>' + escapeMarkup(status.items.totalCount) + '</dd>'
+        + '<dt>Unread items</dt><dd>' + escapeMarkup(status.items.unreadCount) + '</dd>'
+        + '<dt>Newest item</dt><dd>' + escapeMarkup(status.items.newestAt || 'Unknown') + '</dd>'
+        + '<dt>Latest RSS fetch</dt><dd>' + escapeMarkup(status.rss.latestFetchAttemptAt || 'Unknown') + '</dd>'
+        + failingFeeds
+        + '</dl>';
+    } catch (_error) {
+      if (session.token) {
+        settingsContent.textContent = 'Could not load status.';
+      }
+    }
+  }
+
+  function buildStreamIdsUrl(view) {
+    const params = new URLSearchParams();
+    params.set('s', view.streamId);
+    params.set('n', String(client.INITIAL_ITEM_ID_LIMIT));
+    if (view.kind === 'unread') {
+      params.set('xt', 'user/-/state/com.google/read');
+    }
+    return '/reader/api/0/stream/items/ids?' + params.toString();
+  }
+
+  async function loadContentChunk(preferredItemId, requestId) {
+    const plan = client.createContentLoadPlan({
+      itemIds,
+      loadedItemIds: Object.keys(loadedItemsById),
+      selectedItemId: preferredItemId || selectedItemId,
+    });
+
+    if (plan.length === 0) {
+      renderArticles();
+      renderReader();
+      return;
+    }
+
+    const form = new FormData();
+    for (const itemId of plan) {
+      form.append('i', itemId);
+    }
+
+    try {
+      const payload = await authenticatedJson('/reader/api/0/stream/items/contents', {
+        method: 'POST',
+        body: form,
+      });
+      if (requestId !== activeViewRequestId) {
+        return;
+      }
+
+      for (const item of payload.items || []) {
+        loadedItemsById[client.normalizeBrowserItemId(item.id)] = item;
+      }
+
+      renderArticles();
+      renderReader();
+    } catch (_error) {
+      if (requestId === activeViewRequestId && session.token) {
+        articlesStatus.textContent = 'Could not load article bodies.';
+      }
+    }
+  }
+
+  async function loadActiveView() {
+    const activeView = getActiveView();
+    if (!activeView) {
+      resetReaderState();
+      return;
+    }
+
+    const requestId = activeViewRequestId + 1;
+    activeViewRequestId = requestId;
+    itemIds = [];
+    loadedItemsById = {};
+    selectedItemId = null;
+    articlesStatus.textContent = 'Loading articles…';
+    articlesList.innerHTML = '';
+    loadMoreButton.classList.add('hidden');
+    renderFeeds();
+    renderReader();
+
+    try {
+      const payload = await authenticatedJson(buildStreamIdsUrl(activeView));
+      if (requestId !== activeViewRequestId) {
+        return;
+      }
+
+      itemIds = client.limitInitialItemIds((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
+      selectedItemId = itemIds[0] || null;
+      renderArticles();
+      renderReader();
+
+      if (itemIds.length > 0) {
+        await loadContentChunk(selectedItemId, requestId);
+      }
+    } catch (_error) {
+      if (requestId === activeViewRequestId && session.token) {
+        articlesStatus.textContent = 'Could not load this view.';
+      }
+    }
+  }
+
+  async function loadSubscriptionsAndUnreadCounts() {
+    feedsStatus.textContent = 'Loading feeds…';
+
+    try {
+      const [subscriptionPayload, unreadPayload] = await Promise.all([
+        authenticatedJson('/reader/api/0/subscription/list'),
+        authenticatedJson('/reader/api/0/unread-count'),
+      ]);
+      views = client.buildFeedViews(subscriptionPayload.subscriptions || [], unreadPayload.unreadcounts || []);
+      if (!views.some((view) => view.id === activeViewId)) {
+        activeViewId = 'all';
+      }
+      renderFeeds();
+      await loadActiveView();
+    } catch (_error) {
+      if (session.token) {
+        feedsStatus.textContent = 'Could not load feeds.';
+      }
+    }
+  }
+
+  async function selectView(viewId) {
+    if (viewId === activeViewId) {
+      return;
+    }
+
+    activeViewId = viewId;
+    await loadActiveView();
+  }
+
+  async function selectArticle(itemId) {
+    if (!itemIds.includes(itemId)) {
+      return;
+    }
+
+    selectedItemId = itemId;
+    renderArticles();
+    renderReader();
+    if (!loadedItemsById[itemId]) {
+      await loadContentChunk(itemId, activeViewRequestId);
+    }
+  }
+
+  async function restoreOrBootstrapReader() {
+    renderFeeds();
+    renderArticles();
+    renderReader();
+    await loadSubscriptionsAndUnreadCounts();
   }
 
   async function login(password) {
@@ -365,6 +767,7 @@ export function renderBrowserAppRuntimeScript(): string {
     cancelPendingValidation();
     setStoredToken(token);
     setLoggedIn();
+    void restoreOrBootstrapReader();
     return true;
   }
 
@@ -377,16 +780,36 @@ export function renderBrowserAppRuntimeScript(): string {
   });
 
   logoutButton.addEventListener('click', () => {
-    cancelPendingValidation();
     setLoggedOut('');
   });
 
   settingsButton.addEventListener('click', () => {
-    settingsPanel.classList.toggle('hidden');
+    const isHidden = settingsPanel.classList.toggle('hidden');
+    if (!isHidden && !statusLoaded) {
+      void loadStatus();
+    }
   });
 
   closeSettingsButton.addEventListener('click', () => {
     settingsPanel.classList.add('hidden');
+  });
+
+  feedsList.addEventListener('click', (event) => {
+    const target = event.target && event.target.closest ? event.target.closest('[data-view-id]') : null;
+    if (target) {
+      void selectView(target.getAttribute('data-view-id'));
+    }
+  });
+
+  articlesList.addEventListener('click', (event) => {
+    const target = event.target && event.target.closest ? event.target.closest('[data-item-id]') : null;
+    if (target) {
+      void selectArticle(target.getAttribute('data-item-id'));
+    }
+  });
+
+  loadMoreButton.addEventListener('click', () => {
+    void loadContentChunk(selectedItemId, activeViewRequestId);
   });
 
   if (config.baseUrl) {
@@ -404,6 +827,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
       if (isValid) {
         setLoggedIn();
+        void restoreOrBootstrapReader();
       } else if (loginError.textContent === '') {
         setLoggedOut('');
       }
