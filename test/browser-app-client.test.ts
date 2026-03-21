@@ -89,6 +89,20 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 	};
 }
 
+function createDeferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
+async function flushBrowserTasks() {
+	await Promise.resolve();
+	await Promise.resolve();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 async function createBrowserHarness(options?: {
 	storedToken?: string | null;
 	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string> }) => Promise<Response>;
@@ -145,9 +159,7 @@ async function createBrowserHarness(options?: {
 
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
 	vm.runInNewContext(renderBrowserAppRuntimeScript(), context);
-	await Promise.resolve();
-	await Promise.resolve();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await flushBrowserTasks();
 
 	return { elements, storage };
 }
@@ -178,4 +190,38 @@ test('runtime script validates a stored token before restoring the logged-in she
 	assert.equal(storage.has(AUTH_STORAGE_KEY), false);
 	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false);
 	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), true);
+});
+
+test('startup token validation cannot overwrite a newer successful manual login', async () => {
+	const startupValidation = createDeferred<Response>();
+	const { elements, storage } = await createBrowserHarness({
+		storedToken: 'stale-token',
+		fetchImpl: async (input, init) => {
+			if (input === '/app/status') {
+				return startupValidation.promise;
+			}
+
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/fresh-token\nLSID=null\nAuth=pigeon/fresh-token', {
+					status: 200,
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), true);
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+
+	startupValidation.resolve(new Response('Unauthorized', { status: 401 }));
+	await flushBrowserTasks();
+
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), true);
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
 });

@@ -282,6 +282,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const settingsPanel = document.getElementById('settings-panel');
   const closeSettingsButton = document.getElementById('close-settings-button');
   let session = client.createLoggedOutSession();
+  let activeValidationId = 0;
 
   function getStoredToken() {
     return window.sessionStorage.getItem(storageKey);
@@ -293,6 +294,19 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearStoredToken() {
     window.sessionStorage.removeItem(storageKey);
+  }
+
+  function startValidation() {
+    activeValidationId += 1;
+    return activeValidationId;
+  }
+
+  function cancelPendingValidation() {
+    activeValidationId += 1;
+  }
+
+  function isActiveValidation(validationId) {
+    return validationId === activeValidationId;
   }
 
   function setLoggedOut(message) {
@@ -353,6 +367,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     session = client.createSessionFromToken(token);
+    cancelPendingValidation();
     setStoredToken(token);
     setLoggedIn();
     return true;
@@ -367,6 +382,7 @@ export function renderBrowserAppRuntimeScript(): string {
   });
 
   logoutButton.addEventListener('click', () => {
+    cancelPendingValidation();
     setLoggedOut('');
   });
 
@@ -385,7 +401,12 @@ export function renderBrowserAppRuntimeScript(): string {
   const existingToken = getStoredToken();
   if (existingToken) {
     session = client.createSessionFromToken(existingToken);
+    const validationId = startValidation();
     validateToken(existingToken).then((isValid) => {
+      if (!isActiveValidation(validationId)) {
+        return;
+      }
+
       if (isValid) {
         setLoggedIn();
       } else if (loginError.textContent === '') {
