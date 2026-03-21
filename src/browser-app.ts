@@ -372,6 +372,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeValidationId = 0;
   let activeViewRequestId = 0;
   let activeStatusRequestId = 0;
+  let activeContentRequestId = 0;
   let views = [];
   let activeViewId = 'all';
   let itemIds = [];
@@ -407,6 +408,11 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function cancelViewLoads() {
     activeViewRequestId += 1;
+  }
+
+  function cancelContentLoads() {
+    activeContentRequestId += 1;
+    inFlightContentIds = [];
   }
 
   function startStatusRequest() {
@@ -516,9 +522,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function resetReaderState() {
     cancelViewLoads();
+    cancelContentLoads();
     itemIds = [];
     loadedItemsById = {};
-    inFlightContentIds = [];
     selectedItemId = null;
     clearElement(articlesList);
     loadMoreButton.disabled = false;
@@ -743,6 +749,8 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    const contentRequestId = activeContentRequestId + 1;
+    activeContentRequestId = contentRequestId;
     inFlightContentIds = plan;
     renderArticles();
 
@@ -756,7 +764,7 @@ export function renderBrowserAppRuntimeScript(): string {
         method: 'POST',
         body: form,
       });
-      if (requestId !== activeViewRequestId) {
+      if (requestId !== activeViewRequestId || contentRequestId !== activeContentRequestId) {
         return;
       }
 
@@ -768,10 +776,10 @@ export function renderBrowserAppRuntimeScript(): string {
       renderArticles();
       renderReader();
     } catch (_error) {
-      if (requestId === activeViewRequestId) {
+      if (requestId === activeViewRequestId && contentRequestId === activeContentRequestId) {
         inFlightContentIds = [];
       }
-      if (requestId === activeViewRequestId && session.token) {
+      if (requestId === activeViewRequestId && contentRequestId === activeContentRequestId && session.token) {
         articlesStatus.textContent = 'Could not load article bodies.';
       }
       renderArticles();
@@ -787,6 +795,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const requestId = activeViewRequestId + 1;
     activeViewRequestId = requestId;
+    cancelContentLoads();
     itemIds = [];
     loadedItemsById = {};
     selectedItemId = null;

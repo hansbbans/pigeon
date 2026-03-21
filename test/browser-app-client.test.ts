@@ -769,3 +769,99 @@ test('load-more does not duplicate an in-flight chunk and advances after the fir
 	assert.ok(loadMoreToggleCalls().filter((force) => force === false).length >= 2);
 	assert.deepEqual(contentRequests[1], ['21', '22', '23', '24', '25']);
 });
+
+test('switching views during an in-flight content load still fetches bodies for the new view', async () => {
+	const allItemsContentResponse = createDeferred<Response>();
+	const contentRequests: string[][] = [];
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Alpha' },
+						{ id: 'feed/2', title: 'Bravo' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/1', count: 1 },
+						{ id: 'feed/2', count: 1 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				const url = new URL(`https://pigeon.example${String(input)}`);
+				const streamId = url.searchParams.get('s');
+				if (streamId === 'feed/2') {
+					return Response.json({
+						itemRefs: [{ id: '301' }],
+					});
+				}
+				return Response.json({
+					itemRefs: [{ id: '101' }, { id: '102' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				const ids = Array.from((init.body as FormData).values()).map(String);
+				contentRequests.push(ids);
+				if (contentRequests.length === 1) {
+					return allItemsContentResponse.promise;
+				}
+				return Response.json({
+					items: ids.map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: id === '301' ? 'Bravo' : 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})),
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => contentRequests.length === 1);
+
+	const feedsList = elements.get('feeds-list');
+	const bravoFeedButton = feedsList?.children[3]?.children[0];
+	await bravoFeedButton?.dispatch('click');
+	await waitForBrowserCondition(() => contentRequests.length === 2);
+
+	assert.deepEqual(contentRequests[0], ['101', '102']);
+	assert.deepEqual(contentRequests[1], ['301']);
+	assert.match(elements.get('reader-title')?.textContent ?? '', /Article 301/);
+	assert.match(elements.get('reader-meta')?.textContent ?? '', /Bravo/);
+
+	allItemsContentResponse.resolve(
+		Response.json({
+			items: [
+				{
+					id: 'tag:google.com,2005:reader/item/0000000000000065',
+					title: 'Article 101',
+					published: 1_742_460_800,
+					origin: { title: 'Alpha' },
+					summary: { content: 'Preview 101' },
+					content: { content: '<p>Body 101</p>' },
+				},
+			],
+		}),
+	);
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	assert.match(elements.get('articles-list')?.textContent ?? '', /Article 301/);
+	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Article 101/);
+});
