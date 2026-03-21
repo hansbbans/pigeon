@@ -263,7 +263,13 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .toolbar-pill[data-control-tone="subtle"][disabled] {
-        opacity: 1;
+        opacity: 0.72;
+      }
+
+      .toolbar-pill[data-control-tone="subtle"][disabled]:hover {
+        background: rgba(239, 243, 249, 0.96);
+        color: #66758b;
+        border-color: rgba(206, 216, 229, 0.96);
       }
 
       .reader-grid {

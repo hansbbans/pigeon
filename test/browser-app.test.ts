@@ -219,6 +219,8 @@ test('GET /app returns an HTML shell', async () => {
 		html,
 		/<button[^>]+data-presentational-control="true"[^>]+data-control-tone="subtle"[^>]+disabled[^>]*>/,
 	);
+	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
+	assert.doesNotMatch(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]\s*\{[^}]*opacity:\s*1;/);
 	assert.doesNotMatch(html, /feedsList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /articlesList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /settingsContent\.innerHTML\s*=/);
