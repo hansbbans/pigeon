@@ -91,10 +91,12 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 
 function createDeferred<T>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
-	const promise = new Promise<T>((resolvePromise) => {
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
 		resolve = resolvePromise;
+		reject = rejectPromise;
 	});
-	return { promise, resolve };
+	return { promise, resolve, reject };
 }
 
 async function flushBrowserTasks() {
@@ -219,6 +221,40 @@ test('startup token validation cannot overwrite a newer successful manual login'
 	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
 
 	startupValidation.resolve(new Response('Unauthorized', { status: 401 }));
+	await flushBrowserTasks();
+
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), true);
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+});
+
+test('startup validation request failure cannot overwrite a newer successful manual login', async () => {
+	const startupValidation = createDeferred<Response>();
+	const { elements, storage } = await createBrowserHarness({
+		storedToken: 'stale-token',
+		fetchImpl: async (input, init) => {
+			if (input === '/app/status') {
+				return startupValidation.promise;
+			}
+
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/fresh-token\nLSID=null\nAuth=pigeon/fresh-token', {
+					status: 200,
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), true);
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+
+	startupValidation.reject(new Error('network down'));
 	await flushBrowserTasks();
 
 	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');

@@ -325,18 +325,13 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function validateToken(token) {
-    try {
-      const response = await fetch('/app/status', {
-        headers: {
-          Authorization: 'GoogleLogin auth=pigeon/' + token,
-        },
-      });
+    const response = await fetch('/app/status', {
+      headers: {
+        Authorization: 'GoogleLogin auth=pigeon/' + token,
+      },
+    });
 
-      return response.status === 200;
-    } catch (_error) {
-      setLoggedOut('Could not restore session.');
-      return false;
-    }
+    return response.status === 200;
   }
 
   async function login(password) {
@@ -412,6 +407,12 @@ export function renderBrowserAppRuntimeScript(): string {
       } else if (loginError.textContent === '') {
         setLoggedOut('');
       }
+    }).catch(() => {
+      if (!isActiveValidation(validationId)) {
+        return;
+      }
+
+      setLoggedOut('Could not restore session.');
     });
   } else {
     setLoggedOut('');
