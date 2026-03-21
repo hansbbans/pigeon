@@ -3,6 +3,7 @@ import { renderBrowserAppClientScript } from './browser-app-client';
 export function renderBrowserAppHtml(baseUrl: string): string {
 	const config = JSON.stringify({ baseUrl });
 	const sharedClientScript = renderBrowserAppClientScript();
+	const runtimeScript = renderBrowserAppRuntimeScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -259,111 +260,143 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       </aside>
     </div>
     <script>
-      (() => {
-        const config = window.__PIGEON_CONFIG__ || {};
-        const client = window.__PIGEON_BROWSER_CLIENT__;
-        const storageKey = client.AUTH_STORAGE_KEY;
-        const loginScreen = document.getElementById('login-screen');
-        const readerShell = document.getElementById('reader-shell');
-        const loginForm = document.getElementById('login-form');
-        const loginError = document.getElementById('login-error');
-        const passwordInput = document.getElementById('password-input');
-        const logoutButton = document.getElementById('logout-button');
-        const settingsButton = document.getElementById('settings-button');
-        const settingsPanel = document.getElementById('settings-panel');
-        const closeSettingsButton = document.getElementById('close-settings-button');
-        let session = client.createLoggedOutSession();
-
-        function getStoredToken() {
-          return window.sessionStorage.getItem(storageKey);
-        }
-
-        function setStoredToken(token) {
-          window.sessionStorage.setItem(storageKey, token);
-        }
-
-        function clearStoredToken() {
-          window.sessionStorage.removeItem(storageKey);
-        }
-
-        function setLoggedOut(message) {
-          session = client.createLoggedOutSession();
-          clearStoredToken();
-          loginScreen.classList.remove('hidden');
-          readerShell.classList.add('hidden');
-          settingsPanel.classList.add('hidden');
-          loginError.textContent = message || '';
-        }
-
-        function setLoggedIn() {
-          loginError.textContent = '';
-          loginScreen.classList.add('hidden');
-          readerShell.classList.remove('hidden');
-        }
-
-        async function login(password) {
-          const form = new FormData();
-          form.set('Passwd', password);
-
-          const response = await fetch('/accounts/ClientLogin', {
-            method: 'POST',
-            body: form,
-          });
-
-          if (!response.ok) {
-            setLoggedOut('Incorrect password.');
-            return false;
-          }
-
-          const text = await response.text();
-          const token = client.extractAuthToken(text);
-          if (!token) {
-            setLoggedOut('Could not start a session.');
-            return false;
-          }
-
-          session = client.createSessionFromToken(token);
-          setStoredToken(token);
-          setLoggedIn();
-          return true;
-        }
-
-        loginForm.addEventListener('submit', async (event) => {
-          event.preventDefault();
-          const ok = await login(passwordInput.value);
-          if (ok) {
-            passwordInput.value = '';
-          }
-        });
-
-        logoutButton.addEventListener('click', () => {
-          setLoggedOut('');
-        });
-
-        settingsButton.addEventListener('click', () => {
-          settingsPanel.classList.toggle('hidden');
-        });
-
-        closeSettingsButton.addEventListener('click', () => {
-          settingsPanel.classList.add('hidden');
-        });
-
-        if (config.baseUrl) {
-          document.documentElement.setAttribute('data-base-url', config.baseUrl);
-        }
-
-        const existingToken = getStoredToken();
-        if (existingToken) {
-          session = client.createSessionFromToken(existingToken);
-          setLoggedIn();
-        } else {
-          session = client.applyUnauthorizedState(session);
-          setLoggedOut('');
-        }
-      })();
+      ${runtimeScript}
     </script>
   </body>
 </html>`;
+}
+
+export function renderBrowserAppRuntimeScript(): string {
+	return `
+(() => {
+  const config = window.__PIGEON_CONFIG__ || {};
+  const client = window.__PIGEON_BROWSER_CLIENT__;
+  const storageKey = client.AUTH_STORAGE_KEY;
+  const loginScreen = document.getElementById('login-screen');
+  const readerShell = document.getElementById('reader-shell');
+  const loginForm = document.getElementById('login-form');
+  const loginError = document.getElementById('login-error');
+  const passwordInput = document.getElementById('password-input');
+  const logoutButton = document.getElementById('logout-button');
+  const settingsButton = document.getElementById('settings-button');
+  const settingsPanel = document.getElementById('settings-panel');
+  const closeSettingsButton = document.getElementById('close-settings-button');
+  let session = client.createLoggedOutSession();
+
+  function getStoredToken() {
+    return window.sessionStorage.getItem(storageKey);
+  }
+
+  function setStoredToken(token) {
+    window.sessionStorage.setItem(storageKey, token);
+  }
+
+  function clearStoredToken() {
+    window.sessionStorage.removeItem(storageKey);
+  }
+
+  function setLoggedOut(message) {
+    session = client.applyUnauthorizedState(session);
+    clearStoredToken();
+    loginScreen.classList.remove('hidden');
+    readerShell.classList.add('hidden');
+    settingsPanel.classList.add('hidden');
+    loginError.textContent = message || '';
+  }
+
+  function setLoggedIn() {
+    loginError.textContent = '';
+    loginScreen.classList.add('hidden');
+    readerShell.classList.remove('hidden');
+  }
+
+  async function validateToken(token) {
+    try {
+      const response = await fetch('/app/status', {
+        headers: {
+          Authorization: 'GoogleLogin auth=pigeon/' + token,
+        },
+      });
+
+      return response.status === 200;
+    } catch (_error) {
+      setLoggedOut('Could not restore session.');
+      return false;
+    }
+  }
+
+  async function login(password) {
+    const form = new FormData();
+    form.set('Passwd', password);
+
+    let response;
+    try {
+      response = await fetch('/accounts/ClientLogin', {
+        method: 'POST',
+        body: form,
+      });
+    } catch (_error) {
+      setLoggedOut('Could not reach the server.');
+      return false;
+    }
+
+    if (!response.ok) {
+      setLoggedOut('Incorrect password.');
+      return false;
+    }
+
+    const text = await response.text();
+    const token = client.extractAuthToken(text);
+    if (!token) {
+      setLoggedOut('Could not start a session.');
+      return false;
+    }
+
+    session = client.createSessionFromToken(token);
+    setStoredToken(token);
+    setLoggedIn();
+    return true;
+  }
+
+  loginForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const ok = await login(passwordInput.value);
+    if (ok) {
+      passwordInput.value = '';
+    }
+  });
+
+  logoutButton.addEventListener('click', () => {
+    setLoggedOut('');
+  });
+
+  settingsButton.addEventListener('click', () => {
+    settingsPanel.classList.toggle('hidden');
+  });
+
+  closeSettingsButton.addEventListener('click', () => {
+    settingsPanel.classList.add('hidden');
+  });
+
+  if (config.baseUrl) {
+    document.documentElement.setAttribute('data-base-url', config.baseUrl);
+  }
+
+  const existingToken = getStoredToken();
+  if (existingToken) {
+    session = client.createSessionFromToken(existingToken);
+    validateToken(existingToken).then((isValid) => {
+      if (isValid) {
+        setLoggedIn();
+      } else if (loginError.textContent === '') {
+        setLoggedOut('');
+      }
+    });
+  } else {
+    setLoggedOut('');
+  }
+})();
+`.trim();
 }
 
 function escapeHtml(value: string): string {
