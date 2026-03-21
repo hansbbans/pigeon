@@ -617,7 +617,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         overflow: auto;
         border: 1px solid var(--border);
         border-radius: 1.25rem;
+        background: rgba(248, 250, 252, 0.98);
         box-shadow: var(--shadow);
+        z-index: 20;
       }
 
       #settings-panel h2 {
@@ -644,22 +646,84 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       @media (max-width: 1100px) {
         #app {
+          padding: 0.9rem;
+        }
+
+        #reader-window-bar {
+          grid-template-columns: auto minmax(0, 1fr);
+          gap: 0.8rem;
+          padding: 0.75rem 0.9rem;
+        }
+
+        #reader-toolbar {
+          padding: 0.85rem 0.9rem;
+        }
+
+        .reader-grid {
+          padding: 0 0.9rem 0.9rem;
+          grid-template-columns: minmax(12.75rem, 14.5rem) minmax(17rem, 20rem) minmax(0, 1fr);
+        }
+      }
+
+      @media (max-width: 900px) {
+        #app {
           padding: 0.75rem;
+        }
+
+        .reader-window {
+          border-radius: 1.25rem;
         }
 
         #reader-window-bar {
           grid-template-columns: 1fr;
           justify-items: flex-start;
+          gap: 0.65rem;
+          padding: 0.75rem 0.85rem;
+        }
+
+        .window-address {
+          width: 100%;
+          text-align: left;
+        }
+
+        .window-status {
+          font-size: 0.75rem;
         }
 
         #reader-toolbar {
           flex-direction: column;
-          align-items: flex-start;
+          align-items: stretch;
+          gap: 0.75rem;
+          padding: 0.8rem 0.85rem;
+        }
+
+        .toolbar-actions {
+          width: 100%;
+          justify-content: space-between;
+        }
+
+        .toolbar-actions button {
+          flex: 1 1 0;
+          min-width: 0;
+          padding: 0.65rem 0.9rem;
         }
 
         #reader-pane-toolbar {
           flex-direction: column;
-          align-items: flex-start;
+          align-items: stretch;
+          gap: 0.75rem;
+          padding: 0.75rem 0.85rem;
+        }
+
+        .reader-pane-actions {
+          width: 100%;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 0.5rem;
+        }
+
+        .toolbar-pill {
+          padding: 0.6rem 0.8rem;
         }
 
         .reader-grid {
@@ -670,6 +734,28 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
         .article-card.has-hero-image .article-card-grid {
           grid-template-columns: 1fr;
+        }
+
+        .reader-copy {
+          padding: 0 0.15rem;
+          gap: 0.45rem;
+        }
+
+        .reader-copy strong {
+          font-size: clamp(1.3rem, 5vw, 1.75rem);
+          line-height: 1.12;
+        }
+
+        #reader-meta {
+          font-size: 0.88rem;
+        }
+
+        .reader-frame-shell {
+          padding: 0.25rem;
+        }
+
+        #reader-frame {
+          min-height: 48vh;
         }
 
         #feeds-panel,
@@ -686,6 +772,51 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         #reader-panel {
           border-bottom-left-radius: 1rem;
           border-bottom-right-radius: 1rem;
+        }
+
+        #settings-panel {
+          top: auto;
+          right: 0.75rem;
+          bottom: 0.75rem;
+          left: 0.75rem;
+          width: auto;
+          max-height: min(28rem, calc(100vh - 1.5rem));
+          border-radius: 1.1rem;
+        }
+      }
+
+      @media (max-width: 640px) {
+        #app {
+          padding: 0.5rem;
+        }
+
+        .reader-window {
+          border-radius: 1rem;
+        }
+
+        .window-controls {
+          display: none;
+        }
+
+        .reader-brand h1 {
+          font-size: 1.6rem;
+        }
+
+        .reader-pane-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .toolbar-actions button,
+        .toolbar-pill {
+          padding: 0.6rem 0.75rem;
+        }
+
+        .reader-frame-shell {
+          border-radius: 1rem;
+        }
+
+        #reader-frame {
+          min-height: 54vh;
         }
       }
     </style>

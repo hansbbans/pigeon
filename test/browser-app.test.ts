@@ -203,9 +203,16 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
 	assert.match(html, /grid-template-columns:\s*minmax\(14rem, 16rem\) minmax\(20rem, 26rem\) minmax\(24rem, 1fr\);/);
 	assert.match(html, /@media \(max-width: 1100px\)/);
+	assert.match(html, /@media \(max-width: 900px\)/);
 	assert.doesNotMatch(html, /@media \(max-width: 960px\)/);
-	assert.match(html, /grid-template-columns:\s*1fr;/);
-	assert.match(html, /grid-template-areas:\s*"sidebar"\s*"stream"\s*"reader";/);
+	assert.match(
+		html,
+		/@media \(max-width: 900px\)\s*\{[\s\S]*?\.reader-grid\s*\{[\s\S]*?grid-template-columns:\s*1fr;[\s\S]*?grid-template-areas:\s*"sidebar"\s*"stream"\s*"reader";/,
+	);
+	assert.match(
+		html,
+		/@media \(max-width: 900px\)\s*\{[\s\S]*?#settings-panel\s*\{[\s\S]*?top:\s*auto;[\s\S]*?right:\s*0\.75rem;[\s\S]*?bottom:\s*0\.75rem;[\s\S]*?left:\s*0\.75rem;[\s\S]*?width:\s*auto;/,
+	);
 	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);
 	assert.match(html, /\/reader\/api\/0\/subscription\/list/);
 	assert.match(html, /\/reader\/api\/0\/unread-count/);
