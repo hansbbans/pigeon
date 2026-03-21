@@ -438,20 +438,40 @@ export function renderBrowserAppRuntimeScript(): string {
     return response.json();
   }
 
+  function addClassNames(element, classNames) {
+    for (const className of classNames) {
+      if (className) {
+        element.classList.add(className);
+      }
+    }
+  }
+
+  function clearElement(element) {
+    element.replaceChildren();
+  }
+
+  function createNode(tagName, options) {
+    const element = document.createElement(tagName);
+    if (options && options.classNames) {
+      addClassNames(element, options.classNames);
+    }
+    if (options && Object.prototype.hasOwnProperty.call(options, 'text')) {
+      element.textContent = options.text;
+    }
+    if (options && options.attributes) {
+      for (const [name, value] of Object.entries(options.attributes)) {
+        element.setAttribute(name, String(value));
+      }
+    }
+    return element;
+  }
+
   function formatTimestamp(timestampSeconds) {
     if (!timestampSeconds) {
       return '';
     }
 
     return new Date(timestampSeconds * 1000).toLocaleString();
-  }
-
-  function escapeMarkup(value) {
-    return String(value)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
   }
 
   function getActiveView() {
@@ -463,7 +483,7 @@ export function renderBrowserAppRuntimeScript(): string {
     itemIds = [];
     loadedItemsById = {};
     selectedItemId = null;
-    articlesList.innerHTML = '';
+    clearElement(articlesList);
     loadMoreButton.classList.add('hidden');
     renderArticles();
     renderReader();
@@ -475,7 +495,7 @@ export function renderBrowserAppRuntimeScript(): string {
     cancelPendingValidation();
     resetReaderState();
     views = [];
-    feedsList.innerHTML = '';
+    clearElement(feedsList);
     feedsStatus.textContent = 'Feed list loads after login.';
     settingsPanel.classList.add('hidden');
     settingsContent.textContent = 'Open settings to load status.';
@@ -502,19 +522,53 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderFeeds() {
+    clearElement(feedsList);
+
     if (views.length === 0) {
       feedsStatus.textContent = 'Feed list loads after login.';
-      feedsList.innerHTML = '';
       return;
     }
 
     feedsStatus.textContent = 'Choose a view.';
-    feedsList.innerHTML = views.map((view) => {
-      const unreadSuffix = view.unreadCount > 0 ? ' (' + view.unreadCount + ')' : '';
-      const activeClass = view.id === activeViewId ? ' is-active' : '';
-      const meta = view.kind === 'feed' ? 'Feed' : 'View';
-      return '<li><button class="list-button' + activeClass + '" data-view-id="' + escapeMarkup(view.id) + '" type="button"><span class="feed-row"><span class="feed-title">' + escapeMarkup(view.title) + unreadSuffix + '</span></span><span class="feed-meta">' + meta + '</span></button></li>';
-    }).join('');
+    for (const view of views) {
+      const listItem = createNode('li');
+      const button = createNode('button', {
+        classNames: ['list-button', view.id === activeViewId ? 'is-active' : ''],
+        attributes: {
+          type: 'button',
+          'data-view-id': view.id,
+        },
+      });
+      button.addEventListener('click', () => {
+        void selectView(view.id);
+      });
+
+      const row = createNode('span', { classNames: ['feed-row'] });
+      const titleGroup = createNode('span');
+      if (view.iconUrl) {
+        const icon = createNode('img', {
+          attributes: {
+            src: view.iconUrl,
+            alt: '',
+            width: '16',
+            height: '16',
+          },
+        });
+        titleGroup.appendChild(icon);
+      }
+      titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
+      row.appendChild(titleGroup);
+      row.appendChild(createNode('span', { classNames: ['feed-meta'], text: String(view.unreadCount) }));
+      button.appendChild(row);
+      button.appendChild(
+        createNode('span', {
+          classNames: ['feed-meta'],
+          text: view.kind === 'feed' ? 'Feed' : 'View',
+        }),
+      );
+      listItem.appendChild(button);
+      feedsList.appendChild(listItem);
+    }
   }
 
   function renderArticles() {
@@ -523,21 +577,39 @@ export function renderBrowserAppRuntimeScript(): string {
       loadedItemsById,
     });
 
+    clearElement(articlesList);
+
     if (entries.length === 0) {
       articlesStatus.textContent = 'Choose a feed to load article previews.';
-      articlesList.innerHTML = '';
       loadMoreButton.classList.add('hidden');
       return;
     }
 
     articlesStatus.textContent = entries.length + ' article' + (entries.length === 1 ? '' : 's');
-    articlesList.innerHTML = entries.map((entry) => {
-      const activeClass = entry.id === selectedItemId ? ' is-active' : '';
-      const preview = entry.preview ? '<span class="article-preview">' + escapeMarkup(entry.preview) + '</span>' : '';
+    for (const entry of entries) {
+      const listItem = createNode('li');
+      const button = createNode('button', {
+        classNames: ['list-button', entry.id === selectedItemId ? 'is-active' : ''],
+        attributes: {
+          type: 'button',
+          'data-item-id': entry.id,
+        },
+      });
+      button.addEventListener('click', () => {
+        void selectArticle(entry.id);
+      });
+      button.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
+      if (entry.preview) {
+        button.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
+      }
       const metaParts = [entry.feedTitle, formatTimestamp(entry.published)].filter(Boolean);
-      const meta = metaParts.length ? '<span class="article-meta">' + escapeMarkup(metaParts.join(' · ')) + '</span>' : '';
-      return '<li><button class="list-button' + activeClass + '" data-item-id="' + escapeMarkup(entry.id) + '" type="button"><span class="article-title">' + escapeMarkup(entry.title) + '</span>' + preview + meta + '</button></li>';
-    }).join('');
+      if (metaParts.length > 0) {
+        button.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
+      }
+      listItem.appendChild(button);
+      articlesList.appendChild(listItem);
+    }
+
     loadMoreButton.classList.toggle('hidden', client.createContentLoadPlan({
       itemIds,
       loadedItemIds: Object.keys(loadedItemsById),
@@ -573,23 +645,35 @@ export function renderBrowserAppRuntimeScript(): string {
     try {
       const status = await authenticatedJson('/app/status');
       statusLoaded = true;
-      const failingFeeds = status.feeds.failing.length
-        ? '<dt>Failing RSS feeds</dt><dd>' + escapeMarkup(status.feeds.failing.map((feed) => feed.title + ': ' + feed.error).join(' | ')) + '</dd>'
-        : '<dt>Failing RSS feeds</dt><dd>None</dd>';
-      settingsContent.innerHTML = '<dl>'
-        + '<dt>Configured BASE_URL</dt><dd>' + escapeMarkup(status.configuredBaseUrl) + '</dd>'
-        + '<dt>Current origin</dt><dd>' + escapeMarkup(status.currentOrigin) + '</dd>'
-        + '<dt>Health URL</dt><dd>' + escapeMarkup(status.healthUrl) + '</dd>'
-        + '<dt>Schema version</dt><dd>' + escapeMarkup(status.schemaVersion) + '</dd>'
-        + '<dt>Active feeds</dt><dd>' + escapeMarkup(status.feeds.activeCount) + '</dd>'
-        + '<dt>Email feeds</dt><dd>' + escapeMarkup(status.feeds.emailCount) + '</dd>'
-        + '<dt>RSS feeds</dt><dd>' + escapeMarkup(status.feeds.rssCount) + '</dd>'
-        + '<dt>Total items</dt><dd>' + escapeMarkup(status.items.totalCount) + '</dd>'
-        + '<dt>Unread items</dt><dd>' + escapeMarkup(status.items.unreadCount) + '</dd>'
-        + '<dt>Newest item</dt><dd>' + escapeMarkup(status.items.newestAt || 'Unknown') + '</dd>'
-        + '<dt>Latest RSS fetch</dt><dd>' + escapeMarkup(status.rss.latestFetchAttemptAt || 'Unknown') + '</dd>'
-        + failingFeeds
-        + '</dl>';
+      const definitionList = createNode('dl');
+      const appendStatusRow = (label, value) => {
+        definitionList.appendChild(createNode('dt', { text: label }));
+        definitionList.appendChild(createNode('dd', { text: value == null || value === '' ? 'Unknown' : String(value) }));
+      };
+
+      appendStatusRow('Configured BASE_URL', status.configuredBaseUrl);
+      appendStatusRow('Current origin', status.currentOrigin);
+      appendStatusRow('Health URL', status.healthUrl);
+      appendStatusRow('Schema version', status.schemaVersion);
+      appendStatusRow('Active feeds', status.feeds.activeCount);
+      appendStatusRow('Email feeds', status.feeds.emailCount);
+      appendStatusRow('RSS feeds', status.feeds.rssCount);
+      appendStatusRow('Failing RSS feed count', status.feeds.failingRssCount);
+      appendStatusRow('Total items', status.items.totalCount);
+      appendStatusRow('Unread items', status.items.unreadCount);
+      appendStatusRow('Starred items', status.items.starredCount);
+      appendStatusRow('Newest item', status.items.newestAt);
+      appendStatusRow('Newest email item', status.items.newestEmailAt);
+      appendStatusRow('Newest RSS item', status.items.newestRssAt);
+      appendStatusRow('Latest RSS fetch', status.rss.latestFetchAttemptAt);
+      appendStatusRow(
+        'Failing RSS feeds',
+        status.feeds.failing.length > 0
+          ? status.feeds.failing.map((feed) => feed.title + ': ' + feed.error).join(' | ')
+          : 'None',
+      );
+
+      settingsContent.replaceChildren(definitionList);
     } catch (_error) {
       if (session.token) {
         settingsContent.textContent = 'Could not load status.';
@@ -660,7 +744,7 @@ export function renderBrowserAppRuntimeScript(): string {
     loadedItemsById = {};
     selectedItemId = null;
     articlesStatus.textContent = 'Loading articles…';
-    articlesList.innerHTML = '';
+    clearElement(articlesList);
     loadMoreButton.classList.add('hidden');
     renderFeeds();
     renderReader();
@@ -792,20 +876,6 @@ export function renderBrowserAppRuntimeScript(): string {
 
   closeSettingsButton.addEventListener('click', () => {
     settingsPanel.classList.add('hidden');
-  });
-
-  feedsList.addEventListener('click', (event) => {
-    const target = event.target && event.target.closest ? event.target.closest('[data-view-id]') : null;
-    if (target) {
-      void selectView(target.getAttribute('data-view-id'));
-    }
-  });
-
-  articlesList.addEventListener('click', (event) => {
-    const target = event.target && event.target.closest ? event.target.closest('[data-item-id]') : null;
-    if (target) {
-      void selectArticle(target.getAttribute('data-item-id'));
-    }
   });
 
   loadMoreButton.addEventListener('click', () => {

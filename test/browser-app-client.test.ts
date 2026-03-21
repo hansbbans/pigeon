@@ -179,12 +179,16 @@ test('renderBrowserAppClientScript exposes the shared auth helpers for the shell
 function createElement(initialValue = '', initialClasses: string[] = []) {
 	const handlers = new Map<string, (event: { preventDefault(): void }) => unknown>();
 	const classes = new Set(initialClasses);
-	return {
+	const attributes = new Map<string, string>();
+	const dataset: Record<string, string> = {};
+	const children: Array<ReturnType<typeof createElement>> = [];
+	let ownTextContent = '';
+	let innerHtmlValue = '';
+	const element = {
 		value: initialValue,
-		textContent: '',
-		innerHTML: '',
 		srcdoc: '',
 		hidden: false,
+		dataset,
 		classList: {
 			add(...names: string[]) {
 				for (const name of names) {
@@ -208,6 +212,25 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 				return classes.has(name);
 			},
 		},
+		appendChild(child: ReturnType<typeof createElement>) {
+			children.push(child);
+			return child;
+		},
+		replaceChildren(...newChildren: Array<ReturnType<typeof createElement>>) {
+			children.length = 0;
+			for (const child of newChildren) {
+				children.push(child);
+			}
+		},
+		setAttribute(name: string, value: string) {
+			attributes.set(name, value);
+			if (name.startsWith('data-')) {
+				dataset[name.slice(5).replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())] = value;
+			}
+		},
+		getAttribute(name: string) {
+			return attributes.get(name) ?? null;
+		},
 		addEventListener(type: string, handler: (event: { preventDefault(): void }) => unknown) {
 			handlers.set(type, handler);
 		},
@@ -219,6 +242,32 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 			return undefined;
 		},
 	};
+
+	Object.defineProperty(element, 'textContent', {
+		get() {
+			return ownTextContent + children.map((child) => child.textContent).join('');
+		},
+		set(value: string) {
+			ownTextContent = value;
+			children.length = 0;
+		},
+		enumerable: true,
+		configurable: true,
+	});
+
+	Object.defineProperty(element, 'innerHTML', {
+		get() {
+			return innerHtmlValue;
+		},
+		set(value: string) {
+			innerHtmlValue = value;
+			children.length = 0;
+		},
+		enumerable: true,
+		configurable: true,
+	});
+
+	return element;
 }
 
 function createDeferred<T>() {
@@ -262,8 +311,24 @@ async function createBrowserHarness(options?: {
 		['settings-content', createElement()],
 	]);
 	const storage = new Map<string, string>();
+	const innerHtmlWrites: string[] = [];
 	if (options?.storedToken) {
 		storage.set(AUTH_STORAGE_KEY, options.storedToken);
+	}
+
+	for (const [id, element] of elements) {
+		let currentValue = '';
+		Object.defineProperty(element, 'innerHTML', {
+			get() {
+				return currentValue;
+			},
+			set(value: string) {
+				currentValue = value;
+				innerHtmlWrites.push(id);
+			},
+			enumerable: true,
+			configurable: true,
+		});
 	}
 
 	const context = {
@@ -286,6 +351,9 @@ async function createBrowserHarness(options?: {
 			documentElement: {
 				setAttribute() {},
 			},
+			createElement() {
+				return createElement();
+			},
 			getElementById(id: string) {
 				const element = elements.get(id);
 				if (!element) {
@@ -305,7 +373,7 @@ async function createBrowserHarness(options?: {
 	vm.runInNewContext(renderBrowserAppRuntimeScript(), context);
 	await flushBrowserTasks();
 
-	return { elements, storage };
+	return { elements, storage, innerHtmlWrites };
 }
 
 test('runtime script shows a user-facing error when login request fails', async () => {
@@ -402,4 +470,101 @@ test('startup validation request failure cannot overwrite a newer successful man
 	assert.equal(storage.get(AUTH_STORAGE_KEY), 'fresh-token');
 	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), true);
 	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+});
+
+test('runtime script keeps app chrome rendering out of innerHTML and shows the full settings fields', async () => {
+	const { elements, innerHtmlWrites } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/2', title: 'Bravo', iconUrl: 'https://example.com/bravo.ico' },
+						{ id: 'feed/1', title: 'Alpha' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/2', count: 4 },
+						{ id: 'feed/1', count: 1 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '101' }, { id: '102' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'First article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Loaded preview' },
+							content: { content: '<p>Body</p>' },
+						},
+					],
+				});
+			}
+
+			if (input === '/app/status') {
+				return Response.json({
+					configuredBaseUrl: 'https://pigeon.example',
+					currentOrigin: 'https://pigeon.example',
+					healthUrl: 'https://pigeon.example/health',
+					schemaVersion: '3',
+					feeds: {
+						activeCount: 2,
+						emailCount: 1,
+						rssCount: 1,
+						failingRssCount: 1,
+						failing: [{ title: 'Bravo', error: 'HTTP 500' }],
+					},
+					items: {
+						totalCount: 12,
+						unreadCount: 5,
+						starredCount: 2,
+						newestAt: '2026-03-20T12:00:00.000Z',
+						newestEmailAt: '2026-03-20T11:00:00.000Z',
+						newestRssAt: '2026-03-20T10:00:00.000Z',
+					},
+					rss: {
+						latestFetchAttemptAt: '2026-03-20T12:05:00.000Z',
+					},
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+	await elements.get('settings-button')?.dispatch('click');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	assert.deepEqual(
+		innerHtmlWrites.filter((id) => ['feeds-list', 'articles-list', 'settings-content'].includes(id)),
+		[],
+	);
+	assert.match(elements.get('feeds-list')?.textContent ?? '', /Alpha/);
+	assert.match(elements.get('feeds-list')?.textContent ?? '', /Bravo/);
+	assert.match(elements.get('feeds-list')?.textContent ?? '', /4/);
+	assert.match(elements.get('settings-content')?.textContent ?? '', /Starred items2/);
+	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest email item2026-03-20T11:00:00.000Z/);
+	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest RSS item2026-03-20T10:00:00.000Z/);
+	assert.match(elements.get('settings-content')?.textContent ?? '', /Failing RSS feed count1/);
 });

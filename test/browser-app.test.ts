@@ -204,6 +204,14 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /\/app\/status/);
 	assert.match(html, /srcdoc/);
 	assert.match(html, /sandbox=""/);
+	assert.doesNotMatch(html, /feedsList\.innerHTML\s*=/);
+	assert.doesNotMatch(html, /articlesList\.innerHTML\s*=/);
+	assert.doesNotMatch(html, /settingsContent\.innerHTML\s*=/);
+	assert.match(html, /starredCount/);
+	assert.match(html, /newestEmailAt/);
+	assert.match(html, /newestRssAt/);
+	assert.match(html, /failingRssCount/);
+	assert.match(html, /iconUrl/);
 });
 
 test('GET /app/ returns the same HTML shell as /app', async () => {
