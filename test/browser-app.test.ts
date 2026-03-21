@@ -197,10 +197,12 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="reader-panel"/);
 	assert.match(html, /id="real-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);
+	assert.match(html, /id="views-list"/);
 	assert.match(html, /id="settings-panel"/);
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
 	assert.match(html, /grid-template-columns:\s*minmax\(14rem, 16rem\) minmax\(20rem, 26rem\) minmax\(24rem, 1fr\);/);
-	assert.match(html, /@media \(max-width: 960px\)/);
+	assert.match(html, /@media \(max-width: 1100px\)/);
+	assert.doesNotMatch(html, /@media \(max-width: 960px\)/);
 	assert.match(html, /grid-template-columns:\s*1fr;/);
 	assert.match(html, /grid-template-areas:\s*"sidebar"\s*"stream"\s*"reader";/);
 	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);

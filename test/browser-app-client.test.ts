@@ -320,6 +320,7 @@ async function createBrowserHarness(options?: {
 		['settings-button', createElement()],
 		['settings-panel', createElement('', ['hidden'])],
 		['close-settings-button', createElement()],
+		['views-list', createElement()],
 		['feeds-status', createElement()],
 		['feeds-list', createElement()],
 		['articles-status', createElement()],
@@ -394,6 +395,20 @@ async function createBrowserHarness(options?: {
 	await flushBrowserTasks();
 
 	return { elements, storage, innerHtmlWrites };
+}
+
+function findListButtonByViewId(
+	listElement: ReturnType<typeof createElement> | undefined,
+	viewId: string,
+) {
+	for (const listItem of listElement?.children ?? []) {
+		for (const child of listItem.children) {
+			if (child.dataset.viewId === viewId) {
+				return child;
+			}
+		}
+	}
+	return undefined;
 }
 
 test('runtime script shows a user-facing error when login request fails', async () => {
@@ -577,12 +592,18 @@ test('runtime script keeps app chrome rendering out of innerHTML and shows the f
 	await flushBrowserTasks();
 
 	assert.deepEqual(
-		innerHtmlWrites.filter((id) => ['feeds-list', 'articles-list', 'settings-content'].includes(id)),
+		innerHtmlWrites.filter((id) => ['views-list', 'feeds-list', 'articles-list', 'settings-content'].includes(id)),
 		[],
 	);
+	assert.match(elements.get('views-list')?.textContent ?? '', /All items/);
+	assert.match(elements.get('views-list')?.textContent ?? '', /Unread/);
+	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Alpha/);
+	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Bravo/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /Alpha/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /Bravo/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /4/);
+	assert.doesNotMatch(elements.get('feeds-list')?.textContent ?? '', /All items/);
+	assert.doesNotMatch(elements.get('feeds-list')?.textContent ?? '', /Unread/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Starred items2/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest email item2026-03-20T11:00:00.000Z/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest RSS item2026-03-20T10:00:00.000Z/);
@@ -836,7 +857,7 @@ test('switching views during an in-flight content load still fetches bodies for 
 	await waitForBrowserCondition(() => contentRequests.length === 1);
 
 	const feedsList = elements.get('feeds-list');
-	const bravoFeedButton = feedsList?.children[3]?.children[0];
+	const bravoFeedButton = findListButtonByViewId(feedsList, 'feed/2');
 	await bravoFeedButton?.dispatch('click');
 	await waitForBrowserCondition(() => contentRequests.length === 2);
 

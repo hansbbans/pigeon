@@ -424,7 +424,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         color: var(--muted);
       }
 
-      @media (max-width: 960px) {
+      @media (max-width: 1100px) {
         #app {
           padding: 0.75rem;
         }
@@ -519,7 +519,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                 <span class="section-kicker">Views</span>
                 <div class="pane-header">
                   <h2>Real views</h2>
-                  <p class="status-meta">All items and unread remain the only built-in views today; the dedicated list lands in the next pass.</p>
+                  <p class="status-meta">All items and unread stay here as the built-in reader views.</p>
+                </div>
+                <div class="list-shell">
+                  <ul class="list-reset" id="views-list"></ul>
                 </div>
               </section>
 
@@ -592,6 +595,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const settingsButton = document.getElementById('settings-button');
   const settingsPanel = document.getElementById('settings-panel');
   const closeSettingsButton = document.getElementById('close-settings-button');
+  const viewsList = document.getElementById('views-list');
   const feedsStatus = document.getElementById('feeds-status');
   const feedsList = document.getElementById('feeds-list');
   const articlesStatus = document.getElementById('articles-status');
@@ -773,6 +777,7 @@ export function renderBrowserAppRuntimeScript(): string {
     resetReaderState();
     cancelStatusLoads();
     views = [];
+    clearElement(viewsList);
     clearElement(feedsList);
     feedsStatus.textContent = 'Feed list loads after login.';
     settingsPanel.classList.add('hidden');
@@ -799,16 +804,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return response.status === 200;
   }
 
-  function renderFeeds() {
-    clearElement(feedsList);
+  function renderViewList(targetList, availableViews) {
+    clearElement(targetList);
 
-    if (views.length === 0) {
-      feedsStatus.textContent = 'Feed list loads after login.';
-      return;
-    }
-
-    feedsStatus.textContent = 'Choose a view.';
-    for (const view of views) {
+    for (const view of availableViews) {
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: ['list-button', view.id === activeViewId ? 'is-active' : ''],
@@ -845,8 +844,25 @@ export function renderBrowserAppRuntimeScript(): string {
         }),
       );
       listItem.appendChild(button);
-      feedsList.appendChild(listItem);
+      targetList.appendChild(listItem);
     }
+  }
+
+  function renderFeeds() {
+    clearElement(viewsList);
+    clearElement(feedsList);
+
+    if (views.length === 0) {
+      feedsStatus.textContent = 'Feed list loads after login.';
+      return;
+    }
+
+    const builtInViews = views.filter((view) => view.kind !== 'feed');
+    const feedViews = views.filter((view) => view.kind === 'feed');
+
+    renderViewList(viewsList, builtInViews);
+    renderViewList(feedsList, feedViews);
+    feedsStatus.textContent = feedViews.length > 0 ? 'Choose a feed.' : 'No feeds yet.';
   }
 
   function renderArticles() {
