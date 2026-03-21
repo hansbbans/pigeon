@@ -682,7 +682,9 @@ test('stale status responses do not overwrite logout state or suppress a later s
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Configured BASE_URLhttps:\/\/pigeon\.example/);
 });
 
-test('load-more visibility is driven through repeated toggle(false) calls while more items remain', async () => {
+test('load-more does not duplicate an in-flight chunk and advances after the first chunk settles', async () => {
+	const firstContentResponse = createDeferred<Response>();
+	const contentRequests: string[][] = [];
 	const { elements } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
@@ -709,6 +711,10 @@ test('load-more visibility is driven through repeated toggle(false) calls while 
 
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
 				const ids = Array.from((init.body as FormData).values()).map(String);
+				contentRequests.push(ids);
+				if (contentRequests.length === 1) {
+					return firstContentResponse.promise;
+				}
 				return Response.json({
 					items: ids.map((id) => ({
 						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
@@ -726,16 +732,40 @@ test('load-more visibility is driven through repeated toggle(false) calls while 
 	});
 
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => (elements.get('articles-list')?.textContent ?? '').includes('Loading article…'));
+	await waitForBrowserCondition(() => contentRequests.length === 1);
 	const loadMoreToggleCalls = () =>
 		elements.get('load-more-button')?.toggleCalls.filter((call) => call.name === 'hidden').map((call) => call.force) ?? [];
 
 	assert.ok(loadMoreToggleCalls().includes(false));
+	assert.equal(elements.get('load-more-button')?.disabled, true);
+	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 1))]);
 
-	const articlesList = elements.get('articles-list');
-	const firstArticleButton = articlesList?.children[0]?.children[0];
-	await firstArticleButton?.dispatch('click');
-	await waitForBrowserCondition(() => loadMoreToggleCalls().filter((force) => force === false).length >= 2);
+	await elements.get('load-more-button')?.dispatch('click');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 1))]);
+
+	firstContentResponse.resolve(
+		Response.json({
+			items: Array.from({ length: 20 }, (_, index) => {
+				const id = String(index + 1);
+				return {
+					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+					title: `Article ${id}`,
+					published: 1_742_460_800,
+					origin: { title: 'Alpha' },
+					summary: { content: `Preview ${id}` },
+					content: { content: `<p>Body ${id}</p>` },
+				};
+			}),
+		}),
+	);
+	await waitForBrowserCondition(() => elements.get('load-more-button')?.disabled === false);
+
+	await elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => contentRequests.length === 2);
 
 	assert.ok(loadMoreToggleCalls().filter((force) => force === false).length >= 2);
+	assert.deepEqual(contentRequests[1], ['21', '22', '23', '24', '25']);
 });

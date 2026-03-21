@@ -376,6 +376,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeViewId = 'all';
   let itemIds = [];
   let loadedItemsById = {};
+  let inFlightContentIds = [];
   let selectedItemId = null;
   let statusLoaded = false;
 
@@ -490,11 +491,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function createPendingContentPlan(preferredItemId) {
     const loadedIds = new Set(Object.keys(loadedItemsById));
+    const inFlightIds = new Set(inFlightContentIds);
     const plannedIds = [];
     const targetItemId = preferredItemId || selectedItemId;
 
     const addId = (itemId) => {
-      if (!itemId || loadedIds.has(itemId) || plannedIds.includes(itemId) || !itemIds.includes(itemId)) {
+      if (!itemId || loadedIds.has(itemId) || inFlightIds.has(itemId) || plannedIds.includes(itemId) || !itemIds.includes(itemId)) {
         return;
       }
       plannedIds.push(itemId);
@@ -516,8 +518,10 @@ export function renderBrowserAppRuntimeScript(): string {
     cancelViewLoads();
     itemIds = [];
     loadedItemsById = {};
+    inFlightContentIds = [];
     selectedItemId = null;
     clearElement(articlesList);
+    loadMoreButton.disabled = false;
     loadMoreButton.classList.add('hidden');
     renderArticles();
     renderReader();
@@ -645,7 +649,9 @@ export function renderBrowserAppRuntimeScript(): string {
       articlesList.appendChild(listItem);
     }
 
-    loadMoreButton.classList.toggle('hidden', createPendingContentPlan(selectedItemId).length === 0);
+    const pendingPlan = createPendingContentPlan(selectedItemId);
+    loadMoreButton.disabled = inFlightContentIds.length > 0;
+    loadMoreButton.classList.toggle('hidden', pendingPlan.length === 0);
   }
 
   function renderReader() {
@@ -737,6 +743,9 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    inFlightContentIds = plan;
+    renderArticles();
+
     const form = new FormData();
     for (const itemId of plan) {
       form.append('i', itemId);
@@ -755,12 +764,17 @@ export function renderBrowserAppRuntimeScript(): string {
         loadedItemsById[client.normalizeBrowserItemId(item.id)] = item;
       }
 
+      inFlightContentIds = [];
       renderArticles();
       renderReader();
     } catch (_error) {
+      if (requestId === activeViewRequestId) {
+        inFlightContentIds = [];
+      }
       if (requestId === activeViewRequestId && session.token) {
         articlesStatus.textContent = 'Could not load article bodies.';
       }
+      renderArticles();
     }
   }
 
@@ -912,6 +926,9 @@ export function renderBrowserAppRuntimeScript(): string {
   });
 
   loadMoreButton.addEventListener('click', () => {
+    if (inFlightContentIds.length > 0) {
+      return;
+    }
     void loadContentChunk(selectedItemId, activeViewRequestId);
   });
 
