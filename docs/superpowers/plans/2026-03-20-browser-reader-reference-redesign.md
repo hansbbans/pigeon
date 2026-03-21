@@ -35,6 +35,7 @@ In `test/browser-app.test.ts`, extend `GET /app returns an HTML shell` so it che
 
 - browser-style top bar marker such as `id="reader-window-bar"`
 - app toolbar marker such as `id="reader-toolbar"`
+- preserved logout control marker such as `id="logout-button"`
 - explicit sidebar section markers for real views and feeds
 - updated desktop three-pane column definition closer to the reference proportions
 - mobile media-query markers for the redesigned stacked layout
@@ -61,6 +62,7 @@ In `src/browser-app.ts`:
 - add a browser-style top bar above the reader app
 - tighten the main pane seams and reduce oversized outer padding
 - update the desktop grid proportions so the left rail is narrower, the stream is stronger, and the reader pane is wider
+- preserve the existing working logout control while moving it into the redesigned chrome
 - add explicit markup hooks for:
   - real views section
   - real feeds section
@@ -101,6 +103,7 @@ In `test/browser-app-client.test.ts`, add tests covering:
 - a helper that selects a usable hero image URL from already-loaded article HTML, returning `null` when none exists
 - article cards rendering a hero image only when the currently loaded item content includes one
 - article cards falling back to a text-first layout when no image is available
+- article cards still showing preview text alongside title, source, and timestamp
 - feed list rendering that still uses only real views and feeds, with counts intact
 
 Use the runtime harness rather than shell string matching for the card assertions.
@@ -125,6 +128,7 @@ In `src/browser-app.ts` and `src/browser-app-client.ts`:
 - keep the sidebar honest to today’s functionality; do not invent reference-like fake sections
 - turn article rows into stream cards with:
   - stronger title hierarchy
+  - visible preview text
   - quieter source and timestamp metadata
   - clearer selected-state treatment
 - add optional hero-image support using already-loaded article data only
@@ -278,6 +282,7 @@ npx wrangler dev --remote
 2. Open the local `/app` URL in a browser and verify:
 
 - login still works
+- logout still works
 - desktop three-pane layout feels substantially closer to the approved reference
 - real views and feeds still load in the sidebar
 - article stream cards and selection state look correct
