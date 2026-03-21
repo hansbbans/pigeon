@@ -189,6 +189,8 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 		srcdoc: '',
 		hidden: false,
 		dataset,
+		children,
+		toggleCalls: [] as Array<{ name: string; force: boolean | undefined }>,
 		classList: {
 			add(...names: string[]) {
 				for (const name of names) {
@@ -200,7 +202,16 @@ function createElement(initialValue = '', initialClasses: string[] = []) {
 					classes.delete(name);
 				}
 			},
-			toggle(name: string) {
+			toggle(name: string, force?: boolean) {
+				element.toggleCalls.push({ name, force });
+				if (force === true) {
+					classes.add(name);
+					return true;
+				}
+				if (force === false) {
+					classes.delete(name);
+					return false;
+				}
 				if (classes.has(name)) {
 					classes.delete(name);
 					return false;
@@ -284,6 +295,15 @@ async function flushBrowserTasks() {
 	await Promise.resolve();
 	await Promise.resolve();
 	await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function waitForBrowserCondition(check: () => boolean, attempts = 20) {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		if (check()) {
+			return;
+		}
+		await flushBrowserTasks();
+	}
 }
 
 async function createBrowserHarness(options?: {
@@ -567,4 +587,155 @@ test('runtime script keeps app chrome rendering out of innerHTML and shows the f
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest email item2026-03-20T11:00:00.000Z/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest RSS item2026-03-20T10:00:00.000Z/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Failing RSS feed count1/);
+});
+
+test('stale status responses do not overwrite logout state or suppress a later settings fetch', async () => {
+	const firstStatus = createDeferred<Response>();
+	const statusCalls: string[] = [];
+	let loginCount = 0;
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				loginCount += 1;
+				const token = loginCount === 1 ? 'first-token' : 'second-token';
+				return new Response(`SID=pigeon/${token}\nLSID=null\nAuth=pigeon/${token}`, { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({ subscriptions: [] });
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [] });
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({ itemRefs: [] });
+			}
+
+			if (input === '/app/status') {
+				statusCalls.push(`status-${statusCalls.length + 1}`);
+				if (statusCalls.length === 1) {
+					return firstStatus.promise;
+				}
+				return Response.json({
+					configuredBaseUrl: 'https://pigeon.example',
+					currentOrigin: 'https://pigeon.example',
+					healthUrl: 'https://pigeon.example/health',
+					schemaVersion: '3',
+					feeds: { activeCount: 0, emailCount: 0, rssCount: 0, failingRssCount: 0, failing: [] },
+					items: {
+						totalCount: 0,
+						unreadCount: 0,
+						starredCount: 0,
+						newestAt: null,
+						newestEmailAt: null,
+						newestRssAt: null,
+					},
+					rss: { latestFetchAttemptAt: null },
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	await elements.get('settings-button')?.dispatch('click');
+	await flushBrowserTasks();
+
+	await elements.get('logout-button')?.dispatch('click');
+	firstStatus.resolve(
+		Response.json({
+			configuredBaseUrl: 'https://stale.example',
+			currentOrigin: 'https://stale.example',
+			healthUrl: 'https://stale.example/health',
+			schemaVersion: '3',
+			feeds: { activeCount: 9, emailCount: 9, rssCount: 9, failingRssCount: 9, failing: [] },
+			items: {
+				totalCount: 9,
+				unreadCount: 9,
+				starredCount: 9,
+				newestAt: '2026-03-20T12:00:00.000Z',
+				newestEmailAt: '2026-03-20T12:00:00.000Z',
+				newestRssAt: '2026-03-20T12:00:00.000Z',
+			},
+			rss: { latestFetchAttemptAt: '2026-03-20T12:00:00.000Z' },
+		}),
+	);
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	assert.equal(elements.get('settings-content')?.textContent, 'Open settings to load status.');
+
+	await elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+	await elements.get('settings-button')?.dispatch('click');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+
+	assert.deepEqual(statusCalls, ['status-1', 'status-2']);
+	assert.match(elements.get('settings-content')?.textContent ?? '', /Configured BASE_URLhttps:\/\/pigeon\.example/);
+});
+
+test('load-more visibility is driven through repeated toggle(false) calls while more items remain', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Alpha' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [{ id: 'feed/1', count: 25 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: Array.from({ length: 25 }, (_, index) => ({ id: String(index + 1) })),
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				const ids = Array.from((init.body as FormData).values()).map(String);
+				return Response.json({
+					items: ids.map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})),
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => (elements.get('articles-list')?.textContent ?? '').includes('Loading article…'));
+	const loadMoreToggleCalls = () =>
+		elements.get('load-more-button')?.toggleCalls.filter((call) => call.name === 'hidden').map((call) => call.force) ?? [];
+
+	assert.ok(loadMoreToggleCalls().includes(false));
+
+	const articlesList = elements.get('articles-list');
+	const firstArticleButton = articlesList?.children[0]?.children[0];
+	await firstArticleButton?.dispatch('click');
+	await waitForBrowserCondition(() => loadMoreToggleCalls().filter((force) => force === false).length >= 2);
+
+	assert.ok(loadMoreToggleCalls().filter((force) => force === false).length >= 2);
 });

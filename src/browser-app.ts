@@ -371,6 +371,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let session = client.createLoggedOutSession();
   let activeValidationId = 0;
   let activeViewRequestId = 0;
+  let activeStatusRequestId = 0;
   let views = [];
   let activeViewId = 'all';
   let itemIds = [];
@@ -405,6 +406,15 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function cancelViewLoads() {
     activeViewRequestId += 1;
+  }
+
+  function startStatusRequest() {
+    activeStatusRequestId += 1;
+    return activeStatusRequestId;
+  }
+
+  function cancelStatusLoads() {
+    activeStatusRequestId += 1;
   }
 
   function getAuthorizationHeader() {
@@ -478,6 +488,30 @@ export function renderBrowserAppRuntimeScript(): string {
     return views.find((view) => view.id === activeViewId) || views[0] || null;
   }
 
+  function createPendingContentPlan(preferredItemId) {
+    const loadedIds = new Set(Object.keys(loadedItemsById));
+    const plannedIds = [];
+    const targetItemId = preferredItemId || selectedItemId;
+
+    const addId = (itemId) => {
+      if (!itemId || loadedIds.has(itemId) || plannedIds.includes(itemId) || !itemIds.includes(itemId)) {
+        return;
+      }
+      plannedIds.push(itemId);
+    };
+
+    addId(targetItemId);
+
+    for (const itemId of itemIds) {
+      addId(itemId);
+      if (plannedIds.length >= client.CONTENT_CHUNK_SIZE) {
+        break;
+      }
+    }
+
+    return plannedIds;
+  }
+
   function resetReaderState() {
     cancelViewLoads();
     itemIds = [];
@@ -494,6 +528,7 @@ export function renderBrowserAppRuntimeScript(): string {
     clearStoredToken();
     cancelPendingValidation();
     resetReaderState();
+    cancelStatusLoads();
     views = [];
     clearElement(feedsList);
     feedsStatus.textContent = 'Feed list loads after login.';
@@ -610,11 +645,7 @@ export function renderBrowserAppRuntimeScript(): string {
       articlesList.appendChild(listItem);
     }
 
-    loadMoreButton.classList.toggle('hidden', client.createContentLoadPlan({
-      itemIds,
-      loadedItemIds: Object.keys(loadedItemsById),
-      selectedItemId,
-    }).length === 0);
+    loadMoreButton.classList.toggle('hidden', createPendingContentPlan(selectedItemId).length === 0);
   }
 
   function renderReader() {
@@ -641,9 +672,15 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function loadStatus() {
+    const requestId = startStatusRequest();
+    const requestToken = session.token;
     settingsContent.textContent = 'Loading status…';
     try {
       const status = await authenticatedJson('/app/status');
+      if (requestId !== activeStatusRequestId || session.token !== requestToken || session.status !== 'authenticated') {
+        return;
+      }
+
       statusLoaded = true;
       const definitionList = createNode('dl');
       const appendStatusRow = (label, value) => {
@@ -675,7 +712,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
       settingsContent.replaceChildren(definitionList);
     } catch (_error) {
-      if (session.token) {
+      if (requestId === activeStatusRequestId && session.token === requestToken && session.status === 'authenticated') {
         settingsContent.textContent = 'Could not load status.';
       }
     }
@@ -692,11 +729,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function loadContentChunk(preferredItemId, requestId) {
-    const plan = client.createContentLoadPlan({
-      itemIds,
-      loadedItemIds: Object.keys(loadedItemsById),
-      selectedItemId: preferredItemId || selectedItemId,
-    });
+    const plan = createPendingContentPlan(preferredItemId);
 
     if (plan.length === 0) {
       renderArticles();
@@ -755,7 +788,7 @@ export function renderBrowserAppRuntimeScript(): string {
         return;
       }
 
-      itemIds = client.limitInitialItemIds((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
+      itemIds = (payload.itemRefs || []).map((itemRef) => String(itemRef.id)).slice(0, client.INITIAL_ITEM_ID_LIMIT);
       selectedItemId = itemIds[0] || null;
       renderArticles();
       renderReader();
