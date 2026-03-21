@@ -14,15 +14,22 @@ export function renderBrowserAppHtml(baseUrl: string): string {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4f1e8;
-        --panel: #fffaf0;
-        --panel-strong: #f0e7d4;
-        --border: #d9cdb6;
-        --text: #1f1b16;
-        --muted: #6f6559;
-        --accent: #1e6b52;
-        --accent-strong: #184f3d;
-        --danger: #b24732;
+        --bg: #dfe8f5;
+        --bg-strong: #cfd9e9;
+        --window: rgba(245, 248, 252, 0.94);
+        --window-edge: #becada;
+        --panel: #f8fafc;
+        --panel-strong: #eef3f8;
+        --reader-surface: #f4f7fb;
+        --reader-paper: #fcfdfd;
+        --reader-toolbar: rgba(248, 250, 253, 0.94);
+        --border: #d4dde8;
+        --text: #1f2937;
+        --muted: #66758b;
+        --accent: #2f6fed;
+        --accent-strong: #2358be;
+        --danger: #c34747;
+        --shadow: 0 30px 80px rgba(31, 41, 55, 0.18);
       }
 
       * {
@@ -32,11 +39,12 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: Georgia, 'Times New Roman', serif;
+        font-family: 'Avenir Next', 'Segoe UI', sans-serif;
         color: var(--text);
         background:
-          radial-gradient(circle at top left, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 30%),
-          linear-gradient(180deg, #efe7d7 0%, var(--bg) 100%);
+          radial-gradient(circle at top left, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0) 32%),
+          radial-gradient(circle at right, rgba(47, 111, 237, 0.14), rgba(47, 111, 237, 0) 34%),
+          linear-gradient(180deg, #edf3fb 0%, var(--bg) 100%);
       }
 
       button,
@@ -45,16 +53,24 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       button {
-        border: 0;
+        border: 1px solid transparent;
         border-radius: 999px;
         background: var(--accent);
         color: #fff;
         cursor: pointer;
-        padding: 0.7rem 1.1rem;
+        padding: 0.7rem 1.15rem;
+        transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
       }
 
       button:hover {
         background: var(--accent-strong);
+        transform: translateY(-1px);
+      }
+
+      button[disabled] {
+        cursor: default;
+        transform: none;
+        opacity: 0.72;
       }
 
       input {
@@ -62,12 +78,12 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         padding: 0.75rem 0.9rem;
         border-radius: 0.9rem;
         border: 1px solid var(--border);
-        background: #fff;
+        background: rgba(255, 255, 255, 0.96);
       }
 
       #app {
         min-height: 100vh;
-        padding: 1.5rem;
+        padding: 1.25rem;
       }
 
       .hidden {
@@ -75,7 +91,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .login-shell {
-        min-height: calc(100vh - 3rem);
+        min-height: calc(100vh - 2.5rem);
         display: grid;
         place-items: center;
       }
@@ -85,18 +101,19 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         padding: 1.5rem;
         border: 1px solid var(--border);
         border-radius: 1.5rem;
-        background: rgba(255, 250, 240, 0.95);
-        box-shadow: 0 20px 50px rgba(64, 42, 12, 0.12);
+        background: rgba(248, 250, 252, 0.96);
+        box-shadow: var(--shadow);
       }
 
       .login-card h1,
-      .reader-header h1 {
+      .reader-brand h1 {
         margin: 0 0 0.5rem;
         font-size: clamp(1.8rem, 3vw, 2.6rem);
+        letter-spacing: -0.04em;
       }
 
       .login-card p,
-      .reader-header p,
+      .reader-brand p,
       .panel-note,
       .status-meta,
       .article-meta,
@@ -116,48 +133,232 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .reader-shell {
-        display: grid;
-        gap: 1rem;
+        width: min(100%, 96rem);
+        margin: 0 auto;
       }
 
-      .reader-header {
+      .reader-window {
+        border: 1px solid rgba(255, 255, 255, 0.7);
+        border-radius: 1.5rem;
+        overflow: hidden;
+        background: var(--window);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      #reader-window-bar {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 1rem;
+        align-items: center;
+        padding: 0.8rem 1rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(232, 238, 246, 0.92)),
+          linear-gradient(90deg, rgba(47, 111, 237, 0.06), rgba(47, 111, 237, 0));
+      }
+
+      .window-controls {
+        display: inline-flex;
+        gap: 0.45rem;
+      }
+
+      .window-dot {
+        width: 0.72rem;
+        height: 0.72rem;
+        border-radius: 999px;
+        display: inline-block;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+      }
+
+      .window-dot[data-tone="close"] {
+        background: #ff5f57;
+      }
+
+      .window-dot[data-tone="minimize"] {
+        background: #febc2e;
+      }
+
+      .window-dot[data-tone="expand"] {
+        background: #28c840;
+      }
+
+      .window-address {
+        min-width: 0;
+        padding: 0.55rem 0.9rem;
+        border: 1px solid rgba(190, 202, 218, 0.9);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.76);
+        color: var(--muted);
+        font-size: 0.93rem;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .window-status {
+        font-size: 0.83rem;
+        color: var(--muted);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      #reader-toolbar {
         display: flex;
         justify-content: space-between;
         gap: 1rem;
-        align-items: flex-start;
+        align-items: center;
+        padding: 0.9rem 1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.56);
+        border-bottom: 1px solid rgba(210, 220, 233, 0.72);
+        background: rgba(246, 249, 252, 0.78);
+      }
+
+      .reader-brand {
+        display: grid;
+        gap: 0.15rem;
+      }
+
+      .reader-brand p {
+        margin: 0;
+        font-size: 0.8rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .reader-brand h1 {
+        margin-bottom: 0;
+      }
+
+      .toolbar-actions,
+      .reader-pane-actions {
+        display: flex;
+        gap: 0.65rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .toolbar-pill,
+      .secondary-button {
+        background: rgba(255, 255, 255, 0.74);
+        color: var(--text);
+        border-color: var(--border);
+      }
+
+      .toolbar-pill:hover,
+      .secondary-button:hover {
+        background: rgba(255, 255, 255, 0.96);
+      }
+
+      .toolbar-pill[data-presentational-control="true"] {
+        color: var(--muted);
+      }
+
+      .toolbar-pill[data-control-tone="subtle"] {
+        background: rgba(239, 243, 249, 0.96);
+        color: #66758b;
+        border-color: rgba(206, 216, 229, 0.96);
+        box-shadow: none;
+      }
+
+      .toolbar-pill[data-control-tone="subtle"][disabled] {
+        opacity: 0.72;
+      }
+
+      .toolbar-pill[data-control-tone="subtle"][disabled]:hover {
+        background: rgba(239, 243, 249, 0.96);
+        color: #66758b;
+        border-color: rgba(206, 216, 229, 0.96);
       }
 
       .reader-grid {
         display: grid;
-        gap: 1rem;
-        grid-template-columns: minmax(15rem, 18rem) minmax(18rem, 22rem) minmax(0, 1fr);
+        gap: 1px;
+        padding: 0 1rem 1rem;
+        grid-template-columns: minmax(14rem, 16rem) minmax(20rem, 26rem) minmax(24rem, 1fr);
+        grid-template-areas: "sidebar stream reader";
+        align-items: stretch;
+        background: var(--window-edge);
       }
 
       .panel {
         min-height: 18rem;
         padding: 1rem;
-        border: 1px solid var(--border);
-        border-radius: 1.25rem;
-        background: rgba(255, 250, 240, 0.92);
-        box-shadow: 0 10px 30px rgba(64, 42, 12, 0.08);
+        border: 0;
+        border-radius: 0;
+        background: var(--panel);
+        box-shadow: none;
+      }
+
+      #feeds-panel {
+        grid-area: sidebar;
+        background:
+          linear-gradient(180deg, rgba(241, 246, 252, 0.98), rgba(233, 240, 248, 0.94)),
+          var(--panel);
+        border-radius: 0 0 0 1.15rem;
+      }
+
+      #articles-panel {
+        grid-area: stream;
+      }
+
+      #reader-panel {
+        grid-area: reader;
+        border-radius: 0 0 1.15rem 0;
+        background:
+          linear-gradient(180deg, rgba(247, 249, 253, 0.98), rgba(239, 244, 249, 0.96)),
+          var(--panel);
       }
 
       .panel h2,
       .reader-copy h2 {
         margin: 0 0 0.75rem;
-        font-size: 1rem;
+        font-size: 0.78rem;
+        color: var(--muted);
         letter-spacing: 0.06em;
         text-transform: uppercase;
       }
 
+      .section-kicker {
+        display: inline-flex;
+        margin: 0 0 0.35rem;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        background: var(--panel-strong);
+        color: var(--muted);
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .sidebar-section,
+      .pane-header {
+        display: grid;
+        gap: 0.25rem;
+      }
+
+      .sidebar-section {
+        padding: 0.9rem;
+        border: 1px solid rgba(206, 216, 229, 0.9);
+        border-radius: 1rem;
+        background: rgba(255, 255, 255, 0.58);
+      }
+
+      .sidebar-divider {
+        height: 1px;
+        margin: 0.8rem 0;
+        background: var(--border);
+      }
+
       .list-shell {
         display: grid;
-        gap: 0.75rem;
+        gap: 0.85rem;
       }
 
       .list-reset {
         display: grid;
-        gap: 0.75rem;
+        gap: 0.6rem;
         padding: 0;
         margin: 0;
         list-style: none;
@@ -166,16 +367,23 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       .list-button {
         width: 100%;
         border-radius: 1rem;
-        border: 1px solid transparent;
-        background: var(--panel-strong);
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.78);
         color: var(--text);
-        padding: 0.8rem;
+        padding: 0.8rem 0.9rem;
         text-align: left;
+      }
+
+      .list-button:hover {
+        background: rgba(255, 255, 255, 0.98);
+        color: var(--text);
+        border-color: #c3d0e2;
       }
 
       .list-button.is-active {
         border-color: var(--accent);
-        background: rgba(30, 107, 82, 0.12);
+        background: rgba(47, 111, 237, 0.15);
+        box-shadow: inset 0 0 0 1px rgba(47, 111, 237, 0.2), 0 10px 24px rgba(47, 111, 237, 0.08);
       }
 
       .feed-row {
@@ -185,10 +393,42 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         align-items: center;
       }
 
+      .feed-title-line {
+        display: inline-flex;
+        gap: 0.55rem;
+        align-items: center;
+        min-width: 0;
+      }
+
       .feed-title,
       .article-title {
         display: block;
         font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+
+      .feed-title {
+        font-size: 0.95rem;
+      }
+
+      .feed-count {
+        min-width: 2rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(47, 111, 237, 0.09);
+        color: var(--accent-strong);
+        font-size: 0.79rem;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .feed-kind {
+        display: block;
+        margin-top: 0.28rem;
+        color: var(--muted);
+        font-size: 0.76rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
       }
 
       .feed-meta,
@@ -198,22 +438,173 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         margin-top: 0.25rem;
       }
 
+      .article-card {
+        width: 100%;
+        display: grid;
+        gap: 0.85rem;
+        border-radius: 1.15rem;
+        border: 1px solid rgba(209, 218, 231, 0.95);
+        background: rgba(255, 255, 255, 0.92);
+        color: var(--text);
+        padding: 0.95rem;
+        text-align: left;
+        box-shadow: 0 10px 30px rgba(31, 41, 55, 0.04);
+      }
+
+      .article-card:hover {
+        background: #ffffff;
+        color: var(--text);
+        border-color: #c6d4e4;
+      }
+
+      .article-card.is-active {
+        border-color: rgba(47, 111, 237, 0.92);
+        background:
+          linear-gradient(180deg, rgba(238, 245, 255, 0.98), rgba(231, 241, 255, 0.98)),
+          #fff;
+        box-shadow:
+          0 16px 36px rgba(47, 111, 237, 0.14),
+          inset 0 0 0 1px rgba(47, 111, 237, 0.18);
+      }
+
+      .article-card-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0.9rem;
+        align-items: start;
+      }
+
+      .article-card.has-hero-image .article-card-grid {
+        grid-template-columns: minmax(0, 1fr) 7.5rem;
+      }
+
+      .article-card-copy {
+        display: grid;
+        gap: 0.48rem;
+        min-width: 0;
+      }
+
+      .article-title {
+        font-size: 1rem;
+        line-height: 1.3;
+        letter-spacing: -0.02em;
+      }
+
+      .article-preview {
+        margin-top: 0;
+        color: #526176;
+        font-size: 0.92rem;
+        line-height: 1.45;
+      }
+
+      .article-meta {
+        margin-top: 0;
+        color: #7a8799;
+        font-size: 0.77rem;
+        letter-spacing: 0.02em;
+      }
+
+      .article-hero {
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        border-radius: 0.95rem;
+        border: 1px solid rgba(210, 220, 232, 0.95);
+        background: var(--panel-strong);
+        object-fit: cover;
+      }
+
       #reader-panel {
         display: grid;
-        gap: 0.9rem;
+      }
+
+      .reader-pane-surface {
+        display: grid;
+        gap: 1rem;
+        min-height: 100%;
+        padding: 0.6rem;
+        border: 1px solid rgba(219, 227, 238, 0.95);
+        border-radius: 1.2rem;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 248, 252, 0.98)),
+          var(--reader-surface);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.88),
+          0 20px 45px rgba(31, 41, 55, 0.05);
+      }
+
+      #reader-pane-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.85rem;
+        align-items: center;
+        padding: 0.8rem 0.95rem;
+        border: 1px solid rgba(216, 225, 236, 0.94);
+        border-radius: 1rem;
+        background: var(--reader-toolbar);
+      }
+
+      .reader-pane-toolbar-copy {
+        display: grid;
+        gap: 0.2rem;
+      }
+
+      .reader-pane-label {
+        margin: 0;
+        font-size: 0.74rem;
+        color: var(--muted);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .reader-pane-note {
+        margin: 0;
+        color: #7a8799;
+        font-size: 0.84rem;
+        line-height: 1.4;
       }
 
       .reader-copy {
         display: grid;
-        gap: 0.4rem;
+        gap: 0.55rem;
+        padding: 0.15rem 0.35rem 0;
+      }
+
+      .reader-copy strong {
+        font-size: clamp(1.45rem, 2.2vw, 2.15rem);
+        line-height: 1.08;
+        letter-spacing: -0.045em;
+      }
+
+      .reader-copy h2 {
+        margin-bottom: 0;
+      }
+
+      #reader-meta {
+        margin: 0;
+        font-size: 0.9rem;
+        line-height: 1.55;
+        letter-spacing: 0.01em;
+      }
+
+      .reader-frame-shell {
+        padding: 0.35rem;
+        border: 1px solid rgba(215, 224, 236, 0.94);
+        border-radius: 1.2rem;
+        background:
+          linear-gradient(180deg, rgba(252, 253, 255, 0.92), rgba(241, 245, 250, 0.96)),
+          var(--reader-surface);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.92),
+          0 18px 38px rgba(31, 41, 55, 0.06);
       }
 
       #reader-frame {
         width: 100%;
-        min-height: 55vh;
-        border: 1px solid var(--border);
-        border-radius: 1rem;
-        background: #fff;
+        min-height: 58vh;
+        border: 0;
+        border-radius: 0.95rem;
+        background: var(--reader-paper);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
       }
 
       #settings-panel {
@@ -224,6 +615,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         min-height: auto;
         max-height: calc(100vh - 3rem);
         overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 1.25rem;
+        background: rgba(248, 250, 252, 0.98);
+        box-shadow: var(--shadow);
+        z-index: 20;
       }
 
       #settings-panel h2 {
@@ -248,19 +644,179 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         color: var(--muted);
       }
 
-      .secondary-button {
-        background: transparent;
-        color: var(--accent-strong);
-        border: 1px solid var(--border);
+      @media (max-width: 1100px) {
+        #app {
+          padding: 0.9rem;
+        }
+
+        #reader-window-bar {
+          grid-template-columns: auto minmax(0, 1fr);
+          gap: 0.8rem;
+          padding: 0.75rem 0.9rem;
+        }
+
+        #reader-toolbar {
+          padding: 0.85rem 0.9rem;
+        }
+
+        .reader-grid {
+          padding: 0 0.9rem 0.9rem;
+          grid-template-columns: minmax(12.75rem, 14.5rem) minmax(17rem, 20rem) minmax(0, 1fr);
+        }
       }
 
-      @media (max-width: 960px) {
+      @media (max-width: 900px) {
+        #app {
+          padding: 0.75rem;
+        }
+
+        .reader-window {
+          border-radius: 1.25rem;
+        }
+
+        #reader-window-bar {
+          grid-template-columns: 1fr;
+          justify-items: flex-start;
+          gap: 0.65rem;
+          padding: 0.75rem 0.85rem;
+        }
+
+        .window-address {
+          width: 100%;
+          text-align: left;
+        }
+
+        .window-status {
+          font-size: 0.75rem;
+        }
+
+        #reader-toolbar {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.75rem;
+          padding: 0.8rem 0.85rem;
+        }
+
+        .toolbar-actions {
+          width: 100%;
+          justify-content: space-between;
+        }
+
+        .toolbar-actions button {
+          flex: 1 1 0;
+          min-width: 0;
+          padding: 0.65rem 0.9rem;
+        }
+
+        #reader-pane-toolbar {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.75rem;
+          padding: 0.75rem 0.85rem;
+        }
+
+        .reader-pane-actions {
+          width: 100%;
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 0.5rem;
+        }
+
+        .toolbar-pill {
+          padding: 0.6rem 0.8rem;
+        }
+
         .reader-grid {
+          grid-template-columns: 1fr;
+          grid-template-areas: "sidebar" "stream" "reader";
+          padding: 0 0.75rem 0.75rem;
+        }
+
+        .article-card.has-hero-image .article-card-grid {
           grid-template-columns: 1fr;
         }
 
-        .reader-header {
-          flex-direction: column;
+        .reader-copy {
+          padding: 0 0.15rem;
+          gap: 0.45rem;
+        }
+
+        .reader-copy strong {
+          font-size: clamp(1.3rem, 5vw, 1.75rem);
+          line-height: 1.12;
+        }
+
+        #reader-meta {
+          font-size: 0.88rem;
+        }
+
+        .reader-frame-shell {
+          padding: 0.25rem;
+        }
+
+        #reader-frame {
+          min-height: 48vh;
+        }
+
+        #feeds-panel,
+        #articles-panel,
+        #reader-panel {
+          border-radius: 0;
+        }
+
+        #feeds-panel {
+          border-top-left-radius: 0;
+          border-top-right-radius: 0;
+        }
+
+        #reader-panel {
+          border-bottom-left-radius: 1rem;
+          border-bottom-right-radius: 1rem;
+        }
+
+        #settings-panel {
+          top: auto;
+          right: 0.75rem;
+          bottom: 0.75rem;
+          left: 0.75rem;
+          width: auto;
+          max-height: min(28rem, calc(100vh - 1.5rem));
+          border-radius: 1.1rem;
+        }
+      }
+
+      @media (max-width: 640px) {
+        #app {
+          padding: 0.5rem;
+        }
+
+        .reader-window {
+          border-radius: 1rem;
+        }
+
+        .window-controls {
+          display: none;
+        }
+
+        .reader-brand h1 {
+          font-size: 1.6rem;
+        }
+
+        .reader-pane-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .toolbar-actions button,
+        .toolbar-pill {
+          padding: 0.6rem 0.75rem;
+        }
+
+        .reader-frame-shell {
+          border-radius: 1rem;
+        }
+
+        #reader-frame {
+          min-height: 54vh;
         }
       }
     </style>
@@ -289,43 +845,93 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       </section>
 
       <section class="reader-shell hidden" id="reader-shell">
-        <header class="reader-header">
-          <div>
-            <p>Private browser reader</p>
-            <h1>Pigeon</h1>
+        <div class="reader-window">
+          <div id="reader-window-bar">
+            <div class="window-controls" aria-hidden="true">
+              <span class="window-dot" data-tone="close"></span>
+              <span class="window-dot" data-tone="minimize"></span>
+              <span class="window-dot" data-tone="expand"></span>
+            </div>
+            <div class="window-address">pigeon://reader/private</div>
+            <div class="window-status">Read-only browser shell</div>
           </div>
-          <div>
-            <button class="secondary-button" id="settings-button" type="button">Settings</button>
-            <button id="logout-button" type="button">Log Out</button>
+
+          <header id="reader-toolbar">
+            <div class="reader-brand">
+              <p>Private browser reader</p>
+              <h1>Pigeon</h1>
+            </div>
+            <div class="toolbar-actions">
+              <button class="secondary-button" id="settings-button" type="button">Settings</button>
+              <button id="logout-button" type="button">Log Out</button>
+            </div>
+          </header>
+
+          <div class="reader-grid">
+            <aside class="panel" id="feeds-panel">
+              <section class="sidebar-section" id="real-views-section">
+                <span class="section-kicker">Views</span>
+                <div class="pane-header">
+                  <h2>Real views</h2>
+                  <p class="status-meta">All items and unread stay here as the built-in reader views.</p>
+                </div>
+                <div class="list-shell">
+                  <ul class="list-reset" id="views-list"></ul>
+                </div>
+              </section>
+
+              <div class="sidebar-divider" aria-hidden="true"></div>
+
+              <section class="sidebar-section" id="real-feeds-section">
+                <span class="section-kicker">Feeds</span>
+                <div class="pane-header">
+                  <h2>Real feeds</h2>
+                  <p class="status-meta" id="feeds-status">Feed list loads after login.</p>
+                </div>
+                <div class="list-shell">
+                  <ul class="list-reset" id="feeds-list"></ul>
+                </div>
+              </section>
+            </aside>
+
+            <section class="panel" id="articles-panel">
+              <div class="pane-header">
+                <span class="section-kicker">Stream</span>
+                <h2>Articles</h2>
+                <p class="status-meta" id="articles-status">Choose a feed to load article previews.</p>
+              </div>
+              <div class="list-shell">
+                <ul class="list-reset" id="articles-list"></ul>
+                <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
+              </div>
+            </section>
+
+            <article class="panel" id="reader-panel">
+              <div class="reader-pane-surface">
+                <div id="reader-pane-toolbar">
+                  <div class="reader-pane-toolbar-copy">
+                    <p class="reader-pane-label">Reading surface</p>
+                    <p class="reader-pane-note">Visual-only controls stay muted until article actions are wired up.</p>
+                  </div>
+                  <div class="reader-pane-actions" aria-label="Reader future actions">
+                    <!-- Visual-only today: Mark unread, Save, and Open original. Follow-up: wire supported reader actions, then add stateful icons and enabled states once the mutation and outbound-link flows exist. -->
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Mark unread</button>
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Save</button>
+                    <button class="toolbar-pill" type="button" data-presentational-control="true" data-control-tone="subtle" disabled>Open original</button>
+                  </div>
+                </div>
+                <div class="reader-copy">
+                  <span class="section-kicker">Reader</span>
+                  <h2>Selected article</h2>
+                  <strong id="reader-title">Select an article</strong>
+                  <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
+                </div>
+                <div class="reader-frame-shell">
+                  <iframe id="reader-frame" title="Article content" sandbox="" srcdoc=""></iframe>
+                </div>
+              </div>
+            </article>
           </div>
-        </header>
-
-        <div class="reader-grid">
-          <aside class="panel" id="feeds-panel">
-            <h2>Feeds</h2>
-            <div class="list-shell">
-              <p class="status-meta" id="feeds-status">Feed list loads after login.</p>
-              <ul class="list-reset" id="feeds-list"></ul>
-            </div>
-          </aside>
-
-          <section class="panel" id="articles-panel">
-            <h2>Articles</h2>
-            <div class="list-shell">
-              <p class="status-meta" id="articles-status">Choose a feed to load article previews.</p>
-              <ul class="list-reset" id="articles-list"></ul>
-              <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
-            </div>
-          </section>
-
-          <article class="panel" id="reader-panel">
-            <div class="reader-copy">
-              <h2>Reader</h2>
-              <strong id="reader-title">Select an article</strong>
-              <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
-            </div>
-            <iframe id="reader-frame" title="Article content" sandbox="" srcdoc=""></iframe>
-          </article>
         </div>
       </section>
 
@@ -359,6 +965,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const settingsButton = document.getElementById('settings-button');
   const settingsPanel = document.getElementById('settings-panel');
   const closeSettingsButton = document.getElementById('close-settings-button');
+  const viewsList = document.getElementById('views-list');
   const feedsStatus = document.getElementById('feeds-status');
   const feedsList = document.getElementById('feeds-list');
   const articlesStatus = document.getElementById('articles-status');
@@ -540,6 +1147,7 @@ export function renderBrowserAppRuntimeScript(): string {
     resetReaderState();
     cancelStatusLoads();
     views = [];
+    clearElement(viewsList);
     clearElement(feedsList);
     feedsStatus.textContent = 'Feed list loads after login.';
     settingsPanel.classList.add('hidden');
@@ -566,16 +1174,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return response.status === 200;
   }
 
-  function renderFeeds() {
-    clearElement(feedsList);
+  function renderViewList(targetList, availableViews) {
+    clearElement(targetList);
 
-    if (views.length === 0) {
-      feedsStatus.textContent = 'Feed list loads after login.';
-      return;
-    }
-
-    feedsStatus.textContent = 'Choose a view.';
-    for (const view of views) {
+    for (const view of availableViews) {
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: ['list-button', view.id === activeViewId ? 'is-active' : ''],
@@ -589,7 +1191,7 @@ export function renderBrowserAppRuntimeScript(): string {
       });
 
       const row = createNode('span', { classNames: ['feed-row'] });
-      const titleGroup = createNode('span');
+      const titleGroup = createNode('span', { classNames: ['feed-title-line'] });
       if (view.iconUrl) {
         const icon = createNode('img', {
           attributes: {
@@ -603,17 +1205,34 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
       row.appendChild(titleGroup);
-      row.appendChild(createNode('span', { classNames: ['feed-meta'], text: String(view.unreadCount) }));
+      row.appendChild(createNode('span', { classNames: ['feed-count'], text: String(view.unreadCount) }));
       button.appendChild(row);
       button.appendChild(
         createNode('span', {
-          classNames: ['feed-meta'],
+          classNames: ['feed-kind'],
           text: view.kind === 'feed' ? 'Feed' : 'View',
         }),
       );
       listItem.appendChild(button);
-      feedsList.appendChild(listItem);
+      targetList.appendChild(listItem);
     }
+  }
+
+  function renderFeeds() {
+    clearElement(viewsList);
+    clearElement(feedsList);
+
+    if (views.length === 0) {
+      feedsStatus.textContent = 'Feed list loads after login.';
+      return;
+    }
+
+    const builtInViews = views.filter((view) => view.kind !== 'feed');
+    const feedViews = views.filter((view) => view.kind === 'feed');
+
+    renderViewList(viewsList, builtInViews);
+    renderViewList(feedsList, feedViews);
+    feedsStatus.textContent = feedViews.length > 0 ? 'Choose a feed.' : 'No feeds yet.';
   }
 
   function renderArticles() {
@@ -634,7 +1253,11 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const entry of entries) {
       const listItem = createNode('li');
       const button = createNode('button', {
-        classNames: ['list-button', entry.id === selectedItemId ? 'is-active' : ''],
+        classNames: [
+          'article-card',
+          entry.id === selectedItemId ? 'is-active' : '',
+          entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+        ],
         attributes: {
           type: 'button',
           'data-item-id': entry.id,
@@ -643,14 +1266,32 @@ export function renderBrowserAppRuntimeScript(): string {
       button.addEventListener('click', () => {
         void selectArticle(entry.id);
       });
-      button.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
+
+      const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
+      const copy = createNode('span', { classNames: ['article-card-copy'] });
+      copy.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
       if (entry.preview) {
-        button.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
+        copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       const metaParts = [entry.feedTitle, formatTimestamp(entry.published)].filter(Boolean);
       if (metaParts.length > 0) {
-        button.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
+        copy.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
       }
+      cardGrid.appendChild(copy);
+      if (entry.heroImageUrl) {
+        cardGrid.appendChild(
+          createNode('img', {
+            classNames: ['article-hero'],
+            attributes: {
+              src: entry.heroImageUrl,
+              alt: '',
+              loading: 'lazy',
+              'data-card-hero': 'true',
+            },
+          }),
+        );
+      }
+      button.appendChild(cardGrid);
       listItem.appendChild(button);
       articlesList.appendChild(listItem);
     }

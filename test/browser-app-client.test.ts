@@ -13,6 +13,7 @@ import {
 	extractAuthToken,
 	limitInitialItemIds,
 	renderBrowserAppClientScript,
+	selectArticleHeroImageUrl,
 	sortSubscriptionsByTitle,
 } from '../src/browser-app-client';
 import { renderBrowserAppRuntimeScript } from '../src/browser-app';
@@ -154,6 +155,7 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				feedTitle: 'Alpha Feed',
 				published: 1_742_460_800,
 				preview: 'Loaded preview',
+				heroImageUrl: null,
 				isLoaded: true,
 			},
 			{
@@ -162,9 +164,53 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				feedTitle: '',
 				published: 0,
 				preview: '',
+				heroImageUrl: null,
 				isLoaded: false,
 			},
 		],
+	);
+});
+
+test('selectArticleHeroImageUrl returns the first usable absolute image URL from loaded article HTML', () => {
+	assert.equal(
+		selectArticleHeroImageUrl(
+			'<figure><img src="cid:hero" /><img src="/relative.jpg" /><img src="https://cdn.example/pixel.gif" width="1" height="1" /><img src="https://cdn.example/hero.jpg" /></figure>',
+		),
+		'https://cdn.example/hero.jpg',
+	);
+	assert.equal(selectArticleHeroImageUrl('<p>No hero here.</p>'), null);
+});
+
+test('selectArticleHeroImageUrl decodes HTML-escaped query strings and accepts protocol-relative URLs', () => {
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="//cdn.example/hero.jpg?utm=reader&amp;id=42" />'),
+		'//cdn.example/hero.jpg?utm=reader&id=42',
+	);
+});
+
+test('selectArticleHeroImageUrl skips obviously hidden tracker-style images and continues to a real image', () => {
+	assert.equal(
+		selectArticleHeroImageUrl(
+			'<img src="https://cdn.example/tracker.gif" style="display:none" /><img src="https://cdn.example/hero.jpg" />',
+		),
+		'https://cdn.example/hero.jpg',
+	);
+	assert.equal(
+		selectArticleHeroImageUrl(
+			'<img src="https://cdn.example/tracker.gif" style="visibility:hidden;opacity:0" /><img src="//cdn.example/hero-2.jpg" />',
+		),
+		'//cdn.example/hero-2.jpg',
+	);
+});
+
+test('selectArticleHeroImageUrl ignores malformed oversized numeric entities instead of throwing', () => {
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="https://cdn.example/hero.jpg?broken=&#1114112;&amp;ok=1" />'),
+		'https://cdn.example/hero.jpg?broken=&#1114112;&ok=1',
+	);
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="https://cdn.example/hero.jpg?broken=&#9999999999;" />'),
+		'https://cdn.example/hero.jpg?broken=&#9999999999;',
 	);
 });
 
@@ -320,6 +366,7 @@ async function createBrowserHarness(options?: {
 		['settings-button', createElement()],
 		['settings-panel', createElement('', ['hidden'])],
 		['close-settings-button', createElement()],
+		['views-list', createElement()],
 		['feeds-status', createElement()],
 		['feeds-list', createElement()],
 		['articles-status', createElement()],
@@ -394,6 +441,80 @@ async function createBrowserHarness(options?: {
 	await flushBrowserTasks();
 
 	return { elements, storage, innerHtmlWrites };
+}
+
+function findListButtonByViewId(
+	listElement: ReturnType<typeof createElement> | undefined,
+	viewId: string,
+) {
+	for (const listItem of listElement?.children ?? []) {
+		for (const child of listItem.children) {
+			if (child.dataset.viewId === viewId) {
+				return child;
+			}
+		}
+	}
+	return undefined;
+}
+
+function findListButtonByItemId(
+	listElement: ReturnType<typeof createElement> | undefined,
+	itemId: string,
+) {
+	for (const listItem of listElement?.children ?? []) {
+		for (const child of listItem.children) {
+			if (child.dataset.itemId === itemId) {
+				return child;
+			}
+		}
+	}
+	return undefined;
+}
+
+function findDescendantByClass(
+	element: ReturnType<typeof createElement> | undefined,
+	className: string,
+): ReturnType<typeof createElement> | undefined {
+	if (!element) {
+		return undefined;
+	}
+
+	if (element.classList.contains(className)) {
+		return element;
+	}
+
+	for (const child of element.children) {
+		const match = findDescendantByClass(child, className);
+		if (match) {
+			return match;
+		}
+	}
+
+	return undefined;
+}
+
+function findDescendantByAttribute(
+	element: ReturnType<typeof createElement> | undefined,
+	name: string,
+	value?: string,
+): ReturnType<typeof createElement> | undefined {
+	if (!element) {
+		return undefined;
+	}
+
+	const attributeValue = element.getAttribute(name);
+	if (attributeValue !== null && (value === undefined || attributeValue === value)) {
+		return element;
+	}
+
+	for (const child of element.children) {
+		const match = findDescendantByAttribute(child, name, value);
+		if (match) {
+			return match;
+		}
+	}
+
+	return undefined;
 }
 
 test('runtime script shows a user-facing error when login request fails', async () => {
@@ -577,16 +698,211 @@ test('runtime script keeps app chrome rendering out of innerHTML and shows the f
 	await flushBrowserTasks();
 
 	assert.deepEqual(
-		innerHtmlWrites.filter((id) => ['feeds-list', 'articles-list', 'settings-content'].includes(id)),
+		innerHtmlWrites.filter((id) => ['views-list', 'feeds-list', 'articles-list', 'settings-content'].includes(id)),
 		[],
 	);
+	assert.match(elements.get('views-list')?.textContent ?? '', /All items/);
+	assert.match(elements.get('views-list')?.textContent ?? '', /Unread/);
+	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Alpha/);
+	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Bravo/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /Alpha/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /Bravo/);
 	assert.match(elements.get('feeds-list')?.textContent ?? '', /4/);
+	assert.doesNotMatch(elements.get('feeds-list')?.textContent ?? '', /All items/);
+	assert.doesNotMatch(elements.get('feeds-list')?.textContent ?? '', /Unread/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Starred items2/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest email item2026-03-20T11:00:00.000Z/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Newest RSS item2026-03-20T10:00:00.000Z/);
 	assert.match(elements.get('settings-content')?.textContent ?? '', /Failing RSS feed count1/);
+});
+
+test('runtime script renders hero-image cards only for loaded articles whose content includes one', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Alpha' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [{ id: 'feed/1', count: 2 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '101' }, { id: '102' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'Hero story',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Hero preview' },
+							content: { content: '<p>Body</p><img src="https://cdn.example/hero.jpg" />' },
+						},
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000066',
+							title: 'Text story',
+							published: 1_742_460_860,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Text preview' },
+							content: { content: '<p>Body only</p>' },
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '102')));
+
+	const heroCard = findListButtonByItemId(elements.get('articles-list'), '101');
+	const textOnlyCard = findListButtonByItemId(elements.get('articles-list'), '102');
+
+	assert.equal(
+		findDescendantByAttribute(heroCard, 'data-card-hero', 'true')?.getAttribute('src'),
+		'https://cdn.example/hero.jpg',
+	);
+	assert.equal(findDescendantByAttribute(textOnlyCard, 'data-card-hero', 'true'), undefined);
+});
+
+test('runtime script falls back to a text-first card layout and keeps preview metadata visible when no image is available', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Alpha' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [{ id: 'feed/1', count: 1 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '201' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/00000000000000c9',
+							title: 'Text-first article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Preview stays visible' },
+							content: { content: '<p>No image here.</p>' },
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '201')));
+
+	const articleCard = findListButtonByItemId(elements.get('articles-list'), '201');
+
+	assert.ok(articleCard?.classList.contains('is-text-only'));
+	assert.equal(findDescendantByAttribute(articleCard, 'data-card-hero', 'true'), undefined);
+	assert.match(findDescendantByClass(articleCard, 'article-title')?.textContent ?? '', /Text-first article/);
+	assert.match(findDescendantByClass(articleCard, 'article-preview')?.textContent ?? '', /Preview stays visible/);
+	assert.match(findDescendantByClass(articleCard, 'article-meta')?.textContent ?? '', /Alpha/);
+	assert.match(findDescendantByClass(articleCard, 'article-meta')?.textContent ?? '', /\d{1,2}:\d{2}/);
+});
+
+test('runtime script keeps real views and real feeds separated with intact counts', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/2', title: 'Bravo' },
+						{ id: 'feed/1', title: 'Alpha' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/2', count: 4 },
+						{ id: 'feed/1', count: 1 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '101' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'First article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Loaded preview' },
+							content: { content: '<p>Body</p>' },
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')));
+
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'all')?.textContent ?? '', /All items/);
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'all')?.textContent ?? '', /5/);
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'unread')?.textContent ?? '', /Unread/);
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'unread')?.textContent ?? '', /5/);
+	assert.equal(findListButtonByViewId(elements.get('views-list'), 'feed/1'), undefined);
+	assert.equal(findListButtonByViewId(elements.get('views-list'), 'feed/2'), undefined);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /Alpha/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /1/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Bravo/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /4/);
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'all'), undefined);
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'unread'), undefined);
 });
 
 test('stale status responses do not overwrite logout state or suppress a later settings fetch', async () => {
@@ -836,7 +1152,7 @@ test('switching views during an in-flight content load still fetches bodies for 
 	await waitForBrowserCondition(() => contentRequests.length === 1);
 
 	const feedsList = elements.get('feeds-list');
-	const bravoFeedButton = feedsList?.children[3]?.children[0];
+	const bravoFeedButton = findListButtonByViewId(feedsList, 'feed/2');
 	await bravoFeedButton?.dispatch('click');
 	await waitForBrowserCondition(() => contentRequests.length === 2);
 
@@ -864,4 +1180,60 @@ test('switching views during an in-flight content load still fetches bodies for 
 
 	assert.match(elements.get('articles-list')?.textContent ?? '', /Article 301/);
 	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Article 101/);
+});
+
+test('runtime script keeps the active article title and metadata outside the iframe while the iframe holds the full body', async () => {
+	const articleBody = '<article><p>Full body copy that belongs in the frame.</p><p>Second paragraph.</p></article>';
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Alpha' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [{ id: 'feed/1', count: 1 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({
+					itemRefs: [{ id: '101' }],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'Reader polish story',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Short summary' },
+							content: { content: articleBody },
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '') === articleBody);
+
+	assert.match(elements.get('reader-title')?.textContent ?? '', /Reader polish story/);
+	assert.match(elements.get('reader-meta')?.textContent ?? '', /Alpha/);
+	assert.match(elements.get('reader-meta')?.textContent ?? '', /2025/);
+	assert.equal(elements.get('reader-frame')?.srcdoc, articleBody);
+	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Full body copy that belongs in the frame/);
+	assert.doesNotMatch(elements.get('reader-meta')?.textContent ?? '', /Full body copy that belongs in the frame/);
 });
