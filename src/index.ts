@@ -5,6 +5,8 @@ import { generateOpml } from './opml';
 import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
+import { renderBrowserAppHtml } from './browser-app';
+import { handleStatusRequest } from './status';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -25,6 +27,16 @@ export default {
 
 		if (path === '/feeds') {
 			return handleFeedList(env);
+		}
+
+		if (path === '/app' || path === '/app/') {
+			return new Response(renderBrowserAppHtml(env.BASE_URL), {
+				headers: { 'Content-Type': 'text/html; charset=utf-8' },
+			});
+		}
+
+		if (path === '/app/status') {
+			return handleStatusRequest(request, env);
 		}
 
 		if (path.startsWith('/feed/')) {
