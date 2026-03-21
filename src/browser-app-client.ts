@@ -213,7 +213,9 @@ export function selectArticleHeroImageUrl(articleHtml: string | undefined): stri
 						normalizedEntity.slice(isHex ? 2 : 1),
 						isHex ? 16 : 10,
 					);
-					return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+					return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+						? String.fromCodePoint(codePoint)
+						: match;
 				}
 			}
 		});

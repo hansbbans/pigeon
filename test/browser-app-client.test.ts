@@ -203,6 +203,17 @@ test('selectArticleHeroImageUrl skips obviously hidden tracker-style images and 
 	);
 });
 
+test('selectArticleHeroImageUrl ignores malformed oversized numeric entities instead of throwing', () => {
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="https://cdn.example/hero.jpg?broken=&#1114112;&amp;ok=1" />'),
+		'https://cdn.example/hero.jpg?broken=&#1114112;&ok=1',
+	);
+	assert.equal(
+		selectArticleHeroImageUrl('<img src="https://cdn.example/hero.jpg?broken=&#9999999999;" />'),
+		'https://cdn.example/hero.jpg?broken=&#9999999999;',
+	);
+});
+
 test('renderBrowserAppClientScript exposes the shared auth helpers for the shell', () => {
 	const script = renderBrowserAppClientScript();
 
