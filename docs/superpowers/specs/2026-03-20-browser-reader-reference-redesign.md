@@ -20,6 +20,8 @@ The target is a close homage to the reference image:
 
 Pigeon should still feel like its own app in naming and content, but the visual direction should clearly lean toward that reference rather than the current warm, rustic shell.
 
+The reference image from this conversation is the visual calibration point for implementation review.
+
 ## What Stays The Same
 
 The redesign does not change:
@@ -147,6 +149,8 @@ Where content allows it, make the stream more image-forward.
 
 If a loaded article includes a suitable image or hero-like content, the card may present that image prominently. If it does not, the card should fall back to a deliberate text-first card rather than looking broken or empty.
 
+This redesign should rely on article data that is already available to the current browser reader. It should not expand scope into new image extraction or content-processing work.
+
 The stream should still look coherent when many items are text-only.
 
 ### Selected State
@@ -204,7 +208,7 @@ If mobile navigation affordances are needed, only add a real navigation control 
 
 ### Presentational Future Controls
 
-Buttons that visually suggest reference-like capabilities may appear only if they are clearly secondary and non-misleading.
+Buttons that visually suggest reference-like capabilities are optional. If used, they may appear only if they are clearly secondary and non-misleading.
 
 They should not be styled as high-confidence primary actions unless they actually work.
 
@@ -220,6 +224,8 @@ The highest-value follow-ups are:
 4. richer article actions from the reader toolbar
 
 These are follow-up product features, not part of this redesign implementation.
+
+Implementation notes should explicitly record which toolbar controls are visual-only today and which follow-up actions are recommended next.
 
 ## Scope Boundaries
 
