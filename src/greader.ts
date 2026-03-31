@@ -215,7 +215,7 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 
 	const { results } = await env.DB.prepare(sql).bind(...binds).all<{ rowid: number }>();
 
-	const itemRefs = results.map((r) => ({ id: r.rowid.toString() }));
+	const itemRefs = results.map((r) => ({ id: toGoogleItemId(r.rowid) }));
 	return Response.json({ itemRefs });
 }
 
