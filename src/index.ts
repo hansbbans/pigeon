@@ -69,10 +69,14 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function handleFeed(request: Request, url: URL, env: Env): Promise<Response> {
-	const feedKey = url.pathname.slice('/feed/'.length);
-	if (!feedKey) {
+	let feedKeyWithVariant = url.pathname.slice('/feed/'.length);
+	if (!feedKeyWithVariant) {
 		return new Response('Feed key required', { status: 400 });
 	}
+
+	const isLight = feedKeyWithVariant.endsWith('/light');
+	const feedKey = isLight ? feedKeyWithVariant.slice(0, -'/light'.length) : feedKeyWithVariant;
+	const variant = isLight ? 'light' : 'full';
 
 	// Get feed metadata
 	const feed = await env.DB.prepare(
@@ -99,17 +103,16 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	}
 
 	// Get items
-	const limit = Math.min(
-		parseInt(url.searchParams.get('limit') || env.ITEMS_PER_FEED || '50'),
-		100,
-	);
+	const defaultLimit = isLight ? (env.LIGHT_ITEMS_PER_FEED || '12') : (env.ITEMS_PER_FEED || '50');
+	const limit = Math.min(parseInt(url.searchParams.get('limit') || defaultLimit), 100);
 
 	const { results: items } = await env.DB.prepare(
-		'SELECT id, subject, html_content, text_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
+		'SELECT id, message_id, subject, html_content, text_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
 	)
 		.bind(feedKey, limit)
 		.all<{
-			id: string;
+			id: string | null;
+			message_id: string | null;
 			subject: string;
 			html_content: string;
 			text_content: string | null;
@@ -118,7 +121,8 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 			received_at: string;
 		}>();
 
-	const xml = generateAtomFeed(feed, items, env.BASE_URL);
+	const feedUrl = `${env.BASE_URL}/feed/${feedKey}${isLight ? '/light' : ''}`;
+	const xml = await generateAtomFeed(feed, items, env.BASE_URL, { variant, feedUrl });
 
 	return new Response(xml, {
 		headers: {
@@ -158,6 +162,7 @@ async function handleFeedList(env: Env): Promise<Response> {
 		last_item_at: f.last_item_at,
 		category: f.category,
 		feed_url: `${env.BASE_URL}/feed/${f.feed_key}`,
+		light_feed_url: `${env.BASE_URL}/feed/${f.feed_key}/light`,
 	}));
 
 	return new Response(JSON.stringify({ feeds }, null, 2), {
