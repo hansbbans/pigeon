@@ -1,6 +1,7 @@
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
 import { createPreviewText } from './preview-text';
+import { createRenderedContent } from './rendered-content';
 import { generateApiToken, requireApiAuth } from './api-auth';
 
 // --- ID conversion utilities ---
@@ -219,15 +220,46 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 	return Response.json({ itemRefs });
 }
 
+async function extractItemContentIds(request: Request): Promise<string[]> {
+	const ids = [...new URL(request.url).searchParams.getAll('i')];
+
+	if (request.method === 'GET' || request.method === 'HEAD') {
+		return ids.filter(Boolean);
+	}
+
+	const contentType = (request.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
+
+	if (contentType === 'application/x-www-form-urlencoded' || contentType === 'multipart/form-data') {
+		const body = await request.formData();
+		ids.push(...body.getAll('i').filter((value): value is string => typeof value === 'string'));
+		return ids.filter(Boolean);
+	}
+
+	const rawBody = await request.text();
+	if (!rawBody.trim()) {
+		return ids.filter(Boolean);
+	}
+
+	if (rawBody.includes('=')) {
+		ids.push(...new URLSearchParams(rawBody).getAll('i'));
+	}
+
+	return ids.filter(Boolean);
+}
+
 async function handleStreamItemContents(request: Request, env: Env): Promise<Response> {
-	const body = await request.formData();
-	const ids = body.getAll('i') as string[];
+	const ids = await extractItemContentIds(request);
 
 	if (ids.length === 0) {
 		return Response.json({ items: [] });
 	}
 
-	const rowids = ids.map(parseItemId);
+	const rowids = ids
+		.map(parseItemId)
+		.filter((rowid) => Number.isFinite(rowid));
+	if (rowids.length === 0) {
+		return Response.json({ items: [] });
+	}
 	const placeholders = rowids.map(() => '?').join(',');
 
 	const { results: items } = await env.DB.prepare(
@@ -272,6 +304,10 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 			textContent: item.text_content,
 			htmlContent: item.html_content,
 		});
+		const renderedContent = createRenderedContent({
+			htmlContent: item.html_content,
+			textContent: item.text_content,
+		});
 		if (item.is_read) categories.push('user/-/state/com.google/read');
 		if (item.is_starred) categories.push('user/-/state/com.google/starred');
 
@@ -285,7 +321,7 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 			timestampUsec: (ts * 1_000_000).toString(),
 			author: item.from_name || '',
 			summary: { direction: 'ltr', content: previewText },
-			content: { direction: 'ltr', content: item.html_content },
+			content: { direction: 'ltr', content: renderedContent },
 			origin: {
 				streamId: feed ? `feed/${feed.rowid}` : `feed/0`,
 				title: feed ? (feed.custom_title || feed.display_name) : '',
