@@ -160,8 +160,8 @@ test('createPreviewText truncates long previews to a readable excerpt', () => {
 	assert.match(preview, /\.\.\.$/);
 });
 
-test('generateAtomFeed adds a clean text summary while keeping full HTML content', () => {
-	const xml = generateAtomFeed(
+test('generateAtomFeed adds a clean text summary while keeping full HTML content', async () => {
+	const xml = await generateAtomFeed(
 		{
 			feed_key: 'sender-example-com',
 			display_name: 'Example Sender',
