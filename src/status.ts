@@ -1,4 +1,5 @@
 import { requireApiAuth } from './api-auth';
+import { ensureDatabaseSchema } from './migrations';
 import type { Env } from './types';
 
 interface FeedCountsRow {
@@ -51,6 +52,13 @@ export async function handleStatusRequest(
 		return authErr;
 	}
 
+	try {
+		await ensureDatabaseSchema(env);
+	} catch (error) {
+		console.error('[Migrations] Status request failed because database migration failed', error);
+		return new Response('Database migration failed', { status: 503 });
+	}
+
 	const currentOrigin = new URL(request.url).origin;
 	const schemaVersion = await getSchemaVersion(env);
 
@@ -65,28 +73,31 @@ export async function handleStatusRequest(
 
 	const { results: itemCountsResults } = await env.DB.prepare(
 		`SELECT COUNT(*) AS total_item_count,
-		        SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS unread_item_count,
-		        SUM(CASE WHEN is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
-		        MAX(received_at) AS newest_item_at
-		   FROM items`,
+		        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 THEN 1 ELSE 0 END) AS unread_item_count,
+		        SUM(CASE WHEN i.is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
+		        MAX(CASE WHEN f.is_active = 1 THEN i.received_at ELSE NULL END) AS newest_item_at
+		   FROM items i
+		   LEFT JOIN feeds f ON f.feed_key = i.feed_key`,
 	).all<ItemCountsRow>();
 
 	const newestEmailItem = await env.DB.prepare(
 		`SELECT MAX(i.received_at) AS value
 		   FROM items i
 		   JOIN feeds f ON f.feed_key = i.feed_key
-		  WHERE f.source_type = 'email'`,
+		  WHERE f.source_type = 'email'
+		    AND f.is_active = 1`,
 	).first<ValueRow>();
 
 	const newestRssItem = await env.DB.prepare(
 		`SELECT MAX(i.received_at) AS value
 		   FROM items i
 		   JOIN feeds f ON f.feed_key = i.feed_key
-		  WHERE f.source_type = 'rss'`,
+		  WHERE f.source_type = 'rss'
+		    AND f.is_active = 1`,
 	).first<ValueRow>();
 
 	const latestFetchAttempt = await env.DB.prepare(
-		`SELECT MAX(last_fetched_at) AS value FROM feeds WHERE source_type = 'rss'`,
+		`SELECT MAX(last_fetched_at) AS value FROM feeds WHERE source_type = 'rss' AND is_active = 1`,
 	).first<ValueRow>();
 
 	const { results: failingFeeds } = await env.DB.prepare(

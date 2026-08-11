@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v3
+-- D1 Schema v8
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS feeds (
   from_email TEXT,
   source_type TEXT NOT NULL DEFAULT 'email',
   source_url TEXT,
+  site_url TEXT,
   fetch_interval_minutes INTEGER DEFAULT 60,
   last_fetched_at TEXT,
   fetch_error TEXT,
@@ -29,6 +30,16 @@ CREATE TABLE IF NOT EXISTS feeds (
   icon_url TEXT
 );
 
+CREATE TABLE IF NOT EXISTS feed_tags (
+  feed_key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (feed_key, label),
+  FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feed_tags_label ON feed_tags(label, feed_key);
+
 -- Newsletter items
 CREATE TABLE IF NOT EXISTS items (
   id TEXT PRIMARY KEY,
@@ -38,6 +49,7 @@ CREATE TABLE IF NOT EXISTS items (
   subject TEXT NOT NULL,
   html_content TEXT NOT NULL,
   text_content TEXT,
+  original_url TEXT,
   message_id TEXT UNIQUE,
   received_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -68,6 +80,40 @@ CREATE TABLE IF NOT EXISTS parsing_rules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_feed_key ON parsing_rules(feed_key, priority DESC);
+
+-- Append-only behavior signals used by Pigeon Reader recommendations.
+CREATE TABLE IF NOT EXISTS engagement_events (
+  id TEXT PRIMARY KEY,
+  event_key TEXT NOT NULL UNIQUE,
+  item_id TEXT,
+  feed_key TEXT,
+  event_type TEXT NOT NULL,
+  client_family TEXT NOT NULL DEFAULT 'other',
+  value REAL,
+  duration_seconds REAL,
+  scroll_depth REAL,
+  destination_host TEXT,
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  metadata_json TEXT,
+  FOREIGN KEY (item_id) REFERENCES items(id),
+  FOREIGN KEY (feed_key) REFERENCES feeds(feed_key),
+  CHECK (event_type IN (
+    'explicit_open', 'active_reading', 'scroll_depth', 'outbound_link',
+    'star', 'unstar', 'more_like_this', 'not_interested',
+    'read', 'unread', 'bulk_mark_all_read'
+  )),
+  CHECK (client_family IN ('pigeon', 'reeder_classic', 'netnewswire', 'other')),
+  CHECK (scroll_depth IS NULL OR (scroll_depth >= 0 AND scroll_depth <= 1)),
+  CHECK (duration_seconds IS NULL OR (duration_seconds >= 0 AND duration_seconds <= 86400))
+);
+
+CREATE INDEX IF NOT EXISTS idx_engagement_events_feed
+  ON engagement_events(feed_key, event_type, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_engagement_events_item
+  ON engagement_events(item_id, event_type, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_engagement_events_occurred
+  ON engagement_events(occurred_at DESC);
 
 -- Routing rules: override feed key based on subject/sender patterns
 CREATE TABLE IF NOT EXISTS routing_rules (

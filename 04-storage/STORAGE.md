@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS feeds (
   feed_key TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   from_email TEXT,
+  source_type TEXT NOT NULL DEFAULT 'email',
+  source_url TEXT,                     -- RSS/Atom URL for external feeds
+  site_url TEXT,                       -- Feed homepage from channel/feed metadata
   first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_item_at TEXT,
   item_count INTEGER DEFAULT 0,
@@ -24,6 +27,7 @@ CREATE TABLE IF NOT EXISTS items (
   subject TEXT NOT NULL,
   html_content TEXT NOT NULL,
   text_content TEXT,                    -- Plain text fallback
+  original_url TEXT,                   -- Original article URL when one exists
   message_id TEXT UNIQUE,              -- RFC 5322 Message-ID for dedup
   received_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -51,6 +55,10 @@ CREATE TABLE IF NOT EXISTS parsing_rules (
 CREATE INDEX IF NOT EXISTS idx_rules_feed_key ON parsing_rules(feed_key, priority DESC);
 ```
 
+### Reader engagement events
+
+The native reader adds an append-only `engagement_events` table in schema v7, with schema v8 adding an optional normalized destination host for outbound-link events. It stores coarse client family, item/feed identity, event type, optional reading duration/scroll depth, and an idempotency key. Outbound telemetry stores only the destination host, never a path or query. It deliberately has no raw user-agent or IP columns. Repeated native submissions use `INSERT OR IGNORE`; GReader state changes are recorded only when the requested state actually changes, while mark-all requests use the neutral `bulk_mark_all_read` event type.
+
 ## Key Queries
 
 ### Insert new item (with feed upsert)
@@ -64,13 +72,13 @@ ON CONFLICT(feed_key) DO UPDATE SET
   display_name = COALESCE(feeds.display_name, ?2);
 
 -- Step 2: Insert item (skip if duplicate message_id)
-INSERT OR IGNORE INTO items (id, feed_key, from_name, from_email, subject, html_content, text_content, message_id, received_at, content_size)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);
+INSERT OR IGNORE INTO items (id, feed_key, from_name, from_email, subject, html_content, text_content, original_url, message_id, received_at, content_size)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
 ```
 
 ### Get feed items (for RSS generation)
 ```sql
-SELECT id, subject, html_content, from_name, from_email, received_at, message_id
+SELECT id, subject, html_content, text_content, original_url, from_name, from_email, received_at, message_id
 FROM items
 WHERE feed_key = ?
 ORDER BY received_at DESC
@@ -79,7 +87,7 @@ LIMIT ?;
 
 ### List all feeds (for /feeds endpoint)
 ```sql
-SELECT feed_key, display_name, from_email, item_count, last_item_at, custom_title
+SELECT feed_key, display_name, from_email, source_url, site_url, item_count, last_item_at, custom_title
 FROM feeds
 WHERE is_active = 1
 ORDER BY last_item_at DESC;
@@ -143,7 +151,7 @@ CREATE TABLE IF NOT EXISTS _meta (
   value TEXT
 );
 
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '1');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
 ```
 
 See MIGRATIONS.md for the migration runner pattern.

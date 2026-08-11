@@ -26,7 +26,7 @@
    - MX: `route3.mx.cloudflare.net` (priority 37)
    - TXT: SPF record for Cloudflare
 4. Under "Routing Rules" → Create a catch-all rule or a specific address rule:
-   - **Option A (recommended):** Custom address `rss@yourdomain.com` → Route to Worker
+   - **Option A (recommended):** Custom address `rss@hanscho.com` → Route to Worker
    - **Option B:** Catch-all → Route to Worker
 5. The Worker must be deployed first before you can select it as a destination
 
@@ -62,23 +62,29 @@ database_name = "pigeon-db"
 database_id = "paste-your-id-here"
 
 [vars]
-BASE_URL = "https://feeds.yourdomain.com"
+BASE_URL = "https://pigeon.hanscho.com"
 ITEMS_PER_FEED = "50"
+
+[[routes]]
+pattern = "pigeon.hanscho.com"
+custom_domain = true
 ```
 
 ## Step 5: Set Up Custom Domain for Worker
 
-1. Cloudflare Dashboard → Workers & Pages → your worker → Settings → Triggers
-2. Add Custom Domain: `feeds.yourdomain.com`
-3. Cloudflare auto-provisions TLS and DNS
+Declare the custom domain in `wrangler.toml` and deploy the Worker.
 
-This means your feed URLs will be `https://feeds.yourdomain.com/feed/:feed_key`
+Before the first deploy, confirm that `pigeon.hanscho.com` does not already have a conflicting DNS record in Cloudflare. Cloudflare's custom-domain flow refuses hostnames with an existing CNAME record.
+
+After `wrangler deploy`, Cloudflare auto-provisions TLS and creates the DNS record for the custom domain.
+
+This means your feed URLs will be `https://pigeon.hanscho.com/feed/:feed_key`
 
 ## Step 6: Link Email Routing to Worker
 
 1. Deploy the Worker first: `wrangler deploy`
 2. Go back to Email → Email Routing → Routing Rules
-3. Edit the rule for `rss@yourdomain.com`
+3. Edit the rule for `rss@hanscho.com`
 4. Destination: "Send to Worker" → select `pigeon`
 5. Save
 
@@ -111,4 +117,4 @@ After setup, your domain should have:
 | MX | @ | route2.mx.cloudflare.net | Email routing |
 | MX | @ | route3.mx.cloudflare.net | Email routing |
 | TXT | @ | v=spf1 include:_spf.mx.cloudflare.net ~all | SPF for email routing |
-| CNAME | feeds | pigeon.yoursubdomain.workers.dev | Worker custom domain |
+| Cloudflare-managed DNS record | pigeon | Created during Worker custom-domain attach | Worker custom domain |

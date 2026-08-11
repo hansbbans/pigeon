@@ -4,12 +4,13 @@ import { test } from 'node:test';
 import app from '../src/index';
 
 const FEED_SQL =
-	'SELECT feed_key, display_name, from_email, custom_title, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
+	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
 
 const ITEMS_SQL =
-	'SELECT id, message_id, subject, html_content, text_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
+	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
 
 const FEEDS_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC';
+const OPML_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY display_name';
 
 class FeedVariantStatement {
 	private readonly sql: string;
@@ -18,6 +19,8 @@ class FeedVariantStatement {
 		display_name: string;
 		from_email: string | null;
 		custom_title: string | null;
+		source_url: string | null;
+		site_url: string | null;
 		last_item_at: string | null;
 	};
 	private readonly items: Array<{
@@ -26,6 +29,7 @@ class FeedVariantStatement {
 		subject: string;
 		html_content: string;
 		text_content: string | null;
+		original_url: string | null;
 		from_name: string | null;
 		from_email: string | null;
 		received_at: string;
@@ -34,9 +38,10 @@ class FeedVariantStatement {
 		feed_key: string;
 		display_name: string;
 		from_email: string | null;
-		source_type: string;
-		source_url: string | null;
-		icon_url: string | null;
+			source_type: string;
+			source_url: string | null;
+			site_url: string | null;
+			icon_url: string | null;
 		item_count: number;
 		last_item_at: string | null;
 		custom_title: string | null;
@@ -75,6 +80,27 @@ class FeedVariantStatement {
 	}
 
 	async all<T>(): Promise<{ results: T[] }> {
+		if (this.sql === 'PRAGMA table_info(feeds)') {
+			return {
+				results: [
+					'source_type',
+					'source_url',
+					'fetch_interval_minutes',
+					'last_fetched_at',
+					'fetch_error',
+					'etag',
+					'last_modified',
+					'icon_url',
+					'site_url',
+					'category',
+				].map((name) => ({ name })) as T[],
+			};
+		}
+
+		if (this.sql === 'PRAGMA table_info(items)') {
+			return { results: [{ name: 'original_url' }] as T[] };
+		}
+
 		if (this.sql === ITEMS_SQL) {
 			this.tracker.lastItemsLimit = this.boundValues[1] as number;
 			return { results: this.items as T[] };
@@ -84,7 +110,30 @@ class FeedVariantStatement {
 			return { results: this.feeds as T[] };
 		}
 
+		if (this.sql.includes(OPML_SQL_FRAGMENT)) {
+			return { results: this.feeds as T[] };
+		}
+
 		throw new Error(`Unexpected SQL in all(): ${this.sql}`);
+	}
+
+	async run(): Promise<void> {
+		if (
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO feed_tags') ||
+			this.sql.includes('CREATE TABLE IF NOT EXISTS engagement_events') ||
+			this.sql.startsWith('ALTER TABLE engagement_events ADD COLUMN destination_host') ||
+			this.sql.includes('CREATE INDEX IF NOT EXISTS idx_engagement_events_') ||
+			this.sql.startsWith('UPDATE _meta SET value')
+		) {
+			return;
+		}
+
+		throw new Error(`Unexpected SQL in run(): ${this.sql}`);
 	}
 }
 
@@ -94,6 +143,8 @@ function createEnv() {
 		display_name: 'Example Feed',
 		from_email: 'feed@example.com',
 		custom_title: null,
+		source_url: 'https://example.com/feed.xml',
+		site_url: 'https://example.com/',
 		last_item_at: '2026-03-27T12:34:56.000Z',
 	};
 	const items = [
@@ -104,6 +155,7 @@ function createEnv() {
 			html_content:
 				'<style>.noise{display:none}</style><div data-full-only="yes">FULL BODY MARKER</div><p>Hello from the lightweight feed test.</p>',
 			text_content: null,
+			original_url: 'https://example.com/posts/heavy-newsletter',
 			from_name: 'Example Feed',
 			from_email: 'feed@example.com',
 			received_at: '2026-03-27T12:34:56.000Z',
@@ -114,9 +166,10 @@ function createEnv() {
 			feed_key: 'example-feed',
 			display_name: 'Example Feed',
 			from_email: 'feed@example.com',
-			source_type: 'rss',
-			source_url: 'https://example.com/feed.xml',
-			icon_url: 'https://example.com/favicon.ico',
+				source_type: 'rss',
+				source_url: 'https://example.com/feed.xml',
+				site_url: 'https://example.com/',
+				icon_url: 'https://example.com/favicon.ico',
 			item_count: 12,
 			last_item_at: '2026-03-27T12:34:56.000Z',
 			custom_title: null,
@@ -154,6 +207,9 @@ test('GET /feed/:feed_key/light returns the lightweight feed variant with a smal
 	const xml = await response.text();
 	assert.match(xml, /<title>Example Feed \(Light\)<\/title>/);
 	assert.match(xml, /<link href="https:\/\/pigeon\.example\/feed\/example-feed\/light" rel="self"/);
+	assert.match(xml, /<link href="https:\/\/example\.com\/" rel="alternate" type="text\/html"\/>/);
+	assert.match(xml, /<entry xml:base="https:\/\/example\.com\/posts\/heavy-newsletter">/);
+	assert.match(xml, /<link href="https:\/\/example\.com\/posts\/heavy-newsletter"\/>/);
 	assert.match(xml, /data-full-only="yes"/);
 	assert.match(xml, /Hello from the lightweight feed test\./);
 	assert.doesNotMatch(xml, /<!doctype|<html|<head|<body|<style>/i);
@@ -171,4 +227,18 @@ test('GET /feeds includes a dedicated lightweight feed URL alongside the full fe
 
 	assert.equal(payload.feeds[0].feed_url, 'https://pigeon.example/feed/example-feed');
 	assert.equal(payload.feeds[0].light_feed_url, 'https://pigeon.example/feed/example-feed/light');
+	assert.equal(payload.feeds[0].site_url, 'https://example.com/');
+});
+
+test('GET /feeds/opml includes the feed homepage when available', async () => {
+	const { env } = createEnv();
+	const response = await app.fetch(
+		new Request('https://pigeon.example/feeds/opml'),
+		env as never,
+	);
+
+	assert.equal(response.status, 200);
+	const opml = await response.text();
+	assert.match(opml, /xmlUrl="https:\/\/pigeon\.example\/feed\/example-feed"/);
+	assert.match(opml, /htmlUrl="https:\/\/example\.com\/"/);
 });

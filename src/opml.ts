@@ -3,6 +3,8 @@ interface FeedInfo {
 	display_name: string;
 	custom_title: string | null;
 	category: string | null;
+	source_url?: string | null;
+	site_url?: string | null;
 }
 
 function escapeXml(str: string): string {
@@ -17,7 +19,9 @@ function escapeXml(str: string): string {
 function feedOutline(f: FeedInfo, baseUrl: string, indent: string): string {
 	const title = escapeXml(f.custom_title || f.display_name);
 	const url = escapeXml(`${baseUrl}/feed/${f.feed_key}`);
-	return `${indent}<outline type="rss" text="${title}" title="${title}" xmlUrl="${url}"/>`;
+	const htmlUrl = f.site_url || f.source_url;
+	const htmlUrlAttribute = htmlUrl ? ` htmlUrl="${escapeXml(htmlUrl)}"` : '';
+	return `${indent}<outline type="rss" text="${title}" title="${title}" xmlUrl="${url}"${htmlUrlAttribute}/>`;
 }
 
 export function generateOpml(feeds: FeedInfo[], baseUrl: string): string {

@@ -8,6 +8,8 @@ interface FeedMeta {
 	display_name: string;
 	from_email: string | null;
 	custom_title: string | null;
+	source_url?: string | null;
+	site_url?: string | null;
 }
 
 interface FeedItem {
@@ -16,6 +18,7 @@ interface FeedItem {
 	subject: string;
 	html_content: string;
 	text_content?: string | null;
+	original_url?: string | null;
 	from_name: string | null;
 	from_email: string | null;
 	received_at: string;
@@ -52,6 +55,7 @@ export async function generateAtomFeed(
 ): Promise<string> {
 	const variant = options?.variant || 'full';
 	const feedUrl = options?.feedUrl || `${baseUrl}/feed/${feed.feed_key}`;
+	const feedHomeUrl = feed.site_url || feed.source_url || baseUrl;
 	const titleBase = feed.custom_title || feed.display_name;
 	const title = variant === 'light' ? `${titleBase} (Light)` : titleBase;
 	const preparedItems = await prepareFeedItems(feed.feed_key, items);
@@ -65,11 +69,13 @@ export async function generateAtomFeed(
 			const renderedContent = createRenderedContent({
 				htmlContent: item.html_content,
 				textContent: item.text_content,
+				originalUrl: item.original_url,
 			});
 
-			return `  <entry>
+			return `  <entry${item.original_url ? ` xml:base="${escapeXml(item.original_url)}"` : ''}>
     <title>${escapeXml(item.subject)}</title>
     <id>urn:uuid:${item.canonicalId}</id>
+    ${item.original_url ? `<link href="${escapeXml(item.original_url)}"/>` : ''}
     <updated>${item.received_at}</updated>
     <published>${item.received_at}</published>
     <author>
@@ -86,7 +92,7 @@ export async function generateAtomFeed(
   <title>${escapeXml(title)}</title>
   <link href="${escapeXml(feedUrl)}" rel="self" type="application/atom+xml"/>
   ${options?.hubUrl ? `<link href="${escapeXml(options.hubUrl)}" rel="hub"/>` : ''}
-  <link href="${escapeXml(baseUrl)}" rel="alternate" type="text/html"/>
+  <link href="${escapeXml(feedHomeUrl)}" rel="alternate" type="text/html"/>
   <id>${escapeXml(feedUrl)}</id>
   <updated>${preparedItems[0]?.received_at || new Date().toISOString()}</updated>
   <generator>Pigeon Newsletter-to-RSS</generator>

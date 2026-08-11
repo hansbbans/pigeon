@@ -19,7 +19,7 @@ function generateAtomFeed(feed: FeedMeta, items: FeedItem[], baseUrl: string): s
 <feed xmlns="http://www.w3.org/2005/Atom">
   <title>${escapeXml(title)}</title>
   <link href="${escapeXml(feedUrl)}" rel="self" type="application/atom+xml"/>
-  <link href="${escapeXml(baseUrl)}" rel="alternate" type="text/html"/>
+  <link href="${escapeXml(feed.site_url || baseUrl)}" rel="alternate" type="text/html"/>
   <id>${escapeXml(feedUrl)}</id>
   <updated>${items[0]?.received_at || new Date().toISOString()}</updated>
   <generator>Pigeon Newsletter-to-RSS</generator>

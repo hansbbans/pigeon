@@ -7,6 +7,8 @@ import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
 import { renderBrowserAppHtml } from './browser-app';
 import { handleStatusRequest } from './status';
+import { ensureDatabaseSchema } from './migrations';
+import { handleNativeApiRequest } from './native-api';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -18,14 +20,20 @@ export default {
 		}
 
 		if (path === '/feeds/opml') {
+			const migrationError = await ensureSchemaReady(env);
+			if (migrationError) return migrationError;
 			return handleOpml(env);
 		}
 
 		if (path === '/feeds/subscribe' && request.method === 'POST') {
+			const migrationError = await ensureSchemaReady(env);
+			if (migrationError) return migrationError;
 			return handleSubscribe(request, env);
 		}
 
 		if (path === '/feeds') {
+			const migrationError = await ensureSchemaReady(env);
+			if (migrationError) return migrationError;
 			return handleFeedList(env);
 		}
 
@@ -39,7 +47,13 @@ export default {
 			return handleStatusRequest(request, env);
 		}
 
+		if (path === '/api/v1/recommendations' || path === '/api/v1/engagement') {
+			return handleNativeApiRequest(request, env);
+		}
+
 		if (path.startsWith('/feed/')) {
+			const migrationError = await ensureSchemaReady(env);
+			if (migrationError) return migrationError;
 			return handleFeed(request, url, env);
 		}
 
@@ -60,13 +74,35 @@ export default {
 	},
 
 	async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+		try {
+			await ensureDatabaseSchema(env);
+		} catch (error) {
+			console.error('[Migrations] Email processing skipped because database migration failed', error);
+			return;
+		}
 		await handleIncomingEmail(message, env);
 	},
 
 	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+		try {
+			await ensureDatabaseSchema(env);
+		} catch (error) {
+			console.error('[Migrations] Scheduled refresh skipped because database migration failed', error);
+			return;
+		}
 		await handleCronTrigger(env);
 	},
 } satisfies ExportedHandler<Env>;
+
+async function ensureSchemaReady(env: Env): Promise<Response | null> {
+	try {
+		await ensureDatabaseSchema(env);
+		return null;
+	} catch (error) {
+		console.error('[Migrations] Database migration failed', error);
+		return new Response('Database migration failed', { status: 503 });
+	}
+}
 
 async function handleFeed(request: Request, url: URL, env: Env): Promise<Response> {
 	let feedKeyWithVariant = url.pathname.slice('/feed/'.length);
@@ -80,7 +116,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 	// Get feed metadata
 	const feed = await env.DB.prepare(
-		'SELECT feed_key, display_name, from_email, custom_title, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
+		'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
 	)
 		.bind(feedKey)
 		.first<{
@@ -88,6 +124,8 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 			display_name: string;
 			from_email: string | null;
 			custom_title: string | null;
+			source_url: string | null;
+			site_url: string | null;
 			last_item_at: string | null;
 		}>();
 
@@ -107,7 +145,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	const limit = Math.min(parseInt(url.searchParams.get('limit') || defaultLimit), 100);
 
 	const { results: items } = await env.DB.prepare(
-		'SELECT id, message_id, subject, html_content, text_content, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
+		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
 	)
 		.bind(feedKey, limit)
 		.all<{
@@ -116,6 +154,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 			subject: string;
 			html_content: string;
 			text_content: string | null;
+			original_url: string | null;
 			from_name: string | null;
 			from_email: string | null;
 			received_at: string;
@@ -136,7 +175,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 async function handleFeedList(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
-		`SELECT feed_key, display_name, from_email, source_type, source_url, icon_url, item_count, last_item_at, custom_title, category
+		`SELECT feed_key, display_name, from_email, source_type, source_url, site_url, icon_url, item_count, last_item_at, custom_title, category
 		 FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC`,
 	).all<{
 		feed_key: string;
@@ -144,6 +183,7 @@ async function handleFeedList(env: Env): Promise<Response> {
 		from_email: string | null;
 		source_type: string;
 		source_url: string | null;
+		site_url: string | null;
 		icon_url: string | null;
 		item_count: number;
 		last_item_at: string | null;
@@ -153,11 +193,12 @@ async function handleFeedList(env: Env): Promise<Response> {
 
 	const feeds = results.map((f) => ({
 		feed_key: f.feed_key,
-		title: f.custom_title || f.display_name,
-		source_type: f.source_type,
-		source_url: f.source_url,
-		from_email: f.from_email,
-		icon_url: f.icon_url,
+			title: f.custom_title || f.display_name,
+			source_type: f.source_type,
+			source_url: f.source_url,
+			site_url: f.site_url,
+			from_email: f.from_email,
+			icon_url: f.icon_url,
 		item_count: f.item_count,
 		last_item_at: f.last_item_at,
 		category: f.category,
@@ -172,13 +213,15 @@ async function handleFeedList(env: Env): Promise<Response> {
 
 async function handleOpml(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
-		`SELECT feed_key, display_name, custom_title, category
+		`SELECT feed_key, display_name, custom_title, category, source_url, site_url
 		 FROM feeds WHERE is_active = 1 ORDER BY display_name`,
 	).all<{
 		feed_key: string;
 		display_name: string;
 		custom_title: string | null;
 		category: string | null;
+		source_url: string | null;
+		site_url: string | null;
 	}>();
 
 	const opml = generateOpml(results, env.BASE_URL);

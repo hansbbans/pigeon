@@ -74,7 +74,7 @@ Reeder supports OPML import. Generate at `/feeds/opml`:
         text="Morning Brew"
         title="Morning Brew"
         xmlUrl="https://feeds.domain.com/feed/mb.morningbrew.com"
-        htmlUrl="https://feeds.domain.com"/>
+        htmlUrl="https://www.morningbrew.com/"/>
       <!-- more outlines -->
     </outline>
   </body>
