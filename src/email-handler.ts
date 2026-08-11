@@ -3,8 +3,23 @@ import type { Env } from './types';
 import { resolveFeedKey, resolveFeedDisplayName } from './normalize';
 import { applyRoutingRules } from './routing-rules';
 import { getFaviconForEmail } from './favicon';
+import { extractOriginalUrlFromEmail } from './original-url';
+import { ensureDatabaseSchema } from './migrations';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
+
+function deriveSiteUrlFromOriginalUrl(originalUrl: string | null): string | null {
+	if (!originalUrl) {
+		return null;
+	}
+
+	try {
+		const url = new URL(originalUrl);
+		return `${url.origin}/`;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Detect forwarded emails and extract the original sender.
@@ -74,6 +89,8 @@ export async function handleIncomingEmail(
 	env: Env,
 ): Promise<void> {
 	try {
+		await ensureDatabaseSchema(env);
+
 		// 1. Read raw email
 		const rawEmail = await new Response(message.raw).arrayBuffer();
 		const size = rawEmail.byteLength;
@@ -129,7 +146,8 @@ export async function handleIncomingEmail(
 		}
 
 		// 5. Content with size check
-		let htmlContent = parsed.html || '';
+		const originalHtmlContent = parsed.html || '';
+		let htmlContent = originalHtmlContent;
 		const textContent = parsed.text || '';
 		const contentSize = new Blob([htmlContent || textContent]).size;
 
@@ -142,30 +160,42 @@ export async function handleIncomingEmail(
 
 		// html_content is NOT NULL in schema — always store something
 		const storedHtml = htmlContent || textContent || '(empty)';
+		const originalUrl = extractOriginalUrlFromEmail({
+			subject,
+			htmlContent: originalHtmlContent || storedHtml,
+			textContent,
+		});
+		const siteUrl = deriveSiteUrlFromOriginalUrl(originalUrl);
 
 		// 6. D1 batch: upsert feed + insert item
 		const id = crypto.randomUUID();
 		const now = new Date().toISOString();
-	const iconUrl = getFaviconForEmail(fromAddress);
+		const iconUrl = getFaviconForEmail(fromAddress);
 
 		await env.DB.batch([
-			env.DB.prepare(
-				`INSERT INTO feeds (feed_key, display_name, from_email, icon_url, first_seen_at, last_item_at, item_count)
-				 VALUES (?, ?, ?, ?, ?, ?, 1)
-				 ON CONFLICT(feed_key) DO UPDATE SET
-				   last_item_at = excluded.last_item_at,
-				   item_count = item_count + 1,
+				env.DB.prepare(
+					`INSERT INTO feeds (feed_key, display_name, from_email, icon_url, site_url, first_seen_at, last_item_at, item_count)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+					 ON CONFLICT(feed_key) DO UPDATE SET
+					   last_item_at = excluded.last_item_at,
+					   item_count = item_count + 1,
 				   display_name = CASE
 				     WHEN excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%'
 				       THEN excluded.display_name
 				     ELSE feeds.display_name
-			   END,
-			   icon_url = COALESCE(feeds.icon_url, excluded.icon_url)`,
-			).bind(feedKey, displayName, fromAddress, iconUrl, now, receivedAt),
+				   END,
+				   icon_url = COALESCE(feeds.icon_url, excluded.icon_url),
+				   site_url = COALESCE(feeds.site_url, excluded.site_url)`,
+				).bind(feedKey, displayName, fromAddress, iconUrl, siteUrl, now, receivedAt),
 
 			env.DB.prepare(
-				`INSERT OR IGNORE INTO items (id, feed_key, from_name, from_email, subject, html_content, text_content, message_id, received_at, content_size)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO items (
+					id, feed_key, from_name, from_email, subject,
+					html_content, text_content, original_url, message_id, received_at, content_size
+				 )
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(message_id) DO UPDATE SET
+				   original_url = COALESCE(items.original_url, excluded.original_url)`,
 			).bind(
 				id,
 				feedKey,
@@ -174,6 +204,7 @@ export async function handleIncomingEmail(
 				subject,
 				storedHtml,
 				textContent || null,
+				originalUrl,
 				messageId,
 				receivedAt,
 				contentSize,

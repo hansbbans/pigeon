@@ -4,6 +4,8 @@
  */
 
 import { parseRssFeed } from './rss-parser';
+import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
+import { ensureDatabaseSchema } from './migrations';
 import type { Env } from './types';
 
 interface FeedToFetch {
@@ -27,6 +29,8 @@ const MAX_CONTENT_SIZE = 900_000; // Leave buffer under D1 1MB row limit
  */
 export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise<void> {
 	try {
+		await ensureDatabaseSchema(env);
+
 		// Build conditional GET headers
 		const headers: Record<string, string> = {
 			'User-Agent': 'Pigeon RSS Reader/1.0',
@@ -76,24 +80,45 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 		// Limit items to prevent spam
 		const items = parsed.items.slice(0, MAX_ITEMS_PER_FETCH);
 
-		// Batch insert items (INSERT OR IGNORE for deduplication)
+		// Batch insert items and backfill original URLs on refetches.
 		const statements: D1PreparedStatement[] = [];
 
 		for (const item of items) {
 			const identity = await createRssItemIdentity(feed.feed_key, item);
+			const originalUrl = resolveRssItemUrl({
+				itemGuid: item.guid,
+				itemLink: item.link,
+				content: item.content,
+				title: item.title,
+				feedSiteUrl: parsed.link,
+				feedSourceUrl: feed.source_url,
+			});
+			const contentBaseUrl = originalUrl || parsed.link || feed.source_url;
 
 			// Truncate content if too large
-			let content = item.content;
+			let content = rewriteRssContentLinks(item.content, contentBaseUrl);
 			if (content.length > MAX_CONTENT_SIZE) {
 				content = content.slice(0, MAX_CONTENT_SIZE) + '\n\n[Content truncated]';
 			}
 
 			statements.push(
 				env.DB.prepare(
-					`INSERT OR IGNORE INTO items (
+					`INSERT INTO items (
 						id, message_id, feed_key, subject,
-						from_email, received_at, html_content, text_content
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+						from_email, received_at, html_content, text_content, original_url
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(message_id) DO UPDATE SET
+						html_content = excluded.html_content,
+						original_url = CASE
+								WHEN excluded.original_url IS NOT NULL
+								  AND (
+									items.original_url IS NULL
+									OR items.original_url LIKE 'https://feeds.feedblitz.com/%'
+									OR excluded.feed_key LIKE '%feedblitz%'
+								  )
+								THEN excluded.original_url
+							ELSE items.original_url
+						END`
 				).bind(
 					identity.id,
 					identity.messageId,
@@ -102,7 +127,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 					item.author || null,
 					item.pubDate || now,
 					content,
-					null // RSS items don't have separate text/html
+					null, // RSS items don't have separate text/html
+					originalUrl,
 				)
 			);
 		}
@@ -115,10 +141,11 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 				    fetch_error = NULL,
 				    etag = ?,
 				    last_modified = ?,
+				    site_url = COALESCE(?, site_url),
 				    last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
 				    item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
 				WHERE feed_key = ?`
-			).bind(now, newEtag, newLastModified, feed.feed_key, feed.feed_key, feed.feed_key)
+			).bind(now, newEtag, newLastModified, parsed.link || null, feed.feed_key, feed.feed_key, feed.feed_key)
 		);
 
 		// Execute all statements in a batch

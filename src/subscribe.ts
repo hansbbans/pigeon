@@ -42,6 +42,7 @@ export async function subscribeToFeed(
 
 	// Fetch feed to extract title and validate parsability
 	let feedTitle: string;
+	let siteUrl: string | null = null;
 	try {
 		const response = await fetch(parsedUrl.toString(), {
 			headers: {
@@ -57,6 +58,7 @@ export async function subscribeToFeed(
 		const xmlText = await response.text();
 		const parsed = parseRssFeed(xmlText);
 		feedTitle = parsed.title;
+		siteUrl = parsed.link || null;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(`Failed to parse feed: ${message}`);
@@ -72,10 +74,18 @@ export async function subscribeToFeed(
 
 	if (existing) {
 		// Reactivate if inactive
-		await env.DB.prepare('UPDATE feeds SET is_active = 1 WHERE feed_key = ?')
-			.bind(feedKey)
+		await env.DB.prepare(
+			`UPDATE feeds
+			 SET display_name = ?, source_url = ?, site_url = COALESCE(?, site_url), is_active = 1
+			 WHERE feed_key = ?`
+		)
+			.bind(feedTitle, parsedUrl.toString(), siteUrl, feedKey)
 			.run();
-		return existing;
+		return {
+			rowid: existing.rowid,
+			feed_key: existing.feed_key,
+			display_name: feedTitle,
+		};
 	}
 
 	// Insert into feeds table
@@ -83,11 +93,11 @@ export async function subscribeToFeed(
 	const iconUrl = getFaviconForUrl(parsedUrl.toString());
 	await env.DB.prepare(
 		`INSERT INTO feeds (
-			feed_key, display_name, source_type, source_url,
+			feed_key, display_name, source_type, source_url, site_url,
 			category, icon_url, is_active, first_seen_at
-		) VALUES (?, ?, 'rss', ?, ?, ?, 1, ?)`
+		) VALUES (?, ?, 'rss', ?, ?, ?, ?, 1, ?)`
 	)
-		.bind(feedKey, feedTitle, parsedUrl.toString(), category || null, iconUrl, now)
+		.bind(feedKey, feedTitle, parsedUrl.toString(), siteUrl, category || null, iconUrl, now)
 		.run();
 
 	// Get the rowid of the inserted feed

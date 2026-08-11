@@ -13,16 +13,15 @@ wrangler d1 create pigeon-db
 # 3. Initialize schema on remote D1
 wrangler d1 execute pigeon-db --file=./04-storage/SCHEMA.sql
 
-# 4. Deploy Worker
-wrangler deploy
+# 4. Before the first custom-domain deploy, confirm `pigeon.hanscho.com`
+# does not already have a conflicting DNS record in Cloudflare.
 
-# 5. Set up custom domain (in Cloudflare Dashboard)
-# Workers & Pages → pigeon → Settings → Triggers → Add Custom Domain
-# Enter: feeds.yourdomain.com
+# 5. Deploy Worker
+wrangler deploy
 
 # 6. Configure Email Routing (in Cloudflare Dashboard)
 # Email → Email Routing → Create rule
-# Address: rss@yourdomain.com → Send to Worker → pigeon
+# Address: rss@hanscho.com → Send to Worker → pigeon
 ```
 
 ## Subsequent Deploys
@@ -65,7 +64,7 @@ wrangler d1 execute pigeon-db --command "SELECT * FROM error_log ORDER BY create
 ```
 
 ### Health Check
-Hit `https://feeds.yourdomain.com/health` — should return 200 "ok".
+Hit `https://pigeon.hanscho.com/health` — should return 200 "ok".
 
 For automated monitoring, use an external uptime checker (UptimeRobot free tier) pointed at the health endpoint.
 

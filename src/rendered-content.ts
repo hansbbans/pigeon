@@ -71,6 +71,75 @@ function normalizeWhitespaceAroundHtml(html: string): string {
 		.trim();
 }
 
+function absolutizeRelativeUrl(urlValue: string, baseUrl: string): string | null {
+	const trimmed = urlValue.trim();
+	if (!trimmed || trimmed.startsWith('#')) {
+		return null;
+	}
+
+	if (/^(?:data|cid|mailto|tel|javascript):/i.test(trimmed)) {
+		return null;
+	}
+
+	try {
+		return new URL(trimmed, baseUrl).toString();
+	} catch {
+		return null;
+	}
+}
+
+function absolutizeSrcset(srcset: string, baseUrl: string): string {
+	const candidates = srcset
+		.split(',')
+		.map((candidate) => candidate.trim())
+		.filter(Boolean);
+
+	if (candidates.length === 0) {
+		return srcset;
+	}
+
+	return candidates
+		.map((candidate) => {
+			const parts = candidate.match(/^(\S+)(\s+.+)?$/);
+			if (!parts) {
+				return candidate;
+			}
+
+			const resolvedUrl = absolutizeRelativeUrl(parts[1], baseUrl);
+			if (!resolvedUrl) {
+				return candidate;
+			}
+
+			return `${resolvedUrl}${parts[2] || ''}`;
+		})
+		.join(', ');
+}
+
+function absolutizeRelativeUrlsInHtml(html: string, baseUrl: string): string {
+	let result = html.replace(
+		/\b(href|src|poster)\s*=\s*(["'])(.*?)\2/gi,
+		(match, attribute: string, quote: string, value: string) => {
+			const resolvedUrl = absolutizeRelativeUrl(value, baseUrl);
+			if (!resolvedUrl) {
+				return match;
+			}
+
+			return `${attribute}=${quote}${resolvedUrl}${quote}`;
+		},
+	);
+
+	result = result.replace(/\bsrcset\s*=\s*(["'])(.*?)\1/gi, (match, quote: string, value: string) => {
+		const resolvedSrcset = absolutizeSrcset(value, baseUrl);
+		if (resolvedSrcset === value) {
+			return match;
+		}
+
+		return `srcset=${quote}${resolvedSrcset}${quote}`;
+	});
+
+	return result;
+}
+
 function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -281,6 +350,7 @@ function shouldNormalizeEmailHtml(html: string): boolean {
 export function createRenderedContent(input: {
 	htmlContent?: string | null;
 	textContent?: string | null;
+	originalUrl?: string | null;
 }): string {
 	const rawHtml = input.htmlContent ?? '';
 	if (!rawHtml.trim()) {
@@ -292,7 +362,7 @@ export function createRenderedContent(input: {
 	}
 
 	if (!shouldNormalizeEmailHtml(rawHtml)) {
-		return rawHtml;
+		return input.originalUrl ? absolutizeRelativeUrlsInHtml(rawHtml, input.originalUrl) : rawHtml;
 	}
 
 	let candidate = stripDocumentShell(rawHtml);
@@ -313,8 +383,9 @@ export function createRenderedContent(input: {
 	candidate = normalizeWhitespaceAroundHtml(candidate);
 
 	if (!candidate) {
-		return rawHtml;
+		return input.originalUrl ? absolutizeRelativeUrlsInHtml(rawHtml, input.originalUrl) : rawHtml;
 	}
 
-	return `<div data-pigeon-rendered="email-fragment" style="text-align:left">${candidate}</div>`;
+	const rendered = `<div data-pigeon-rendered="email-fragment" style="text-align:left">${candidate}</div>`;
+	return input.originalUrl ? absolutizeRelativeUrlsInHtml(rendered, input.originalUrl) : rendered;
 }

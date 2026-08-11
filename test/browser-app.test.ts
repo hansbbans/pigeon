@@ -12,19 +12,24 @@ const FEED_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS active_feed_count,
 	   FROM feeds
 	  WHERE is_active = 1`);
 const ITEM_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS total_item_count,
-	        SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END) AS unread_item_count,
-	        SUM(CASE WHEN is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
-	        MAX(received_at) AS newest_item_at
-	   FROM items`);
+	        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 THEN 1 ELSE 0 END) AS unread_item_count,
+	        SUM(CASE WHEN i.is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
+	        MAX(CASE WHEN f.is_active = 1 THEN i.received_at ELSE NULL END) AS newest_item_at
+	   FROM items i
+	   LEFT JOIN feeds f ON f.feed_key = i.feed_key`);
 const NEWEST_EMAIL_SQL = normalizeSql(`SELECT MAX(i.received_at) AS value
 	   FROM items i
 	   JOIN feeds f ON f.feed_key = i.feed_key
-	  WHERE f.source_type = 'email'`);
+	  WHERE f.source_type = 'email'
+	    AND f.is_active = 1`);
 const NEWEST_RSS_SQL = normalizeSql(`SELECT MAX(i.received_at) AS value
 	   FROM items i
 	   JOIN feeds f ON f.feed_key = i.feed_key
-	  WHERE f.source_type = 'rss'`);
-const LATEST_FETCH_SQL = normalizeSql(`SELECT MAX(last_fetched_at) AS value FROM feeds WHERE source_type = 'rss'`);
+	  WHERE f.source_type = 'rss'
+	    AND f.is_active = 1`);
+const LATEST_FETCH_SQL = normalizeSql(
+	`SELECT MAX(last_fetched_at) AS value FROM feeds WHERE source_type = 'rss' AND is_active = 1`,
+);
 const FAILING_FEEDS_SQL = normalizeSql(`SELECT feed_key,
 	        COALESCE(custom_title, display_name) AS title,
 	        fetch_error,
@@ -115,6 +120,27 @@ class FakePreparedStatement {
 	}
 
 	async all<T>(): Promise<{ results: T[] }> {
+		if (this.sql === 'PRAGMA table_info(feeds)') {
+			return {
+				results: [
+					'source_type',
+					'source_url',
+					'fetch_interval_minutes',
+					'last_fetched_at',
+					'fetch_error',
+					'etag',
+					'last_modified',
+					'icon_url',
+					'site_url',
+					'category',
+				].map((name) => ({ name })) as T[],
+			};
+		}
+
+		if (this.sql === 'PRAGMA table_info(items)') {
+			return { results: [{ name: 'original_url' }] as T[] };
+		}
+
 		switch (this.sql) {
 			case FEED_COUNTS_SQL:
 				return {
@@ -153,6 +179,25 @@ class FakePreparedStatement {
 
 		throw new Error(`Unexpected SQL in all(): ${this.sql}`);
 	}
+
+	async run(): Promise<void> {
+		if (
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO feed_tags') ||
+			this.sql.includes('CREATE TABLE IF NOT EXISTS engagement_events') ||
+			this.sql.startsWith('ALTER TABLE engagement_events ADD COLUMN destination_host') ||
+			this.sql.includes('CREATE INDEX IF NOT EXISTS idx_engagement_events_') ||
+			this.sql.startsWith('UPDATE _meta SET value')
+		) {
+			return;
+		}
+
+		throw new Error(`Unexpected SQL in run(): ${this.sql}`);
+	}
 }
 
 function createEnv(overrides?: { DB?: { prepare(sql: string): FakePreparedStatement } }) {
@@ -189,19 +234,40 @@ test('GET /app returns an HTML shell', async () => {
 	const html = await response.text();
 	assert.match(html, /id="app"/);
 	assert.match(html, /id="login-form"/);
-	assert.match(html, /id="reader-window-bar"/);
+	assert.match(html, /Enter the same Pigeon password you use in your reader apps/);
+	assert.match(html, /name="Email" type="text" autocomplete="username" value="pigeon"/);
+	assert.match(html, /<span class="login-field-label">Pigeon password<\/span>/);
+	assert.match(html, /<strong>Reeder Classic:<\/strong> use username <strong>pigeon<\/strong> and this same password/);
+	assert.match(html, /<strong>pigeon\.example<\/strong>/);
+	assert.match(html, /id="clear-session-button"/);
 	assert.match(html, /id="reader-toolbar"/);
+	assert.match(html, /id="theme-toggle-button"/);
+	assert.match(html, /id="article-list-mode-button"/);
 	assert.match(html, /id="logout-button"/);
+	assert.match(html, /id="logout-button" type="button">Sign Out<\/button>/);
 	assert.match(html, /id="feeds-panel"/);
 	assert.match(html, /id="articles-panel"/);
 	assert.match(html, /id="reader-panel"/);
+	assert.match(html, /id="reader-grid"/);
+	assert.match(html, /id="sidebar-column-resizer"/);
+	assert.match(html, /id="stream-column-resizer"/);
+	assert.match(html, /id="sidebar-column-resizer"[\s\S]*?aria-controls="feeds-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="224"[\s\S]*?aria-valuemax="520"[\s\S]*?aria-valuenow="416"/);
+	assert.match(html, /id="stream-column-resizer"[\s\S]*?aria-controls="articles-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="288"[\s\S]*?aria-valuemax="640"[\s\S]*?aria-valuenow="524"/);
 	assert.match(html, /id="reader-pane-toolbar"/);
 	assert.match(html, /id="real-views-section"/);
+	assert.match(html, /id="folder-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);
+	assert.match(html, /id="sidebar-current-title"/);
+	assert.match(html, /id="folders-list"/);
 	assert.match(html, /id="views-list"/);
 	assert.match(html, /id="settings-panel"/);
+	assert.match(html, /id="reader-shell" tabindex="-1"/);
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
-	assert.match(html, /grid-template-columns:\s*minmax\(14rem, 16rem\) minmax\(20rem, 26rem\) minmax\(24rem, 1fr\);/);
+	assert.match(html, /--sidebar-column-width:\s*26rem;/);
+	assert.match(html, /--stream-column-width:\s*32\.75rem;/);
+	assert.match(html, /grid-template-areas:\s*"sidebar sidebar-resizer stream stream-resizer reader";/);
+	assert.match(html, /data-resizer="sidebar"/);
+	assert.match(html, /data-resizer="stream"/);
 	assert.match(html, /@media \(max-width: 1100px\)/);
 	assert.match(html, /@media \(max-width: 900px\)/);
 	assert.doesNotMatch(html, /@media \(max-width: 960px\)/);
@@ -214,20 +280,32 @@ test('GET /app returns an HTML shell', async () => {
 		/@media \(max-width: 900px\)\s*\{[\s\S]*?#settings-panel\s*\{[\s\S]*?top:\s*auto;[\s\S]*?right:\s*0\.75rem;[\s\S]*?bottom:\s*0\.75rem;[\s\S]*?left:\s*0\.75rem;[\s\S]*?width:\s*auto;/,
 	);
 	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);
+	assert.match(html, /localStorage\.getItem\("pigeon\.browser\.theme"\)/);
+	assert.match(html, /pigeon\.browser\.article-list-mode/);
+	assert.match(html, /pigeon\.browser\.column-widths/);
+	assert.match(html, /document\.documentElement\.setAttribute\('data-theme', storedTheme === 'dark' \? 'dark' : 'light'\)/);
 	assert.match(html, /\/reader\/api\/0\/subscription\/list/);
 	assert.match(html, /\/reader\/api\/0\/unread-count/);
 	assert.match(html, /\/reader\/api\/0\/stream\/items\/ids/);
 	assert.match(html, /\/reader\/api\/0\/stream\/items\/contents/);
 	assert.match(html, /\/app\/status/);
 	assert.match(html, /srcdoc/);
-	assert.match(html, /sandbox=""/);
+	assert.match(html, /sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"/);
+	assert.match(html, /<base target="_blank" \/>/);
 	assert.match(html, /data-presentational-control="true"/);
 	assert.match(
 		html,
 		/<button[^>]+data-presentational-control="true"[^>]+data-control-tone="subtle"[^>]+disabled[^>]*>/,
 	);
 	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
+	assert.match(html, /html\[data-theme="dark"\]\s*\{/);
+	assert.match(html, /#theme-toggle-button\[aria-pressed="true"\],[\s\S]*?#article-list-mode-button\[aria-pressed="true"\]\s*\{/);
 	assert.doesNotMatch(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]\s*\{[^}]*opacity:\s*1;/);
+	assert.doesNotMatch(html, /radial-gradient/);
+	assert.doesNotMatch(html, /id="reader-window-bar"/);
+	assert.doesNotMatch(html, /reader-window-address/);
+	assert.doesNotMatch(html, /window-control/);
+	assert.doesNotMatch(html, /backdrop-filter/);
 	assert.doesNotMatch(html, /feedsList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /articlesList\.innerHTML\s*=/);
 	assert.doesNotMatch(html, /settingsContent\.innerHTML\s*=/);
@@ -236,6 +314,12 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /newestRssAt/);
 	assert.match(html, /failingRssCount/);
 	assert.match(html, /iconUrl/);
+	assert.match(html, /parentId/);
+	assert.match(html, /user\/-\/state\/com\.google\/read/);
+	assert.match(html, /document\.addEventListener\('keydown'/);
+	assert.match(html, /readerFrame\.addEventListener\('load'/);
+	assert.doesNotMatch(html, /readerFrame\.addEventListener\('pointerdown'/);
+	assert.doesNotMatch(html, /readerFrame\.addEventListener\('focus'/);
 });
 
 test('GET /app/ returns the same HTML shell as /app', async () => {
