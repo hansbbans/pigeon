@@ -1129,7 +1129,12 @@ async function loadMarkAllRowIds(
 	const cutoffBind = options.cutoff.kind === 'cutoff' ? [options.cutoff.seconds] : [];
 
 	if (options.feedKey) {
-		const result = await env.DB.prepare(`SELECT rowid FROM items WHERE feed_key = ?${cutoffClause}`)
+		const result = await env.DB.prepare(
+			`SELECT i.rowid
+			   FROM items i
+			   JOIN feeds f ON f.feed_key = i.feed_key
+			  WHERE f.is_active = 1 AND i.feed_key = ?${cutoffClause}`,
+		)
 			.bind(options.feedKey, ...cutoffBind)
 			.all<{ rowid: number }>();
 		return result.results.map((row) => row.rowid);
@@ -1246,7 +1251,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 				env,
 				rowids,
 				{
-					sql: "UPDATE items SET is_read = 1 WHERE feed_key = ? AND datetime(received_at) <= datetime(?, 'unixepoch')",
+					sql: "UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND datetime(received_at) <= datetime(?, 'unixepoch')",
 					binds: [feedKey, parsedTs.seconds],
 				},
 				clientFamily,
@@ -1256,7 +1261,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 			await runMarkAllUpdate(
 				env,
 				rowids,
-				{ sql: 'UPDATE items SET is_read = 1 WHERE feed_key = ?', binds: [feedKey] },
+				{ sql: 'UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)', binds: [feedKey] },
 				clientFamily,
 			);
 		}

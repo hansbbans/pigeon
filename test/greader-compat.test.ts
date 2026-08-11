@@ -676,21 +676,37 @@ function createMarkAllAsReadEnv(
 				return;
 			}
 
-			if (this.sql === 'UPDATE items SET is_read = 1 WHERE feed_key = ?') {
+			if (
+				this.sql ===
+					'UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)'
+			) {
 				const feedKey = String(this.values[0]);
+				const activeFeedKeys = new Set(
+					feeds
+						.filter((feed) => (feed.is_active ?? 1) === 1)
+						.map((feed) => feed.feed_key),
+				);
 				for (const item of items) {
-					if (item.feed_key === feedKey) {
+					if (item.feed_key === feedKey && activeFeedKeys.has(item.feed_key)) {
 						item.is_read = 1;
 					}
 				}
 				return;
 			}
 
-			if (this.sql === "UPDATE items SET is_read = 1 WHERE feed_key = ? AND datetime(received_at) <= datetime(?, 'unixepoch')") {
+			if (
+				this.sql ===
+					"UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND datetime(received_at) <= datetime(?, 'unixepoch')"
+			) {
 				const feedKey = String(this.values[0]);
 				const cutoffMs = cutoffMillis(this.values[1]);
+				const activeFeedKeys = new Set(
+					feeds
+						.filter((feed) => (feed.is_active ?? 1) === 1)
+						.map((feed) => feed.feed_key),
+				);
 				for (const item of items) {
-					if (item.feed_key === feedKey && Date.parse(item.received_at) <= cutoffMs) {
+					if (item.feed_key === feedKey && activeFeedKeys.has(item.feed_key) && Date.parse(item.received_at) <= cutoffMs) {
 						item.is_read = 1;
 					}
 				}
@@ -1754,6 +1770,32 @@ test('mark-all-as-read for the reading list preserves unread state in inactive f
 	assert.deepEqual(
 		items.map((item) => item.is_read),
 		[1, 0],
+	);
+});
+
+test('mark-all-as-read for an inactive feed preserves unread state', async () => {
+	const { db, env } = createSqliteMarkAllAsReadEnv(
+		[
+			{ rowid: 1, feed_key: 'active-feed', received_at: '2026-03-20T12:00:00.000Z', is_read: 0 },
+			{ rowid: 2, feed_key: 'inactive-feed', received_at: '2026-03-20T12:30:00.000Z', is_read: 0 },
+		],
+		[
+			{ rowid: 7, feed_key: 'active-feed', is_active: 1 },
+			{ rowid: 8, feed_key: 'inactive-feed', is_active: 0 },
+		],
+	);
+
+	const response = await markAllAsRead(env, { s: 'feed/8' });
+
+	assert.equal(response.status, 200);
+	assert.deepEqual(
+		(db.prepare('SELECT rowid, is_read FROM items ORDER BY rowid').all() as Array<{ rowid: number; is_read: number }>).map(
+			(row) => ({ rowid: row.rowid, is_read: row.is_read }),
+		),
+		[
+			{ rowid: 1, is_read: 0 },
+			{ rowid: 2, is_read: 0 },
+		],
 	);
 });
 
