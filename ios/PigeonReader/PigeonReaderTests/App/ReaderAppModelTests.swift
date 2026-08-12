@@ -97,6 +97,35 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: .forYou).map(\.id) == ["newer"])
 	}
 
+	@Test(arguments: ReaderSection.allCases)
+	func everySectionSortsDeterministicallyAndPreservesSelection(section: ReaderSection) throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let olderHigh = makeArticle(id: "older-high", receivedAt: 1_786_100_000, score: 90)
+		let newerHigh = makeArticle(id: "newer-high", receivedAt: 1_786_200_000, score: 90)
+		let tieB = makeArticle(id: "tie-b", receivedAt: 1_786_200_000, score: 90)
+		let tieA = makeArticle(id: "tie-a", receivedAt: 1_786_200_000, score: 90)
+		let newestLow = makeArticle(id: "newest-low", receivedAt: 1_786_300_000, score: 10)
+		model.setArticles([olderHigh, newestLow, tieB, newerHigh, tieA], for: section)
+		model.select(section: section)
+		model.select(article: tieA)
+
+		model.setSortOrder(.newest, for: section)
+		#expect(model.articles(for: section).map(\.id) == ["newest-low", "newer-high", "tie-a", "tie-b", "older-high"])
+		#expect(model.selectedArticleID == tieA.id)
+
+		model.setSortOrder(.score, for: section)
+		#expect(model.articles(for: section).map(\.id) == ["newer-high", "tie-a", "tie-b", "older-high", "newest-low"])
+		#expect(model.selectedArticleID == tieA.id)
+	}
+
+	@Test func sortDefaultsMatchEachReaderSection() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+
+		#expect(model.sortOrder(for: .forYou) == .score)
+		#expect(model.sortOrder(for: .unread) == .newest)
+		#expect(model.sortOrder(for: .starred) == .newest)
+	}
+
 	@Test func folderAndFeedNavigationFilterUnreadWithoutAutoOpening() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let design = makeSubscription(id: "feed/1", key: "design", title: "Design Weekly", folder: "Design")
@@ -180,7 +209,13 @@ struct ReaderAppModelTests {
 		return ReaderAppModel(sessionStore: TestSessionStore(session: session), httpClient: httpClient)
 	}
 
-	private func makeArticle(id: String, isRead: Bool = false, feedKey: String = "daily") -> Recommendation {
+	private func makeArticle(
+		id: String,
+		isRead: Bool = false,
+		feedKey: String = "daily",
+		receivedAt: TimeInterval = 1_786_272_000,
+		score: Int = 50
+	) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: "tag:google.com,2005:reader/item/\(id)",
@@ -190,10 +225,10 @@ struct ReaderAppModelTests {
 			html: "<p>Body</p>",
 			text: "Body",
 			originalURL: nil,
-			receivedAt: Date(timeIntervalSince1970: 1_786_272_000),
+			receivedAt: Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
 			isStarred: false,
-			score: 50,
+			score: score,
 			confidence: 0,
 			sampleCount: 0,
 			explanation: "Starting with recency",
