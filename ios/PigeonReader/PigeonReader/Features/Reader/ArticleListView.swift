@@ -6,9 +6,11 @@ struct ArticleListView: View {
 	@Environment(ReaderAppModel.self) private var model
 
 	var body: some View {
+		@Bindable var model = model
 		let articles = model.articles(for: destination)
 		let isLoading = model.isLoading(section: destination.sourceSection)
 		let title = model.selectedDestination == destination ? model.selectedDestinationTitle : "Stories"
+		let section = destination.sourceSection
 
 		Group {
 			if isLoading && articles.isEmpty {
@@ -52,7 +54,20 @@ struct ArticleListView: View {
 			await model.load(destination: destination)
 		}
 		.toolbar {
-			ToolbarItem(placement: .topBarTrailing) {
+			ToolbarItemGroup(placement: .topBarTrailing) {
+				Menu("Sort", systemImage: "arrow.up.arrow.down") {
+					Picker("Sort stories", selection: Binding(
+						get: { model.sortOrder(for: section) },
+						set: { model.setSortOrder($0, for: section) }
+					)) {
+						ForEach(ArticleSortOrder.allCases) { sortOrder in
+							Label(sortOrder.title, systemImage: sortOrder.systemImage)
+								.tag(sortOrder)
+						}
+					}
+				}
+				.accessibilityLabel("Sort \(title) stories")
+
 				Button("Refresh", systemImage: "arrow.clockwise") {
 					Task { await model.load(destination: destination, force: true) }
 				}

@@ -21,6 +21,7 @@ final class ReaderAppModel {
 	private let httpClient: any HTTPClient
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [ReaderSection: [Recommendation]] = [:]
+	private var sortOrders: [ReaderSection: ArticleSortOrder] = [:]
 	private var selectedArticleIDs: [ReaderDestination: String] = [:]
 	private var loadingSections: Set<ReaderSection> = []
 	private var activeLoadIDs: [ReaderSection: UUID] = [:]
@@ -59,6 +60,11 @@ final class ReaderAppModel {
 
 	var selectedSection: ReaderSection {
 		selectedDestination.sourceSection
+	}
+
+	var sortOrder: ArticleSortOrder {
+		get { sortOrder(for: selectedSection) }
+		set { setSortOrder(newValue, for: selectedSection) }
 	}
 
 	var selectedDestinationTitle: String {
@@ -136,6 +142,7 @@ final class ReaderAppModel {
 			session = nil
 			apiClient = nil
 			articleCache = [:]
+			sortOrders = [:]
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
@@ -240,6 +247,20 @@ final class ReaderAppModel {
 		articleCache[section] ?? []
 	}
 
+	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
+		sortOrders[section] ?? ArticleSortOrder.defaultOrder(for: section)
+	}
+
+	func setSortOrder(_ newSortOrder: ArticleSortOrder, for section: ReaderSection) {
+		guard sortOrder(for: section) != newSortOrder else {
+			return
+		}
+		sortOrders[section] = newSortOrder
+		if let cachedArticles = articleCache[section] {
+			articleCache[section] = newSortOrder.sorted(cachedArticles)
+		}
+	}
+
 	func articles(for destination: ReaderDestination) -> [Recommendation] {
 		let source = articleCache[destination.sourceSection] ?? []
 		switch destination {
@@ -257,7 +278,7 @@ final class ReaderAppModel {
 	}
 
 	func setArticles(_ newArticles: [Recommendation], for section: ReaderSection) {
-		articleCache[section] = newArticles
+		articleCache[section] = sortOrder(for: section).sorted(newArticles)
 		guard selectedDestination.sourceSection == section,
 			let rememberedID = selectedArticleIDs[selectedDestination] else {
 			return

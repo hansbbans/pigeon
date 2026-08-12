@@ -1,8 +1,12 @@
 import Foundation
 
-struct OutboundDestination: Equatable, Sendable {
+struct OutboundDestination: Equatable, Identifiable, Sendable {
 	let url: URL
 	let host: String
+
+	var id: String {
+		url.absoluteString
+	}
 
 	init?(url: URL) {
 		guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {

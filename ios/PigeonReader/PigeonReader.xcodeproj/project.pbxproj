@@ -8,9 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		0478333034498D61271D45C6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B99A85858808B3E95F389362 /* Assets.xcassets */; };
+		059C0F36AF84A77036EB0A6C /* ReaderShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFE4401A0C1FFB61EA394441 /* ReaderShareSheet.swift */; };
 		06B62BD860A9C3630A8E425F /* PigeonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 326129381F837CD3FA990C22 /* PigeonSession.swift */; };
 		125539C92E8F25F94E476991 /* PigeonError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F82BA7F9785575E4180F2A8 /* PigeonError.swift */; };
 		14C06D91D1C59E3602939D48 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB947CED95B25256754B8759 /* RootView.swift */; };
+		1AD407C6AD8D94E1EFBE28ED /* ArticleSortOrder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18A38EB490D4ED8F7EB874C7 /* ArticleSortOrder.swift */; };
 		257BD8129DF4A2D0004970E7 /* ReaderAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 342135558B6FFF31EB345BAA /* ReaderAppModel.swift */; };
 		2AC2D5163A16F0A8581B35A0 /* ArticleContentFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 615E02965BA1004EAE40D210 /* ArticleContentFormatter.swift */; };
 		2D75967FD9E8A073D53746D3 /* PreviewData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E899879012FBD92B7D16184 /* PreviewData.swift */; };
@@ -29,6 +31,7 @@
 		88128B14277F0D1AE49F1FD1 /* ReaderSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6832A6A4676240FF8AB1763A /* ReaderSection.swift */; };
 		8C5E030FB429B1F30D1677AE /* ReaderShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 805BD9437296220E8237C9C8 /* ReaderShellView.swift */; };
 		91319E07A20EF9334D2D8191 /* PreviewHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4032C6A1DBF83393798AD9C /* PreviewHTTPClient.swift */; };
+		954AE36E500769EEC4561465 /* OutboundLinkChoiceState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8DAB3443559136FCC33A69B /* OutboundLinkChoiceState.swift */; };
 		97565F46CF5070ACE6706D1E /* EngagementAggregatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F56B13BDB61540BE7F9D2305 /* EngagementAggregatorTests.swift */; };
 		988BA503A2A1789815DA8D0C /* PreviewSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92333A435D4EAAC625378041 /* PreviewSessionStore.swift */; };
 		9BCDE9A7FA6F0DC7D5F965B7 /* HTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 439F1FE9FC96A2F8A8EE3FDA /* HTTPClient.swift */; };
@@ -39,6 +42,7 @@
 		ADA6D5F83D457DE8341B5E28 /* ReaderTypographyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 038F0E81D2D4349CBF808BC8 /* ReaderTypographyTests.swift */; };
 		B733B6DF6ED59464F72C54C0 /* KeychainSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E87D4CA007F14F41A3316023 /* KeychainSessionStore.swift */; };
 		B96595CE2E31BD01FA402694 /* Bookerly-BoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 645A40E6B13B39A5894A3A62 /* Bookerly-BoldItalic.ttf */; };
+		BB8E545606D4C3164E97C7FD /* OutboundLinkChoiceStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C23F918BA06E08A9291D1508 /* OutboundLinkChoiceStateTests.swift */; };
 		BCD950181A62F19E23F6ED41 /* ReaderSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA84CB1608A136032F7B586E /* ReaderSidebarView.swift */; };
 		C2069199C73706DC4A4F4E1E /* PigeonReaderApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 023E8B3CF3B4148174AB1B16 /* PigeonReaderApp.swift */; };
 		C277B98E3A1033AD02CC4276 /* FeedSubscription.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6AF83C61C126F9ADA0362D9 /* FeedSubscription.swift */; };
@@ -49,12 +53,14 @@
 		CFDB978CD3D898B1A1CC08A7 /* ArticleRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A41278D46A9E7E605DFD54 /* ArticleRowView.swift */; };
 		D675482A043FC36B66DA62B6 /* Bookerly-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9319B6C105BE890B8926C61D /* Bookerly-Bold.ttf */; };
 		DC4142B090655A77A3D36AF8 /* EngagementEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A9E0E3EEAE679D0961DD0C /* EngagementEvent.swift */; };
+		DEAD24647B17D34F33484EEA /* OutboundLinkRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD1C93F9C799AE70951D53A /* OutboundLinkRoute.swift */; };
 		DFD547C5CD0413F4F0221EC8 /* ControlledHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABEE0C4F90390DB1558A15B /* ControlledHTTPClient.swift */; };
 		E387110A83CF49FC7361F1E5 /* TestSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F34C1B63B65057D559755C /* TestSessionStore.swift */; };
 		E78523B0A4EEF04AD7E549B1 /* PigeonAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66043B1FA33C07955ACDBDB8 /* PigeonAPIClient.swift */; };
 		EACA26E790D667C6099FE22C /* Bookerly-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C09092CB3E7A5B6809CAA8D8 /* Bookerly-Regular.ttf */; };
 		F05EB1BFC345423694686064 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5D5B91D109739BFCB40CFE /* SessionStore.swift */; };
 		F2202D5C7D476BAE81CE7C03 /* MockHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A38F3C591A8FCEAA046CFD /* MockHTTPClient.swift */; };
+		F47C42EFB13277A7A68BB478 /* OutboundLinkChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8045AE10B58AFF7751867C82 /* OutboundLinkChoice.swift */; };
 		F5E646CA59B5A12FE65282A0 /* ReaderErrorBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FC1C78330EE803EE10D9EF0 /* ReaderErrorBanner.swift */; };
 /* End PBXBuildFile section */
 
@@ -74,7 +80,9 @@
 		04F34C1B63B65057D559755C /* TestSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSessionStore.swift; sourceTree = "<group>"; };
 		11A38F3C591A8FCEAA046CFD /* MockHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockHTTPClient.swift; sourceTree = "<group>"; };
 		13F90A059AFCCB988CFB9B02 /* PigeonAPIClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonAPIClientTests.swift; sourceTree = "<group>"; };
+		18A38EB490D4ED8F7EB874C7 /* ArticleSortOrder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleSortOrder.swift; sourceTree = "<group>"; };
 		1ABEE0C4F90390DB1558A15B /* ControlledHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlledHTTPClient.swift; sourceTree = "<group>"; };
+		1AD1C93F9C799AE70951D53A /* OutboundLinkRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkRoute.swift; sourceTree = "<group>"; };
 		20A41278D46A9E7E605DFD54 /* ArticleRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleRowView.swift; sourceTree = "<group>"; };
 		2A34DA73A78C59435EABE4D5 /* ArticleListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleListView.swift; sourceTree = "<group>"; };
 		2FC1C78330EE803EE10D9EF0 /* ReaderErrorBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderErrorBanner.swift; sourceTree = "<group>"; };
@@ -93,6 +101,7 @@
 		6E899879012FBD92B7D16184 /* PreviewData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewData.swift; sourceTree = "<group>"; };
 		6F0A022F9108416B1794FCED /* PigeonReaderTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PigeonReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7DB918F88B6BC2422BB2C6BC /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		8045AE10B58AFF7751867C82 /* OutboundLinkChoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoice.swift; sourceTree = "<group>"; };
 		805BD9437296220E8237C9C8 /* ReaderShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderShellView.swift; sourceTree = "<group>"; };
 		9210840D19C65C1CE2C5F67E /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
 		92333A435D4EAAC625378041 /* PreviewSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewSessionStore.swift; sourceTree = "<group>"; };
@@ -107,8 +116,11 @@
 		BD5D5B91D109739BFCB40CFE /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
 		BD77219F695A21671D958082 /* ArticleReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleReaderView.swift; sourceTree = "<group>"; };
 		C09092CB3E7A5B6809CAA8D8 /* Bookerly-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Bookerly-Regular.ttf"; sourceTree = "<group>"; };
+		C23F918BA06E08A9291D1508 /* OutboundLinkChoiceStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoiceStateTests.swift; sourceTree = "<group>"; };
 		C6E8701A33181654F7155130 /* EngagementAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngagementAggregator.swift; sourceTree = "<group>"; };
+		C8DAB3443559136FCC33A69B /* OutboundLinkChoiceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoiceState.swift; sourceTree = "<group>"; };
 		CF72D64880446B8D2B725418 /* ModelDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDecodingTests.swift; sourceTree = "<group>"; };
+		CFE4401A0C1FFB61EA394441 /* ReaderShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderShareSheet.swift; sourceTree = "<group>"; };
 		D4032C6A1DBF83393798AD9C /* PreviewHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewHTTPClient.swift; sourceTree = "<group>"; };
 		D4C819D2068C81B4028E19AF /* ArticleBodyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleBodyView.swift; sourceTree = "<group>"; };
 		DB947CED95B25256754B8759 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -141,6 +153,7 @@
 				20A41278D46A9E7E605DFD54 /* ArticleRowView.swift */,
 				2FC1C78330EE803EE10D9EF0 /* ReaderErrorBanner.swift */,
 				9AE78A196E76AD8E8D926F19 /* ReaderPlaceholderView.swift */,
+				CFE4401A0C1FFB61EA394441 /* ReaderShareSheet.swift */,
 				AA84CB1608A136032F7B586E /* ReaderSidebarView.swift */,
 				65A49E29E5597D20149E0858 /* ReadingMonitorID.swift */,
 				E462A87B015885064310725E /* ScoreBadge.swift */,
@@ -212,12 +225,16 @@
 			isa = PBXGroup;
 			children = (
 				615E02965BA1004EAE40D210 /* ArticleContentFormatter.swift */,
+				18A38EB490D4ED8F7EB874C7 /* ArticleSortOrder.swift */,
 				C6E8701A33181654F7155130 /* EngagementAggregator.swift */,
 				F9A9E0E3EEAE679D0961DD0C /* EngagementEvent.swift */,
 				A6AF83C61C126F9ADA0362D9 /* FeedSubscription.swift */,
 				439F1FE9FC96A2F8A8EE3FDA /* HTTPClient.swift */,
 				E87D4CA007F14F41A3316023 /* KeychainSessionStore.swift */,
 				F08144C6FD8990F8EC077164 /* OutboundDestination.swift */,
+				8045AE10B58AFF7751867C82 /* OutboundLinkChoice.swift */,
+				C8DAB3443559136FCC33A69B /* OutboundLinkChoiceState.swift */,
+				1AD1C93F9C799AE70951D53A /* OutboundLinkRoute.swift */,
 				66043B1FA33C07955ACDBDB8 /* PigeonAPIClient.swift */,
 				5F82BA7F9785575E4180F2A8 /* PigeonError.swift */,
 				326129381F837CD3FA990C22 /* PigeonSession.swift */,
@@ -237,6 +254,7 @@
 				F56B13BDB61540BE7F9D2305 /* EngagementAggregatorTests.swift */,
 				11A38F3C591A8FCEAA046CFD /* MockHTTPClient.swift */,
 				CF72D64880446B8D2B725418 /* ModelDecodingTests.swift */,
+				C23F918BA06E08A9291D1508 /* OutboundLinkChoiceStateTests.swift */,
 				13F90A059AFCCB988CFB9B02 /* PigeonAPIClientTests.swift */,
 				038F0E81D2D4349CBF808BC8 /* ReaderTypographyTests.swift */,
 				04F34C1B63B65057D559755C /* TestSessionStore.swift */,
@@ -405,6 +423,7 @@
 				4023E27B6D040A30E813BE82 /* ArticleListView.swift in Sources */,
 				593D400CB9B9EBFF1D985D15 /* ArticleReaderView.swift in Sources */,
 				CFDB978CD3D898B1A1CC08A7 /* ArticleRowView.swift in Sources */,
+				1AD407C6AD8D94E1EFBE28ED /* ArticleSortOrder.swift in Sources */,
 				A09D4200228651351DFD9812 /* ConnectionView.swift in Sources */,
 				3A6D0407F85F5D87E3993F34 /* EngagementAggregator.swift in Sources */,
 				DC4142B090655A77A3D36AF8 /* EngagementEvent.swift in Sources */,
@@ -413,6 +432,9 @@
 				B733B6DF6ED59464F72C54C0 /* KeychainSessionStore.swift in Sources */,
 				CBDA954DE2F2FAF694328D88 /* LibraryManagementView.swift in Sources */,
 				5E01160194DF2DB6493A3132 /* OutboundDestination.swift in Sources */,
+				F47C42EFB13277A7A68BB478 /* OutboundLinkChoice.swift in Sources */,
+				954AE36E500769EEC4561465 /* OutboundLinkChoiceState.swift in Sources */,
+				DEAD24647B17D34F33484EEA /* OutboundLinkRoute.swift in Sources */,
 				E78523B0A4EEF04AD7E549B1 /* PigeonAPIClient.swift in Sources */,
 				125539C92E8F25F94E476991 /* PigeonError.swift in Sources */,
 				C2069199C73706DC4A4F4E1E /* PigeonReaderApp.swift in Sources */,
@@ -425,6 +447,7 @@
 				F5E646CA59B5A12FE65282A0 /* ReaderErrorBanner.swift in Sources */,
 				AB4C75C60AE9542F03CC2C7B /* ReaderPlaceholderView.swift in Sources */,
 				88128B14277F0D1AE49F1FD1 /* ReaderSection.swift in Sources */,
+				059C0F36AF84A77036EB0A6C /* ReaderShareSheet.swift in Sources */,
 				8C5E030FB429B1F30D1677AE /* ReaderShellView.swift in Sources */,
 				BCD950181A62F19E23F6ED41 /* ReaderSidebarView.swift in Sources */,
 				501C3E0BBBD127D7DC08B646 /* ReaderTypography.swift in Sources */,
@@ -445,6 +468,7 @@
 				97565F46CF5070ACE6706D1E /* EngagementAggregatorTests.swift in Sources */,
 				F2202D5C7D476BAE81CE7C03 /* MockHTTPClient.swift in Sources */,
 				572ACDA4165C25A07DF33E21 /* ModelDecodingTests.swift in Sources */,
+				BB8E545606D4C3164E97C7FD /* OutboundLinkChoiceStateTests.swift in Sources */,
 				A9934F185F1CE8245FB63B32 /* PigeonAPIClientTests.swift in Sources */,
 				45DBC3F4013C04EE48BB2862 /* ReaderAppModelTests.swift in Sources */,
 				ADA6D5F83D457DE8341B5E28 /* ReaderTypographyTests.swift in Sources */,

@@ -29,10 +29,15 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'recent' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'recent' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
+}
+
+export interface BrowserLocalDayBounds {
+	startSeconds: number;
+	endSeconds: number;
 }
 
 export interface BrowserLoadedItem {
@@ -361,6 +366,14 @@ export function buildFeedViews(
 			section: 'views',
 		},
 		{
+			id: 'today',
+			title: 'Today',
+			streamId: 'user/-/state/com.google/reading-list',
+			unreadCount: 0,
+			kind: 'today',
+			section: 'views',
+		},
+		{
 			id: 'recent',
 			title: 'Recently read',
 			streamId: 'user/-/state/com.google/read',
@@ -371,6 +384,33 @@ export function buildFeedViews(
 		...folderViews,
 		...feedViews,
 	];
+}
+
+export function getLocalDayBounds(now: Date = new Date()): BrowserLocalDayBounds {
+	const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+	const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+	return {
+		startSeconds: Math.floor(start.getTime() / 1000),
+		endSeconds: Math.floor(end.getTime() / 1000),
+	};
+}
+
+export function filterItemIdsForLocalDay(
+	itemIds: string[],
+	loadedItemsById: Record<string, Pick<BrowserLoadedItem, 'published'>>,
+	now: Date = new Date(),
+): string[] {
+	const bounds = getLocalDayBounds(now);
+	return itemIds.filter((itemId) => {
+		const published = loadedItemsById[itemId]?.published;
+		return (
+			typeof published === 'number' &&
+			Number.isFinite(published) &&
+			published >= bounds.startSeconds &&
+			published < bounds.endSeconds
+		);
+	});
 }
 
 export function limitInitialItemIds(itemIds: string[]): string[] {
@@ -626,6 +666,8 @@ ${normalizeBrowserTheme.toString()}
 ${applyUnauthorizedState.toString()}
 ${sortSubscriptionsByTitle.toString()}
 ${buildFeedViews.toString()}
+${getLocalDayBounds.toString()}
+${filterItemIdsForLocalDay.toString()}
 ${limitInitialItemIds.toString()}
 ${createContentLoadPlan.toString()}
 ${safePreviewCodePoint.toString()}
@@ -651,6 +693,8 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   applyUnauthorizedState,
   sortSubscriptionsByTitle,
   buildFeedViews,
+  getLocalDayBounds,
+  filterItemIdsForLocalDay,
   limitInitialItemIds,
   createContentLoadPlan,
   buildArticleListEntries,
