@@ -1865,6 +1865,29 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'unread';
   }
 
+  function isTodayView() {
+    const activeView = getActiveView();
+    return activeView && activeView.kind === 'today';
+  }
+
+  function getVisibleItemIds() {
+    return isTodayView()
+      ? client.filterItemIdsForLocalDay(itemIds, loadedItemsById)
+      : itemIds;
+  }
+
+  function hasReachedTodayBoundary() {
+    if (!isTodayView()) {
+      return false;
+    }
+
+    const bounds = client.getLocalDayBounds();
+    return Object.values(loadedItemsById).some((item) => {
+      const published = item && item.published;
+      return typeof published === 'number' && Number.isFinite(published) && published < bounds.startSeconds;
+    });
+  }
+
   function shouldShowFeedInSidebar(view) {
     return !isUnreadFilterActive() || view.unreadCount > 0;
   }
@@ -1942,7 +1965,8 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function getSelectedItemIndex() {
-    return selectedItemId ? itemIds.indexOf(selectedItemId) : -1;
+    const visibleItemIds = getVisibleItemIds();
+    return selectedItemId ? visibleItemIds.indexOf(selectedItemId) : -1;
   }
 
   function moveArticleSelection(direction) {
@@ -1956,11 +1980,12 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const nextIndex = selectedIndex + direction;
-    if (nextIndex < 0 || nextIndex >= itemIds.length) {
+    const visibleItemIds = getVisibleItemIds();
+    if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
       return false;
     }
 
-    void selectArticle(itemIds[nextIndex]);
+    void selectArticle(visibleItemIds[nextIndex]);
     return true;
   }
 
@@ -2010,6 +2035,10 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function createPendingContentPlan(preferredItemId) {
+    if (isTodayView() && hasReachedTodayBoundary()) {
+      return [];
+    }
+
     const loadedIds = new Set(Object.keys(loadedItemsById));
     const inFlightIds = new Set(inFlightContentIds);
     const plannedIds = [];
@@ -2216,6 +2245,8 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     if (activeView.kind === 'unread') {
       summaryParts.push('Unread only');
+    } else if (activeView.kind === 'today') {
+      summaryParts.push('Received today');
     } else if (activeView.kind === 'recent') {
       summaryParts.push('Read items');
     } else if (activeView.kind === 'all') {
@@ -2262,8 +2293,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderArticles() {
+    const visibleItemIds = getVisibleItemIds();
     const entries = client.buildArticleListEntries({
-      itemIds,
+      itemIds: visibleItemIds,
       loadedItemsById,
     });
 
@@ -2271,9 +2303,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
     if (entries.length === 0) {
       const activeView = getActiveView();
-      articlesStatus.textContent = activeView
-        ? 'No articles in ' + activeView.title + '.'
-        : 'Choose a feed to load article previews.';
+      articlesStatus.textContent =
+        isTodayView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
+          ? 'Loading articles…'
+          : activeView
+            ? 'No articles in ' + activeView.title + '.'
+            : 'Choose a feed to load article previews.';
       loadMoreButton.classList.add('hidden');
       return;
     }
@@ -2329,7 +2364,11 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const pendingPlan = createPendingContentPlan(selectedItemId);
     loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-    loadMoreButton.classList.toggle('hidden', pendingPlan.length === 0 && !nextItemIdsContinuation);
+    const todayCanLoadMore = !isTodayView() || !hasReachedTodayBoundary();
+    loadMoreButton.classList.toggle(
+      'hidden',
+      !todayCanLoadMore || (pendingPlan.length === 0 && !nextItemIdsContinuation),
+    );
   }
 
   function renderReader() {
@@ -2440,6 +2479,28 @@ export function renderBrowserAppRuntimeScript(): string {
     return '/reader/api/0/stream/items/ids?' + params.toString();
   }
 
+  function shouldContinueLoadingToday() {
+    if (!isTodayView() || hasReachedTodayBoundary()) {
+      return false;
+    }
+
+    return createPendingContentPlan(null).length > 0 || Boolean(nextItemIdsContinuation);
+  }
+
+  async function continueLoadingToday(requestId) {
+    if (requestId !== activeViewRequestId || !shouldContinueLoadingToday()) {
+      return;
+    }
+
+    const pendingPlan = createPendingContentPlan(null);
+    if (pendingPlan.length > 0) {
+      await loadContentChunk(pendingPlan[0], requestId);
+      return;
+    }
+
+    await loadNextItemIdsPage(requestId);
+  }
+
   async function loadContentChunk(preferredItemId, requestId) {
     const plan = createPendingContentPlan(preferredItemId);
 
@@ -2459,6 +2520,7 @@ export function renderBrowserAppRuntimeScript(): string {
       form.append('i', itemId);
     }
 
+    const loadedItemCountBefore = Object.keys(loadedItemsById).length;
     try {
       const payload = await authenticatedJson('/reader/api/0/stream/items/contents', {
         method: 'POST',
@@ -2473,8 +2535,19 @@ export function renderBrowserAppRuntimeScript(): string {
       }
 
       inFlightContentIds = [];
+      const visibleItemIds = getVisibleItemIds();
+      if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+        selectedItemId = visibleItemIds[0] || null;
+      }
       renderArticles();
       renderReader();
+      if (
+        isTodayView() &&
+        Object.keys(loadedItemsById).length > loadedItemCountBefore &&
+        shouldContinueLoadingToday()
+      ) {
+        await continueLoadingToday(requestId);
+      }
     } catch (_error) {
       if (requestId === activeViewRequestId && contentRequestId === activeContentRequestId) {
         inFlightContentIds = [];
@@ -2489,7 +2562,7 @@ export function renderBrowserAppRuntimeScript(): string {
   async function loadNextItemIdsPage(requestId) {
     const activeView = getActiveView();
     const continuation = nextItemIdsContinuation;
-    if (!activeView || !continuation || isLoadingItemIdsPage) {
+    if (!activeView || !continuation || isLoadingItemIdsPage || (isTodayView() && hasReachedTodayBoundary())) {
       return;
     }
 
@@ -2523,6 +2596,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
       if (appendedIds.length > 0) {
         await loadContentChunk(appendedIds[0], requestId);
+      } else if (isTodayView()) {
+        await continueLoadingToday(requestId);
       }
     } catch (_error) {
       if (requestId !== activeViewRequestId) {
@@ -2565,12 +2640,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
       itemIds = [...new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)))];
       nextItemIdsContinuation = payload.continuation ? String(payload.continuation) : '';
-      selectedItemId = itemIds[0] || null;
+      selectedItemId = isTodayView() ? null : itemIds[0] || null;
       renderArticles();
       renderReader();
 
       if (itemIds.length > 0) {
-        await loadContentChunk(selectedItemId, requestId);
+        await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
       }
     } catch (_error) {
       if (requestId === activeViewRequestId && session.token) {
@@ -2616,7 +2691,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function selectArticle(itemId) {
-    if (!itemIds.includes(itemId)) {
+    if (!getVisibleItemIds().includes(itemId)) {
       return;
     }
 

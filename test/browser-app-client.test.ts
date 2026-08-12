@@ -13,6 +13,8 @@ import {
 	createLoggedOutSession,
 	createSessionFromToken,
 	extractAuthToken,
+	filterItemIdsForLocalDay,
+	getLocalDayBounds,
 	limitInitialItemIds,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
@@ -52,6 +54,25 @@ test('applyUnauthorizedState returns the login state on 401', () => {
 	assert.deepEqual(
 		applyUnauthorizedState(createSessionFromToken('secret-token')),
 		createLoggedOutSession(),
+	);
+});
+
+test('filterItemIdsForLocalDay uses local midnight boundaries deterministically', () => {
+	const now = new Date(2026, 2, 20, 12, 0, 0, 0);
+	const bounds = getLocalDayBounds(now);
+
+	assert.deepEqual(
+		filterItemIdsForLocalDay(
+			['previous-day', 'at-midnight', 'same-day', 'next-midnight'],
+			{
+				'previous-day': { published: bounds.startSeconds - 1 },
+				'at-midnight': { published: bounds.startSeconds },
+				'same-day': { published: bounds.endSeconds - 1 },
+				'next-midnight': { published: bounds.endSeconds },
+			},
+			now,
+		),
+		['at-midnight', 'same-day'],
 	);
 });
 
@@ -97,6 +118,14 @@ test('buildFeedViews returns built-in views plus sorted uncategorized feeds', ()
 				streamId: 'user/-/state/com.google/reading-list',
 				unreadCount: 5,
 				kind: 'unread',
+				section: 'views',
+			},
+			{
+				id: 'today',
+				title: 'Today',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 0,
+				kind: 'today',
 				section: 'views',
 			},
 			{
@@ -164,6 +193,14 @@ test('buildFeedViews groups categorized feeds into folder views and keeps uncate
 				streamId: 'user/-/state/com.google/reading-list',
 				unreadCount: 7,
 				kind: 'unread',
+				section: 'views',
+			},
+			{
+				id: 'today',
+				title: 'Today',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 0,
+				kind: 'today',
 				section: 'views',
 			},
 			{
@@ -689,12 +726,46 @@ async function waitForBrowserCondition(check: () => boolean, attempts = 20) {
 	}
 }
 
+function createFixedDateConstructor(timestamp: number) {
+	return class FixedDate extends Date {
+		constructor(
+			value?: string | number,
+			month?: number,
+			day?: number,
+			hours?: number,
+			minutes?: number,
+			seconds?: number,
+			milliseconds?: number,
+		) {
+			if (month === undefined) {
+				super(value === undefined ? timestamp : value);
+				return;
+			}
+
+			super(
+				value as number,
+				month,
+				day ?? 1,
+				hours ?? 0,
+				minutes ?? 0,
+				seconds ?? 0,
+				milliseconds ?? 0,
+			);
+		}
+
+		static now() {
+			return timestamp;
+		}
+	};
+}
+
 async function createBrowserHarness(options?: {
 	storedToken?: string | null;
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
 	storedColumnWidths?: { sidebar?: number; stream?: number };
 	readerGridWidth?: number | (() => number);
+	now?: number;
 	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string> }) => Promise<Response>;
 }) {
 	const documentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
@@ -895,6 +966,7 @@ async function createBrowserHarness(options?: {
 		FormData,
 		Response,
 		URLSearchParams,
+		Date: options?.now === undefined ? Date : createFixedDateConstructor(options.now),
 		console,
 		setTimeout,
 		clearTimeout,
@@ -1332,6 +1404,7 @@ test('runtime script keeps app chrome rendering out of innerHTML and shows the f
 	);
 	assert.match(elements.get('views-list')?.textContent ?? '', /All items/);
 	assert.match(elements.get('views-list')?.textContent ?? '', /Unread/);
+	assert.match(elements.get('views-list')?.textContent ?? '', /Today/);
 	assert.match(elements.get('views-list')?.textContent ?? '', /Recently read/);
 	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Alpha/);
 	assert.doesNotMatch(elements.get('views-list')?.textContent ?? '', /Bravo/);
@@ -1634,6 +1707,7 @@ test('runtime script keeps real views and real feeds separated with intact count
 	assert.match(findListButtonByViewId(elements.get('views-list'), 'all')?.textContent ?? '', /5/);
 	assert.match(findListButtonByViewId(elements.get('views-list'), 'unread')?.textContent ?? '', /Unread/);
 	assert.match(findListButtonByViewId(elements.get('views-list'), 'unread')?.textContent ?? '', /5/);
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'today')?.textContent ?? '', /Today/);
 	assert.match(findListButtonByViewId(elements.get('views-list'), 'recent')?.textContent ?? '', /Recently read/);
 	assert.equal(findListButtonByViewId(elements.get('views-list'), 'feed/1'), undefined);
 	assert.equal(findListButtonByViewId(elements.get('views-list'), 'feed/2'), undefined);
@@ -1645,6 +1719,82 @@ test('runtime script keeps real views and real feeds separated with intact count
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /4/);
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'all'), undefined);
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'unread'), undefined);
+});
+
+test('runtime Today view filters received timestamps in the local day and stops at the older page', async () => {
+	const now = new Date(2026, 2, 20, 12, 0, 0, 0).getTime();
+	const bounds = getLocalDayBounds(new Date(now));
+	const contentFor = (id: string, title: string, published: number) => ({
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title,
+		published,
+		origin: { title: 'Alpha' },
+		summary: { content: `${title} preview` },
+		content: { content: `<p>${title} body</p>` },
+	});
+	const contentById = {
+		'1': contentFor('1', 'Previous-day article', bounds.startSeconds - 1),
+		'2': contentFor('2', 'At-midnight article', bounds.startSeconds),
+		'3': contentFor('3', 'Same-day article', bounds.endSeconds - 1),
+		'4': contentFor('4', 'Next-day article', bounds.endSeconds),
+	};
+	const idRequests: Array<string | null> = [];
+	const { elements } = await createBrowserHarness({
+		now,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				const url = new URL(`https://pigeon.example${String(input)}`);
+				const continuation = url.searchParams.get('c');
+				idRequests.push(continuation);
+				return continuation
+					? Response.json({ itemRefs: [{ id: '1' }] })
+					: Response.json({
+							itemRefs: [{ id: '4' }, { id: '3' }, { id: '2' }],
+							continuation: 'older-page',
+						});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				const ids = [...(init.body?.getAll('i') ?? [])].map(String);
+				return Response.json({ items: ids.map((id) => contentById[id as keyof typeof contentById]) });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('views-list'), 'today')));
+
+	await findListButtonByViewId(elements.get('views-list'), 'today')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			(elements.get('articles-heading')?.textContent ?? '') === 'Today' &&
+			elements.get('articles-list')?.children.length === 2,
+	);
+
+	assert.deepEqual(idRequests, [null, null, 'older-page']);
+	assert.equal(elements.get('articles-status')?.textContent, '2 articles');
+	assert.equal(findListButtonByItemId(elements.get('articles-list'), '1'), undefined);
+	assert.ok(findListButtonByItemId(elements.get('articles-list'), '2'));
+	assert.ok(findListButtonByItemId(elements.get('articles-list'), '3'));
+	assert.equal(findListButtonByItemId(elements.get('articles-list'), '4'), undefined);
+	assert.equal(elements.get('reader-title')?.textContent, 'Same-day article');
+
+	await findListButtonByItemId(elements.get('articles-list'), '2')?.dispatch('click');
+	assert.equal(elements.get('reader-title')?.textContent, 'At-midnight article');
 });
 
 test('runtime script hides all-read feeds when the unread filter is active', async () => {
@@ -1731,6 +1881,151 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'feed/3'), undefined);
 	assert.match(findListButtonByViewId(elements.get('folders-list'), 'feed/4')?.textContent ?? '', /Unread Folder Feed/);
 	assert.match(elements.get('feeds-status')?.textContent ?? '', /Uncategorized feeds/);
+});
+
+test('runtime unread filtering hides empty folders and restores the full library after view transitions', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Read Inbox' },
+						{ id: 'feed/2', title: 'Unread Inbox' },
+						{
+							id: 'feed/3',
+							title: 'Read Folder Feed',
+							categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
+						},
+						{
+							id: 'feed/4',
+							title: 'Unread Folder Feed',
+							categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
+						},
+						{
+							id: 'feed/5',
+							title: 'Empty Folder Feed',
+							categories: [{ id: 'user/-/label/Read Only', label: 'Read Only' }],
+						},
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/1', count: 0 },
+						{ id: 'feed/2', count: 2 },
+						{ id: 'feed/3', count: 0 },
+						{ id: 'feed/4', count: 3 },
+						{ id: 'feed/5', count: 0 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({ itemRefs: [] });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')));
+
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Newsletters')?.textContent ?? '', /Newsletters/);
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only')?.textContent ?? '', /Read Only/);
+	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters')?.dispatch('click');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'feed/4')));
+
+	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
+	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
+	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'feed/3'), undefined);
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/2'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'feed/4'));
+
+	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Newsletters')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Newsletters');
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'feed/3'));
+
+	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
+	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
+
+	await findListButtonByViewId(elements.get('views-list'), 'all')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'All items');
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+
+	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
+
+	await findListButtonByViewId(elements.get('views-list'), 'recent')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Recently read');
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+
+	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
+
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread Inbox');
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+});
+
+test('runtime unread filtering renders empty folder and feed states when every count is zero', async () => {
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Read Inbox' },
+						{
+							id: 'feed/2',
+							title: 'Read Folder Feed',
+							categories: [{ id: 'user/-/label/Read Only', label: 'Read Only' }],
+						},
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 0 }, { id: 'feed/2', count: 0 }] });
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({ itemRefs: [] });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+
+	assert.equal(elements.get('folders-list')?.textContent, '');
+	assert.equal(elements.get('feeds-list')?.textContent, '');
+	assert.equal(elements.get('folders-status')?.textContent, 'No tagged feeds with unread items.');
+	assert.equal(elements.get('feeds-status')?.textContent, 'No uncategorized feeds with unread items.');
 });
 
 test('runtime script lets column resizer drags persist reader column widths', async () => {

@@ -315,6 +315,7 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /failingRssCount/);
 	assert.match(html, /iconUrl/);
 	assert.match(html, /parentId/);
+	assert.match(html, /Today/);
 	assert.match(html, /user\/-\/state\/com\.google\/read/);
 	assert.match(html, /document\.addEventListener\('keydown'/);
 	assert.match(html, /readerFrame\.addEventListener\('load'/);
