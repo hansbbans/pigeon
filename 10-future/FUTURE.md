@@ -1,7 +1,11 @@
 # Future Roadmap
 
-## Phase 6: Web Management UI
-- React SPA served from the same Worker (or Pages)
+## Delivered Reader surfaces
+
+The authenticated browser Reader at `/app` and the native iOS Reader now provide the core navigation and triage surface: Today, folders, feeds, unread counts, article reading, keyboard navigation, bulk read actions, and browser Mark All Read for a selected feed or folder. The native client also supports direct Readwise saves with Keychain-backed token storage.
+
+## Phase 6: Reader surface follow-ups
+- Reader list-view and visual-design refinements
 - Feed list with enable/disable toggles
 - Item browser with HTML preview
 - Custom rule editor with live preview

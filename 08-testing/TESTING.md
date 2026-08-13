@@ -1,5 +1,23 @@
 # Testing Strategy
 
+## Current local checks
+
+The Worker and browser suite uses Node's test runner through `tsx`; it is not a Vitest project. From the repository root:
+
+```bash
+npm ci
+npm test
+npx tsc --noEmit
+```
+
+The native iOS suite is generated from `ios/PigeonReader/project.yml` and runs with XcodeGen and Xcode. From `ios/PigeonReader`:
+
+```bash
+xcodegen generate
+xcodebuild test -project PigeonReader.xcodeproj -scheme PigeonReader -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+xcodebuild build -project PigeonReader.xcodeproj -scheme PigeonReader -configuration Release -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+```
+
 ## Layers
 
 ### 1. Unit Tests — Parsing Logic
@@ -75,8 +93,8 @@ Test with local D1 via wrangler.
 # Initialize local D1 with schema
 wrangler d1 execute pigeon-db --local --file=./04-storage/SCHEMA.sql
 
-# Run integration tests that use the local D1
-vitest run --config vitest.integration.config.ts
+# Run the repository's Worker and browser tests
+npm test
 ```
 
 ### 4. End-to-End Tests — Full Pipeline
@@ -142,19 +160,10 @@ Save as `test/fixtures/simple.eml`.
 
 ## Test Framework
 
-Use **Vitest** — it's fast, works with TypeScript, and the Workers community uses it:
+The current TypeScript test command is the Node test runner invoked through `tsx`:
 
-```bash
-npm install -D vitest
+```json
+"test": "tsx --test test/*.test.ts"
 ```
 
-```typescript
-// vitest.config.ts
-import { defineConfig } from 'vitest/config';
-
-export default defineConfig({
-  test: {
-    include: ['test/**/*.test.ts'],
-  },
-});
-```
+Keep Worker-runtime constraints in mind when adding tests: production code runs in the Cloudflare Workers V8 runtime, while the local suite uses representative HTTP and D1 test doubles where a real email event or deployed D1 binding is unavailable.
