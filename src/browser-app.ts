@@ -458,6 +458,16 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         gap: 0.25rem;
       }
 
+      .article-pane-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 0.75rem;
+      }
+
+      .article-pane-heading .sidebar-current {
+        min-width: 0;
+      }
       .sidebar-current strong {
         font-size: 1.05rem;
         line-height: 1.25;
@@ -1020,6 +1030,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           padding: 0.75rem 0.85rem;
         }
 
+        .article-pane-heading {
+          flex-direction: column;
+        }
+
         .reader-pane-actions {
           width: 100%;
           display: grid;
@@ -1237,9 +1251,17 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
             <section class="panel" id="articles-panel">
               <div class="sidebar-top">
-                <div class="sidebar-current">
-                  <strong id="articles-heading">All items</strong>
-                  <p class="status-meta" id="articles-status">Choose a feed to load article previews.</p>
+                <div class="article-pane-heading">
+                  <div class="sidebar-current">
+                    <strong id="articles-heading">All items</strong>
+                    <p class="status-meta" id="articles-status" role="status" aria-live="polite">Choose a feed to load article previews.</p>
+                  </div>
+                  <button
+                    class="secondary-button hidden"
+                    id="mark-all-as-read-button"
+                    type="button"
+                    aria-label="Mark all items in the selected feed or folder as read"
+                  >Mark all as read</button>
                 </div>
               </div>
               <div class="list-shell">
@@ -1338,6 +1360,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const articlesStatus = document.getElementById('articles-status');
   const articlesList = document.getElementById('articles-list');
   const loadMoreButton = document.getElementById('load-more-button');
+  const markAllAsReadButton = document.getElementById('mark-all-as-read-button');
   const readerSourceLabel = document.getElementById('reader-source-label');
   const readerSourceNote = document.getElementById('reader-source-note');
   const openOriginalButton = document.getElementById('open-original-button');
@@ -1365,6 +1388,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let loadedItemsById = {};
   let inFlightContentIds = [];
   let selectedItemId = null;
+  let isMarkingAllAsRead = false;
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -1914,6 +1938,33 @@ export function renderBrowserAppRuntimeScript(): string {
     return unreadCount >= 0 ? String(unreadCount) : '';
   }
 
+  function isIndividualStreamView(view) {
+    return view && (view.kind === 'feed' || view.kind === 'folder');
+  }
+
+  function renderMarkAllAsReadAction() {
+    if (!markAllAsReadButton) {
+      return;
+    }
+
+    const activeView = getActiveView();
+    if (!isIndividualStreamView(activeView)) {
+      markAllAsReadButton.classList.add('hidden');
+      markAllAsReadButton.disabled = true;
+      markAllAsReadButton.setAttribute('aria-disabled', 'true');
+      markAllAsReadButton.textContent = 'Mark all as read';
+      return;
+    }
+
+    const hasUnreadItems = activeView.unreadCount > 0;
+    const isDisabled = isMarkingAllAsRead || !hasUnreadItems;
+    const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
+    markAllAsReadButton.classList.remove('hidden');
+    markAllAsReadButton.disabled = isDisabled;
+    markAllAsReadButton.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
+    markAllAsReadButton.setAttribute('aria-label', scopeLabel);
+    markAllAsReadButton.textContent = isMarkingAllAsRead ? 'Marking all as read…' : 'Mark all as read';
+  }
   function isReaderVisible() {
     return session.status === 'authenticated' && !readerShell.classList.contains('hidden');
   }
@@ -2233,6 +2284,7 @@ export function renderBrowserAppRuntimeScript(): string {
       sidebarCurrentTitle.textContent = 'All items';
       sidebarCurrentMeta.textContent = 'Choose a stream to load article previews.';
       articlesHeading.textContent = 'All items';
+      renderMarkAllAsReadAction();
       return;
     }
 
@@ -2256,6 +2308,7 @@ export function renderBrowserAppRuntimeScript(): string {
     sidebarCurrentTitle.textContent = activeView.title;
     sidebarCurrentMeta.textContent = summaryParts.join(' · ') || 'Choose a stream to load article previews.';
     articlesHeading.textContent = activeView.title;
+    renderMarkAllAsReadAction();
   }
 
   function renderFeeds() {
@@ -2654,6 +2707,53 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
+  async function markAllAsRead() {
+    const activeView = getActiveView();
+    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead) {
+      return;
+    }
+
+    const requestViewId = activeView.id;
+    const requestToken = session.token;
+    isMarkingAllAsRead = true;
+    renderMarkAllAsReadAction();
+    articlesStatus.textContent = 'Marking all items as read…';
+
+    const form = new FormData();
+    form.set('s', activeView.streamId);
+
+    try {
+      const response = await authenticatedFetch('/reader/api/0/mark-all-as-read', {
+        method: 'POST',
+        body: form,
+      });
+      if (!response.ok) {
+        throw new Error('Mark all as read request failed');
+      }
+
+      const refreshed = await loadSubscriptionsAndUnreadCounts();
+      if (
+        !refreshed &&
+        requestViewId === getActiveView()?.id &&
+        session.token === requestToken &&
+        session.status === 'authenticated'
+      ) {
+        articlesStatus.textContent = 'Marked all as read, but could not refresh this view.';
+      }
+    } catch (_error) {
+      if (
+        requestViewId === getActiveView()?.id &&
+        session.token === requestToken &&
+        session.status === 'authenticated'
+      ) {
+        articlesStatus.textContent = 'Could not mark all as read.';
+      }
+    } finally {
+      isMarkingAllAsRead = false;
+      renderMarkAllAsReadAction();
+    }
+  }
+
   async function loadSubscriptionsAndUnreadCounts() {
     feedsStatus.textContent = 'Loading feeds…';
 
@@ -2669,10 +2769,12 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       renderFeeds();
       await loadActiveView();
+      return true;
     } catch (_error) {
       if (session.token) {
         feedsStatus.textContent = 'Could not load feeds.';
       }
+      return false;
     }
   }
 
@@ -2794,6 +2896,9 @@ export function renderBrowserAppRuntimeScript(): string {
     window.open(href, '_blank', 'noopener');
   });
 
+  markAllAsReadButton.addEventListener('click', () => {
+    void markAllAsRead();
+  });
   loadMoreButton.addEventListener('click', () => {
     if (inFlightContentIds.length > 0 || isLoadingItemIdsPage) {
       return;

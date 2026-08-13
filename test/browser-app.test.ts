@@ -248,6 +248,8 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="feeds-panel"/);
 	assert.match(html, /id="articles-panel"/);
 	assert.match(html, /id="reader-panel"/);
+	assert.match(html, /id="mark-all-as-read-button"/);
+	assert.match(html, /id="mark-all-as-read-button"[^>]+type="button"[^>]+aria-label="Mark all items in the selected feed or folder as read"/);
 	assert.match(html, /id="reader-grid"/);
 	assert.match(html, /id="sidebar-column-resizer"/);
 	assert.match(html, /id="stream-column-resizer"/);
@@ -288,6 +290,7 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /\/reader\/api\/0\/unread-count/);
 	assert.match(html, /\/reader\/api\/0\/stream\/items\/ids/);
 	assert.match(html, /\/reader\/api\/0\/stream\/items\/contents/);
+	assert.match(html, /id="articles-status"[^>]+role="status"[^>]+aria-live="polite"/);
 	assert.match(html, /\/app\/status/);
 	assert.match(html, /srcdoc/);
 	assert.match(html, /sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"/);
