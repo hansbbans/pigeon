@@ -4,7 +4,7 @@ import Testing
 
 struct ModelDecodingTests {
 	@Test func unsafeOriginalURLIsNotOpened() throws {
-		let unsafeURL = try #require(URL(string: "javascript:alert(1)"))
+		let unsafeURL = URL(string: "javascript:alert(1)")!
 		let recommendation = Recommendation(
 			id: "item-1",
 			readerId: "reader-1",
@@ -33,8 +33,7 @@ struct ModelDecodingTests {
 
 		#expect(destination.host == "news.example.com")
 		#expect(destination.host.contains("private") == false)
-		let unsafeURL = try #require(URL(string: "javascript:alert(1)"))
-		#expect(OutboundDestination(url: unsafeURL) == nil)
+		#expect(OutboundDestination(url: URL(string: "javascript:alert(1)")!) == nil)
 	}
 
 	@Test func articleFormattingRemovesPublisherPresentationWithoutDroppingInlineLinks() throws {

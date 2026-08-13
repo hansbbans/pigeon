@@ -38,4 +38,19 @@ struct OutboundLinkChoiceStateTests {
 		#expect(state.pendingDestination == nil)
 		#expect(state.isDialogPresented == false)
 	}
+
+	@Test func acceptedURLCanBeRecordedExactlyOnceBeforeChoosingABrowserRoute() throws {
+		let url = try #require(URL(string: "https://example.com/story?source=feed"))
+		let destination = try #require(OutboundDestination(url: url))
+		var state = OutboundLinkChoiceState()
+		var recordingCount = 0
+
+		if let accepted = state.accept(url) {
+			recordingCount += 1
+			#expect(accepted.url == destination.url)
+		}
+		#expect(state.accept(url) == nil)
+		#expect(recordingCount == 1)
+		#expect(state.choose(.openInBrowser) == .openInBrowser(destination))
+	}
 }

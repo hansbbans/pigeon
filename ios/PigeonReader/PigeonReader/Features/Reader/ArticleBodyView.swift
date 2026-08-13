@@ -3,15 +3,17 @@ import SwiftUI
 struct ArticleBodyView: View {
 	let content: AttributedString
 	let openedDestination: (OutboundDestination) -> Void
+	let saveToReader: (OutboundDestination) async throws -> ReadwiseSaveOutcome
 	@Environment(\.openURL) private var openURL
 	@State private var linkChoiceState = OutboundLinkChoiceState()
-	@State private var shareDestination: OutboundDestination?
+	@State private var readwiseSaveRequest: ReadwiseSaveRequest?
+	@State private var saveMessage: String?
+	@State private var isShowingSaveMessage = false
 
 	var body: some View {
 		Text(content)
-			.font(ReaderTypography.articleBody)
+			.font(.body)
 			.textSelection(.enabled)
-			.accessibilityElement(children: .combine)
 			.environment(\.openURL, OpenURLAction(handler: handleOpenURL))
 			.confirmationDialog(
 				"Open article link",
@@ -29,8 +31,13 @@ struct ArticleBodyView: View {
 			} message: { destination in
 				Text(destination.url.absoluteString)
 			}
-			.sheet(item: $shareDestination) { destination in
-				ReaderShareSheet(items: [destination.url])
+			.task(id: readwiseSaveRequest?.id) {
+				await performReadwiseSave()
+			}
+			.alert("Readwise Reader", isPresented: $isShowingSaveMessage) {
+				Button("OK") {}
+			} message: {
+				Text(saveMessage ?? "")
 			}
 	}
 
@@ -54,7 +61,36 @@ struct ArticleBodyView: View {
 		case .openInBrowser(let destination):
 			openURL(destination.url)
 		case .shareToReader(let destination):
-			shareDestination = destination
+			readwiseSaveRequest = ReadwiseSaveRequest(destination: destination)
 		}
+	}
+
+	private func performReadwiseSave() async {
+		guard let request = readwiseSaveRequest else {
+			return
+		}
+		defer {
+			if readwiseSaveRequest?.id == request.id {
+				readwiseSaveRequest = nil
+			}
+		}
+
+		do {
+			switch try await saveToReader(request.destination) {
+			case .saved:
+				presentSaveMessage("Saved to Reader.")
+			case .alreadyInFlight:
+				presentSaveMessage("This link is already being saved.")
+			}
+		} catch is CancellationError {
+			// Leaving the article is a normal cancellation.
+		} catch {
+			presentSaveMessage(error.localizedDescription)
+		}
+	}
+
+	private func presentSaveMessage(_ message: String) {
+		saveMessage = message
+		isShowingSaveMessage = true
 	}
 }

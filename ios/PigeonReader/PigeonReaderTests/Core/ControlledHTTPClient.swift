@@ -48,6 +48,10 @@ actor ControlledHTTPClient: HTTPClient {
 		continuation.resume(returning: (data, response))
 	}
 
+	func requestCount() -> Int {
+		nextID
+	}
+
 	private static var fallbackURL: URL {
 		guard let url = URL(string: "https://pigeon.test") else {
 			preconditionFailure("The test URL must be valid")

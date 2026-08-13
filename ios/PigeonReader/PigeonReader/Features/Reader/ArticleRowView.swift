@@ -13,10 +13,12 @@ struct ArticleRowView: View {
 						.accessibilityHidden(true)
 				}
 				Text(article.title)
-					.font(ReaderTypography.storyTitle)
+					.font(.body.weight(.semibold))
 					.lineLimit(2)
 				Spacer(minLength: 4)
-				ScoreBadge(score: article.score)
+					if article.sampleCount > 0 || article.score > 0 {
+						ScoreBadge(score: article.score)
+					}
 			}
 
 			HStack(spacing: 6) {

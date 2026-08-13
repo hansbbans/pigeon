@@ -5,37 +5,77 @@ import SwiftUI
 @MainActor
 @Observable
 final class ReaderAppModel {
+	private enum ReadBoundary: Sendable {
+		case above
+		case below
+	}
+
+	private struct PendingReadMutation: Sendable {
+		let article: Recommendation
+		let mutationID: UUID
+		let previousValues: [String: [Bool]]
+		let navigationDeltas: [String: Int]
+
+		var mutationKey: String {
+			"\(article.id)|read"
+		}
+	}
+
+	private struct ReadMutationResult: Sendable {
+		let articleID: String
+		let succeeded: Bool
+		let wasCancelled: Bool
+		let errorDescription: String?
+	}
+
 	var session: PigeonSession?
 	var serverURLText = ""
 	var password = ""
-	var selectedDestination: ReaderDestination = .section(.forYou)
+	private(set) var selectedNavigationID = ReaderSection.forYou.rawValue
 	var selectedArticleID: String?
 	var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
 	var isConnecting = false
-	var isLoadingLibrary = false
 	var errorMessage: String?
 	var isShowingSettings = false
 	private(set) var subscriptions: [FeedSubscription] = []
+	var isLoadingLibrary = false
+	private(set) var hasReadwiseToken = false
+	private(set) var navigation = ReaderNavigationState.initial
+	private(set) var isLoadingNavigation = false
 
 	private let sessionStore: any SessionStore
 	private let httpClient: any HTTPClient
+	private let readwiseTokenStore: any ReadwiseTokenStore
+	private let readwiseAPIClient: ReadwiseAPIClient
 	private var apiClient: PigeonAPIClient?
-	private var articleCache: [ReaderSection: [Recommendation]] = [:]
-	private var sortOrders: [ReaderSection: ArticleSortOrder] = [:]
-	private var selectedArticleIDs: [ReaderDestination: String] = [:]
-	private var loadingSections: Set<ReaderSection> = []
-	private var activeLoadIDs: [ReaderSection: UUID] = [:]
-	private var activeLibraryLoadID: UUID?
+	private var articleCache: [String: [Recommendation]] = [:]
+	private var sortOrders: [String: ArticleSortOrder] = [:]
+	private var selectedArticleIDs: [String: String] = [:]
+	private var loadingCollections: Set<String> = []
+	private var activeLoadIDs: [String: UUID] = [:]
 	private var activeMutationIDs: [String: UUID] = [:]
+	private var inFlightReadwiseSaves: Set<String> = []
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
+	private var hasLoadedNavigation = false
+	private var activeNavigationLoadID: UUID?
+	private var activeNavigationLoadIDs: Set<UUID> = []
+	private var activeLibraryLoadID: UUID?
 
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
-		httpClient: any HTTPClient = URLSessionHTTPClient()
+		httpClient: any HTTPClient = URLSessionHTTPClient(),
+		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore()
 	) {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
+		self.readwiseTokenStore = readwiseTokenStore
+		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
+		do {
+			hasReadwiseToken = try readwiseTokenStore.load()?.isEmpty == false
+		} catch {
+			hasReadwiseToken = false
+		}
 		if let savedSession = try? sessionStore.load() {
 			if savedSession.baseURL.scheme?.lowercased() == "https" {
 				session = savedSession
@@ -53,41 +93,59 @@ final class ReaderAppModel {
 		!serverURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty && !isConnecting
 	}
 
-	var articles: [Recommendation] {
-		get { articles(for: selectedDestination) }
-		set { setArticles(newValue, for: selectedDestination.sourceSection) }
-	}
-
-	var selectedSection: ReaderSection {
-		selectedDestination.sourceSection
-	}
-
-	var sortOrder: ArticleSortOrder {
-		get { sortOrder(for: selectedSection) }
-		set { setSortOrder(newValue, for: selectedSection) }
-	}
-
-	var selectedDestinationTitle: String {
-		switch selectedDestination {
-		case .section(let section): section.title
-		case .allFeeds: "All Feeds"
-		case .folder(let name): name
-		case .feed(let id): subscription(id: id)?.title ?? "Feed"
-		}
-	}
-
+	// These library projections keep the existing feed-management screens working while
+	// navigation is sourced from the newer Reader API snapshot.
 	var folders: [FeedFolder] {
 		let names = Set(subscriptions.flatMap(\.folderNames))
 		return names.map { name in
 			FeedFolder(
 				name: name,
-				subscriptions: sortedSubscriptions(subscriptions.filter { $0.folderNames.contains(name) })
+				subscriptions: sortedSubscriptions(subscriptions.filter { $0.folderNames.contains(name) }),
 			)
 		}.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 	}
 
 	var unfiledSubscriptions: [FeedSubscription] {
 		sortedSubscriptions(subscriptions.filter { $0.categories.isEmpty })
+	}
+
+	var selectedSection: ReaderSection {
+		get { ReaderSection(rawValue: selectedNavigationID) ?? .forYou }
+		set { select(section: newValue) }
+	}
+
+	var selectedCollection: ReaderNavigationItem {
+		navigation.item(withID: selectedNavigationID) ?? .smart(selectedSection)
+	}
+
+	var smartNavigationItems: [ReaderNavigationItem] {
+		navigation.smartItems
+	}
+
+	var folderNavigationItems: [ReaderNavigationItem] {
+		navigation.folderItems
+	}
+
+	var uncategorizedFeedNavigationItems: [ReaderNavigationItem] {
+		navigation.uncategorizedFeedItems
+	}
+
+	func feedNavigationItems(in folder: ReaderNavigationItem) -> [ReaderNavigationItem] {
+		navigation.children(of: folder.id)
+	}
+
+	func isFolderExpanded(_ folder: ReaderNavigationItem) -> Bool {
+		navigation.expandedFolderIDs.contains(folder.id)
+	}
+
+	var articles: [Recommendation] {
+		get { articleCache[selectedNavigationID] ?? [] }
+		set { setArticles(newValue, for: selectedNavigationID) }
+	}
+
+	var sortOrder: ArticleSortOrder {
+		get { sortOrder(for: selectedNavigationID) }
+		set { setSortOrder(newValue, for: selectedNavigationID) }
 	}
 
 	var selectedArticle: Recommendation? {
@@ -98,11 +156,15 @@ final class ReaderAppModel {
 	}
 
 	var isLoading: Bool {
-		loadingSections.contains(selectedDestination.sourceSection)
+		loadingCollections.contains(selectedNavigationID)
 	}
 
 	func isLoading(section: ReaderSection) -> Bool {
-		loadingSections.contains(section)
+		loadingCollections.contains(section.rawValue)
+	}
+
+	func isLoading(collection: ReaderNavigationItem) -> Bool {
+		loadingCollections.contains(collection.id)
 	}
 
 	func connect() async {
@@ -126,9 +188,8 @@ final class ReaderAppModel {
 			password = ""
 			apiClient = PigeonAPIClient(session: newSession, httpClient: httpClient)
 			select(section: .forYou)
-			async let library: Void = loadLibrary(force: true)
-			async let stories: Void = load(section: .forYou, force: true)
-			_ = await (library, stories)
+			await loadNavigation(force: true)
+			await load(section: .forYou, force: true)
 		} catch is CancellationError {
 			// Leaving the connection screen is a normal cancellation.
 		} catch {
@@ -146,7 +207,14 @@ final class ReaderAppModel {
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
-			selectedDestination = .section(.forYou)
+			selectedNavigationID = ReaderSection.forYou.rawValue
+			navigation = .initial
+			isLoadingNavigation = false
+			activeNavigationLoadID = nil
+			activeNavigationLoadIDs.removeAll()
+			activeLibraryLoadID = nil
+			isLoadingLibrary = false
+			hasLoadedNavigation = false
 			preferredCompactColumn = .sidebar
 			errorMessage = nil
 		} catch {
@@ -154,14 +222,61 @@ final class ReaderAppModel {
 		}
 	}
 
-	func select(section: ReaderSection) {
-		select(destination: .section(section))
+	func saveReadwiseToken(_ token: String) throws {
+		try readwiseTokenStore.save(token)
+		hasReadwiseToken = true
 	}
 
-	func select(destination: ReaderDestination) {
-		selectedDestination = destination
-		selectedArticleID = selectedArticleIDs[destination].flatMap { rememberedID in
-			articles(for: destination).contains(where: { $0.id == rememberedID }) ? rememberedID : nil
+	func removeReadwiseToken() throws {
+		try readwiseTokenStore.remove()
+		hasReadwiseToken = false
+	}
+
+	func saveToReader(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
+		try Task.checkCancellation()
+		let key = destination.url.absoluteString
+		guard inFlightReadwiseSaves.insert(key).inserted else {
+			return .alreadyInFlight
+		}
+		defer { inFlightReadwiseSaves.remove(key) }
+
+		try await readwiseAPIClient.save(url: destination.url)
+		try Task.checkCancellation()
+		return .saved
+	}
+
+	func select(section: ReaderSection) {
+		select(collectionID: section.rawValue)
+	}
+
+	func select(item: ReaderNavigationItem) {
+		if let parentID = item.parentID {
+			navigation.expandFolder(parentID)
+		}
+		select(collectionID: item.id)
+	}
+
+	func toggleFolder(_ folder: ReaderNavigationItem) {
+		navigation.toggleFolder(folder.id)
+	}
+
+	func setNavigation(_ state: ReaderNavigationState, markAsLoaded: Bool = false) {
+		let previousSelection = selectedNavigationID
+		var next = state
+		next.preserveExpansion(from: navigation)
+		navigation = next
+		if markAsLoaded {
+			hasLoadedNavigation = true
+		}
+		if navigation.item(withID: previousSelection) == nil {
+			select(collectionID: ReaderSection.forYou.rawValue)
+		}
+	}
+
+	private func select(collectionID: String) {
+		selectedNavigationID = collectionID
+		selectedArticleID = selectedArticleIDs[collectionID].flatMap { rememberedID in
+			articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
 		}
 		preferredCompactColumn = .content
 	}
@@ -171,135 +286,523 @@ final class ReaderAppModel {
 			return
 		}
 		selectedArticleID = article.id
-		selectedArticleIDs[selectedDestination] = article.id
+		selectedArticleIDs[selectedNavigationID] = article.id
 		preferredCompactColumn = .detail
 	}
 
-	func selectAdjacentArticle(offset: Int) {
-		guard offset != 0, let selectedArticleID,
-			let index = articles.firstIndex(where: { $0.id == selectedArticleID }) else {
-			return
-		}
-		let target = index + offset
-		guard articles.indices.contains(target) else {
-			return
-		}
-		select(article: articles[target])
-	}
-
-	func canSelectAdjacentArticle(offset: Int) -> Bool {
-		guard let selectedArticleID,
-			let index = articles.firstIndex(where: { $0.id == selectedArticleID }) else {
-			return false
-		}
-		return articles.indices.contains(index + offset)
-	}
-
-	func load(destination: ReaderDestination, force: Bool = false) async {
-		if case .folder = destination {
-			await loadLibrary()
-		} else if case .feed = destination {
-			await loadLibrary()
-		}
-		await load(section: destination.sourceSection, force: force)
-	}
-
-	func load(section: ReaderSection, force: Bool = false) async {
+	func loadNavigation(
+		force: Bool = false,
+		now: Date = .now,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async {
 		guard let apiClient else {
 			return
 		}
-		if force == false, articleCache[section] != nil {
+		if force == false, hasLoadedNavigation {
 			return
 		}
 
 		let loadID = UUID()
-		activeLoadIDs[section] = loadID
-		loadingSections.insert(section)
-		if selectedDestination.sourceSection == section {
+		activeNavigationLoadID = loadID
+		activeNavigationLoadIDs.insert(loadID)
+		isLoadingNavigation = true
+		defer {
+			activeNavigationLoadIDs.remove(loadID)
+			if activeNavigationLoadID == loadID {
+				activeNavigationLoadID = nil
+			}
+			isLoadingNavigation = activeNavigationLoadIDs.isEmpty == false
+		}
+
+		do {
+			let snapshot = try await apiClient.navigationSnapshot(now: now, dayBounds: dayBounds)
+			try Task.checkCancellation()
+			guard activeNavigationLoadID == loadID else {
+				return
+			}
+			// For You is the complete bounded recommendation collection returned by the existing
+			// endpoint. Its trailing count covers every currently displayed unread recommendation,
+			// rather than a server-wide proxy or an arbitrary first-page count.
+			let forYouCount = articleCache[ReaderSection.forYou.rawValue]?.count(where: { $0.isRead == false }) ?? 0
+			let state = ReaderNavigationCatalog.make(
+				subscriptions: snapshot.subscriptions,
+				unreadCounts: snapshot.unreadCounts,
+				smartCounts: ReaderNavigationSmartCounts(
+					forYou: forYouCount,
+					today: snapshot.todayUnreadCount,
+					unread: snapshot.unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0,
+					starred: snapshot.starredUnreadCount,
+				),
+			)
+			setNavigation(state, markAsLoaded: true)
+			if selectedNavigationID == ReaderSection.forYou.rawValue {
+				selectedArticleID = selectedArticleIDs[selectedNavigationID].flatMap { rememberedID in
+					articleCache[selectedNavigationID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
+				}
+			}
+		} catch is CancellationError {
+			return
+		} catch {
+			guard activeNavigationLoadID == loadID else {
+				return
+			}
+			if session != nil {
+				errorMessage = error.localizedDescription
+			}
+		}
+	}
+
+	func refresh(collection: ReaderNavigationItem) async {
+		await load(collection: collection, force: true)
+		if hasLoadedNavigation {
+			await loadNavigation(force: true)
+		}
+	}
+
+	func load(section: ReaderSection, force: Bool = false) async {
+		await load(collection: .smart(section), force: force)
+	}
+
+	func load(collection: ReaderNavigationItem, force: Bool = false) async {
+		guard let apiClient else {
+			return
+		}
+		if force == false, articleCache[collection.id] != nil {
+			return
+		}
+
+		let loadID = UUID()
+		activeLoadIDs[collection.id] = loadID
+		loadingCollections.insert(collection.id)
+		if selectedNavigationID == collection.id {
 			errorMessage = nil
 		}
 
 		defer {
-			if activeLoadIDs[section] == loadID {
-				activeLoadIDs[section] = nil
-				loadingSections.remove(section)
+			if activeLoadIDs[collection.id] == loadID {
+				activeLoadIDs[collection.id] = nil
+				loadingCollections.remove(collection.id)
 			}
 		}
 
 		do {
-			let loadedArticles = try await apiClient.recommendations(for: section, limit: section == .unread ? 100 : 30)
+			let loadedArticles: [Recommendation]
+			if let section = collection.smartSection, section.usesRecommendationEndpoint {
+				loadedArticles = try await apiClient.recommendations(for: section)
+			} else if collection.smartSection == .today {
+				loadedArticles = try await apiClient.recommendations(
+					from: "user/-/state/com.google/reading-list",
+					dayBounds: ReaderLocalDayBounds.localDay(containing: .now),
+				)
+			} else {
+				loadedArticles = try await apiClient.recommendations(from: collection.streamID)
+			}
 			try Task.checkCancellation()
-			guard activeLoadIDs[section] == loadID else {
+			guard activeLoadIDs[collection.id] == loadID else {
 				return
 			}
-			setArticles(loadedArticles, for: section)
+			setArticles(loadedArticles, for: collection.id)
+			if collection.smartSection == .forYou {
+				// This endpoint is bounded by its requested recommendation collection. Count the
+				// entire returned/displayed collection, not merely the first page or request limit.
+				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
+			}
+			if collection.smartSection == .today {
+				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
+			}
 		} catch is CancellationError {
 			return
 		} catch {
-			guard activeLoadIDs[section] == loadID, selectedDestination.sourceSection == section else {
+			guard activeLoadIDs[collection.id] == loadID, selectedNavigationID == collection.id else {
 				return
 			}
 			errorMessage = error.localizedDescription
 		}
 	}
 
+	func loadLibrary(force: Bool = false) async {
+		guard let apiClient else {
+			return
+		}
+		if force == false, subscriptions.isEmpty == false {
+			return
+		}
+
+		let loadID = UUID()
+		activeLibraryLoadID = loadID
+		isLoadingLibrary = true
+		defer {
+			if activeLibraryLoadID == loadID {
+				activeLibraryLoadID = nil
+				isLoadingLibrary = false
+			}
+		}
+
+		do {
+			let loaded = try await apiClient.subscriptions()
+			try Task.checkCancellation()
+			guard activeLibraryLoadID == loadID else {
+				return
+			}
+			setSubscriptions(loaded)
+		} catch is CancellationError {
+			return
+		} catch {
+			guard activeLibraryLoadID == loadID else {
+				return
+			}
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	func setSubscriptions(_ newSubscriptions: [FeedSubscription]) {
+		subscriptions = sortedSubscriptions(newSubscriptions)
+	}
+
+	@discardableResult
+	func addFeed(urlText: String, folderName: String?) async -> Bool {
+		guard let apiClient else {
+			return false
+		}
+		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard let url = URL(string: trimmedURL), let scheme = url.scheme?.lowercased(),
+			scheme == "http" || scheme == "https", url.host != nil else {
+			errorMessage = "Enter a complete HTTP or HTTPS feed URL."
+			return false
+		}
+
+		do {
+			let result = try await apiClient.addSubscription(url: url)
+			if let folder = normalizedFolderName(folderName) {
+				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
+			}
+			await loadLibrary(force: true)
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			return false
+		} catch {
+			errorMessage = error.localizedDescription
+			await loadLibrary(force: true)
+			return false
+		}
+	}
+
+	@discardableResult
+	func renameFeed(_ subscription: FeedSubscription, to newTitle: String) async -> Bool {
+		guard let apiClient else {
+			return false
+		}
+		let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard title.isEmpty == false, title.count <= 200 else {
+			errorMessage = "Feed names must be between 1 and 200 characters."
+			return false
+		}
+		let mutationKey = "feed-title:\(subscription.id)"
+		let mutationID = beginMutation(key: mutationKey)
+		updateSubscription(id: subscription.id) { $0.title = title }
+
+		do {
+			try await apiClient.editSubscription(id: subscription.id, title: title)
+			finishMutation(key: mutationKey, id: mutationID)
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			return false
+		} catch {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	@discardableResult
+	func moveFeed(_ subscription: FeedSubscription, to folderName: String?) async -> Bool {
+		guard let apiClient else {
+			return false
+		}
+		let folder = normalizedFolderName(folderName)
+		if folderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, folder == nil {
+			errorMessage = "Folder names must be between 1 and 80 characters."
+			return false
+		}
+		let mutationKey = "feed-folder:\(subscription.id)"
+		let mutationID = beginMutation(key: mutationKey)
+		updateSubscription(id: subscription.id) { item in
+			item.categories = folder.map { [FeedCategory(id: "user/-/label/\($0)", label: $0)] } ?? []
+		}
+
+		do {
+			try await apiClient.editSubscription(
+				id: subscription.id,
+				addingFolders: folder.map { [$0] } ?? [],
+				removingFolders: subscription.folderNames.filter { $0 != folder },
+			)
+			finishMutation(key: mutationKey, id: mutationID)
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			return false
+		} catch {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	@discardableResult
+	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
+		guard let apiClient else {
+			return false
+		}
+		let mutationKey = "unsubscribe:\(subscription.id)"
+		let mutationID = beginMutation(key: mutationKey)
+		subscriptions.removeAll { $0.id == subscription.id }
+
+		do {
+			try await apiClient.unsubscribe(id: subscription.id)
+			finishMutation(key: mutationKey, id: mutationID)
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			return false
+		} catch {
+			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	@discardableResult
+	func renameFolder(_ oldName: String, to newName: String) async -> Bool {
+		guard let apiClient, let name = normalizedFolderName(newName) else {
+			errorMessage = "Folder names must be between 1 and 80 characters."
+			return false
+		}
+		guard name != oldName else {
+			return true
+		}
+		guard folders.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) == false else {
+			errorMessage = "A folder with that name already exists."
+			return false
+		}
+		let affected = subscriptions.filter { $0.folderNames.contains(oldName) }
+		applyFolderRename(from: oldName, to: name)
+
+		do {
+			for subscription in affected {
+				try Task.checkCancellation()
+				try await apiClient.editSubscription(
+					id: subscription.id,
+					addingFolders: [name],
+					removingFolders: [oldName],
+				)
+			}
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			await loadLibrary(force: true)
+			return false
+		} catch {
+			errorMessage = error.localizedDescription
+			await loadLibrary(force: true)
+			return false
+		}
+	}
+
+	@discardableResult
+	func deleteFolder(_ name: String) async -> Bool {
+		guard let apiClient else {
+			return false
+		}
+		let affected = subscriptions.filter { $0.folderNames.contains(name) }
+		for subscription in affected {
+			updateSubscription(id: subscription.id) { item in
+				item.categories.removeAll { $0.label == name }
+			}
+		}
+
+		do {
+			for subscription in affected {
+				try Task.checkCancellation()
+				try await apiClient.editSubscription(id: subscription.id, removingFolders: [name])
+			}
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
+			return true
+		} catch is CancellationError {
+			await loadLibrary(force: true)
+			return false
+		} catch {
+			errorMessage = error.localizedDescription
+			await loadLibrary(force: true)
+			return false
+		}
+	}
+
 	func articles(for section: ReaderSection) -> [Recommendation] {
-		articleCache[section] ?? []
+		articleCache[section.rawValue] ?? []
+	}
+
+	func articles(for collection: ReaderNavigationItem) -> [Recommendation] {
+		articleCache[collection.id] ?? []
 	}
 
 	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
-		sortOrders[section] ?? ArticleSortOrder.defaultOrder(for: section)
+		sortOrder(for: section.rawValue)
+	}
+
+	func sortOrder(for collection: ReaderNavigationItem) -> ArticleSortOrder {
+		sortOrder(for: collection.id)
 	}
 
 	func setSortOrder(_ newSortOrder: ArticleSortOrder, for section: ReaderSection) {
-		guard sortOrder(for: section) != newSortOrder else {
-			return
-		}
-		sortOrders[section] = newSortOrder
-		if let cachedArticles = articleCache[section] {
-			articleCache[section] = newSortOrder.sorted(cachedArticles)
-		}
+		setSortOrder(newSortOrder, for: section.rawValue)
 	}
 
-	func articles(for destination: ReaderDestination) -> [Recommendation] {
-		let source = articleCache[destination.sourceSection] ?? []
-		switch destination {
-		case .section, .allFeeds:
-			return source
-		case .folder(let name):
-			let feedKeys = Set(subscriptions.filter { $0.folderNames.contains(name) }.map(\.feedKey))
-			return source.filter { feedKeys.contains($0.feedKey) }
-		case .feed(let id):
-			guard let feedKey = subscription(id: id)?.feedKey else {
-				return []
-			}
-			return source.filter { $0.feedKey == feedKey }
+	func setSortOrder(_ newSortOrder: ArticleSortOrder, for collection: ReaderNavigationItem) {
+		setSortOrder(newSortOrder, for: collection.id)
+	}
+
+	private func sortOrder(for collectionID: String) -> ArticleSortOrder {
+		sortOrders[collectionID] ?? (ReaderSection(rawValue: collectionID).map(ArticleSortOrder.defaultOrder) ?? .newest)
+	}
+
+	private func setSortOrder(_ newSortOrder: ArticleSortOrder, for collectionID: String) {
+		guard sortOrder(for: collectionID) != newSortOrder else {
+			return
+		}
+		sortOrders[collectionID] = newSortOrder
+		if let cachedArticles = articleCache[collectionID] {
+			articleCache[collectionID] = newSortOrder.sorted(cachedArticles)
 		}
 	}
 
 	func setArticles(_ newArticles: [Recommendation], for section: ReaderSection) {
-		articleCache[section] = sortOrder(for: section).sorted(newArticles)
-		guard selectedDestination.sourceSection == section,
-			let rememberedID = selectedArticleIDs[selectedDestination] else {
+		setArticles(newArticles, for: section.rawValue)
+	}
+
+	func setArticles(_ newArticles: [Recommendation], for collection: ReaderNavigationItem) {
+		setArticles(newArticles, for: collection.id)
+	}
+
+	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
+		articleCache[collectionID] = sortOrder(for: collectionID).sorted(newArticles)
+		guard let rememberedID = selectedArticleIDs[collectionID] else {
 			return
 		}
-		guard articles(for: selectedDestination).contains(where: { $0.id == rememberedID }) else {
-			selectedArticleIDs[selectedDestination] = nil
-			if selectedDestination.sourceSection == section {
+		guard newArticles.contains(where: { $0.id == rememberedID }) else {
+			selectedArticleIDs[collectionID] = nil
+			if selectedNavigationID == collectionID {
 				selectedArticleID = nil
 				preferredCompactColumn = .content
 			}
 			return
 		}
-		selectedArticleID = rememberedID
+		if selectedNavigationID == collectionID {
+			selectedArticleID = rememberedID
+		}
+	}
+
+	private func updateNavigationCount(for itemID: String, to count: Int) {
+		navigation = navigation.replacingCount(for: itemID, with: count)
+	}
+
+	private func navigationCountDeltas(for article: Recommendation, fromRead: Bool, toRead: Bool) -> [String: Int] {
+		guard fromRead != toRead else {
+			return [:]
+		}
+		let delta = toRead ? -1 : 1
+		let todayBounds = ReaderLocalDayBounds.localDay(containing: .now)
+		var deltas: [String: Int] = [:]
+
+		for item in navigation.items {
+			let shouldAdjust: Bool
+			switch item.kind {
+			case .smart:
+				switch item.smartSection {
+				case .forYou:
+					shouldAdjust = articleCache[item.id]?.contains(where: { articlesMatch($0, article) }) == true
+				case .today:
+					shouldAdjust = todayBounds.contains(article.receivedAt)
+				case .unread:
+					shouldAdjust = true
+				case .starred:
+					shouldAdjust = article.isStarred
+				case nil:
+					shouldAdjust = false
+				}
+			case .feed:
+				shouldAdjust = feedItemContains(item, article: article)
+			case .folder:
+				shouldAdjust = navigation.children(of: item.id).contains { feedItemContains($0, article: article) }
+			}
+
+			if shouldAdjust {
+				deltas[item.id] = delta
+			}
+		}
+
+		return deltas
+	}
+
+	private func applyNavigationCountDeltas(_ deltas: [String: Int]) {
+		guard deltas.isEmpty == false else {
+			return
+		}
+		var nextNavigation = navigation
+		for item in navigation.items {
+			guard let delta = deltas[item.id] else {
+				continue
+			}
+			nextNavigation = nextNavigation.replacingCount(for: item.id, with: item.unreadCount + delta)
+		}
+		navigation = nextNavigation
+	}
+
+	private func adjustNavigationCounts(for article: Recommendation, fromRead: Bool, toRead: Bool) {
+		applyNavigationCountDeltas(navigationCountDeltas(for: article, fromRead: fromRead, toRead: toRead))
+	}
+
+	private func adjustStarredNavigationCount(for article: Recommendation, fromStarred: Bool, toStarred: Bool) {
+		guard article.isRead == false, fromStarred != toStarred else {
+			return
+		}
+		let delta = toStarred ? 1 : -1
+		guard let starredItem = navigation.smartItems.first(where: { $0.smartSection == .starred }) else {
+			return
+		}
+		navigation = navigation.replacingCount(for: starredItem.id, with: starredItem.unreadCount + delta)
+	}
+
+	private func feedItemContains(_ item: ReaderNavigationItem, article: Recommendation) -> Bool {
+		item.feedKey == article.feedKey || item.streamID == article.feedKey || articleCache[item.id]?.contains(where: { articlesMatch($0, article) }) == true
+	}
+
+	private func articlesMatch(_ left: Recommendation, _ right: Recommendation) -> Bool {
+		left.id == right.id || left.readerId == right.readerId
 	}
 
 	func article(withId id: String) -> Recommendation? {
-		if let current = articles.first(where: { $0.id == id }) {
+		if let current = articles.first(where: { $0.id == id || $0.readerId == id }) {
 			return current
 		}
-		for section in ReaderSection.allCases {
-			if let article = articleCache[section]?.first(where: { $0.id == id }) {
+		for cachedArticles in articleCache.values {
+			if let article = cachedArticles.first(where: { $0.id == id || $0.readerId == id }) {
 				return article
 			}
 		}
@@ -362,6 +865,14 @@ final class ReaderAppModel {
 		)
 	}
 
+	func markStoriesAboveAsRead(_ article: Recommendation, in collection: ReaderNavigationItem) async {
+		await markStoriesAsRead(.above, around: article, in: collection)
+	}
+
+	func markStoriesBelowAsRead(_ article: Recommendation, in collection: ReaderNavigationItem) async {
+		await markStoriesAsRead(.below, around: article, in: collection)
+	}
+
 	func setStarred(_ article: Recommendation, starred: Bool) async {
 		await optimisticallyUpdateState(
 			article: article,
@@ -373,7 +884,7 @@ final class ReaderAppModel {
 	}
 
 	func recordPreference(_ type: EngagementEventType, for article: Recommendation) async {
-		guard type == .notInterested, selectedDestination == .section(.forYou) else {
+		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
 			await send(EngagementEvent(itemId: article.id, type: type))
 			return
 		}
@@ -386,13 +897,19 @@ final class ReaderAppModel {
 				activeMutationIDs[mutationKey] = nil
 			}
 		}
-		let previousItems = articleCache[.forYou] ?? []
-		let forYouDestination = ReaderDestination.section(.forYou)
-		let previousSelection = selectedArticleIDs[forYouDestination]
-		articleCache[.forYou]?.removeAll(where: { $0.id == article.id })
-		if selectedArticleIDs[forYouDestination] == article.id {
-			selectedArticleIDs[forYouDestination] = nil
-			if selectedDestination == .section(.forYou) {
+		let forYouID = ReaderSection.forYou.rawValue
+		let previousItems = articleCache[forYouID] ?? []
+		let previousNavigation = navigation
+		let previousSelection = selectedArticleIDs[forYouID]
+		let removedArticle = previousItems.contains(where: { articlesMatch($0, article) })
+		articleCache[forYouID]?.removeAll(where: { articlesMatch($0, article) })
+		if removedArticle {
+			let remainingUnread = articleCache[forYouID]?.count(where: { $0.isRead == false }) ?? 0
+			updateNavigationCount(for: forYouID, to: remainingUnread)
+		}
+		if let selectedID = selectedArticleIDs[forYouID], previousItems.first(where: { $0.id == selectedID && articlesMatch($0, article) }) != nil {
+			selectedArticleIDs[forYouID] = nil
+			if selectedNavigationID == forYouID {
 				selectedArticleID = nil
 				preferredCompactColumn = .content
 			}
@@ -402,234 +919,12 @@ final class ReaderAppModel {
 		guard succeeded == false, activeMutationIDs[mutationKey] == mutationID else {
 			return
 		}
-		articleCache[.forYou] = previousItems
-		selectedArticleIDs[forYouDestination] = previousSelection
-		if selectedDestination == .section(.forYou), selectedArticleID == nil {
+		articleCache[forYouID] = previousItems
+		navigation = previousNavigation
+		selectedArticleIDs[forYouID] = previousSelection
+		if selectedNavigationID == forYouID, selectedArticleID == nil {
 			selectedArticleID = previousSelection
 			preferredCompactColumn = previousSelection == nil ? .content : .detail
-		}
-	}
-
-	func loadLibrary(force: Bool = false) async {
-		guard let apiClient else {
-			return
-		}
-		if force == false, subscriptions.isEmpty == false {
-			return
-		}
-
-		let loadID = UUID()
-		activeLibraryLoadID = loadID
-		isLoadingLibrary = true
-		defer {
-			if activeLibraryLoadID == loadID {
-				activeLibraryLoadID = nil
-				isLoadingLibrary = false
-			}
-		}
-
-		do {
-			let loaded = try await apiClient.subscriptions()
-			try Task.checkCancellation()
-			guard activeLibraryLoadID == loadID else {
-				return
-			}
-			setSubscriptions(loaded)
-		} catch is CancellationError {
-			return
-		} catch {
-			guard activeLibraryLoadID == loadID else {
-				return
-			}
-			errorMessage = error.localizedDescription
-		}
-	}
-
-	func setSubscriptions(_ newSubscriptions: [FeedSubscription]) {
-		subscriptions = sortedSubscriptions(newSubscriptions)
-		validateLibrarySelection()
-	}
-
-	@discardableResult
-	func addFeed(urlText: String, folderName: String?) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard let url = URL(string: trimmedURL), let scheme = url.scheme?.lowercased(),
-			scheme == "http" || scheme == "https", url.host != nil else {
-			errorMessage = "Enter a complete HTTP or HTTPS feed URL."
-			return false
-		}
-
-		do {
-			let result = try await apiClient.addSubscription(url: url)
-			if let folder = normalizedFolderName(folderName) {
-				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
-			}
-			await loadLibrary(force: true)
-			return true
-		} catch is CancellationError {
-			return false
-		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
-			return false
-		}
-	}
-
-	@discardableResult
-	func renameFeed(_ subscription: FeedSubscription, to newTitle: String) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard title.isEmpty == false, title.count <= 200 else {
-			errorMessage = "Feed names must be between 1 and 200 characters."
-			return false
-		}
-		let mutationID = beginMutation(key: "feed-title:\(subscription.id)")
-		updateSubscription(id: subscription.id) { $0.title = title }
-
-		do {
-			try await apiClient.editSubscription(id: subscription.id, title: title)
-			finishMutation(key: "feed-title:\(subscription.id)", id: mutationID)
-			return true
-		} catch is CancellationError {
-			rollbackSubscription(subscription, key: "feed-title:\(subscription.id)", id: mutationID)
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: "feed-title:\(subscription.id)", id: mutationID)
-			errorMessage = error.localizedDescription
-			return false
-		}
-	}
-
-	@discardableResult
-	func moveFeed(_ subscription: FeedSubscription, to folderName: String?) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let folder = normalizedFolderName(folderName)
-		if folderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, folder == nil {
-			errorMessage = "Folder names must be between 1 and 80 characters."
-			return false
-		}
-		let mutationKey = "feed-folder:\(subscription.id)"
-		let mutationID = beginMutation(key: mutationKey)
-		updateSubscription(id: subscription.id) { item in
-			item.categories = folder.map { [FeedCategory(id: "user/-/label/\($0)", label: $0)] } ?? []
-		}
-
-		do {
-			try await apiClient.editSubscription(
-				id: subscription.id,
-				addingFolders: folder.map { [$0] } ?? [],
-				removingFolders: subscription.folderNames.filter { $0 != folder }
-			)
-			finishMutation(key: mutationKey, id: mutationID)
-			return true
-		} catch is CancellationError {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			errorMessage = error.localizedDescription
-			return false
-		}
-	}
-
-	@discardableResult
-	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let mutationKey = "unsubscribe:\(subscription.id)"
-		let mutationID = beginMutation(key: mutationKey)
-		let wasSelected = selectedDestination == .feed(subscription.id)
-		subscriptions.removeAll { $0.id == subscription.id }
-		validateLibrarySelection()
-
-		do {
-			try await apiClient.unsubscribe(id: subscription.id)
-			finishMutation(key: mutationKey, id: mutationID)
-			return true
-		} catch is CancellationError {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			if wasSelected { select(destination: .feed(subscription.id)) }
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			if wasSelected { select(destination: .feed(subscription.id)) }
-			errorMessage = error.localizedDescription
-			return false
-		}
-	}
-
-	@discardableResult
-	func renameFolder(_ oldName: String, to newName: String) async -> Bool {
-		guard let apiClient, let name = normalizedFolderName(newName) else {
-			errorMessage = "Folder names must be between 1 and 80 characters."
-			return false
-		}
-		guard name != oldName else {
-			return true
-		}
-		guard folders.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) == false else {
-			errorMessage = "A folder with that name already exists."
-			return false
-		}
-		let affected = subscriptions.filter { $0.folderNames.contains(oldName) }
-		applyFolderRename(from: oldName, to: name)
-
-		do {
-			for subscription in affected {
-				try Task.checkCancellation()
-				try await apiClient.editSubscription(
-					id: subscription.id,
-					addingFolders: [name],
-					removingFolders: [oldName]
-				)
-			}
-			return true
-		} catch is CancellationError {
-			await loadLibrary(force: true)
-			return false
-		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
-			return false
-		}
-	}
-
-	@discardableResult
-	func deleteFolder(_ name: String) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let affected = subscriptions.filter { $0.folderNames.contains(name) }
-		for subscription in affected {
-			updateSubscription(id: subscription.id) { item in
-				item.categories.removeAll { $0.label == name }
-			}
-		}
-		if selectedDestination == .folder(name) {
-			select(destination: .allFeeds)
-		}
-
-		do {
-			for subscription in affected {
-				try Task.checkCancellation()
-				try await apiClient.editSubscription(id: subscription.id, removingFolders: [name])
-			}
-			return true
-		} catch is CancellationError {
-			await loadLibrary(force: true)
-			return false
-		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
-			return false
 		}
 	}
 
@@ -662,7 +957,6 @@ final class ReaderAppModel {
 		}
 		update(&subscriptions[index])
 		subscriptions = sortedSubscriptions(subscriptions)
-		validateLibrarySelection()
 	}
 
 	private func beginMutation(key: String) -> UUID {
@@ -690,41 +984,185 @@ final class ReaderAppModel {
 		activeMutationIDs[key] = nil
 	}
 
-	private func validateLibrarySelection() {
-		let isValid: Bool
-		switch selectedDestination {
-		case .section, .allFeeds:
-			isValid = true
-		case .folder(let name):
-			isValid = subscriptions.contains { $0.folderNames.contains(name) }
-		case .feed(let id):
-			isValid = subscriptions.contains { $0.id == id }
-		}
-		guard isValid == false else {
-			return
-		}
-		selectedDestination = .allFeeds
-		selectedArticleID = selectedArticleIDs[.allFeeds]
-		preferredCompactColumn = .content
-	}
-
 	private func applyFolderRename(from oldName: String, to newName: String) {
 		for index in subscriptions.indices {
 			for categoryIndex in subscriptions[index].categories.indices where subscriptions[index].categories[categoryIndex].label == oldName {
 				subscriptions[index].categories[categoryIndex] = FeedCategory(
 					id: "user/-/label/\(newName)",
-					label: newName
+					label: newName,
 				)
 			}
 		}
-		let oldDestination = ReaderDestination.folder(oldName)
-		let newDestination = ReaderDestination.folder(newName)
-		if let remembered = selectedArticleIDs.removeValue(forKey: oldDestination) {
-			selectedArticleIDs[newDestination] = remembered
+		subscriptions = sortedSubscriptions(subscriptions)
+	}
+
+	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
+		guard let apiClient else {
+			return
 		}
-		if selectedDestination == oldDestination {
-			selectedDestination = newDestination
+		let displayedArticles = articleCache[collection.id] ?? []
+		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
+			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
+			return
 		}
+
+		let candidates: ArraySlice<Recommendation>
+		switch boundary {
+		case .above:
+			candidates = displayedArticles[..<boundaryIndex]
+		case .below:
+			candidates = displayedArticles.dropFirst(boundaryIndex + 1)[...]
+		}
+
+		var seenIdentifiers = Set<String>()
+		let targets = candidates.filter { candidate in
+			guard candidate.isRead == false else {
+				return false
+			}
+			let identifiers = Set([candidate.id, candidate.readerId])
+			guard identifiers.isDisjoint(with: seenIdentifiers) else {
+				return false
+			}
+			seenIdentifiers.formUnion(identifiers)
+			return true
+		}
+		guard targets.isEmpty == false else {
+			return
+		}
+
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
+
+		var pendingMutations: [PendingReadMutation] = []
+		for target in targets {
+			let mutationID = UUID()
+			activeMutationIDs["\(target.id)|read"] = mutationID
+			var previousValues: [String: [Bool]] = [:]
+			for collectionID in Array(articleCache.keys) {
+				guard var cachedArticles = articleCache[collectionID] else {
+					continue
+				}
+				let matchingIndices = cachedArticles.indices.filter { articlesMatch(cachedArticles[$0], target) }
+				guard matchingIndices.isEmpty == false else {
+					continue
+				}
+				previousValues[collectionID] = matchingIndices.map { cachedArticles[$0].isRead }
+				for index in matchingIndices {
+					cachedArticles[index].isRead = true
+				}
+				articleCache[collectionID] = cachedArticles
+			}
+			let navigationDeltas = navigationCountDeltas(for: target, fromRead: false, toRead: true)
+			applyNavigationCountDeltas(navigationDeltas)
+			pendingMutations.append(
+				PendingReadMutation(
+					article: target,
+					mutationID: mutationID,
+					previousValues: previousValues,
+					navigationDeltas: navigationDeltas,
+				),
+			)
+		}
+
+		let results = await withTaskGroup(of: ReadMutationResult.self) { group in
+			for pendingMutation in pendingMutations {
+				group.addTask {
+					do {
+						try Task.checkCancellation()
+						try await apiClient.updateItemState(
+							readerId: pendingMutation.article.readerId,
+							tag: "user/-/state/com.google/read",
+							enabled: true,
+						)
+						return ReadMutationResult(
+							articleID: pendingMutation.article.id,
+							succeeded: true,
+							wasCancelled: false,
+							errorDescription: nil,
+						)
+					} catch is CancellationError {
+						return ReadMutationResult(
+							articleID: pendingMutation.article.id,
+							succeeded: false,
+							wasCancelled: true,
+							errorDescription: nil,
+						)
+					} catch {
+						return ReadMutationResult(
+							articleID: pendingMutation.article.id,
+							succeeded: false,
+							wasCancelled: false,
+							errorDescription: error.localizedDescription,
+						)
+					}
+				}
+			}
+
+			var results: [ReadMutationResult] = []
+			for await result in group {
+				results.append(result)
+			}
+			return results
+		}
+
+		let resultsByID = Dictionary(uniqueKeysWithValues: results.map { ($0.articleID, $0) })
+		var succeededCount = 0
+		var failedTitles: [String] = []
+		var firstFailureDescription: String?
+		for pendingMutation in pendingMutations {
+			guard let result = resultsByID[pendingMutation.article.id] else {
+				failedTitles.append(pendingMutation.article.title)
+				firstFailureDescription = firstFailureDescription ?? "The request did not return a result."
+				_ = rollbackReadMutationIfCurrent(pendingMutation)
+				continue
+			}
+			if result.succeeded {
+				succeededCount += 1
+				if activeMutationIDs[pendingMutation.mutationKey] == pendingMutation.mutationID {
+					activeMutationIDs[pendingMutation.mutationKey] = nil
+				}
+				continue
+			}
+
+			if result.wasCancelled == false {
+				failedTitles.append(pendingMutation.article.title)
+				firstFailureDescription = firstFailureDescription ?? result.errorDescription
+			}
+			_ = rollbackReadMutationIfCurrent(pendingMutation)
+		}
+
+		guard failedTitles.isEmpty == false else {
+			return
+		}
+		let failedSummary = failedTitles.joined(separator: ", ")
+		let detail = firstFailureDescription.map { " \($0)" } ?? ""
+		errorMessage = "Marked \(succeededCount) of \(pendingMutations.count) stories as read. Failed: \(failedSummary).\(detail)"
+	}
+
+	private func rollbackReadMutationIfCurrent(_ mutation: PendingReadMutation) -> Bool {
+		guard activeMutationIDs[mutation.mutationKey] == mutation.mutationID else {
+			return false
+		}
+		for (collectionID, previousValues) in mutation.previousValues {
+			guard var cachedArticles = articleCache[collectionID] else {
+				continue
+			}
+			var previousIndex = 0
+			for index in cachedArticles.indices where articlesMatch(cachedArticles[index], mutation.article) {
+				guard previousIndex < previousValues.count else {
+					break
+				}
+				if cachedArticles[index].isRead {
+					cachedArticles[index].isRead = previousValues[previousIndex]
+				}
+				previousIndex += 1
+			}
+			articleCache[collectionID] = cachedArticles
+		}
+		activeMutationIDs[mutation.mutationKey] = nil
+		applyNavigationCountDeltas(mutation.navigationDeltas.mapValues { -$0 })
+		return true
 	}
 
 	@discardableResult
@@ -762,17 +1200,26 @@ final class ReaderAppModel {
 			}
 		}
 
-		var previousValues: [ReaderSection: Bool] = [:]
-		for section in ReaderSection.allCases {
-			guard let index = articleCache[section]?.firstIndex(where: { $0.id == article.id }) else {
+		let previousNavigation = navigation
+		var previousValues: [String: Bool] = [:]
+		for collectionID in articleCache.keys {
+			guard let index = articleCache[collectionID]?.firstIndex(where: { articlesMatch($0, article) }) else {
 				continue
 			}
-			previousValues[section] = articleCache[section]?[index][keyPath: keyPath]
-			articleCache[section]?[index][keyPath: keyPath] = value
+			previousValues[collectionID] = articleCache[collectionID]?[index][keyPath: keyPath] ?? value
+			articleCache[collectionID]?[index][keyPath: keyPath] = value
+		}
+		if mutationName == "read" {
+			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
+		} else if mutationName == "starred" {
+			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
 
 		do {
 			try await apiClient.updateItemState(readerId: article.readerId, tag: tag, enabled: value)
+			if hasLoadedNavigation {
+				await loadNavigation(force: true)
+			}
 		} catch is CancellationError {
 			rollbackStateIfCurrent(
 				articleID: article.id,
@@ -780,7 +1227,8 @@ final class ReaderAppModel {
 				keyPath: keyPath,
 				mutationKey: mutationKey,
 				mutationID: mutationID,
-				previousValues: previousValues
+				previousValues: previousValues,
+				previousNavigation: previousNavigation,
 			)
 		} catch {
 			guard activeMutationIDs[mutationKey] == mutationID else {
@@ -792,7 +1240,8 @@ final class ReaderAppModel {
 				keyPath: keyPath,
 				mutationKey: mutationKey,
 				mutationID: mutationID,
-				previousValues: previousValues
+				previousValues: previousValues,
+				previousNavigation: previousNavigation,
 			)
 			errorMessage = error.localizedDescription
 		}
@@ -804,19 +1253,21 @@ final class ReaderAppModel {
 		keyPath: WritableKeyPath<Recommendation, Bool>,
 		mutationKey: String,
 		mutationID: UUID,
-		previousValues: [ReaderSection: Bool]
+		previousValues: [String: Bool],
+		previousNavigation: ReaderNavigationState,
 	) {
 		guard activeMutationIDs[mutationKey] == mutationID else {
 			return
 		}
-		for (section, previousValue) in previousValues {
-			guard let index = articleCache[section]?.firstIndex(where: { $0.id == articleID }) else {
+		for (collectionID, previousValue) in previousValues {
+			guard let index = articleCache[collectionID]?.firstIndex(where: { $0.id == articleID || $0.readerId == articleID }) else {
 				continue
 			}
-			guard articleCache[section]?[index][keyPath: keyPath] == value else {
+			guard articleCache[collectionID]?[index][keyPath: keyPath] == value else {
 				continue
 			}
-			articleCache[section]?[index][keyPath: keyPath] = previousValue
+			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
 		}
+		navigation = previousNavigation
 	}
 }
