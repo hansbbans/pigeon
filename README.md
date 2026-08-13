@@ -90,7 +90,26 @@ Main files:
 - `src/greader.ts`
 - `src/api-auth.ts`
 
-### 4. Database
+### 4. Reader clients
+
+Pigeon includes two authenticated Reader clients backed by the Google Reader style API:
+
+- `/app` is the browser Reader. It supports Today, unread filtering, folders, feeds, keyboard navigation, article triage, and Mark All Read for a selected feed or folder.
+- `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, unread counts, bulk Mark Above/Below triage, and direct Readwise saves.
+
+The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
+
+The browser client and native client both use the authenticated `/reader/api/0/*` endpoints; the browser Mark All Read action uses `/reader/api/0/mark-all-as-read`.
+
+Native local checks, from `ios/PigeonReader`, are:
+
+```bash
+xcodegen generate
+xcodebuild test -project PigeonReader.xcodeproj -scheme PigeonReader -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+xcodebuild build -project PigeonReader.xcodeproj -scheme PigeonReader -configuration Release -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+```
+
+### 5. Database
 
 The app stores feed metadata in `feeds` and content items in `items`.
 
@@ -237,6 +256,9 @@ If you are changing the public hostname itself, commit the `wrangler.toml` route
 - `src/subscribe.ts`: external RSS subscription endpoint
 - `src/rss-fetcher.ts`: hourly RSS refresh logic
 - `src/greader.ts`: reader-compatible API
+- `src/browser-app.ts`: authenticated browser Reader shell and client
+- `ios/PigeonReader/project.yml`: authoritative native iOS project definition
+- `ios/PigeonReader/PigeonReader/`: native Reader app
 - `04-storage/SCHEMA.sql`: current schema
 - `09-deployment/DEPLOYMENT.md`: older deployment notes
 

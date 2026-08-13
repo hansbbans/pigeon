@@ -1,16 +1,13 @@
 import SwiftUI
 
 struct ArticleListView: View {
-	let destination: ReaderDestination
-	var selectedArticle: ((Recommendation) -> Void)? = nil
+	let collection: ReaderNavigationItem
 	@Environment(ReaderAppModel.self) private var model
 
 	var body: some View {
 		@Bindable var model = model
-		let articles = model.articles(for: destination)
-		let isLoading = model.isLoading(section: destination.sourceSection)
-		let title = model.selectedDestination == destination ? model.selectedDestinationTitle : "Stories"
-		let section = destination.sourceSection
+		let articles = model.articles(for: collection)
+		let isLoading = model.isLoading(collection: collection)
 
 		Group {
 			if isLoading && articles.isEmpty {
@@ -18,15 +15,14 @@ struct ArticleListView: View {
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
 				ContentUnavailableView(
-					destination == .section(.starred) ? "No starred stories" : "You are all caught up",
-					systemImage: destination == .section(.starred) ? "star" : "checkmark.circle",
-					description: Text(destination == .section(.starred) ? "Star a story to keep it here." : "New stories will appear here as Pigeon receives them.")
+					emptyTitle,
+					systemImage: emptySystemImage,
+					description: Text(emptyDescription),
 				)
 			} else {
 				List(articles) { article in
 					Button {
 						model.select(article: article)
-						selectedArticle?(article)
 					} label: {
 						ArticleRowView(article: article)
 					}
@@ -41,39 +37,68 @@ struct ArticleListView: View {
 					.contextMenu {
 						readButton(for: article)
 						starButton(for: article)
+						Divider()
+						markAboveButton(for: article)
+						markBelowButton(for: article)
 					}
 				}
 				.listStyle(.plain)
 			}
 		}
-		.navigationTitle(title)
+		.navigationTitle(collection.title)
 		.refreshable {
-			await model.load(destination: destination, force: true)
+			await model.refresh(collection: collection)
 		}
-		.task(id: destination) {
-			await model.load(destination: destination)
+		.task(id: collection.id) {
+			await model.load(collection: collection)
 		}
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
 				Menu("Sort", systemImage: "arrow.up.arrow.down") {
-					Picker("Sort stories", selection: Binding(
-						get: { model.sortOrder(for: section) },
-						set: { model.setSortOrder($0, for: section) }
-					)) {
+					Picker("Sort stories", selection: $model.sortOrder) {
 						ForEach(ArticleSortOrder.allCases) { sortOrder in
 							Label(sortOrder.title, systemImage: sortOrder.systemImage)
 								.tag(sortOrder)
 						}
 					}
 				}
-				.accessibilityLabel("Sort \(title) stories")
+				.accessibilityLabel(ReaderAccessibilityText.sortStories(for: collection.title))
 
 				Button("Refresh", systemImage: "arrow.clockwise") {
-					Task { await model.load(destination: destination, force: true) }
+					Task { await model.refresh(collection: collection) }
 				}
 				.keyboardShortcut("r", modifiers: .command)
 				.disabled(isLoading)
 			}
+		}
+	}
+
+	private var emptyTitle: String {
+		switch collection.smartSection {
+		case .starred: "No starred stories"
+		case .today: "Nothing from today"
+		case .forYou: "No recommendations yet"
+		case .unread: "You are all caught up"
+		case nil: "No stories yet"
+		}
+	}
+
+	private var emptySystemImage: String {
+		switch collection.smartSection {
+		case .starred: "star"
+		case .today: "calendar"
+		case .forYou: "sparkles"
+		default: "checkmark.circle"
+		}
+	}
+
+	private var emptyDescription: String {
+		switch collection.smartSection {
+		case .starred: "Star a story to keep it here."
+		case .today: "Stories received today will appear here."
+		case .forYou: "Pigeon will surface unread stories as it learns what you like."
+		case .unread: "New stories will appear here as Pigeon receives them."
+		case nil: "New stories will appear here as Pigeon receives them."
 		}
 	}
 
@@ -89,5 +114,19 @@ struct ArticleListView: View {
 			Task { await model.setStarred(article, starred: !article.isStarred) }
 		}
 		.tint(.orange)
+	}
+
+	private func markAboveButton(for article: Recommendation) -> some View {
+		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
+			Task { await model.markStoriesAboveAsRead(article, in: collection) }
+		}
+		.tint(.blue)
+	}
+
+	private func markBelowButton(for article: Recommendation) -> some View {
+		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
+			Task { await model.markStoriesBelowAsRead(article, in: collection) }
+		}
+		.tint(.blue)
 	}
 }

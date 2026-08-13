@@ -22,7 +22,8 @@ struct ArticleReaderView: View {
 						.font(.subheadline.weight(.semibold))
 						.foregroundStyle(.tint)
 					Text(current.title)
-						.font(ReaderTypography.articleTitle)
+						.font(.title)
+						.bold()
 						.textSelection(.enabled)
 					Text(current.receivedAt, format: .dateTime.month(.wide).day().year().hour().minute())
 						.font(.subheadline)
@@ -44,7 +45,11 @@ struct ArticleReaderView: View {
 				Divider()
 
 				if let renderedContent {
-					ArticleBodyView(content: renderedContent, openedDestination: openInlineDestination)
+					ArticleBodyView(
+						content: renderedContent,
+						openedDestination: openInlineDestination,
+						saveToReader: saveInlineDestination
+					)
 				} else {
 					ProgressView("Preparing article")
 				}
@@ -85,31 +90,6 @@ struct ArticleReaderView: View {
 					}
 				}
 			}
-			ToolbarItemGroup(placement: .bottomBar) {
-				Button("Previous Story", systemImage: "chevron.left") {
-					model.selectAdjacentArticle(offset: -1)
-				}
-				.keyboardShortcut("[", modifiers: .command)
-				.disabled(model.canSelectAdjacentArticle(offset: -1) == false)
-				Spacer()
-				Text("Swipe to move between stories")
-					.font(.caption)
-					.foregroundStyle(.secondary)
-					.accessibilityHidden(true)
-				Spacer()
-				Button("Next Story", systemImage: "chevron.right") {
-					model.selectAdjacentArticle(offset: 1)
-				}
-				.keyboardShortcut("]", modifiers: .command)
-				.disabled(model.canSelectAdjacentArticle(offset: 1) == false)
-			}
-		}
-		.simultaneousGesture(articleTraversalGesture)
-		.accessibilityAction(named: "Previous Story") {
-			model.selectAdjacentArticle(offset: -1)
-		}
-		.accessibilityAction(named: "Next Story") {
-			model.selectAdjacentArticle(offset: 1)
 		}
 		.onScrollGeometryChange(for: CGFloat.self) { geometry in
 			let maximumOffset = max(geometry.contentSize.height - geometry.containerSize.height, 1)
@@ -137,19 +117,11 @@ struct ArticleReaderView: View {
 		}
 	}
 
-	private func makeAttributedContent(from article: Recommendation) -> AttributedString {
-		ArticleContentFormatter.make(html: article.html, fallback: article.text ?? article.title)
+	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
+		try await model.saveToReader(destination)
 	}
 
-	private var articleTraversalGesture: some Gesture {
-		DragGesture(minimumDistance: 40)
-			.onEnded { value in
-				let horizontal = value.predictedEndTranslation.width
-				let vertical = value.predictedEndTranslation.height
-				guard abs(horizontal) > 90, abs(horizontal) > abs(vertical) * 1.35 else {
-					return
-				}
-				model.selectAdjacentArticle(offset: horizontal < 0 ? 1 : -1)
-			}
+	private func makeAttributedContent(from article: Recommendation) -> AttributedString {
+		ArticleContentFormatter.make(html: article.html, fallback: article.text ?? article.title)
 	}
 }

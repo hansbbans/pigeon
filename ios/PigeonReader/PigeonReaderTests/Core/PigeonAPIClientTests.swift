@@ -46,6 +46,21 @@ struct PigeonAPIClientTests {
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
 	}
 
+	@Test func streamRecommendationsIncludeTheOriginSourceInTheirExplanation() async throws {
+		let response = Data(
+			"""
+			{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
+			""".utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let items = try await client.recommendations(from: "feed/7")
+
+		#expect(items.first?.explanation == "From Daily")
+	}
+
 	@Test func clientLoginPreservesAnOptionalServerPath() async throws {
 		let mock = MockHTTPClient(responseData: Data("Auth=pigeon/server-token".utf8))
 		let baseURL = try #require(URL(string: "https://pigeon.test/reader/"))
@@ -116,7 +131,7 @@ struct PigeonAPIClientTests {
 		let response = Data(
 			"""
 			{"subscriptions":[{"id":"feed/7","title":"Daily","categories":[{"id":"user/-/label/News","label":"News"}],"url":"https://pigeon.test/feed/daily","htmlUrl":"https://example.com","iconUrl":""}]}
-			""".utf8
+			""".utf8,
 		)
 		let mock = MockHTTPClient(responseData: response)
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -136,7 +151,7 @@ struct PigeonAPIClientTests {
 		let response = Data(
 			"""
 			{"query":"https://example.com/feed.xml","numResults":1,"streamId":"feed/7","streamName":"Example"}
-			""".utf8
+			""".utf8,
 		)
 		let mock = MockHTTPClient(responseData: response)
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -148,7 +163,7 @@ struct PigeonAPIClientTests {
 			id: added.streamId,
 			title: "Example Daily",
 			addingFolders: ["News", "Reading"],
-			removingFolders: ["Old"]
+			removingFolders: ["Old"],
 		)
 
 		let requests = await mock.requests()

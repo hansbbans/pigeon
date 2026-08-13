@@ -64,6 +64,30 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(RecommendationsResponse.self, from: data).items
 	}
 
+	func navigationSnapshot(
+		now: Date = .now,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async throws -> ReaderNavigationSnapshot {
+		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: now)
+		async let subscriptions = readerSubscriptions()
+		async let unreadCounts = readerUnreadCounts()
+		async let starredUnreadCount = unreadCount(in: "user/-/state/com.google/starred")
+		async let todayUnreadCount = unreadCount(on: bounds)
+		return try await ReaderNavigationSnapshot(
+			subscriptions: subscriptions,
+			unreadCounts: unreadCounts,
+			starredUnreadCount: starredUnreadCount,
+			todayUnreadCount: todayUnreadCount,
+		)
+	}
+
+	func readerSubscriptions() async throws -> [ReaderSubscription] {
+		let (data, _) = try await requestJSON(path: "reader/api/0/subscription/list")
+		return try decoder.decode(ReaderSubscriptionListResponse.self, from: data).subscriptions
+	}
+
+	// Keep the feed-library API available to the existing management screens while the
+	// reader sidebar uses the richer ReaderSubscription models above.
 	func subscriptions() async throws -> [FeedSubscription] {
 		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "reader/api/0/subscription/list"))
 		request.httpMethod = "GET"
@@ -112,6 +136,51 @@ struct PigeonAPIClient: Sendable {
 		])
 	}
 
+	func readerUnreadCounts() async throws -> [ReaderUnreadCount] {
+		let (data, response) = try await requestJSON(path: "reader/api/0/unread-count")
+		_ = response
+		return try decoder.decode(ReaderUnreadCountResponse.self, from: data).unreadCounts
+	}
+
+	func streamContents(
+		streamID: String,
+		excludeTag: String? = nil,
+		limit: Int = 1_000,
+		continuation: String? = nil,
+	) async throws -> ReaderStreamContentsResponse {
+		var components = try endpointComponents(path: "reader/api/0/stream/contents")
+		var queryItems = [
+			URLQueryItem(name: "s", value: streamID),
+			URLQueryItem(name: "n", value: String(min(max(limit, 1), 1_000))),
+		]
+		if let excludeTag {
+			queryItems.append(URLQueryItem(name: "xt", value: excludeTag))
+		}
+		if let continuation {
+			queryItems.append(URLQueryItem(name: "c", value: continuation))
+		}
+		components.queryItems = queryItems
+		let (data, _) = try await requestJSON(components: components)
+		return try decoder.decode(ReaderStreamContentsResponse.self, from: data)
+	}
+
+	func recommendations(from streamID: String, dayBounds: ReaderLocalDayBounds? = nil) async throws -> [Recommendation] {
+		let items = try await streamItems(streamID: streamID, dayBounds: dayBounds)
+		return items.map { recommendation(from: $0, fallbackStreamID: streamID) }
+	}
+
+	func unreadCount(in streamID: String) async throws -> Int {
+		try await streamItems(streamID: streamID, excludeTag: "user/-/state/com.google/read").count
+	}
+
+	func unreadCount(on dayBounds: ReaderLocalDayBounds) async throws -> Int {
+		try await streamItems(
+			streamID: "user/-/state/com.google/reading-list",
+			excludeTag: "user/-/state/com.google/read",
+			dayBounds: dayBounds,
+		).count
+	}
+
 	func updateItemState(readerId: String, tag: String, enabled: Bool) async throws {
 		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "reader/api/0/edit-tag"))
 		request.httpMethod = "POST"
@@ -133,6 +202,95 @@ struct PigeonAPIClient: Sendable {
 		let encoder = JSONEncoder()
 		encoder.dateEncodingStrategy = .iso8601
 		request.httpBody = try encoder.encode(EngagementEnvelope(events: events))
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
+	private func streamItems(
+		streamID: String,
+		excludeTag: String? = nil,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async throws -> [ReaderStreamItem] {
+		var items: [ReaderStreamItem] = []
+		var continuation: String?
+		var seenContinuations = Set<String>()
+
+		while true {
+			let page = try await streamContents(
+				streamID: streamID,
+				excludeTag: excludeTag,
+				continuation: continuation,
+			)
+			var reachedDayBoundary = false
+			for item in page.items {
+				let date = Date(timeIntervalSince1970: TimeInterval(item.published))
+				if let dayBounds {
+					if date < dayBounds.start {
+						reachedDayBoundary = true
+						break
+					}
+					if dayBounds.contains(date) {
+						items.append(item)
+					}
+				} else {
+					items.append(item)
+				}
+			}
+
+			if reachedDayBoundary || page.continuation == nil {
+				return items
+			}
+			guard let nextContinuation = page.continuation, seenContinuations.insert(nextContinuation).inserted else {
+				return items
+			}
+			continuation = nextContinuation
+		}
+	}
+
+	private func recommendation(from item: ReaderStreamItem, fallbackStreamID: String) -> Recommendation {
+		let source = item.origin?.title ?? "Pigeon"
+		let html = item.content?.content ?? item.summary?.content ?? "<p>No article content available.</p>"
+		return Recommendation(
+			id: item.id,
+			readerId: item.id,
+			feedKey: item.origin?.streamID ?? fallbackStreamID,
+			source: source,
+			title: item.title,
+			html: html,
+			text: nil,
+			originalURL: item.alternate.first.flatMap { URL(string: $0.href) },
+			receivedAt: Date(timeIntervalSince1970: TimeInterval(item.published)),
+			isRead: item.isRead,
+			isStarred: item.isStarred,
+			score: 0,
+			confidence: 0,
+			sampleCount: 0,
+			explanation: "From \(source)",
+			learningState: "Reader subscription",
+		)
+	}
+
+	private func requestJSON(path: String) async throws -> (Data, URLResponse) {
+		let components = try endpointComponents(path: path)
+		return try await requestJSON(components: components)
+	}
+
+	private func requestJSON(components: URLComponents) async throws -> (Data, URLResponse) {
+		let url = try endpointURL(components: components)
+		var request = makeAuthorizedRequest(url: url)
+		request.httpMethod = "GET"
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		return (data, response)
+	}
+
+	private func sendSubscriptionEdit(_ queryItems: [URLQueryItem]) async throws {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "reader/api/0/subscription/edit"))
+		request.httpMethod = "POST"
+		request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		var components = URLComponents()
+		components.queryItems = queryItems
+		request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
 		let (data, response) = try await httpClient.data(for: request)
 		try Self.validate(response: response, data: data)
 	}
@@ -162,17 +320,6 @@ struct PigeonAPIClient: Sendable {
 		request.setValue("GoogleLogin auth=pigeon/\(session.token)", forHTTPHeaderField: "Authorization")
 		request.setValue("application/json", forHTTPHeaderField: "Accept")
 		return request
-	}
-
-	private func sendSubscriptionEdit(_ queryItems: [URLQueryItem]) async throws {
-		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "reader/api/0/subscription/edit"))
-		request.httpMethod = "POST"
-		request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
-		var components = URLComponents()
-		components.queryItems = queryItems
-		request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
-		let (data, response) = try await httpClient.data(for: request)
-		try Self.validate(response: response, data: data)
 	}
 
 	private static func normalizeServerURL(_ url: URL) throws -> URL {

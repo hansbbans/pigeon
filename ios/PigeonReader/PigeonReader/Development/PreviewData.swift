@@ -10,14 +10,45 @@ enum PreviewData {
 		let session = PigeonSession(baseURL: baseURL, token: "preview-token")
 		let model = ReaderAppModel(
 			sessionStore: PreviewSessionStore(session: session),
-			httpClient: PreviewHTTPClient()
+			httpClient: PreviewHTTPClient(),
+			readwiseTokenStore: PreviewReadwiseTokenStore()
 		)
 		model.setArticles(articles, for: .forYou)
 		model.setArticles(articles.filter { $0.isRead == false }, for: .unread)
 		model.setArticles(articles.filter(\.isStarred), for: .starred)
-		model.setSubscriptions(subscriptions)
-		model.select(section: .forYou)
-		return model
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: [
+					ReaderSubscription(
+						id: "feed/1",
+						title: "Dense Discovery",
+						categories: [ReaderSubscriptionCategory(id: "user/-/label/Design", label: "Design")],
+						url: "https://pigeon.preview/feed/dense-discovery",
+					),
+					ReaderSubscription(
+						id: "feed/2",
+						title: "Marginal Revolution",
+						categories: [ReaderSubscriptionCategory(id: "user/-/label/Design", label: "Design")],
+						url: "https://pigeon.preview/feed/marginal-revolution",
+					),
+					ReaderSubscription(
+						id: "feed/3",
+						title: "Stratechery",
+						url: "https://pigeon.preview/feed/stratechery",
+					),
+				],
+				unreadCounts: [
+					ReaderUnreadCount(id: "feed/1", count: 1),
+					ReaderUnreadCount(id: "feed/2", count: 1),
+					ReaderUnreadCount(id: "user/-/label/Design", count: 2),
+					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: 2),
+				],
+				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 1, unread: 2, starred: 1),
+			),
+				markAsLoaded: true,
+			)
+			model.select(section: .forYou)
+			return model
 	}
 
 	static let articles: [Recommendation] = [
@@ -76,39 +107,5 @@ enum PreviewData {
 			learningState: "Still learning"
 		),
 	]
-
-	static let subscriptions: [FeedSubscription] = [
-		FeedSubscription(
-			id: "feed/1",
-			title: "Dense Discovery",
-			categories: [FeedCategory(id: "user/-/label/Design", label: "Design")],
-			url: previewURL("https://pigeon.preview/feed/dense-discovery"),
-			htmlUrl: URL(string: "https://example.com"),
-			iconUrl: nil
-		),
-		FeedSubscription(
-			id: "feed/2",
-			title: "Marginal Revolution",
-			categories: [FeedCategory(id: "user/-/label/Ideas", label: "Ideas")],
-			url: previewURL("https://pigeon.preview/feed/marginal-revolution"),
-			htmlUrl: URL(string: "https://example.com"),
-			iconUrl: nil
-		),
-		FeedSubscription(
-			id: "feed/3",
-			title: "Stratechery",
-			categories: [],
-			url: previewURL("https://pigeon.preview/feed/stratechery"),
-			htmlUrl: URL(string: "https://example.com"),
-			iconUrl: nil
-		),
-	]
-
-	private static func previewURL(_ value: String) -> URL {
-		guard let url = URL(string: value) else {
-			preconditionFailure("Invalid preview URL")
-		}
-		return url
-	}
 }
 #endif

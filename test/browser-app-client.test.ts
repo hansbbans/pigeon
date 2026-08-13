@@ -576,6 +576,7 @@ function createElement(
 		tagName: tagName.toUpperCase(),
 		value: initialValue,
 		srcdoc: '',
+		disabled: false,
 		hidden: false,
 		isContentEditable: false,
 		parentElement: null as ReturnType<typeof createElement> | null,
@@ -802,6 +803,7 @@ async function createBrowserHarness(options?: {
 		['articles-status', createElement('', [], 'p', registerFocus)],
 		['articles-list', createElement('', [], 'ul', registerFocus)],
 		['load-more-button', createElement('', ['hidden'], 'button', registerFocus)],
+		['mark-all-as-read-button', createElement('', ['hidden'], 'button', registerFocus)],
 		['reader-source-label', createElement('', [], 'p', registerFocus)],
 		['reader-source-note', createElement('', [], 'p', registerFocus)],
 		['open-original-button', createElement('', [], 'button', registerFocus)],
@@ -1819,6 +1821,11 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 							title: 'Unread Folder Feed',
 							categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
 						},
+						{
+							id: 'feed/5',
+							title: 'Empty Folder Feed',
+							categories: [{ id: 'user/-/label/Read Only', label: 'Read Only' }],
+						},
 					],
 				});
 			}
@@ -1830,6 +1837,7 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 						{ id: 'feed/2', count: 2 },
 						{ id: 'feed/3', count: 0 },
 						{ id: 'feed/4', count: 3 },
+						{ id: 'feed/5', count: 0 },
 					],
 				});
 			}
@@ -1866,6 +1874,8 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /0/);
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Unread Inbox/);
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /2/);
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Newsletters')?.textContent ?? '', /Newsletters/);
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only')?.textContent ?? '', /Read Only/);
 
 	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters')?.dispatch('click');
 	await waitForBrowserCondition(() =>
@@ -1969,7 +1979,6 @@ test('runtime unread filtering hides empty folders and restores the full library
 	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
-
 	await findListButtonByViewId(elements.get('views-list'), 'recent')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Recently read');
 	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
@@ -1978,7 +1987,6 @@ test('runtime unread filtering hides empty folders and restores the full library
 	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
-
 	await findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread Inbox');
 	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
@@ -2335,6 +2343,334 @@ test('runtime script expands folder feeds and requests the folder label stream w
 	await waitForBrowserCondition(() => !findListButtonByViewId(elements.get('folders-list'), 'feed/1'));
 });
 
+test('runtime mark-all action scopes a feed request and refreshes articles and unread counts', async () => {
+	let unreadCountCalls = 0;
+	const markRequests: string[] = [];
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Alpha' },
+						{ id: 'feed/2', title: 'Bravo' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				unreadCountCalls += 1;
+				return Response.json({
+					unreadcounts:
+						unreadCountCalls === 1
+							? [
+									{ id: 'feed/1', count: 2 },
+									{ id: 'feed/2', count: 4 },
+									{ id: 'user/-/state/com.google/reading-list', count: 6 },
+								]
+							: [
+									{ id: 'feed/1', count: 0 },
+									{ id: 'feed/2', count: 4 },
+									{ id: 'user/-/state/com.google/reading-list', count: 4 },
+								],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
+				return Response.json({ itemRefs: streamId === 'feed/1' && unreadCountCalls === 1 ? [{ id: '101' }] : [] });
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'Alpha article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Alpha preview' },
+							content: { content: '<p>Alpha body</p>' },
+						},
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
+				markRequests.push(String(init.body?.get('s') ?? ''));
+				return new Response('OK', { status: 200 });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			elements.get('articles-heading')?.textContent === 'Alpha' &&
+			elements.get('mark-all-as-read-button')?.disabled === false &&
+			Boolean(findListButtonByItemId(elements.get('articles-list'), '101')),
+	);
+
+	await elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			unreadCountCalls === 2 &&
+			elements.get('articles-list')?.children.length === 0 &&
+			elements.get('mark-all-as-read-button')?.disabled === true,
+	);
+
+	assert.deepEqual(markRequests, ['feed/1']);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /Alpha/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /0/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Bravo/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /4/);
+	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Alpha.');
+});
+
+test('runtime mark-all action scopes a folder request and leaves other feeds unchanged', async () => {
+	let unreadCountCalls = 0;
+	const markRequests: string[] = [];
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{
+							id: 'feed/1',
+							title: 'Alpha',
+							categories: [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }],
+						},
+						{
+							id: 'feed/2',
+							title: 'Bravo',
+							categories: [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }],
+						},
+						{ id: 'feed/3', title: 'Charlie' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				unreadCountCalls += 1;
+				return Response.json({
+					unreadcounts:
+						unreadCountCalls === 1
+							? [
+									{ id: 'feed/1', count: 1 },
+									{ id: 'feed/2', count: 2 },
+									{ id: 'feed/3', count: 5 },
+									{ id: 'user/-/label/Daily Reads', count: 3 },
+									{ id: 'user/-/state/com.google/reading-list', count: 8 },
+								]
+							: [
+									{ id: 'feed/1', count: 0 },
+									{ id: 'feed/2', count: 0 },
+									{ id: 'feed/3', count: 5 },
+									{ id: 'user/-/label/Daily Reads', count: 0 },
+									{ id: 'user/-/state/com.google/reading-list', count: 5 },
+								],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
+				return Response.json({
+					itemRefs: streamId === 'user/-/label/Daily Reads' && unreadCountCalls === 1 ? [{ id: '201' }] : [],
+				});
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/00000000000000c9',
+							title: 'Folder article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Folder preview' },
+							content: { content: '<p>Folder body</p>' },
+						},
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
+				markRequests.push(String(init.body?.get('s') ?? ''));
+				return new Response('OK', { status: 200 });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')));
+	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			elements.get('articles-heading')?.textContent === 'Daily Reads' &&
+			elements.get('mark-all-as-read-button')?.disabled === false &&
+			Boolean(findListButtonByItemId(elements.get('articles-list'), '201')),
+	);
+
+	await elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			unreadCountCalls === 2 &&
+			elements.get('articles-list')?.children.length === 0 &&
+			elements.get('mark-all-as-read-button')?.disabled === true,
+	);
+
+	assert.deepEqual(markRequests, ['user/-/label/Daily Reads']);
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.textContent ?? '', /Daily Reads/);
+	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.textContent ?? '', /0/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/3')?.textContent ?? '', /Charlie/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/3')?.textContent ?? '', /5/);
+	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Daily Reads.');
+});
+
+test('runtime mark-all action is a safe no-op for a selected feed with zero unread items', async () => {
+	let markRequestCount = 0;
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/1', count: 0 },
+						{ id: 'user/-/state/com.google/reading-list', count: 0 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({ itemRefs: [] });
+			}
+
+			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
+				markRequestCount += 1;
+				return new Response('OK', { status: 200 });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			elements.get('articles-heading')?.textContent === 'Alpha' &&
+			elements.get('mark-all-as-read-button')?.classList.contains('hidden') === false,
+	);
+
+	const markButton = elements.get('mark-all-as-read-button');
+	assert.equal(markButton?.disabled, true);
+	assert.equal(markButton?.getAttribute('aria-label'), 'Mark all items in Alpha as read');
+	await markButton?.dispatch('click');
+	await flushBrowserTasks();
+
+	assert.equal(markRequestCount, 0);
+	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Alpha.');
+	assert.equal(markButton?.disabled, true);
+});
+
+test('runtime mark-all action surfaces request failures without changing the selected view', async () => {
+	let unreadCountCalls = 0;
+	let markRequestCount = 0;
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Alpha' },
+						{ id: 'feed/2', title: 'Bravo' },
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				unreadCountCalls += 1;
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/1', count: 2 },
+						{ id: 'feed/2', count: 7 },
+						{ id: 'user/-/state/com.google/reading-list', count: 9 },
+					],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
+				return Response.json({ itemRefs: streamId === 'feed/1' ? [{ id: '301' }] : [] });
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/000000000000012d',
+							title: 'Still unread article',
+							published: 1_742_460_800,
+							origin: { title: 'Alpha' },
+							summary: { content: 'Still visible' },
+							content: { content: '<p>Still present</p>' },
+						},
+					],
+				});
+			}
+
+			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
+				markRequestCount += 1;
+				return new Response('Request failed', { status: 500 });
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(
+		() =>
+			elements.get('articles-heading')?.textContent === 'Alpha' &&
+			Boolean(findListButtonByItemId(elements.get('articles-list'), '301')),
+	);
+
+	await elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not mark all as read.');
+
+	assert.equal(markRequestCount, 1);
+	assert.equal(unreadCountCalls, 1);
+	assert.ok(findListButtonByItemId(elements.get('articles-list'), '301'));
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /2/);
+	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /7/);
+	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
+});
 test('stale status responses do not overwrite logout state or suppress a later settings fetch', async () => {
 	const firstStatus = createDeferred<Response>();
 	const statusCalls: string[] = [];
