@@ -8,6 +8,8 @@ struct SettingsView: View {
 	@State private var readwiseMessageIsError = false
 
 	var body: some View {
+		@Bindable var typography = model.readerTypography
+
 		NavigationStack {
 			Form {
 				Section("Connection") {
@@ -15,6 +17,36 @@ struct SettingsView: View {
 					Text("Your password is never stored here. Pigeon Reader keeps only the ClientLogin token in Keychain.")
 						.font(.footnote)
 						.foregroundStyle(.secondary)
+				}
+
+				Section("Reading") {
+					LabeledContent("Text size") {
+						Text(typography.textScale, format: .percent.precision(.fractionLength(0)))
+							.foregroundStyle(.secondary)
+					}
+					Slider(
+						value: $typography.textScale,
+						in: ReaderTypographySettings.textScaleRange,
+						step: 0.05,
+						label: { Text("Text size") },
+					)
+					.accessibilityValue(Text(typography.textScale, format: .percent.precision(.fractionLength(0))))
+
+					LabeledContent("Line spacing") {
+						Text(typography.lineHeight, format: .number.precision(.fractionLength(2)))
+							.foregroundStyle(.secondary)
+					}
+					Slider(
+						value: $typography.lineHeight,
+						in: ReaderTypographySettings.lineHeightRange,
+						step: 0.05,
+						label: { Text("Line spacing") },
+					)
+					.accessibilityValue(Text(typography.lineHeight, format: .number.precision(.fractionLength(2))))
+
+					Button("Reset reading controls", systemImage: "arrow.counterclockwise") {
+						typography.reset()
+					}
 				}
 
 				Section("Readwise Reader") {

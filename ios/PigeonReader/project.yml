@@ -21,6 +21,8 @@ targets:
     platform: iOS
     sources:
       - path: PigeonReader
+    resources:
+      - path: PigeonReader/Resources/Readability.js
     info:
       path: PigeonReader/Resources/Info.plist
       properties:
@@ -53,6 +55,7 @@ targets:
     scheme:
       testTargets:
         - PigeonReaderTests
+        - PigeonReaderUITests
   PigeonReaderTests:
     type: bundle.unit-test
     platform: iOS
@@ -64,3 +67,15 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.tests
         GENERATE_INFOPLIST_FILE: YES
+  PigeonReaderUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: PigeonReaderUITests
+    dependencies:
+      - target: PigeonReader
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated

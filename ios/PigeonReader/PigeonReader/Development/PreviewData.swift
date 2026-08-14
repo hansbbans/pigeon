@@ -58,7 +58,26 @@ enum PreviewData {
 			feedKey: "dense-discovery",
 			source: "Dense Discovery",
 			title: "Designing calmer tools for people who read every day",
-			html: "<article style='font-family: Papyrus; color: red'><p>Good reading software gets out of the way. It keeps navigation predictable, typography quiet, and the original source one deliberate action away.</p><p><a href='https://example.com/design?private=ignored'>Read the design notes</a> for the longer argument.</p></article>",
+			html: """
+			<article>
+				<h1>The quiet craft of a good reading surface</h1>
+				<p>Good reading software gets out of the way. It keeps navigation predictable, typography quiet, and the original source one deliberate action away.</p>
+				<p><strong>Rich content should still feel calm.</strong> A useful reader makes hierarchy visible without shouting.</p>
+				<figure>
+					<a href="https://example.com/design/photo"><img src="https://images.unsplash.com/photo-1499750310107-5fef28a66643?auto=format&amp;fit=crop&amp;w=1200&amp;q=80" srcset="https://images.unsplash.com/photo-1499750310107-5fef28a66643?auto=format&amp;fit=crop&amp;w=640&amp;q=80 640w, https://images.unsplash.com/photo-1499750310107-5fef28a66643?auto=format&amp;fit=crop&amp;w=1200&amp;q=80 1200w" alt="A notebook beside a cup of coffee" width="1200" height="800"></a>
+					<figcaption>A clear page gives attention somewhere to land.</figcaption>
+				</figure>
+				<h2>Small decisions compound</h2>
+				<ul><li>Headings make a long story navigable.</li><li>Lists let the eye move quickly.</li><li><em>Emphasis</em> keeps the voice human.</li></ul>
+				<hr>
+				<blockquote>Make the next useful action obvious, then get out of the way.</blockquote>
+				<pre><code>reader.mode = .calm\nreader.distraction = .low</code></pre>
+				<table><caption>A tiny reading checklist</caption><thead><tr><th>Signal</th><th>Question</th></tr></thead><tbody><tr><td>Rhythm</td><td>Can the eye find the next paragraph?</td></tr><tr><td>Images</td><td>Do they stay inside the column?</td></tr></tbody></table>
+				<p><a href="https://example.com/design?private=ignored">Read the design notes</a> for the longer argument.</p>
+				<img src="/images/missing-preview-image.png" alt="A missing preview image">
+				<script>alert('should not run')</script><form><input value="unsafe"></form>
+			</article>
+			""",
 			text: "Good reading software gets out of the way.",
 			originalURL: URL(string: "https://example.com/design"),
 			receivedAt: Date(timeIntervalSince1970: 1_786_272_000),
@@ -86,7 +105,7 @@ enum PreviewData {
 			confidence: 0.64,
 			sampleCount: 8,
 			explanation: "Recent and similar to stories you read for several minutes.",
-			learningState: "Learning your interests"
+			learningState: "Learning your interests",
 		),
 		Recommendation(
 			id: "preview-3",
