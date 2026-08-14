@@ -67,6 +67,15 @@ struct ReaderStreamContentsResponse: Decodable, Sendable {
 	let continuation: String?
 }
 
+struct ReaderStreamItemIDsResponse: Decodable, Sendable {
+	let itemRefs: [ReaderStreamItemReference]
+	let continuation: String?
+}
+
+struct ReaderStreamItemReference: Decodable, Sendable {
+	let id: String
+}
+
 struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let id: String
 	let categories: [String]
@@ -139,6 +148,6 @@ struct ReaderNavigationSmartCounts: Equatable, Sendable {
 struct ReaderNavigationSnapshot: Sendable {
 	let subscriptions: [ReaderSubscription]
 	let unreadCounts: [ReaderUnreadCount]
-	let starredUnreadCount: Int
-	let todayUnreadCount: Int
+	let starredUnreadCount: Int?
+	let todayUnreadCount: Int?
 }

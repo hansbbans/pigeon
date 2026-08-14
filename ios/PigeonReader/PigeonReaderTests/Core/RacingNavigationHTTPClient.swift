@@ -83,8 +83,8 @@ actor RacingNavigationHTTPClient: HTTPClient {
 			return Data("{\"unreadcounts\":[{\"id\":\"feed/1\",\"count\":1},{\"id\":\"user/-/label/Stale\",\"count\":1},{\"id\":\"user/-/state/com.google/reading-list\",\"count\":1}]}".utf8)
 		case ("/reader/api/0/unread-count", .fresh):
 			return Data("{\"unreadcounts\":[{\"id\":\"feed/1\",\"count\":9},{\"id\":\"user/-/label/Fresh\",\"count\":9},{\"id\":\"user/-/state/com.google/reading-list\",\"count\":9}]}".utf8)
-		case ("/reader/api/0/stream/contents", _):
-			return Data("{\"id\":\"stream\",\"updated\":0,\"items\":[]}".utf8)
+		case ("/reader/api/0/stream/items/ids", _):
+			return Data("{\"itemRefs\":[]}".utf8)
 		default:
 			return Data("{}".utf8)
 		}

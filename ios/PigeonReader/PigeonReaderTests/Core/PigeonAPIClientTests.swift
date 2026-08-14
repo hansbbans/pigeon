@@ -177,4 +177,28 @@ struct PigeonAPIClientTests {
 		#expect(form.filter { $0.name == "a" }.map(\.value) == ["user/-/label/News", "user/-/label/Reading"])
 		#expect(form.filter { $0.name == "r" }.map(\.value) == ["user/-/label/Old"])
 	}
+
+	@Test func cloudflareResourceErrorUsesConciseUserFacingDescription() async throws {
+		let payload = Data(
+			"""
+			{"title":"Error 1102: Worker exceeded resource limits","status":503,"error_code":1102,"error_name":"worker_exceeded_resources","ray_id":"a2aacd260d7a1c3f"}
+			""".utf8,
+		)
+		let mock = MockHTTPClient(responseData: payload, statusCode: 503)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		do {
+			_ = try await client.readerUnreadCounts()
+			Issue.record("Expected the server response to fail.")
+		} catch let error as PigeonError {
+			let description = error.localizedDescription
+			#expect(description.contains("Cloudflare 1102"))
+			#expect(description.contains("a2aacd260d7a1c3f"))
+			#expect(description.contains("{\"title\"") == false)
+			#expect(description.count < 240)
+		} catch {
+			Issue.record("Unexpected error: \(error)")
+		}
+	}
 }
