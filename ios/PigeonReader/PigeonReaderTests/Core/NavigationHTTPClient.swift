@@ -8,9 +8,11 @@ actor NavigationHTTPClient: HTTPClient {
 	private let starredSecondPage: Data
 	private let todayFirstPage: Data
 	private let todaySecondPage: Data
+	private let failingSmartStreamID: String?
 	private var requestURLs: [URL] = []
 
-	init(now: Date, dayBounds: ReaderLocalDayBounds) {
+	init(now _: Date, dayBounds _: ReaderLocalDayBounds, failingSmartStreamID: String? = nil) {
+		self.failingSmartStreamID = failingSmartStreamID
 		subscriptionResponse = Data(
 			"""
 			{"subscriptions":[
@@ -32,24 +34,20 @@ actor NavigationHTTPClient: HTTPClient {
 			]}
 			""".utf8,
 		)
-		starredFirstPage = Self.streamResponse(
-			streamID: "user/-/state/com.google/starred",
-			items: [Self.itemJSON(id: "starred-1", published: Int(now.timeIntervalSince1970), categories: ["user/-/state/com.google/reading-list", "user/-/state/com.google/starred"])],
+		starredFirstPage = Self.itemIDsResponse(
+			ids: ["starred-1"],
 			continuation: "starred-2",
 		)
-		starredSecondPage = Self.streamResponse(
-			streamID: "user/-/state/com.google/starred",
-			items: [Self.itemJSON(id: "starred-2", published: dayBounds.startSeconds - 86_400, categories: ["user/-/state/com.google/reading-list", "user/-/state/com.google/starred"])],
+		starredSecondPage = Self.itemIDsResponse(
+			ids: ["starred-2"],
 			continuation: nil,
 		)
-		todayFirstPage = Self.streamResponse(
-			streamID: "user/-/state/com.google/reading-list",
-			items: [Self.itemJSON(id: "today-1", published: dayBounds.startSeconds + 3_600, categories: ["user/-/state/com.google/reading-list"])],
+		todayFirstPage = Self.itemIDsResponse(
+			ids: ["today-1"],
 			continuation: "today-2",
 		)
-		todaySecondPage = Self.streamResponse(
-			streamID: "user/-/state/com.google/reading-list",
-			items: [Self.itemJSON(id: "yesterday-1", published: dayBounds.startSeconds - 1, categories: ["user/-/state/com.google/reading-list"])],
+		todaySecondPage = Self.itemIDsResponse(
+			ids: [],
 			continuation: nil,
 		)
 	}
@@ -68,13 +66,17 @@ actor NavigationHTTPClient: HTTPClient {
 			responseData = subscriptionResponse
 		case "/reader/api/0/unread-count":
 			responseData = unreadResponse
-		case "/reader/api/0/stream/contents":
+		case "/reader/api/0/stream/items/ids":
+			if streamID == failingSmartStreamID {
+				let payload = Data("{\"error_code\":1102,\"error_name\":\"worker_exceeded_resources\",\"ray_id\":\"test-ray\"}".utf8)
+				return (payload, try Self.response(for: url, statusCode: 503))
+			}
 			switch (streamID, continuation) {
 			case ("user/-/state/com.google/starred", nil): responseData = starredFirstPage
 			case ("user/-/state/com.google/starred", "starred-2"): responseData = starredSecondPage
 			case ("user/-/state/com.google/reading-list", nil): responseData = todayFirstPage
 			case ("user/-/state/com.google/reading-list", "today-2"): responseData = todaySecondPage
-			default: responseData = Self.streamResponse(streamID: streamID ?? "", items: [], continuation: nil)
+			default: responseData = Self.itemIDsResponse(ids: [], continuation: nil)
 			}
 		default:
 			let errorResponse = try Self.response(for: url, statusCode: 404)
@@ -94,13 +96,9 @@ actor NavigationHTTPClient: HTTPClient {
 		return response
 	}
 
-	private static func itemJSON(id: String, published: Int, categories: [String]) -> String {
-		let encodedCategories = categories.map { "\"\($0)\"" }.joined(separator: ",")
-		return "{\"id\":\"\(id)\",\"categories\":[\(encodedCategories)],\"title\":\"Story\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"Alpha\",\"htmlUrl\":\"https://example.com\"}}"
-	}
-
-	private static func streamResponse(streamID: String, items: [String], continuation: String?) -> Data {
+	private static func itemIDsResponse(ids: [String], continuation: String?) -> Data {
+		let itemRefs = ids.map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
 		let continuationJSON = continuation.map { ",\"continuation\":\"\($0)\"" } ?? ""
-		return Data("{\"id\":\"\(streamID)\",\"updated\":0,\"items\":[\(items.joined(separator: ","))]\(continuationJSON)}".utf8)
+		return Data("{\"itemRefs\":[\(itemRefs)]\(continuationJSON)}".utf8)
 	}
 }

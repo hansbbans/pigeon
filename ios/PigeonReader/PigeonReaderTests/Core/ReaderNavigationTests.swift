@@ -118,7 +118,7 @@ struct ReaderNavigationTests {
 	}
 
 	@MainActor
-	@Test func refreshUsesAllStarredPagesAndStopsTodayAtLocalBoundary() async throws {
+	@Test func refreshUsesPaginatedItemIDsAndServerSideTodayBoundary() async throws {
 		var calendar = Calendar(identifier: .gregorian)
 		calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
 		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 8, day: 13, hour: 7, minute: 48)))
@@ -136,6 +136,48 @@ struct ReaderNavigationTests {
 		#expect(requests.contains(where: { $0.path == "/reader/api/0/unread-count" }))
 		#expect(requests.contains(where: { $0.query?.contains("c=starred-2") == true }))
 		#expect(requests.contains(where: { $0.query?.contains("c=today-2") == true }))
+		#expect(requests.contains(where: { $0.path == "/reader/api/0/stream/contents" }) == false)
+		let todayRequest = try #require(requests.first(where: { url in
+			guard url.path == "/reader/api/0/stream/items/ids" else {
+				return false
+			}
+			let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+			return queryItems.first(where: { $0.name == "s" })?.value == "user/-/state/com.google/reading-list"
+				&& queryItems.first(where: { $0.name == "c" }) == nil
+		}))
+		let todayQueryItems = URLComponents(url: todayRequest, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(todayQueryItems.first(where: { $0.name == "xt" })?.value == "user/-/state/com.google/read")
+		#expect(todayQueryItems.first(where: { $0.name == "ot" })?.value == String(bounds.startSeconds - 1))
+		#expect(todayQueryItems.first(where: { $0.name == "n" })?.value == "1000")
+	}
+
+	@MainActor
+	@Test func smartCountFailureKeepsPreviousSmartCountWhileRefreshingFeedCounts() async throws {
+		var calendar = Calendar(identifier: .gregorian)
+		calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 8, day: 13, hour: 7, minute: 48)))
+		let bounds = ReaderLocalDayBounds.localDay(containing: now, calendar: calendar)
+		let client = NavigationHTTPClient(
+			now: now,
+			dayBounds: bounds,
+			failingSmartStreamID: "user/-/state/com.google/reading-list",
+		)
+		let model = try makeModel(httpClient: client)
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: [],
+				unreadCounts: [],
+				smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 6, unread: 0, starred: 5),
+			),
+		)
+
+		await model.loadNavigation(force: true, now: now, dayBounds: bounds)
+
+		#expect(model.folderNavigationItems.first(where: { $0.title == "Work" })?.unreadCount == 7)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 8)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .starred })?.unreadCount == 2)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 6)
+		#expect(model.errorMessage == nil)
 	}
 
 	@MainActor

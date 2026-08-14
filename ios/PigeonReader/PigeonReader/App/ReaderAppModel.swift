@@ -320,6 +320,8 @@ final class ReaderAppModel {
 			guard activeNavigationLoadID == loadID else {
 				return
 			}
+			let previousTodayCount = navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0
+			let previousStarredCount = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
 			// For You is the complete bounded recommendation collection returned by the existing
 			// endpoint. Its trailing count covers every currently displayed unread recommendation,
 			// rather than a server-wide proxy or an arbitrary first-page count.
@@ -329,9 +331,9 @@ final class ReaderAppModel {
 				unreadCounts: snapshot.unreadCounts,
 				smartCounts: ReaderNavigationSmartCounts(
 					forYou: forYouCount,
-					today: snapshot.todayUnreadCount,
+					today: snapshot.todayUnreadCount ?? previousTodayCount,
 					unread: snapshot.unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0,
-					starred: snapshot.starredUnreadCount,
+					starred: snapshot.starredUnreadCount ?? previousStarredCount,
 				),
 			)
 			setNavigation(state, markAsLoaded: true)

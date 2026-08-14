@@ -71,8 +71,8 @@ struct PigeonAPIClient: Sendable {
 		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: now)
 		async let subscriptions = readerSubscriptions()
 		async let unreadCounts = readerUnreadCounts()
-		async let starredUnreadCount = unreadCount(in: "user/-/state/com.google/starred")
-		async let todayUnreadCount = unreadCount(on: bounds)
+		async let starredUnreadCount = unreadCountIfAvailable(in: "user/-/state/com.google/starred")
+		async let todayUnreadCount = unreadCountIfAvailable(on: bounds)
 		return try await ReaderNavigationSnapshot(
 			subscriptions: subscriptions,
 			unreadCounts: unreadCounts,
@@ -164,21 +164,88 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(ReaderStreamContentsResponse.self, from: data)
 	}
 
+	func streamItemIDs(
+		streamID: String,
+		excludeTag: String? = nil,
+		olderThanUnix: Int? = nil,
+		limit: Int = 1_000,
+		continuation: String? = nil,
+	) async throws -> ReaderStreamItemIDsResponse {
+		var components = try endpointComponents(path: "reader/api/0/stream/items/ids")
+		var queryItems = [
+			URLQueryItem(name: "s", value: streamID),
+			URLQueryItem(name: "n", value: String(min(max(limit, 1), 1_000))),
+		]
+		if let excludeTag {
+			queryItems.append(URLQueryItem(name: "xt", value: excludeTag))
+		}
+		if let olderThanUnix {
+			queryItems.append(URLQueryItem(name: "ot", value: String(olderThanUnix)))
+		}
+		if let continuation {
+			queryItems.append(URLQueryItem(name: "c", value: continuation))
+		}
+		components.queryItems = queryItems
+		let (data, _) = try await requestJSON(components: components)
+		return try decoder.decode(ReaderStreamItemIDsResponse.self, from: data)
+	}
+
 	func recommendations(from streamID: String, dayBounds: ReaderLocalDayBounds? = nil) async throws -> [Recommendation] {
 		let items = try await streamItems(streamID: streamID, dayBounds: dayBounds)
 		return items.map { recommendation(from: $0, fallbackStreamID: streamID) }
 	}
 
 	func unreadCount(in streamID: String) async throws -> Int {
-		try await streamItems(streamID: streamID, excludeTag: "user/-/state/com.google/read").count
+		try await unreadItemCount(streamID: streamID)
 	}
 
 	func unreadCount(on dayBounds: ReaderLocalDayBounds) async throws -> Int {
-		try await streamItems(
+		try await unreadItemCount(
 			streamID: "user/-/state/com.google/reading-list",
-			excludeTag: "user/-/state/com.google/read",
-			dayBounds: dayBounds,
-		).count
+			olderThanUnix: max(dayBounds.startSeconds - 1, 0),
+		)
+	}
+
+	private func unreadItemCount(streamID: String, olderThanUnix: Int? = nil) async throws -> Int {
+		var count = 0
+		var continuation: String?
+		var seenContinuations = Set<String>()
+
+		while true {
+			try Task.checkCancellation()
+			let page = try await streamItemIDs(
+				streamID: streamID,
+				excludeTag: "user/-/state/com.google/read",
+				olderThanUnix: olderThanUnix,
+				continuation: continuation,
+			)
+			count += page.itemRefs.count
+			guard let nextContinuation = page.continuation,
+				seenContinuations.insert(nextContinuation).inserted else {
+				return count
+			}
+			continuation = nextContinuation
+		}
+	}
+
+	private func unreadCountIfAvailable(in streamID: String) async throws -> Int? {
+		do {
+			return try await unreadCount(in: streamID)
+		} catch is CancellationError {
+			throw CancellationError()
+		} catch {
+			return nil
+		}
+	}
+
+	private func unreadCountIfAvailable(on dayBounds: ReaderLocalDayBounds) async throws -> Int? {
+		do {
+			return try await unreadCount(on: dayBounds)
+		} catch is CancellationError {
+			throw CancellationError()
+		} catch {
+			return nil
+		}
 	}
 
 	func updateItemState(readerId: String, tag: String, enabled: Bool) async throws {
