@@ -42,6 +42,15 @@ final class ReaderAppModel {
 	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var isLoadingNavigation = false
+	var articleFilter = ReaderArticleFilter.all {
+		didSet {
+			guard oldValue != articleFilter else {
+				return
+			}
+			reconcileCurrentArticleSelection()
+		}
+	}
+	var sidebarFilter = ReaderSidebarFilter.all
 
 	private let sessionStore: any SessionStore
 	private let httpClient: any HTTPClient
@@ -131,8 +140,19 @@ final class ReaderAppModel {
 		navigation.smartItems
 	}
 
+	var visibleSmartNavigationItems: [ReaderNavigationItem] {
+		smartNavigationItems.filter { $0.smartSection != .unread }
+	}
+
 	var folderNavigationItems: [ReaderNavigationItem] {
 		navigation.folderItems
+	}
+
+	var visibleFolderNavigationItems: [ReaderNavigationItem] {
+		guard sidebarFilter == .unread else {
+			return folderNavigationItems
+		}
+		return folderNavigationItems.filter { $0.unreadCount > 0 }
 	}
 
 	var uncategorizedFeedNavigationItems: [ReaderNavigationItem] {
@@ -143,12 +163,27 @@ final class ReaderAppModel {
 		navigation.children(of: folder.id)
 	}
 
+	func visibleFeedNavigationItems(in folder: ReaderNavigationItem) -> [ReaderNavigationItem] {
+		let feeds = feedNavigationItems(in: folder)
+		guard sidebarFilter == .unread else {
+			return feeds
+		}
+		return feeds.filter { $0.unreadCount > 0 }
+	}
+
+	var visibleUncategorizedFeedNavigationItems: [ReaderNavigationItem] {
+		guard sidebarFilter == .unread else {
+			return uncategorizedFeedNavigationItems
+		}
+		return uncategorizedFeedNavigationItems.filter { $0.unreadCount > 0 }
+	}
+
 	func isFolderExpanded(_ folder: ReaderNavigationItem) -> Bool {
 		navigation.expandedFolderIDs.contains(folder.id)
 	}
 
 	var articles: [Recommendation] {
-		get { articleCache[selectedNavigationID] ?? [] }
+		get { displayedArticles(for: selectedNavigationID) }
 		set { setArticles(newValue, for: selectedNavigationID) }
 	}
 
@@ -216,6 +251,8 @@ final class ReaderAppModel {
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
+			articleFilter = .all
+			sidebarFilter = .all
 			selectedNavigationID = ReaderSection.forYou.rawValue
 			navigation = .initial
 			isLoadingNavigation = false
@@ -291,15 +328,15 @@ final class ReaderAppModel {
 		}
 		if navigation.item(withID: previousSelection) == nil {
 			select(collectionID: ReaderSection.forYou.rawValue)
+		} else {
+			reconcileCurrentArticleSelection()
 		}
 	}
 
 	private func select(collectionID: String) {
 		selectedNavigationID = collectionID
-		selectedArticleID = selectedArticleIDs[collectionID].flatMap { rememberedID in
-			articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
-		}
 		preferredCompactColumn = .content
+		reconcileSelection(for: collectionID)
 	}
 
 	func select(article: Recommendation) {
@@ -358,11 +395,6 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
-			if selectedNavigationID == ReaderSection.forYou.rawValue {
-				selectedArticleID = selectedArticleIDs[selectedNavigationID].flatMap { rememberedID in
-					articleCache[selectedNavigationID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
-				}
-			}
 		} catch is CancellationError {
 			return
 		} catch {
@@ -678,11 +710,21 @@ final class ReaderAppModel {
 	}
 
 	func articles(for section: ReaderSection) -> [Recommendation] {
-		articleCache[section.rawValue] ?? []
+		displayedArticles(for: section.rawValue)
 	}
 
 	func articles(for collection: ReaderNavigationItem) -> [Recommendation] {
+		displayedArticles(for: collection.id)
+	}
+
+	func allArticles(for collection: ReaderNavigationItem) -> [Recommendation] {
 		articleCache[collection.id] ?? []
+	}
+
+	func isArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
+		articleFilter != .all
+			&& allArticles(for: collection).isEmpty == false
+			&& articles(for: collection).isEmpty
 	}
 
 	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
@@ -725,10 +767,25 @@ final class ReaderAppModel {
 
 	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
 		articleCache[collectionID] = sortOrder(for: collectionID).sorted(newArticles)
+		reconcileSelection(for: collectionID)
+	}
+
+	private func displayedArticles(for collectionID: String) -> [Recommendation] {
+		articleFilter.filtering(articleCache[collectionID] ?? [])
+	}
+
+	private func reconcileSelection(for collectionID: String) {
 		guard let rememberedID = selectedArticleIDs[collectionID] else {
+			if selectedNavigationID == collectionID {
+				selectedArticleID = nil
+				if preferredCompactColumn == .detail {
+					preferredCompactColumn = .content
+				}
+			}
 			return
 		}
-		guard newArticles.contains(where: { $0.id == rememberedID }) else {
+
+		guard articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true else {
 			selectedArticleIDs[collectionID] = nil
 			if selectedNavigationID == collectionID {
 				selectedArticleID = nil
@@ -736,9 +793,22 @@ final class ReaderAppModel {
 			}
 			return
 		}
-		if selectedNavigationID == collectionID {
-			selectedArticleID = rememberedID
+
+		guard selectedNavigationID == collectionID else {
+			return
 		}
+		if displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID }) {
+			selectedArticleID = rememberedID
+		} else {
+			selectedArticleID = nil
+			if preferredCompactColumn == .detail {
+				preferredCompactColumn = .content
+			}
+		}
+	}
+
+	private func reconcileCurrentArticleSelection() {
+		reconcileSelection(for: selectedNavigationID)
 	}
 
 	private func updateNavigationCount(for itemID: String, to count: Int) {
@@ -1087,6 +1157,7 @@ final class ReaderAppModel {
 				),
 			)
 		}
+		reconcileCurrentArticleSelection()
 
 		let results = await withTaskGroup(of: ReadMutationResult.self) { group in
 			for pendingMutation in pendingMutations {
@@ -1185,6 +1256,7 @@ final class ReaderAppModel {
 		}
 		activeMutationIDs[mutation.mutationKey] = nil
 		applyNavigationCountDeltas(mutation.navigationDeltas.mapValues { -$0 })
+		reconcileCurrentArticleSelection()
 		return true
 	}
 
@@ -1234,6 +1306,7 @@ final class ReaderAppModel {
 		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
+			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
@@ -1292,5 +1365,6 @@ final class ReaderAppModel {
 			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
 		}
 		navigation = previousNavigation
+		reconcileCurrentArticleSelection()
 	}
 }
