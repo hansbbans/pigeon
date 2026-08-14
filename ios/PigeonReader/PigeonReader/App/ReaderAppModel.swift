@@ -47,6 +47,9 @@ final class ReaderAppModel {
 	private let httpClient: any HTTPClient
 	private let readwiseTokenStore: any ReadwiseTokenStore
 	private let readwiseAPIClient: ReadwiseAPIClient
+	private let readerModeStore: ReaderModeStore
+	let readerTypography: ReaderTypographySettings
+	private let readerViewExtractor: any ReaderViewExtracting
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [String: [Recommendation]] = [:]
 	private var sortOrders: [String: ArticleSortOrder] = [:]
@@ -65,12 +68,18 @@ final class ReaderAppModel {
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
 		httpClient: any HTTPClient = URLSessionHTTPClient(),
-		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore()
+		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
+		readerModeStore: ReaderModeStore = ReaderModeStore(),
+		readerTypography: ReaderTypographySettings? = nil,
+		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
 		self.readwiseTokenStore = readwiseTokenStore
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
+		self.readerModeStore = readerModeStore
+		self.readerTypography = readerTypography ?? ReaderTypographySettings()
+		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		do {
 			hasReadwiseToken = try readwiseTokenStore.load()?.isEmpty == false
 		} catch {
@@ -243,6 +252,18 @@ final class ReaderAppModel {
 		try await readwiseAPIClient.save(url: destination.url)
 		try Task.checkCancellation()
 		return .saved
+	}
+
+	func readerMode(for feedID: String) -> ReaderMode {
+		readerModeStore.mode(for: feedID)
+	}
+
+	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
+		readerModeStore.setMode(mode, for: feedID)
+	}
+
+	func loadReaderView(from url: URL) async throws -> ReaderViewDocument {
+		try await readerViewExtractor.extract(from: url)
 	}
 
 	func select(section: ReaderSection) {

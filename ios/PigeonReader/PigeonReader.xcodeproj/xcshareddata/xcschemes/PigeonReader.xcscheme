@@ -50,6 +50,17 @@
                ReferencedContainer = "container:PigeonReader.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "534177D40E890BC16F6F6FB3"
+               BuildableName = "PigeonReaderUITests.xctest"
+               BlueprintName = "PigeonReaderUITests"
+               ReferencedContainer = "container:PigeonReader.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

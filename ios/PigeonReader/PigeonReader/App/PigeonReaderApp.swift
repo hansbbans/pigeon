@@ -6,6 +6,11 @@ struct PigeonReaderApp: App {
 
 	init() {
 		#if DEBUG
+		if ProcessInfo.processInfo.arguments.contains("-reader-reset-reader-state") {
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.text-scale")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.line-height")
+		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
 			let previewModel = PreviewData.makeModel()
 			if ProcessInfo.processInfo.arguments.contains("-reader-show-sidebar") {
@@ -13,6 +18,7 @@ struct PigeonReaderApp: App {
 			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-article"),
 				let firstArticle = previewModel.articles.first {
 				previewModel.select(article: firstArticle)
+				previewModel.setReaderMode(.feedContent, for: firstArticle.feedKey)
 			}
 			_model = State(initialValue: previewModel)
 			return

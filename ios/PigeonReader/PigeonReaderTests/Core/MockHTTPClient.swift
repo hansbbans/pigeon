@@ -14,12 +14,14 @@ actor MockHTTPClient: HTTPClient {
 	private let responseData: Data
 	private let statusCode: Int
 	private let shouldFail: Bool
+	private let responseURL: URL?
 	private var snapshots: [RequestSnapshot] = []
 
-	init(responseData: Data = Data(), statusCode: Int = 200, shouldFail: Bool = false) {
+	init(responseData: Data = Data(), statusCode: Int = 200, shouldFail: Bool = false, responseURL: URL? = nil) {
 		self.responseData = responseData
 		self.statusCode = statusCode
 		self.shouldFail = shouldFail
+		self.responseURL = responseURL
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -27,13 +29,14 @@ actor MockHTTPClient: HTTPClient {
 			throw URLError(.notConnectedToInternet)
 		}
 		let fallbackURL = Self.fallbackURL
-		let url = request.url ?? fallbackURL
-		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+		let requestedURL = request.url ?? fallbackURL
+		let returnedURL = responseURL ?? requestedURL
+		guard let response = HTTPURLResponse(url: returnedURL, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
 			fatalError("Unable to create a test HTTP response")
 		}
 		snapshots.append(
 			RequestSnapshot(
-				url: url,
+				url: requestedURL,
 				method: request.httpMethod,
 				authorization: request.value(forHTTPHeaderField: "Authorization"),
 				accept: request.value(forHTTPHeaderField: "Accept"),
