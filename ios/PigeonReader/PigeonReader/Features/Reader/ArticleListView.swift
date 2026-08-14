@@ -8,11 +8,18 @@ struct ArticleListView: View {
 		@Bindable var model = model
 		let articles = model.articles(for: collection)
 		let isLoading = model.isLoading(collection: collection)
+		let isUnreadFilterEmpty = model.isUnreadArticleFilterEmpty(for: collection)
 
 		Group {
 			if isLoading && articles.isEmpty {
 				ProgressView("Loading stories")
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
+			} else if isUnreadFilterEmpty {
+				ContentUnavailableView(
+					"No unread stories",
+					systemImage: "checkmark.circle",
+					description: Text("All stories in this collection are read. Turn off Unread only to see them."),
+				)
 			} else if articles.isEmpty {
 				ContentUnavailableView(
 					emptyTitle,
@@ -54,6 +61,12 @@ struct ArticleListView: View {
 		}
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
+				Toggle("Unread only", systemImage: "envelope.badge", isOn: $model.isArticleListUnreadOnly)
+					.toggleStyle(.button)
+					.accessibilityLabel(ReaderAccessibilityText.unreadStoriesOnly)
+					.accessibilityValue(model.isArticleListUnreadOnly ? "On" : "Off")
+					.accessibilityHint("Shows only unread stories in this collection.")
+
 				Menu("Sort", systemImage: "arrow.up.arrow.down") {
 					Picker("Sort stories", selection: $model.sortOrder) {
 						ForEach(ArticleSortOrder.allCases) { sortOrder in

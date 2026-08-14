@@ -42,6 +42,15 @@ final class ReaderAppModel {
 	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var isLoadingNavigation = false
+	var isSidebarUnreadOnly = false
+	var isArticleListUnreadOnly = false {
+		didSet {
+			guard oldValue != isArticleListUnreadOnly else {
+				return
+			}
+			reconcileCurrentArticleSelection()
+		}
+	}
 
 	private let sessionStore: any SessionStore
 	private let httpClient: any HTTPClient
@@ -122,6 +131,10 @@ final class ReaderAppModel {
 		navigation.smartItems
 	}
 
+	var visibleSmartNavigationItems: [ReaderNavigationItem] {
+		smartNavigationItems.filter { $0.smartSection != .unread }
+	}
+
 	var folderNavigationItems: [ReaderNavigationItem] {
 		navigation.folderItems
 	}
@@ -134,12 +147,34 @@ final class ReaderAppModel {
 		navigation.children(of: folder.id)
 	}
 
+	var visibleFolderNavigationItems: [ReaderNavigationItem] {
+		guard isSidebarUnreadOnly else {
+			return folderNavigationItems
+		}
+		return folderNavigationItems.filter { $0.unreadCount > 0 }
+	}
+
+	func visibleFeedNavigationItems(in folder: ReaderNavigationItem) -> [ReaderNavigationItem] {
+		let feeds = feedNavigationItems(in: folder)
+		guard isSidebarUnreadOnly else {
+			return feeds
+		}
+		return feeds.filter { $0.unreadCount > 0 }
+	}
+
+	var visibleUncategorizedFeedNavigationItems: [ReaderNavigationItem] {
+		guard isSidebarUnreadOnly else {
+			return uncategorizedFeedNavigationItems
+		}
+		return uncategorizedFeedNavigationItems.filter { $0.unreadCount > 0 }
+	}
+
 	func isFolderExpanded(_ folder: ReaderNavigationItem) -> Bool {
 		navigation.expandedFolderIDs.contains(folder.id)
 	}
 
 	var articles: [Recommendation] {
-		get { articleCache[selectedNavigationID] ?? [] }
+		get { displayedArticles(for: selectedNavigationID) }
 		set { setArticles(newValue, for: selectedNavigationID) }
 	}
 
@@ -207,6 +242,8 @@ final class ReaderAppModel {
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
+			isSidebarUnreadOnly = false
+			isArticleListUnreadOnly = false
 			selectedNavigationID = ReaderSection.forYou.rawValue
 			navigation = .initial
 			isLoadingNavigation = false
@@ -276,7 +313,7 @@ final class ReaderAppModel {
 	private func select(collectionID: String) {
 		selectedNavigationID = collectionID
 		selectedArticleID = selectedArticleIDs[collectionID].flatMap { rememberedID in
-			articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
+			displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID }) ? rememberedID : nil
 		}
 		preferredCompactColumn = .content
 	}
@@ -339,7 +376,7 @@ final class ReaderAppModel {
 			setNavigation(state, markAsLoaded: true)
 			if selectedNavigationID == ReaderSection.forYou.rawValue {
 				selectedArticleID = selectedArticleIDs[selectedNavigationID].flatMap { rememberedID in
-					articleCache[selectedNavigationID]?.contains(where: { $0.id == rememberedID }) == true ? rememberedID : nil
+					displayedArticles(for: selectedNavigationID).contains(where: { $0.id == rememberedID }) ? rememberedID : nil
 				}
 			}
 		} catch is CancellationError {
@@ -657,11 +694,21 @@ final class ReaderAppModel {
 	}
 
 	func articles(for section: ReaderSection) -> [Recommendation] {
-		articleCache[section.rawValue] ?? []
+		displayedArticles(for: section.rawValue)
 	}
 
 	func articles(for collection: ReaderNavigationItem) -> [Recommendation] {
+		displayedArticles(for: collection.id)
+	}
+
+	func allArticles(for collection: ReaderNavigationItem) -> [Recommendation] {
 		articleCache[collection.id] ?? []
+	}
+
+	func isUnreadArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
+		isArticleListUnreadOnly
+			&& allArticles(for: collection).isEmpty == false
+			&& articles(for: collection).isEmpty
 	}
 
 	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
@@ -716,8 +763,33 @@ final class ReaderAppModel {
 			return
 		}
 		if selectedNavigationID == collectionID {
-			selectedArticleID = rememberedID
+			selectedArticleID = displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID }) ? rememberedID : nil
+			if selectedArticleID == nil {
+				preferredCompactColumn = .content
+			}
 		}
+	}
+
+	private func displayedArticles(for collectionID: String) -> [Recommendation] {
+		let cachedArticles = articleCache[collectionID] ?? []
+		guard isArticleListUnreadOnly else {
+			return cachedArticles
+		}
+		return cachedArticles.filter { $0.isRead == false }
+	}
+
+	private func reconcileCurrentArticleSelection() {
+		let visibleSelection = selectedArticleIDs[selectedNavigationID].flatMap { rememberedID in
+			displayedArticles(for: selectedNavigationID).contains(where: { $0.id == rememberedID }) ? rememberedID : nil
+		}
+		guard let visibleSelection else {
+			if selectedArticleID != nil || preferredCompactColumn == .detail {
+				selectedArticleID = nil
+				preferredCompactColumn = .content
+			}
+			return
+		}
+		selectedArticleID = visibleSelection
 	}
 
 	private func updateNavigationCount(for itemID: String, to count: Int) {
@@ -1066,6 +1138,7 @@ final class ReaderAppModel {
 				),
 			)
 		}
+		reconcileCurrentArticleSelection()
 
 		let results = await withTaskGroup(of: ReadMutationResult.self) { group in
 			for pendingMutation in pendingMutations {
@@ -1164,6 +1237,7 @@ final class ReaderAppModel {
 		}
 		activeMutationIDs[mutation.mutationKey] = nil
 		applyNavigationCountDeltas(mutation.navigationDeltas.mapValues { -$0 })
+		reconcileCurrentArticleSelection()
 		return true
 	}
 
@@ -1213,6 +1287,7 @@ final class ReaderAppModel {
 		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
+			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
@@ -1271,5 +1346,6 @@ final class ReaderAppModel {
 			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
 		}
 		navigation = previousNavigation
+		reconcileCurrentArticleSelection()
 	}
 }

@@ -4,6 +4,7 @@ struct ReaderSidebarView: View {
 	@Environment(ReaderAppModel.self) private var model
 
 	var body: some View {
+		@Bindable var model = model
 		let selection = Binding<String?>(
 			get: { model.selectedNavigationID },
 			set: { id in
@@ -16,7 +17,7 @@ struct ReaderSidebarView: View {
 
 		List(selection: selection) {
 			Section("Smart Views") {
-				ForEach(model.smartNavigationItems) { item in
+				ForEach(model.visibleSmartNavigationItems) { item in
 					ReaderNavigationRowView(
 						item: item,
 						isSelected: model.selectedNavigationID == item.id,
@@ -27,9 +28,9 @@ struct ReaderSidebarView: View {
 				}
 			}
 
-			if model.folderNavigationItems.isEmpty == false {
+			if model.visibleFolderNavigationItems.isEmpty == false {
 				Section("Folders") {
-					ForEach(model.folderNavigationItems) { folder in
+					ForEach(model.visibleFolderNavigationItems) { folder in
 						ReaderFolderNavigationRowView(
 							folder: folder,
 							isExpanded: model.isFolderExpanded(folder),
@@ -40,7 +41,7 @@ struct ReaderSidebarView: View {
 						.tag(folder.id)
 
 						if model.isFolderExpanded(folder) {
-							ForEach(model.feedNavigationItems(in: folder)) { feed in
+							ForEach(model.visibleFeedNavigationItems(in: folder)) { feed in
 								ReaderNavigationRowView(
 									item: feed,
 									isSelected: model.selectedNavigationID == feed.id,
@@ -54,9 +55,9 @@ struct ReaderSidebarView: View {
 				}
 			}
 
-			if model.uncategorizedFeedNavigationItems.isEmpty == false {
+			if model.visibleUncategorizedFeedNavigationItems.isEmpty == false {
 				Section("Feeds") {
-					ForEach(model.uncategorizedFeedNavigationItems) { feed in
+					ForEach(model.visibleUncategorizedFeedNavigationItems) { feed in
 						ReaderNavigationRowView(
 							item: feed,
 							isSelected: model.selectedNavigationID == feed.id,
@@ -69,6 +70,15 @@ struct ReaderSidebarView: View {
 		}
 		.listStyle(.sidebar)
 		.navigationTitle("Pigeon")
+		.toolbar {
+			ToolbarItem(placement: .topBarTrailing) {
+				Toggle("Unread only", systemImage: "line.3.horizontal.decrease.circle", isOn: $model.isSidebarUnreadOnly)
+					.toggleStyle(.button)
+					.accessibilityLabel(ReaderAccessibilityText.unreadCollectionsOnly)
+					.accessibilityValue(model.isSidebarUnreadOnly ? "On" : "Off")
+					.accessibilityHint("Filters the sidebar to collections with unread stories.")
+			}
+		}
 		.task {
 			await model.loadNavigation()
 		}

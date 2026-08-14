@@ -124,6 +124,222 @@ struct ReaderAppModelTests {
 		#expect(model.sortOrder(for: .starred) == .newest)
 	}
 
+	@Test func sidebarUnreadFilterHidesZeroUnreadItemsAndRestoresOnDisable() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let workFolderID = "user/-/label/Work"
+		let emptyFolderID = "user/-/label/Empty"
+		let state = ReaderNavigationCatalog.make(
+			subscriptions: [
+				ReaderSubscription(
+					id: "feed/1",
+					title: "Unread folder feed",
+					categories: [ReaderSubscriptionCategory(id: workFolderID, label: "Work")],
+					url: "https://pigeon.test/feed/work-unread",
+				),
+				ReaderSubscription(
+					id: "feed/2",
+					title: "Read folder feed",
+					categories: [ReaderSubscriptionCategory(id: workFolderID, label: "Work")],
+					url: "https://pigeon.test/feed/work-read",
+				),
+				ReaderSubscription(
+					id: "feed/3",
+					title: "Empty folder feed",
+					categories: [ReaderSubscriptionCategory(id: emptyFolderID, label: "Empty")],
+					url: "https://pigeon.test/feed/empty",
+				),
+				ReaderSubscription(
+					id: "feed/4",
+					title: "Unread uncategorized feed",
+					categories: [],
+					url: "https://pigeon.test/feed/unread",
+				),
+				ReaderSubscription(
+					id: "feed/5",
+					title: "Read uncategorized feed",
+					categories: [],
+					url: "https://pigeon.test/feed/read",
+				),
+			],
+			unreadCounts: [
+				ReaderUnreadCount(id: "feed/1", count: 2),
+				ReaderUnreadCount(id: "feed/2", count: 0),
+				ReaderUnreadCount(id: "feed/3", count: 0),
+				ReaderUnreadCount(id: "feed/4", count: 1),
+				ReaderUnreadCount(id: "feed/5", count: 0),
+				ReaderUnreadCount(id: workFolderID, count: 2),
+				ReaderUnreadCount(id: emptyFolderID, count: 0),
+			],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 3, starred: 0),
+		)
+		model.setNavigation(state)
+
+		let workFolder = try #require(model.folderNavigationItems.first(where: { $0.id == workFolderID }))
+		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
+		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .starred, .today])
+		#expect(model.visibleFolderNavigationItems.map(\.id) == [emptyFolderID, workFolderID])
+		#expect(model.visibleFeedNavigationItems(in: workFolder).map(\.title) == ["Read folder feed", "Unread folder feed"])
+		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Read uncategorized feed", "Unread uncategorized feed"])
+
+		model.isSidebarUnreadOnly = true
+
+		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
+		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .starred, .today])
+		#expect(model.visibleFolderNavigationItems.map(\.id) == [workFolderID])
+		#expect(model.visibleFeedNavigationItems(in: workFolder).map(\.title) == ["Unread folder feed"])
+		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Unread uncategorized feed"])
+
+		model.isSidebarUnreadOnly = false
+
+		#expect(model.visibleFolderNavigationItems.map(\.id) == [emptyFolderID, workFolderID])
+		#expect(model.visibleFeedNavigationItems(in: workFolder).map(\.title) == ["Read folder feed", "Unread folder feed"])
+		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Read uncategorized feed", "Unread uncategorized feed"])
+	}
+
+	@Test(arguments: [ReaderNavigationKind.smart, ReaderNavigationKind.folder, ReaderNavigationKind.feed])
+	func articleUnreadFilterShowsUnreadStoriesAndRestoresTheFullCollection(kind: ReaderNavigationKind) throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let state = try makeNavigationState(unreadCount: 1)
+		model.setNavigation(state)
+		let collection: ReaderNavigationItem
+		switch kind {
+		case .smart:
+			collection = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		case .folder:
+			collection = try #require(model.folderNavigationItems.first)
+		case .feed:
+			let folder = try #require(model.folderNavigationItems.first)
+			collection = try #require(model.feedNavigationItems(in: folder).first)
+		}
+		let unread = makeArticle(id: "unread", receivedAt: 1_786_272_100)
+		let read = makeArticle(id: "read", isRead: true, receivedAt: 1_786_272_000)
+		model.setArticles([unread, read], for: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		#expect(model.articles(for: collection).map(\.id) == [unread.id, read.id])
+
+		model.isArticleListUnreadOnly = true
+
+		#expect(model.articles(for: collection).map(\.id) == [unread.id])
+		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
+		#expect(model.isUnreadArticleFilterEmpty(for: collection) == false)
+
+		model.isArticleListUnreadOnly = false
+
+		#expect(model.articles(for: collection).map(\.id) == [unread.id, read.id])
+	}
+
+	@Test func articleUnreadFilterDistinguishesReadOnlyAndGenuinelyEmptyCollections() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readOnlyCollection = ReaderNavigationItem.smart(.today)
+		model.setArticles([makeArticle(id: "read", isRead: true)], for: readOnlyCollection)
+		model.isArticleListUnreadOnly = true
+
+		#expect(model.articles(for: readOnlyCollection).isEmpty)
+		#expect(model.isUnreadArticleFilterEmpty(for: readOnlyCollection))
+
+		let genuinelyEmptyCollection = ReaderNavigationItem.smart(.starred)
+		#expect(model.articles(for: genuinelyEmptyCollection).isEmpty)
+		#expect(model.isUnreadArticleFilterEmpty(for: genuinelyEmptyCollection) == false)
+	}
+
+	@Test func readStateTransitionClearsFilteredDetailAndMakesItVisibleAgainWhenUnread() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let article = makeArticle(id: "selected")
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([article], for: collection)
+		model.select(item: collection)
+		model.select(article: article)
+		model.isArticleListUnreadOnly = true
+
+		let readMutation = Task { await model.setRead(article, read: true) }
+		let readRequest = await controlled.nextRequest()
+
+		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.selectedArticle == nil)
+		#expect(model.preferredCompactColumn == .content)
+
+		await controlled.resolve(readRequest)
+		await readMutation.value
+		let readArticle = try #require(model.allArticles(for: collection).first)
+		#expect(readArticle.isRead)
+
+		let unreadMutation = Task { await model.setRead(readArticle, read: false) }
+		let unreadRequest = await controlled.nextRequest()
+
+		#expect(model.articles(for: collection).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.isRead == false)
+
+		await controlled.resolve(unreadRequest)
+		await unreadMutation.value
+	}
+
+	@Test func filteredBulkReadKeepsBoundarySelectionAcrossAboveAndBelowMutations() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start.addingTimeInterval(12 * 60 * 60)
+		let above = makeArticle(id: "above", receivedDate: day.addingTimeInterval(300))
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(200))
+		let below = makeArticle(id: "below", receivedDate: day.addingTimeInterval(100))
+		model.setArticles([below, boundary, above], for: collection)
+		model.select(article: boundary)
+		model.isArticleListUnreadOnly = true
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == true)
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id, below.id])
+		#expect(model.selectedArticleID == boundary.id)
+		#expect(model.selectedArticle?.id == boundary.id)
+
+		await model.markStoriesBelowAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == below.id })?.isRead == true)
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func filteredBulkReadRollbackRestoresHiddenStoryAndSelection() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start.addingTimeInterval(12 * 60 * 60)
+		let above = makeArticle(id: "above", receivedDate: day.addingTimeInterval(200))
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(100))
+		model.setArticles([boundary, above], for: collection)
+		model.select(article: boundary)
+		model.isArticleListUnreadOnly = true
+
+		let mutation = Task { await model.markStoriesAboveAsRead(boundary, in: collection) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
+		#expect(model.selectedArticleID == boundary.id)
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == false)
+		#expect(model.articles(for: collection).map(\.id) == [above.id, boundary.id])
+		#expect(model.selectedArticleID == boundary.id)
+		#expect(model.selectedArticle?.id == boundary.id)
+	}
+
 	@Test func markAboveUsesStrictBoundaryAndNewestDisplayedOrder() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
