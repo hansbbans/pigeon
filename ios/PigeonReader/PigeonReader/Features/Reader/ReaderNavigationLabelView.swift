@@ -6,10 +6,29 @@ struct ReaderNavigationLabelView: View {
 
 	var body: some View {
 		HStack(spacing: 10) {
-			Image(systemName: item.systemImage)
-				.symbolRenderingMode(.hierarchical)
-				.foregroundStyle(.tint)
-				.frame(width: 20)
+			if item.kind == .feed, let iconURL = item.iconURL {
+				AsyncImage(url: iconURL) { phase in
+					if let image = phase.image {
+						image
+							.resizable()
+							.scaledToFit()
+							.frame(width: 20, height: 20)
+							.clipShape(.rect(cornerRadius: 4))
+					} else {
+						Image(systemName: item.systemImage)
+							.symbolRenderingMode(.hierarchical)
+							.foregroundStyle(.tint)
+					}
+				}
+				.frame(width: 20, height: 20)
+				.accessibilityHidden(true)
+			} else {
+				Image(systemName: item.systemImage)
+					.symbolRenderingMode(.hierarchical)
+					.foregroundStyle(.tint)
+					.frame(width: 20, height: 20)
+					.accessibilityHidden(true)
+			}
 			Text(item.title)
 				.lineLimit(1)
 				.truncationMode(.tail)

@@ -10,6 +10,7 @@ interface FeedMeta {
 	custom_title: string | null;
 	source_url?: string | null;
 	site_url?: string | null;
+	icon_url?: string | null;
 }
 
 interface FeedItem {
@@ -56,6 +57,8 @@ export async function generateAtomFeed(
 	const variant = options?.variant || 'full';
 	const feedUrl = options?.feedUrl || `${baseUrl}/feed/${feed.feed_key}`;
 	const feedHomeUrl = feed.site_url || feed.source_url || baseUrl;
+	const iconUrl = feed.icon_url?.trim();
+	const icon = iconUrl ? `<icon>${escapeXml(iconUrl)}</icon>` : '';
 	const titleBase = feed.custom_title || feed.display_name;
 	const title = variant === 'light' ? `${titleBase} (Light)` : titleBase;
 	const preparedItems = await prepareFeedItems(feed.feed_key, items);
@@ -93,6 +96,7 @@ export async function generateAtomFeed(
   <link href="${escapeXml(feedUrl)}" rel="self" type="application/atom+xml"/>
   ${options?.hubUrl ? `<link href="${escapeXml(options.hubUrl)}" rel="hub"/>` : ''}
   <link href="${escapeXml(feedHomeUrl)}" rel="alternate" type="text/html"/>
+  ${icon}
   <id>${escapeXml(feedUrl)}</id>
   <updated>${preparedItems[0]?.received_at || new Date().toISOString()}</updated>
   <generator>Pigeon Newsletter-to-RSS</generator>

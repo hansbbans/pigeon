@@ -8,7 +8,7 @@ struct ReaderNavigationTests {
 			"""
 			{
 				"subscriptions":[
-					{"id":"feed/7","title":"Alpha","categories":[{"id":"user/-/label/Work","label":"Work"},{"id":"user/-/label/Work","label":"Work"},{"id":"user/-/label/News","label":"News"}],"url":"https://pigeon.test/feed/alpha"},
+					{"id":"feed/7","title":"Alpha","categories":[{"id":"user/-/label/Work","label":"Work"},{"id":"user/-/label/Work","label":"Work"},{"id":"user/-/label/News","label":"News"}],"url":"https://pigeon.test/feed/alpha","iconUrl":"https://pigeon.test/icons/alpha.png"},
 					{"id":"feed/8","title":"Bravo","categories":[{"id":"user/-/label/Work","label":"Work"}],"url":"https://pigeon.test/feed/bravo"},
 					{"id":"feed/9","title":"Unfiled","categories":[],"url":"https://pigeon.test/feed/unfiled"}
 				],
@@ -37,6 +37,7 @@ struct ReaderNavigationTests {
 		#expect(work.unreadCount == 7, "A folder count must use the server aggregate once, not sum duplicate labels.")
 		#expect(workChildren.count == 2)
 		#expect(workChildren.map(\.unreadCount) == [4, 3])
+		#expect(workChildren.first(where: { $0.title == "Alpha" })?.iconURL == URL(string: "https://pigeon.test/icons/alpha.png"))
 		#expect(state.uncategorizedFeedItems.map(\.title) == ["Unfiled"])
 		#expect(state.uncategorizedFeedItems.first?.unreadCount == 1)
 		#expect(state.smartItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 2)

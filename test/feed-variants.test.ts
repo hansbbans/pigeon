@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import app from '../src/index';
 
 const FEED_SQL =
-	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
+	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
 
 const ITEMS_SQL =
 	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
@@ -21,6 +21,7 @@ class FeedVariantStatement {
 		custom_title: string | null;
 		source_url: string | null;
 		site_url: string | null;
+		icon_url: string | null;
 		last_item_at: string | null;
 	};
 	private readonly items: Array<{
@@ -137,7 +138,7 @@ class FeedVariantStatement {
 	}
 }
 
-function createEnv() {
+function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 	const feed = {
 		feed_key: 'example-feed',
 		display_name: 'Example Feed',
@@ -145,6 +146,7 @@ function createEnv() {
 		custom_title: null,
 		source_url: 'https://example.com/feed.xml',
 		site_url: 'https://example.com/',
+		icon_url: iconURL,
 		last_item_at: '2026-03-27T12:34:56.000Z',
 	};
 	const items = [
@@ -210,9 +212,35 @@ test('GET /feed/:feed_key/light returns the lightweight feed variant with a smal
 	assert.match(xml, /<link href="https:\/\/example\.com\/" rel="alternate" type="text\/html"\/>/);
 	assert.match(xml, /<entry xml:base="https:\/\/example\.com\/posts\/heavy-newsletter">/);
 	assert.match(xml, /<link href="https:\/\/example\.com\/posts\/heavy-newsletter"\/>/);
+	assert.match(xml, /<icon>https:\/\/example\.com\/favicon\.ico<\/icon>/);
 	assert.match(xml, /data-full-only="yes"/);
 	assert.match(xml, /Hello from the lightweight feed test\./);
 	assert.doesNotMatch(xml, /<!doctype|<html|<head|<body|<style>/i);
+});
+
+test('feed Atom variants emit one escaped icon URL when the feed has an icon', async () => {
+	for (const path of ['/feed/example-feed', '/feed/example-feed/light']) {
+		const { env } = createEnv('https://example.com/icon.svg?size=32&theme=light');
+		const response = await app.fetch(new Request(`https://pigeon.example${path}`), env as never);
+
+		assert.equal(response.status, 200);
+		const xml = await response.text();
+		assert.equal((xml.match(/<icon>.*?<\/icon>/g) ?? []).length, 1);
+		assert.match(xml, /<icon>https:\/\/example\.com\/icon\.svg\?size=32&amp;theme=light<\/icon>/);
+	}
+});
+
+test('feed Atom variants omit the icon element when the feed icon is null, empty, or whitespace-only', async () => {
+	for (const iconURL of [null, '', '   ']) {
+		for (const path of ['/feed/example-feed', '/feed/example-feed/light']) {
+			const { env } = createEnv(iconURL);
+			const response = await app.fetch(new Request(`https://pigeon.example${path}`), env as never);
+
+			assert.equal(response.status, 200);
+			const xml = await response.text();
+			assert.doesNotMatch(xml, /<icon>/);
+		}
+	}
 });
 
 test('GET /feeds includes a dedicated lightweight feed URL alongside the full feed URL', async () => {

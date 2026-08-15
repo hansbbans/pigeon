@@ -116,7 +116,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 	// Get feed metadata
 	const feed = await env.DB.prepare(
-		'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
+		'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
 	)
 		.bind(feedKey)
 		.first<{
@@ -126,6 +126,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 			custom_title: string | null;
 			source_url: string | null;
 			site_url: string | null;
+			icon_url: string | null;
 			last_item_at: string | null;
 		}>();
 
