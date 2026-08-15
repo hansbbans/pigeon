@@ -1,18 +1,50 @@
 /**
- * RSS feed fetcher - handles fetching, parsing, and storing RSS items
- * Uses conditional GET (ETag/Last-Modified) to minimize bandwidth
+ * Bounded, idempotent external-feed refresh.
+ *
+ * Network policy is applied before every request and redirect. Refresh results
+ * are persisted as separate operational state so content and sync health do not
+ * depend on one overloaded error string.
  */
 
-import { parseRssFeed } from './rss-parser';
-import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
+import { fetchBoundedFeedResource } from './feed-network';
 import { ensureDatabaseSchema } from './migrations';
+import {
+	computeNextFetchAt,
+	parseCacheControlMaxAge,
+	parseRetryAfter,
+	redactRefreshError,
+	shouldUseConditionalRequest,
+	type RefreshOutcome,
+} from './refresh-policy';
+import { parseFeed, type FeedFormat } from './rss-parser';
+import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import type { Env } from './types';
 
-interface FeedToFetch {
+export interface FeedToFetch {
 	feed_key: string;
 	source_url: string;
 	etag: string | null;
 	last_modified: string | null;
+	fetch_interval_minutes?: number | null;
+	consecutive_failures?: number | null;
+	content_hash?: string | null;
+	conditional_checked_at?: string | null;
+	refresh_lease_token?: string | null;
+}
+
+export interface RefreshResult {
+	feedKey: string;
+	outcome: RefreshOutcome;
+	attemptedAt: string;
+	completedAt: string;
+	durationMs: number;
+	httpStatus: number | null;
+	itemsProcessed: number;
+	responseBytes: number | null;
+	retryAt: string | null;
+	cacheUntilAt: string | null;
+	errorCode: string | null;
+	errorMessage: string | null;
 }
 
 interface RssItemIdentity {
@@ -20,69 +52,153 @@ interface RssItemIdentity {
 	messageId: string;
 }
 
-const MAX_ITEMS_PER_FETCH = 50; // Prevent spam/abuse
-const MAX_CONTENT_SIZE = 900_000; // Leave buffer under D1 1MB row limit
+interface SuccessfulContent {
+	statements: D1PreparedStatement[];
+	format: FeedFormat | null;
+	siteUrl: string | null;
+	etag: string | null;
+	lastModified: string | null;
+	contentHash: string;
+	finalUrl: string;
+	aliases: string[];
+	itemsProcessed: number;
+	responseBytes: number;
+	performedFullFetch: boolean;
+}
 
-/**
- * Fetch and store items from an RSS feed
- * Handles conditional GET, parsing, deduplication, and error logging
- */
-export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise<void> {
+class RefreshFailure extends Error {
+	constructor(
+		message: string,
+		readonly outcome: RefreshOutcome,
+		readonly code: string,
+		readonly httpStatus: number | null = null,
+		readonly retryAt: string | null = null,
+		readonly responseBytes: number | null = null,
+	) {
+		super(message);
+	}
+}
+
+const MAX_ITEMS_PER_FETCH = 50;
+const MAX_CONTENT_SIZE = 900_000;
+const PERSISTENCE_LEASE_MINUTES = 3;
+const USER_AGENT = 'Pigeon RSS Reader/1.0';
+
+export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise<RefreshResult> {
+	await ensureDatabaseSchema(env);
+	const startedAt = Date.now();
+	const attemptedAt = new Date(startedAt).toISOString();
+
 	try {
-		await ensureDatabaseSchema(env);
-
-		// Build conditional GET headers
 		const headers: Record<string, string> = {
-			'User-Agent': 'Pigeon RSS Reader/1.0',
+			Accept: 'application/rss+xml, application/atom+xml, application/feed+json, application/rdf+xml, application/xml, text/xml, */*;q=0.1',
+			'User-Agent': USER_AGENT,
 		};
-		if (feed.etag) {
-			headers['If-None-Match'] = feed.etag;
+		const useConditionalRequest = shouldUseConditionalRequest(
+			new Date(attemptedAt),
+			feed.conditional_checked_at,
+			Boolean(feed.etag || feed.last_modified),
+		);
+		if (useConditionalRequest && feed.etag) headers['If-None-Match'] = feed.etag;
+		if (useConditionalRequest && feed.last_modified) headers['If-Modified-Since'] = feed.last_modified;
+
+		let resource: Awaited<ReturnType<typeof fetchBoundedFeedResource>>;
+		try {
+			resource = await fetchBoundedFeedResource(feed.source_url, { headers });
+		} catch (error) {
+			const message = redactRefreshError(error);
+			const rejected = /private|internal|unsupported|redirect|exceeds|content type|credentials|invalid feed url/i.test(
+				message,
+			);
+			throw new RefreshFailure(
+				message,
+				rejected ? 'rejected' : 'network_error',
+				rejected ? 'request_rejected' : 'network_failure',
+			);
 		}
-		if (feed.last_modified) {
-			headers['If-Modified-Since'] = feed.last_modified;
-		}
 
-		// Fetch feed
-		const response = await fetch(feed.source_url, {
-			headers,
-			// 10 second timeout
-			signal: AbortSignal.timeout(10000),
-		});
-
-		const now = new Date().toISOString();
-
-		// Handle 304 Not Modified
+		const response = resource.response;
+		const completedAt = new Date().toISOString();
+		const durationMs = Date.now() - startedAt;
 		if (response.status === 304) {
-			await env.DB.prepare('UPDATE feeds SET last_fetched_at = ?, fetch_error = NULL WHERE feed_key = ?')
-				.bind(now, feed.feed_key)
-				.run();
-			return;
+			const result = makeResult({
+				feed,
+				outcome: 'not_modified',
+				attemptedAt,
+				completedAt,
+				durationMs,
+				httpStatus: 304,
+				responseBytes: resource.byteLength,
+				cacheUntilAt: parseCacheControlMaxAge(
+					response.headers.get('Cache-Control'),
+					new Date(completedAt),
+				),
+			});
+			return finalizeRefresh(env, feed, result, null);
 		}
 
-		// Handle non-OK responses
 		if (!response.ok) {
-			const error = `HTTP ${response.status}: ${response.statusText}`;
-			await env.DB.prepare('UPDATE feeds SET last_fetched_at = ?, fetch_error = ? WHERE feed_key = ?')
-				.bind(now, error, feed.feed_key)
-				.run();
-			console.error(`[RSS Fetcher] Failed to fetch ${feed.feed_key}: ${error}`);
-			return;
+			const retryAt = parseRetryAfter(response.headers.get('Retry-After'), new Date(completedAt));
+			const rateLimited = response.status === 429 || (response.status === 503 && retryAt !== null);
+			throw new RefreshFailure(
+				`HTTP ${response.status}${response.statusText ? `: ${response.statusText}` : ''}`,
+				rateLimited ? 'rate_limited' : 'http_error',
+				rateLimited ? 'rate_limited' : `http_${response.status}`,
+				response.status,
+				retryAt,
+				resource.byteLength,
+			);
 		}
 
-		// Parse XML
-		const xmlText = await response.text();
-		const parsed = parseRssFeed(xmlText);
+		const contentHash = await sha256Hex(resource.text);
+		if (feed.content_hash && feed.content_hash === contentHash) {
+			const result = makeResult({
+				feed,
+				outcome: 'unchanged',
+				attemptedAt,
+				completedAt,
+				durationMs,
+				httpStatus: response.status,
+				responseBytes: resource.byteLength,
+				cacheUntilAt: parseCacheControlMaxAge(
+					response.headers.get('Cache-Control'),
+					new Date(completedAt),
+				),
+			});
+			return finalizeRefresh(env, feed, result, {
+				statements: [],
+				format: null,
+				siteUrl: null,
+				etag: response.headers.get('ETag'),
+				lastModified: response.headers.get('Last-Modified'),
+				contentHash,
+				finalUrl: resource.finalUrl.href,
+				aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
+				itemsProcessed: 0,
+				responseBytes: resource.byteLength,
+				performedFullFetch: !useConditionalRequest,
+			});
+		}
 
-		// Extract conditional headers for next fetch
-		const newEtag = response.headers.get('ETag');
-		const newLastModified = response.headers.get('Last-Modified');
+		let parsed: ReturnType<typeof parseFeed>;
+		try {
+			parsed = parseFeed(resource.text, {
+				sourceUrl: resource.finalUrl.href,
+				contentType: resource.contentType,
+			});
+		} catch (error) {
+			throw new RefreshFailure(
+				redactRefreshError(error),
+				'parse_error',
+				'unsupported_or_malformed_feed',
+				response.status,
+				null,
+				resource.byteLength,
+			);
+		}
 
-		// Limit items to prevent spam
 		const items = parsed.items.slice(0, MAX_ITEMS_PER_FETCH);
-
-		// Batch insert items and backfill original URLs on refetches.
 		const statements: D1PreparedStatement[] = [];
-
 		for (const item of items) {
 			const identity = await createRssItemIdentity(feed.feed_key, item);
 			const originalUrl = resolveRssItemUrl({
@@ -91,14 +207,15 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 				content: item.content,
 				title: item.title,
 				feedSiteUrl: parsed.link,
-				feedSourceUrl: feed.source_url,
+				feedSourceUrl: resource.finalUrl.href,
 			});
-			const contentBaseUrl = originalUrl || parsed.link || feed.source_url;
-
-			// Truncate content if too large
-			let content = rewriteRssContentLinks(item.content, contentBaseUrl);
+			const contentBaseUrl = originalUrl || parsed.link || resource.finalUrl.href;
+			let content = rewriteRssContentLinks(
+				appendFeedAttachments(item.content, item.attachments),
+				contentBaseUrl,
+			);
 			if (content.length > MAX_CONTENT_SIZE) {
-				content = content.slice(0, MAX_CONTENT_SIZE) + '\n\n[Content truncated]';
+				content = `${content.slice(0, MAX_CONTENT_SIZE)}\n\n[Content truncated]`;
 			}
 
 			statements.push(
@@ -109,6 +226,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 					ON CONFLICT(message_id) DO UPDATE SET
 						html_content = excluded.html_content,
+						content_pruned_at = NULL,
 						original_url = CASE
 								WHEN excluded.original_url IS NOT NULL
 								  AND (
@@ -118,59 +236,313 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 								  )
 								THEN excluded.original_url
 							ELSE items.original_url
-						END`
+						END`,
 				).bind(
 					identity.id,
 					identity.messageId,
 					feed.feed_key,
 					item.title,
 					item.author || null,
-					item.pubDate || now,
+					item.pubDate || attemptedAt,
 					content,
-					null, // RSS items don't have separate text/html
+					null,
 					originalUrl,
-				)
+				),
 			);
 		}
 
-		// Update feed metadata
+		const content: SuccessfulContent = {
+			statements,
+			format: parsed.format,
+			siteUrl: parsed.link ?? null,
+			etag: response.headers.get('ETag'),
+			lastModified: response.headers.get('Last-Modified'),
+			contentHash,
+			finalUrl: resource.finalUrl.href,
+			aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
+			itemsProcessed: items.length,
+			responseBytes: resource.byteLength,
+			performedFullFetch: !useConditionalRequest,
+		};
+		const result = makeResult({
+			feed,
+			outcome: 'success',
+			attemptedAt,
+			completedAt,
+			durationMs,
+			httpStatus: response.status,
+			itemsProcessed: items.length,
+			responseBytes: resource.byteLength,
+			cacheUntilAt: parseCacheControlMaxAge(
+				response.headers.get('Cache-Control'),
+				new Date(completedAt),
+			),
+		});
+		const finalized = await finalizeRefresh(env, feed, result, content);
+		if (finalized.outcome === 'success') {
+			console.log(`[RSS Fetcher] Refreshed ${feed.feed_key}: ${items.length} items processed`);
+		}
+		return finalized;
+	} catch (error) {
+		const failure =
+			error instanceof RefreshFailure
+				? error
+				: new RefreshFailure(
+						redactRefreshError(error),
+						'network_error',
+						'unexpected_refresh_failure',
+					);
+		const result = makeResult({
+			feed,
+			outcome: failure.outcome,
+			attemptedAt,
+			completedAt: new Date().toISOString(),
+			durationMs: Date.now() - startedAt,
+			httpStatus: failure.httpStatus,
+			responseBytes: failure.responseBytes,
+			retryAt: failure.retryAt,
+			errorCode: failure.code,
+			errorMessage: redactRefreshError(failure),
+		});
+		const finalized = await finalizeRefresh(env, feed, result, null);
+		console.error(`[RSS Fetcher] ${feed.feed_key}: ${finalized.errorCode}`);
+		return finalized;
+	}
+}
+
+async function finalizeRefresh(
+	env: Env,
+	feed: FeedToFetch,
+	result: RefreshResult,
+	content: SuccessfulContent | null,
+): Promise<RefreshResult> {
+	if (await persistRefresh(env, feed, result, content)) return result;
+
+	const completedAt = new Date().toISOString();
+	const leaseLost = makeResult({
+		feed,
+		outcome: 'lease_lost',
+		attemptedAt: result.attemptedAt,
+		completedAt,
+		durationMs: Math.max(result.durationMs, new Date(completedAt).getTime() - new Date(result.attemptedAt).getTime()),
+		errorCode: 'lease_lost',
+		errorMessage: 'Refresh ownership expired before content could be saved',
+	});
+	await activityStatement(env.DB, leaseLost).run();
+	return leaseLost;
+}
+
+function appendFeedAttachments(
+	content: string,
+	attachments: Array<{ url: string; mimeType?: string; title?: string }>,
+): string {
+	const additions = attachments.flatMap((attachment) => {
+		if (content.includes(attachment.url)) return [];
+		const url = escapeHtmlAttribute(attachment.url);
+		const title = escapeHtmlText(attachment.title || 'Media attachment');
+		const isImage = attachment.mimeType?.toLowerCase().startsWith('image/') ||
+			/\.(?:avif|gif|jpe?g|png|webp)(?:$|[?#])/i.test(attachment.url);
+		if (isImage) {
+			return [`<figure><img src="${url}" alt="${title}"></figure>`];
+		}
+		return [`<p><a href="${url}">${title}</a></p>`];
+	});
+	return additions.length > 0 ? [content, ...additions].filter(Boolean).join('\n') : content;
+}
+
+function escapeHtmlAttribute(value: string): string {
+	return escapeHtmlText(value).replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function escapeHtmlText(value: string): string {
+	return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function makeResult(input: {
+	feed: FeedToFetch;
+	outcome: RefreshOutcome;
+	attemptedAt: string;
+	completedAt: string;
+	durationMs: number;
+	httpStatus?: number | null;
+	itemsProcessed?: number;
+	responseBytes?: number | null;
+	retryAt?: string | null;
+	cacheUntilAt?: string | null;
+	errorCode?: string | null;
+	errorMessage?: string | null;
+}): RefreshResult {
+	return {
+		feedKey: input.feed.feed_key,
+		outcome: input.outcome,
+		attemptedAt: input.attemptedAt,
+		completedAt: input.completedAt,
+		durationMs: input.durationMs,
+		httpStatus: input.httpStatus ?? null,
+		itemsProcessed: input.itemsProcessed ?? 0,
+		responseBytes: input.responseBytes ?? null,
+		retryAt: input.retryAt ?? null,
+		cacheUntilAt: input.cacheUntilAt ?? null,
+		errorCode: input.errorCode ?? null,
+		errorMessage: input.errorMessage ?? null,
+	};
+}
+
+async function persistRefresh(
+	env: Env,
+	feed: FeedToFetch,
+	result: RefreshResult,
+	content: SuccessfulContent | null,
+): Promise<boolean> {
+	if (feed.refresh_lease_token) {
+		const renewedUntil = new Date(
+			Date.now() + PERSISTENCE_LEASE_MINUTES * 60_000,
+		).toISOString();
+		const renewal = await env.DB.prepare(
+			`UPDATE feeds
+			 SET refresh_lease_until = ?
+			 WHERE feed_key = ? AND refresh_lease_token = ?`,
+		)
+			.bind(renewedUntil, feed.feed_key, feed.refresh_lease_token)
+			.run();
+		if (renewal.meta.changes === 0) return false;
+	}
+
+	const succeeded = ['success', 'not_modified', 'unchanged'].includes(result.outcome);
+	const nextFetchAt = computeNextFetchAt(new Date(result.completedAt), {
+		feedKey: feed.feed_key,
+		fetchIntervalMinutes: feed.fetch_interval_minutes,
+		consecutiveFailures: feed.consecutive_failures,
+		outcome: result.outcome,
+		retryAfterAt: result.retryAt,
+		cacheUntilAt: result.cacheUntilAt,
+	});
+	const failureCount = succeeded ? 0 : (feed.consecutive_failures ?? 0) + 1;
+	const statements = [...(content?.statements ?? [])];
+
+	if (content) {
 		statements.push(
 			env.DB.prepare(
 				`UPDATE feeds
-				SET last_fetched_at = ?,
-				    fetch_error = NULL,
-				    etag = ?,
-				    last_modified = ?,
-				    site_url = COALESCE(?, site_url),
-				    last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
-				    item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
-				WHERE feed_key = ?`
-			).bind(now, newEtag, newLastModified, parsed.link || null, feed.feed_key, feed.feed_key, feed.feed_key)
+				 SET last_fetched_at = ?,
+				     etag = COALESCE(?, etag),
+				     last_modified = COALESCE(?, last_modified),
+				     site_url = COALESCE(?, site_url),
+				     last_attempt_at = ?,
+				     last_success_at = ?,
+				     fetch_error = NULL,
+				     consecutive_failures = 0,
+				     last_http_status = ?,
+				     retry_after_at = NULL,
+				     content_hash = COALESCE(?, content_hash),
+				     conditional_checked_at = COALESCE(?, conditional_checked_at),
+				     next_fetch_at = ?,
+				     feed_format = COALESCE(?, feed_format),
+				     source_url = COALESCE(?, source_url),
+				     canonical_url = COALESCE(canonical_url, ?),
+				     last_refresh_outcome = ?,
+				     last_fetch_duration_ms = ?,
+				     refresh_lease_until = NULL,
+				     refresh_lease_token = NULL,
+				     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
+				     item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
+				 WHERE feed_key = ?
+				   AND (? IS NULL OR refresh_lease_token = ?)`,
+			).bind(
+				result.attemptedAt,
+				content.etag,
+				content.lastModified,
+				content.siteUrl,
+				result.attemptedAt,
+				result.completedAt,
+				result.httpStatus,
+				content.contentHash,
+				content.performedFullFetch ? result.completedAt : null,
+				nextFetchAt,
+				content.format,
+				content.finalUrl,
+				content.finalUrl,
+				result.outcome,
+				result.durationMs,
+				feed.feed_key,
+				feed.feed_key,
+				feed.feed_key,
+				feed.refresh_lease_token ?? null,
+				feed.refresh_lease_token ?? null,
+			),
 		);
 
-		// Execute all statements in a batch
-		await env.DB.batch(statements);
-
-		console.log(
-			`[RSS Fetcher] Successfully fetched ${feed.feed_key}: ${items.length} items`
-		);
-	} catch (error) {
-		// Log error to database (don't rethrow - prevents retry loops)
-		const errorMessage =
-			error instanceof Error ? error.message : String(error);
-		const now = new Date().toISOString();
-
-		await env.DB.prepare(
-			'UPDATE feeds SET last_fetched_at = ?, fetch_error = ? WHERE feed_key = ?'
-		)
-			.bind(now, errorMessage, feed.feed_key)
-			.run();
-
-		console.error(
-			`[RSS Fetcher] Error fetching ${feed.feed_key}:`,
-			errorMessage
+		for (const alias of [...new Set(content.aliases)]) {
+			if (alias === content.finalUrl) continue;
+			statements.push(
+				env.DB.prepare(
+					`INSERT OR IGNORE INTO feed_url_aliases (alias_url, feed_key, canonical_url)
+					 VALUES (?, ?, ?)`,
+				).bind(alias, feed.feed_key, content.finalUrl),
+			);
+		}
+	} else {
+		statements.push(
+			env.DB.prepare(
+				`UPDATE feeds SET last_fetched_at = ?,
+				     last_attempt_at = ?,
+				     last_success_at = CASE WHEN ? = 1 THEN ? ELSE last_success_at END,
+				     fetch_error = ?,
+				     consecutive_failures = ?,
+				     last_http_status = ?,
+				     retry_after_at = ?,
+				     next_fetch_at = ?,
+				     last_refresh_outcome = ?,
+				     last_fetch_duration_ms = ?,
+				     refresh_lease_until = NULL,
+				     refresh_lease_token = NULL
+				 WHERE feed_key = ?
+				   AND (? IS NULL OR refresh_lease_token = ?)`,
+			).bind(
+				result.attemptedAt,
+				result.attemptedAt,
+				succeeded ? 1 : 0,
+				result.completedAt,
+				result.errorMessage,
+				failureCount,
+				result.httpStatus,
+				result.retryAt,
+				nextFetchAt,
+				result.outcome,
+				result.durationMs,
+				feed.feed_key,
+				feed.refresh_lease_token ?? null,
+				feed.refresh_lease_token ?? null,
+			),
 		);
 	}
+
+	statements.push(activityStatement(env.DB, result));
+
+	await env.DB.batch(statements);
+	return true;
+}
+
+function activityStatement(db: D1Database, result: RefreshResult): D1PreparedStatement {
+	return db.prepare(
+		`INSERT INTO refresh_activity (
+		  id, feed_key, attempted_at, completed_at, outcome, http_status,
+		  duration_ms, items_added, response_bytes, error_code, error_message, retry_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	).bind(
+		crypto.randomUUID(),
+		result.feedKey,
+		result.attemptedAt,
+		result.completedAt,
+		result.outcome,
+		result.httpStatus,
+		result.durationMs,
+		result.itemsProcessed,
+		result.responseBytes,
+		result.errorCode,
+		result.errorMessage,
+		result.retryAt,
+	);
 }
 
 async function createRssItemIdentity(
@@ -185,15 +557,9 @@ async function createRssItemIdentity(
 	},
 ): Promise<RssItemIdentity> {
 	const rawIdentity =
-		item.guid ||
-		item.link ||
-		[item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+		item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
 	const digest = await sha256Hex(`${feedKey}\n${rawIdentity}`);
-
-	return {
-		id: hexToUuid(digest),
-		messageId: `rss:${digest}`,
-	};
+	return { id: hexToUuid(digest), messageId: `rss:${digest}` };
 }
 
 async function sha256Hex(input: string): Promise<string> {
@@ -204,10 +570,12 @@ async function sha256Hex(input: string): Promise<string> {
 
 function hexToUuid(hex: string): string {
 	const raw = hex.slice(0, 32);
-	const versioned = `${raw.slice(0, 12)}5${raw.slice(13, 16)}${((parseInt(raw.slice(16, 18), 16) & 0x3f) | 0x80)
+	const versioned = `${raw.slice(0, 12)}5${raw.slice(13, 16)}${(
+		(parseInt(raw.slice(16, 18), 16) & 0x3f) |
+		0x80
+	)
 		.toString(16)
 		.padStart(2, '0')}${raw.slice(18)}`;
-
 	return [
 		versioned.slice(0, 8),
 		versioned.slice(8, 12),

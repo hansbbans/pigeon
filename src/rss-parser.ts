@@ -1,143 +1,369 @@
 /**
- * RSS/Atom feed parser using fast-xml-parser
- * Handles both RSS 2.0 and Atom formats
+ * Liberal, deterministic parser for the feed formats Pigeon accepts.
+ *
+ * Publishers routinely send incorrect content types, mixed-case attributes,
+ * empty feeds, and malformed dates. Format detection therefore uses the body
+ * first and treats dates as optional instead of inventing a current timestamp.
  */
 
 import { XMLParser } from 'fast-xml-parser';
+
+export type FeedFormat = 'rss2' | 'rss1' | 'atom' | 'json';
 
 export interface ParsedFeed {
 	title: string;
 	link?: string;
 	items: ParsedItem[];
+	format: FeedFormat;
 }
 
 export interface ParsedItem {
-	guid: string; // Unique identifier (used as message_id for dedup)
+	guid: string;
 	title: string;
 	link?: string;
-	pubDate?: string; // ISO 8601 string
-	content: string; // HTML content (description or content:encoded)
+	pubDate?: string;
+	content: string;
 	author?: string;
+	attachments: ParsedAttachment[];
 }
 
-const parser = new XMLParser({
+export interface ParsedAttachment {
+	url: string;
+	mimeType?: string;
+	title?: string;
+}
+
+export interface ParseFeedOptions {
+	sourceUrl?: string;
+	contentType?: string | null;
+}
+
+type FeedRecord = Record<string, unknown>;
+
+const xmlParser = new XMLParser({
 	ignoreAttributes: false,
 	attributeNamePrefix: '@_',
 	textNodeName: '#text',
-	parseAttributeValue: true,
+	parseAttributeValue: false,
 	trimValues: true,
+	processEntities: true,
+	removeNSPrefix: false,
 });
 
-/**
- * Parse RSS 2.0 or Atom feed from XML text
- * @throws Error if feed is malformed or unsupported format
- */
-export function parseRssFeed(xmlText: string): ParsedFeed {
-	const parsed = parser.parse(xmlText);
-
-	// Detect Atom feed
-	if (parsed.feed && parsed.feed.entry) {
-		return parseAtomFeed(parsed.feed);
+export function parseFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
+	const text = feedText.replace(/^\uFEFF/, '').trim();
+	if (!text) {
+		throw new Error('Feed is empty');
 	}
 
-	// Detect RSS 2.0 feed
-	if (parsed.rss && parsed.rss.channel) {
-		return parseRss2Feed(parsed.rss.channel);
+	const contentType = options.contentType?.toLowerCase() ?? '';
+	if (text.startsWith('{') || text.startsWith('[') || contentType.includes('json')) {
+		return parseJsonFeed(text, options.sourceUrl);
 	}
 
-	throw new Error('Unsupported feed format (expected RSS 2.0 or Atom)');
+	let document: FeedRecord;
+	try {
+		document = asRecord(xmlParser.parse(text));
+	} catch (error) {
+		throw new Error(`Malformed XML feed: ${errorMessage(error)}`);
+	}
+
+	const atom = asOptionalRecord(findKey(document, ['feed']));
+	if (atom) {
+		return parseAtomFeed(atom, options.sourceUrl);
+	}
+
+	const rss = asOptionalRecord(findKey(document, ['rss']));
+	const channel = rss ? asOptionalRecord(findKey(rss, ['channel'])) : undefined;
+	if (channel) {
+		return parseRss2Feed(channel, options.sourceUrl);
+	}
+
+	const rdf = asOptionalRecord(findKey(document, ['rdf:RDF', 'RDF']));
+	if (rdf) {
+		return parseRss1Feed(rdf, options.sourceUrl);
+	}
+
+	throw new Error('Unsupported feed format (expected RSS, RDF, Atom, or JSON Feed)');
 }
 
-/**
- * Parse Atom feed format
- */
-function parseAtomFeed(feed: any): ParsedFeed {
-	const title = feed.title?.['#text'] || feed.title || 'Untitled Feed';
-	const link = extractAtomLink(feed.link);
-
-	const entries = Array.isArray(feed.entry) ? feed.entry : [feed.entry];
-	const items: ParsedItem[] = entries
-		.filter((entry: any) => entry) // Filter out undefined entries
-		.map((entry: any) => {
-			const guid = entry.id || extractAtomLink(entry.link) || '';
-			const itemTitle = entry.title?.['#text'] || entry.title || 'Untitled';
-			const itemLink = extractAtomLink(entry.link);
-			const pubDate = entry.updated || entry.published;
-			const content =
-				entry.content?.['#text'] || entry.content || entry.summary?.['#text'] || entry.summary || '';
-			const author = entry.author?.name || entry.author?.['#text'] || undefined;
-
-			return {
-				guid,
-				title: itemTitle,
-				link: itemLink,
-				pubDate: pubDate ? normalizeDate(pubDate) : undefined,
-				content,
-				author,
-			};
-		});
-
-	return { title, link, items };
+/** Kept for existing callers and Google Reader compatibility tests. */
+export function parseRssFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
+	return parseFeed(feedText, options);
 }
 
-/**
- * Parse RSS 2.0 feed format
- */
-function parseRss2Feed(channel: any): ParsedFeed {
-	const title = channel.title || 'Untitled Feed';
-	const link = channel.link;
-
-	const entries = Array.isArray(channel.item) ? channel.item : [channel.item];
-	const items: ParsedItem[] = entries
-		.filter((item: any) => item) // Filter out undefined items
-		.map((item: any) => {
-			const guid = item.guid?.['#text'] || item.guid || item.link || '';
-			const itemTitle = item.title || 'Untitled';
-			const itemLink = item.link;
-			const pubDate = item.pubDate || item['dc:date'];
-			const content =
-				item['content:encoded'] || item.description || item.summary || '';
-			const author = item.author || item['dc:creator'] || undefined;
-
-			return {
-				guid,
-				title: itemTitle,
-				link: itemLink,
-				pubDate: pubDate ? normalizeDate(pubDate) : undefined,
-				content,
-				author,
-			};
-		});
-
-	return { title, link, items };
+export function detectFeedFormat(feedText: string, contentType?: string | null): FeedFormat | null {
+	try {
+		return parseFeed(feedText, { contentType }).format;
+	} catch {
+		return null;
+	}
 }
 
-/**
- * Extract href from Atom link (can be object or array)
- */
-function extractAtomLink(link: any): string | undefined {
-	if (!link) return undefined;
-	if (typeof link === 'string') return link;
-	if (link['@_href']) return link['@_href'];
-	if (Array.isArray(link)) {
-		const alternate = link.find((l) => l['@_rel'] === 'alternate' || !l['@_rel']);
-		return alternate?.['@_href'];
+function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`Malformed JSON feed: ${errorMessage(error)}`);
+	}
+
+	const feed = asRecord(value);
+	const version = textValue(feed.version);
+	if (!version?.startsWith('https://jsonfeed.org/version/')) {
+		throw new Error('Unsupported JSON document (expected JSON Feed)');
+	}
+
+	const homePageUrl = resolveUrl(textValue(feed.home_page_url), sourceUrl);
+	const feedUrl = resolveUrl(textValue(feed.feed_url), sourceUrl);
+	const baseUrl = homePageUrl ?? feedUrl ?? sourceUrl;
+	const items = arrayValue(feed.items).map((rawItem) => {
+		const item = asRecord(rawItem);
+		const link = resolveUrl(textValue(item.url) ?? textValue(item.external_url), baseUrl);
+		const plainText = textValue(item.content_text);
+		const content = textValue(item.content_html) ?? (plainText ? escapePlainText(plainText) : '');
+		const authors = arrayValue(item.authors);
+		const firstAuthor = authors.length > 0 ? asRecord(authors[0]) : undefined;
+		const legacyAuthor = asOptionalRecord(item.author);
+		const author = firstAuthor
+			? textValue(firstAuthor.name)
+			: legacyAuthor
+				? textValue(legacyAuthor.name)
+				: undefined;
+
+		return {
+			guid: textValue(item.id) ?? link ?? '',
+			title: textValue(item.title) ?? 'Untitled',
+			link,
+			pubDate: normalizeDate(textValue(item.date_published) ?? textValue(item.date_modified)),
+			content,
+			author,
+			attachments: parseJsonAttachments(item, baseUrl),
+		};
+	});
+
+	return {
+		title: textValue(feed.title) ?? 'Untitled Feed',
+		link: homePageUrl,
+		items,
+		format: 'json',
+	};
+}
+
+function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
+	const feedLink = extractAtomLink(findKey(feed, ['link']), sourceUrl);
+	const baseUrl = feedLink ?? sourceUrl;
+	const entries = arrayValue(findKey(feed, ['entry']));
+	const items = entries.map((rawEntry) => {
+		const entry = asRecord(rawEntry);
+		const link = extractAtomLink(findKey(entry, ['link']), baseUrl);
+		const authorRecord = asOptionalRecord(findKey(entry, ['author']));
+
+		return {
+			guid: textValue(findKey(entry, ['id'])) ?? link ?? '',
+			title: textValue(findKey(entry, ['title'])) ?? 'Untitled',
+			link,
+			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
+			content: textValue(findKey(entry, ['content', 'summary'])) ?? '',
+			author: authorRecord ? textValue(findKey(authorRecord, ['name'])) : undefined,
+			attachments: parseAtomAttachments(findKey(entry, ['link']), baseUrl),
+		};
+	});
+
+	return {
+		title: textValue(findKey(feed, ['title'])) ?? 'Untitled Feed',
+		link: feedLink,
+		items,
+		format: 'atom',
+	};
+}
+
+function parseRss2Feed(channel: FeedRecord, sourceUrl?: string): ParsedFeed {
+	const feedLink = resolveUrl(textValue(findKey(channel, ['link'])), sourceUrl);
+	const baseUrl = feedLink ?? sourceUrl;
+	const entries = arrayValue(findKey(channel, ['item']));
+
+	return {
+		title: textValue(findKey(channel, ['title'])) ?? 'Untitled Feed',
+		link: feedLink,
+		items: entries.map((rawItem) => parseRssItem(asRecord(rawItem), baseUrl)),
+		format: 'rss2',
+	};
+}
+
+function parseRss1Feed(rdf: FeedRecord, sourceUrl?: string): ParsedFeed {
+	const channel = asOptionalRecord(findKey(rdf, ['channel'])) ?? {};
+	const feedLink = resolveUrl(textValue(findKey(channel, ['link'])), sourceUrl);
+	const baseUrl = feedLink ?? sourceUrl;
+	const entries = arrayValue(findKey(rdf, ['item']));
+
+	return {
+		title: textValue(findKey(channel, ['title'])) ?? 'Untitled Feed',
+		link: feedLink,
+		items: entries.map((rawItem) => parseRssItem(asRecord(rawItem), baseUrl)),
+		format: 'rss1',
+	};
+}
+
+function parseRssItem(item: FeedRecord, baseUrl?: string): ParsedItem {
+	const guidValue = findKey(item, ['guid', 'dc:identifier']);
+	const link = resolveUrl(textValue(findKey(item, ['link'])), baseUrl);
+
+	return {
+		guid: textValue(guidValue) ?? attributeValue(item, ['rdf:about', 'about']) ?? link ?? '',
+		title: textValue(findKey(item, ['title'])) ?? 'Untitled',
+		link,
+		pubDate: normalizeDate(textValue(findKey(item, ['pubDate', 'dc:date', 'date']))),
+		content: textValue(findKey(item, ['content:encoded', 'description', 'summary'])) ?? '',
+		author: textValue(findKey(item, ['author', 'dc:creator', 'creator'])),
+		attachments: parseRssAttachments(item, baseUrl),
+	};
+}
+
+function parseJsonAttachments(item: FeedRecord, baseUrl?: string): ParsedAttachment[] {
+	return deduplicateAttachments(
+		arrayValue(item.attachments).flatMap((rawAttachment) => {
+			const attachment = asRecord(rawAttachment);
+			const url = resolveUrl(textValue(attachment.url), baseUrl);
+			if (!url) return [];
+			return [{
+				url,
+				mimeType: textValue(attachment.mime_type),
+				title: textValue(attachment.title),
+			}];
+		}),
+	);
+}
+
+function parseAtomAttachments(value: unknown, baseUrl?: string): ParsedAttachment[] {
+	return deduplicateAttachments(
+		arrayValue(value).flatMap((rawLink) => {
+			const link = asRecord(rawLink);
+			if (attributeValue(link, ['rel'])?.toLowerCase() !== 'enclosure') return [];
+			const url = resolveUrl(attributeValue(link, ['href']) ?? textValue(link), baseUrl);
+			if (!url) return [];
+			return [{
+				url,
+				mimeType: attributeValue(link, ['type']),
+				title: attributeValue(link, ['title']),
+			}];
+		}),
+	);
+}
+
+function parseRssAttachments(item: FeedRecord, baseUrl?: string): ParsedAttachment[] {
+	const candidates = [
+		...arrayValue(findKey(item, ['enclosure'])),
+		...arrayValue(findKey(item, ['media:content'])),
+		...arrayValue(findKey(item, ['media:thumbnail'])),
+	];
+	return deduplicateAttachments(
+		candidates.flatMap((rawAttachment) => {
+			const attachment = asRecord(rawAttachment);
+			const url = resolveUrl(
+				attributeValue(attachment, ['url', 'href']) ?? textValue(attachment),
+				baseUrl,
+			);
+			if (!url) return [];
+			return [{
+				url,
+				mimeType: attributeValue(attachment, ['type', 'medium']),
+				title: attributeValue(attachment, ['title', 'description']),
+			}];
+		}),
+	);
+}
+
+function deduplicateAttachments(attachments: ParsedAttachment[]): ParsedAttachment[] {
+	const seen = new Set<string>();
+	return attachments.filter((attachment) => {
+		if (seen.has(attachment.url)) return false;
+		seen.add(attachment.url);
+		return true;
+	});
+}
+
+function extractAtomLink(value: unknown, baseUrl?: string): string | undefined {
+	for (const candidate of arrayValue(value)) {
+		if (typeof candidate === 'string') {
+			return resolveUrl(candidate, baseUrl);
+		}
+		const link = asRecord(candidate);
+		const rel = attributeValue(link, ['rel'])?.toLowerCase();
+		if (!rel || rel === 'alternate') {
+			const href = attributeValue(link, ['href']) ?? textValue(link);
+			const resolved = resolveUrl(href, baseUrl);
+			if (resolved) return resolved;
+		}
 	}
 	return undefined;
 }
 
-/**
- * Normalize various date formats to ISO 8601 UTC
- */
-function normalizeDate(dateStr: string): string {
+function normalizeDate(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function resolveUrl(value: string | undefined, baseUrl?: string): string | undefined {
+	if (!value) return undefined;
 	try {
-		const date = new Date(dateStr);
-		if (isNaN(date.getTime())) {
-			// Invalid date - return current time
-			return new Date().toISOString();
-		}
-		return date.toISOString();
+		return new URL(value, baseUrl).href;
 	} catch {
-		return new Date().toISOString();
+		return undefined;
 	}
+}
+
+function findKey(record: FeedRecord, candidates: string[]): unknown {
+	for (const candidate of candidates) {
+		const exact = Object.keys(record).find((key) => key.toLowerCase() === candidate.toLowerCase());
+		if (exact !== undefined) return record[exact];
+	}
+	return undefined;
+}
+
+function attributeValue(record: FeedRecord, candidates: string[]): string | undefined {
+	for (const candidate of candidates) {
+		const value = findKey(record, [`@_${candidate}`, candidate]);
+		const text = textValue(value);
+		if (text) return text;
+	}
+	return undefined;
+}
+
+function textValue(value: unknown): string | undefined {
+	if (typeof value === 'string') return value.trim() || undefined;
+	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+	if (!value || Array.isArray(value) || typeof value !== 'object') return undefined;
+
+	const record = value as FeedRecord;
+	return textValue(findKey(record, ['#text', '__cdata']));
+}
+
+function arrayValue(value: unknown): unknown[] {
+	if (value === undefined || value === null) return [];
+	return Array.isArray(value) ? value : [value];
+}
+
+function asRecord(value: unknown): FeedRecord {
+	return value && typeof value === 'object' && !Array.isArray(value) ? (value as FeedRecord) : {};
+}
+
+function asOptionalRecord(value: unknown): FeedRecord | undefined {
+	const record = asRecord(value);
+	return Object.keys(record).length > 0 ? record : undefined;
+}
+
+function escapePlainText(value: string): string {
+	return value
+		.replaceAll('&', '&amp;')
+		.replaceAll('<', '&lt;')
+		.replaceAll('>', '&gt;')
+		.replaceAll('"', '&quot;')
+		.replaceAll("'", '&#39;')
+		.replaceAll('\n', '<br>');
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }

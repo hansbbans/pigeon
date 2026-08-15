@@ -67,6 +67,20 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(RecommendationsResponse.self, from: data).items
 	}
 
+	func syncHealth() async throws -> SyncHealthSnapshot {
+		let (data, _) = try await requestJSON(path: "app/status")
+		return try decoder.decode(ServerStatusResponse.self, from: data).syncHealth
+	}
+
+	func retryFeed(feedKey: String) async throws {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "app/status/retry"))
+		request.httpMethod = "POST"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(["feed_key": feedKey])
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
 	func navigationSnapshot(
 		now: Date = .now,
 		dayBounds: ReaderLocalDayBounds? = nil,
@@ -405,7 +419,23 @@ struct PigeonAPIClient: Sendable {
 
 	private var decoder: JSONDecoder {
 		let decoder = JSONDecoder()
-		decoder.dateDecodingStrategy = .iso8601
+		decoder.dateDecodingStrategy = .custom { decoder in
+			let value = try decoder.singleValueContainer().decode(String.self)
+			let fractionalFormatter = ISO8601DateFormatter()
+			fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+			if let date = fractionalFormatter.date(from: value) {
+				return date
+			}
+			let formatter = ISO8601DateFormatter()
+			formatter.formatOptions = [.withInternetDateTime]
+			guard let date = formatter.date(from: value) else {
+				throw DecodingError.dataCorruptedError(
+					in: try decoder.singleValueContainer(),
+					debugDescription: "Expected an ISO 8601 date.",
+				)
+			}
+			return date
+		}
 		return decoder
 	}
 

@@ -122,7 +122,19 @@ class FeedVariantStatement {
 		if (
 			this.sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+			this.sql.startsWith('ALTER TABLE feeds ADD COLUMN ') ||
+			this.sql.startsWith('ALTER TABLE items ADD COLUMN ') ||
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due') ||
+			this.sql.startsWith('CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_url_aliases') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_refresh_activity_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS item_statuses') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
+			this.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
 			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO feed_tags') ||

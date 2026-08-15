@@ -5,6 +5,9 @@ export interface SchemaState {
 	hasItemsTable: boolean;
 	hasFeedTagsTable: boolean;
 	hasEngagementEventsTable: boolean;
+	hasFeedUrlAliasesTable: boolean;
+	hasRefreshActivityTable: boolean;
+	hasItemStatusesTable: boolean;
 	engagementEventColumns: Set<string>;
 	feedColumns: Set<string>;
 	itemColumns: Set<string>;
@@ -17,12 +20,15 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '8',
+		schemaVersion: '9',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
 		hasFeedTagsTable: true,
 		hasEngagementEventsTable: true,
+		hasFeedUrlAliasesTable: true,
+		hasRefreshActivityTable: true,
+		hasItemStatusesTable: true,
 		engagementEventColumns: new Set(['destination_host']),
 		feedColumns: new Set([
 			'feed_key',
@@ -43,6 +49,20 @@ export function createCurrentSchemaState(): SchemaState {
 			'custom_title',
 			'category',
 			'icon_url',
+			'canonical_url',
+			'feed_format',
+			'next_fetch_at',
+			'last_attempt_at',
+			'last_success_at',
+			'consecutive_failures',
+			'last_http_status',
+			'retry_after_at',
+			'content_hash',
+			'conditional_checked_at',
+			'refresh_lease_until',
+			'refresh_lease_token',
+			'last_refresh_outcome',
+			'last_fetch_duration_ms',
 		]),
 		itemColumns: new Set([
 			'id',
@@ -57,6 +77,7 @@ export function createCurrentSchemaState(): SchemaState {
 			'received_at',
 			'created_at',
 			'content_size',
+			'content_pruned_at',
 			'is_read',
 			'is_starred',
 		]),
@@ -69,9 +90,31 @@ export function createLegacySchemaState(): SchemaState {
 	state.schemaVersion = '3';
 	state.hasFeedTagsTable = false;
 	state.hasEngagementEventsTable = false;
+	state.hasFeedUrlAliasesTable = false;
+	state.hasRefreshActivityTable = false;
+	state.hasItemStatusesTable = false;
 	state.engagementEventColumns.clear();
 	state.feedColumns.delete('site_url');
+	for (const column of [
+		'canonical_url',
+		'feed_format',
+		'next_fetch_at',
+		'last_attempt_at',
+		'last_success_at',
+		'consecutive_failures',
+		'last_http_status',
+		'retry_after_at',
+		'content_hash',
+		'conditional_checked_at',
+		'refresh_lease_until',
+		'refresh_lease_token',
+		'last_refresh_outcome',
+		'last_fetch_duration_ms',
+	]) {
+		state.feedColumns.delete(column);
+	}
 	state.itemColumns.delete('original_url');
+	state.itemColumns.delete('content_pruned_at');
 	return state;
 }
 
@@ -94,6 +137,9 @@ export function maybeHandleSchemaFirst<T>(
 			(tableName === 'items' && state.hasItemsTable) ||
 			(tableName === 'feed_tags' && state.hasFeedTagsTable) ||
 			(tableName === 'engagement_events' && state.hasEngagementEventsTable) ||
+			(tableName === 'feed_url_aliases' && state.hasFeedUrlAliasesTable) ||
+			(tableName === 'refresh_activity' && state.hasRefreshActivityTable) ||
+			(tableName === 'item_statuses' && state.hasItemStatusesTable) ||
 			(tableName === '_meta' && state.hasMetaTable);
 
 		return {
@@ -179,6 +225,53 @@ export function maybeHandleSchemaRun(
 
 	if (sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch')) {
 		state.operations.push('create-next-fetch-index');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due')) {
+		state.operations.push('create-refresh-due-index');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url')) {
+		state.operations.push('create-canonical-url-index');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS feed_url_aliases')) {
+		state.hasFeedUrlAliasesTable = true;
+		state.operations.push('create-feed_url_aliases');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity')) {
+		state.hasRefreshActivityTable = true;
+		state.operations.push('create-refresh_activity');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS item_statuses')) {
+		state.hasItemStatusesTable = true;
+		state.operations.push('create-item_statuses');
+		return true;
+	}
+
+	if (
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_refresh_activity_') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_')
+	) {
+		state.operations.push('create-v9-index');
+		return true;
+	}
+
+	if (sql.startsWith('INSERT OR IGNORE INTO item_statuses')) {
+		state.operations.push('backfill-item_statuses');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_')) {
+		state.operations.push('create-item-status-trigger');
 		return true;
 	}
 

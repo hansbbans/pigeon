@@ -1,0 +1,412 @@
+[
+  {
+    "name": "rss2-1",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 1</title><link>https://example.com/</link><item><guid>rss-1</guid><title>RSS item 1</title><link>/posts/1</link><description><![CDATA[<p>RSS 1</p>]]></description><pubDate>Fri, 01 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-2",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 2</title><link>https://example.com/</link><item><guid>rss-2</guid><title>RSS item 2</title><link>/posts/2</link><description><![CDATA[<p>RSS 2</p>]]></description><pubDate>Fri, 02 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-3",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 3</title><link>https://example.com/</link><item><guid>rss-3</guid><title>RSS item 3</title><link>/posts/3</link><description><![CDATA[<p>RSS 3</p>]]></description><pubDate>not-a-date</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-4",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 4</title><link>https://example.com/</link><item><guid>rss-4</guid><title>RSS item 4</title><link>/posts/4</link><description><![CDATA[<p>RSS 4</p>]]></description><pubDate>Fri, 04 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-5",
+    "expectedFormat": "rss2",
+    "expectedItems": 0,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 5</title><link>https://example.com/</link></channel></rss>"
+  },
+  {
+    "name": "rss2-6",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 6</title><link>https://example.com/</link><item><guid>rss-6</guid><title>RSS item 6</title><link>/posts/6</link><description><![CDATA[<p>RSS 6</p>]]></description><pubDate>Fri, 06 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-7",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\"><channel><title>RSS 7</title><link>https://example.com/</link><item><guid>rss-7</guid><title>RSS item 7</title><link>/posts/7</link><description><![CDATA[<p>RSS 7</p>]]></description><pubDate>Fri, 07 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-8",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 8</title><link>https://example.com/</link><item><guid>rss-8</guid><title>RSS item 8</title><link>/posts/8</link><description><![CDATA[<p>RSS 8</p>]]></description><pubDate>Fri, 08 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-9",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 9</title><link>https://example.com/</link><item><guid>rss-9</guid><title>RSS item 9</title><link>/posts/9</link><description><![CDATA[<p>RSS 9</p>]]></description><pubDate>Fri, 09 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-10",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 10</title><link>https://example.com/</link><item><guid>rss-10</guid><title>RSS item 10</title><link>/posts/10</link><description><![CDATA[<p>RSS 10</p>]]></description><pubDate>Fri, 10 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-11",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 11</title><link>https://example.com/</link><item><guid>rss-11</guid><title>RSS item 11</title><link>/posts/11</link><description><![CDATA[<p>RSS 11</p>]]></description><pubDate>Fri, 11 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-12",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 12</title><link>https://example.com/</link><item><guid>rss-12</guid><title>RSS item 12</title><link>/posts/12</link><description><![CDATA[<p>RSS 12</p>]]></description><pubDate>Fri, 12 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-13",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 13</title><link>https://example.com/</link><item><guid>rss-13</guid><title>RSS item 13</title><link>/posts/13</link><description><![CDATA[<p>RSS 13</p>]]></description><pubDate>Fri, 13 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-14",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 14</title><link>https://example.com/</link><item><guid>rss-14</guid><title>RSS item 14</title><link>/posts/14</link><description><![CDATA[<p>RSS 14</p>]]></description><pubDate>Fri, 14 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-15",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS 15</title><link>https://example.com/</link><item><guid>rss-15</guid><title>RSS item 15</title><link>/posts/15</link><description><![CDATA[<p>RSS 15</p>]]></description><pubDate>Fri, 15 Mar 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "atom-1",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 1</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-1</id><title>Atom item 1</title><link href=\"/atom/1\"/><updated>2026-03-01T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 1&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-2",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 2</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-2</id><title>Atom item 2</title><link href=\"/atom/2\"/><updated>2026-03-02T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 2&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-3",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 3</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-3</id><title>Atom item 3</title><link href=\"/atom/3\"/><updated>bad-date</updated><content type=\"html\">&lt;p&gt;Atom 3&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-4",
+    "expectedFormat": "atom",
+    "expectedItems": 0,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 4</title><link rel=\"alternate\" href=\"https://example.com/\"/></feed>"
+  },
+  {
+    "name": "atom-5",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 5</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-5</id><title>Atom item 5</title><link href=\"/atom/5\"/><updated>2026-03-05T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 5&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-6",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 6</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-6</id><title>Atom item 6</title><link href=\"/atom/6\"/><updated>2026-03-06T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 6&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-7",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 7</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-7</id><title>Atom item 7</title><link href=\"/atom/7\"/><updated>2026-03-07T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 7&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-8",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 8</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-8</id><title>Atom item 8</title><link href=\"/atom/8\"/><updated>2026-03-08T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 8&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-9",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 9</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-9</id><title>Atom item 9</title><link href=\"/atom/9\"/><updated>2026-03-09T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 9&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "atom-10",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/atom.xml",
+    "source": "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom 10</title><link rel=\"alternate\" href=\"https://example.com/\"/><entry><id>atom-10</id><title>Atom item 10</title><link href=\"/atom/10\"/><updated>2026-03-10T12:00:00Z</updated><content type=\"html\">&lt;p&gt;Atom 10&lt;/p&gt;</content></entry></feed>"
+  },
+  {
+    "name": "rss1-1",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 1</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/1\"><title>RDF item 1</title><link>/rdf/1</link><description>RDF 1</description><dc:date>2026-03-01T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-2",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 2</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/2\"><title>RDF item 2</title><link>/rdf/2</link><description>RDF 2</description><dc:date>2026-03-02T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-3",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 3</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/3\"><title>RDF item 3</title><link>/rdf/3</link><description>RDF 3</description><dc:date>2026-03-03T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-4",
+    "expectedFormat": "rss1",
+    "expectedItems": 0,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 4</title><link>https://example.com/</link></channel></rdf:RDF>"
+  },
+  {
+    "name": "rss1-5",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 5</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/5\"><title>RDF item 5</title><link>/rdf/5</link><description>RDF 5</description><dc:date>2026-03-05T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-6",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 6</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/6\"><title>RDF item 6</title><link>/rdf/6</link><description>RDF 6</description><dc:date>2026-03-06T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-7",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 7</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/7\"><title>RDF item 7</title><link>/rdf/7</link><description>RDF 7</description><dc:date>2026-03-07T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-8",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 8</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/8\"><title>RDF item 8</title><link>/rdf/8</link><description>RDF 8</description><dc:date>2026-03-08T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-9",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 9</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/9\"><title>RDF item 9</title><link>/rdf/9</link><description>RDF 9</description><dc:date>2026-03-09T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "rss1-10",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/rdf.xml",
+    "source": "<?xml version=\"1.0\"?><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><channel rdf:about=\"https://example.com/rdf.xml\"><title>RDF 10</title><link>https://example.com/</link></channel><item rdf:about=\"https://example.com/rdf/10\"><title>RDF item 10</title><link>/rdf/10</link><description>RDF 10</description><dc:date>2026-03-10T12:00:00Z</dc:date></item></rdf:RDF>"
+  },
+  {
+    "name": "json-1",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 1\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-1\",\"url\":\"/json/1\",\"title\":\"JSON item 1\",\"content_text\":\"JSON 1\",\"date_published\":\"2026-03-01T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-2",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 2\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-2\",\"url\":\"/json/2\",\"title\":\"JSON item 2\",\"content_text\":\"JSON 2\",\"date_published\":\"2026-03-02T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-3",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 3\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-3\",\"url\":\"/json/3\",\"title\":\"JSON item 3\",\"content_text\":\"JSON 3\",\"date_published\":\"bad-date\"}]}"
+  },
+  {
+    "name": "json-4",
+    "expectedFormat": "json",
+    "expectedItems": 0,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 4\",\"home_page_url\":\"https://example.com/\",\"items\":[]}"
+  },
+  {
+    "name": "json-5",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 5\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-5\",\"url\":\"/json/5\",\"title\":\"JSON item 5\",\"content_text\":\"JSON 5\",\"date_published\":\"2026-03-05T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-6",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 6\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-6\",\"url\":\"/json/6\",\"title\":\"JSON item 6\",\"content_text\":\"JSON 6\",\"date_published\":\"2026-03-06T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-7",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 7\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-7\",\"url\":\"/json/7\",\"title\":\"JSON item 7\",\"content_text\":\"JSON 7\",\"date_published\":\"2026-03-07T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-8",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 8\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-8\",\"url\":\"/json/8\",\"title\":\"JSON item 8\",\"content_text\":\"JSON 8\",\"date_published\":\"2026-03-08T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-9",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON 9\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-9\",\"url\":\"/json/9\",\"title\":\"JSON item 9\",\"content_text\":\"JSON 9\",\"date_published\":\"2026-03-09T12:00:00Z\"}]}"
+  },
+  {
+    "name": "json-10",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1\",\"title\":\"JSON 10\",\"home_page_url\":\"https://example.com/\",\"items\":[{\"id\":\"json-10\",\"url\":\"/json/10\",\"title\":\"JSON item 10\",\"content_text\":\"JSON 10\",\"date_published\":\"2026-03-10T12:00:00Z\"}]}"
+  },
+  {
+    "name": "invalid-html",
+    "source": "<!doctype html><html><title>Not a feed</title></html>",
+    "expectedError": true
+  },
+  {
+    "name": "invalid-json",
+    "source": "{\"hello\":\"world\"}",
+    "expectedError": true
+  },
+  {
+    "name": "invalid-xml",
+    "source": "<document><title>Not a feed</title></document>",
+    "expectedError": true
+  },
+  {
+    "name": "invalid-empty",
+    "source": "   ",
+    "expectedError": true
+  },
+  {
+    "name": "invalid-array",
+    "source": "[]",
+    "expectedError": true
+  },
+  {
+    "name": "rss2-newsletter-content",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://newsletter.example/feed.xml",
+    "source": "<rss version=\"2.0\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\"><channel><title>Email Newsletter</title><link>https://newsletter.example/archive/</link><item><guid>newsletter-1</guid><title>Issue 42</title><content:encoded><![CDATA[<table><tr><td><a href=\"stories/42\">Read</a><img src=\"images/42.jpg\"></td></tr></table>]]></content:encoded></item></channel></rss>"
+  },
+  {
+    "name": "rss2-mixed-case-and-entities",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<RSS version=\"2.0\"><CHANNEL><TITLE>Research &amp; Practice</TITLE><LINK>https://example.com/</LINK><ITEM><GUID>mixed-1</GUID><TITLE>Design &amp; Engineering</TITLE><LINK>/mixed</LINK><DESCRIPTION>Useful &amp; readable</DESCRIPTION></ITEM></CHANNEL></RSS>"
+  },
+  {
+    "name": "rss2-duplicate-identifiers",
+    "expectedFormat": "rss2",
+    "expectedItems": 2,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<rss version=\"2.0\"><channel><title>Duplicates</title><link>https://example.com/</link><item><guid>same-guid</guid><title>First</title><description>First copy</description></item><item><guid>same-guid</guid><title>Second</title><description>Second copy</description></item></channel></rss>"
+  },
+  {
+    "name": "rss2-missing-identifiers",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.xml",
+    "source": "<rss version=\"2.0\"><channel><title>No IDs</title><link>https://example.com/</link><item><title>Stable fallback</title><description>The body is the identity fallback.</description><pubDate>bad date</pubDate></item></channel></rss>"
+  },
+  {
+    "name": "rss2-relative-media",
+    "expectedFormat": "rss2",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feeds/main.xml",
+    "source": "<rss version=\"2.0\" xmlns:media=\"http://search.yahoo.com/mrss/\"><channel><title>Media</title><link>https://example.com/articles/</link><item><guid>media-1</guid><title>Photo</title><media:content url=\"../images/photo.jpg\" type=\"image/jpeg\"/><enclosure url=\"../audio/episode.mp3\" type=\"audio/mpeg\"/></item></channel></rss>"
+  },
+  {
+    "name": "atom-relative-enclosure",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feeds/atom.xml",
+    "source": "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Atom Media</title><link rel=\"alternate\" href=\"https://example.com/articles/\"/><entry><id>atom-media-1</id><title>Episode</title><link rel=\"alternate\" href=\"episode\"/><link rel=\"enclosure\" href=\"../audio/episode.mp3\" type=\"audio/mpeg\" title=\"Listen\"/><updated>2026-08-15T12:00:00Z</updated></entry></feed>"
+  },
+  {
+    "name": "atom-invalid-date",
+    "expectedFormat": "atom",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.atom",
+    "source": "<feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Undated Atom</title><entry><id>undated-atom</id><title>Old item</title><updated>sometime yesterday</updated><summary>Still valid content</summary></entry></feed>"
+  },
+  {
+    "name": "rss1-relative-media",
+    "expectedFormat": "rss1",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.rdf",
+    "source": "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns=\"http://purl.org/rss/1.0/\" xmlns:media=\"http://search.yahoo.com/mrss/\"><channel rdf:about=\"https://example.com/feed.rdf\"><title>RDF Media</title><link>https://example.com/posts/</link></channel><item rdf:about=\"https://example.com/posts/1\"><title>RDF photo</title><link>1</link><media:thumbnail url=\"../images/thumb.jpg\"/></item></rdf:RDF>"
+  },
+  {
+    "name": "json-relative-attachment",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feeds/main.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1.1\",\"title\":\"JSON Media\",\"home_page_url\":\"https://example.com/articles/\",\"items\":[{\"id\":\"json-media-1\",\"url\":\"story\",\"content_text\":\"Listen now\",\"attachments\":[{\"url\":\"../audio/show.mp3\",\"mime_type\":\"audio/mpeg\",\"title\":\"The show\"}]}]}"
+  },
+  {
+    "name": "json-missing-id-invalid-date",
+    "expectedFormat": "json",
+    "expectedItems": 1,
+    "sourceUrl": "https://example.com/feed.json",
+    "source": "{\"version\":\"https://jsonfeed.org/version/1\",\"title\":\"Loose JSON\",\"items\":[{\"title\":\"Fallback identity\",\"content_html\":\"<p>Body</p>\",\"date_published\":\"not-a-date\"}]}"
+  }
+]

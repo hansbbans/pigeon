@@ -84,6 +84,7 @@ struct ReaderSidebarView: View {
 				.accessibilityValue(model.sidebarFilter.title)
 				.accessibilityHint(ReaderAccessibilityText.filterCollectionsHint)
 			}
+			ReaderSettingsToolbarItem()
 		}
 		.task {
 			await model.loadNavigation()

@@ -66,7 +66,7 @@ struct ReaderViewExtractorTests {
 		let document = try await extractor.extract(
 			html: html,
 			title: nil,
-			baseURL: try #require(URL(string: "pigeon-test://reader/story")),
+			baseURL: URL(string: "pigeon-test://reader/story")!,
 		)
 
 		#expect(document.title == "Safe title")

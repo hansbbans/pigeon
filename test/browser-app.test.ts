@@ -141,6 +141,20 @@ class FakePreparedStatement {
 			return { results: [{ name: 'original_url' }] as T[] };
 		}
 
+		if (this.sql.includes('AS due_count') && this.sql.includes('AS backed_off_count')) {
+			return {
+				results: [{ due_count: 0, backed_off_count: 0, leased_count: 0, healthy_count: 1 }] as T[],
+			};
+		}
+
+		if (this.sql.includes('SELECT feed_key, COALESCE(custom_title, display_name) AS title, source_url')) {
+			return { results: [] as T[] };
+		}
+
+		if (this.sql.includes('FROM refresh_activity activity')) {
+			return { results: [] as T[] };
+		}
+
 		switch (this.sql) {
 			case FEED_COUNTS_SQL:
 				return {
@@ -184,7 +198,19 @@ class FakePreparedStatement {
 		if (
 			this.sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+			this.sql.startsWith('ALTER TABLE feeds ADD COLUMN ') ||
+			this.sql.startsWith('ALTER TABLE items ADD COLUMN ') ||
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due') ||
+			this.sql.startsWith('CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_url_aliases') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_refresh_activity_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS item_statuses') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
+			this.sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
+			this.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
 			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO feed_tags') ||
@@ -363,7 +389,9 @@ test('GET /app/status returns aggregated status JSON when authenticated', async 
 	);
 
 	assert.equal(response.status, 200);
-	assert.deepEqual(await response.json(), {
+	const body = (await response.json()) as Record<string, unknown>;
+	const { syncHealth, ...core } = body;
+	assert.deepEqual(core, {
 		configuredBaseUrl: 'https://pigeon.example',
 		currentOrigin: 'https://status.example',
 		healthUrl: 'https://status.example/health',
@@ -393,6 +421,15 @@ test('GET /app/status returns aggregated status JSON when authenticated', async 
 		rss: {
 			latestFetchAttemptAt: '2026-03-20T12:05:00.000Z',
 		},
+	});
+	assert.deepEqual(syncHealth, {
+		generatedAt: (syncHealth as { generatedAt: string }).generatedAt,
+		dueCount: 0,
+		backedOffCount: 0,
+		leasedCount: 0,
+		healthyCount: 1,
+		feeds: [],
+		recentActivity: [],
 	});
 });
 
@@ -428,7 +465,9 @@ test('GET /app/status falls back to unknown schema version and empty counts', as
 	);
 
 	assert.equal(response.status, 200);
-	assert.deepEqual(await response.json(), {
+	const body = (await response.json()) as Record<string, unknown>;
+	const { syncHealth, ...core } = body;
+	assert.deepEqual(core, {
 		configuredBaseUrl: 'https://pigeon.example',
 		currentOrigin: 'https://status.example',
 		healthUrl: 'https://status.example/health',
@@ -451,5 +490,14 @@ test('GET /app/status falls back to unknown schema version and empty counts', as
 		rss: {
 			latestFetchAttemptAt: null,
 		},
+	});
+	assert.deepEqual(syncHealth, {
+		generatedAt: (syncHealth as { generatedAt: string }).generatedAt,
+		dueCount: 0,
+		backedOffCount: 0,
+		leasedCount: 0,
+		healthyCount: 1,
+		feeds: [],
+		recentActivity: [],
 	});
 });

@@ -92,6 +92,7 @@ struct ArticleListView: View {
 				.keyboardShortcut("r", modifiers: .command)
 				.disabled(isLoading)
 			}
+			ReaderSettingsToolbarItem()
 		}
 	}
 

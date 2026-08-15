@@ -11,6 +11,10 @@ struct PreviewHTTPClient: HTTPClient {
 		switch url.path {
 		case "/api/v1/recommendations":
 			data = Data("{\"generatedAt\":\"2026-08-09T12:00:00Z\",\"view\":\"preview\",\"items\":[]}".utf8)
+		case "/app/status":
+			data = Data(Self.syncHealthFixture.utf8)
+		case "/app/status/retry":
+			data = Data("{\"feed_key\":\"design-weekly\",\"queued_at\":\"2026-08-15T14:30:00.000Z\"}".utf8)
 		case "/reader/api/0/subscription/list":
 			data = Data("{\"subscriptions\":[]}".utf8)
 		case "/reader/api/0/unread-count":
@@ -37,5 +41,45 @@ struct PreviewHTTPClient: HTTPClient {
 		}
 		return (data, response)
 	}
+
+	nonisolated private static let syncHealthFixture = """
+	{
+	  "syncHealth": {
+	    "generatedAt": "2026-08-15T14:30:00.000Z",
+	    "dueCount": 1,
+	    "backedOffCount": 0,
+	    "leasedCount": 0,
+	    "healthyCount": 2,
+	    "feeds": [{
+	      "feedKey": "design-weekly",
+	      "title": "Design Weekly",
+	      "host": "design.example.com",
+	      "state": "failing",
+	      "lastAttemptAt": "2026-08-15T14:20:00.000Z",
+	      "lastSuccessAt": "2026-08-14T14:20:00.000Z",
+	      "nextFetchAt": "2026-08-15T14:30:00.000Z",
+	      "retryAt": null,
+	      "consecutiveFailures": 1,
+	      "httpStatus": 503,
+	      "outcome": "http_error",
+	      "durationMs": 520,
+	      "error": "HTTP 503",
+	      "canRetry": true
+	    }],
+	    "recentActivity": [{
+	      "feedKey": "design-weekly",
+	      "title": "Design Weekly",
+	      "attemptedAt": "2026-08-15T14:20:00.000Z",
+	      "outcome": "http_error",
+	      "httpStatus": 503,
+	      "durationMs": 520,
+	      "itemsProcessed": 0,
+	      "errorCode": "http_503",
+	      "error": "HTTP 503",
+	      "retryAt": null
+	    }]
+	  }
+	}
+	"""
 }
 #endif
