@@ -1,4 +1,21 @@
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GOOGLE_ITEM_PREFIX = 'tag:google.com,2005:reader/item/';
+
+export function parseGoogleReaderItemRowid(itemId: string): number | null {
+	if (itemId.startsWith(GOOGLE_ITEM_PREFIX)) {
+		const parsed = Number.parseInt(itemId.slice(GOOGLE_ITEM_PREFIX.length), 16);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+	}
+	if (/^[0-9a-fA-F]{16}$/.test(itemId)) {
+		const parsed = Number.parseInt(itemId, 16);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+	}
+	if (/^\d+$/.test(itemId)) {
+		const parsed = Number.parseInt(itemId, 10);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+	}
+	return null;
+}
 
 export function hasStoredItemId(id: string | null): boolean {
 	return id !== null && UUID_REGEX.test(id);

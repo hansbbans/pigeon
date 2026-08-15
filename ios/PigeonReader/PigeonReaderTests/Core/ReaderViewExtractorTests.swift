@@ -39,6 +39,46 @@ struct ReaderViewExtractorTests {
 	}
 
 	@Test
+	func extractsReadableArticleFromFeedHTMLWhenTheOriginalPageIsMissing() async throws {
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(responseData: Data(), statusCode: 404),
+		)
+		let document = try await extractor.extract(
+			html: "<p>The cheapest fat loss tool most people sleep on is a walk after meals.</p><p>Consistency matters more than intensity for this habit.</p>",
+			title: "4 Minute Fridays",
+			baseURL: URL(string: "https://example.com/newsletter"),
+		)
+
+		#expect(document.contentHTML.contains("cheapest fat loss tool"))
+		#expect(document.title == "4 Minute Fridays" || document.contentHTML.contains("4 Minute Fridays"))
+	}
+
+	@Test
+	func keepsHiddenChromeHiddenSoNewsletterPagesStillExtract() async throws {
+		let hiddenChrome = String(repeating: "Unsubscribe manage account privacy terms login share comment follow us. ", count: 20)
+		let html = """
+		<!doctype html>
+		<html><head><title>4 Minute Fridays</title></head>
+		<body>
+			<div style="display:none">\(hiddenChrome)</div>
+			<article>
+				<h1>4 Minute Fridays</h1>
+				<p>The cheapest fat loss tool most people sleep on is a walk after meals.</p>
+				<p>What your poop says about your health is mostly about consistency and color.</p>
+				<p>The toothpaste I use every day is just a fluoride paste without extra claims.</p>
+			</article>
+		</body></html>
+		"""
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(responseData: Data(html.utf8)),
+		)
+		let document = try await extractor.extract(from: try #require(URL(string: "https://example.com/p/4-minute-fridays")))
+
+		#expect(document.contentHTML.contains("cheapest fat loss tool"))
+		#expect(document.contentHTML.contains("Unsubscribe manage account") == false)
+	}
+
+	@Test
 	func readabilityFailureIsDeterministicWhenThePageHasNoUsableArticle() async throws {
 		let extractor = ReaderViewExtractor(
 			httpClient: MockHTTPClient(responseData: Data("<html><head></head><body></body></html>".utf8)),

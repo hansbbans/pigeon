@@ -23,6 +23,7 @@ struct ArticleBodyView: View {
 	@State private var deferredLinkDestination: OutboundDestination?
 	@State private var failedImageURLs: Set<String> = []
 	@State private var webViewHeight: CGFloat = 1
+	@State private var columnWidth: CGFloat = 0
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
 	init(
@@ -81,10 +82,18 @@ struct ArticleBodyView: View {
 					onImage: handleImage,
 					onImageFailure: handleImageFailure,
 				)
-				.frame(maxWidth: .infinity)
+				.frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .leading)
+				.frame(maxWidth: .infinity, alignment: .leading)
 				.frame(height: max(webViewHeight, 1))
+				.clipped()
 			}
 		}
+		.background {
+			GeometryReader { geometry in
+				Color.clear.preference(key: ArticleColumnWidthKey.self, value: geometry.size.width)
+			}
+		}
+		.onPreferenceChange(ArticleColumnWidthKey.self) { columnWidth = $0 }
 		.sheet(item: $imageSelection) { selection in
 			ZoomableImageView(url: selection.url)
 		}
@@ -218,5 +227,13 @@ struct ArticleBodyView: View {
 	private func presentSaveMessage(_ message: String) {
 		saveMessage = message
 		isShowingSaveMessage = true
+	}
+}
+
+private struct ArticleColumnWidthKey: PreferenceKey {
+	static let defaultValue: CGFloat = 0
+
+	static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+		value = nextValue()
 	}
 }

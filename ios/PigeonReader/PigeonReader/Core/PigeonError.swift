@@ -48,6 +48,9 @@ enum PigeonError: Error, LocalizedError, Sendable {
 			if let title = payload["title"] as? String, title.isEmpty == false {
 				return "\(title) (\(statusCode))."
 			}
+			if let error = payload["error"] as? String, error.isEmpty == false, error.count <= 240, error.contains("<") == false {
+				return "\(error) (\(statusCode))."
+			}
 			return fallback
 		}
 
@@ -55,5 +58,12 @@ enum PigeonError: Error, LocalizedError, Sendable {
 			return fallback
 		}
 		return trimmed
+	}
+
+	var isNonFatalEngagementFailure: Bool {
+		if case .server(let statusCode, _) = self, statusCode == 404 {
+			return true
+		}
+		return false
 	}
 }

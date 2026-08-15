@@ -106,4 +106,14 @@ struct StructuredHTMLSanitizerTests {
 			try #require(URL(string: "https://example.com/image?w=1200&q=80")),
 		])
 	}
+
+	@Test
+	func renderingShellConstrainsNewsletterTablesAndImagesToTheViewport() {
+		let shell = StructuredHTMLJavaScript.renderingShell
+		#expect(shell.contains("width=device-width"))
+		#expect(shell.contains("max-width: 100%"))
+		#expect(shell.contains("width: max-content") == false)
+		#expect(shell.contains("table-layout: fixed"))
+		#expect(shell.contains("max-width: 100% !important"))
+	}
 }

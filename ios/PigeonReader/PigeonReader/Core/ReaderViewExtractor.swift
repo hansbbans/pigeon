@@ -4,6 +4,7 @@ import WebKit
 @MainActor
 protocol ReaderViewExtracting {
 	func extract(from url: URL) async throws -> ReaderViewDocument
+	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument
 }
 
 @MainActor
@@ -44,16 +45,23 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 			throw ReaderViewError.unsupportedContent
 		}
 		let sourceHTML = String(decoding: data, as: UTF8.self)
-		guard sourceHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+		return try await extract(html: sourceHTML, title: nil, baseURL: finalDestination.url)
+	}
+
+	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument {
+		let sourceHTML = html.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard sourceHTML.isEmpty == false else {
 			throw ReaderViewError.extractionFailed
 		}
+		let extractionBaseURL = baseURL ?? URL(string: "https://pigeon.invalid/")!
+		let wrappedHTML = Self.wrappedSourceHTML(sourceHTML, title: title)
 
 		let session = ReaderViewExtractionSession()
-		try await session.loadExtractionShell(baseURL: finalDestination.url)
+		try await session.loadExtractionShell(baseURL: extractionBaseURL)
 		try Task.checkCancellation()
 		let readabilitySource = try Self.readabilitySource()
 		try await session.evaluateScript(readabilitySource + "\nwindow.__PigeonReadability = Readability;\nnull;")
-		guard let serializedPayload = try await session.evaluateJavaScript(Self.extractionScript(html: sourceHTML, baseURL: finalDestination.url)),
+		guard let serializedPayload = try await session.evaluateJavaScript(Self.extractionScript(html: wrappedHTML, baseURL: extractionBaseURL)),
 			let payloadData = serializedPayload.data(using: .utf8),
 			let payloadObject = try? JSONSerialization.jsonObject(with: payloadData, options: [.fragmentsAllowed]),
 			let payload = payloadObject as? [String: Any] else {
@@ -62,11 +70,29 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 		try Task.checkCancellation()
 		let content = StructuredHTMLSanitizer.sanitize(
 			html: payload["content"] as? String ?? "",
-			baseURL: finalDestination.url,
+			baseURL: baseURL,
 		)
 		var sanitizedPayload = payload
 		sanitizedPayload["content"] = content
+		if sanitizedPayload["title"] == nil, let title, title.isEmpty == false {
+			sanitizedPayload["title"] = title
+		}
 		return try ReaderViewDocument(payload: sanitizedPayload)
+	}
+
+	private static func wrappedSourceHTML(_ html: String, title: String?) -> String {
+		let looksLikeDocument = html.range(of: "<html", options: [.caseInsensitive]) != nil
+			|| html.range(of: "<!doctype", options: [.caseInsensitive]) != nil
+		guard looksLikeDocument == false else {
+			return html
+		}
+		let escapedTitle = (title ?? "Article")
+			.replacingOccurrences(of: "&", with: "&amp;")
+			.replacingOccurrences(of: "<", with: "&lt;")
+			.replacingOccurrences(of: ">", with: "&gt;")
+		return """
+		<!doctype html><html><head><title>\(escapedTitle)</title></head><body><article>\(html)</article></body></html>
+		"""
 	}
 
 	private static func readabilitySource() throws -> String {
@@ -95,9 +121,25 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 			source.documentElement.innerHTML = rawHTML;
 			const metaImage = source.querySelector('meta[property="og:image"], meta[name="twitter:image"]');
 			const metadataImage = metaImage ? __pigeonSafeURL(metaImage.getAttribute("content"), baseURL) : null;
-			__pigeonSanitizeRoot(source.documentElement, baseURL);
+			for (const tag of ["script", "iframe", "object", "embed", "form"]) {
+				for (const node of Array.from(source.querySelectorAll(tag))) node.remove();
+			}
 			document.documentElement.replaceWith(document.importNode(source.documentElement, true));
-			const article = new window.__PigeonReadability(document, { debug: false, charThreshold: 0 }).parse();
+			const working = document.implementation.createHTMLDocument("");
+			working.documentElement.replaceWith(working.importNode(document.documentElement, true));
+			let article = new window.__PigeonReadability(working, { debug: false, charThreshold: 0 }).parse();
+			if (!article || !article.content) {
+				const fallbackRoot = document.querySelector("article, [role='main'], main, .post-content, .article-content, .entry-content, .prose, .beehiiv-post");
+				const fallbackText = fallbackRoot && (fallbackRoot.innerText || "").trim();
+				if (fallbackRoot && fallbackText && fallbackText.length >= 80) {
+					article = {
+						title: document.title || null,
+						byline: null,
+						excerpt: null,
+						content: fallbackRoot.outerHTML,
+					};
+				}
+			}
 			if (!article || !article.content) return null;
 			const output = document.createElement("template");
 			output.innerHTML = article.content;

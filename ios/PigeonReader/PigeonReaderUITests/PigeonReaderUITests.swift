@@ -78,8 +78,10 @@ final class PigeonReaderUITests: XCTestCase {
 	func testReaderViewExplicitFallback() throws {
 		app.buttons["Feed Content"].tap()
 		app.buttons["Reader View"].tap()
-		XCTAssertTrue(app.staticTexts["Reader View unavailable"].waitForExistence(timeout: 15))
-		XCTAssertTrue(app.buttons["Use Feed Content"].exists)
+		// The original page fixture is empty, but feed HTML is still readable.
+		XCTAssertTrue(app.otherElements["reader-view-loaded-content"].waitForExistence(timeout: 30))
+		XCTAssertFalse(app.staticTexts["Preparing Reader View"].exists)
+		XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5))
 		attachScreenshot(named: "reader-view-fallback")
 	}
 

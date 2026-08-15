@@ -116,7 +116,7 @@ enum StructuredHTMLJavaScript {
 		<style>
 			:root { color-scheme: light dark; }
 			* { box-sizing: border-box; }
-			html, body { margin: 0; padding: 0; width: 100%; overflow-x: hidden; }
+			html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: hidden; width: 100%; }
 			body {
 				background: transparent;
 				color: #202124;
@@ -126,6 +126,7 @@ enum StructuredHTMLJavaScript {
 				word-wrap: break-word;
 				overflow-wrap: anywhere;
 			}
+			#pigeon-content, #pigeon-content * { max-width: 100%; }
 			#pigeon-content { width: 100%; }
 			#pigeon-content > :first-child { margin-top: 0; }
 			#pigeon-content > :last-child { margin-bottom: 0; }
@@ -147,12 +148,12 @@ enum StructuredHTMLJavaScript {
 			code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .88em; }
 			pre code { font-size: 1em; }
 			figure { margin-inline: 0; }
-			img { display: block; height: auto; margin: 1.25em auto; max-width: 100%; object-fit: contain; width: auto; }
+			img { display: block; height: auto !important; margin: 1.25em auto; max-width: 100% !important; object-fit: contain; width: auto; }
 			figcaption { color: #66727b; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .82em; line-height: 1.4; margin: -.7em auto 1.3em; max-width: 44em; text-align: center; }
-			.table-scroll { margin: 0 0 1.08em; max-width: 100%; overflow-x: auto; }
-			.table-scroll table { margin: 0; min-width: 100%; width: max-content; }
-			table { border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .84em; line-height: 1.4; }
-			th, td { border: 1px solid #b7c0c6; padding: .55em .7em; text-align: start; vertical-align: top; }
+			.table-scroll { margin: 0 0 1.08em; max-width: 100%; overflow-x: auto; width: 100%; }
+			.table-scroll table { margin: 0; max-width: 100% !important; min-width: 0; table-layout: fixed; width: 100% !important; }
+			table { border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .84em; line-height: 1.4; max-width: 100% !important; table-layout: fixed; width: 100% !important; }
+			th, td { border: 1px solid #b7c0c6; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
 			th { background: #eef1f3; font-weight: 650; }
 			.pigeon-image-failure { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #5e6971; display: flex; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .8em; gap: .45em; justify-content: center; margin: 1.25em auto; min-height: 3.5em; padding: .75em; text-align: center; }
 			@media (prefers-color-scheme: dark) {

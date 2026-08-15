@@ -37,6 +37,10 @@ struct StructuredHTMLView: UIViewRepresentable {
 		webView.scrollView.isScrollEnabled = false
 		webView.scrollView.alwaysBounceVertical = false
 		webView.scrollView.alwaysBounceHorizontal = false
+		webView.scrollView.showsHorizontalScrollIndicator = false
+		webView.scrollView.contentInsetAdjustmentBehavior = .never
+		webView.setContentHuggingPriority(.required, for: .horizontal)
+		webView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 		context.coordinator.webView = webView
 		context.coordinator.loadShell(baseURL: baseURL)
 		return webView

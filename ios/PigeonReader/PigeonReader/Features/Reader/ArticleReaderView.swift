@@ -34,32 +34,37 @@ struct ArticleReaderView: View {
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 				}
 			} else {
-				ScrollView {
-					VStack(alignment: .leading, spacing: 18) {
-					ArticleReaderHeaderView(
-							article: current,
-							selectedMode: selectedMode,
-							hasOriginalURL: current.safeOriginalURL != nil,
-							onSelectMode: selectMode,
-							onOpenOriginal: openOriginal,
-						)
+				GeometryReader { geometry in
+					let columnWidth = min(max(geometry.size.width, 1), 720)
+					ScrollView(.vertical) {
+						VStack(alignment: .leading, spacing: 18) {
+							ArticleReaderHeaderView(
+								article: current,
+								selectedMode: selectedMode,
+								hasOriginalURL: current.safeOriginalURL != nil,
+								onSelectMode: selectMode,
+								onOpenOriginal: openOriginal,
+							)
 
-						Divider()
+							Divider()
 
-						articleContent(for: current)
+							articleContent(for: current)
+						}
+						.padding(.horizontal, 16)
+						.padding(.vertical, 24)
+						.frame(width: columnWidth, alignment: .leading)
+						.frame(maxWidth: .infinity, alignment: .center)
+						.clipped()
 					}
-					.padding(.horizontal)
-					.padding(.vertical, 24)
-					.frame(maxWidth: 720)
-					.frame(maxWidth: .infinity)
+					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+					.onScrollGeometryChange(for: CGFloat.self) { geometry in
+						let maximumOffset = max(geometry.contentSize.height - geometry.containerSize.height, 1)
+						return min(max(geometry.contentOffset.y / maximumOffset, 0), 1)
+					} action: { _, depth in
+						model.recordScrollDepth(itemId: current.id, depth: depth)
+					}
 				}
 				.background(.background)
-				.onScrollGeometryChange(for: CGFloat.self) { geometry in
-					let maximumOffset = max(geometry.contentSize.height - geometry.containerSize.height, 1)
-					return min(max(geometry.contentOffset.y / maximumOffset, 0), 1)
-				} action: { _, depth in
-					model.recordScrollDepth(itemId: current.id, depth: depth)
-				}
 			}
 		}
 		.background(.background)
@@ -169,17 +174,9 @@ struct ArticleReaderView: View {
 				description: Text("This article does not have an original web address."),
 			)
 		case .failed(let message):
-			VStack(alignment: .leading, spacing: 12) {
-				Label("Reader View unavailable", systemImage: "exclamationmark.triangle")
-					.font(.headline)
-				Text(message)
-					.foregroundStyle(.secondary)
-				Button("Use Feed Content") {
-					selectMode(.feedContent)
-				}
-				.buttonStyle(.borderedProminent)
-			}
-			.frame(maxWidth: .infinity, alignment: .leading)
+			readerViewFailure(message: message, article: article, showingFeedContent: false)
+		case .fallback(let message):
+			readerViewFailure(message: message, article: article, showingFeedContent: true)
 		case .loaded:
 			if let readerDocument {
 				VStack(alignment: .leading, spacing: 12) {
@@ -230,15 +227,43 @@ struct ArticleReaderView: View {
 
 		readerViewState = .loading
 		do {
-			let document = try await model.loadReaderView(from: originalURL)
+			let document = try await model.loadReaderView(for: article)
 			try Task.checkCancellation()
 			readerDocument = document
 			readerViewState = .loaded
 		} catch is CancellationError {
 			return
 		} catch {
-			readerViewState = .failed(error.localizedDescription)
+			let hasFeedContent = article.html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+			readerViewState = hasFeedContent ? .fallback(error.localizedDescription) : .failed(error.localizedDescription)
 		}
+	}
+
+	@ViewBuilder
+	private func readerViewFailure(message: String, article: Recommendation, showingFeedContent: Bool) -> some View {
+		VStack(alignment: .leading, spacing: 12) {
+			Label("Reader View unavailable", systemImage: "exclamationmark.triangle")
+				.font(.headline)
+			Text(message)
+				.foregroundStyle(.secondary)
+			Button("Use Feed Content") {
+				selectMode(.feedContent)
+			}
+			.buttonStyle(.borderedProminent)
+			if showingFeedContent {
+				ArticleBodyView(
+					content: article.html,
+					fallbackText: article.text ?? article.title,
+					baseURL: article.safeOriginalURL,
+					leadImageURL: nil,
+					textScale: model.readerTypography.textScale,
+					lineHeight: model.readerTypography.lineHeight,
+					openedDestination: openInlineDestination,
+					saveToReader: saveInlineDestination,
+				)
+			}
+		}
+		.frame(maxWidth: .infinity, alignment: .leading)
 	}
 
 	private func openOriginal() {
