@@ -3,18 +3,22 @@ import type { Env } from './types';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
 
-interface RecommendationRow {
+interface RecommendationCandidate {
 	rowid: number;
 	id: string;
 	feed_key: string;
 	source: string;
 	title: string;
-	html_content: string;
-	text_content: string | null;
 	original_url: string | null;
 	received_at: string;
 	is_read: number;
 	is_starred: number;
+}
+
+interface RecommendationContentRow {
+	id: string;
+	html_content: string;
+	text_content: string | null;
 }
 
 interface SignalRow {
@@ -41,6 +45,9 @@ const SCORING_EVENT_TYPES: readonly ScoringEventType[] = [
 	'bulk_mark_all_read',
 ];
 
+const CANDIDATE_POOL_SIZE = 100;
+const MAX_IN_QUERY_BIND_PARAMS = 100;
+
 function isScoringEventType(value: string): value is ScoringEventType {
 	return SCORING_EVENT_TYPES.includes(value as ScoringEventType);
 }
@@ -56,6 +63,14 @@ function parseLimit(raw: string | null): number {
 
 function toGoogleItemId(rowid: number): string {
 	return `tag:google.com,2005:reader/item/${rowid.toString(16).padStart(16, '0')}`;
+}
+
+function chunkValues<T>(values: T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let i = 0; i < values.length; i += size) {
+		chunks.push(values.slice(i, i + size));
+	}
+	return chunks;
 }
 
 const PER_ITEM_EVENT_CAPS: Record<ScoringEventType, number> = {
@@ -98,6 +113,78 @@ function addSignal(map: Map<string, SignalSummary>, key: string, row: SignalRow,
 	map.set(key, signals);
 }
 
+async function loadSignalsForFeeds(
+	env: Env,
+	feedKeys: string[],
+): Promise<{ feedSignals: Map<string, SignalSummary>; itemSignals: Map<string, SignalSummary> }> {
+	const feedSignals = new Map<string, SignalSummary>();
+	const itemSignals = new Map<string, SignalSummary>();
+	if (feedKeys.length === 0) {
+		return { feedSignals, itemSignals };
+	}
+
+	const uniqueFeedKeys = [...new Set(feedKeys)];
+	const signalPages = await Promise.all(
+		chunkValues(uniqueFeedKeys, MAX_IN_QUERY_BIND_PARAMS).map((feedKeyChunk) => {
+			const placeholders = feedKeyChunk.map(() => '?').join(',');
+			return env.DB.prepare(
+				`SELECT item_id, feed_key, event_type, COUNT(*) AS count,
+				        SUM(COALESCE(duration_seconds, 0)) AS duration_seconds,
+				        MAX(COALESCE(scroll_depth, 0)) AS max_scroll_depth
+				   FROM engagement_events
+				  WHERE event_type <> 'bulk_mark_all_read'
+				    AND feed_key IN (${placeholders})
+				  GROUP BY item_id, feed_key, event_type`,
+			)
+				.bind(...feedKeyChunk)
+				.all<SignalRow>();
+		}),
+	);
+
+	for (const row of signalPages.flatMap((page) => page.results)) {
+		if (!isScoringEventType(row.event_type) || row.event_type === 'bulk_mark_all_read') {
+			continue;
+		}
+		if (row.feed_key) {
+			addSignal(feedSignals, row.feed_key, row, row.event_type);
+		}
+		if (row.item_id) {
+			addSignal(itemSignals, row.item_id, row, row.event_type);
+		}
+	}
+
+	return { feedSignals, itemSignals };
+}
+
+async function loadRecommendationContent(
+	env: Env,
+	itemIds: string[],
+): Promise<Map<string, { html: string; text: string | null }>> {
+	const content = new Map<string, { html: string; text: string | null }>();
+	if (itemIds.length === 0) {
+		return content;
+	}
+
+	const uniqueItemIds = [...new Set(itemIds)];
+	const pages = await Promise.all(
+		chunkValues(uniqueItemIds, MAX_IN_QUERY_BIND_PARAMS).map((itemIdChunk) => {
+			const placeholders = itemIdChunk.map(() => '?').join(',');
+			return env.DB.prepare(
+				`SELECT id, html_content, text_content
+				   FROM items
+				  WHERE id IN (${placeholders})`,
+			)
+				.bind(...itemIdChunk)
+				.all<RecommendationContentRow>();
+		}),
+	);
+
+	for (const row of pages.flatMap((page) => page.results)) {
+		content.set(row.id, { html: row.html_content, text: row.text_content });
+	}
+	return content;
+}
+
 export async function handleRecommendations(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
 	const view = parseView(url.searchParams.get('view'));
@@ -115,7 +202,7 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	const { results: candidates } = await env.DB.prepare(
 		`SELECT i.rowid, i.id, i.feed_key,
 		        COALESCE(f.custom_title, f.display_name) AS source,
-		        i.subject AS title, i.html_content, i.text_content, i.original_url,
+		        i.subject AS title, i.original_url,
 		        i.received_at, i.is_read, i.is_starred
 		   FROM items i
 		   JOIN feeds f ON f.feed_key = i.feed_key
@@ -123,38 +210,20 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		  ORDER BY i.received_at DESC, i.rowid DESC
 		  LIMIT ?`,
 	)
-		.bind(Math.max(limit, 100))
-		.all<RecommendationRow>();
+		.bind(Math.max(limit, CANDIDATE_POOL_SIZE))
+		.all<RecommendationCandidate>();
 
 	if (candidates.length === 0) {
 		return Response.json({ generatedAt: new Date().toISOString(), view, items: [] });
 	}
 
-	const { results: signalRows } = await env.DB.prepare(
-		`SELECT item_id, feed_key, event_type, COUNT(*) AS count,
-		        SUM(COALESCE(duration_seconds, 0)) AS duration_seconds,
-		        MAX(COALESCE(scroll_depth, 0)) AS max_scroll_depth
-		   FROM engagement_events
-		  WHERE event_type <> 'bulk_mark_all_read'
-		  GROUP BY item_id, feed_key, event_type`,
-	).all<SignalRow>();
-
-	const feedSignals = new Map<string, SignalSummary>();
-	const itemSignals = new Map<string, SignalSummary>();
-	for (const row of signalRows) {
-		if (!isScoringEventType(row.event_type) || row.event_type === 'bulk_mark_all_read') {
-			continue;
-		}
-		if (row.feed_key) {
-			addSignal(feedSignals, row.feed_key, row, row.event_type);
-		}
-		if (row.item_id) {
-			addSignal(itemSignals, row.item_id, row, row.event_type);
-		}
-	}
+	const { feedSignals, itemSignals } = await loadSignalsForFeeds(
+		env,
+		candidates.map((candidate) => candidate.feed_key),
+	);
 
 	const now = new Date().toISOString();
-	const items = candidates.map((candidate) => {
+	const ranked = candidates.map((candidate) => {
 		const candidateFeedSignals = feedSignals.get(candidate.feed_key) ?? {};
 		const candidateItemSignals = itemSignals.get(candidate.id) ?? {};
 		const scoring = scoreRecommendation({
@@ -174,8 +243,6 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 			feedKey: candidate.feed_key,
 			source: candidate.source,
 			title: candidate.title,
-			html: candidate.html_content,
-			text: candidate.text_content,
 			originalURL: candidate.original_url,
 			receivedAt: candidate.received_at,
 			isRead: candidate.is_read === 1,
@@ -184,12 +251,29 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		};
 	});
 
-	items.sort((left, right) => {
+	ranked.sort((left, right) => {
 		if (view === 'for-you' && right.score !== left.score) {
 			return right.score - left.score;
 		}
 		return right.receivedAt.localeCompare(left.receivedAt) || left.id.localeCompare(right.id);
 	});
 
-	return Response.json({ generatedAt: now, view, items: items.slice(0, limit) });
+	const selected = ranked.slice(0, limit);
+	const contentById = await loadRecommendationContent(
+		env,
+		selected.map((item) => item.id),
+	);
+
+	return Response.json({
+		generatedAt: now,
+		view,
+		items: selected.map((item) => {
+			const content = contentById.get(item.id);
+			return {
+				...item,
+				html: content?.html ?? '',
+				text: content?.text ?? null,
+			};
+		}),
+	});
 }
