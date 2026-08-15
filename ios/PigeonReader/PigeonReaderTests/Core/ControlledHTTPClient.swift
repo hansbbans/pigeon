@@ -48,6 +48,13 @@ actor ControlledHTTPClient: HTTPClient {
 		continuation.resume(returning: (data, response))
 	}
 
+	func fail(_ request: PendingRequest, with error: any Error) {
+		guard let continuation = pendingContinuations.removeValue(forKey: request.id) else {
+			return
+		}
+		continuation.resume(throwing: error)
+	}
+
 	func requestCount() -> Int {
 		nextID
 	}

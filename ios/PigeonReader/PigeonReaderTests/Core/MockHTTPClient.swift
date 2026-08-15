@@ -14,17 +14,28 @@ actor MockHTTPClient: HTTPClient {
 	private let responseData: Data
 	private let statusCode: Int
 	private let shouldFail: Bool
+	private let failure: (any Error)?
 	private let responseURL: URL?
 	private var snapshots: [RequestSnapshot] = []
 
-	init(responseData: Data = Data(), statusCode: Int = 200, shouldFail: Bool = false, responseURL: URL? = nil) {
+	init(
+		responseData: Data = Data(),
+		statusCode: Int = 200,
+		shouldFail: Bool = false,
+		failure: (any Error)? = nil,
+		responseURL: URL? = nil,
+	) {
 		self.responseData = responseData
 		self.statusCode = statusCode
 		self.shouldFail = shouldFail
+		self.failure = failure
 		self.responseURL = responseURL
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		if let failure {
+			throw failure
+		}
 		if shouldFail {
 			throw URLError(.notConnectedToInternet)
 		}
