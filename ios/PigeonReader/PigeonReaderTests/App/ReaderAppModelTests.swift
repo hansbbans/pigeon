@@ -80,6 +80,122 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage != nil)
 	}
 
+	@Test func cancelledReadMutationDoesNotSetErrorMessage() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let article = makeArticle(id: "shared", isRead: false)
+		model.setArticles([article], for: .forYou)
+
+		let mutation = Task { await model.setRead(article, read: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.cancelled))
+		await mutation.value
+
+		#expect(model.articles(for: .forYou).first?.isRead == false)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func cancelledURLSessionLoadDoesNotSetErrorMessage() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.cancelled))
+		await load.value
+
+		#expect(model.errorMessage == nil)
+		#expect(model.articles(for: .forYou).isEmpty)
+	}
+
+	@Test func cancelledNSURLErrorLoadDoesNotSetErrorMessage() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)),
+		)
+
+		await model.load(section: .forYou, force: true)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func realLoadFailureStillSetsErrorMessage() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func cloudflareResourceLimitStillSurfacesOnLoad() async throws {
+		let payload = Data(
+			"""
+			{"title":"Error 1102: Worker exceeded resource limits","status":503,"error_code":1102,"error_name":"worker_exceeded_resources","ray_id":"a2aacd260d7a1c3f"}
+			""".utf8,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(responseData: payload, statusCode: 503))
+
+		await model.load(section: .forYou, force: true)
+
+		#expect(model.errorMessage?.contains("Cloudflare 1102") == true)
+		#expect(model.errorMessage?.contains("a2aacd260d7a1c3f") == true)
+	}
+
+	@Test func cancelledURLSessionNavigationLoadDoesNotSetErrorMessage() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(failure: URLError(.cancelled)))
+
+		await model.loadNavigation(force: true)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func realNavigationFailureStillSetsErrorMessage() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)))
+
+		await model.loadNavigation(force: true)
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func cancelledURLSessionLibraryLoadDoesNotSetErrorMessage() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		let load = Task { await model.loadLibrary(force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.cancelled))
+		await load.value
+
+		#expect(model.errorMessage == nil)
+		#expect(model.subscriptions.isEmpty)
+	}
+
+	@Test func cancelledURLSessionConnectDoesNotSetErrorMessage() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		model.serverURLText = "https://pigeon.test"
+		model.password = "secret"
+
+		let connect = Task { await model.connect() }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.cancelled))
+		await connect.value
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func isCancellationMatchesTaskAndURLSessionCancellationOnly() {
+		#expect(isCancellation(CancellationError()))
+		#expect(isCancellation(URLError(.cancelled)))
+		#expect(isCancellation(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)))
+		#expect(isCancellation(URLError(.notConnectedToInternet)) == false)
+		#expect(isCancellation(PigeonError.invalidResponse) == false)
+		#expect(isCancellation(PigeonError.server(statusCode: 503, message: "down")) == false)
+	}
+
 	@Test func olderLoadCannotReplaceASectionWithStaleResults() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)

@@ -234,7 +234,7 @@ final class ReaderAppModel {
 			select(section: .forYou)
 			await loadNavigation(force: true)
 			await load(section: .forYou, force: true)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			// Leaving the connection screen is a normal cancellation.
 		} catch {
 			errorMessage = error.localizedDescription
@@ -395,7 +395,7 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeNavigationLoadID == loadID else {
@@ -465,7 +465,7 @@ final class ReaderAppModel {
 			if collection.smartSection == .today {
 				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeLoadIDs[collection.id] == loadID, selectedNavigationID == collection.id else {
@@ -500,7 +500,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeLibraryLoadID == loadID else {
@@ -536,7 +536,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return false
 		} catch {
 			errorMessage = error.localizedDescription
@@ -566,7 +566,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -603,7 +603,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -629,7 +629,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -668,7 +668,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			await loadLibrary(force: true)
 			return false
 		} catch {
@@ -699,7 +699,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			await loadLibrary(force: true)
 			return false
 		} catch {
@@ -924,7 +924,7 @@ final class ReaderAppModel {
 					try await apiClient.sendEngagement([event])
 				}
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			errorMessage = error.localizedDescription
@@ -1175,7 +1175,7 @@ final class ReaderAppModel {
 							wasCancelled: false,
 							errorDescription: nil,
 						)
-					} catch is CancellationError {
+					} catch let error where isCancellation(error) {
 						return ReadMutationResult(
 							articleID: pendingMutation.article.id,
 							succeeded: false,
@@ -1268,7 +1268,7 @@ final class ReaderAppModel {
 		do {
 			try await apiClient.sendEngagement([event])
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return false
 		} catch {
 			errorMessage = error.localizedDescription
@@ -1316,7 +1316,7 @@ final class ReaderAppModel {
 			if hasLoadedNavigation {
 				await loadNavigation(force: true)
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackStateIfCurrent(
 				articleID: article.id,
 				value: value,
