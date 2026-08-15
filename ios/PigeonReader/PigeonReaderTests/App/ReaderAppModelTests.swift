@@ -13,7 +13,7 @@ struct ReaderAppModelTests {
 
 		await model.recordExplicitOpen(for: article)
 
-		#expect(model.articles.first?.isRead == true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		let requests = await mock.requests()
 		#expect(requests.filter { $0.url.path == "/api/v1/engagement" }.count == 1)
 		#expect(requests.filter { $0.url.path == "/reader/api/0/edit-tag" }.count == 1)
@@ -69,14 +69,14 @@ struct ReaderAppModelTests {
 		let mutation = Task { await model.setRead(article, read: true) }
 		let request = await controlled.nextRequest()
 
-		#expect(model.articles(for: .forYou).first?.isRead == true)
-		#expect(model.articles(for: .starred).first?.isRead == true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.allArticles(for: .starred).first?.isRead == true)
 
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.articles(for: .forYou).first?.isRead == false)
-		#expect(model.articles(for: .starred).first?.isRead == false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		#expect(model.allArticles(for: .starred).first?.isRead == false)
 		#expect(model.errorMessage != nil)
 	}
 
@@ -145,8 +145,11 @@ struct ReaderAppModelTests {
 		let newestUnread = makeArticle(id: "newest-unread", receivedAt: 1_786_272_200)
 		let olderRead = makeArticle(id: "older-read", isRead: true, receivedAt: 1_786_272_100)
 		model.setArticles([olderRead, newestUnread], for: collection)
+		model.select(item: collection)
 
-		#expect(model.articles(for: collection).map(\.id) == [newestUnread.id, olderRead.id])
+		#expect(model.articleFilter == .unread)
+		#expect(model.articles(for: collection).map(\.id) == [newestUnread.id])
+		#expect(model.allArticles(for: collection).map(\.id) == [newestUnread.id, olderRead.id])
 
 		model.articleFilter = .unread
 		#expect(model.articles(for: collection).map(\.id) == [newestUnread.id])
@@ -168,7 +171,7 @@ struct ReaderAppModelTests {
 		model.setArticles([lowUnread, highRead, highUnread], for: collection)
 		model.setSortOrder(.score, for: collection)
 
-		#expect(model.articles(for: collection).map(\.id) == [highRead.id, highUnread.id, lowUnread.id])
+		#expect(model.articles(for: collection).map(\.id) == [highUnread.id, lowUnread.id])
 
 		model.articleFilter = .unread
 		#expect(model.articles(for: collection).map(\.id) == [highUnread.id, lowUnread.id])
@@ -184,7 +187,7 @@ struct ReaderAppModelTests {
 		let filteredCollection = ReaderNavigationItem.smart(.today)
 		let article = makeArticle(id: "opposite-state", isRead: filter == .unread)
 		model.setArticles([article], for: filteredCollection)
-		model.articleFilter = filter
+		model.setArticleFilter(filter, for: filteredCollection)
 
 		#expect(model.articles(for: filteredCollection).isEmpty)
 		#expect(model.isArticleFilterEmpty(for: filteredCollection))
@@ -193,7 +196,7 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: genuinelyEmptyCollection).isEmpty)
 		#expect(model.isArticleFilterEmpty(for: genuinelyEmptyCollection) == false)
 
-		model.articleFilter = .all
+		model.setArticleFilter(.all, for: filteredCollection)
 		#expect(model.isArticleFilterEmpty(for: filteredCollection) == false)
 	}
 
@@ -220,6 +223,70 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == unread.id)
 		#expect(model.selectedArticle?.id == unread.id)
 		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
+	}
+
+	@Test func articleFilterDefaultsToUnreadAndStaysPerCollection() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let state = try makeNavigationState(unreadCount: 1)
+		model.setNavigation(state)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		let forYou = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+
+		#expect(model.articleFilter == .unread)
+		#expect(model.articleFilter(for: forYou) == .unread)
+		#expect(model.articleFilter(for: folder) == .unread)
+		#expect(model.articleFilter(for: feed) == .unread)
+
+		model.select(item: feed)
+		model.articleFilter = .all
+		model.select(item: folder)
+		model.articleFilter = .read
+		model.select(item: forYou)
+
+		#expect(model.articleFilter == .unread)
+		#expect(model.articleFilter(for: feed) == .all)
+		#expect(model.articleFilter(for: folder) == .read)
+		#expect(model.articleFilter(for: forYou) == .unread)
+	}
+
+	@Test func articleFilterPersistsPerCollectionAcrossModelInstances() throws {
+		let suiteName = "pigeon-article-filter-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderArticleFilterStore(defaults: defaults)
+		let state = try makeNavigationState(unreadCount: 1)
+		let firstModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: store)
+		firstModel.setNavigation(state)
+		let folder = try #require(firstModel.folderNavigationItems.first)
+		let feed = try #require(firstModel.feedNavigationItems(in: folder).first)
+		let forYou = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+
+		firstModel.select(item: feed)
+		firstModel.articleFilter = .all
+		firstModel.articleFilter = .unread
+		firstModel.select(item: folder)
+		firstModel.articleFilter = .read
+
+		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + feed.id) == "unread")
+		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + folder.id) == "read")
+		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + forYou.id) == nil)
+
+		let restoredModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: ReaderArticleFilterStore(defaults: defaults))
+		restoredModel.setNavigation(state)
+		let restoredFolder = try #require(restoredModel.folderNavigationItems.first)
+		let restoredFeed = try #require(restoredModel.feedNavigationItems(in: restoredFolder).first)
+		let restoredForYou = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+
+		restoredModel.select(item: restoredFeed)
+		#expect(restoredModel.articleFilter == .unread)
+		restoredModel.select(item: restoredFolder)
+		#expect(restoredModel.articleFilter == .read)
+		restoredModel.select(item: restoredForYou)
+		#expect(restoredModel.articleFilter == .unread)
+		#expect(restoredModel.articleFilter(for: restoredFeed) == .unread)
+		#expect(restoredModel.articleFilter(for: restoredFolder) == .read)
+		#expect(restoredModel.articleFilter(for: restoredForYou) == .unread)
 	}
 
 	@Test func singleReadChangesMoveStoriesOutOfAndBackIntoTheActiveFilter() async throws {
@@ -359,6 +426,7 @@ struct ReaderAppModelTests {
 		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(100))
 		let below = makeArticle(id: "below", receivedDate: day)
 		model.setArticles([below, boundary, unreadAbove, alreadyRead], for: collection)
+		model.articleFilter = .all
 		model.select(article: boundary)
 
 		await model.markStoriesAboveAsRead(boundary, in: collection)
@@ -385,6 +453,7 @@ struct ReaderAppModelTests {
 		let boundary = makeArticle(id: "boundary", score: 50)
 		let low = makeArticle(id: "low", score: 10)
 		model.setArticles([low, boundary, high], for: collection)
+		model.articleFilter = .all
 
 		await model.markStoriesBelowAsRead(boundary, in: collection)
 
@@ -425,15 +494,16 @@ struct ReaderAppModelTests {
 		for item in state.items {
 			model.setArticles(displayed, for: item)
 		}
+		model.articleFilter = .all
 		model.select(article: boundary)
 
 		await model.markStoriesAboveAsRead(boundary, in: currentCollection)
 
 		#expect(editTagReaderIDs(from: await mock.requests()) == [target.readerId])
 		for item in state.items {
-			#expect(model.articles(for: item).first(where: { $0.id == target.id })?.isRead == true)
-			#expect(model.articles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
-			#expect(model.articles(for: item).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == target.id })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
+			#expect(model.allArticles(for: item).first(where: { $0.id == alreadyRead.id })?.isRead == true)
 		}
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 1 })
 		#expect(model.selectedArticleID == boundary.id)
@@ -460,6 +530,7 @@ struct ReaderAppModelTests {
 		for item in state.items {
 			model.setArticles(displayed, for: item)
 		}
+		model.articleFilter = .all
 		model.select(article: boundary)
 
 		let mutation = Task { await model.markStoriesAboveAsRead(boundary, in: feed) }
@@ -467,9 +538,9 @@ struct ReaderAppModelTests {
 		let secondRequest = await controlled.nextRequest()
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
 		for item in state.items {
-			#expect(model.articles(for: item).first(where: { $0.id == first.id })?.isRead == true)
-			#expect(model.articles(for: item).first(where: { $0.id == second.id })?.isRead == true)
-			#expect(model.articles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
+			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 
 		let firstReaderID = try #require(readerID(from: firstRequest.request))
@@ -484,9 +555,9 @@ struct ReaderAppModelTests {
 		await mutation.value
 
 		for item in state.items {
-			#expect(model.articles(for: item).first(where: { $0.id == successID })?.isRead == true)
-			#expect(model.articles(for: item).first(where: { $0.id == failedID })?.isRead == false)
-			#expect(model.articles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
+			#expect(model.allArticles(for: item).first(where: { $0.id == successID })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == failedID })?.isRead == false)
+			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 1 })
 		#expect(model.selectedArticleID == boundary.id)
@@ -534,13 +605,18 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
-	private func makeModel(httpClient: any HTTPClient) throws -> ReaderAppModel {
+	private func makeModel(
+		httpClient: any HTTPClient,
+		articleFilterStore: ReaderArticleFilterStore? = nil,
+	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let session = PigeonSession(baseURL: baseURL, token: "server-token")
+		let isolatedDefaults = try #require(UserDefaults(suiteName: "pigeon-article-filter-\(UUID().uuidString)"))
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: httpClient,
-			readwiseTokenStore: TestReadwiseTokenStore()
+			readwiseTokenStore: TestReadwiseTokenStore(),
+			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 		)
 	}
 

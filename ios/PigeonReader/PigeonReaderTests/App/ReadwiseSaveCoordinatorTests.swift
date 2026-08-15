@@ -67,10 +67,12 @@ struct ReadwiseSaveCoordinatorTests {
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let session = PigeonSession(baseURL: baseURL, token: "server-token")
+		let isolatedDefaults = try #require(UserDefaults(suiteName: "pigeon-article-filter-\(UUID().uuidString)"))
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: httpClient,
-			readwiseTokenStore: tokenStore ?? TestReadwiseTokenStore(token: token)
+			readwiseTokenStore: tokenStore ?? TestReadwiseTokenStore(token: token),
+			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
 		)
 	}
 

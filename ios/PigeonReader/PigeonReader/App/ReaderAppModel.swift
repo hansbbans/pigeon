@@ -42,13 +42,9 @@ final class ReaderAppModel {
 	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var isLoadingNavigation = false
-	var articleFilter = ReaderArticleFilter.all {
-		didSet {
-			guard oldValue != articleFilter else {
-				return
-			}
-			reconcileCurrentArticleSelection()
-		}
+	var articleFilter: ReaderArticleFilter {
+		get { articleFilter(for: selectedNavigationID) }
+		set { setArticleFilter(newValue, for: selectedNavigationID) }
 	}
 	var sidebarFilter = ReaderSidebarFilter.all
 
@@ -57,11 +53,13 @@ final class ReaderAppModel {
 	private let readwiseTokenStore: any ReadwiseTokenStore
 	private let readwiseAPIClient: ReadwiseAPIClient
 	private let readerModeStore: ReaderModeStore
+	private let articleFilterStore: ReaderArticleFilterStore
 	let readerTypography: ReaderTypographySettings
 	private let readerViewExtractor: any ReaderViewExtracting
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [String: [Recommendation]] = [:]
 	private var sortOrders: [String: ArticleSortOrder] = [:]
+	private var articleFilters: [String: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
@@ -79,6 +77,7 @@ final class ReaderAppModel {
 		httpClient: any HTTPClient = URLSessionHTTPClient(),
 		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
 		readerModeStore: ReaderModeStore = ReaderModeStore(),
+		articleFilterStore: ReaderArticleFilterStore = ReaderArticleFilterStore(),
 		readerTypography: ReaderTypographySettings? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) {
@@ -87,6 +86,7 @@ final class ReaderAppModel {
 		self.readwiseTokenStore = readwiseTokenStore
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
 		self.readerModeStore = readerModeStore
+		self.articleFilterStore = articleFilterStore
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		do {
@@ -251,7 +251,6 @@ final class ReaderAppModel {
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
-			articleFilter = .all
 			sidebarFilter = .all
 			selectedNavigationID = ReaderSection.forYou.rawValue
 			navigation = .initial
@@ -717,14 +716,34 @@ final class ReaderAppModel {
 		displayedArticles(for: collection.id)
 	}
 
+	func allArticles(for section: ReaderSection) -> [Recommendation] {
+		articleCache[section.rawValue] ?? []
+	}
+
 	func allArticles(for collection: ReaderNavigationItem) -> [Recommendation] {
 		articleCache[collection.id] ?? []
 	}
 
 	func isArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
-		articleFilter != .all
+		articleFilter(for: collection.id) != .all
 			&& allArticles(for: collection).isEmpty == false
 			&& articles(for: collection).isEmpty
+	}
+
+	func articleFilter(for section: ReaderSection) -> ReaderArticleFilter {
+		articleFilter(for: section.rawValue)
+	}
+
+	func articleFilter(for collection: ReaderNavigationItem) -> ReaderArticleFilter {
+		articleFilter(for: collection.id)
+	}
+
+	func setArticleFilter(_ filter: ReaderArticleFilter, for section: ReaderSection) {
+		setArticleFilter(filter, for: section.rawValue)
+	}
+
+	func setArticleFilter(_ filter: ReaderArticleFilter, for collection: ReaderNavigationItem) {
+		setArticleFilter(filter, for: collection.id)
 	}
 
 	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
@@ -770,8 +789,21 @@ final class ReaderAppModel {
 		reconcileSelection(for: collectionID)
 	}
 
+	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
+		articleFilters[collectionID] ?? articleFilterStore.filter(for: collectionID)
+	}
+
+	private func setArticleFilter(_ filter: ReaderArticleFilter, for collectionID: String) {
+		guard articleFilter(for: collectionID) != filter else {
+			return
+		}
+		articleFilters[collectionID] = filter
+		articleFilterStore.setFilter(filter, for: collectionID)
+		reconcileSelection(for: collectionID)
+	}
+
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
-		articleFilter.filtering(articleCache[collectionID] ?? [])
+		articleFilter(for: collectionID).filtering(articleCache[collectionID] ?? [])
 	}
 
 	private func reconcileSelection(for collectionID: String) {
