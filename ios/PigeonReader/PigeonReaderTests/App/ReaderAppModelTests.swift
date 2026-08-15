@@ -153,6 +153,87 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func notInterestedFromTodayDropsTheStoryFromALoadedForYouCache() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "shared")
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.recordPreference(.notInterested, for: article)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedFromAFeedDropsForYouStoryWithADifferentItemID() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readerId = "tag:google.com,2005:reader/item/0000000000000001"
+		let forYouArticle = makeArticle(id: "item-uuid", readerId: readerId)
+		let feedArticle = makeArticle(id: readerId, feedKey: "feed/7", readerId: readerId)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setArticles([forYouArticle], for: .forYou)
+		model.setArticles([feedArticle], for: feed)
+		model.select(item: feed)
+		model.select(article: feedArticle)
+
+		await model.recordPreference(.notInterested, for: feedArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: feed).map(\.id) == [feedArticle.id])
+		#expect(model.selectedArticleID == feedArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedDoesNotCreateForYouCacheBeforeThatCollectionLoads() async throws {
+		let serverArticle = makeArticle(id: "from-server")
+		let mock = MockHTTPClient(responseData: try responseData(items: [serverArticle]))
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-today")
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+
+		await model.recordPreference(.notInterested, for: article)
+		await model.load(section: .forYou)
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["from-server"])
+	}
+
+	@Test func failedNotInterestedFromTodayRestoresForYouCache() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let article = makeArticle(id: "shared")
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		let mutation = Task { await model.recordPreference(.notInterested, for: article) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .forYou).isEmpty)
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.errorMessage != nil)
+	}
+
 	@Test func optimisticReadRollsBackAcrossCachedSectionsWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)

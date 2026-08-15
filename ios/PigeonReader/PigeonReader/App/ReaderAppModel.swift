@@ -1060,7 +1060,7 @@ final class ReaderAppModel {
 	}
 
 	func recordPreference(_ type: EngagementEventType, for article: Recommendation) async {
-		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
+		guard type == .notInterested, articleCache[ReaderSection.forYou.rawValue] != nil else {
 			await send(EngagementEvent(itemId: article.id, type: type))
 			return
 		}
