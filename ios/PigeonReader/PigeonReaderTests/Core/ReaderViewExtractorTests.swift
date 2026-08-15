@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WebKit
 @testable import PigeonReader
 
 @MainActor
@@ -36,6 +37,41 @@ struct ReaderViewExtractorTests {
 		#expect(document.contentHTML.contains("form") == false)
 		#expect(document.contentHTML.contains("onclick") == false)
 		#expect(document.leadImageURL == URL(string: "https://example.com/images/lead.jpg"))
+	}
+
+	@Test
+	func hostileSourceCannotExecuteHandlersOrRequestSubresourcesBeforeSanitization() async throws {
+		let handler = RecordingURLSchemeHandler()
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(),
+			sessionFactory: {
+				ReaderViewExtractionSession(urlSchemeHandlers: ["pigeon-test": handler])
+			},
+		)
+		let html = """
+		<!doctype html>
+		<html onload="document.title='html-handler-ran'"><head><title>Safe title</title>
+		<style>@import url('pigeon-test://tracker/style.css');</style></head>
+		<body>
+			<div style="display:none">Unsubscribe and account navigation</div>
+			<article>
+				<script>document.title = 'script-ran'</script>
+				<svg onload="document.title='svg-handler-ran'"><image href="pigeon-test://tracker/svg"></image></svg>
+				<img src="pigeon-test://tracker/pixel" onload="document.title='image-handler-ran'" onerror="document.title='image-error-ran'">
+				<p>The story body remains readable while hostile handlers and resource requests are removed before extraction.</p>
+			</article>
+		</body></html>
+		"""
+
+		let document = try await extractor.extract(
+			html: html,
+			title: nil,
+			baseURL: try #require(URL(string: "pigeon-test://reader/story")),
+		)
+
+		#expect(document.title == "Safe title")
+		#expect(document.contentHTML.contains("story body remains readable"))
+		#expect(handler.requestedURLs().isEmpty)
 	}
 
 	@Test
@@ -148,5 +184,23 @@ private actor RoutingHTTPClient: HTTPClient {
 			throw URLError(.badServerResponse)
 		}
 		return (data, response)
+	}
+}
+
+@MainActor
+private final class RecordingURLSchemeHandler: NSObject, WKURLSchemeHandler {
+	private var urls: [URL] = []
+
+	func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+		if let url = urlSchemeTask.request.url {
+			urls.append(url)
+		}
+		urlSchemeTask.didFinish()
+	}
+
+	func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+
+	func requestedURLs() -> [URL] {
+		urls
 	}
 }

@@ -304,14 +304,14 @@ final class ReaderAppModel {
 	}
 
 	func loadReaderView(for article: Recommendation) async throws -> ReaderViewDocument {
-		var lastError: Error?
+		var primaryError: Error?
 		if let originalURL = article.safeOriginalURL {
 			do {
 				return try await readerViewExtractor.extract(from: originalURL)
 			} catch is CancellationError {
 				throw CancellationError()
 			} catch {
-				lastError = error
+				primaryError = error
 			}
 		}
 
@@ -326,11 +326,13 @@ final class ReaderAppModel {
 			} catch is CancellationError {
 				throw CancellationError()
 			} catch {
-				lastError = error
+				if primaryError == nil {
+					primaryError = error
+				}
 			}
 		}
 
-		throw lastError ?? ReaderViewError.extractionFailed
+		throw primaryError ?? ReaderViewError.extractionFailed
 	}
 
 	func select(section: ReaderSection) {

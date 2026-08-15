@@ -7,14 +7,21 @@ protocol ReaderViewExtracting {
 	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument
 }
 
+typealias ReaderViewExtractionSessionFactory = @MainActor () -> ReaderViewExtractionSession
+
 @MainActor
 final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 	private static let maximumResponseBytes = 5_000_000
 
 	private let httpClient: any HTTPClient
+	private let sessionFactory: ReaderViewExtractionSessionFactory
 
-	init(httpClient: any HTTPClient = URLSessionHTTPClient()) {
+	init(
+		httpClient: any HTTPClient = URLSessionHTTPClient(),
+		sessionFactory: @escaping ReaderViewExtractionSessionFactory = { ReaderViewExtractionSession() },
+	) {
 		self.httpClient = httpClient
+		self.sessionFactory = sessionFactory
 		super.init()
 	}
 
@@ -56,7 +63,7 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 		let extractionBaseURL = baseURL ?? URL(string: "https://pigeon.invalid/")!
 		let wrappedHTML = Self.wrappedSourceHTML(sourceHTML, title: title)
 
-		let session = ReaderViewExtractionSession()
+		let session = sessionFactory()
 		try await session.loadExtractionShell(baseURL: extractionBaseURL)
 		try Task.checkCancellation()
 		let readabilitySource = try Self.readabilitySource()
@@ -121,19 +128,16 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 			source.documentElement.innerHTML = rawHTML;
 			const metaImage = source.querySelector('meta[property="og:image"], meta[name="twitter:image"]');
 			const metadataImage = metaImage ? __pigeonSafeURL(metaImage.getAttribute("content"), baseURL) : null;
-			for (const tag of ["script", "iframe", "object", "embed", "form"]) {
-				for (const node of Array.from(source.querySelectorAll(tag))) node.remove();
-			}
-			document.documentElement.replaceWith(document.importNode(source.documentElement, true));
+			__pigeonPrepareSource(source.documentElement);
 			const working = document.implementation.createHTMLDocument("");
-			working.documentElement.replaceWith(working.importNode(document.documentElement, true));
+			working.documentElement.replaceWith(working.importNode(source.documentElement, true));
 			let article = new window.__PigeonReadability(working, { debug: false, charThreshold: 0 }).parse();
 			if (!article || !article.content) {
-				const fallbackRoot = document.querySelector("article, [role='main'], main, .post-content, .article-content, .entry-content, .prose, .beehiiv-post");
+				const fallbackRoot = working.querySelector("article, [role='main'], main, .post-content, .article-content, .entry-content, .prose, .beehiiv-post");
 				const fallbackText = fallbackRoot && (fallbackRoot.innerText || "").trim();
 				if (fallbackRoot && fallbackText && fallbackText.length >= 80) {
 					article = {
-						title: document.title || null,
+						title: working.title || null,
 						byline: null,
 						excerpt: null,
 						content: fallbackRoot.outerHTML,
@@ -141,13 +145,13 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 				}
 			}
 			if (!article || !article.content) return null;
-			const output = document.createElement("template");
+			const output = working.createElement("template");
 			output.innerHTML = article.content;
 			__pigeonSanitizeRoot(output.content, baseURL);
 			const firstImage = output.content.querySelector("img");
 			const contentImage = firstImage ? __pigeonSafeURL(firstImage.getAttribute("src") || firstImage.getAttribute("data-src"), baseURL) : null;
 			return {
-				title: article.title || document.title || null,
+				title: article.title || working.title || null,
 				byline: article.byline || null,
 				excerpt: article.excerpt || null,
 				content: output.innerHTML,
@@ -159,7 +163,7 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 }
 
 @MainActor
-private final class ReaderViewExtractionSession: NSObject, WKNavigationDelegate {
+final class ReaderViewExtractionSession: NSObject, WKNavigationDelegate {
 	private let webView: WKWebView
 	private var navigationContinuation: CheckedContinuation<Void, Error>?
 	private var activeNavigation: WKNavigation?
@@ -169,10 +173,14 @@ private final class ReaderViewExtractionSession: NSObject, WKNavigationDelegate 
 	private var activeVoidJavaScriptID: UInt = 0
 	private var nextJavaScriptID: UInt = 0
 
-	override init() {
+	init(urlSchemeHandlers: [String: any WKURLSchemeHandler] = [:]) {
 		let configuration = WKWebViewConfiguration()
 		configuration.websiteDataStore = .nonPersistent()
 		configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+		configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+		for (scheme, handler) in urlSchemeHandlers {
+			configuration.setURLSchemeHandler(handler, forURLScheme: scheme)
+		}
 		webView = WKWebView(frame: .zero, configuration: configuration)
 		super.init()
 		webView.navigationDelegate = self
@@ -188,7 +196,7 @@ private final class ReaderViewExtractionSession: NSObject, WKNavigationDelegate 
 				}
 				navigationContinuation = continuation
 				activeNavigation = webView.loadHTMLString(
-					"<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"></head><body></body></html>",
+					"<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'none'; child-src 'none'; connect-src 'none'; font-src 'none'; frame-src 'none'; img-src 'none'; media-src 'none'; object-src 'none'; style-src 'unsafe-inline'; script-src 'none'; form-action 'none'\"></head><body></body></html>",
 					baseURL: baseURL,
 				)
 			}

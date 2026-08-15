@@ -68,6 +68,37 @@ struct ReaderAppModelTests {
 		#expect(extractor.extractedHTML?.contains("Newsletter body") == true)
 	}
 
+	@Test func loadReaderViewPreservesOriginal404WhenFeedFallbackAlsoFails() async throws {
+		let extractor = ScriptedReaderViewExtractor(
+			urlError: ReaderViewError.httpStatus(404),
+			htmlError: ReaderViewError.extractionFailed,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerViewExtractor: extractor)
+		var article = makeArticle(id: "item-1", isRead: true)
+		article = Recommendation(
+			id: article.id,
+			readerId: article.readerId,
+			feedKey: article.feedKey,
+			source: article.source,
+			title: article.title,
+			html: "<p>Feed content that cannot be extracted either.</p>",
+			text: article.text,
+			originalURL: URL(string: "https://example.com/expired"),
+			receivedAt: article.receivedAt,
+			isRead: article.isRead,
+			isStarred: article.isStarred,
+			score: article.score,
+			confidence: article.confidence,
+			sampleCount: article.sampleCount,
+			explanation: article.explanation,
+			learningState: article.learningState,
+		)
+
+		await #expect(throws: ReaderViewError.httpStatus(404)) {
+			try await model.loadReaderView(for: article)
+		}
+	}
+
 	@Test func explicitOpenMarksUnreadStoryReadAndDoesNotRepeatDuringActiveMonitoring() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -710,11 +741,13 @@ struct ReaderAppModelTests {
 private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 	var urlError: Error?
 	var htmlDocument: ReaderViewDocument?
+	var htmlError: Error?
 	private(set) var extractedHTML: String?
 
-	init(urlError: Error? = nil, htmlDocument: ReaderViewDocument? = nil) {
+	init(urlError: Error? = nil, htmlDocument: ReaderViewDocument? = nil, htmlError: Error? = nil) {
 		self.urlError = urlError
 		self.htmlDocument = htmlDocument
+		self.htmlError = htmlError
 	}
 
 	func extract(from url: URL) async throws -> ReaderViewDocument {
@@ -726,6 +759,9 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 
 	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument {
 		extractedHTML = html
+		if let htmlError {
+			throw htmlError
+		}
 		if let htmlDocument {
 			return htmlDocument
 		}

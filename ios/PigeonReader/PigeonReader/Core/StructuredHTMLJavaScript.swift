@@ -24,6 +24,56 @@ enum StructuredHTMLJavaScript {
 		}).filter(Boolean).join(", ");
 	}
 
+	function __pigeonPrepareSource(root) {
+		// This runs while the source is still in a detached HTMLDocument. Keep
+		// Readability's useful display styles, but remove every active or
+		// resource-bearing path before anything can enter the WebView document.
+		const blockedTags = new Set([
+			"applet", "audio", "base", "button", "canvas", "embed", "form", "frame", "frameset", "iframe", "input", "link",
+			"meta", "object", "option", "portal", "script", "select", "source", "style", "svg", "template", "textarea", "track", "video",
+		]);
+		const removedAttributes = new Set([
+			"action", "background", "data", "formaction", "ping", "poster", "srcdoc", "xlink:href",
+		]);
+		const elements = root instanceof Element ? [root, ...Array.from(root.querySelectorAll("*"))] : Array.from(root.querySelectorAll("*"));
+		for (const element of elements) {
+			const tag = element.tagName.toLowerCase();
+			if (blockedTags.has(tag)) {
+				element.remove();
+				continue;
+			}
+
+			for (const attribute of Array.from(element.attributes)) {
+				const name = attribute.name.toLowerCase();
+				const value = attribute.value;
+				if (
+					name.startsWith("on")
+					|| removedAttributes.has(name)
+					|| (name === "style" && /@import|url\\s*\\(|expression\\s*\\(|javascript\\s*:|behavior\\s*:|-moz-binding/i.test(value))
+				) {
+					element.removeAttribute(attribute.name);
+					continue;
+				}
+				if (name === "src" && tag !== "img") {
+					element.removeAttribute("src");
+				}
+				if (name === "srcset" && tag !== "img") {
+					element.removeAttribute("srcset");
+				}
+			}
+
+			if (tag === "img") {
+				const src = element.getAttribute("src");
+				if (src && !element.getAttribute("data-src")) element.setAttribute("data-src", src);
+				element.removeAttribute("src");
+				const srcset = element.getAttribute("srcset");
+				if (srcset && !element.getAttribute("data-srcset")) element.setAttribute("data-srcset", srcset);
+				element.removeAttribute("srcset");
+			}
+		}
+		return root;
+	}
+
 	function __pigeonSanitizeRoot(root, baseURL) {
 		const allowedTags = new Set([
 			"a", "article", "aside", "blockquote", "br", "caption", "code", "col", "colgroup", "dd", "del",
