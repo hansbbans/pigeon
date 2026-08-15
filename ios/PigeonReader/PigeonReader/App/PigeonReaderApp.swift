@@ -10,6 +10,7 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.text-scale")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.line-height")
+			ReaderArticleFilterStore().removeAll()
 		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
 			let previewModel = PreviewData.makeModel()

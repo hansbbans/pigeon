@@ -232,7 +232,7 @@ struct ReaderNavigationTests {
 
 		let mutation = Task { await model.setRead(article, read: true) }
 		let request = await controlled.nextRequest()
-		#expect(model.articles(for: .unread).first?.isRead == true)
+		#expect(model.allArticles(for: .unread).first?.isRead == true)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 0)
@@ -243,7 +243,7 @@ struct ReaderNavigationTests {
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.articles(for: .unread).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).first?.isRead == false)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 1)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 1)
@@ -273,16 +273,18 @@ struct ReaderNavigationTests {
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .starred })?.unreadCount == 1)
 		await controlled.resolve(unreadRequest)
 		await unreadMutation.value
-		#expect(model.articles(for: .unread).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).first?.isRead == false)
 	}
 
 	private func makeModel(httpClient: any HTTPClient) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let session = PigeonSession(baseURL: baseURL, token: "server-token")
+		let isolatedDefaults = try #require(UserDefaults(suiteName: "pigeon-article-filter-\(UUID().uuidString)"))
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
+			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
 		)
 	}
 
