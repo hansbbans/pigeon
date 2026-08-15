@@ -207,7 +207,7 @@ struct ReaderNavigationTests {
 	}
 
 	@MainActor
-	@Test func optimisticReadCountChangesRollBackForSmartFolderAndFeedCollectionsOnFailure() async throws {
+	@Test func offlineReadCountChangesStayOptimisticAcrossEveryCollection() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		let state = ReaderNavigationCatalog.make(
@@ -243,14 +243,14 @@ struct ReaderNavigationTests {
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.allArticles(for: .unread).first?.isRead == false)
-		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 1)
-		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
-		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 1)
-		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .starred })?.unreadCount == 1)
-		#expect(model.folderNavigationItems.first?.unreadCount == 1)
-		#expect(model.feedNavigationItems(in: try #require(model.folderNavigationItems.first)).first?.unreadCount == 1)
-		#expect(model.errorMessage != nil)
+		#expect(model.allArticles(for: .unread).first?.isRead == true)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 0)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 0)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 0)
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .starred })?.unreadCount == 0)
+		#expect(model.folderNavigationItems.first?.unreadCount == 0)
+		#expect(model.feedNavigationItems(in: try #require(model.folderNavigationItems.first)).first?.unreadCount == 0)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 
 		var readArticle = article
 		readArticle.isRead = true
@@ -285,6 +285,7 @@ struct ReaderNavigationTests {
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
+			offlineStore: OfflineLibraryStore.inMemory(),
 		)
 	}
 

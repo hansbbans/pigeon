@@ -6,6 +6,8 @@ struct SettingsView: View {
 	@State private var readwiseToken = ""
 	@State private var readwiseMessage: String?
 	@State private var readwiseMessageIsError = false
+	@State private var offlineMessage: String?
+	@State private var isShowingClearOfflineConfirmation = false
 
 	var body: some View {
 		@Bindable var typography = model.readerTypography
@@ -30,6 +32,41 @@ struct SettingsView: View {
 							.font(.footnote)
 							.foregroundStyle(.secondary)
 					}
+				}
+
+				Section("Offline Library") {
+					LabeledContent("Status", value: model.isOffline ? "Offline" : "Up to date")
+					LabeledContent("Saved articles", value: model.offlineStorageStats.articleCount.formatted())
+					LabeledContent(
+						"Local storage",
+						value: ByteCountFormatter.string(
+							fromByteCount: model.offlineStorageStats.bodyBytes,
+							countStyle: .file,
+						),
+					)
+					LabeledContent("Waiting to sync", value: model.offlineStorageStats.pendingMutationCount.formatted())
+					if let lastSyncAt = model.offlineStorageStats.lastSyncAt {
+						LabeledContent("Last sync") {
+							Text(lastSyncAt, style: .relative)
+						}
+					}
+					Button("Free space from older read articles", systemImage: "arrow.down.circle") {
+						Task {
+							let count = await model.cleanupOfflineBodies()
+							offlineMessage = count == 1 ? "Removed one saved article body." : "Removed \(count) saved article bodies."
+						}
+					}
+					Button("Clear saved articles", systemImage: "trash", role: .destructive) {
+						isShowingClearOfflineConfirmation = true
+					}
+					if let offlineMessage {
+						Text(offlineMessage)
+							.font(.footnote)
+							.foregroundStyle(.secondary)
+					}
+					Text("Unread and starred article bodies are protected during automatic cleanup. Pending changes stay queued until the server is reachable.")
+						.font(.footnote)
+						.foregroundStyle(.secondary)
 				}
 
 				Section("Reading") {
@@ -101,6 +138,23 @@ struct SettingsView: View {
 				ToolbarItem(placement: .confirmationAction) {
 					Button("Done") { dismiss() }
 				}
+			}
+			.task {
+				await model.refreshOfflineStorageStats()
+			}
+			.confirmationDialog(
+				"Clear saved articles?",
+				isPresented: $isShowingClearOfflineConfirmation,
+				titleVisibility: .visible,
+			) {
+				Button("Clear Saved Articles", role: .destructive) {
+					Task {
+						await model.clearOfflineArticles()
+						offlineMessage = "Saved articles cleared. Feeds will cache again as you open or refresh them."
+					}
+				}
+			} message: {
+				Text("Pending read, star, folder, and feedback changes will not be deleted.")
 			}
 		}
 	}

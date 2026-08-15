@@ -14,7 +14,7 @@ extension PigeonSession {
 	/// login, rather than issuing a rotating nonce. Hashing it together with the normalized
 	/// server URL keeps credentials out of UserDefaults keys while keeping the same account
 	/// stable across reconnects.
-	var articleFilterStorageIdentity: String {
+	var storageIdentity: String {
 		let material = "\(normalizedArticleFilterServerURL)\u{0}\(token)"
 		let digest = SHA256.hash(data: Data(material.utf8))
 		return digest.reduce(into: "") { result, byte in
@@ -25,6 +25,8 @@ extension PigeonSession {
 			result.append(contentsOf: hex)
 		}
 	}
+
+	var articleFilterStorageIdentity: String { storageIdentity }
 
 	private var normalizedArticleFilterServerURL: String {
 		var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)

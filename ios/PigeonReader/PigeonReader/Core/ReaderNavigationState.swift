@@ -1,6 +1,6 @@
 import Foundation
 
-struct ReaderNavigationState: Equatable, Sendable {
+nonisolated struct ReaderNavigationState: Codable, Equatable, Sendable {
 	var items: [ReaderNavigationItem]
 	var expandedFolderIDs: Set<String>
 

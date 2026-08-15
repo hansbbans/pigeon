@@ -90,21 +90,32 @@ native Mac app are outside this program.
 
 ## PR 2 - Offline-first native library and synchronization
 
-- [ ] Add an account-scoped local SQLite library.
-- [ ] Persist feeds, folders, article metadata, sanitized bodies, statuses,
+- [x] Add an account-scoped local SQLite library.
+- [x] Persist feeds, folders, article metadata, sanitized bodies, statuses,
       recommendations, sync cursors, and pending actions.
-- [ ] Load cached navigation and articles before networking.
-- [ ] Add a bounded incremental-sync API and stable cursor semantics.
-- [ ] Add a durable outbox for read, unread, star, unstar, mark-all/above/below,
+- [x] Load cached navigation and articles before networking.
+- [x] Add a bounded incremental-sync API and stable cursor semantics.
+- [x] Add a durable outbox for read, unread, star, unstar, mark-all/above/below,
       recommendation feedback, rename, move, and unsubscribe operations.
-- [ ] Give every pending operation a stable idempotency key.
-- [ ] Reconcile optimistic state without double-applying successful operations.
-- [ ] Preserve pending work across termination, cancellation, and connectivity loss.
-- [ ] Prevent account cache, status, filter, or selection leakage.
-- [ ] Restore collection, article, scroll position, Reader mode, filters, sort order,
+- [x] Give every pending operation a stable idempotency key.
+- [x] Reconcile optimistic state without double-applying successful operations.
+- [x] Preserve pending work across termination, cancellation, and connectivity loss.
+- [x] Prevent account cache, status, filter, or selection leakage.
+- [x] Restore collection, article, scroll position, Reader mode, filters, sort order,
       expanded folders, and compact-column state.
-- [ ] Add cleanup controls and storage statistics.
-- [ ] Verify airplane-mode launch and reading with representative cached content.
+- [x] Add cleanup controls and storage statistics.
+- [x] Verify airplane-mode launch and reading with representative cached content.
+
+### PR 2 verification evidence
+
+- Schema v10 adds an ordered change log and atomic mutation receipts; sync pages are
+  limited to 200 changes and mutation requests to 100 actions/200 item references.
+- Native SQLite tests prove account isolation, relaunch persistence, sanitized bodies,
+  transactional cursors, cleanup protection, and lost-response replay behavior.
+- 273 Worker tests pass with TypeScript checking and a zero-vulnerability audit.
+- 122 native unit tests and 7 iPhone UI tests pass; the clean unsigned Release build
+  passes and all native logs contain zero first-party warnings.
+- A Wrangler dry run bundles the Worker successfully without publishing it.
 
 ## PR 3 - Reading velocity, readability, accessibility, and personalization
 

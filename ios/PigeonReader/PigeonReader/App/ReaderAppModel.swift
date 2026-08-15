@@ -10,24 +10,6 @@ final class ReaderAppModel {
 		case below
 	}
 
-	private struct PendingReadMutation: Sendable {
-		let article: Recommendation
-		let mutationID: UUID
-		let previousValues: [String: [Bool]]
-		let navigationDeltas: [String: Int]
-
-		var mutationKey: String {
-			"\(article.id)|read"
-		}
-	}
-
-	private struct ReadMutationResult: Sendable {
-		let articleID: String
-		let succeeded: Bool
-		let wasCancelled: Bool
-		let errorDescription: String?
-	}
-
 	private struct ArticleFilterKey: Hashable {
 		let sessionIdentity: String
 		let collectionID: String
@@ -38,7 +20,11 @@ final class ReaderAppModel {
 	var password = ""
 	private(set) var selectedNavigationID = ReaderSection.forYou.rawValue
 	var selectedArticleID: String?
-	var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+	var preferredCompactColumn: NavigationSplitViewColumn = .sidebar {
+		didSet {
+			if preferredCompactColumn != oldValue { scheduleRestorationSave() }
+		}
+	}
 	var isConnecting = false
 	var errorMessage: String?
 	var isShowingSettings = false
@@ -51,7 +37,11 @@ final class ReaderAppModel {
 		get { articleFilter(for: selectedNavigationID) }
 		set { setArticleFilter(newValue, for: selectedNavigationID) }
 	}
-	var sidebarFilter = ReaderSidebarFilter.all
+	var sidebarFilter = ReaderSidebarFilter.all {
+		didSet {
+			if sidebarFilter != oldValue { scheduleRestorationSave() }
+		}
+	}
 
 	private let sessionStore: any SessionStore
 	private let httpClient: any HTTPClient
@@ -59,6 +49,9 @@ final class ReaderAppModel {
 	private let readwiseAPIClient: ReadwiseAPIClient
 	private let readerModeStore: ReaderModeStore
 	private let articleFilterStore: ReaderArticleFilterStore
+	private let offlineStore: any OfflineLibraryStoring
+	private let mutationReplayer: OfflineMutationReplayer
+	private let offlineSynchronizationEnabled: Bool
 	let readerTypography: ReaderTypographySettings
 	private let readerViewExtractor: any ReaderViewExtracting
 	private var apiClient: PigeonAPIClient?
@@ -68,7 +61,6 @@ final class ReaderAppModel {
 	private var selectedArticleIDs: [String: String] = [:]
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
-	private var activeMutationIDs: [String: UUID] = [:]
 	private var inFlightReadwiseSaves: Set<String> = []
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
@@ -76,6 +68,14 @@ final class ReaderAppModel {
 	private var activeNavigationLoadID: UUID?
 	private var activeNavigationLoadIDs: Set<UUID> = []
 	private var activeLibraryLoadID: UUID?
+	private var preparedOfflineAccountID: String?
+	private var isApplyingRestoration = false
+	private var restorationSaveTask: Task<Void, Never>?
+	private var restoredReaderModes: [String: String] = [:]
+	private var articleScrollOffsets: [String: Double] = [:]
+	private(set) var offlineStorageStats = OfflineStorageStats.empty
+	private(set) var isSynchronizingOfflineLibrary = false
+	private(set) var isOffline = false
 
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
@@ -83,6 +83,8 @@ final class ReaderAppModel {
 		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
 		readerModeStore: ReaderModeStore = ReaderModeStore(),
 		articleFilterStore: ReaderArticleFilterStore = ReaderArticleFilterStore(),
+		offlineStore: any OfflineLibraryStoring = OfflineLibraryStore.shared,
+		offlineSynchronizationEnabled: Bool = true,
 		readerTypography: ReaderTypographySettings? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) {
@@ -92,6 +94,9 @@ final class ReaderAppModel {
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
 		self.readerModeStore = readerModeStore
 		self.articleFilterStore = articleFilterStore
+		self.offlineStore = offlineStore
+		self.mutationReplayer = OfflineMutationReplayer(store: offlineStore)
+		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		do {
@@ -236,16 +241,12 @@ final class ReaderAppModel {
 		do {
 			let newSession = try await PigeonAPIClient.authenticate(baseURL: url, password: password, httpClient: httpClient)
 			try sessionStore.save(newSession)
-			// Filter state is a performance cache. Reload it from the session-scoped store
-			// after every successful connection, including a reconnect to the same account.
-			articleFilters.removeAll()
+			resetInMemoryLibraryForAccountChange()
 			session = newSession
 			serverURLText = newSession.baseURL.absoluteString
 			password = ""
 			apiClient = PigeonAPIClient(session: newSession, httpClient: httpClient)
-			select(section: .forYou)
-			await loadNavigation(force: true)
-			await load(section: .forYou, force: true)
+			await prepareOfflineLibrary()
 		} catch let error where isCancellation(error) {
 			// Leaving the connection screen is a normal cancellation.
 		} catch {
@@ -274,6 +275,12 @@ final class ReaderAppModel {
 			isLoadingLibrary = false
 			hasLoadedNavigation = false
 			preferredCompactColumn = .sidebar
+			preparedOfflineAccountID = nil
+			restoredReaderModes = [:]
+			articleScrollOffsets = [:]
+			offlineStorageStats = .empty
+			isSynchronizingOfflineLibrary = false
+			isOffline = false
 			errorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
@@ -304,11 +311,108 @@ final class ReaderAppModel {
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
-		readerModeStore.mode(for: feedID)
+		if let rawValue = restoredReaderModes[feedID], let mode = ReaderMode(rawValue: rawValue) {
+			return mode
+		}
+		guard let session else { return .feedContent }
+		return readerModeStore.mode(for: feedID, session: session)
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
-		readerModeStore.setMode(mode, for: feedID)
+		guard let session else { return }
+		restoredReaderModes[feedID] = mode.rawValue
+		readerModeStore.setMode(mode, for: feedID, session: session)
+		scheduleRestorationSave()
+	}
+
+	func articleScrollOffset(for articleID: String) -> Double {
+		min(max(articleScrollOffsets[articleID] ?? 0, 0), 1)
+	}
+
+	func setArticleScrollOffset(_ offset: Double, for articleID: String) {
+		let normalized = min(max(offset, 0), 1)
+		guard abs((articleScrollOffsets[articleID] ?? 0) - normalized) >= 0.01 else { return }
+		articleScrollOffsets[articleID] = normalized
+		scheduleRestorationSave()
+	}
+
+	func prepareOfflineLibrary() async {
+		guard offlineSynchronizationEnabled, let session, let apiClient else { return }
+		let accountID = session.storageIdentity
+		if preparedOfflineAccountID != accountID {
+			resetInMemoryLibraryForAccountChange()
+			do {
+				let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+				guard self.session?.storageIdentity == accountID else { return }
+				applyCachedSnapshot(snapshot)
+				preparedOfflineAccountID = accountID
+			} catch {
+				errorMessage = error.localizedDescription
+				return
+			}
+		}
+
+		isSynchronizingOfflineLibrary = true
+		defer { isSynchronizingOfflineLibrary = false }
+		do {
+			_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
+			try await synchronizeIncrementally(accountID: accountID, apiClient: apiClient)
+			guard self.session?.storageIdentity == accountID else { return }
+			isOffline = false
+			await loadNavigation(force: true)
+			await loadLibrary(force: true)
+			await load(collection: selectedCollection, force: true)
+		} catch let error where isCancellation(error) {
+			return
+		} catch {
+			guard self.session?.storageIdentity == accountID else { return }
+			isOffline = true
+			if articleCache.isEmpty && navigation.items == ReaderNavigationState.initial.items {
+				errorMessage = error.localizedDescription
+			}
+		}
+		await refreshOfflineStorageStats()
+	}
+
+	func refreshOfflineStorageStats() async {
+		guard let accountID = session?.storageIdentity else {
+			offlineStorageStats = .empty
+			return
+		}
+		do {
+			offlineStorageStats = try await offlineStore.storageStats(accountID: accountID)
+		} catch {
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	@discardableResult
+	func cleanupOfflineBodies() async -> Int {
+		guard let accountID = session?.storageIdentity else { return 0 }
+		do {
+			let count = try await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 200)
+			applyCachedSnapshot(try await offlineStore.loadSnapshot(accountID: accountID))
+			await refreshOfflineStorageStats()
+			return count
+		} catch {
+			errorMessage = error.localizedDescription
+			return 0
+		}
+	}
+
+	func clearOfflineArticles() async {
+		guard let accountID = session?.storageIdentity else { return }
+		do {
+			try await offlineStore.clearCachedArticles(accountID: accountID)
+			articleCache = [:]
+			selectedArticleIDs = [:]
+			selectedArticleID = nil
+			preferredCompactColumn = .content
+			await refreshOfflineStorageStats()
+			scheduleRestorationSave()
+		} catch {
+			errorMessage = error.localizedDescription
+		}
 	}
 
 	func loadReaderView(from url: URL) async throws -> ReaderViewDocument {
@@ -360,6 +464,7 @@ final class ReaderAppModel {
 
 	func toggleFolder(_ folder: ReaderNavigationItem) {
 		navigation.toggleFolder(folder.id)
+		scheduleRestorationSave()
 	}
 
 	func setNavigation(_ state: ReaderNavigationState, markAsLoaded: Bool = false) {
@@ -375,12 +480,14 @@ final class ReaderAppModel {
 		} else {
 			reconcileCurrentArticleSelection()
 		}
+		scheduleRestorationSave()
 	}
 
 	private func select(collectionID: String) {
 		selectedNavigationID = collectionID
 		preferredCompactColumn = .content
 		reconcileSelection(for: collectionID)
+		scheduleRestorationSave()
 	}
 
 	func select(article: Recommendation) {
@@ -390,6 +497,7 @@ final class ReaderAppModel {
 		selectedArticleID = article.id
 		selectedArticleIDs[selectedNavigationID] = article.id
 		preferredCompactColumn = .detail
+		scheduleRestorationSave()
 	}
 
 	func loadNavigation(
@@ -439,6 +547,7 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
+			try await offlineStore.saveNavigation(navigation, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -501,6 +610,11 @@ final class ReaderAppModel {
 				return
 			}
 			setArticles(loadedArticles, for: collection.id)
+			try await offlineStore.saveArticles(
+				loadedArticles,
+				collectionID: collection.id,
+				accountID: apiClient.session.storageIdentity,
+			)
 			if collection.smartSection == .forYou {
 				// This endpoint is bounded by its requested recommendation collection. Count the
 				// entire returned/displayed collection, not merely the first page or request limit.
@@ -509,6 +623,7 @@ final class ReaderAppModel {
 			if collection.smartSection == .today {
 				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
 			}
+			try await offlineStore.saveNavigation(navigation, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -544,6 +659,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
+			try await offlineStore.saveSubscriptions(loaded, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -591,101 +707,59 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func renameFeed(_ subscription: FeedSubscription, to newTitle: String) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
 		let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard title.isEmpty == false, title.count <= 200 else {
 			errorMessage = "Feed names must be between 1 and 200 characters."
 			return false
 		}
-		let mutationKey = "feed-title:\(subscription.id)"
-		let mutationID = beginMutation(key: mutationKey)
+		let mutation = OfflineMutation(kind: .renameFeed, feedId: subscription.id, title: title)
+		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { $0.title = title }
-
-		do {
-			try await apiClient.editSubscription(id: subscription.id, title: title)
-			finishMutation(key: mutationKey, id: mutationID)
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-			return true
-		} catch let error where isCancellation(error) {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			errorMessage = error.localizedDescription
-			return false
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
 		}
+		await replayPendingMutations()
+		return true
 	}
 
 	@discardableResult
 	func moveFeed(_ subscription: FeedSubscription, to folderName: String?) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
 		let folder = normalizedFolderName(folderName)
 		if folderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, folder == nil {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
-		let mutationKey = "feed-folder:\(subscription.id)"
-		let mutationID = beginMutation(key: mutationKey)
+		let mutation = OfflineMutation(
+			kind: .moveFeed,
+			feedId: subscription.id,
+			folders: folder.map { [$0] } ?? [],
+		)
+		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { item in
 			item.categories = folder.map { [FeedCategory(id: "user/-/label/\($0)", label: $0)] } ?? []
 		}
-
-		do {
-			try await apiClient.editSubscription(
-				id: subscription.id,
-				addingFolders: folder.map { [$0] } ?? [],
-				removingFolders: subscription.folderNames.filter { $0 != folder },
-			)
-			finishMutation(key: mutationKey, id: mutationID)
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-			return true
-		} catch let error where isCancellation(error) {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			errorMessage = error.localizedDescription
-			return false
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
 		}
+		await replayPendingMutations()
+		return true
 	}
 
 	@discardableResult
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
-		let mutationKey = "unsubscribe:\(subscription.id)"
-		let mutationID = beginMutation(key: mutationKey)
+		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
+		guard await enqueueOfflineMutation(mutation) else { return false }
 		subscriptions.removeAll { $0.id == subscription.id }
-
-		do {
-			try await apiClient.unsubscribe(id: subscription.id)
-			finishMutation(key: mutationKey, id: mutationID)
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-			return true
-		} catch let error where isCancellation(error) {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			return false
-		} catch {
-			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
-			errorMessage = error.localizedDescription
-			return false
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
 		}
+		await replayPendingMutations()
+		return true
 	}
 
 	@discardableResult
 	func renameFolder(_ oldName: String, to newName: String) async -> Bool {
-		guard let apiClient, let name = normalizedFolderName(newName) else {
+		guard let name = normalizedFolderName(newName) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
@@ -697,60 +771,43 @@ final class ReaderAppModel {
 			return false
 		}
 		let affected = subscriptions.filter { $0.folderNames.contains(oldName) }
-		applyFolderRename(from: oldName, to: name)
-
-		do {
-			for subscription in affected {
-				try Task.checkCancellation()
-				try await apiClient.editSubscription(
-					id: subscription.id,
-					addingFolders: [name],
-					removingFolders: [oldName],
-				)
-			}
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-			return true
-		} catch let error where isCancellation(error) {
-			await loadLibrary(force: true)
-			return false
-		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
-			return false
+		for subscription in affected {
+			let folders = subscription.folderNames.map { $0 == oldName ? name : $0 }
+			guard await enqueueOfflineMutation(
+				OfflineMutation(kind: .moveFeed, feedId: subscription.id, folders: folders)
+			) else { return false }
 		}
+		applyFolderRename(from: oldName, to: name)
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		}
+		await replayPendingMutations()
+		return true
 	}
 
 	@discardableResult
 	func deleteFolder(_ name: String) async -> Bool {
-		guard let apiClient else {
-			return false
-		}
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
+		for subscription in affected {
+			guard await enqueueOfflineMutation(
+				OfflineMutation(
+					kind: .moveFeed,
+					feedId: subscription.id,
+					folders: subscription.folderNames.filter { $0 != name },
+				)
+			) else { return false }
+		}
 		for subscription in affected {
 			updateSubscription(id: subscription.id) { item in
 				item.categories.removeAll { $0.label == name }
 			}
 		}
 
-		do {
-			for subscription in affected {
-				try Task.checkCancellation()
-				try await apiClient.editSubscription(id: subscription.id, removingFolders: [name])
-			}
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-			return true
-		} catch let error where isCancellation(error) {
-			await loadLibrary(force: true)
-			return false
-		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
-			return false
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
 		}
+		await replayPendingMutations()
+		return true
 	}
 
 	func articles(for section: ReaderSection) -> [Recommendation] {
@@ -819,6 +876,7 @@ final class ReaderAppModel {
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(cachedArticles)
 		}
+		scheduleRestorationSave()
 	}
 
 	func setArticles(_ newArticles: [Recommendation], for section: ReaderSection) {
@@ -853,6 +911,7 @@ final class ReaderAppModel {
 		articleFilters[key] = filter
 		articleFilterStore.setFilter(filter, for: collectionID, session: session)
 		reconcileSelection(for: collectionID)
+		scheduleRestorationSave()
 	}
 
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
@@ -1040,8 +1099,7 @@ final class ReaderAppModel {
 			article: article,
 			value: read,
 			mutationName: "read",
-			keyPath: \.isRead,
-			tag: "user/-/state/com.google/read"
+			keyPath: \.isRead
 		)
 	}
 
@@ -1053,34 +1111,37 @@ final class ReaderAppModel {
 		await markStoriesAsRead(.below, around: article, in: collection)
 	}
 
+	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
+		await markArticlesAsRead(
+			articleCache[collection.id]?.filter { $0.isRead == false } ?? [],
+			scope: .all,
+		)
+	}
+
 	func setStarred(_ article: Recommendation, starred: Bool) async {
 		await optimisticallyUpdateState(
 			article: article,
 			value: starred,
 			mutationName: "starred",
-			keyPath: \.isStarred,
-			tag: "user/-/state/com.google/starred"
+			keyPath: \.isStarred
 		)
 	}
 
 	func recordPreference(_ type: EngagementEventType, for article: Recommendation) async {
+		guard type == .moreLikeThis || type == .notInterested else { return }
+		let mutation = OfflineMutation(
+			kind: .feedback,
+			itemIds: [article.readerId],
+			feedback: type.rawValue,
+		)
+		guard await enqueueOfflineMutation(mutation) else { return }
 		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
-			await send(EngagementEvent(itemId: article.id, type: type))
+			await replayPendingMutations()
 			return
 		}
 
-		let mutationKey = "\(article.id)|not-interested"
-		let mutationID = UUID()
-		activeMutationIDs[mutationKey] = mutationID
-		defer {
-			if activeMutationIDs[mutationKey] == mutationID {
-				activeMutationIDs[mutationKey] = nil
-			}
-		}
 		let forYouID = ReaderSection.forYou.rawValue
 		let previousItems = articleCache[forYouID] ?? []
-		let previousNavigation = navigation
-		let previousSelection = selectedArticleIDs[forYouID]
 		let removedArticle = previousItems.contains(where: { articlesMatch($0, article) })
 		articleCache[forYouID]?.removeAll(where: { articlesMatch($0, article) })
 		if removedArticle {
@@ -1094,17 +1155,183 @@ final class ReaderAppModel {
 				preferredCompactColumn = .content
 			}
 		}
+		await persistCollections([forYouID])
+		await replayPendingMutations()
+	}
 
-		let succeeded = await send(EngagementEvent(itemId: article.id, type: type))
-		guard succeeded == false, activeMutationIDs[mutationKey] == mutationID else {
-			return
+	private func synchronizeIncrementally(accountID: String, apiClient: PigeonAPIClient) async throws {
+		var cursor = try await offlineStore.loadSnapshot(accountID: accountID).cursor
+		var seenCursors = Set<String>()
+		while true {
+			try Task.checkCancellation()
+			let page = try await apiClient.incrementalSync(cursor: cursor)
+			guard seenCursors.insert(page.cursor).inserted || page.hasMore == false else {
+				throw PigeonError.invalidResponse
+			}
+			try await offlineStore.apply(page, accountID: accountID)
+			cursor = page.cursor
+			if page.hasMore == false { break }
 		}
-		articleCache[forYouID] = previousItems
-		navigation = previousNavigation
-		selectedArticleIDs[forYouID] = previousSelection
-		if selectedNavigationID == forYouID, selectedArticleID == nil {
-			selectedArticleID = previousSelection
-			preferredCompactColumn = previousSelection == nil ? .content : .detail
+		_ = try? await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 500)
+		let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+		guard session?.storageIdentity == accountID else { return }
+		applyCachedSnapshot(snapshot)
+	}
+
+	private func applyCachedSnapshot(_ snapshot: CachedLibrarySnapshot) {
+		guard let session else { return }
+		isApplyingRestoration = true
+		defer { isApplyingRestoration = false }
+		if let restoration = snapshot.restoration {
+			sortOrders = restoration.sortOrders.reduce(into: [:]) { result, pair in
+				if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
+			}
+			articleFilters = restoration.articleFilters.reduce(into: [:]) { result, pair in
+				if let filter = ReaderArticleFilter(rawValue: pair.value) {
+					result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
+				}
+			}
+			selectedArticleIDs = restoration.selectedArticleIDs
+			sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
+			restoredReaderModes = restoration.readerModes
+			articleScrollOffsets = restoration.articleScrollOffsets
+			preferredCompactColumn = compactColumn(from: restoration.compactColumn)
+			selectedNavigationID = restoration.selectedNavigationID
+		}
+
+		if let cachedNavigation = snapshot.navigation {
+			var restoredNavigation = cachedNavigation
+			if let restoration = snapshot.restoration {
+				restoredNavigation.expandedFolderIDs = restoration.expandedFolderIDs
+					.intersection(Set(restoredNavigation.folderItems.map(\.id)))
+			}
+			navigation = restoredNavigation
+			hasLoadedNavigation = true
+		}
+		subscriptions = sortedSubscriptions(snapshot.subscriptions)
+		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
+			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
+		}
+
+		if navigation.item(withID: selectedNavigationID) == nil {
+			selectedNavigationID = ReaderSection.forYou.rawValue
+		}
+		selectedArticleID = selectedArticleIDs[selectedNavigationID]
+		reconcileCurrentArticleSelection()
+	}
+
+	private func resetInMemoryLibraryForAccountChange() {
+		preparedOfflineAccountID = nil
+		articleCache = [:]
+		sortOrders = [:]
+		articleFilters.removeAll()
+		selectedArticleIDs = [:]
+		restoredReaderModes = [:]
+		articleScrollOffsets = [:]
+		subscriptions = []
+		selectedArticleID = nil
+		selectedNavigationID = ReaderSection.forYou.rawValue
+		navigation = .initial
+		sidebarFilter = .all
+		preferredCompactColumn = .sidebar
+		hasLoadedNavigation = false
+		offlineStorageStats = .empty
+		isOffline = false
+	}
+
+	private func scheduleRestorationSave() {
+		guard isApplyingRestoration == false,
+			let session,
+			preparedOfflineAccountID == session.storageIdentity else { return }
+		let accountID = session.storageIdentity
+		let restoration = makeRestorationState()
+		let previousSave = restorationSaveTask
+		restorationSaveTask = Task { [offlineStore] in
+			// Serialize captured snapshots so an earlier write can never land after
+			// a newer scroll/selection state during rapid UI changes.
+			await previousSave?.value
+			try? await offlineStore.saveRestoration(restoration, accountID: accountID)
+		}
+	}
+
+	private func makeRestorationState() -> ReaderRestorationState {
+		let identity = session?.storageIdentity
+		let filters = articleFilters.reduce(into: [String: String]()) { result, pair in
+			guard pair.key.sessionIdentity == identity else { return }
+			result[pair.key.collectionID] = pair.value.rawValue
+		}
+		return ReaderRestorationState(
+			selectedNavigationID: selectedNavigationID,
+			selectedArticleIDs: selectedArticleIDs,
+			sortOrders: sortOrders.mapValues(\.rawValue),
+			articleFilters: filters,
+			sidebarFilter: sidebarFilter.rawValue,
+			expandedFolderIDs: navigation.expandedFolderIDs,
+			compactColumn: restoredCompactColumn(from: preferredCompactColumn),
+			readerModes: restoredReaderModes,
+			articleScrollOffsets: articleScrollOffsets,
+		)
+	}
+
+	private func restoredCompactColumn(from column: NavigationSplitViewColumn) -> ReaderRestoredCompactColumn {
+		switch column {
+		case .sidebar: .sidebar
+		case .content: .content
+		case .detail: .detail
+		default: .sidebar
+		}
+	}
+
+	private func compactColumn(from column: ReaderRestoredCompactColumn) -> NavigationSplitViewColumn {
+		switch column {
+		case .sidebar: .sidebar
+		case .content: .content
+		case .detail: .detail
+		}
+	}
+
+	@discardableResult
+	private func enqueueOfflineMutation(_ mutation: OfflineMutation) async -> Bool {
+		guard let session else { return false }
+		let accountID = session.storageIdentity
+		do {
+			try await offlineStore.enqueue(mutation, accountID: accountID)
+			await refreshOfflineStorageStats()
+			return true
+		} catch {
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	private func replayPendingMutations() async {
+		guard let session, let apiClient else { return }
+		let accountID = session.storageIdentity
+		do {
+			_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
+			isOffline = false
+		} catch let error where isCancellation(error) {
+			// The action is durable already. Cancellation must never roll it back.
+		} catch {
+			isOffline = true
+		}
+		await refreshOfflineStorageStats()
+	}
+
+	private func persistCollections(_ collectionIDs: Set<String>) async {
+		guard let accountID = session?.storageIdentity else { return }
+		do {
+			for collectionID in collectionIDs {
+				try await offlineStore.saveArticles(
+					articleCache[collectionID] ?? [],
+					collectionID: collectionID,
+					accountID: accountID,
+				)
+			}
+			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			scheduleRestorationSave()
+		} catch {
+			errorMessage = error.localizedDescription
 		}
 	}
 
@@ -1139,31 +1366,6 @@ final class ReaderAppModel {
 		subscriptions = sortedSubscriptions(subscriptions)
 	}
 
-	private func beginMutation(key: String) -> UUID {
-		let id = UUID()
-		activeMutationIDs[key] = id
-		return id
-	}
-
-	private func finishMutation(key: String, id: UUID) {
-		if activeMutationIDs[key] == id {
-			activeMutationIDs[key] = nil
-		}
-	}
-
-	private func rollbackSubscription(_ subscription: FeedSubscription, key: String, id: UUID) {
-		guard activeMutationIDs[key] == id else {
-			return
-		}
-		if let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
-			subscriptions[index] = subscription
-		} else {
-			subscriptions.append(subscription)
-		}
-		subscriptions = sortedSubscriptions(subscriptions)
-		activeMutationIDs[key] = nil
-	}
-
 	private func applyFolderRename(from oldName: String, to newName: String) {
 		for index in subscriptions.indices {
 			for categoryIndex in subscriptions[index].categories.indices where subscriptions[index].categories[categoryIndex].label == oldName {
@@ -1177,9 +1379,6 @@ final class ReaderAppModel {
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
-		guard let apiClient else {
-			return
-		}
 		let displayedArticles = articleCache[collection.id] ?? []
 		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
@@ -1206,19 +1405,25 @@ final class ReaderAppModel {
 			seenIdentifiers.formUnion(identifiers)
 			return true
 		}
-		guard targets.isEmpty == false else {
-			return
+		await markArticlesAsRead(Array(targets), scope: boundary == .above ? .above : .below)
+	}
+
+	private func markArticlesAsRead(_ targets: [Recommendation], scope: OfflineMutationScope) async {
+		guard targets.isEmpty == false else { return }
+		let targetIDs = targets.map(\.readerId)
+		for start in stride(from: 0, to: targetIDs.count, by: 200) {
+			let end = min(start + 200, targetIDs.count)
+			let mutation = OfflineMutation(
+				kind: .setReadBatch,
+				itemIds: Array(targetIDs[start..<end]),
+				value: true,
+				scope: scope,
+			)
+			guard await enqueueOfflineMutation(mutation) else { return }
 		}
 
-		if selectedNavigationID == collection.id {
-			errorMessage = nil
-		}
-
-		var pendingMutations: [PendingReadMutation] = []
+		var changedCollections = Set<String>()
 		for target in targets {
-			let mutationID = UUID()
-			activeMutationIDs["\(target.id)|read"] = mutationID
-			var previousValues: [String: [Bool]] = [:]
 			for collectionID in Array(articleCache.keys) {
 				guard var cachedArticles = articleCache[collectionID] else {
 					continue
@@ -1227,124 +1432,17 @@ final class ReaderAppModel {
 				guard matchingIndices.isEmpty == false else {
 					continue
 				}
-				previousValues[collectionID] = matchingIndices.map { cachedArticles[$0].isRead }
 				for index in matchingIndices {
 					cachedArticles[index].isRead = true
 				}
 				articleCache[collectionID] = cachedArticles
+				changedCollections.insert(collectionID)
 			}
-			let navigationDeltas = navigationCountDeltas(for: target, fromRead: false, toRead: true)
-			applyNavigationCountDeltas(navigationDeltas)
-			pendingMutations.append(
-				PendingReadMutation(
-					article: target,
-					mutationID: mutationID,
-					previousValues: previousValues,
-					navigationDeltas: navigationDeltas,
-				),
-			)
+			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: false, toRead: true))
 		}
 		reconcileCurrentArticleSelection()
-
-		let results = await withTaskGroup(of: ReadMutationResult.self) { group in
-			for pendingMutation in pendingMutations {
-				group.addTask {
-					do {
-						try Task.checkCancellation()
-						try await apiClient.updateItemState(
-							readerId: pendingMutation.article.readerId,
-							tag: "user/-/state/com.google/read",
-							enabled: true,
-						)
-						return ReadMutationResult(
-							articleID: pendingMutation.article.id,
-							succeeded: true,
-							wasCancelled: false,
-							errorDescription: nil,
-						)
-					} catch let error where isCancellation(error) {
-						return ReadMutationResult(
-							articleID: pendingMutation.article.id,
-							succeeded: false,
-							wasCancelled: true,
-							errorDescription: nil,
-						)
-					} catch {
-						return ReadMutationResult(
-							articleID: pendingMutation.article.id,
-							succeeded: false,
-							wasCancelled: false,
-							errorDescription: error.localizedDescription,
-						)
-					}
-				}
-			}
-
-			var results: [ReadMutationResult] = []
-			for await result in group {
-				results.append(result)
-			}
-			return results
-		}
-
-		let resultsByID = Dictionary(uniqueKeysWithValues: results.map { ($0.articleID, $0) })
-		var succeededCount = 0
-		var failedTitles: [String] = []
-		var firstFailureDescription: String?
-		for pendingMutation in pendingMutations {
-			guard let result = resultsByID[pendingMutation.article.id] else {
-				failedTitles.append(pendingMutation.article.title)
-				firstFailureDescription = firstFailureDescription ?? "The request did not return a result."
-				_ = rollbackReadMutationIfCurrent(pendingMutation)
-				continue
-			}
-			if result.succeeded {
-				succeededCount += 1
-				if activeMutationIDs[pendingMutation.mutationKey] == pendingMutation.mutationID {
-					activeMutationIDs[pendingMutation.mutationKey] = nil
-				}
-				continue
-			}
-
-			if result.wasCancelled == false {
-				failedTitles.append(pendingMutation.article.title)
-				firstFailureDescription = firstFailureDescription ?? result.errorDescription
-			}
-			_ = rollbackReadMutationIfCurrent(pendingMutation)
-		}
-
-		guard failedTitles.isEmpty == false else {
-			return
-		}
-		let failedSummary = failedTitles.joined(separator: ", ")
-		let detail = firstFailureDescription.map { " \($0)" } ?? ""
-		errorMessage = "Marked \(succeededCount) of \(pendingMutations.count) stories as read. Failed: \(failedSummary).\(detail)"
-	}
-
-	private func rollbackReadMutationIfCurrent(_ mutation: PendingReadMutation) -> Bool {
-		guard activeMutationIDs[mutation.mutationKey] == mutation.mutationID else {
-			return false
-		}
-		for (collectionID, previousValues) in mutation.previousValues {
-			guard var cachedArticles = articleCache[collectionID] else {
-				continue
-			}
-			var previousIndex = 0
-			for index in cachedArticles.indices where articlesMatch(cachedArticles[index], mutation.article) {
-				guard previousIndex < previousValues.count else {
-					break
-				}
-				if cachedArticles[index].isRead {
-					cachedArticles[index].isRead = previousValues[previousIndex]
-				}
-				previousIndex += 1
-			}
-			articleCache[collectionID] = cachedArticles
-		}
-		activeMutationIDs[mutation.mutationKey] = nil
-		applyNavigationCountDeltas(mutation.navigationDeltas.mapValues { -$0 })
-		reconcileCurrentArticleSelection()
-		return true
+		await persistCollections(changedCollections)
+		await replayPendingMutations()
 	}
 
 	@discardableResult
@@ -1369,29 +1467,24 @@ final class ReaderAppModel {
 		article: Recommendation,
 		value: Bool,
 		mutationName: String,
-		keyPath: WritableKeyPath<Recommendation, Bool>,
-		tag: String
+		keyPath: WritableKeyPath<Recommendation, Bool>
 	) async {
-		guard let apiClient else {
-			return
-		}
-		let mutationKey = "\(article.id)|\(mutationName)"
-		let mutationID = UUID()
-		activeMutationIDs[mutationKey] = mutationID
-		defer {
-			if activeMutationIDs[mutationKey] == mutationID {
-				activeMutationIDs[mutationKey] = nil
-			}
-		}
+		let kind: OfflineMutationKind = mutationName == "read" ? .setRead : .setStarred
+		let mutation = OfflineMutation(
+			kind: kind,
+			itemIds: [article.readerId],
+			value: value,
+			scope: .single,
+		)
+		guard await enqueueOfflineMutation(mutation) else { return }
 
-		let previousNavigation = navigation
-		var previousValues: [String: Bool] = [:]
+		var changedCollections = Set<String>()
 		for collectionID in articleCache.keys {
 			guard let index = articleCache[collectionID]?.firstIndex(where: { articlesMatch($0, article) }) else {
 				continue
 			}
-			previousValues[collectionID] = articleCache[collectionID]?[index][keyPath: keyPath] ?? value
 			articleCache[collectionID]?[index][keyPath: keyPath] = value
+			changedCollections.insert(collectionID)
 		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
@@ -1400,60 +1493,8 @@ final class ReaderAppModel {
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
 
-		do {
-			try await apiClient.updateItemState(readerId: article.readerId, tag: tag, enabled: value)
-			if hasLoadedNavigation {
-				await loadNavigation(force: true)
-			}
-		} catch let error where isCancellation(error) {
-			rollbackStateIfCurrent(
-				articleID: article.id,
-				value: value,
-				keyPath: keyPath,
-				mutationKey: mutationKey,
-				mutationID: mutationID,
-				previousValues: previousValues,
-				previousNavigation: previousNavigation,
-			)
-		} catch {
-			guard activeMutationIDs[mutationKey] == mutationID else {
-				return
-			}
-			rollbackStateIfCurrent(
-				articleID: article.id,
-				value: value,
-				keyPath: keyPath,
-				mutationKey: mutationKey,
-				mutationID: mutationID,
-				previousValues: previousValues,
-				previousNavigation: previousNavigation,
-			)
-			errorMessage = error.localizedDescription
-		}
+		await persistCollections(changedCollections)
+		await replayPendingMutations()
 	}
 
-	private func rollbackStateIfCurrent(
-		articleID: String,
-		value: Bool,
-		keyPath: WritableKeyPath<Recommendation, Bool>,
-		mutationKey: String,
-		mutationID: UUID,
-		previousValues: [String: Bool],
-		previousNavigation: ReaderNavigationState,
-	) {
-		guard activeMutationIDs[mutationKey] == mutationID else {
-			return
-		}
-		for (collectionID, previousValue) in previousValues {
-			guard let index = articleCache[collectionID]?.firstIndex(where: { $0.id == articleID || $0.readerId == articleID }) else {
-				continue
-			}
-			guard articleCache[collectionID]?[index][keyPath: keyPath] == value else {
-				continue
-			}
-			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
-		}
-		navigation = previousNavigation
-		reconcileCurrentArticleSelection()
-	}
 }

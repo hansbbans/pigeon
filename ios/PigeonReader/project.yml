@@ -23,6 +23,8 @@ targets:
       - path: PigeonReader
     resources:
       - path: PigeonReader/Resources/Readability.js
+    dependencies:
+      - sdk: libsqlite3.tbd
     info:
       path: PigeonReader/Resources/Info.plist
       properties:

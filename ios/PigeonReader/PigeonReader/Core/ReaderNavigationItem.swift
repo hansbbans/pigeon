@@ -1,12 +1,12 @@
 import Foundation
 
-enum ReaderNavigationKind: String, Hashable, Sendable {
+nonisolated enum ReaderNavigationKind: String, Codable, Hashable, Sendable {
 	case smart
 	case folder
 	case feed
 }
 
-struct ReaderNavigationItem: Hashable, Identifiable, Sendable {
+nonisolated struct ReaderNavigationItem: Codable, Hashable, Identifiable, Sendable {
 	let id: String
 	let title: String
 	let streamID: String

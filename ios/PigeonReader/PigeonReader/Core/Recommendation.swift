@@ -1,6 +1,6 @@
 import Foundation
 
-struct Recommendation: Codable, Equatable, Hashable, Identifiable, Sendable {
+nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, Sendable {
 	let id: String
 	let readerId: String
 	let feedKey: String

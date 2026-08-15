@@ -8,6 +8,8 @@ export interface SchemaState {
 	hasFeedUrlAliasesTable: boolean;
 	hasRefreshActivityTable: boolean;
 	hasItemStatusesTable: boolean;
+	hasSyncChangesTable: boolean;
+	hasMutationReceiptsTable: boolean;
 	engagementEventColumns: Set<string>;
 	feedColumns: Set<string>;
 	itemColumns: Set<string>;
@@ -20,7 +22,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '9',
+		schemaVersion: '10',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
@@ -29,6 +31,8 @@ export function createCurrentSchemaState(): SchemaState {
 		hasFeedUrlAliasesTable: true,
 		hasRefreshActivityTable: true,
 		hasItemStatusesTable: true,
+		hasSyncChangesTable: true,
+		hasMutationReceiptsTable: true,
 		engagementEventColumns: new Set(['destination_host']),
 		feedColumns: new Set([
 			'feed_key',
@@ -93,6 +97,8 @@ export function createLegacySchemaState(): SchemaState {
 	state.hasFeedUrlAliasesTable = false;
 	state.hasRefreshActivityTable = false;
 	state.hasItemStatusesTable = false;
+	state.hasSyncChangesTable = false;
+	state.hasMutationReceiptsTable = false;
 	state.engagementEventColumns.clear();
 	state.feedColumns.delete('site_url');
 	for (const column of [
@@ -140,6 +146,8 @@ export function maybeHandleSchemaFirst<T>(
 			(tableName === 'feed_url_aliases' && state.hasFeedUrlAliasesTable) ||
 			(tableName === 'refresh_activity' && state.hasRefreshActivityTable) ||
 			(tableName === 'item_statuses' && state.hasItemStatusesTable) ||
+			(tableName === 'sync_changes' && state.hasSyncChangesTable) ||
+			(tableName === 'mutation_receipts' && state.hasMutationReceiptsTable) ||
 			(tableName === '_meta' && state.hasMetaTable);
 
 		return {
@@ -272,6 +280,36 @@ export function maybeHandleSchemaRun(
 
 	if (sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_')) {
 		state.operations.push('create-item-status-trigger');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS sync_changes')) {
+		state.hasSyncChangesTable = true;
+		state.operations.push('create-sync_changes');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS mutation_receipts')) {
+		state.hasMutationReceiptsTable = true;
+		state.operations.push('create-mutation_receipts');
+		return true;
+	}
+
+	if (
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_')
+	) {
+		state.operations.push('create-v10-index');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_sync_')) {
+		state.operations.push('create-sync-trigger');
+		return true;
+	}
+
+	if (sql.startsWith('INSERT INTO sync_changes')) {
+		state.operations.push('seed-sync_changes');
 		return true;
 	}
 

@@ -110,7 +110,7 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		let requests = await mock.requests()
 		#expect(requests.filter { $0.url.path == "/api/v1/engagement" }.count == 1)
-		#expect(requests.filter { $0.url.path == "/reader/api/0/edit-tag" }.count == 1)
+		#expect(requests.filter { $0.url.path == "/api/v1/mutations" }.count == 1)
 	}
 
 	@Test func navigationAdvancesExplicitlyWithoutSelectingTheFirstStory() throws {
@@ -153,7 +153,7 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
-	@Test func optimisticReadRollsBackAcrossCachedSectionsWhenRequestFails() async throws {
+	@Test func offlineReadStaysOptimisticAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		let article = makeArticle(id: "shared", isRead: false)
@@ -169,9 +169,49 @@ struct ReaderAppModelTests {
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.allArticles(for: .forYou).first?.isRead == false)
-		#expect(model.allArticles(for: .starred).first?.isRead == false)
-		#expect(model.errorMessage != nil)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.allArticles(for: .starred).first?.isRead == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline)
+	}
+
+	@Test func cachedLibraryAndReadingPositionRestoreBeforeAnOfflineRefreshFails() async throws {
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let session = PigeonSession(baseURL: baseURL, token: "offline-account")
+		let store = OfflineLibraryStore.inMemory()
+		let article = makeArticle(id: "cached-article", isRead: false)
+		let navigation = ReaderNavigationState(
+			items: [.smart(.forYou, unreadCount: 1)],
+			expandedFolderIDs: [],
+		)
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: ReaderSection.forYou.rawValue,
+			selectedArticleIDs: [ReaderSection.forYou.rawValue: article.id],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .detail,
+			readerModes: [article.feedKey: ReaderMode.readerView.rawValue],
+			articleScrollOffsets: [article.id: 0.72],
+		)
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.saveArticles([article], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
+		try await store.saveRestoration(restoration, accountID: session.storageIdentity)
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.isOffline)
+		#expect(model.articles(for: .forYou).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.readerMode(for: article.feedKey) == .readerView)
+		#expect(model.articleScrollOffset(for: article.id) == 0.72)
+		#expect(model.preferredCompactColumn == .detail)
 	}
 
 	@Test func cancelledReadMutationDoesNotSetErrorMessage() async throws {
@@ -185,8 +225,9 @@ struct ReaderAppModelTests {
 		await controlled.fail(request, with: URLError(.cancelled))
 		await mutation.value
 
-		#expect(model.articles(for: .forYou).first?.isRead == false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		#expect(model.errorMessage == nil)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
 	@Test func cancelledURLSessionLoadDoesNotSetErrorMessage() async throws {
@@ -604,7 +645,27 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.id == boundary.id)
 	}
 
-	@Test func filteredBulkReadRollbackRestoresHiddenStoriesAndSelection() async throws {
+	@Test func markAllQueuesBoundedBatchAndUpdatesEveryLoadedUnreadStory() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)
+		let unreadOne = makeArticle(id: "unread-one")
+		let unreadTwo = makeArticle(id: "unread-two")
+		let alreadyRead = makeArticle(id: "already-read", isRead: true)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([unreadOne, alreadyRead, unreadTwo], for: collection)
+
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+		let request = try #require(await mock.lastRequest())
+		let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: try #require(request.body))
+		#expect(envelope.mutations.count == 1)
+		#expect(envelope.mutations.first?.scope == .all)
+		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
+	}
+
+	@Test func filteredBulkReadStaysQueuedAndOptimisticWhenOffline() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
@@ -624,10 +685,11 @@ struct ReaderAppModelTests {
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == false)
-		#expect(model.articles(for: collection).map(\.id) == [above.id, boundary.id])
+		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == true)
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
 		#expect(model.selectedArticleID == boundary.id)
 		#expect(model.selectedArticle?.id == boundary.id)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
 	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewInternalOnly() throws {
@@ -772,7 +834,7 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .detail)
 	}
 
-	@Test func partialBulkReadFailureKeepsSuccessAndRollsBackFailedStoryEverywhere() async throws {
+	@Test func bulkReadUsesOneDurableBatchAndKeepsOptimisticStateOnFailure() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		let state = try makeNavigationState(unreadCount: 2)
@@ -796,8 +858,7 @@ struct ReaderAppModelTests {
 		model.select(article: boundary)
 
 		let mutation = Task { await model.markStoriesAboveAsRead(boundary, in: feed) }
-		let firstRequest = await controlled.nextRequest()
-		let secondRequest = await controlled.nextRequest()
+		let request = await controlled.nextRequest()
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
 		for item in state.items {
 			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
@@ -805,30 +866,28 @@ struct ReaderAppModelTests {
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 
-		let firstReaderID = try #require(readerID(from: firstRequest.request))
-		let secondReaderID = try #require(readerID(from: secondRequest.request))
-		#expect(Set([firstReaderID, secondReaderID]) == Set([first.readerId, second.readerId]))
-		let successRequest = firstRequest
-		let failedRequest = secondRequest
-		let successID = firstReaderID == first.readerId ? first.id : second.id
-		let failedID = firstReaderID == first.readerId ? second.id : first.id
-		await controlled.resolve(successRequest)
-		await controlled.resolve(failedRequest, statusCode: 500)
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations.count == 1)
+		#expect(Set(envelope.mutations[0].itemIds) == Set([first.readerId, second.readerId]))
+		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == successID })?.isRead == true)
-			#expect(model.allArticles(for: item).first(where: { $0.id == failedID })?.isRead == false)
+			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
-		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 1 })
+		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
 		#expect(model.selectedArticleID == boundary.id)
 		#expect(model.preferredCompactColumn == .detail)
-		#expect(model.errorMessage?.contains("Marked 1 of 2 stories as read") == true)
-		#expect(model.errorMessage?.contains("Story \(failedID)") == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline)
 	}
 
-	@Test func optimisticFeedRenameRollsBackWhenRequestFails() async throws {
+	@Test func offlineFeedRenameStaysVisibleAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
@@ -841,9 +900,10 @@ struct ReaderAppModelTests {
 		await controlled.resolve(request, statusCode: 500)
 		let succeeded = await mutation.value
 
-		#expect(succeeded == false)
-		#expect(model.subscriptions.first?.title == "Daily")
-		#expect(model.errorMessage != nil)
+		#expect(succeeded)
+		#expect(model.subscriptions.first?.title == "Renamed")
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline)
 	}
 
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
@@ -872,6 +932,7 @@ struct ReaderAppModelTests {
 		articleFilterStore: ReaderArticleFilterStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
+		offlineStore: (any OfflineLibraryStoring)? = nil,
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
@@ -879,8 +940,9 @@ struct ReaderAppModelTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
-		readwiseTokenStore: TestReadwiseTokenStore(),
+			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
+			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerViewExtractor: readerViewExtractor,
 		)
 	}
@@ -950,22 +1012,12 @@ struct ReaderAppModelTests {
 		)
 	}
 
-	private func readerID(from request: URLRequest) -> String? {
-		readerID(from: request.httpBody)
-	}
-
-	private func readerID(from body: Data?) -> String? {
-		guard let body, let bodyString = String(data: body, encoding: .utf8),
-			let components = URLComponents(string: "https://pigeon.test?\(bodyString)") else {
-			return nil
-		}
-		return components.queryItems?.first(where: { $0.name == "i" })?.value
-	}
-
 	private func editTagReaderIDs(from requests: [MockHTTPClient.RequestSnapshot]) -> [String] {
 		requests
-			.filter { $0.url.path == "/reader/api/0/edit-tag" }
-			.compactMap { readerID(from: $0.body) }
+			.filter { $0.url.path == "/api/v1/mutations" }
+			.compactMap(\.body)
+			.compactMap { try? JSONDecoder().decode(OfflineMutationEnvelope.self, from: $0) }
+			.flatMap { $0.mutations.flatMap(\.itemIds) }
 	}
 
 	private func responseData(items: [Recommendation]) throws -> Data {

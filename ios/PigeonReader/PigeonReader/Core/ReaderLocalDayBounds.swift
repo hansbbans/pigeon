@@ -1,6 +1,6 @@
 import Foundation
 
-struct ReaderLocalDayBounds: Equatable, Sendable {
+nonisolated struct ReaderLocalDayBounds: Equatable, Sendable {
 	let start: Date
 	let end: Date
 

@@ -86,11 +86,8 @@ struct ReaderSidebarView: View {
 			}
 			ReaderSettingsToolbarItem()
 		}
-		.task {
-			await model.loadNavigation()
-		}
 		.refreshable {
-			await model.loadNavigation(force: true)
+			await model.prepareOfflineLibrary()
 		}
 	}
 }

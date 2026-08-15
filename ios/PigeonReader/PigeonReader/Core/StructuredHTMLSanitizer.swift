@@ -1,6 +1,6 @@
 import Foundation
 
-enum StructuredHTMLSanitizer {
+nonisolated enum StructuredHTMLSanitizer {
 	private static let allowedTags: Set<String> = [
 		"a", "article", "aside", "blockquote", "br", "caption", "code", "col", "colgroup", "dd", "del",
 		"div", "dl", "dt", "em", "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr",

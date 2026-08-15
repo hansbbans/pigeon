@@ -86,6 +86,12 @@ struct ArticleListView: View {
 				}
 				.accessibilityLabel(ReaderAccessibilityText.sortStories(for: collection.title))
 
+				Button("Mark All as Read", systemImage: "checkmark.circle") {
+					Task { await model.markAllStoriesAsRead(in: collection) }
+				}
+				.disabled(allArticles.contains(where: { $0.isRead == false }) == false)
+				.accessibilityHint("Marks every loaded unread story in \(collection.title) as read")
+
 				Button("Refresh", systemImage: "arrow.clockwise") {
 					Task { await model.refresh(collection: collection) }
 				}

@@ -143,6 +143,12 @@ function isMigrationSql(sql: string): boolean {
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
 		sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
 		sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS sync_changes') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS mutation_receipts') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_') ||
+		sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_sync_') ||
+		sql.startsWith('INSERT INTO sync_changes') ||
 		sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 		sql.includes('CREATE TABLE IF NOT EXISTS engagement_events') ||

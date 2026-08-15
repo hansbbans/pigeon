@@ -46,6 +46,51 @@ struct PigeonAPIClientTests {
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
 	}
 
+	@Test func incrementalSyncSendsOpaqueCursorAndDecodesCanonicalDates() async throws {
+		let response = Data(
+			#"{"cursor":"v1:42","hasMore":false,"changes":[{"sequence":42,"entityType":"status","entityId":"item-1","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"itemId":"item-1","isRead":true,"isStarred":false,"updatedAt":"2026-08-15T12:00:00.000Z","version":2,"mutationId":"mutation-1"}}]}"#.utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let page = try await client.incrementalSync(cursor: "v1:41", limit: 999)
+
+		#expect(page.cursor == "v1:42")
+		#expect(page.changes.first?.payload?.mutationId == "mutation-1")
+		let request = try #require(await mock.lastRequest())
+		let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(request.url.path == "/api/v1/sync")
+		#expect(query.first(where: { $0.name == "cursor" })?.value == "v1:41")
+		#expect(query.first(where: { $0.name == "limit" })?.value == "200")
+	}
+
+	@Test func mutationBatchUsesStableIdsAndDecodesAlreadyAppliedReceipts() async throws {
+		let response = Data(
+			#"{"results":[{"mutationId":"mutation-1","status":"already_applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null}]}"#.utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+		let mutation = OfflineMutation(
+			id: "mutation-1",
+			kind: .setRead,
+			itemIds: ["reader-1"],
+			value: true,
+			scope: .single,
+		)
+
+		let result = try await client.sendMutations([mutation])
+
+		#expect(result.results.first?.status == .alreadyApplied)
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path == "/api/v1/mutations")
+		#expect(request.method == "POST")
+		#expect(request.contentType == "application/json; charset=utf-8")
+		let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: try #require(request.body))
+		#expect(envelope.mutations == [mutation])
+	}
+
 	@Test func streamRecommendationsIncludeTheOriginSourceInTheirExplanation() async throws {
 		let mock = SingleStreamHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))

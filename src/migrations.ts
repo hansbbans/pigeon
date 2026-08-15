@@ -1,6 +1,6 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '9';
+const REQUIRED_SCHEMA_VERSION = '10';
 
 const migrationPromises = new WeakMap<D1Database, Promise<void>>();
 
@@ -256,7 +256,111 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_engagement_events_item ON engagement_events(item_id, event_type, occurred_at DESC)').run();
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_engagement_events_occurred ON engagement_events(occurred_at DESC)').run();
 
+	// The sync log comes last: its triggers depend on the v6-v9 tables above,
+	// and its one-time seed must see every existing status row.
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS sync_changes (
+			  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			  entity_type TEXT NOT NULL,
+			  entity_id TEXT NOT NULL,
+			  operation TEXT NOT NULL DEFAULT 'upsert',
+			  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+			  CHECK (entity_type IN ('feed', 'article', 'status')),
+			  CHECK (operation IN ('upsert', 'delete'))
+			)`,
+		)
+		.run();
+	await db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_sequence ON sync_changes(sequence)').run();
+	await db
+		.prepare(
+			`CREATE TABLE IF NOT EXISTS mutation_receipts (
+			  account_id TEXT NOT NULL DEFAULT 'default',
+			  mutation_id TEXT NOT NULL,
+			  mutation_kind TEXT NOT NULL,
+			  applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+			  result_json TEXT NOT NULL,
+			  PRIMARY KEY (account_id, mutation_id)
+			)`,
+		)
+		.run();
+	await db
+		.prepare('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_applied ON mutation_receipts(account_id, applied_at DESC)')
+		.run();
+
+	for (const trigger of syncTriggers()) {
+		await db.prepare(trigger).run();
+	}
+
+	// Seed current rows once so a client starting at cursor zero receives the
+	// complete existing library before it switches to trigger-generated deltas.
+	await db
+		.prepare(
+			`INSERT INTO sync_changes (entity_type, entity_id)
+			 SELECT 'feed', feed_key FROM feeds f
+			 WHERE NOT EXISTS (
+			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'feed' AND c.entity_id = f.feed_key
+			 )`,
+		)
+		.run();
+	await db
+		.prepare(
+			`INSERT INTO sync_changes (entity_type, entity_id)
+			 SELECT 'article', id FROM items i
+			 WHERE id IS NOT NULL AND NOT EXISTS (
+			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'article' AND c.entity_id = i.id
+			 )`,
+		)
+		.run();
+	await db
+		.prepare(
+			`INSERT INTO sync_changes (entity_type, entity_id)
+			 SELECT 'status', item_id FROM item_statuses s
+			 WHERE account_id = 'default' AND NOT EXISTS (
+			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'status' AND c.entity_id = s.item_id
+			 )`,
+		)
+		.run();
+
 	await db.prepare("UPDATE _meta SET value = ? WHERE key = 'schema_version'").bind(REQUIRED_SCHEMA_VERSION).run();
+}
+
+function syncTriggers(): string[] {
+	return [
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_feed_insert AFTER INSERT ON feeds BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_feed_update
+		 AFTER UPDATE OF display_name, custom_title, source_url, site_url, icon_url, is_active ON feeds BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_feed_delete AFTER DELETE ON feeds BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('feed', OLD.feed_key, 'delete');
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_feed_tag_insert AFTER INSERT ON feed_tags BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_feed_tag_delete AFTER DELETE ON feed_tags BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', OLD.feed_key);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_article_insert AFTER INSERT ON items BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_article_update
+		 AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at ON items BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_article_delete AFTER DELETE ON items BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('article', OLD.id, 'delete');
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_status_insert AFTER INSERT ON item_statuses BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sync_status_update
+		 AFTER UPDATE OF is_read, is_starred, version, mutation_id ON item_statuses BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
+		 END`,
+	];
 }
 
 async function getTableColumns(db: D1Database, tableName: 'feeds' | 'items'): Promise<Set<string>> {

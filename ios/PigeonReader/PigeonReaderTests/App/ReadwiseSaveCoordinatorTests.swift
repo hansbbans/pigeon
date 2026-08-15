@@ -73,6 +73,7 @@ struct ReadwiseSaveCoordinatorTests {
 			httpClient: httpClient,
 			readwiseTokenStore: tokenStore ?? TestReadwiseTokenStore(token: token),
 			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
+			offlineStore: OfflineLibraryStore.inMemory(),
 		)
 	}
 
