@@ -28,6 +28,11 @@ final class ReaderAppModel {
 		let errorDescription: String?
 	}
 
+	private struct ArticleFilterKey: Hashable {
+		let sessionIdentity: String
+		let collectionID: String
+	}
+
 	var session: PigeonSession?
 	var serverURLText = ""
 	var password = ""
@@ -59,7 +64,7 @@ final class ReaderAppModel {
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [String: [Recommendation]] = [:]
 	private var sortOrders: [String: ArticleSortOrder] = [:]
-	private var articleFilters: [String: ReaderArticleFilter] = [:]
+	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
@@ -227,6 +232,9 @@ final class ReaderAppModel {
 		do {
 			let newSession = try await PigeonAPIClient.authenticate(baseURL: url, password: password, httpClient: httpClient)
 			try sessionStore.save(newSession)
+			// Filter state is a performance cache. Reload it from the session-scoped store
+			// after every successful connection, including a reconnect to the same account.
+			articleFilters.removeAll()
 			session = newSession
 			serverURLText = newSession.baseURL.absoluteString
 			password = ""
@@ -248,6 +256,7 @@ final class ReaderAppModel {
 			apiClient = nil
 			articleCache = [:]
 			sortOrders = [:]
+			articleFilters.removeAll()
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
@@ -790,15 +799,23 @@ final class ReaderAppModel {
 	}
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
-		articleFilters[collectionID] ?? articleFilterStore.filter(for: collectionID)
+		guard let session else {
+			return ReaderArticleFilterStore.defaultFilter
+		}
+		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
+		return articleFilters[key] ?? articleFilterStore.filter(for: collectionID, session: session)
 	}
 
 	private func setArticleFilter(_ filter: ReaderArticleFilter, for collectionID: String) {
+		guard let session else {
+			return
+		}
+		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
 		guard articleFilter(for: collectionID) != filter else {
 			return
 		}
-		articleFilters[collectionID] = filter
-		articleFilterStore.setFilter(filter, for: collectionID)
+		articleFilters[key] = filter
+		articleFilterStore.setFilter(filter, for: collectionID, session: session)
 		reconcileSelection(for: collectionID)
 	}
 

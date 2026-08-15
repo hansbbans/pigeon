@@ -268,9 +268,11 @@ struct ReaderAppModelTests {
 		firstModel.select(item: folder)
 		firstModel.articleFilter = .read
 
-		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + feed.id) == "unread")
-		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + folder.id) == "read")
-		#expect(defaults.string(forKey: ReaderArticleFilterStore.keyPrefix + forYou.id) == nil)
+		let session = try #require(firstModel.session)
+		let sessionKeyPrefix = ReaderArticleFilterStore.keyPrefix + session.articleFilterStorageIdentity + "."
+		#expect(defaults.string(forKey: sessionKeyPrefix + feed.id) == "unread")
+		#expect(defaults.string(forKey: sessionKeyPrefix + folder.id) == "read")
+		#expect(defaults.string(forKey: sessionKeyPrefix + forYou.id) == nil)
 
 		let restoredModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: ReaderArticleFilterStore(defaults: defaults))
 		restoredModel.setNavigation(state)
@@ -287,6 +289,56 @@ struct ReaderAppModelTests {
 		#expect(restoredModel.articleFilter(for: restoredFeed) == .unread)
 		#expect(restoredModel.articleFilter(for: restoredFolder) == .read)
 		#expect(restoredModel.articleFilter(for: restoredForYou) == .unread)
+	}
+
+	@Test func articleFilterRestoresAfterDisconnectAndReconnectToSameIdentity() async throws {
+		let suiteName = "pigeon-article-filter-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let session = try makeSession(token: "same-session-token")
+		let store = ReaderArticleFilterStore(defaults: defaults)
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("Auth=pigeon/same-session-token".utf8)),
+			articleFilterStore: store,
+			session: session,
+		)
+
+		model.setArticleFilter(.all, for: .forYou)
+		model.disconnect()
+		#expect(model.articleFilter == .unread)
+
+		model.password = "not-stored-password"
+		await model.connect()
+
+		#expect(model.session?.articleFilterStorageIdentity == session.articleFilterStorageIdentity)
+		#expect(model.articleFilter == .all)
+	}
+
+	@Test func articleFilterCacheDoesNotBleedAcrossDisconnectAndSessionTransition() async throws {
+		let suiteName = "pigeon-article-filter-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let firstSession = try makeSession(token: "first-session-token")
+		let secondSession = try makeSession(token: "second-session-token")
+		let store = ReaderArticleFilterStore(defaults: defaults)
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("Auth=pigeon/second-session-token".utf8)),
+			articleFilterStore: store,
+			session: firstSession,
+		)
+
+		model.setArticleFilter(.all, for: .forYou)
+		model.disconnect()
+		#expect(model.articleFilter == .unread)
+
+		model.password = "not-stored-password"
+		await model.connect()
+
+		#expect(model.session?.articleFilterStorageIdentity == secondSession.articleFilterStorageIdentity)
+		#expect(model.articleFilter == .unread)
+		model.articleFilter = .read
+		#expect(store.filter(for: "forYou", session: firstSession) == .all)
+		#expect(store.filter(for: "forYou", session: secondSession) == .read)
 	}
 
 	@Test func singleReadChangesMoveStoriesOutOfAndBackIntoTheActiveFilter() async throws {
@@ -608,16 +660,21 @@ struct ReaderAppModelTests {
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		session: PigeonSession? = nil,
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
-		let session = PigeonSession(baseURL: baseURL, token: "server-token")
+		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
 		let isolatedDefaults = try #require(UserDefaults(suiteName: "pigeon-article-filter-\(UUID().uuidString)"))
 		return ReaderAppModel(
-			sessionStore: TestSessionStore(session: session),
+			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 		)
+	}
+
+	private func makeSession(token: String) throws -> PigeonSession {
+		PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: token)
 	}
 
 	private func makeNavigationState(unreadCount: Int) throws -> ReaderNavigationState {
