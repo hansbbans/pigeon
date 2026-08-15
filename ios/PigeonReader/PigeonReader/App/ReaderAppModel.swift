@@ -311,6 +311,38 @@ final class ReaderAppModel {
 		try await readerViewExtractor.extract(from: url)
 	}
 
+	func loadReaderView(for article: Recommendation) async throws -> ReaderViewDocument {
+		var primaryError: Error?
+		if let originalURL = article.safeOriginalURL {
+			do {
+				return try await readerViewExtractor.extract(from: originalURL)
+			} catch is CancellationError {
+				throw CancellationError()
+			} catch {
+				primaryError = error
+			}
+		}
+
+		let feedHTML = article.html.trimmingCharacters(in: .whitespacesAndNewlines)
+		if feedHTML.isEmpty == false {
+			do {
+				return try await readerViewExtractor.extract(
+					html: feedHTML,
+					title: article.title,
+					baseURL: article.safeOriginalURL,
+				)
+			} catch is CancellationError {
+				throw CancellationError()
+			} catch {
+				if primaryError == nil {
+					primaryError = error
+				}
+			}
+		}
+
+		throw primaryError ?? ReaderViewError.extractionFailed
+	}
+
 	func select(section: ReaderSection) {
 		select(collectionID: section.rawValue)
 	}
@@ -975,6 +1007,8 @@ final class ReaderAppModel {
 			}
 		} catch let error where isCancellation(error) {
 			return
+		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
+			return
 		} catch {
 			errorMessage = error.localizedDescription
 		}
@@ -1318,6 +1352,8 @@ final class ReaderAppModel {
 			try await apiClient.sendEngagement([event])
 			return true
 		} catch let error where isCancellation(error) {
+			return false
+		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
 		} catch {
 			errorMessage = error.localizedDescription

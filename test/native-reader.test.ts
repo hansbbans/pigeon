@@ -284,6 +284,59 @@ test('native engagement is authenticated, validated, migrated, and idempotent', 
 	}
 });
 
+test('native engagement accepts Google Reader item IDs used by the iOS stream API', async () => {
+	const { db, env } = createFixture([
+		{
+			id: 'item-1',
+			feedKey: 'daily-feed',
+			title: 'Daily story',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+	const row = db.prepare('SELECT rowid FROM items WHERE id = ?').get('item-1') as { rowid: number };
+	const googleItemId = `tag:google.com,2005:reader/item/${row.rowid.toString(16).padStart(16, '0')}`;
+
+	const accepted = await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'X-Pigeon-Client': 'pigeon-reader/1' },
+		body: JSON.stringify({
+			events: [
+				{
+					id: 'open-greader',
+					itemId: googleItemId,
+					type: 'explicit_open',
+					occurredAt: '2026-08-09T12:00:00.000Z',
+				},
+			],
+		}),
+	});
+	assert.equal(accepted.status, 200);
+	assert.deepEqual(await accepted.json(), { accepted: 1, clientFamily: 'pigeon' });
+	assert.equal(
+		(db.prepare("SELECT item_id FROM engagement_events WHERE id = 'open-greader'").get() as { item_id: string }).item_id,
+		'item-1',
+	);
+
+	const numeric = await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'X-Pigeon-Client': 'pigeon-reader/1' },
+		body: JSON.stringify({
+			events: [{ id: 'open-numeric', itemId: String(row.rowid), type: 'explicit_open' }],
+		}),
+	});
+	assert.equal(numeric.status, 200);
+
+	const missing = await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'X-Pigeon-Client': 'pigeon-reader/1' },
+		body: JSON.stringify({
+			events: [{ id: 'open-missing', itemId: 'tag:google.com,2005:reader/item/0000000000000099', type: 'explicit_open' }],
+		}),
+	});
+	assert.equal(missing.status, 404);
+	assert.deepEqual(await missing.json(), { error: 'Unknown item tag:google.com,2005:reader/item/0000000000000099' });
+});
+
 test('GReader state transitions record client family, bulk intent, and no duplicate sync events', async () => {
 	const { db, env } = createFixture([
 		{

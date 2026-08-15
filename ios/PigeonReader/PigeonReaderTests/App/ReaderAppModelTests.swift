@@ -5,6 +5,100 @@ import Testing
 
 @MainActor
 struct ReaderAppModelTests {
+	@Test func explicitOpenDoesNotBannerWhenEngagementItemIsUnknown() async throws {
+		let mock = MockHTTPClient(
+			responseData: Data(#"{"error":"Unknown item tag:google.com,2005:reader/item/0000000000000001"}"#.utf8),
+			statusCode: 404,
+		)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(
+			id: "tag:google.com,2005:reader/item/0000000000000001",
+			isRead: true,
+			readerId: "tag:google.com,2005:reader/item/0000000000000001",
+		)
+		model.articles = [article]
+
+		await model.recordExplicitOpen(for: article)
+
+		#expect(model.errorMessage == nil)
+		let requests = await mock.requests()
+		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+	}
+
+	@Test func explicitOpenStillBannersWhenEngagementServerFails() async throws {
+		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		await model.recordExplicitOpen(for: article)
+
+		#expect(model.errorMessage != nil)
+	}
+
+	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
+		let extractor = ScriptedReaderViewExtractor(
+			urlError: ReaderViewError.httpStatus(404),
+			htmlDocument: try ReaderViewDocument(contentHTML: "<p>From feed</p>"),
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerViewExtractor: extractor)
+		var article = makeArticle(id: "item-1", isRead: true)
+		article = Recommendation(
+			id: article.id,
+			readerId: article.readerId,
+			feedKey: article.feedKey,
+			source: article.source,
+			title: article.title,
+			html: "<p>Newsletter body that still exists in the feed.</p>",
+			text: article.text,
+			originalURL: URL(string: "https://example.com/expired"),
+			receivedAt: article.receivedAt,
+			isRead: article.isRead,
+			isStarred: article.isStarred,
+			score: article.score,
+			confidence: article.confidence,
+			sampleCount: article.sampleCount,
+			explanation: article.explanation,
+			learningState: article.learningState,
+		)
+
+		let document = try await model.loadReaderView(for: article)
+
+		#expect(document.contentHTML.contains("From feed"))
+		#expect(extractor.extractedHTML?.contains("Newsletter body") == true)
+	}
+
+	@Test func loadReaderViewPreservesOriginal404WhenFeedFallbackAlsoFails() async throws {
+		let extractor = ScriptedReaderViewExtractor(
+			urlError: ReaderViewError.httpStatus(404),
+			htmlError: ReaderViewError.extractionFailed,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerViewExtractor: extractor)
+		var article = makeArticle(id: "item-1", isRead: true)
+		article = Recommendation(
+			id: article.id,
+			readerId: article.readerId,
+			feedKey: article.feedKey,
+			source: article.source,
+			title: article.title,
+			html: "<p>Feed content that cannot be extracted either.</p>",
+			text: article.text,
+			originalURL: URL(string: "https://example.com/expired"),
+			receivedAt: article.receivedAt,
+			isRead: article.isRead,
+			isStarred: article.isStarred,
+			score: article.score,
+			confidence: article.confidence,
+			sampleCount: article.sampleCount,
+			explanation: article.explanation,
+			learningState: article.learningState,
+		)
+
+		await #expect(throws: ReaderViewError.httpStatus(404)) {
+			try await model.loadReaderView(for: article)
+		}
+	}
+
 	@Test func explicitOpenMarksUnreadStoryReadAndDoesNotRepeatDuringActiveMonitoring() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -777,6 +871,7 @@ struct ReaderAppModelTests {
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
 		session: PigeonSession? = nil,
+		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
@@ -784,8 +879,9 @@ struct ReaderAppModelTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
-			readwiseTokenStore: TestReadwiseTokenStore(),
+		readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
+			readerViewExtractor: readerViewExtractor,
 		)
 	}
 
@@ -885,5 +981,37 @@ struct ReaderAppModelTests {
 
 	private func subscriptionsData(_ subscriptions: [FeedSubscription]) throws -> Data {
 		try JSONEncoder().encode(SubscriptionListResponse(subscriptions: subscriptions))
+	}
+}
+
+@MainActor
+private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
+	var urlError: Error?
+	var htmlDocument: ReaderViewDocument?
+	var htmlError: Error?
+	private(set) var extractedHTML: String?
+
+	init(urlError: Error? = nil, htmlDocument: ReaderViewDocument? = nil, htmlError: Error? = nil) {
+		self.urlError = urlError
+		self.htmlDocument = htmlDocument
+		self.htmlError = htmlError
+	}
+
+	func extract(from url: URL) async throws -> ReaderViewDocument {
+		if let urlError {
+			throw urlError
+		}
+		return try ReaderViewDocument(contentHTML: "<p>From URL</p>")
+	}
+
+	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument {
+		extractedHTML = html
+		if let htmlError {
+			throw htmlError
+		}
+		if let htmlDocument {
+			return htmlDocument
+		}
+		throw ReaderViewError.extractionFailed
 	}
 }

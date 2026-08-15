@@ -6,4 +6,5 @@ enum ReaderViewLoadState: Equatable, Sendable {
 	case loaded
 	case unavailable
 	case failed(String)
+	case fallback(String)
 }

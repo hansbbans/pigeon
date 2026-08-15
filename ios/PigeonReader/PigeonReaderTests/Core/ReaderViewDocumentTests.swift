@@ -20,6 +20,13 @@ struct ReaderViewDocumentTests {
 	}
 
 	@Test
+	func originalPage404ExplainsTheFailureWithoutUsingTheSessionBannerCopy() {
+		#expect(ReaderViewError.httpStatus(404).localizedDescription.contains("not found"))
+		#expect(ReaderViewError.httpStatus(404).localizedDescription.contains("Pigeon returned an error") == false)
+		#expect(ReaderViewError.extractionFailed.localizedDescription.contains("readable article"))
+	}
+
+	@Test
 	func rejectsEmptyReadabilityContentForDeterministicFallback() {
 		#expect(throws: ReaderViewError.extractionFailed) {
 			try ReaderViewDocument(contentHTML: "   ")

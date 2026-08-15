@@ -1,4 +1,27 @@
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const GOOGLE_ITEM_PREFIX = 'tag:google.com,2005:reader/item/';
+const HEX_ITEM_ID_REGEX = /^[0-9a-fA-F]{16}$/;
+const GOOGLE_ITEM_SUFFIX_REGEX = /^[0-9a-fA-F]{16}$/;
+const NUMERIC_ITEM_ID_REGEX = /^\d+$/;
+
+function parsePositiveSafeInteger(value: string, radix: 10 | 16): number | null {
+	const parsed = Number.parseInt(value, radix);
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function parseGoogleReaderItemRowid(itemId: string): number | null {
+	if (itemId.startsWith(GOOGLE_ITEM_PREFIX)) {
+		const suffix = itemId.slice(GOOGLE_ITEM_PREFIX.length);
+		return GOOGLE_ITEM_SUFFIX_REGEX.test(suffix) ? parsePositiveSafeInteger(suffix, 16) : null;
+	}
+	if (HEX_ITEM_ID_REGEX.test(itemId)) {
+		return parsePositiveSafeInteger(itemId, 16);
+	}
+	if (NUMERIC_ITEM_ID_REGEX.test(itemId)) {
+		return parsePositiveSafeInteger(itemId, 10);
+	}
+	return null;
+}
 
 export function hasStoredItemId(id: string | null): boolean {
 	return id !== null && UUID_REGEX.test(id);

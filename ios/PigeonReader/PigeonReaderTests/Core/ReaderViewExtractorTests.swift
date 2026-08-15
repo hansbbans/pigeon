@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WebKit
 @testable import PigeonReader
 
 @MainActor
@@ -36,6 +37,81 @@ struct ReaderViewExtractorTests {
 		#expect(document.contentHTML.contains("form") == false)
 		#expect(document.contentHTML.contains("onclick") == false)
 		#expect(document.leadImageURL == URL(string: "https://example.com/images/lead.jpg"))
+	}
+
+	@Test
+	func hostileSourceCannotExecuteHandlersOrRequestSubresourcesBeforeSanitization() async throws {
+		let handler = RecordingURLSchemeHandler()
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(),
+			sessionFactory: {
+				ReaderViewExtractionSession(urlSchemeHandlers: ["pigeon-test": handler])
+			},
+		)
+		let html = """
+		<!doctype html>
+		<html onload="document.title='html-handler-ran'"><head><title>Safe title</title>
+		<style>@import url('pigeon-test://tracker/style.css');</style></head>
+		<body>
+			<div style="display:none">Unsubscribe and account navigation</div>
+			<article>
+				<script>document.title = 'script-ran'</script>
+				<svg onload="document.title='svg-handler-ran'"><image href="pigeon-test://tracker/svg"></image></svg>
+				<img src="pigeon-test://tracker/pixel" onload="document.title='image-handler-ran'" onerror="document.title='image-error-ran'">
+				<p>The story body remains readable while hostile handlers and resource requests are removed before extraction.</p>
+			</article>
+		</body></html>
+		"""
+
+		let document = try await extractor.extract(
+			html: html,
+			title: nil,
+			baseURL: try #require(URL(string: "pigeon-test://reader/story")),
+		)
+
+		#expect(document.title == "Safe title")
+		#expect(document.contentHTML.contains("story body remains readable"))
+		#expect(handler.requestedURLs().isEmpty)
+	}
+
+	@Test
+	func extractsReadableArticleFromFeedHTMLWhenTheOriginalPageIsMissing() async throws {
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(responseData: Data(), statusCode: 404),
+		)
+		let document = try await extractor.extract(
+			html: "<p>The cheapest fat loss tool most people sleep on is a walk after meals.</p><p>Consistency matters more than intensity for this habit.</p>",
+			title: "4 Minute Fridays",
+			baseURL: URL(string: "https://example.com/newsletter"),
+		)
+
+		#expect(document.contentHTML.contains("cheapest fat loss tool"))
+		#expect(document.title == "4 Minute Fridays" || document.contentHTML.contains("4 Minute Fridays"))
+	}
+
+	@Test
+	func keepsHiddenChromeHiddenSoNewsletterPagesStillExtract() async throws {
+		let hiddenChrome = String(repeating: "Unsubscribe manage account privacy terms login share comment follow us. ", count: 20)
+		let html = """
+		<!doctype html>
+		<html><head><title>4 Minute Fridays</title></head>
+		<body>
+			<div style="display:none">\(hiddenChrome)</div>
+			<article>
+				<h1>4 Minute Fridays</h1>
+				<p>The cheapest fat loss tool most people sleep on is a walk after meals.</p>
+				<p>What your poop says about your health is mostly about consistency and color.</p>
+				<p>The toothpaste I use every day is just a fluoride paste without extra claims.</p>
+			</article>
+		</body></html>
+		"""
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(responseData: Data(html.utf8)),
+		)
+		let document = try await extractor.extract(from: try #require(URL(string: "https://example.com/p/4-minute-fridays")))
+
+		#expect(document.contentHTML.contains("cheapest fat loss tool"))
+		#expect(document.contentHTML.contains("Unsubscribe manage account") == false)
 	}
 
 	@Test
@@ -108,5 +184,23 @@ private actor RoutingHTTPClient: HTTPClient {
 			throw URLError(.badServerResponse)
 		}
 		return (data, response)
+	}
+}
+
+@MainActor
+private final class RecordingURLSchemeHandler: NSObject, WKURLSchemeHandler {
+	private var urls: [URL] = []
+
+	func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+		if let url = urlSchemeTask.request.url {
+			urls.append(url)
+		}
+		urlSchemeTask.didFinish()
+	}
+
+	func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+
+	func requestedURLs() -> [URL] {
+		urls
 	}
 }

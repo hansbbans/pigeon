@@ -1,5 +1,6 @@
 import type { D1PreparedStatement } from '@cloudflare/workers-types';
 
+import { parseGoogleReaderItemRowid } from './item-identity';
 import type { Env } from './types';
 
 export const CLIENT_FAMILIES = ['pigeon', 'reeder_classic', 'netnewswire', 'other'] as const;
@@ -178,15 +179,56 @@ function chunkValues<T>(values: T[], size: number): T[][] {
 }
 
 async function loadItemsByIDs(env: Env, itemIds: string[]): Promise<Map<string, { id: string; feed_key: string }>> {
-	const rows = await Promise.all(
-		chunkValues([...new Set(itemIds)], 90).map(async (chunk) => {
-			const placeholders = chunk.map(() => '?').join(',');
-			return env.DB.prepare(`SELECT id, feed_key FROM items WHERE id IN (${placeholders})`)
-				.bind(...chunk)
-				.all<{ id: string; feed_key: string }>();
-		}),
+	const uniqueIds = [...new Set(itemIds)];
+	const storedIds: string[] = [];
+	const rowids: number[] = [];
+
+	for (const itemId of uniqueIds) {
+		const rowid = parseGoogleReaderItemRowid(itemId);
+		if (rowid !== null) {
+			rowids.push(rowid);
+		} else {
+			storedIds.push(itemId);
+		}
+	}
+
+	const [idRows, rowidRows] = await Promise.all([
+		storedIds.length === 0
+			? Promise.resolve([])
+			: Promise.all(
+					chunkValues(storedIds, 90).map(async (chunk) => {
+						const placeholders = chunk.map(() => '?').join(',');
+						return env.DB.prepare(`SELECT id, feed_key FROM items WHERE id IN (${placeholders})`)
+							.bind(...chunk)
+							.all<{ id: string; feed_key: string }>();
+					}),
+				),
+		rowids.length === 0
+			? Promise.resolve([])
+			: Promise.all(
+					chunkValues([...new Set(rowids)], 90).map(async (chunk) => {
+						const placeholders = chunk.map(() => '?').join(',');
+						return env.DB.prepare(`SELECT rowid, id, feed_key FROM items WHERE rowid IN (${placeholders})`)
+							.bind(...chunk)
+							.all<{ rowid: number; id: string; feed_key: string }>();
+					}),
+				),
+	]);
+
+	const itemsByStoredId = new Map(idRows.flatMap((result) => result.results).map((row) => [row.id, row]));
+	const itemsByRowid = new Map(
+		rowidRows.flatMap((result) => result.results).map((row) => [row.rowid, { id: row.id, feed_key: row.feed_key }]),
 	);
-	return new Map(rows.flatMap((result) => result.results).map((row) => [row.id, row]));
+
+	const resolved = new Map<string, { id: string; feed_key: string }>();
+	for (const itemId of uniqueIds) {
+		const rowid = parseGoogleReaderItemRowid(itemId);
+		const item = rowid !== null ? itemsByRowid.get(rowid) : itemsByStoredId.get(itemId);
+		if (item) {
+			resolved.set(itemId, item);
+		}
+	}
+	return resolved;
 }
 
 export async function handleEngagementIngestion(request: Request, env: Env): Promise<Response> {

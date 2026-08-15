@@ -22,6 +22,8 @@ struct ArticleReaderHeaderView: View {
 			Text(article.title)
 				.font(ReaderTypography.articleTitle)
 				.bold()
+				.fixedSize(horizontal: false, vertical: true)
+				.frame(maxWidth: .infinity, alignment: .leading)
 				.textSelection(.enabled)
 
 			HStack(spacing: 10) {

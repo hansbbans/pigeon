@@ -173,6 +173,17 @@ struct PigeonAPIClientTests {
 		#expect(form.filter { $0.name == "r" }.map(\.value) == ["user/-/label/Old"])
 	}
 
+	@Test func jsonErrorFieldIsShownInsteadOfGenericStatusFallback() {
+		let error = PigeonError.server(
+			statusCode: 404,
+			message: #"{"error":"Unknown item tag:google.com,2005:reader/item/0000000000000001"}"#,
+		)
+		#expect(error.localizedDescription.contains("Unknown item"))
+		#expect(error.localizedDescription.contains("404"))
+		#expect(error.localizedDescription.contains("Pigeon returned an error") == false)
+		#expect(error.isNonFatalEngagementFailure)
+	}
+
 	@Test func cloudflareResourceErrorUsesConciseUserFacingDescription() async throws {
 		let payload = Data(
 			"""

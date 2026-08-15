@@ -15,6 +15,8 @@ enum ReaderViewError: Error, LocalizedError, Equatable, Sendable {
 			"Reader View needs a valid original web address."
 		case .invalidResponse:
 			"The original page returned an unexpected response."
+		case let .httpStatus(status) where status == 404:
+			"The original page was not found (HTTP 404). The web version of this newsletter may have expired or moved."
 		case let .httpStatus(status):
 			"The original page could not be loaded (HTTP \(status))."
 		case .responseTooLarge:
