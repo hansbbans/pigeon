@@ -4,6 +4,17 @@ import Testing
 
 struct ReaderArticleFilterStoreTests {
 	@Test
+	func defaultFilterIsUnreadExceptStarred() {
+		#expect(ReaderArticleFilterStore.defaultFilter == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "forYou") == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "today") == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "unread") == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "feed/one") == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "user/-/label/Work") == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: ReaderSection.starred.rawValue) == .all)
+	}
+
+	@Test
 	func defaultsToUnreadAndPersistsPerCollection() throws {
 		let suiteName = "pigeon-article-filter-\(UUID().uuidString)"
 		let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -13,6 +24,7 @@ struct ReaderArticleFilterStoreTests {
 
 		#expect(store.filter(for: "feed/one", session: session) == .unread)
 		#expect(store.filter(for: "forYou", session: session) == .unread)
+		#expect(store.filter(for: ReaderSection.starred.rawValue, session: session) == .all)
 		store.setFilter(.unread, for: "feed/one", session: session)
 		store.setFilter(.all, for: "feed/two", session: session)
 		store.setFilter(.read, for: "user/-/label/Work", session: session)
@@ -24,6 +36,11 @@ struct ReaderArticleFilterStoreTests {
 		#expect(store.filter(for: "feed/three", session: session) == .unread)
 		let missingFeedKey = ReaderArticleFilterStore.keyPrefix + session.articleFilterStorageIdentity + ".feed/three"
 		#expect(defaults.string(forKey: missingFeedKey) == nil)
+		let missingStarredKey = ReaderArticleFilterStore.keyPrefix + session.articleFilterStorageIdentity + "." + ReaderSection.starred.rawValue
+		#expect(defaults.string(forKey: missingStarredKey) == nil)
+
+		store.setFilter(.unread, for: ReaderSection.starred.rawValue, session: session)
+		#expect(store.filter(for: ReaderSection.starred.rawValue, session: session) == .unread)
 	}
 
 	@Test

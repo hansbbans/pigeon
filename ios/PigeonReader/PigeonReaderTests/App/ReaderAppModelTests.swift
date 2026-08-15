@@ -435,18 +435,26 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
 	}
 
-	@Test func articleFilterDefaultsToUnreadAndStaysPerCollection() throws {
+	@Test func articleFilterDefaultsToUnreadExceptStarredWhichKeepsReadStories() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let state = try makeNavigationState(unreadCount: 1)
 		model.setNavigation(state)
 		let folder = try #require(model.folderNavigationItems.first)
 		let feed = try #require(model.feedNavigationItems(in: folder).first)
 		let forYou = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .starred }))
+		let readStarred = makeArticle(id: "kept-starred", isRead: true)
+		model.setArticles([readStarred], for: starred)
 
 		#expect(model.articleFilter == .unread)
 		#expect(model.articleFilter(for: forYou) == .unread)
 		#expect(model.articleFilter(for: folder) == .unread)
 		#expect(model.articleFilter(for: feed) == .unread)
+		#expect(model.articleFilter(for: starred) == .all)
+		model.select(item: starred)
+		#expect(model.articleFilter == .all)
+		#expect(model.articles(for: starred).map(\.id) == [readStarred.id])
+		#expect(model.isArticleFilterEmpty(for: starred) == false)
 
 		model.select(item: feed)
 		model.articleFilter = .all
@@ -458,6 +466,25 @@ struct ReaderAppModelTests {
 		#expect(model.articleFilter(for: feed) == .all)
 		#expect(model.articleFilter(for: folder) == .read)
 		#expect(model.articleFilter(for: forYou) == .unread)
+		#expect(model.articleFilter(for: starred) == .all)
+	}
+
+	@Test func starredKeepsAStoryAfterExplicitOpenMarksItRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		var article = makeArticle(id: "saved")
+		article.isStarred = true
+		model.setNavigation(ReaderNavigationState(items: [starred]))
+		model.setArticles([article], for: starred)
+		model.select(item: starred)
+		model.select(article: article)
+
+		#expect(model.articleFilter == .all)
+		await model.recordExplicitOpen(for: article)
+
+		#expect(model.allArticles(for: starred).first?.isRead == true)
+		#expect(model.articles(for: starred).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
 	}
 
 	@Test func articleFilterPersistsPerCollectionAcrossModelInstances() throws {
@@ -471,6 +498,7 @@ struct ReaderAppModelTests {
 		let folder = try #require(firstModel.folderNavigationItems.first)
 		let feed = try #require(firstModel.feedNavigationItems(in: folder).first)
 		let forYou = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		firstModel.select(item: feed)
 		firstModel.articleFilter = .all
@@ -483,12 +511,14 @@ struct ReaderAppModelTests {
 		#expect(defaults.string(forKey: sessionKeyPrefix + feed.id) == "unread")
 		#expect(defaults.string(forKey: sessionKeyPrefix + folder.id) == "read")
 		#expect(defaults.string(forKey: sessionKeyPrefix + forYou.id) == nil)
+		#expect(defaults.string(forKey: sessionKeyPrefix + starred.id) == nil)
 
 		let restoredModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: ReaderArticleFilterStore(defaults: defaults))
 		restoredModel.setNavigation(state)
 		let restoredFolder = try #require(restoredModel.folderNavigationItems.first)
 		let restoredFeed = try #require(restoredModel.feedNavigationItems(in: restoredFolder).first)
 		let restoredForYou = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let restoredStarred = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		restoredModel.select(item: restoredFeed)
 		#expect(restoredModel.articleFilter == .unread)
@@ -496,9 +526,12 @@ struct ReaderAppModelTests {
 		#expect(restoredModel.articleFilter == .read)
 		restoredModel.select(item: restoredForYou)
 		#expect(restoredModel.articleFilter == .unread)
+		restoredModel.select(item: restoredStarred)
+		#expect(restoredModel.articleFilter == .all)
 		#expect(restoredModel.articleFilter(for: restoredFeed) == .unread)
 		#expect(restoredModel.articleFilter(for: restoredFolder) == .read)
 		#expect(restoredModel.articleFilter(for: restoredForYou) == .unread)
+		#expect(restoredModel.articleFilter(for: restoredStarred) == .all)
 	}
 
 	@Test func articleFilterRestoresAfterDisconnectAndReconnectToSameIdentity() async throws {
