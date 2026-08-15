@@ -67,3 +67,16 @@ enum PigeonError: Error, LocalizedError, Sendable {
 		return false
 	}
 }
+
+/// SwiftUI `.task` cancellation aborts in-flight `URLSession` work as
+/// `URLError.cancelled` (`NSURLErrorCancelled` / -999), not `CancellationError`.
+nonisolated func isCancellation(_ error: Error) -> Bool {
+	if error is CancellationError {
+		return true
+	}
+	if let urlError = error as? URLError, urlError.code == .cancelled {
+		return true
+	}
+	let nsError = error as NSError
+	return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+}

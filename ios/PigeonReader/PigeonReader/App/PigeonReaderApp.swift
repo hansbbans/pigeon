@@ -10,15 +10,19 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.text-scale")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.line-height")
+			ReaderArticleFilterStore().removeAll()
 		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
 			let previewModel = PreviewData.makeModel()
 			if ProcessInfo.processInfo.arguments.contains("-reader-show-sidebar") {
 				previewModel.preferredCompactColumn = .sidebar
-			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-article"),
-				let firstArticle = previewModel.articles.first {
-				previewModel.select(article: firstArticle)
-				previewModel.setReaderMode(.feedContent, for: firstArticle.feedKey)
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-article") {
+				// Keep the launch fixture stable while the opened article is marked read.
+				previewModel.setArticleFilter(.all, for: .forYou)
+				if let firstArticle = previewModel.articles.first {
+					previewModel.select(article: firstArticle)
+					previewModel.setReaderMode(.feedContent, for: firstArticle.feedKey)
+				}
 			}
 			_model = State(initialValue: previewModel)
 			return

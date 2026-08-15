@@ -28,6 +28,11 @@ final class ReaderAppModel {
 		let errorDescription: String?
 	}
 
+	private struct ArticleFilterKey: Hashable {
+		let sessionIdentity: String
+		let collectionID: String
+	}
+
 	var session: PigeonSession?
 	var serverURLText = ""
 	var password = ""
@@ -42,13 +47,9 @@ final class ReaderAppModel {
 	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var isLoadingNavigation = false
-	var articleFilter = ReaderArticleFilter.all {
-		didSet {
-			guard oldValue != articleFilter else {
-				return
-			}
-			reconcileCurrentArticleSelection()
-		}
+	var articleFilter: ReaderArticleFilter {
+		get { articleFilter(for: selectedNavigationID) }
+		set { setArticleFilter(newValue, for: selectedNavigationID) }
 	}
 	var sidebarFilter = ReaderSidebarFilter.all
 
@@ -57,11 +58,13 @@ final class ReaderAppModel {
 	private let readwiseTokenStore: any ReadwiseTokenStore
 	private let readwiseAPIClient: ReadwiseAPIClient
 	private let readerModeStore: ReaderModeStore
+	private let articleFilterStore: ReaderArticleFilterStore
 	let readerTypography: ReaderTypographySettings
 	private let readerViewExtractor: any ReaderViewExtracting
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [String: [Recommendation]] = [:]
 	private var sortOrders: [String: ArticleSortOrder] = [:]
+	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
@@ -79,6 +82,7 @@ final class ReaderAppModel {
 		httpClient: any HTTPClient = URLSessionHTTPClient(),
 		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
 		readerModeStore: ReaderModeStore = ReaderModeStore(),
+		articleFilterStore: ReaderArticleFilterStore = ReaderArticleFilterStore(),
 		readerTypography: ReaderTypographySettings? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) {
@@ -87,6 +91,7 @@ final class ReaderAppModel {
 		self.readwiseTokenStore = readwiseTokenStore
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
 		self.readerModeStore = readerModeStore
+		self.articleFilterStore = articleFilterStore
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		do {
@@ -227,6 +232,9 @@ final class ReaderAppModel {
 		do {
 			let newSession = try await PigeonAPIClient.authenticate(baseURL: url, password: password, httpClient: httpClient)
 			try sessionStore.save(newSession)
+			// Filter state is a performance cache. Reload it from the session-scoped store
+			// after every successful connection, including a reconnect to the same account.
+			articleFilters.removeAll()
 			session = newSession
 			serverURLText = newSession.baseURL.absoluteString
 			password = ""
@@ -234,7 +242,7 @@ final class ReaderAppModel {
 			select(section: .forYou)
 			await loadNavigation(force: true)
 			await load(section: .forYou, force: true)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			// Leaving the connection screen is a normal cancellation.
 		} catch {
 			errorMessage = error.localizedDescription
@@ -248,10 +256,10 @@ final class ReaderAppModel {
 			apiClient = nil
 			articleCache = [:]
 			sortOrders = [:]
+			articleFilters.removeAll()
 			selectedArticleIDs = [:]
 			subscriptions = []
 			selectedArticleID = nil
-			articleFilter = .all
 			sidebarFilter = .all
 			selectedNavigationID = ReaderSection.forYou.rawValue
 			navigation = .initial
@@ -427,7 +435,7 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeNavigationLoadID == loadID else {
@@ -497,7 +505,7 @@ final class ReaderAppModel {
 			if collection.smartSection == .today {
 				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeLoadIDs[collection.id] == loadID, selectedNavigationID == collection.id else {
@@ -532,7 +540,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch {
 			guard activeLibraryLoadID == loadID else {
@@ -568,7 +576,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return false
 		} catch {
 			errorMessage = error.localizedDescription
@@ -598,7 +606,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -635,7 +643,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -661,7 +669,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackSubscription(subscription, key: mutationKey, id: mutationID)
 			return false
 		} catch {
@@ -700,7 +708,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			await loadLibrary(force: true)
 			return false
 		} catch {
@@ -731,7 +739,7 @@ final class ReaderAppModel {
 				await loadNavigation(force: true)
 			}
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			await loadLibrary(force: true)
 			return false
 		} catch {
@@ -749,14 +757,34 @@ final class ReaderAppModel {
 		displayedArticles(for: collection.id)
 	}
 
+	func allArticles(for section: ReaderSection) -> [Recommendation] {
+		articleCache[section.rawValue] ?? []
+	}
+
 	func allArticles(for collection: ReaderNavigationItem) -> [Recommendation] {
 		articleCache[collection.id] ?? []
 	}
 
 	func isArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
-		articleFilter != .all
+		articleFilter(for: collection.id) != .all
 			&& allArticles(for: collection).isEmpty == false
 			&& articles(for: collection).isEmpty
+	}
+
+	func articleFilter(for section: ReaderSection) -> ReaderArticleFilter {
+		articleFilter(for: section.rawValue)
+	}
+
+	func articleFilter(for collection: ReaderNavigationItem) -> ReaderArticleFilter {
+		articleFilter(for: collection.id)
+	}
+
+	func setArticleFilter(_ filter: ReaderArticleFilter, for section: ReaderSection) {
+		setArticleFilter(filter, for: section.rawValue)
+	}
+
+	func setArticleFilter(_ filter: ReaderArticleFilter, for collection: ReaderNavigationItem) {
+		setArticleFilter(filter, for: collection.id)
 	}
 
 	func sortOrder(for section: ReaderSection) -> ArticleSortOrder {
@@ -802,8 +830,29 @@ final class ReaderAppModel {
 		reconcileSelection(for: collectionID)
 	}
 
+	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
+		guard let session else {
+			return ReaderArticleFilterStore.defaultFilter
+		}
+		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
+		return articleFilters[key] ?? articleFilterStore.filter(for: collectionID, session: session)
+	}
+
+	private func setArticleFilter(_ filter: ReaderArticleFilter, for collectionID: String) {
+		guard let session else {
+			return
+		}
+		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
+		guard articleFilter(for: collectionID) != filter else {
+			return
+		}
+		articleFilters[key] = filter
+		articleFilterStore.setFilter(filter, for: collectionID, session: session)
+		reconcileSelection(for: collectionID)
+	}
+
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
-		articleFilter.filtering(articleCache[collectionID] ?? [])
+		articleFilter(for: collectionID).filtering(articleCache[collectionID] ?? [])
 	}
 
 	private func reconcileSelection(for collectionID: String) {
@@ -956,7 +1005,7 @@ final class ReaderAppModel {
 					try await apiClient.sendEngagement([event])
 				}
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return
@@ -1209,7 +1258,7 @@ final class ReaderAppModel {
 							wasCancelled: false,
 							errorDescription: nil,
 						)
-					} catch is CancellationError {
+					} catch let error where isCancellation(error) {
 						return ReadMutationResult(
 							articleID: pendingMutation.article.id,
 							succeeded: false,
@@ -1302,7 +1351,7 @@ final class ReaderAppModel {
 		do {
 			try await apiClient.sendEngagement([event])
 			return true
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			return false
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
@@ -1352,7 +1401,7 @@ final class ReaderAppModel {
 			if hasLoadedNavigation {
 				await loadNavigation(force: true)
 			}
-		} catch is CancellationError {
+		} catch let error where isCancellation(error) {
 			rollbackStateIfCurrent(
 				articleID: article.id,
 				value: value,
