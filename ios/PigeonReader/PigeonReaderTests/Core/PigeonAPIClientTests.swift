@@ -47,12 +47,7 @@ struct PigeonAPIClientTests {
 	}
 
 	@Test func streamRecommendationsIncludeTheOriginSourceInTheirExplanation() async throws {
-		let response = Data(
-			"""
-			{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
-			""".utf8,
-		)
-		let mock = MockHTTPClient(responseData: response)
+		let mock = SingleStreamHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
 
@@ -200,5 +195,162 @@ struct PigeonAPIClientTests {
 		} catch {
 			Issue.record("Unexpected error: \(error)")
 		}
+	}
+
+	@Test func folderRecommendationsUseBoundedItemContentRequestsAcrossContinuationPages() async throws {
+		let mock = FolderLoadingHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		let recommendations = try await client.recommendations(from: "user/-/label/News")
+
+		#expect(recommendations.count == 22)
+		let expectedTitles = ["Newest"] + stride(from: 20, through: 1, by: -1).map { "Story \($0)" } + ["Older"]
+		#expect(recommendations.map(\.title) == expectedTitles)
+		let requests = await mock.requests()
+		let itemIDRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }
+		#expect(itemIDRequests.count == 2)
+		#expect(itemIDRequests.allSatisfy { request in
+			let queryItems = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+			return queryItems.first(where: { $0.name == "s" })?.value == "user/-/label/News"
+				&& queryItems.first(where: { $0.name == "n" })?.value == "50"
+		})
+		let secondItemIDRequest = try #require(itemIDRequests.dropFirst().first)
+		#expect(URLComponents(url: secondItemIDRequest.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "c" })?.value == "folder-page-2")
+
+		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 3)
+		#expect(contentRequests.allSatisfy { $0.method == "POST" })
+		let contentRequestIDs = contentRequests.map { Self.formValues(from: $0.body, named: "i") }
+		let expectedFirstContentRequestIDs = Array((2...21).reversed()).map { String($0) }
+		let expectedContentRequestIDs: [[String]] = [expectedFirstContentRequestIDs, ["1"], ["0"]]
+		#expect(contentRequestIDs == expectedContentRequestIDs)
+		#expect(contentRequestIDs.allSatisfy { $0.count <= 20 })
+		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/contents" }) == false)
+	}
+
+	private static func formValues(from body: Data?, named name: String) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems.filter { $0.name == name }.compactMap(\.value)
+	}
+}
+
+private actor SingleStreamHTTPClient: HTTPClient {
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+
+		switch url.path {
+		case "/reader/api/0/stream/items/ids":
+			return (
+				Data("{\"itemRefs\":[{\"id\":\"1\"}]}".utf8),
+				try Self.response(for: url, statusCode: 200),
+			)
+		case "/reader/api/0/stream/items/contents":
+			let payload = Data(
+				"""
+				{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
+				""".utf8,
+			)
+			return (payload, try Self.response(for: url, statusCode: 200))
+		default:
+			return (Data("not found".utf8), try Self.response(for: url, statusCode: 404))
+		}
+	}
+
+	private static func response(for url: URL, statusCode: Int) throws -> HTTPURLResponse {
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return response
+	}
+}
+
+private actor FolderLoadingHTTPClient: HTTPClient {
+	struct Request: Sendable {
+		let url: URL
+		let method: String?
+		let body: Data?
+	}
+
+	private var capturedRequests: [Request] = []
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		capturedRequests.append(Request(url: url, method: request.httpMethod, body: request.httpBody))
+
+		switch url.path {
+		case "/reader/api/0/stream/contents":
+			let payload = Data("{\"error_code\":1102,\"error_name\":\"worker_exceeded_resources\",\"ray_id\":\"folder-ray\"}".utf8)
+			return (payload, try Self.response(for: url, statusCode: 503))
+		case "/reader/api/0/stream/items/ids":
+			return try itemIDsResponse(for: url)
+		case "/reader/api/0/stream/items/contents":
+			let ids = Self.formValues(from: request.httpBody, named: "i")
+			return (Self.contentsResponse(for: ids), try Self.response(for: url, statusCode: 200))
+		default:
+			return (Data("not found".utf8), try Self.response(for: url, statusCode: 404))
+		}
+	}
+
+	func requests() -> [Request] {
+		capturedRequests
+	}
+
+	private func itemIDsResponse(for url: URL) throws -> (Data, URLResponse) {
+		let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		guard queryItems.first(where: { $0.name == "s" })?.value == "user/-/label/News" else {
+			return (Data("invalid stream".utf8), try Self.response(for: url, statusCode: 400))
+		}
+
+		let continuation = queryItems.first(where: { $0.name == "c" })?.value
+		let payload: Data
+		switch continuation {
+		case nil:
+			let itemRefs = (1...21).reversed().map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
+			payload = Data("{\"itemRefs\":[\(itemRefs)],\"continuation\":\"folder-page-2\"}".utf8)
+		case "folder-page-2":
+			payload = Data("{\"itemRefs\":[{\"id\":\"0\"}]}".utf8)
+		default:
+			payload = Data("{\"itemRefs\":[]}".utf8)
+		}
+		return (payload, try Self.response(for: url, statusCode: 200))
+	}
+
+	private static func contentsResponse(for ids: [String]) -> Data {
+		let items = ids.map { id in
+			let title: String
+			if id == "21" {
+				title = "Newest"
+			} else if id == "0" {
+				title = "Older"
+			} else {
+				title = "Story \(id)"
+			}
+			let hexID = String(UInt64(id) ?? 0, radix: 16)
+			let readerID = String(repeating: "0", count: max(0, 16 - hexID.count)) + hexID
+			return "{\"id\":\"tag:google.com,2005:reader/item/\(readerID)\",\"categories\":[],\"title\":\"\(title)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+		}.joined(separator: ",")
+		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+	}
+
+	private static func formValues(from body: Data?, named name: String) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems.filter { $0.name == name }.compactMap(\.value)
+	}
+
+	private static func response(for url: URL, statusCode: Int) throws -> HTTPURLResponse {
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return response
 	}
 }

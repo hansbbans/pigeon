@@ -7,6 +7,9 @@ struct RecommendationsResponse: Codable, Sendable {
 }
 
 struct PigeonAPIClient: Sendable {
+	private static let streamItemIDPageLimit = 50
+	private static let streamItemContentChunkSize = 20
+
 	let session: PigeonSession
 	private let httpClient: any HTTPClient
 
@@ -190,6 +193,18 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(ReaderStreamItemIDsResponse.self, from: data)
 	}
 
+	private func streamItemContents(itemIDs: [String]) async throws -> ReaderStreamContentsResponse {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "reader/api/0/stream/items/contents"))
+		request.httpMethod = "POST"
+		request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		var components = URLComponents()
+		components.queryItems = itemIDs.map { URLQueryItem(name: "i", value: $0) }
+		request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		return try decoder.decode(ReaderStreamContentsResponse.self, from: data)
+	}
+
 	func recommendations(from streamID: String, dayBounds: ReaderLocalDayBounds? = nil) async throws -> [Recommendation] {
 		let items = try await streamItems(streamID: streamID, dayBounds: dayBounds)
 		return items.map { recommendation(from: $0, fallbackStreamID: streamID) }
@@ -281,30 +296,47 @@ struct PigeonAPIClient: Sendable {
 		var items: [ReaderStreamItem] = []
 		var continuation: String?
 		var seenContinuations = Set<String>()
+		var seenItemIDs = Set<String>()
+		let olderThanUnix = dayBounds.map { max($0.startSeconds - 1, 0) }
 
 		while true {
-			let page = try await streamContents(
+			try Task.checkCancellation()
+			let page = try await streamItemIDs(
 				streamID: streamID,
 				excludeTag: excludeTag,
+				olderThanUnix: olderThanUnix,
+				limit: Self.streamItemIDPageLimit,
 				continuation: continuation,
 			)
-			var reachedDayBoundary = false
-			for item in page.items {
-				let date = Date(timeIntervalSince1970: TimeInterval(item.published))
-				if let dayBounds {
-					if date < dayBounds.start {
-						reachedDayBoundary = true
-						break
+			let newItemIDs = page.itemRefs.map(\.id).filter { itemID in
+				seenItemIDs.insert(Self.normalizedItemID(itemID)).inserted
+			}
+
+			for startIndex in stride(from: 0, to: newItemIDs.count, by: Self.streamItemContentChunkSize) {
+				try Task.checkCancellation()
+				let endIndex = min(startIndex + Self.streamItemContentChunkSize, newItemIDs.count)
+				let itemIDChunk = Array(newItemIDs[startIndex..<endIndex])
+				let contentPage = try await streamItemContents(itemIDs: itemIDChunk)
+				let itemsByID = Dictionary(
+					contentPage.items.map { (Self.normalizedItemID($0.id), $0) },
+					uniquingKeysWith: { first, _ in first },
+				)
+
+				for itemID in itemIDChunk {
+					guard let item = itemsByID[Self.normalizedItemID(itemID)] else {
+						continue
 					}
-					if dayBounds.contains(date) {
-						items.append(item)
+					if let dayBounds {
+						let date = Date(timeIntervalSince1970: TimeInterval(item.published))
+						guard dayBounds.contains(date) else {
+							continue
+						}
 					}
-				} else {
 					items.append(item)
 				}
 			}
 
-			if reachedDayBoundary || page.continuation == nil {
+			if page.continuation == nil {
 				return items
 			}
 			guard let nextContinuation = page.continuation, seenContinuations.insert(nextContinuation).inserted else {
@@ -312,6 +344,15 @@ struct PigeonAPIClient: Sendable {
 			}
 			continuation = nextContinuation
 		}
+	}
+
+	private static func normalizedItemID(_ itemID: String) -> String {
+		let prefix = "tag:google.com,2005:reader/item/"
+		guard itemID.hasPrefix(prefix),
+			let rowID = UInt64(String(itemID.dropFirst(prefix.count)), radix: 16) else {
+			return itemID
+		}
+		return String(rowID)
 	}
 
 	private func recommendation(from item: ReaderStreamItem, fallbackStreamID: String) -> Recommendation {
