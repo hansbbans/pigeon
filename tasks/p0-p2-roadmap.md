@@ -121,37 +121,50 @@ native Mac app are outside this program.
 
 ### Reading workflows
 
-- [ ] Search titles, authors, feeds, summaries, and cached article bodies.
-- [ ] Scope search to a feed, folder, smart view, or the full library.
-- [ ] Find text within the open article.
-- [ ] Navigate to the next unread article across feed boundaries.
-- [ ] Add oldest-first sorting.
-- [ ] Add configurable mark-read-on-open and mark-read-on-scroll behavior.
-- [ ] Add undo for mark all/above/below/older-than-date actions.
-- [ ] Preserve the open article when filters or status changes remove it from the list.
-- [ ] Wire the system share sheet into the article UI.
-- [ ] Add title-only, compact, comfortable, and image-rich timeline densities.
-- [ ] Show last-updated and cached/live state.
+- [x] Search titles, authors, feeds, summaries, and cached article bodies.
+- [x] Scope search to a feed, folder, smart view, or the full library.
+- [x] Find text within the open article.
+- [x] Navigate to the next unread article across feed boundaries.
+- [x] Add oldest-first sorting.
+- [x] Add configurable mark-read-on-open and mark-read-on-scroll behavior.
+- [x] Add undo for mark all/above/below/older-than-date actions.
+- [x] Preserve the open article when filters or status changes remove it from the list.
+- [x] Wire the system share sheet into the article UI.
+- [x] Add title-only, compact, comfortable, and image-rich timeline densities.
+- [x] Show last-updated and cached/live state.
 
 ### Readability, accessibility, and privacy
 
-- [ ] Add system, light, dark, and sepia reading themes.
-- [ ] Add adjustable margins and reading-column width.
-- [ ] Keep an explicit per-feed Feed Content, Reader View, or Website default.
-- [ ] Improve tables, code blocks, captions, block quotes, and wide newsletters.
-- [ ] Add normal, blocked-until-requested, and privacy-proxied remote image policies.
-- [ ] Explain publisher-visible remote content behavior.
-- [ ] Complete VoiceOver, Voice Control, and hardware-keyboard coverage.
-- [ ] Verify accessibility Dynamic Type sizes, Reduce Motion, contrast, and non-color cues.
+- [x] Add system, light, dark, and sepia reading themes.
+- [x] Add adjustable margins and reading-column width.
+- [x] Keep an explicit per-feed Feed Content, Reader View, or Website default.
+- [x] Improve tables, code blocks, captions, block quotes, and wide newsletters.
+- [x] Add normal, blocked-until-requested, and privacy-proxied remote image policies.
+- [x] Explain publisher-visible remote content behavior.
+- [x] Complete VoiceOver, Voice Control, and hardware-keyboard coverage.
+- [x] Verify accessibility Dynamic Type sizes, Reduce Motion, contrast, and non-color cues.
 
 ### Trustworthy personalization
 
-- [ ] Keep bulk read state neutral and prioritize explicit positive/negative feedback.
-- [ ] Show a plain-language "Why this?" explanation for every recommendation.
-- [ ] Add preference reset, feedback history, delete, and export controls.
-- [ ] Add feed/topic diversity, freshness, and exploration constraints.
-- [ ] Exclude pending or failed actions from confirmed training signals.
-- [ ] Publish concise signal and retention behavior in the app.
+- [x] Keep bulk read state neutral and prioritize explicit positive/negative feedback.
+- [x] Show a plain-language "Why this?" explanation for every recommendation.
+- [x] Add preference reset, feedback history, delete, and export controls.
+- [x] Add feed/topic diversity, freshness, and exploration constraints.
+- [x] Exclude pending or failed actions from confirmed training signals.
+- [x] Publish concise signal and retention behavior in the app.
+
+### PR 3 verification evidence
+
+- Local SQLite search proves account and collection isolation across title, author,
+  source, summary text, and sanitized cached HTML.
+- Bulk read undo writes a durable reverse mutation; mark-on-open/scroll, cross-feed
+  navigation, oldest sorting, and hidden-row selection all have model regressions.
+- The image proxy rejects internal redirects, active content, and responses above 8 MiB;
+  only authenticated raster responses reach the nonpersistent reader web view.
+- Recommendation tests prove bulk neutrality, confirmed-only history, individual delete,
+  reset/export, source/topic caps, freshness scoring, and a deterministic exploration slot.
+- 279 Worker tests, 127 native unit tests, and 8 native UI tests pass, including an
+  accessibility-size reader flow; native logs contain zero first-party warnings.
 
 ## PR 4 - Background delivery and platform integration
 

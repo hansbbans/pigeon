@@ -5,6 +5,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	let readerId: String
 	let feedKey: String
 	let source: String
+	var author: String? = nil
 	let title: String
 	let html: String
 	let text: String?

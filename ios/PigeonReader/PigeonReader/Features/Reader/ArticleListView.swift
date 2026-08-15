@@ -3,11 +3,14 @@ import SwiftUI
 struct ArticleListView: View {
 	let collection: ReaderNavigationItem
 	@Environment(ReaderAppModel.self) private var model
+	@State private var searchText = ""
+	@State private var searchScope = ReaderSearchScope.collection
 
 	var body: some View {
 		@Bindable var model = model
 		let allArticles = model.allArticles(for: collection)
-		let articles = model.articles(for: collection)
+		let isSearchActive = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+		let articles = isSearchActive ? model.searchResults : model.articles(for: collection)
 		let isLoading = model.isLoading(collection: collection)
 		let isFilteredEmpty = model.isArticleFilterEmpty(for: collection)
 
@@ -15,8 +18,13 @@ struct ArticleListView: View {
 			if isLoading && allArticles.isEmpty {
 				ProgressView("Loading stories")
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
+			} else if model.isSearchingArticles && articles.isEmpty {
+				ProgressView("Searching saved stories")
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
-				if isFilteredEmpty {
+				if isSearchActive {
+					ContentUnavailableView.search(text: searchText)
+				} else if isFilteredEmpty {
 					ContentUnavailableView(
 						filteredEmptyTitle,
 						systemImage: filteredEmptySystemImage,
@@ -30,37 +38,67 @@ struct ArticleListView: View {
 					)
 				}
 			} else {
-				List(articles) { article in
-					Button {
-						model.select(article: article)
-					} label: {
-						ArticleRowView(article: article)
+				List {
+					ForEach(articles) { article in
+						Button {
+							model.select(article: article)
+						} label: {
+							ArticleRowView(
+								article: article,
+								density: model.readerTypography.timelineDensity,
+								remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+							)
+						}
+						.buttonStyle(.plain)
+						.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
+						.swipeActions(edge: .leading, allowsFullSwipe: true) {
+							readButton(for: article)
+						}
+						.swipeActions(edge: .trailing, allowsFullSwipe: true) {
+							starButton(for: article)
+						}
+						.contextMenu {
+							readButton(for: article)
+							starButton(for: article)
+							Divider()
+							markAboveButton(for: article)
+							markBelowButton(for: article)
+						}
 					}
-					.buttonStyle(.plain)
-					.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
-					.swipeActions(edge: .leading, allowsFullSwipe: true) {
-						readButton(for: article)
-					}
-					.swipeActions(edge: .trailing, allowsFullSwipe: true) {
-						starButton(for: article)
-					}
-					.contextMenu {
-						readButton(for: article)
-						starButton(for: article)
-						Divider()
-						markAboveButton(for: article)
-						markBelowButton(for: article)
-					}
+					Text(model.collectionStatusText(for: collection))
+						.font(.footnote)
+						.foregroundStyle(.secondary)
+						.frame(maxWidth: .infinity, alignment: .center)
+						.listRowSeparator(.hidden)
+						.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
 				}
 				.listStyle(.plain)
 			}
 		}
 		.navigationTitle(collection.title)
+		.searchable(text: $searchText, prompt: "Titles, authors, feeds, and text")
+		.searchScopes($searchScope) {
+			ForEach(ReaderSearchScope.allCases) { scope in
+				Text(scope == .collection ? collection.title : scope.title).tag(scope)
+			}
+		}
 		.refreshable {
 			await model.refresh(collection: collection)
 		}
 		.task(id: collection.id) {
+			searchText = ""
+			model.clearArticleSearch()
 			await model.load(collection: collection)
+		}
+		.task(id: ArticleSearchRequest(query: searchText, scope: searchScope, collectionID: collection.id)) {
+			let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+			guard query.isEmpty == false else {
+				model.clearArticleSearch()
+				return
+			}
+			try? await Task.sleep(for: .milliseconds(250))
+			guard Task.isCancelled == false else { return }
+			await model.searchArticles(query: query, scope: searchScope, in: collection)
 		}
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
@@ -86,11 +124,36 @@ struct ArticleListView: View {
 				}
 				.accessibilityLabel(ReaderAccessibilityText.sortStories(for: collection.title))
 
-				Button("Mark All as Read", systemImage: "checkmark.circle") {
-					Task { await model.markAllStoriesAsRead(in: collection) }
+				Menu("Display", systemImage: "rectangle.grid.1x2") {
+					Picker("Timeline density", selection: Binding(
+						get: { model.readerTypography.timelineDensity },
+						set: { model.readerTypography.timelineDensity = $0 },
+					)) {
+						ForEach(ReaderTimelineDensity.allCases) { density in
+							Text(density.title).tag(density)
+						}
+					}
 				}
-				.disabled(allArticles.contains(where: { $0.isRead == false }) == false)
-				.accessibilityHint("Marks every loaded unread story in \(collection.title) as read")
+				.accessibilityValue(model.readerTypography.timelineDensity.title)
+
+				Menu("Read actions", systemImage: "checkmark.circle") {
+					Button("Mark All as Read", systemImage: "checkmark.circle") {
+						Task { await model.markAllStoriesAsRead(in: collection) }
+					}
+					.disabled(allArticles.contains(where: { $0.isRead == false }) == false)
+					Divider()
+					olderThanButton(days: 1)
+					olderThanButton(days: 7)
+					olderThanButton(days: 30)
+					if model.canUndoBulkRead {
+						Divider()
+						Button("Undo \(model.bulkReadUndoTitle ?? "Last Read Action")", systemImage: "arrow.uturn.backward") {
+							Task { await model.undoLastBulkRead() }
+						}
+						.keyboardShortcut("z", modifiers: .command)
+					}
+				}
+				.accessibilityHint("Marks stories read or reverses the most recent bulk read action")
 
 				Button("Refresh", systemImage: "arrow.clockwise") {
 					Task { await model.refresh(collection: collection) }
@@ -182,4 +245,17 @@ struct ArticleListView: View {
 		}
 		.tint(.blue)
 	}
+
+	private func olderThanButton(days: Int) -> some View {
+		Button("Older than \(days) \(days == 1 ? "day" : "days")", systemImage: "calendar.badge.checkmark") {
+			let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
+			Task { await model.markStoriesOlderThan(cutoff, in: collection) }
+		}
+	}
+}
+
+private struct ArticleSearchRequest: Equatable {
+	let query: String
+	let scope: ReaderSearchScope
+	let collectionID: String
 }

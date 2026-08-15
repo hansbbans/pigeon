@@ -9,10 +9,17 @@ interface RecommendationCandidate {
 	feed_key: string;
 	source: string;
 	title: string;
+	author: string | null;
 	original_url: string | null;
 	received_at: string;
 	is_read: number;
 	is_starred: number;
+}
+
+function topicBucket(title: string): string {
+	const stopWords = new Set(['about', 'after', 'again', 'from', 'into', 'story', 'their', 'there', 'these', 'this', 'with', 'your']);
+	const terms = title.toLowerCase().match(/[a-z0-9]{4,}/g)?.filter((term) => !stopWords.has(term)) ?? [];
+	return terms.slice(0, 2).join(':') || 'general';
 }
 
 interface RecommendationContentRow {
@@ -47,6 +54,60 @@ const SCORING_EVENT_TYPES: readonly ScoringEventType[] = [
 
 const CANDIDATE_POOL_SIZE = 100;
 const MAX_IN_QUERY_BIND_PARAMS = 100;
+
+interface RankedRecommendation {
+	id: string;
+	feedKey: string;
+	source: string;
+	title: string;
+	receivedAt: string;
+	score: number;
+	sampleCount: number;
+	explanation: string;
+}
+
+export function selectDiverseRecommendations<T extends RankedRecommendation>(
+	ranked: T[],
+	limit: number,
+): T[] {
+	if (ranked.length <= limit) return ranked.slice(0, limit);
+	const perFeedLimit = Math.max(2, Math.ceil(limit * 0.35));
+	const perTopicLimit = Math.max(2, Math.ceil(limit * 0.4));
+	const exploration = limit >= 5
+		? ranked.slice(limit).find((candidate) => candidate.sampleCount === 0)
+		: undefined;
+	const selected: T[] = [];
+	const feedCounts = new Map<string, number>();
+	const topicCounts = new Map<string, number>();
+	const target = exploration ? limit - 1 : limit;
+
+	for (const candidate of ranked) {
+		if (candidate.id === exploration?.id) continue;
+		const count = feedCounts.get(candidate.feedKey) ?? 0;
+		const topic = topicBucket(candidate.title);
+		const topicCount = topicCounts.get(topic) ?? 0;
+		if (count >= perFeedLimit || topicCount >= perTopicLimit) continue;
+		selected.push(candidate);
+		feedCounts.set(candidate.feedKey, count + 1);
+		topicCounts.set(topic, topicCount + 1);
+		if (selected.length === target) break;
+	}
+	for (const candidate of ranked) {
+		if (selected.length === target) break;
+		if (candidate.id === exploration?.id || selected.some((item) => item.id === candidate.id)) continue;
+		const count = feedCounts.get(candidate.feedKey) ?? 0;
+		if (count >= perFeedLimit) continue;
+		selected.push(candidate);
+		feedCounts.set(candidate.feedKey, count + 1);
+	}
+	if (exploration) {
+		selected.push({
+			...exploration,
+			explanation: `A fresh exploration pick from ${exploration.source} to keep recommendations varied.`,
+		});
+	}
+	return selected.slice(0, limit);
+}
 
 function isScoringEventType(value: string): value is ScoringEventType {
 	return SCORING_EVENT_TYPES.includes(value as ScoringEventType);
@@ -202,7 +263,7 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	const { results: candidates } = await env.DB.prepare(
 		`SELECT i.rowid, i.id, i.feed_key,
 		        COALESCE(f.custom_title, f.display_name) AS source,
-		        i.subject AS title, i.original_url,
+		        i.from_name AS author, i.subject AS title, i.original_url,
 		        i.received_at, i.is_read, i.is_starred
 		   FROM items i
 		   JOIN feeds f ON f.feed_key = i.feed_key
@@ -242,6 +303,7 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 			readerId: toGoogleItemId(candidate.rowid),
 			feedKey: candidate.feed_key,
 			source: candidate.source,
+			author: candidate.author,
 			title: candidate.title,
 			originalURL: candidate.original_url,
 			receivedAt: candidate.received_at,
@@ -258,7 +320,9 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		return right.receivedAt.localeCompare(left.receivedAt) || left.id.localeCompare(right.id);
 	});
 
-	const selected = ranked.slice(0, limit);
+	const selected = view === 'for-you'
+		? selectDiverseRecommendations(ranked, limit)
+		: ranked.slice(0, limit);
 	const contentById = await loadRecommendationContent(
 		env,
 		selected.map((item) => item.id),

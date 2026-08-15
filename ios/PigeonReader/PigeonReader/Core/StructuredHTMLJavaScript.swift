@@ -162,7 +162,7 @@ enum StructuredHTMLJavaScript {
 	<html>
 	<head>
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https: pigeon-image:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 		<style>
 			:root { color-scheme: light dark; }
 			* { box-sizing: border-box; }
@@ -206,6 +206,19 @@ enum StructuredHTMLJavaScript {
 			th, td { border: 1px solid #b7c0c6; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
 			th { background: #eef1f3; font-weight: 650; }
 			.pigeon-image-failure { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #5e6971; display: flex; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .8em; gap: .45em; justify-content: center; margin: 1.25em auto; min-height: 3.5em; padding: .75em; text-align: center; }
+			.pigeon-image-blocked { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #39434a; cursor: pointer; display: flex; font: 600 .82em -apple-system, BlinkMacSystemFont, sans-serif; justify-content: center; margin: 1.25em auto; min-height: 5em; padding: 1em; width: 100%; }
+			body[data-theme="light"] { color: #202124; }
+			body[data-theme="light"] h1, body[data-theme="light"] h2, body[data-theme="light"] h3, body[data-theme="light"] h4, body[data-theme="light"] h5, body[data-theme="light"] h6 { color: #151515; }
+			body[data-theme="dark"] { color: #ececec; }
+			body[data-theme="dark"] h1, body[data-theme="dark"] h2, body[data-theme="dark"] h3, body[data-theme="dark"] h4, body[data-theme="dark"] h5, body[data-theme="dark"] h6 { color: #fafafa; }
+			body[data-theme="dark"] a { color: #75c7ff; }
+			body[data-theme="dark"] blockquote { border-inline-start-color: #71808b; color: #c3ccd2; }
+			body[data-theme="dark"] pre, body[data-theme="dark"] th, body[data-theme="dark"] .pigeon-image-failure, body[data-theme="dark"] .pigeon-image-blocked { background: #252c31; }
+			body[data-theme="sepia"] { color: #433a2c; }
+			body[data-theme="sepia"] h1, body[data-theme="sepia"] h2, body[data-theme="sepia"] h3, body[data-theme="sepia"] h4, body[data-theme="sepia"] h5, body[data-theme="sepia"] h6 { color: #2f281e; }
+			body[data-theme="sepia"] a { color: #735c17; }
+			body[data-theme="sepia"] blockquote { border-inline-start-color: #a58b62; color: #62533d; }
+			body[data-theme="sepia"] pre, body[data-theme="sepia"] th, body[data-theme="sepia"] .pigeon-image-failure, body[data-theme="sepia"] .pigeon-image-blocked { background: #ede2c9; }
 			@media (prefers-color-scheme: dark) {
 				body { color: #ececec; }
 				h1, h2, h3, h4, h5, h6 { color: #fafafa; }
@@ -226,10 +239,33 @@ enum StructuredHTMLJavaScript {
 			window.__pigeonRender = function(payload) {
 				document.documentElement.style.setProperty("--pigeon-text-scale", String(payload.textScale || 1));
 				document.documentElement.style.setProperty("--pigeon-line-height", String(payload.lineHeight || 1.55));
+				document.body.dataset.theme = payload.theme || "system";
 				const template = document.createElement("template");
 				template.innerHTML = payload.html || "";
 				__pigeonSanitizeRoot(template.content, payload.baseURL || document.baseURI);
 				content.replaceChildren(...Array.from(template.content.childNodes));
+				for (const image of Array.from(content.querySelectorAll("img"))) {
+					const source = image.currentSrc || image.getAttribute("src");
+					if (!source) continue;
+					if (payload.remoteImagePolicy === "blocked") {
+						const placeholder = document.createElement("button");
+						placeholder.type = "button";
+						placeholder.className = "pigeon-image-blocked";
+						placeholder.textContent = "Load this remote image";
+						placeholder.setAttribute("aria-label", "Load this remote image. The publisher may see your network address.");
+						placeholder.addEventListener("click", function(event) {
+							event.preventDefault();
+							event.stopPropagation();
+							placeholder.replaceWith(image);
+							__pigeonMeasure();
+						});
+						image.replaceWith(placeholder);
+					} else if (payload.remoteImagePolicy === "privacy-proxied") {
+						image.dataset.pigeonOriginalSrc = source;
+						image.removeAttribute("srcset");
+						image.src = "pigeon-image://proxy?url=" + encodeURIComponent(source);
+					}
+				}
 				for (const table of Array.from(content.querySelectorAll("table"))) {
 					if (table.parentElement && table.parentElement.classList.contains("table-scroll")) continue;
 					const wrapper = document.createElement("div");
@@ -248,7 +284,7 @@ enum StructuredHTMLJavaScript {
 					event.stopPropagation();
 					window.webkit.messageHandlers.pigeonEvent.postMessage({
 						kind: "image",
-						imageURL: image.currentSrc || image.src,
+						imageURL: image.dataset.pigeonOriginalSrc || image.currentSrc || image.src,
 						linkURL: image.closest("a")?.href || null,
 					});
 					return;

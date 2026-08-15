@@ -327,6 +327,36 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
+	func personalization() async throws -> PersonalizationSnapshot {
+		let (data, _) = try await requestJSON(path: "api/v1/personalization")
+		return try decoder.decode(PersonalizationSnapshot.self, from: data)
+	}
+
+	func deletePersonalizationHistory(id: String) async throws {
+		var components = try endpointComponents(path: "api/v1/personalization")
+		components.queryItems = [URLQueryItem(name: "id", value: id)]
+		var request = makeAuthorizedRequest(url: try endpointURL(components: components))
+		request.httpMethod = "DELETE"
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
+	func resetPersonalization() async throws {
+		var components = try endpointComponents(path: "api/v1/personalization")
+		components.queryItems = [URLQueryItem(name: "all", value: "1")]
+		var request = makeAuthorizedRequest(url: try endpointURL(components: components))
+		request.httpMethod = "DELETE"
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
+	func exportPersonalization() async throws -> String {
+		var components = try endpointComponents(path: "api/v1/personalization")
+		components.queryItems = [URLQueryItem(name: "download", value: "1")]
+		let (data, _) = try await requestJSON(components: components)
+		return String(decoding: data, as: UTF8.self)
+	}
+
 	private func streamItems(
 		streamID: String,
 		excludeTag: String? = nil,
@@ -402,6 +432,7 @@ struct PigeonAPIClient: Sendable {
 			readerId: item.id,
 			feedKey: item.origin?.streamID ?? fallbackStreamID,
 			source: source,
+			author: item.author,
 			title: item.title,
 			html: html,
 			text: nil,

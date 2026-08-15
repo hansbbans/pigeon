@@ -365,6 +365,10 @@ struct ReaderAppModelTests {
 		model.setSortOrder(.score, for: section)
 		#expect(model.articles(for: section).map(\.id) == ["newer-high", "older-high", "newest-low"])
 		#expect(model.selectedArticleID == newerHighScore.id)
+
+		model.setSortOrder(.oldest, for: section)
+		#expect(model.articles(for: section).map(\.id) == ["older-high", "newer-high", "newest-low"])
+		#expect(model.selectedArticleID == newerHighScore.id)
 	}
 
 	@Test func sortDefaultsPreserveExistingServerOrdering() throws {
@@ -451,7 +455,7 @@ struct ReaderAppModelTests {
 		#expect(model.isArticleFilterEmpty(for: filteredCollection) == false)
 	}
 
-	@Test func articleFilterClearsHiddenDetailWithoutDiscardingSelectionOrCache() throws {
+	@Test func articleFilterPreservesOpenDetailAndCacheWhenItsRowIsHidden() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou)
 		let unread = makeArticle(id: "selected-unread", receivedAt: 1_786_272_100)
@@ -464,9 +468,9 @@ struct ReaderAppModelTests {
 
 		model.articleFilter = .read
 
-		#expect(model.selectedArticleID == nil)
-		#expect(model.selectedArticle == nil)
-		#expect(model.preferredCompactColumn == .content)
+		#expect(model.selectedArticleID == unread.id)
+		#expect(model.selectedArticle?.id == unread.id)
+		#expect(model.preferredCompactColumn == .detail)
 		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
 
 		model.articleFilter = .all
@@ -606,7 +610,8 @@ struct ReaderAppModelTests {
 		let readMutation = Task { await model.setRead(article, read: true) }
 		let readRequest = await controlled.nextRequest()
 		#expect(model.articles(for: collection).isEmpty)
-		#expect(model.selectedArticleID == nil)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.isRead == true)
 		#expect(model.allArticles(for: collection).first?.isRead == true)
 		await controlled.resolve(readRequest)
 		await readMutation.value
@@ -619,6 +624,65 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.isRead == false)
 		await controlled.resolve(unreadRequest)
 		await unreadMutation.value
+	}
+
+	@Test func nextUnreadCrossesCollectionAndFeedBoundariesWithoutSelectingReadStories() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let current = makeArticle(id: "current", isRead: true, receivedAt: 300, feedKey: "one")
+		let read = makeArticle(id: "read", isRead: true, receivedAt: 200, feedKey: "one")
+		let next = makeArticle(id: "next", receivedAt: 100, feedKey: "two")
+		model.setArticles([current, read], for: .forYou)
+		model.setArticles([next], for: .unread)
+		model.select(section: .forYou)
+		model.select(article: current)
+
+		let selected = model.selectNextUnread(after: current)
+
+		#expect(selected?.id == next.id)
+		#expect(model.selectedArticleID == next.id)
+		#expect(model.selectedArticle?.feedKey == "two")
+	}
+
+	@Test func configurableReadBehaviorSupportsManualAndScrollThresholdModes() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "reading-behavior")
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .manually
+
+		await model.recordExplicitOpen(for: article)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		model.readerTypography.markReadBehavior = .onScroll
+		model.recordScrollDepth(itemId: article.id, depth: 0.59)
+		await Task.yield()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		model.recordScrollDepth(itemId: article.id, depth: 0.6)
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test func bulkReadUndoQueuesAReverseMutationAndRestoresEveryStory() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(statusCode: 500), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let first = makeArticle(id: "first")
+		let second = makeArticle(id: "second")
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([first, second], for: collection)
+
+		await model.markAllStoriesAsRead(in: collection)
+		#expect(model.canUndoBulkRead)
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+
+		await model.undoLastBulkRead()
+		#expect(model.canUndoBulkRead == false)
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead == false })
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.count == 2)
+		#expect(pending.last?.mutation.value == false)
 	}
 
 	@Test func filteredBulkReadMovesAboveAndBelowStoriesOutOfTheUnreadProjection() async throws {
@@ -943,6 +1007,7 @@ struct ReaderAppModelTests {
 			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
+			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,
 		)
 	}

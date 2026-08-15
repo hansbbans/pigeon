@@ -10,6 +10,12 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.text-scale")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.line-height")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.horizontal-margin")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.column-width")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.theme")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
+			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")
 			ReaderArticleFilterStore().removeAll()
 		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {

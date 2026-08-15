@@ -99,6 +99,7 @@ struct PigeonAPIClientTests {
 		let items = try await client.recommendations(from: "feed/7")
 
 		#expect(items.first?.explanation == "From Daily")
+		#expect(items.first?.author == "Alice Appleseed")
 	}
 
 	@Test func clientLoginPreservesAnOptionalServerPath() async throws {
@@ -310,7 +311,7 @@ private actor SingleStreamHTTPClient: HTTPClient {
 		case "/reader/api/0/stream/items/contents":
 			let payload = Data(
 				"""
-				{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
+				{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","author":"Alice Appleseed","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
 				""".utf8,
 			)
 			return (payload, try Self.response(for: url, statusCode: 200))

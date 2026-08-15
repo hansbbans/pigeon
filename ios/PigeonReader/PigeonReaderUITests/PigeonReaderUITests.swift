@@ -114,6 +114,24 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "sync-health")
 	}
 
+	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-article",
+			"-reader-reset-reader-state",
+			"-UIPreferredContentSizeCategoryName",
+			"UICTContentSizeCategoryAccessibilityXL",
+		]
+		app.launch()
+
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
+		XCTAssertTrue(app.buttons["Find in Article"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Next Unread"].exists)
+		XCTAssertTrue(app.buttons["Share"].exists)
+		attachScreenshot(named: "accessibility-large-text-reader")
+	}
+
 	private func tapLinkedImage() throws {
 		let image = app.images["A notebook beside a cup of coffee"]
 		for attempt in 0..<6 {

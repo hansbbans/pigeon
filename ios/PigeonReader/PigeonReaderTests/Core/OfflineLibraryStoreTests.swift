@@ -199,6 +199,37 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == ["pending-1"])
 	}
 
+	@Test func localSearchCoversMetadataAndSanitizedBodiesWithCollectionAndAccountScope() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let metadataMatch = Recommendation(
+			id: "metadata", readerId: "reader-metadata", feedKey: "swift", source: "Swift Weekly",
+			author: "Alice Appleseed", title: "Structured concurrency", html: "<p>Actors</p>",
+			text: "Safe isolation", originalURL: nil, receivedAt: Date(timeIntervalSince1970: 200),
+			isRead: false, isStarred: false, score: 10, confidence: 0, sampleCount: 0,
+			explanation: "Fresh", learningState: "Starting",
+		)
+		let bodyMatch = Recommendation(
+			id: "body", readerId: "reader-body", feedKey: "nature", source: "Nature",
+			title: "Field notes", html: "<p>Rare platypus habitat</p>", text: nil,
+			originalURL: nil, receivedAt: Date(timeIntervalSince1970: 100), isRead: false,
+			isStarred: false, score: 5, confidence: 0, sampleCount: 0,
+			explanation: "Fresh", learningState: "Starting",
+		)
+		try await store.saveArticles([metadataMatch], collectionID: "feed/swift", accountID: "account-a")
+		try await store.saveArticles([bodyMatch], collectionID: "feed/nature", accountID: "account-a")
+		try await store.saveArticles([bodyMatch], collectionID: "feed/nature", accountID: "account-b")
+
+		let author = try await store.searchArticles(query: "alice swift", collectionID: "feed/swift", accountID: "account-a", limit: 20)
+		let wrongCollection = try await store.searchArticles(query: "platypus", collectionID: "feed/swift", accountID: "account-a", limit: 20)
+		let fullLibrary = try await store.searchArticles(query: "platypus habitat", collectionID: nil, accountID: "account-a", limit: 20)
+		let wrongAccount = try await store.searchArticles(query: "concurrency", collectionID: nil, accountID: "account-b", limit: 20)
+
+		#expect(author.map(\.id) == [metadataMatch.id])
+		#expect(wrongCollection.isEmpty)
+		#expect(fullLibrary.map(\.id) == [bodyMatch.id])
+		#expect(wrongAccount.isEmpty)
+	}
+
 	private func makeArticle(
 		id: String = "article-1",
 		score: Int = 80,

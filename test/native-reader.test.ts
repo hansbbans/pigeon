@@ -598,3 +598,46 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	assert.ok(engagementSelects[0].values.every((value) => value === 'saved-feed' || value === 'other-feed'));
 	assert.equal(new Set(engagementSelects[0].values).size, 2);
 });
+
+test('personalization history is transparent, individually deletable, exportable, and resettable', async () => {
+	const { db, env } = createFixture([
+		{ id: 'item-1', feedKey: 'daily-feed', title: 'A useful story', receivedAt: '2026-08-15T11:00:00.000Z' },
+	]);
+	const ingestion = await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			events: [{ id: 'preference-1', itemId: 'item-1', type: 'more_like_this', occurredAt: '2026-08-15T12:00:00.000Z' }],
+		}),
+	});
+	assert.equal(ingestion.status, 200);
+
+	const historyResponse = await nativeRequest(env, '/api/v1/personalization');
+	assert.equal(historyResponse.status, 200);
+	const history = (await historyResponse.json()) as {
+		policy: { confirmationRule: string; retention: string; confirmedSignals: Array<{ name: string; effect: string }> };
+		history: Array<{ id: string; type: string; title: string }>;
+	};
+	assert.match(history.policy.confirmationRule, /pending.*failed/i);
+	assert.match(history.policy.retention, /delete.*reset/i);
+	assert.ok(history.policy.confirmedSignals.some((signal) => signal.name === 'Bulk read actions' && signal.effect === 'Neutral'));
+	assert.equal(history.history[0].type, 'more_like_this');
+	assert.equal(history.history[0].title, 'A useful story');
+
+	const exported = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.equal(exported.headers.get('Content-Disposition'), 'attachment; filename="pigeon-personalization.json"');
+	assert.match(await exported.text(), /more_like_this/);
+
+	const deleted = await nativeRequest(env, `/api/v1/personalization?id=${encodeURIComponent(history.history[0].id)}`, { method: 'DELETE' });
+	assert.equal(deleted.status, 200);
+	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'preference-2', itemId: 'item-1', type: 'not_interested' }] }),
+	});
+	const reset = await nativeRequest(env, '/api/v1/personalization?all=1', { method: 'DELETE' });
+	assert.equal(reset.status, 200);
+	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+});

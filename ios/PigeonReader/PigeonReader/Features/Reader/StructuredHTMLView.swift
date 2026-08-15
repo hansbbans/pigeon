@@ -6,10 +6,42 @@ struct StructuredHTMLView: UIViewRepresentable {
 	let baseURL: URL?
 	let textScale: Double
 	let lineHeight: Double
+	let theme: ReaderTheme
+	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let findQuery: String
+	let imageProxySession: PigeonSession?
 	@Binding var contentHeight: CGFloat
 	let onLink: (URL) -> Void
 	let onImage: (URL, URL?) -> Void
 	let onImageFailure: ([URL]) -> Void
+
+	init(
+		html: String,
+		baseURL: URL?,
+		textScale: Double,
+		lineHeight: Double,
+		theme: ReaderTheme = .system,
+		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
+		findQuery: String = "",
+		imageProxySession: PigeonSession? = nil,
+		contentHeight: Binding<CGFloat>,
+		onLink: @escaping (URL) -> Void,
+		onImage: @escaping (URL, URL?) -> Void,
+		onImageFailure: @escaping ([URL]) -> Void,
+	) {
+		self.html = html
+		self.baseURL = baseURL
+		self.textScale = textScale
+		self.lineHeight = lineHeight
+		self.theme = theme
+		self.remoteImagePolicy = remoteImagePolicy
+		self.findQuery = findQuery
+		self.imageProxySession = imageProxySession
+		_contentHeight = contentHeight
+		self.onLink = onLink
+		self.onImage = onImage
+		self.onImageFailure = onImageFailure
+	}
 
 	func makeCoordinator() -> Coordinator {
 		let heightBinding = _contentHeight
@@ -28,6 +60,10 @@ struct StructuredHTMLView: UIViewRepresentable {
 		configuration.websiteDataStore = .nonPersistent()
 		configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 		configuration.userContentController.add(context.coordinator, name: "pigeonEvent")
+		configuration.setURLSchemeHandler(
+			PrivacyImageSchemeHandler(session: imageProxySession),
+			forURLScheme: "pigeon-image",
+		)
 
 		let webView = WKWebView(frame: .zero, configuration: configuration)
 		webView.navigationDelegate = context.coordinator
@@ -59,7 +95,10 @@ struct StructuredHTMLView: UIViewRepresentable {
 			baseURL: baseURL,
 			textScale: textScale,
 			lineHeight: lineHeight,
+			theme: theme,
+			remoteImagePolicy: remoteImagePolicy,
 		)
+		context.coordinator.find(findQuery)
 	}
 
 	final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
@@ -71,6 +110,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		private var isShellLoaded = false
 		private var pendingPayload: Payload?
 		private var renderedSignature: String?
+		private var pendingFindQuery = ""
 
 		init(
 			onLink: @escaping (URL) -> Void,
@@ -89,18 +129,35 @@ struct StructuredHTMLView: UIViewRepresentable {
 			webView?.loadHTMLString(StructuredHTMLJavaScript.renderingShell, baseURL: baseURL)
 		}
 
-		func render(html: String, baseURL: URL?, textScale: Double, lineHeight: Double) {
+		func render(
+			html: String,
+			baseURL: URL?,
+			textScale: Double,
+			lineHeight: Double,
+			theme: ReaderTheme,
+			remoteImagePolicy: ReaderRemoteImagePolicy,
+		) {
 			let payload = Payload(
 				html: html,
 				baseURL: baseURL?.absoluteString,
 				textScale: textScale,
 				lineHeight: lineHeight,
+				theme: theme.rawValue,
+				remoteImagePolicy: remoteImagePolicy.rawValue,
 			)
 			pendingPayload = payload
 			guard isShellLoaded, payload.signature != renderedSignature else {
 				return
 			}
 			evaluate(payload)
+		}
+
+		func find(_ query: String) {
+			pendingFindQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+			guard isShellLoaded, pendingFindQuery.isEmpty == false else { return }
+			let configuration = WKFindConfiguration()
+			configuration.wraps = true
+			webView?.find(pendingFindQuery, configuration: configuration) { _ in }
 		}
 
 		func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -168,6 +225,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			webView?.evaluateJavaScript("window.__pigeonRender(\(json));") { [weak self] _, _ in
 				guard let self else { return }
 				self.renderedSignature = payload.signature
+				self.find(self.pendingFindQuery)
 			}
 		}
 
@@ -176,9 +234,11 @@ struct StructuredHTMLView: UIViewRepresentable {
 			let baseURL: String?
 			let textScale: Double
 			let lineHeight: Double
+			let theme: String
+			let remoteImagePolicy: String
 
 			var signature: String {
-				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)"
+				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(remoteImagePolicy)"
 			}
 
 			var dictionary: [String: Any] {
@@ -186,6 +246,8 @@ struct StructuredHTMLView: UIViewRepresentable {
 					"html": html,
 					"textScale": textScale,
 					"lineHeight": lineHeight,
+					"theme": theme,
+					"remoteImagePolicy": remoteImagePolicy,
 				]
 				if let baseURL {
 					dictionary["baseURL"] = baseURL

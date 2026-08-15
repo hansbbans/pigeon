@@ -11,6 +11,9 @@ struct ArticleReaderView: View {
 	@State private var readerViewState = ReaderViewLoadState.idle
 	@State private var scrollPosition = ScrollPosition()
 	@State private var pendingRestoredDepth: Double?
+	@State private var findText = ""
+	@State private var activeFindQuery = ""
+	@State private var isShowingFind = false
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -37,7 +40,11 @@ struct ArticleReaderView: View {
 				}
 			} else {
 				GeometryReader { geometry in
-					let columnWidth = min(max(geometry.size.width, 1), 720)
+					let margin = model.readerTypography.horizontalMargin
+					let columnWidth = min(
+						max(geometry.size.width, 1),
+						model.readerTypography.columnWidth + (margin * 2),
+					)
 					ScrollView(.vertical) {
 						VStack(alignment: .leading, spacing: 18) {
 							ArticleReaderHeaderView(
@@ -52,7 +59,7 @@ struct ArticleReaderView: View {
 
 							articleContent(for: current)
 						}
-						.padding(.horizontal, 16)
+						.padding(.horizontal, margin)
 						.padding(.vertical, 24)
 						.frame(width: columnWidth, alignment: .leading)
 						.frame(maxWidth: .infinity, alignment: .center)
@@ -74,14 +81,34 @@ struct ArticleReaderView: View {
 						model.setArticleScrollOffset(depth, for: current.id)
 					}
 				}
-				.background(.background)
+				.background(readerBackground)
 			}
 		}
-		.background(.background)
+		.background(readerBackground)
+		.preferredColorScheme(preferredColorScheme)
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
+				Button("Find in Article", systemImage: "magnifyingglass") {
+					isShowingFind = true
+				}
+				.keyboardShortcut("f", modifiers: .command)
+
+				Button("Next Unread", systemImage: "arrow.right.to.line") {
+					_ = model.selectNextUnread(after: current)
+				}
+				.keyboardShortcut("n", modifiers: .command)
+				.accessibilityHint("Opens the next cached unread article, including articles from other feeds")
+
+				if let shareURL = current.safeOriginalURL {
+					ShareLink(item: shareURL, subject: Text(current.title)) {
+						Label("Share", systemImage: "square.and.arrow.up")
+					}
+					.keyboardShortcut("s", modifiers: [.command, .shift])
+					.accessibilityHint("Opens the system share sheet")
+				}
+
 				Button(current.isRead ? "Mark unread" : "Mark read", systemImage: current.isRead ? "envelope.badge" : "checkmark.circle") {
 					Task { await model.setRead(current, read: !current.isRead) }
 				}
@@ -109,6 +136,14 @@ struct ArticleReaderView: View {
 						model.readerTypography.decreaseLineHeight()
 					}
 					.disabled(model.readerTypography.lineHeight <= ReaderTypographySettings.lineHeightRange.lowerBound)
+					Picker("Theme", selection: Binding(
+						get: { model.readerTypography.theme },
+						set: { model.readerTypography.theme = $0 },
+					)) {
+						ForEach(ReaderTheme.allCases) { theme in
+							Text(theme.title).tag(theme)
+						}
+					}
 					Divider()
 					Button("Reset reading controls", systemImage: "arrow.counterclockwise") {
 						model.readerTypography.reset()
@@ -150,6 +185,15 @@ struct ArticleReaderView: View {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
 		}
+		.alert("Find in Article", isPresented: $isShowingFind) {
+			TextField("Text to find", text: $findText)
+			Button("Find") {
+				activeFindQuery = findText.trimmingCharacters(in: .whitespacesAndNewlines)
+			}
+			Button("Cancel", role: .cancel) {}
+		} message: {
+			Text("Pigeon highlights the next match in the open article.")
+		}
 	}
 
 	@ViewBuilder
@@ -163,6 +207,10 @@ struct ArticleReaderView: View {
 				leadImageURL: nil,
 				textScale: model.readerTypography.textScale,
 				lineHeight: model.readerTypography.lineHeight,
+				theme: model.readerTypography.theme,
+				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+				findQuery: activeFindQuery,
+				imageProxySession: model.session,
 				openedDestination: openInlineDestination,
 				saveToReader: saveInlineDestination,
 			)
@@ -204,6 +252,10 @@ struct ArticleReaderView: View {
 						leadImageURL: readerDocument.leadImageURL,
 						textScale: model.readerTypography.textScale,
 						lineHeight: model.readerTypography.lineHeight,
+						theme: model.readerTypography.theme,
+						remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+						findQuery: activeFindQuery,
+						imageProxySession: model.session,
 						openedDestination: openInlineDestination,
 						saveToReader: saveInlineDestination,
 					)
@@ -270,6 +322,10 @@ struct ArticleReaderView: View {
 					leadImageURL: nil,
 					textScale: model.readerTypography.textScale,
 					lineHeight: model.readerTypography.lineHeight,
+					theme: model.readerTypography.theme,
+					remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+					findQuery: activeFindQuery,
+					imageProxySession: model.session,
 					openedDestination: openInlineDestination,
 					saveToReader: saveInlineDestination,
 				)
@@ -294,6 +350,20 @@ struct ArticleReaderView: View {
 
 	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
 		try await model.saveToReader(destination)
+	}
+
+	private var preferredColorScheme: ColorScheme? {
+		switch model.readerTypography.theme {
+		case .system: nil
+		case .light, .sepia: .light
+		case .dark: .dark
+		}
+	}
+
+	private var readerBackground: Color {
+		model.readerTypography.theme == .sepia
+			? Color(red: 0.965, green: 0.925, blue: 0.82)
+			: Color(uiColor: .systemBackground)
 	}
 }
 
