@@ -63,6 +63,7 @@ struct ArticleReaderView: View {
 					} action: { _, depth in
 						model.recordScrollDepth(itemId: current.id, depth: depth)
 					}
+					.id(ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode))
 				}
 				.background(.background)
 			}
