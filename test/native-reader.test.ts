@@ -24,6 +24,7 @@ class SqliteD1Statement {
 	constructor(
 		private readonly db: DatabaseSync,
 		private readonly sql: string,
+		private readonly executedSql?: Array<{ sql: string; values: unknown[] }>,
 	) {}
 
 	bind(...values: unknown[]): this {
@@ -32,24 +33,32 @@ class SqliteD1Statement {
 	}
 
 	async all<T>(): Promise<{ results: T[] }> {
+		this.record();
 		return { results: this.db.prepare(this.sql).all(...this.values) as T[] };
 	}
 
 	async first<T>(): Promise<T | null> {
+		this.record();
 		return (this.db.prepare(this.sql).get(...this.values) as T | undefined) ?? null;
 	}
 
 	async run(): Promise<void> {
+		this.record();
 		this.db.prepare(this.sql).run(...this.values);
 	}
 
 	isEngagementInsert(): boolean {
 		return this.sql.startsWith('INSERT OR IGNORE INTO engagement_events');
 	}
+
+	private record(): void {
+		this.executedSql?.push({ sql: this.sql, values: [...this.values] });
+	}
 }
 
 class SqliteD1Database {
 	readonly batchSizes: number[] = [];
+	readonly executedSql: Array<{ sql: string; values: unknown[] }> = [];
 
 	constructor(
 		private readonly db: DatabaseSync,
@@ -57,7 +66,11 @@ class SqliteD1Database {
 	) {}
 
 	prepare(sql: string): SqliteD1Statement {
-		return new SqliteD1Statement(this.db, sql);
+		return new SqliteD1Statement(this.db, sql, this.executedSql);
+	}
+
+	clearExecutedSql(): void {
+		this.executedSql.length = 0;
 	}
 
 	async batch(statements: SqliteD1Statement[]): Promise<void> {
@@ -488,4 +501,47 @@ test('active-reading heartbeats aggregate as capped duration and one confidence 
 	assert.equal(many.score, one.score);
 	assert.equal(many.sampleCount, 1);
 	assert.equal(many.confidence, one.confidence);
+});
+
+test('recommendations rank a candidate pool without loading ranking-pool article bodies', async () => {
+	const items = Array.from({ length: 40 }, (_, index) => ({
+		id: `item-${String(index).padStart(2, '0')}`,
+		feedKey: index % 2 === 0 ? 'saved-feed' : 'other-feed',
+		title: `Story ${index}`,
+		receivedAt: new Date(Date.parse('2026-08-09T11:00:00.000Z') - index * 60_000).toISOString(),
+	}));
+	const { database, env } = createFixture(items);
+
+	const warmup = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=1');
+	assert.equal(warmup.status, 200);
+	database.clearExecutedSql();
+
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=3');
+	assert.equal(response.status, 200);
+	const payload = (await response.json()) as { items: Array<{ id: string; html: string; text: string | null }> };
+	assert.equal(payload.items.length, 3);
+	assert.ok(payload.items.every((item) => item.html === '<p>Article body</p>'));
+	assert.ok(payload.items.every((item) => item.text === 'Article body'));
+
+	const itemSelects = database.executedSql.filter(
+		(entry) => /\bFROM items\b/i.test(entry.sql) && /\bSELECT\b/i.test(entry.sql),
+	);
+	const candidateSelect = itemSelects.find((entry) => /LIMIT \?/i.test(entry.sql) && entry.sql.includes('i.subject AS title'));
+	assert.ok(candidateSelect, 'expected a metadata-only ranking query');
+	assert.equal(candidateSelect.sql.includes('html_content'), false);
+	assert.equal(candidateSelect.sql.includes('text_content'), false);
+	assert.deepEqual(candidateSelect.values, [100]);
+
+	const bodySelects = itemSelects.filter((entry) => entry.sql.includes('html_content') && /WHERE id IN/i.test(entry.sql));
+	assert.equal(bodySelects.length, 1);
+	assert.equal(bodySelects[0].values.length, 3);
+	assert.deepEqual(bodySelects[0].values, payload.items.map((item) => item.id));
+
+	const engagementSelects = database.executedSql.filter(
+		(entry) => entry.sql.includes('FROM engagement_events') && entry.sql.includes('GROUP BY'),
+	);
+	assert.equal(engagementSelects.length, 1);
+	assert.match(engagementSelects[0].sql, /feed_key IN \(/i);
+	assert.ok(engagementSelects[0].values.every((value) => value === 'saved-feed' || value === 'other-feed'));
+	assert.equal(new Set(engagementSelects[0].values).size, 2);
 });
