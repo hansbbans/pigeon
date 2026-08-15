@@ -303,8 +303,16 @@ final class ReaderAppModel {
 		readerModeStore.mode(for: feedID)
 	}
 
+	func displayReaderMode(for article: Recommendation) -> ReaderMode {
+		readerModeStore.displayMode(for: article.feedKey, hasOriginalURL: article.safeOriginalURL != nil)
+	}
+
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
 		readerModeStore.setMode(mode, for: feedID)
+	}
+
+	func setReaderMode(_ mode: ReaderMode, for article: Recommendation) {
+		readerModeStore.persistSelection(mode, for: article.feedKey, hasOriginalURL: article.safeOriginalURL != nil)
 	}
 
 	func loadReaderView(from url: URL) async throws -> ReaderViewDocument {

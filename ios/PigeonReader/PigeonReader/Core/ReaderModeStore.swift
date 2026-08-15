@@ -16,8 +16,19 @@ struct ReaderModeStore {
 		return mode
 	}
 
+	func displayMode(for feedID: String, hasOriginalURL: Bool) -> ReaderMode {
+		ReaderMode.displayMode(stored: mode(for: feedID), hasOriginalURL: hasOriginalURL)
+	}
+
 	func setMode(_ mode: ReaderMode, for feedID: String) {
 		defaults.set(mode.rawValue, forKey: key(for: feedID))
+	}
+
+	func persistSelection(_ mode: ReaderMode, for feedID: String, hasOriginalURL: Bool) {
+		guard ReaderMode.shouldPersistSelection(hasOriginalURL: hasOriginalURL) else {
+			return
+		}
+		setMode(mode, for: feedID)
 	}
 
 	private func key(for feedID: String) -> String {

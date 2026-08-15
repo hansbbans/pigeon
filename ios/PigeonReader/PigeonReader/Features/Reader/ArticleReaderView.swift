@@ -115,8 +115,8 @@ struct ArticleReaderView: View {
 				}
 			}
 		}
-		.task(id: current.feedKey) {
-			selectedMode = current.safeOriginalURL == nil ? .feedContent : model.readerMode(for: current.feedKey)
+		.task(id: readerModeTaskID(for: current)) {
+			selectedMode = model.displayReaderMode(for: current)
 			readerDocument = nil
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
@@ -133,7 +133,6 @@ struct ArticleReaderView: View {
 			await model.monitorActiveReading(for: current.id)
 		}
 		.onChange(of: selectedMode) { _, newMode in
-			model.setReaderMode(newMode, for: current.feedKey)
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
@@ -209,11 +208,16 @@ struct ArticleReaderView: View {
 		"\(article.id)|\(selectedMode.rawValue)|\(article.safeOriginalURL?.absoluteString ?? "none")"
 	}
 
+	private func readerModeTaskID(for article: Recommendation) -> String {
+		"\(article.id)|\(article.feedKey)|\(article.safeOriginalURL?.absoluteString ?? "none")"
+	}
+
 	private func selectMode(_ mode: ReaderMode) {
 		guard mode == .feedContent || currentArticle.safeOriginalURL != nil else {
 			return
 		}
 		selectedMode = mode
+		model.setReaderMode(mode, for: currentArticle)
 	}
 
 	private func loadReaderViewIfNeeded(for article: Recommendation) async {

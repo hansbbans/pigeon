@@ -68,6 +68,30 @@ struct ReaderAppModelTests {
 		#expect(extractor.extractedHTML?.contains("Newsletter body") == true)
 	}
 
+	@Test func urlLessArticleDoesNotRewriteStoredFeedReaderMode() async throws {
+		let suiteName = "pigeon-reader-mode-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: ReaderModeStore(defaults: defaults),
+		)
+		let withURL = makeArticle(
+			id: "with-url",
+			feedKey: "daily",
+			originalURL: URL(string: "https://example.com/story"),
+		)
+		let withoutURL = makeArticle(id: "no-url", feedKey: "daily")
+
+		model.setReaderMode(.readerView, for: withURL)
+		#expect(model.displayReaderMode(for: withoutURL) == .feedContent)
+
+		model.setReaderMode(.feedContent, for: withoutURL)
+
+		#expect(model.readerMode(for: "daily") == .readerView)
+		#expect(model.displayReaderMode(for: withURL) == .readerView)
+	}
+
 	@Test func loadReaderViewPreservesOriginal404WhenFeedFallbackAlsoFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
@@ -870,6 +894,7 @@ struct ReaderAppModelTests {
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		readerModeStore: ReaderModeStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) throws -> ReaderAppModel {
@@ -880,6 +905,7 @@ struct ReaderAppModelTests {
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 		readwiseTokenStore: TestReadwiseTokenStore(),
+			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,
 		)
@@ -929,6 +955,7 @@ struct ReaderAppModelTests {
 		feedKey: String = "daily",
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
+		originalURL: URL? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
@@ -938,7 +965,7 @@ struct ReaderAppModelTests {
 			title: "Story \(id)",
 			html: "<p>Body</p>",
 			text: "Body",
-			originalURL: nil,
+			originalURL: originalURL,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
 			isStarred: false,
