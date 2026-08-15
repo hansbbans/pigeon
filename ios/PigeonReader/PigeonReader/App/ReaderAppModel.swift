@@ -1381,6 +1381,11 @@ final class ReaderAppModel {
 		}
 
 		let previousNavigation = navigation
+		let previousStarredArticles = mutationName == "starred" ? articleCache[ReaderSection.starred.rawValue] : nil
+		let restoreStarredMembership = mutationName == "starred"
+		let previousSelectedArticleIDs = selectedArticleIDs
+		let previousSelectedArticleID = selectedArticleID
+		let previousCompactColumn = preferredCompactColumn
 		var previousValues: [String: Bool] = [:]
 		for collectionID in articleCache.keys {
 			guard let index = articleCache[collectionID]?.firstIndex(where: { articlesMatch($0, article) }) else {
@@ -1393,7 +1398,9 @@ final class ReaderAppModel {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
+			syncStarredMembership(for: article, starred: value)
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
+			reconcileCurrentArticleSelection()
 		}
 
 		do {
@@ -1410,6 +1417,11 @@ final class ReaderAppModel {
 				mutationID: mutationID,
 				previousValues: previousValues,
 				previousNavigation: previousNavigation,
+				previousStarredArticles: previousStarredArticles,
+				restoreStarredMembership: restoreStarredMembership,
+				previousSelectedArticleIDs: previousSelectedArticleIDs,
+				previousSelectedArticleID: previousSelectedArticleID,
+				previousCompactColumn: previousCompactColumn,
 			)
 		} catch {
 			guard activeMutationIDs[mutationKey] == mutationID else {
@@ -1423,9 +1435,43 @@ final class ReaderAppModel {
 				mutationID: mutationID,
 				previousValues: previousValues,
 				previousNavigation: previousNavigation,
+				previousStarredArticles: previousStarredArticles,
+				restoreStarredMembership: restoreStarredMembership,
+				previousSelectedArticleIDs: previousSelectedArticleIDs,
+				previousSelectedArticleID: previousSelectedArticleID,
+				previousCompactColumn: previousCompactColumn,
 			)
 			errorMessage = error.localizedDescription
 		}
+	}
+
+	private func syncStarredMembership(for article: Recommendation, starred: Bool) {
+		let starredID = ReaderSection.starred.rawValue
+		guard var starredArticles = articleCache[starredID] else {
+			return
+		}
+
+		if starred {
+			if let index = starredArticles.firstIndex(where: { articlesMatch($0, article) }) {
+				starredArticles[index].isStarred = true
+			} else {
+				var copy = cachedArticle(matching: article) ?? article
+				copy.isStarred = true
+				starredArticles.append(copy)
+			}
+			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles)
+		} else {
+			articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		}
+	}
+
+	private func cachedArticle(matching article: Recommendation) -> Recommendation? {
+		for cachedArticles in articleCache.values {
+			if let match = cachedArticles.first(where: { articlesMatch($0, article) }) {
+				return match
+			}
+		}
+		return nil
 	}
 
 	private func rollbackStateIfCurrent(
@@ -1436,6 +1482,11 @@ final class ReaderAppModel {
 		mutationID: UUID,
 		previousValues: [String: Bool],
 		previousNavigation: ReaderNavigationState,
+		previousStarredArticles: [Recommendation]? = nil,
+		restoreStarredMembership: Bool = false,
+		previousSelectedArticleIDs: [String: String] = [:],
+		previousSelectedArticleID: String? = nil,
+		previousCompactColumn: NavigationSplitViewColumn = .content,
 	) {
 		guard activeMutationIDs[mutationKey] == mutationID else {
 			return
@@ -1448,6 +1499,17 @@ final class ReaderAppModel {
 				continue
 			}
 			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
+		}
+		if restoreStarredMembership {
+			let starredID = ReaderSection.starred.rawValue
+			if let previousStarredArticles {
+				articleCache[starredID] = previousStarredArticles
+			} else {
+				articleCache[starredID] = nil
+			}
+			selectedArticleIDs = previousSelectedArticleIDs
+			selectedArticleID = previousSelectedArticleID
+			preferredCompactColumn = previousCompactColumn
 		}
 		navigation = previousNavigation
 		reconcileCurrentArticleSelection()
