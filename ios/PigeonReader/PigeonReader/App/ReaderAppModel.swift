@@ -300,11 +300,19 @@ final class ReaderAppModel {
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
-		readerModeStore.mode(for: feedID)
+		readerModeStore.mode(for: readerModeAliases(for: feedID))
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
-		readerModeStore.setMode(mode, for: feedID)
+		readerModeStore.setMode(mode, for: readerModeAliases(for: feedID))
+	}
+
+	private func readerModeAliases(for feedID: String) -> [String] {
+		ReaderModeIdentity.aliases(
+			for: feedID,
+			navigationItems: navigation.items,
+			subscriptions: subscriptions,
+		)
 	}
 
 	func loadReaderView(from url: URL) async throws -> ReaderViewDocument {

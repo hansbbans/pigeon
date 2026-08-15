@@ -867,9 +867,46 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
+	@Test func readerModeFollowsAFeedAcrossForYouAndStreamKeys() throws {
+		let suiteName = "pigeon-reader-mode-model-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "alpha") == .feedContent)
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setReaderMode(.readerView, for: "alpha")
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+		#expect(store.mode(for: "feed/7") == .readerView)
+
+		model.setReaderMode(.website, for: "feed/7")
+		#expect(model.readerMode(for: "alpha") == .website)
+		#expect(store.mode(for: "alpha") == .website)
+	}
+
+	@Test func readerModeFindsALegacyKeyAfterNavigationLoads() throws {
+		let suiteName = "pigeon-reader-mode-legacy-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		store.setMode(.website, for: "alpha")
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "feed/7") == .website)
+		#expect(model.readerMode(for: "alpha") == .website)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		readerModeStore: ReaderModeStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 	) throws -> ReaderAppModel {
@@ -880,6 +917,7 @@ struct ReaderAppModelTests {
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 		readwiseTokenStore: TestReadwiseTokenStore(),
+			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,
 		)
