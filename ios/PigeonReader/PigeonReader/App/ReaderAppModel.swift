@@ -201,7 +201,10 @@ final class ReaderAppModel {
 		guard let selectedArticleID else {
 			return nil
 		}
-		return articles.first(where: { $0.id == selectedArticleID })
+		// Resolve from the collection cache, not the active filter. Opening a story
+		// marks it read, and the default Unread filter would otherwise drop it from
+		// the detail pane while the user is still reading it.
+		return cachedArticle(withID: selectedArticleID, in: selectedNavigationID)
 	}
 
 	var isLoading: Bool {
@@ -369,7 +372,7 @@ final class ReaderAppModel {
 		if navigation.item(withID: previousSelection) == nil {
 			select(collectionID: ReaderSection.forYou.rawValue)
 		} else {
-			reconcileCurrentArticleSelection()
+			reconcileCurrentArticleSelection(hidingFilteredDetail: false)
 		}
 	}
 
@@ -855,7 +858,11 @@ final class ReaderAppModel {
 		articleFilter(for: collectionID).filtering(articleCache[collectionID] ?? [])
 	}
 
-	private func reconcileSelection(for collectionID: String) {
+	private func cachedArticle(withID id: String, in collectionID: String) -> Recommendation? {
+		articleCache[collectionID]?.first(where: { $0.id == id || $0.readerId == id })
+	}
+
+	private func reconcileSelection(for collectionID: String, hidingFilteredDetail: Bool = true) {
 		guard let rememberedID = selectedArticleIDs[collectionID] else {
 			if selectedNavigationID == collectionID {
 				selectedArticleID = nil
@@ -866,7 +873,7 @@ final class ReaderAppModel {
 			return
 		}
 
-		guard articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true else {
+		guard cachedArticle(withID: rememberedID, in: collectionID) != nil else {
 			selectedArticleIDs[collectionID] = nil
 			if selectedNavigationID == collectionID {
 				selectedArticleID = nil
@@ -878,7 +885,8 @@ final class ReaderAppModel {
 		guard selectedNavigationID == collectionID else {
 			return
 		}
-		if displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID }) {
+		if hidingFilteredDetail == false
+			|| displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID || $0.readerId == rememberedID }) {
 			selectedArticleID = rememberedID
 		} else {
 			selectedArticleID = nil
@@ -888,8 +896,8 @@ final class ReaderAppModel {
 		}
 	}
 
-	private func reconcileCurrentArticleSelection() {
-		reconcileSelection(for: selectedNavigationID)
+	private func reconcileCurrentArticleSelection(hidingFilteredDetail: Bool = true) {
+		reconcileSelection(for: selectedNavigationID, hidingFilteredDetail: hidingFilteredDetail)
 	}
 
 	private func updateNavigationCount(for itemID: String, to count: Int) {
@@ -1240,7 +1248,7 @@ final class ReaderAppModel {
 				),
 			)
 		}
-		reconcileCurrentArticleSelection()
+		reconcileCurrentArticleSelection(hidingFilteredDetail: false)
 
 		let results = await withTaskGroup(of: ReadMutationResult.self) { group in
 			for pendingMutation in pendingMutations {
@@ -1339,7 +1347,7 @@ final class ReaderAppModel {
 		}
 		activeMutationIDs[mutation.mutationKey] = nil
 		applyNavigationCountDeltas(mutation.navigationDeltas.mapValues { -$0 })
-		reconcileCurrentArticleSelection()
+		reconcileCurrentArticleSelection(hidingFilteredDetail: false)
 		return true
 	}
 
@@ -1391,7 +1399,7 @@ final class ReaderAppModel {
 		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
-			reconcileCurrentArticleSelection()
+			reconcileCurrentArticleSelection(hidingFilteredDetail: false)
 		} else if mutationName == "starred" {
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
@@ -1450,6 +1458,6 @@ final class ReaderAppModel {
 			articleCache[collectionID]?[index][keyPath: keyPath] = previousValue
 		}
 		navigation = previousNavigation
-		reconcileCurrentArticleSelection()
+		reconcileCurrentArticleSelection(hidingFilteredDetail: false)
 	}
 }

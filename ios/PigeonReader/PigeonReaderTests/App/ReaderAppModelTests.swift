@@ -551,6 +551,27 @@ struct ReaderAppModelTests {
 		#expect(store.filter(for: "forYou", session: secondSession) == .read)
 	}
 
+	@Test func explicitOpenKeepsUnreadStoryOpenUnderTheUnreadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let article = makeArticle(id: "opened-unread")
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([article], for: collection)
+		model.select(item: collection)
+		model.select(article: article)
+		model.articleFilter = .unread
+
+		#expect(model.preferredCompactColumn == .detail)
+		await model.recordExplicitOpen(for: article)
+
+		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.allArticles(for: collection).first?.isRead == true)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
 	@Test func singleReadChangesMoveStoriesOutOfAndBackIntoTheActiveFilter() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -565,7 +586,9 @@ struct ReaderAppModelTests {
 		let readMutation = Task { await model.setRead(article, read: true) }
 		let readRequest = await controlled.nextRequest()
 		#expect(model.articles(for: collection).isEmpty)
-		#expect(model.selectedArticleID == nil)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.preferredCompactColumn == .detail)
 		#expect(model.allArticles(for: collection).first?.isRead == true)
 		await controlled.resolve(readRequest)
 		await readMutation.value
@@ -578,6 +601,32 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.isRead == false)
 		await controlled.resolve(unreadRequest)
 		await unreadMutation.value
+	}
+
+	@Test func sidebarCountRefreshDoesNotDismissTheOpenStoryAfterItIsMarkedRead() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let article = makeArticle(id: "opened-unread")
+		let state = ReaderNavigationState(items: [collection])
+		model.setNavigation(state)
+		model.setArticles([article], for: collection)
+		model.select(item: collection)
+		model.select(article: article)
+		model.articleFilter = .unread
+
+		let mutation = Task { await model.setRead(article, read: true) }
+		let request = await controlled.nextRequest()
+		#expect(model.selectedArticle?.isRead == true)
+
+		model.setNavigation(state)
+		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await controlled.resolve(request)
+		await mutation.value
 	}
 
 	@Test func filteredBulkReadMovesAboveAndBelowStoriesOutOfTheUnreadProjection() async throws {
