@@ -38,8 +38,6 @@ jobs:
       APP_DIRECTORY: ios/PigeonReader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
       SCHEME: PigeonReader
-      DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
-      TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
     steps:
       - uses: actions/checkout@v5
       - name: Verify native build tools
@@ -56,6 +54,9 @@ jobs:
         id: simulator
         run: .github/scripts/select-ios-simulator.sh
       - name: Run unit and UI tests
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
         shell: bash
         run: |
           set -o pipefail
@@ -74,10 +75,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.TEST_RESULT_BUNDLE }}
+          path: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
           if-no-files-found: ignore
           retention-days: 7
       - name: Clean Release build
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
         run: |
           set -o pipefail
