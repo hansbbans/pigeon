@@ -18,6 +18,7 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")
+			UserDefaults.standard.removeObject(forKey: ReaderSmartViewStore.key)
 			ReaderArticleFilterStore().removeAll()
 		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
