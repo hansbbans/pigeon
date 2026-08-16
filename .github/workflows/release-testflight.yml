@@ -40,6 +40,9 @@ jobs:
     env:
       APP_DIRECTORY: ios/PigeonReader
       BUNDLE_ID: com.hans.pigeon.reader
+      WIDGETS_BUNDLE_ID: com.hans.pigeon.reader.widgets
+      SHARE_BUNDLE_ID: com.hans.pigeon.reader.share
+      APP_GROUP: group.com.hans.pigeon.reader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
       SCHEME: PigeonReader
       RELEASE_ROOT: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}
@@ -51,6 +54,8 @@ jobs:
       KEYCHAIN_SEARCH_LIST_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/original-keychain-search-list.txt
       CERTIFICATE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/distribution-certificate.p12
       PROFILE_SOURCE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/PigeonReader.mobileprovision
+      WIDGETS_PROFILE_SOURCE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/PigeonWidgets.mobileprovision
+      SHARE_PROFILE_SOURCE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/PigeonShareExtension.mobileprovision
       PROFILE_MANIFEST_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/installed-profile.tsv
       AUTH_KEY_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
 
@@ -124,6 +129,8 @@ jobs:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           APP_PROVISION_PROFILE_BASE64: ${{ secrets.APP_PROVISION_PROFILE_BASE64 }}
+          APP_PROVISION_PROFILE_WIDGETS_BASE64: ${{ secrets.APP_PROVISION_PROFILE_WIDGETS_BASE64 }}
+          APP_PROVISION_PROFILE_SHARE_BASE64: ${{ secrets.APP_PROVISION_PROFILE_SHARE_BASE64 }}
         run: |
           set -euo pipefail
 
@@ -132,12 +139,16 @@ jobs:
           : "${BUILD_CERTIFICATE_BASE64:?Missing BUILD_CERTIFICATE_BASE64 secret}"
           : "${P12_PASSWORD:?Missing P12_PASSWORD secret}"
           : "${APP_PROVISION_PROFILE_BASE64:?Missing APP_PROVISION_PROFILE_BASE64 secret}"
+          : "${APP_PROVISION_PROFILE_WIDGETS_BASE64:?Missing APP_PROVISION_PROFILE_WIDGETS_BASE64 secret}"
+          : "${APP_PROVISION_PROFILE_SHARE_BASE64:?Missing APP_PROVISION_PROFILE_SHARE_BASE64 secret}"
 
           mkdir -p "$RELEASE_ROOT"
           printf '%s' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$AUTH_KEY_PATH"
           chmod 600 "$AUTH_KEY_PATH"
           printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
           printf '%s' "$APP_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_SOURCE_PATH"
+          printf '%s' "$APP_PROVISION_PROFILE_WIDGETS_BASE64" | base64 --decode > "$WIDGETS_PROFILE_SOURCE_PATH"
+          printf '%s' "$APP_PROVISION_PROFILE_SHARE_BASE64" | base64 --decode > "$SHARE_PROFILE_SOURCE_PATH"
 
           security list-keychains -d user \
             | sed -e 's/^[[:space:]]*//' -e 's/^"//' -e 's/"$//' \
@@ -180,48 +191,96 @@ jobs:
           codesign --verify --strict "$signing_test_path"
           rm -f "$signing_test_path"
 
-          profile_plist="$RELEASE_ROOT/PigeonReader-profile.plist"
-          security cms -D -i "$PROFILE_SOURCE_PATH" > "$profile_plist"
-          profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"
-          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"
-          application_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")"
-          get_task_allow="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$profile_plist" 2>/dev/null || echo false)"
+          install_and_validate_profile() {
+            local profile_source_path="$1"
+            local profile_plist="$2"
+            local expected_bundle_id="$3"
+            local profile_label="$4"
 
-          if [[ "$application_identifier" != "$APPLE_TEAM_ID.$BUNDLE_ID" ]]; then
-            echo "The provisioning profile does not match $BUNDLE_ID and team $APPLE_TEAM_ID." >&2
-            exit 1
-          fi
-          if [[ "$get_task_allow" == "true" ]]; then
-            echo "The provisioning profile is a development profile; TestFlight requires an App Store profile." >&2
-            exit 1
-          fi
-          if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" >/dev/null 2>&1; then
-            echo "The provisioning profile contains device registrations; TestFlight requires an App Store profile." >&2
-            exit 1
-          fi
-          if [[ "$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' "$profile_plist" 2>/dev/null || echo false)" == "true" ]]; then
-            echo "The provisioning profile is an enterprise profile; TestFlight requires an App Store profile." >&2
-            exit 1
-          fi
+            security cms -D -i "$profile_source_path" > "$profile_plist"
+            local profile_name
+            local profile_uuid
+            local application_identifier
+            local get_task_allow
+            if ! profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"; then
+              echo "Unable to read the $profile_label provisioning profile name." >&2
+              return 1
+            fi
+            if ! profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"; then
+              echo "Unable to read the $profile_label provisioning profile UUID." >&2
+              return 1
+            fi
+            if ! application_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")"; then
+              echo "Unable to read the $profile_label application identifier." >&2
+              return 1
+            fi
+            get_task_allow="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$profile_plist" 2>/dev/null || echo false)"
 
-          profile_install_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
-          installed_profile_path="$profile_install_dir/$profile_uuid.mobileprovision"
-          profile_backup_path=""
-          mkdir -p "$profile_install_dir"
-          if [[ -f "$installed_profile_path" ]]; then
-            profile_backup_path="$RELEASE_ROOT/$profile_uuid.backup.mobileprovision"
-            cp "$installed_profile_path" "$profile_backup_path"
-          fi
-          printf '%s\t%s\n' "$installed_profile_path" "$profile_backup_path" > "$PROFILE_MANIFEST_PATH"
-          cp "$PROFILE_SOURCE_PATH" "$installed_profile_path"
+            if [[ "$application_identifier" != "$APPLE_TEAM_ID.$expected_bundle_id" ]]; then
+              echo "The $profile_label provisioning profile does not match $expected_bundle_id and team $APPLE_TEAM_ID." >&2
+              return 1
+            fi
+            if [[ "$get_task_allow" == "true" ]]; then
+              echo "The $profile_label provisioning profile is a development profile; TestFlight requires an App Store profile." >&2
+              return 1
+            fi
+            if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$profile_plist" >/dev/null 2>&1; then
+              echo "The $profile_label provisioning profile contains device registrations; TestFlight requires an App Store profile." >&2
+              return 1
+            fi
+            if [[ "$(/usr/libexec/PlistBuddy -c 'Print :ProvisionsAllDevices' "$profile_plist" 2>/dev/null || echo false)" == "true" ]]; then
+              echo "The $profile_label provisioning profile is an enterprise profile; TestFlight requires an App Store profile." >&2
+              return 1
+            fi
+            if ! /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.security.application-groups' "$profile_plist" 2>/dev/null | grep -Fq "$APP_GROUP"; then
+              echo "The $profile_label provisioning profile does not include App Group $APP_GROUP." >&2
+              return 1
+            fi
 
-          echo "profile_name=$profile_name" >> "$GITHUB_OUTPUT"
+            local profile_install_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+            local installed_profile_path="$profile_install_dir/$profile_uuid.mobileprovision"
+            local profile_backup_path=""
+            mkdir -p "$profile_install_dir"
+            if [[ -f "$installed_profile_path" ]]; then
+              profile_backup_path="$RELEASE_ROOT/$profile_label-$profile_uuid.backup.mobileprovision"
+              cp "$installed_profile_path" "$profile_backup_path"
+            fi
+            printf '%s\t%s\n' "$installed_profile_path" "$profile_backup_path" >> "$PROFILE_MANIFEST_PATH"
+            cp "$profile_source_path" "$installed_profile_path"
+
+            printf '%s' "$profile_name"
+          }
+
+          : > "$PROFILE_MANIFEST_PATH"
+          profile_name="$(install_and_validate_profile \
+            "$PROFILE_SOURCE_PATH" \
+            "$RELEASE_ROOT/PigeonReader-profile.plist" \
+            "$BUNDLE_ID" \
+            "PigeonReader")"
+          widgets_profile_name="$(install_and_validate_profile \
+            "$WIDGETS_PROFILE_SOURCE_PATH" \
+            "$RELEASE_ROOT/PigeonWidgets-profile.plist" \
+            "$WIDGETS_BUNDLE_ID" \
+            "PigeonWidgets")"
+          share_profile_name="$(install_and_validate_profile \
+            "$SHARE_PROFILE_SOURCE_PATH" \
+            "$RELEASE_ROOT/PigeonShareExtension-profile.plist" \
+            "$SHARE_BUNDLE_ID" \
+            "PigeonShareExtension")"
+
+          {
+            echo "profile_name=$profile_name"
+            echo "widgets_profile_name=$widgets_profile_name"
+            echo "share_profile_name=$share_profile_name"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create export options
         shell: bash
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           PROFILE_NAME: ${{ steps.signing_assets.outputs.profile_name }}
+          WIDGETS_PROFILE_NAME: ${{ steps.signing_assets.outputs.widgets_profile_name }}
+          SHARE_PROFILE_NAME: ${{ steps.signing_assets.outputs.share_profile_name }}
           INTERNAL_ONLY: ${{ inputs.internal_only }}
         run: |
           set -euo pipefail
@@ -246,6 +305,10 @@ jobs:
             <dict>
               <key>${BUNDLE_ID}</key>
               <string>${PROFILE_NAME}</string>
+              <key>${WIDGETS_BUNDLE_ID}</key>
+              <string>${WIDGETS_PROFILE_NAME}</string>
+              <key>${SHARE_BUNDLE_ID}</key>
+              <string>${SHARE_PROFILE_NAME}</string>
             </dict>
             <key>signingCertificate</key>
             <string>Apple Distribution</string>
@@ -270,6 +333,8 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           PROFILE_NAME: ${{ steps.signing_assets.outputs.profile_name }}
+          WIDGETS_PROFILE_NAME: ${{ steps.signing_assets.outputs.widgets_profile_name }}
+          SHARE_PROFILE_NAME: ${{ steps.signing_assets.outputs.share_profile_name }}
           MARKETING_VERSION_OVERRIDE: ${{ inputs.marketing_version }}
         run: |
           set -euo pipefail
@@ -296,7 +361,9 @@ jobs:
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
             CODE_SIGN_STYLE=Manual
             CODE_SIGN_IDENTITY='Apple Distribution'
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+            PigeonReader_PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+            PigeonWidgets_PROVISIONING_PROFILE_SPECIFIER="$WIDGETS_PROFILE_NAME"
+            PigeonShareExtension_PROVISIONING_PROFILE_SPECIFIER="$SHARE_PROFILE_NAME"
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
           )
           xcodebuild "${archive_arguments[@]}"
