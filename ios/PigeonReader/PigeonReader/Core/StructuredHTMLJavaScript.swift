@@ -214,6 +214,15 @@ enum StructuredHTMLJavaScript {
 			body[data-theme="dark"] a { color: #75c7ff; }
 			body[data-theme="dark"] blockquote { border-inline-start-color: #71808b; color: #c3ccd2; }
 			body[data-theme="dark"] pre, body[data-theme="dark"] th, body[data-theme="dark"] .pigeon-image-failure, body[data-theme="dark"] .pigeon-image-blocked { background: #252c31; }
+			body[data-theme="dark-gray"] { background: #1c1c1e; color: #f2f2f7; }
+			body[data-theme="dark-gray"] h1, body[data-theme="dark-gray"] h2, body[data-theme="dark-gray"] h3, body[data-theme="dark-gray"] h4, body[data-theme="dark-gray"] h5, body[data-theme="dark-gray"] h6 { color: #ffffff; }
+			body[data-theme="dark-gray"] a { color: #64d2ff; }
+			body[data-theme="dark-gray"] blockquote { border-inline-start-color: #8e8e93; color: #d1d1d6; }
+			body[data-theme="dark-gray"] hr { border-top-color: #636366; }
+			body[data-theme="dark-gray"] pre, body[data-theme="dark-gray"] th, body[data-theme="dark-gray"] .pigeon-image-failure, body[data-theme="dark-gray"] .pigeon-image-blocked { background: #2c2c2e; }
+			body[data-theme="dark-gray"] th, body[data-theme="dark-gray"] td { border-color: #636366; }
+			body[data-theme="dark-gray"] figcaption { color: #aeaeb2; }
+			body[data-theme="dark-gray"] .pigeon-image-failure, body[data-theme="dark-gray"] .pigeon-image-blocked { border-color: #636366; color: #d1d1d6; }
 			body[data-theme="sepia"] { color: #433a2c; }
 			body[data-theme="sepia"] h1, body[data-theme="sepia"] h2, body[data-theme="sepia"] h3, body[data-theme="sepia"] h4, body[data-theme="sepia"] h5, body[data-theme="sepia"] h6 { color: #2f281e; }
 			body[data-theme="sepia"] a { color: #735c17; }

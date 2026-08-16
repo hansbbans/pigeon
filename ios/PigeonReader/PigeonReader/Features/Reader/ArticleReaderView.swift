@@ -356,14 +356,19 @@ struct ArticleReaderView: View {
 		switch model.readerTypography.theme {
 		case .system: nil
 		case .light, .sepia: .light
-		case .dark: .dark
+		case .darkGray, .dark: .dark
 		}
 	}
 
 	private var readerBackground: Color {
-		model.readerTypography.theme == .sepia
-			? Color(red: 0.965, green: 0.925, blue: 0.82)
-			: Color(uiColor: .systemBackground)
+		switch model.readerTypography.theme {
+		case .sepia:
+			Color(red: 0.965, green: 0.925, blue: 0.82)
+		case .darkGray:
+			Color(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 30.0 / 255.0)
+		case .system, .light, .dark:
+			Color(uiColor: .systemBackground)
+		}
 	}
 }
 

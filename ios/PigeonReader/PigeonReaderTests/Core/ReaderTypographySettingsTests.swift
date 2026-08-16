@@ -39,4 +39,31 @@ struct ReaderTypographySettingsTests {
 		#expect(settings.columnWidth == ReaderTypographySettings.defaultColumnWidth)
 		#expect(settings.theme == .system)
 	}
+
+	@Test
+	func keepsThemePickerOrderTitlesAndRawValuePersistenceCompatible() throws {
+		let suiteName = "pigeon-reader-theme-compatibility-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+
+		#expect(ReaderTheme.allCases == [.system, .light, .darkGray, .dark, .sepia])
+		#expect(ReaderTheme.dark.rawValue == "dark")
+		#expect(ReaderTheme.dark.title == "Black")
+		#expect(ReaderTheme.darkGray.rawValue == "dark-gray")
+		#expect(ReaderTheme.darkGray.title == "Dark Gray")
+
+		defaults.set("dark", forKey: "pigeon.reader.theme")
+		let restoredBlack = ReaderTypographySettings(defaults: defaults)
+		#expect(restoredBlack.theme == .dark)
+		#expect(restoredBlack.theme.title == "Black")
+
+		restoredBlack.theme = .darkGray
+		#expect(defaults.string(forKey: "pigeon.reader.theme") == "dark-gray")
+		let restoredDarkGray = ReaderTypographySettings(defaults: defaults)
+		#expect(restoredDarkGray.theme == .darkGray)
+
+		restoredDarkGray.reset()
+		#expect(restoredDarkGray.theme == .system)
+		#expect(defaults.string(forKey: "pigeon.reader.theme") == "system")
+	}
 }

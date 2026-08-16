@@ -4,11 +4,20 @@ import Observation
 nonisolated enum ReaderTheme: String, CaseIterable, Identifiable, Sendable {
 	case system
 	case light
+	case darkGray = "dark-gray"
 	case dark
 	case sepia
 
 	var id: Self { self }
-	var title: String { rawValue.capitalized }
+	var title: String {
+		switch self {
+		case .system: "System"
+		case .light: "Light"
+		case .darkGray: "Dark Gray"
+		case .dark: "Black"
+		case .sepia: "Sepia"
+		}
+	}
 }
 
 nonisolated enum ReaderRemoteImagePolicy: String, CaseIterable, Identifiable, Sendable {

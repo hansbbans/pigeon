@@ -54,6 +54,7 @@ final class ReaderAppModel {
 	var isLoadingLibrary = false
 	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
+	private(set) var enabledSmartViewSections: Set<ReaderSection>
 	private(set) var isLoadingNavigation = false
 	var articleFilter: ReaderArticleFilter {
 		get { articleFilter(for: selectedNavigationID) }
@@ -71,6 +72,7 @@ final class ReaderAppModel {
 	private let readwiseAPIClient: ReadwiseAPIClient
 	private let readerModeStore: ReaderModeStore
 	private let articleFilterStore: ReaderArticleFilterStore
+	private let smartViewStore: ReaderSmartViewStore
 	private let offlineStore: any OfflineLibraryStoring
 	private let mutationReplayer: OfflineMutationReplayer
 	private let offlineSynchronizationEnabled: Bool
@@ -124,6 +126,7 @@ final class ReaderAppModel {
 		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
 		readerModeStore: ReaderModeStore = ReaderModeStore(),
 		articleFilterStore: ReaderArticleFilterStore = ReaderArticleFilterStore(),
+		smartViewStore: ReaderSmartViewStore = ReaderSmartViewStore(),
 		offlineStore: any OfflineLibraryStoring = OfflineLibraryStore.shared,
 		offlineSynchronizationEnabled: Bool = true,
 		readerTypography: ReaderTypographySettings? = nil,
@@ -135,12 +138,17 @@ final class ReaderAppModel {
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
 		self.readerModeStore = readerModeStore
 		self.articleFilterStore = articleFilterStore
+		self.smartViewStore = smartViewStore
+		self.enabledSmartViewSections = smartViewStore.enabledSections
 		self.offlineStore = offlineStore
 		self.mutationReplayer = OfflineMutationReplayer(store: offlineStore)
 		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		self.allowsLowDataBackgroundRefresh = UserDefaults.standard.bool(forKey: Self.lowDataBackgroundKey)
+		if let initialSmartView = ReaderSmartViewStore.configurableSections.first(where: enabledSmartViewSections.contains) {
+			selectedNavigationID = initialSmartView.rawValue
+		}
 		do {
 			hasReadwiseToken = try readwiseTokenStore.load()?.isEmpty == false
 		} catch {
@@ -197,7 +205,31 @@ final class ReaderAppModel {
 	}
 
 	var visibleSmartNavigationItems: [ReaderNavigationItem] {
-		smartNavigationItems.filter { $0.smartSection != .unread }
+		smartNavigationItems.filter { item in
+			guard let section = item.smartSection, section != .unread else {
+				return false
+			}
+			return enabledSmartViewSections.contains(section)
+		}
+	}
+
+	var isForYouSmartViewEnabled: Bool {
+		get { enabledSmartViewSections.contains(.forYou) }
+		set { setSmartViewEnabled(newValue, for: .forYou) }
+	}
+
+	var isStarredSmartViewEnabled: Bool {
+		get { enabledSmartViewSections.contains(.starred) }
+		set { setSmartViewEnabled(newValue, for: .starred) }
+	}
+
+	var isTodaySmartViewEnabled: Bool {
+		get { enabledSmartViewSections.contains(.today) }
+		set { setSmartViewEnabled(newValue, for: .today) }
+	}
+
+	func canDisableSmartView(_ section: ReaderSection) -> Bool {
+		!enabledSmartViewSections.contains(section) || enabledSmartViewSections.count > 1
 	}
 
 	var folderNavigationItems: [ReaderNavigationItem] {
@@ -310,7 +342,7 @@ final class ReaderAppModel {
 			subscriptions = []
 			selectedArticleID = nil
 			sidebarFilter = .all
-			selectedNavigationID = ReaderSection.forYou.rawValue
+			selectedNavigationID = firstEnabledSmartSection.rawValue
 			navigation = .initial
 			isLoadingNavigation = false
 			activeNavigationLoadID = nil
@@ -707,8 +739,9 @@ final class ReaderAppModel {
 			hasLoadedNavigation = true
 		}
 		if navigation.item(withID: previousSelection) == nil {
-			select(collectionID: ReaderSection.forYou.rawValue)
+			select(section: firstEnabledSmartSection)
 		} else {
+			reconcileSelectedSmartViewIfNeeded()
 			reconcileCurrentArticleSelection()
 		}
 		scheduleRestorationSave()
@@ -719,6 +752,46 @@ final class ReaderAppModel {
 		preferredCompactColumn = .content
 		reconcileSelection(for: collectionID)
 		scheduleRestorationSave()
+	}
+
+	private func setSmartViewEnabled(_ enabled: Bool, for section: ReaderSection) {
+		guard ReaderSmartViewStore.configurableSections.contains(section) else {
+			return
+		}
+		let previousSections = enabledSmartViewSections
+		smartViewStore.setEnabled(enabled, for: section)
+		let updatedSections = smartViewStore.enabledSections
+		guard previousSections != updatedSections else {
+			return
+		}
+		enabledSmartViewSections = updatedSections
+
+		if enabled == false, selectedNavigationID == section.rawValue {
+			selectedArticleIDs[section.rawValue] = nil
+			selectedArticleID = nil
+			preferredCompactColumn = .content
+			select(section: firstEnabledSmartSection)
+		} else {
+			scheduleRestorationSave()
+		}
+	}
+
+	private var firstEnabledSmartSection: ReaderSection {
+		ReaderSmartViewStore.configurableSections.first(where: enabledSmartViewSections.contains) ?? .forYou
+	}
+
+	private func reconcileSelectedSmartViewIfNeeded() {
+		guard let selectedSection = ReaderSection(rawValue: selectedNavigationID),
+			selectedSection != .unread,
+			ReaderSmartViewStore.configurableSections.contains(selectedSection),
+			enabledSmartViewSections.contains(selectedSection) == false else {
+			return
+		}
+
+		selectedArticleIDs[selectedSection.rawValue] = nil
+		selectedArticleID = nil
+		preferredCompactColumn = .content
+		select(section: firstEnabledSmartSection)
 	}
 
 	func select(article: Recommendation) {
@@ -892,6 +965,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
+			restoreNavigationFromSubscriptionsIfNeeded()
 			try await offlineStore.saveSubscriptions(loaded, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
@@ -901,6 +975,40 @@ final class ReaderAppModel {
 			}
 			errorMessage = error.localizedDescription
 		}
+	}
+
+	private func restoreNavigationFromSubscriptionsIfNeeded() {
+		guard subscriptions.isEmpty == false,
+			navigation.folderItems.isEmpty,
+			navigation.uncategorizedFeedItems.isEmpty else {
+			return
+		}
+
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map { category in
+					ReaderSubscriptionCategory(id: category.id, label: category.label)
+				},
+				url: subscription.url.absoluteString,
+				iconURL: subscription.iconUrl,
+			)
+		}
+		let smartCounts = ReaderNavigationSmartCounts(
+			forYou: navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount ?? 0,
+			today: navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0,
+			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
+			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
+		)
+		setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: readerSubscriptions,
+				unreadCounts: [],
+				smartCounts: smartCounts,
+			),
+			markAsLoaded: true,
+		)
 	}
 
 	func setSubscriptions(_ newSubscriptions: [FeedSubscription]) {
@@ -1646,6 +1754,7 @@ final class ReaderAppModel {
 			hasLoadedNavigation = true
 		}
 		subscriptions = sortedSubscriptions(snapshot.subscriptions)
+		restoreNavigationFromSubscriptionsIfNeeded()
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
@@ -1656,8 +1765,9 @@ final class ReaderAppModel {
 		}
 
 		if navigation.item(withID: selectedNavigationID) == nil {
-			selectedNavigationID = ReaderSection.forYou.rawValue
+			selectedNavigationID = firstEnabledSmartSection.rawValue
 		}
+		reconcileSelectedSmartViewIfNeeded()
 		selectedArticleID = selectedArticleIDs[selectedNavigationID]
 		reconcileCurrentArticleSelection()
 	}
@@ -1679,7 +1789,7 @@ final class ReaderAppModel {
 		scrollReadTriggered = []
 		subscriptions = []
 		selectedArticleID = nil
-		selectedNavigationID = ReaderSection.forYou.rawValue
+		selectedNavigationID = firstEnabledSmartSection.rawValue
 		navigation = .initial
 		sidebarFilter = .all
 		preferredCompactColumn = .sidebar

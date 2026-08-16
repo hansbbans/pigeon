@@ -60,6 +60,18 @@ struct SettingsView: View {
 						.foregroundStyle(.secondary)
 				}
 
+				Section("Smart Views") {
+					Toggle("For You", isOn: $model.isForYouSmartViewEnabled)
+						.disabled(model.canDisableSmartView(.forYou) == false)
+					Toggle("Starred", isOn: $model.isStarredSmartViewEnabled)
+						.disabled(model.canDisableSmartView(.starred) == false)
+					Toggle("Today", isOn: $model.isTodaySmartViewEnabled)
+						.disabled(model.canDisableSmartView(.today) == false)
+					Text("At least one smart view must stay enabled so Reader always has a home.")
+						.font(.footnote)
+						.foregroundStyle(.secondary)
+				}
+
 				Section("Offline Library") {
 					LabeledContent("Status", value: model.isOffline ? "Offline" : "Up to date")
 					LabeledContent("Saved articles", value: model.offlineStorageStats.articleCount.formatted())

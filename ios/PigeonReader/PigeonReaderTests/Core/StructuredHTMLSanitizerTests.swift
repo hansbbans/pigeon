@@ -121,6 +121,10 @@ struct StructuredHTMLSanitizerTests {
 		let shell = StructuredHTMLJavaScript.renderingShell
 
 		#expect(shell.contains("body[data-theme=\"sepia\"]"))
+		#expect(shell.contains("document.body.dataset.theme = payload.theme || \"system\""))
+		#expect(shell.contains("body[data-theme=\"dark-gray\"] { background: #1c1c1e; color: #f2f2f7; }"))
+		#expect(shell.contains("body[data-theme=\"dark-gray\"] a { color: #64d2ff; }"))
+		#expect(shell.contains("body[data-theme=\"dark-gray\"] pre"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"blocked\""))
 		#expect(shell.contains("Load this remote image"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
