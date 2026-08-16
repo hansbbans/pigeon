@@ -70,6 +70,21 @@ struct SettingsView: View {
 				}
 
 				Section("Reading") {
+					Picker("Theme", selection: $typography.theme) {
+						ForEach(ReaderTheme.allCases) { theme in
+							Text(theme.title).tag(theme)
+						}
+					}
+					Picker("Timeline", selection: $typography.timelineDensity) {
+						ForEach(ReaderTimelineDensity.allCases) { density in
+							Text(density.title).tag(density)
+						}
+					}
+					Picker("Mark stories read", selection: $typography.markReadBehavior) {
+						ForEach(ReaderMarkReadBehavior.allCases) { behavior in
+							Text(behavior.title).tag(behavior)
+						}
+					}
 					LabeledContent("Text size") {
 						Text(typography.textScale, format: .percent.precision(.fractionLength(0)))
 							.foregroundStyle(.secondary)
@@ -94,9 +109,53 @@ struct SettingsView: View {
 					)
 					.accessibilityValue(Text(typography.lineHeight, format: .number.precision(.fractionLength(2))))
 
+					LabeledContent("Page margins") {
+						Text(typography.horizontalMargin, format: .number.precision(.fractionLength(0)))
+							.foregroundStyle(.secondary)
+					}
+					Slider(
+						value: $typography.horizontalMargin,
+						in: ReaderTypographySettings.horizontalMarginRange,
+						step: 4,
+						label: { Text("Page margins") },
+					)
+
+					LabeledContent("Reading width") {
+						Text(typography.columnWidth, format: .number.precision(.fractionLength(0)))
+							.foregroundStyle(.secondary)
+					}
+					Slider(
+						value: $typography.columnWidth,
+						in: ReaderTypographySettings.columnWidthRange,
+						step: 40,
+						label: { Text("Reading width") },
+					)
+
 					Button("Reset reading controls", systemImage: "arrow.counterclockwise") {
 						typography.reset()
 					}
+				}
+
+				Section("Remote Images") {
+					Picker("Loading", selection: $typography.remoteImagePolicy) {
+						ForEach(ReaderRemoteImagePolicy.allCases) { policy in
+							Text(policy.title).tag(policy)
+						}
+					}
+					Text(remoteImageExplanation(for: typography.remoteImagePolicy))
+						.font(.footnote)
+						.foregroundStyle(.secondary)
+				}
+
+				Section("Personalization") {
+					NavigationLink {
+						PersonalizationSettingsView()
+					} label: {
+						Label("Signals, History, and Privacy", systemImage: "slider.horizontal.3")
+					}
+					Text("See exactly what affects recommendations, delete individual signals, reset preferences, or export your data.")
+						.font(.footnote)
+						.foregroundStyle(.secondary)
 				}
 
 				Section("Readwise Reader") {
@@ -179,6 +238,17 @@ struct SettingsView: View {
 		} catch {
 			readwiseMessage = error.localizedDescription
 			readwiseMessageIsError = true
+		}
+	}
+
+	private func remoteImageExplanation(for policy: ReaderRemoteImagePolicy) -> String {
+		switch policy {
+		case .normal:
+			"Images load directly from publishers. They can see your network address and the image URL may identify the newsletter recipient."
+		case .blocked:
+			"Images stay blocked until you request one. Loading a requested image connects directly to its publisher."
+		case .privacyProxied:
+			"Pigeon's authenticated server fetches images for you. Publishers see the proxy, not your device address or cookies."
 		}
 	}
 }

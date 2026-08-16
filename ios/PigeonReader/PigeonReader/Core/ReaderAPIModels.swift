@@ -80,6 +80,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let id: String
 	let categories: [String]
 	let title: String
+	let author: String?
 	let published: Int
 	let summary: ReaderStreamContent?
 	let content: ReaderStreamContent?
@@ -90,6 +91,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		case id
 		case categories
 		case title
+		case author
 		case published
 		case summary
 		case content
@@ -102,6 +104,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		id = try container.decode(String.self, forKey: .id)
 		categories = try container.decodeIfPresent([String].self, forKey: .categories) ?? []
 		title = try container.decodeIfPresent(String.self, forKey: .title) ?? "Untitled"
+		author = try container.decodeIfPresent(String.self, forKey: .author)
 		published = try container.decodeIfPresent(Int.self, forKey: .published) ?? 0
 		summary = try container.decodeIfPresent(ReaderStreamContent.self, forKey: .summary)
 		content = try container.decodeIfPresent(ReaderStreamContent.self, forKey: .content)

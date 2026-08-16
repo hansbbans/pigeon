@@ -189,6 +189,19 @@ nonisolated struct OfflineStorageStats: Equatable, Sendable {
 	static let empty = OfflineStorageStats(articleCount: 0, bodyBytes: 0, pendingMutationCount: 0, lastSyncAt: nil)
 }
 
+nonisolated enum ReaderSearchScope: String, CaseIterable, Identifiable, Sendable {
+	case collection
+	case library
+
+	var id: Self { self }
+	var title: String {
+		switch self {
+		case .collection: "This View"
+		case .library: "Full Library"
+		}
+	}
+}
+
 nonisolated protocol OfflineLibraryStoring: Sendable {
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws
@@ -203,4 +216,5 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func storageStats(accountID: String) async throws -> OfflineStorageStats
 	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int
 	func clearCachedArticles(accountID: String) async throws
+	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation]
 }

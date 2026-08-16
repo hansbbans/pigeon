@@ -2,6 +2,7 @@ import Foundation
 
 enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 	case newest
+	case oldest
 	case score
 
 	var id: Self { self }
@@ -9,6 +10,7 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 	var title: String {
 		switch self {
 		case .newest: "Newest to Oldest"
+		case .oldest: "Oldest to Newest"
 		case .score: "Score"
 		}
 	}
@@ -16,6 +18,7 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 	var systemImage: String {
 		switch self {
 		case .newest: "calendar.badge.clock"
+		case .oldest: "calendar"
 		case .score: "chart.bar.fill"
 		}
 	}
@@ -30,7 +33,7 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 				return left.score > right.score
 			}
 			if left.receivedAt != right.receivedAt {
-				return left.receivedAt > right.receivedAt
+				return self == .oldest ? left.receivedAt < right.receivedAt : left.receivedAt > right.receivedAt
 			}
 			return left.id < right.id
 		}

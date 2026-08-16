@@ -15,6 +15,16 @@ final class ReaderAppModel {
 		let collectionID: String
 	}
 
+	private struct BulkReadUndo: Sendable {
+		let articles: [Recommendation]
+		let title: String
+	}
+
+	private struct CollectionFreshness: Sendable {
+		let updatedAt: Date
+		let isCached: Bool
+	}
+
 	var session: PigeonSession?
 	var serverURLText = ""
 	var password = ""
@@ -73,9 +83,18 @@ final class ReaderAppModel {
 	private var restorationSaveTask: Task<Void, Never>?
 	private var restoredReaderModes: [String: String] = [:]
 	private var articleScrollOffsets: [String: Double] = [:]
+	private var collectionFreshness: [String: CollectionFreshness] = [:]
+	private var activeSearchID: UUID?
+	private var bulkReadUndo: BulkReadUndo?
+	private var scrollReadTriggered: Set<String> = []
+	private(set) var searchResults: [Recommendation] = []
+	private(set) var isSearchingArticles = false
+	private(set) var bulkReadUndoTitle: String?
 	private(set) var offlineStorageStats = OfflineStorageStats.empty
 	private(set) var isSynchronizingOfflineLibrary = false
 	private(set) var isOffline = false
+	private(set) var personalization: PersonalizationSnapshot?
+	private(set) var isLoadingPersonalization = false
 
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
@@ -210,8 +229,10 @@ final class ReaderAppModel {
 		guard let selectedArticleID else {
 			return nil
 		}
-		return articles.first(where: { $0.id == selectedArticleID })
+		return article(withId: selectedArticleID)
 	}
+
+	var canUndoBulkRead: Bool { bulkReadUndo != nil }
 
 	var isLoading: Bool {
 		loadingCollections.contains(selectedNavigationID)
@@ -278,9 +299,18 @@ final class ReaderAppModel {
 			preparedOfflineAccountID = nil
 			restoredReaderModes = [:]
 			articleScrollOffsets = [:]
+			collectionFreshness = [:]
+			activeSearchID = nil
+			searchResults = []
+			isSearchingArticles = false
+			bulkReadUndo = nil
+			bulkReadUndoTitle = nil
+			scrollReadTriggered = []
 			offlineStorageStats = .empty
 			isSynchronizingOfflineLibrary = false
 			isOffline = false
+			personalization = nil
+			isLoadingPersonalization = false
 			errorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
@@ -295,6 +325,50 @@ final class ReaderAppModel {
 	func removeReadwiseToken() throws {
 		try readwiseTokenStore.remove()
 		hasReadwiseToken = false
+	}
+
+	func loadPersonalization() async {
+		guard let apiClient else { return }
+		isLoadingPersonalization = true
+		defer { isLoadingPersonalization = false }
+		do {
+			personalization = try await apiClient.personalization()
+		} catch let error where isCancellation(error) {
+			return
+		} catch {
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	func deletePersonalizationHistory(id: String) async {
+		guard let apiClient else { return }
+		do {
+			try await apiClient.deletePersonalizationHistory(id: id)
+			await loadPersonalization()
+		} catch {
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	func resetPersonalization() async {
+		guard let apiClient else { return }
+		do {
+			try await apiClient.resetPersonalization()
+			await loadPersonalization()
+			await load(section: .forYou, force: true)
+		} catch {
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	func exportPersonalization() async -> String? {
+		guard let apiClient else { return nil }
+		do {
+			return try await apiClient.exportPersonalization()
+		} catch {
+			errorMessage = error.localizedDescription
+			return nil
+		}
 	}
 
 	func saveToReader(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
@@ -491,7 +565,7 @@ final class ReaderAppModel {
 	}
 
 	func select(article: Recommendation) {
-		guard articles.contains(where: { $0.id == article.id }) else {
+		guard self.article(withId: article.id) != nil || searchResults.contains(where: { articlesMatch($0, article) }) else {
 			return
 		}
 		selectedArticleID = article.id
@@ -610,6 +684,7 @@ final class ReaderAppModel {
 				return
 			}
 			setArticles(loadedArticles, for: collection.id)
+			collectionFreshness[collection.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 			try await offlineStore.saveArticles(
 				loadedArticles,
 				collectionID: collection.id,
@@ -941,14 +1016,9 @@ final class ReaderAppModel {
 		guard selectedNavigationID == collectionID else {
 			return
 		}
-		if displayedArticles(for: collectionID).contains(where: { $0.id == rememberedID }) {
-			selectedArticleID = rememberedID
-		} else {
-			selectedArticleID = nil
-			if preferredCompactColumn == .detail {
-				preferredCompactColumn = .content
-			}
-		}
+		// Keep the article open while a read-state or filter change removes its row.
+		// Selection is cleared only when the underlying cached article disappears.
+		selectedArticleID = rememberedID
 	}
 
 	private func reconcileCurrentArticleSelection() {
@@ -1043,13 +1113,91 @@ final class ReaderAppModel {
 				return article
 			}
 		}
+		if let result = searchResults.first(where: { $0.id == id || $0.readerId == id }) {
+			return result
+		}
 		return nil
+	}
+
+	func searchArticles(
+		query: String,
+		scope: ReaderSearchScope,
+		in collection: ReaderNavigationItem,
+	) async {
+		let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard trimmed.isEmpty == false, let accountID = session?.storageIdentity else {
+			clearArticleSearch()
+			return
+		}
+
+		let searchID = UUID()
+		activeSearchID = searchID
+		isSearchingArticles = true
+		defer {
+			if activeSearchID == searchID { isSearchingArticles = false }
+		}
+		do {
+			let results = try await offlineStore.searchArticles(
+				query: trimmed,
+				collectionID: scope == .collection ? collection.id : nil,
+				accountID: accountID,
+				limit: 200,
+			)
+			try Task.checkCancellation()
+			guard activeSearchID == searchID else { return }
+			searchResults = sortOrder.sorted(results)
+		} catch let error where isCancellation(error) {
+			return
+		} catch {
+			guard activeSearchID == searchID else { return }
+			errorMessage = error.localizedDescription
+			searchResults = []
+		}
+	}
+
+	func clearArticleSearch() {
+		activeSearchID = nil
+		searchResults = []
+		isSearchingArticles = false
+	}
+
+	func collectionStatusText(for collection: ReaderNavigationItem) -> String {
+		guard let freshness = collectionFreshness[collection.id] else {
+			return isOffline ? "Cached · not yet updated" : "Not yet updated"
+		}
+		let age = freshness.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .wide))
+		let source = freshness.isCached || isOffline ? "Cached" : "Live"
+		return "\(source) · updated \(age)"
+	}
+
+	@discardableResult
+	func selectNextUnread(after article: Recommendation) -> Recommendation? {
+		var seen = Set<String>()
+		let ordered = articleCache.values
+			.flatMap { $0 }
+			.filter { seen.insert($0.readerId).inserted }
+			.sorted {
+				if $0.receivedAt != $1.receivedAt { return $0.receivedAt > $1.receivedAt }
+				return $0.readerId < $1.readerId
+			}
+		guard ordered.isEmpty == false else { return nil }
+		let currentIndex = ordered.firstIndex(where: { articlesMatch($0, article) }) ?? -1
+		let following = ordered.dropFirst(currentIndex + 1)
+		let earlier = ordered.prefix(max(currentIndex + 1, 0))
+		let next = following.first(where: { $0.isRead == false })
+			?? earlier.first(where: { $0.isRead == false && articlesMatch($0, article) == false })
+		guard let next else { return nil }
+		selectedArticleID = next.id
+		selectedArticleIDs[selectedNavigationID] = next.id
+		preferredCompactColumn = .detail
+		scheduleRestorationSave()
+		return next
 	}
 
 	func recordExplicitOpen(for article: Recommendation) async {
 		sentScrollThresholds[article.id] = []
 		await send(EngagementEvent(itemId: article.id, type: .explicitOpen))
-		if !article.isRead {
+		if readerTypography.markReadBehavior == .onOpen, !article.isRead {
 			await setRead(article, read: true)
 		}
 	}
@@ -1078,6 +1226,15 @@ final class ReaderAppModel {
 	}
 
 	func recordScrollDepth(itemId: String, depth: Double) {
+		if readerTypography.markReadBehavior == .onScroll,
+			depth >= 0.6,
+			scrollReadTriggered.insert(itemId).inserted,
+			let article = article(withId: itemId),
+			article.isRead == false {
+			Task { @MainActor [weak self] in
+				await self?.setRead(article, read: true)
+			}
+		}
 		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
 			return
 		}
@@ -1115,7 +1272,23 @@ final class ReaderAppModel {
 		await markArticlesAsRead(
 			articleCache[collection.id]?.filter { $0.isRead == false } ?? [],
 			scope: .all,
+			undoTitle: "Mark All as Read",
 		)
+	}
+
+	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
+		await markArticlesAsRead(
+			articleCache[collection.id]?.filter { $0.isRead == false && $0.receivedAt < date } ?? [],
+			scope: .older,
+			undoTitle: "Mark Older Stories as Read",
+		)
+	}
+
+	func undoLastBulkRead() async {
+		guard let undo = bulkReadUndo else { return }
+		bulkReadUndo = nil
+		bulkReadUndoTitle = nil
+		await updateReadStateForArticles(undo.articles, read: false, scope: .single)
 	}
 
 	func setStarred(_ article: Recommendation, starred: Bool) async {
@@ -1212,6 +1385,11 @@ final class ReaderAppModel {
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
+		if let updatedAt = snapshot.lastSyncAt {
+			collectionFreshness = snapshot.articlesByCollection.keys.reduce(into: [:]) { result, collectionID in
+				result[collectionID] = CollectionFreshness(updatedAt: updatedAt, isCached: true)
+			}
+		}
 
 		if navigation.item(withID: selectedNavigationID) == nil {
 			selectedNavigationID = ReaderSection.forYou.rawValue
@@ -1228,6 +1406,13 @@ final class ReaderAppModel {
 		selectedArticleIDs = [:]
 		restoredReaderModes = [:]
 		articleScrollOffsets = [:]
+		collectionFreshness = [:]
+		activeSearchID = nil
+		searchResults = []
+		isSearchingArticles = false
+		bulkReadUndo = nil
+		bulkReadUndoTitle = nil
+		scrollReadTriggered = []
 		subscriptions = []
 		selectedArticleID = nil
 		selectedNavigationID = ReaderSection.forYou.rawValue
@@ -1237,6 +1422,8 @@ final class ReaderAppModel {
 		hasLoadedNavigation = false
 		offlineStorageStats = .empty
 		isOffline = false
+		personalization = nil
+		isLoadingPersonalization = false
 	}
 
 	private func scheduleRestorationSave() {
@@ -1405,10 +1592,29 @@ final class ReaderAppModel {
 			seenIdentifiers.formUnion(identifiers)
 			return true
 		}
-		await markArticlesAsRead(Array(targets), scope: boundary == .above ? .above : .below)
+		await markArticlesAsRead(
+			Array(targets),
+			scope: boundary == .above ? .above : .below,
+			undoTitle: boundary == .above ? "Mark Above as Read" : "Mark Below as Read",
+		)
 	}
 
-	private func markArticlesAsRead(_ targets: [Recommendation], scope: OfflineMutationScope) async {
+	private func markArticlesAsRead(
+		_ targets: [Recommendation],
+		scope: OfflineMutationScope,
+		undoTitle: String,
+	) async {
+		guard targets.isEmpty == false else { return }
+		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle)
+		bulkReadUndoTitle = undoTitle
+		await updateReadStateForArticles(targets, read: true, scope: scope)
+	}
+
+	private func updateReadStateForArticles(
+		_ targets: [Recommendation],
+		read: Bool,
+		scope: OfflineMutationScope,
+	) async {
 		guard targets.isEmpty == false else { return }
 		let targetIDs = targets.map(\.readerId)
 		for start in stride(from: 0, to: targetIDs.count, by: 200) {
@@ -1416,7 +1622,7 @@ final class ReaderAppModel {
 			let mutation = OfflineMutation(
 				kind: .setReadBatch,
 				itemIds: Array(targetIDs[start..<end]),
-				value: true,
+				value: read,
 				scope: scope,
 			)
 			guard await enqueueOfflineMutation(mutation) else { return }
@@ -1433,12 +1639,12 @@ final class ReaderAppModel {
 					continue
 				}
 				for index in matchingIndices {
-					cachedArticles[index].isRead = true
+					cachedArticles[index].isRead = read
 				}
 				articleCache[collectionID] = cachedArticles
 				changedCollections.insert(collectionID)
 			}
-			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: false, toRead: true))
+			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
 		reconcileCurrentArticleSelection()
 		await persistCollections(changedCollections)

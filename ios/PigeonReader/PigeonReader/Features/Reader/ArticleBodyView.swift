@@ -7,6 +7,10 @@ struct ArticleBodyView: View {
 	let leadImageURL: URL?
 	let textScale: Double
 	let lineHeight: Double
+	let theme: ReaderTheme
+	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let findQuery: String
+	let imageProxySession: PigeonSession?
 	let openedDestination: (OutboundDestination) -> Void
 	let saveToReader: (OutboundDestination) async throws -> ReadwiseSaveOutcome
 
@@ -33,6 +37,10 @@ struct ArticleBodyView: View {
 		leadImageURL: URL?,
 		textScale: Double,
 		lineHeight: Double,
+		theme: ReaderTheme = .system,
+		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
+		findQuery: String = "",
+		imageProxySession: PigeonSession? = nil,
 		openedDestination: @escaping (OutboundDestination) -> Void,
 		saveToReader: @escaping (OutboundDestination) async throws -> ReadwiseSaveOutcome,
 	) {
@@ -42,6 +50,10 @@ struct ArticleBodyView: View {
 		self.leadImageURL = leadImageURL
 		self.textScale = textScale
 		self.lineHeight = lineHeight
+		self.theme = theme
+		self.remoteImagePolicy = remoteImagePolicy
+		self.findQuery = findQuery
+		self.imageProxySession = imageProxySession
 		self.openedDestination = openedDestination
 		self.saveToReader = saveToReader
 		sanitizedContent = StructuredHTMLSanitizer.sanitize(html: content, baseURL: baseURL)
@@ -54,46 +66,7 @@ struct ArticleBodyView: View {
 			dynamicTypeSize: dynamicTypeSize,
 		)
 
-		VStack(alignment: .leading, spacing: 16) {
-			if let fallbackImageURL {
-				Button(action: {
-					imageSelection = ArticleImageSelection(url: fallbackImageURL)
-				}) {
-					RemoteArticleImageView(url: fallbackImageURL)
-					.clipShape(.rect(cornerRadius: 10))
-				}
-				.buttonStyle(.plain)
-				.accessibilityLabel("View lead image")
-				.accessibilityHint("Opens a zoomable image viewer")
-			}
-
-			if sanitizedContent.isEmpty {
-				Text(fallbackText)
-					.font(ReaderTypography.articleBody)
-					.textSelection(.enabled)
-			} else {
-					StructuredHTMLView(
-						html: sanitizedContent,
-						baseURL: baseURL,
-						textScale: renderedTextScale,
-					lineHeight: lineHeight,
-					contentHeight: $webViewHeight,
-					onLink: handleLink,
-					onImage: handleImage,
-					onImageFailure: handleImageFailure,
-				)
-				.frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .leading)
-				.frame(maxWidth: .infinity, alignment: .leading)
-				.frame(height: max(webViewHeight, 1))
-				.clipped()
-			}
-		}
-		.background {
-			GeometryReader { geometry in
-				Color.clear.preference(key: ArticleColumnWidthKey.self, value: geometry.size.width)
-			}
-		}
-		.onPreferenceChange(ArticleColumnWidthKey.self) { columnWidth = $0 }
+		renderedContent(textScale: renderedTextScale)
 		.sheet(item: $imageSelection) { selection in
 			ZoomableImageView(url: selection.url)
 		}
@@ -151,8 +124,73 @@ struct ArticleBodyView: View {
 		}
 	}
 
+	private func renderedContent(textScale: Double) -> some View {
+		VStack(alignment: .leading, spacing: 16) {
+			if remoteImagePolicy == .blocked, bodyImageURLs.isEmpty == false {
+				blockedRemoteImagesNotice
+			}
+			if let fallbackImageURL {
+				Button {
+					imageSelection = ArticleImageSelection(url: fallbackImageURL)
+				} label: {
+					RemoteArticleImageView(url: fallbackImageURL)
+						.clipShape(.rect(cornerRadius: 10))
+				}
+				.buttonStyle(.plain)
+				.accessibilityLabel("View lead image")
+				.accessibilityHint("Opens a zoomable image viewer")
+			}
+
+			if sanitizedContent.isEmpty {
+				Text(fallbackText)
+					.font(ReaderTypography.articleBody)
+					.textSelection(.enabled)
+			} else {
+				structuredContent(textScale: textScale)
+			}
+		}
+		.background {
+			GeometryReader { geometry in
+				Color.clear.preference(key: ArticleColumnWidthKey.self, value: geometry.size.width)
+			}
+		}
+		.onPreferenceChange(ArticleColumnWidthKey.self) { columnWidth = $0 }
+	}
+
+	private var blockedRemoteImagesNotice: some View {
+		Label(
+			"Remote images are blocked. Tap an image placeholder to load only that image.",
+			systemImage: "hand.raised.fill",
+		)
+		.font(.footnote)
+		.foregroundStyle(.secondary)
+		.accessibilityIdentifier("remote-images-blocked-notice")
+	}
+
+	private func structuredContent(textScale: Double) -> some View {
+		StructuredHTMLView(
+			html: sanitizedContent,
+			baseURL: baseURL,
+			textScale: textScale,
+			lineHeight: lineHeight,
+			theme: theme,
+			remoteImagePolicy: remoteImagePolicy,
+			findQuery: findQuery,
+			imageProxySession: imageProxySession,
+			contentHeight: $webViewHeight,
+			onLink: handleLink,
+			onImage: handleImage,
+			onImageFailure: handleImageFailure,
+		)
+		.frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .leading)
+		.frame(maxWidth: .infinity, alignment: .leading)
+		.frame(height: max(webViewHeight, 1))
+		.clipped()
+	}
+
 	private var fallbackImageURL: URL? {
-		ArticleImagePolicy.fallbackLeadImageURL(
+		guard remoteImagePolicy == .normal else { return nil }
+		return ArticleImagePolicy.fallbackLeadImageURL(
 			bodyImageURLs: bodyImageURLs,
 			leadImageURL: leadImageURL,
 			failedImageURLs: failedImageURLs,

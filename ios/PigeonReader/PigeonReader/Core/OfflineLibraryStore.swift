@@ -310,7 +310,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			for (id, article) in candidates {
 				let pruned = Recommendation(
 					id: article.id, readerId: article.readerId, feedKey: article.feedKey,
-					source: article.source, title: article.title, html: "", text: article.text,
+					source: article.source, author: article.author, title: article.title, html: "", text: article.text,
 					originalURL: article.originalURL, receivedAt: article.receivedAt,
 					isRead: article.isRead, isStarred: article.isStarred, score: article.score,
 					confidence: article.confidence, sampleCount: article.sampleCount,
@@ -332,6 +332,63 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 		}
+	}
+
+	func searchArticles(
+		query rawQuery: String,
+		collectionID: String?,
+		accountID: String,
+		limit: Int = 200,
+	) throws -> [Recommendation] {
+		let terms = rawQuery
+			.split(whereSeparator: { $0.isWhitespace })
+			.map(String.init)
+			.filter { $0.isEmpty == false }
+		guard terms.isEmpty == false else { return [] }
+		let database = try openDatabase()
+		var candidates: [Recommendation] = []
+		let boundedLimit = max(1, min(limit, 500))
+		if let collectionID {
+			try query(
+				"""
+				SELECT a.payload FROM cached_collection_articles ca
+				JOIN cached_articles a ON a.account_id = ca.account_id AND a.id = ca.article_id
+				WHERE ca.account_id = ? AND ca.collection_id = ?
+				ORDER BY a.received_at DESC
+				""",
+				bindings: [.text(accountID), .text(collectionID)],
+				database: database,
+			) { statement in
+				if let payload = data(at: 0, statement: statement),
+					let article = try? decoder.decode(Recommendation.self, from: payload) {
+					candidates.append(article)
+				}
+			}
+		} else {
+			try query(
+				"SELECT payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC",
+				bindings: [.text(accountID)],
+				database: database,
+			) { statement in
+				if let payload = data(at: 0, statement: statement),
+					let article = try? decoder.decode(Recommendation.self, from: payload) {
+					candidates.append(article)
+				}
+			}
+		}
+
+		return candidates.filter { article in
+			let searchable = [
+				article.title,
+				article.author ?? "",
+				article.source,
+				article.text ?? "",
+				article.html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression),
+			].joined(separator: "\n")
+			return terms.allSatisfy { term in
+				searchable.range(of: term, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+			}
+		}.prefix(boundedLimit).map { $0 }
 	}
 
 	private func apply(_ change: IncrementalSyncChange, accountID: String, database: OpaquePointer) throws {
@@ -373,7 +430,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			let incomingHTML = payload.html ?? ""
 			let shouldPreserveBody = serverPrunedBody && incomingHTML.isEmpty && existing?.html.isEmpty == false
 			let article = sanitized(Recommendation(
-				id: id, readerId: readerID, feedKey: feedKey, source: source, title: title,
+				id: id, readerId: readerID, feedKey: feedKey, source: source, author: payload.author, title: title,
 				html: shouldPreserveBody ? (existing?.html ?? "") : incomingHTML,
 				text: payload.text ?? existing?.text,
 				originalURL: payload.originalURL ?? existing?.originalURL,
@@ -419,6 +476,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			readerId: article.readerId,
 			feedKey: article.feedKey,
 			source: article.source,
+			author: article.author,
 			title: article.title,
 			html: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
 			text: article.text,

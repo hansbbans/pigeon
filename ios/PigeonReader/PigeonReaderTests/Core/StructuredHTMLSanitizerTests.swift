@@ -116,4 +116,14 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("table-layout: fixed"))
 		#expect(shell.contains("max-width: 100% !important"))
 	}
+
+	@Test func renderingShellSupportsExplicitThemesBlockedImagesAndTheAuthenticatedProxyScheme() {
+		let shell = StructuredHTMLJavaScript.renderingShell
+
+		#expect(shell.contains("body[data-theme=\"sepia\"]"))
+		#expect(shell.contains("payload.remoteImagePolicy === \"blocked\""))
+		#expect(shell.contains("Load this remote image"))
+		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
+		#expect(shell.contains("pigeon-image://proxy?url="))
+	}
 }
