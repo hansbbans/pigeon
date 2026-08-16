@@ -3,7 +3,7 @@ import Foundation
 
 struct AddFeedIntent: AppIntent {
 	static let title: LocalizedStringResource = "Add Feed to Pigeon"
-	static let description = IntentDescription("Open Pigeon Reader with a website or feed ready to add.")
+	static let description = IntentDescription("Open Pigeon with a website or feed ready to add.")
 	static let openAppWhenRun = true
 
 	@Parameter(title: "Website or Feed URL")
@@ -14,7 +14,7 @@ struct AddFeedIntent: AppIntent {
 			throw AddFeedIntentError.invalidURL
 		}
 		PendingFeedStore.save(url)
-		return .result(dialog: "Opening Pigeon Reader to review this feed.")
+		return .result(dialog: "Opening Pigeon to review this feed.")
 	}
 }
 

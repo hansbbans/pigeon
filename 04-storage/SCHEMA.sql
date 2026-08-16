@@ -263,7 +263,7 @@ CREATE TABLE IF NOT EXISTS parsing_rules (
 
 CREATE INDEX IF NOT EXISTS idx_rules_feed_key ON parsing_rules(feed_key, priority DESC);
 
--- Append-only behavior signals used by Pigeon Reader recommendations.
+-- Append-only behavior signals used by Pigeon recommendations.
 CREATE TABLE IF NOT EXISTS engagement_events (
   id TEXT PRIMARY KEY,
   event_key TEXT NOT NULL UNIQUE,

@@ -32,7 +32,7 @@ targets:
     info:
       path: PigeonReader/Resources/Info.plist
       properties:
-        CFBundleDisplayName: Pigeon Reader
+        CFBundleDisplayName: Pigeon
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.news

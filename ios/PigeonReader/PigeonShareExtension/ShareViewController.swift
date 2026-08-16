@@ -7,7 +7,7 @@ final class ShareViewController: UIViewController {
 	override func viewDidLoad() {
 		super.viewDidLoad()
 		view.backgroundColor = .systemBackground
-		statusLabel.text = "Sending to Pigeon Reader…"
+		statusLabel.text = "Sending to Pigeon…"
 		statusLabel.textAlignment = .center
 		statusLabel.numberOfLines = 0
 		statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -22,7 +22,7 @@ final class ShareViewController: UIViewController {
 
 	private func receiveSharedURL() async {
 		guard let url = await firstSharedURL() else {
-			statusLabel.text = "Share a website or feed URL with Pigeon Reader."
+			statusLabel.text = "Share a website or feed URL with Pigeon."
 			return
 		}
 		PendingFeedStore.save(url)
