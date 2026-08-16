@@ -158,13 +158,28 @@ class LegacySchemaStatement {
 		throw new Error(`Unexpected SQL in all(): ${this.sql}`);
 	}
 
-	async run(): Promise<void> {
+	async run(): Promise<void | { meta: { changes: number } }> {
 		if (maybeHandleSchemaRun(this.sql, this.boundValues, this.state)) {
 			return;
 		}
 
 		if (this.mode === 'scheduled' && this.sql.startsWith('UPDATE feeds SET last_fetched_at')) {
 			this.state.operations.push('cron-update');
+			return;
+		}
+
+		if (this.mode === 'scheduled' && this.sql.includes('SET refresh_lease_until = ?')) {
+			this.state.operations.push('cron-lease');
+			return { meta: { changes: 1 } };
+		}
+
+		if (this.mode === 'scheduled' && this.sql.startsWith('DELETE FROM refresh_activity')) {
+			this.state.operations.push('cron-prune-activity');
+			return;
+		}
+
+		if (this.mode === 'scheduled' && this.sql.startsWith('WITH ranked_items AS')) {
+			this.state.operations.push('cron-prune-content');
 			return;
 		}
 
@@ -223,9 +238,12 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '8');
+	assert.equal(db.state.schemaVersion, '9');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
+	assert.equal(db.state.hasFeedUrlAliasesTable, true);
+	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);
 	assert.ok(operationIndex(db.state, 'create-feed_tags') !== -1);
@@ -247,8 +265,11 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '8');
+	assert.equal(db.state.schemaVersion, '9');
 	assert.equal(db.state.hasEngagementEventsTable, true);
+	assert.equal(db.state.hasFeedUrlAliasesTable, true);
+	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.equal(db.batches.length, 1);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);
@@ -273,8 +294,11 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '8');
+	assert.equal(db.state.schemaVersion, '9');
 	assert.equal(db.state.hasEngagementEventsTable, true);
+	assert.equal(db.state.hasFeedUrlAliasesTable, true);
+	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.equal(db.batches.length, 1);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);

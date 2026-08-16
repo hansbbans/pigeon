@@ -4,7 +4,7 @@ import XCTest
 final class PigeonReaderUITests: XCTestCase {
 	private var app: XCUIApplication!
 
-	override func setUpWithError() throws {
+	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
 		app.launchArguments = [
@@ -83,6 +83,35 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(app.staticTexts["Preparing Reader View"].exists)
 		XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 5))
 		attachScreenshot(named: "reader-view-fallback")
+	}
+
+	func testSyncHealthShowsFeedDiagnosticsAndManualRetry() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+		let back = app.buttons.firstMatch
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+		let settings = app.descendants(matching: .any)["Settings"]
+		XCTAssertTrue(settings.waitForExistence(timeout: 5))
+		settings.tap()
+		let syncHealth = app.buttons["Sync Health"]
+		XCTAssertTrue(syncHealth.waitForExistence(timeout: 5))
+		syncHealth.tap()
+
+		XCTAssertTrue(app.navigationBars["Sync Health"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Design Weekly"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["design.example.com"].exists)
+		XCTAssertTrue(app.staticTexts["HTTP 503"].exists)
+		let retry = app.buttons["Retry Design Weekly now"]
+		XCTAssertTrue(retry.exists)
+		retry.tap()
+		XCTAssertTrue(app.staticTexts["Design Weekly"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "sync-health")
 	}
 
 	private func tapLinkedImage() throws {

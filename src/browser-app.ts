@@ -774,6 +774,39 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         color: var(--muted);
       }
 
+	  .sync-health {
+		display: grid;
+		gap: 0.75rem;
+		margin-top: 1.25rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+	  }
+
+	  .sync-health h3,
+	  .sync-feed strong,
+	  .sync-feed p {
+		margin: 0;
+	  }
+
+	  .sync-feed {
+		display: grid;
+		gap: 0.45rem;
+		padding: 0.75rem;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: var(--frame);
+	  }
+
+	  .sync-feed p {
+		color: var(--muted);
+		font-size: 0.84rem;
+		line-height: 1.45;
+	  }
+
+	  .sync-feed button {
+		justify-self: start;
+	  }
+
       /* Feedbin-inspired density and spacing. Keep these late in the cascade so they tune the existing reader components. */
       #app {
         padding: 1.25rem;
@@ -2511,7 +2544,67 @@ export function renderBrowserAppRuntimeScript(): string {
           : 'None',
       );
 
-      settingsContent.replaceChildren(definitionList);
+      const settingsBody = createNode('div');
+      settingsBody.appendChild(definitionList);
+      if (status.syncHealth) {
+        const syncHealth = createNode('section', {
+          classNames: ['sync-health'],
+          attributes: { 'aria-labelledby': 'sync-health-title' },
+        });
+        syncHealth.appendChild(createNode('h3', {
+          text: 'Sync Health',
+          attributes: { id: 'sync-health-title' },
+        }));
+        syncHealth.appendChild(createNode('p', {
+          text:
+            String(status.syncHealth.healthyCount) + ' healthy · ' +
+            String(status.syncHealth.dueCount) + ' due · ' +
+            String(status.syncHealth.backedOffCount) + ' backing off',
+        }));
+
+        for (const feed of status.syncHealth.feeds || []) {
+          const card = createNode('article', { classNames: ['sync-feed'] });
+          card.appendChild(createNode('strong', { text: feed.title || feed.feedKey }));
+          card.appendChild(createNode('p', {
+            text: [feed.host, String(feed.state || '').replaceAll('_', ' '), feed.lastSuccessAt ? 'Last success ' + feed.lastSuccessAt : 'No successful refresh yet']
+              .filter(Boolean)
+              .join(' · '),
+          }));
+          if (feed.error) {
+            card.appendChild(createNode('p', { text: feed.error }));
+          }
+          if (feed.state === 'failing' || feed.state === 'due') {
+            const retryButton = createNode('button', {
+              classNames: ['secondary-button'],
+              text: feed.canRetry ? 'Retry now' : 'Retry scheduled',
+              attributes: { type: 'button' },
+            });
+            retryButton.disabled = !feed.canRetry;
+            retryButton.addEventListener('click', async () => {
+              retryButton.disabled = true;
+              retryButton.textContent = 'Queuing…';
+              try {
+                const response = await authenticatedFetch('/app/status/retry', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ feed_key: feed.feedKey }),
+                });
+                if (!response.ok) throw new Error('Retry request failed');
+                statusLoaded = false;
+                await loadStatus();
+              } catch (_error) {
+                retryButton.textContent = 'Retry failed';
+                retryButton.disabled = false;
+              }
+            });
+            card.appendChild(retryButton);
+          }
+          syncHealth.appendChild(card);
+        }
+        settingsBody.appendChild(syncHealth);
+      }
+
+      settingsContent.replaceChildren(settingsBody);
     } catch (_error) {
       if (requestId === activeStatusRequestId && session.token === requestToken && session.status === 'authenticated') {
         settingsContent.textContent = 'Could not load status.';

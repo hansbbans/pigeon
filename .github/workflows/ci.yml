@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pigeon-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  worker:
+    name: Worker tests, types, and audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  native:
+    name: iOS tests and clean Release build
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - pigeon-ci
+    timeout-minutes: 45
+    env:
+      APP_DIRECTORY: ios/PigeonReader
+      PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
+      SCHEME: PigeonReader
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify native build tools
+        run: |
+          set -euo pipefail
+          command -v xcodegen
+          command -v xcodebuild
+          xcodebuild -version
+          swift --version
+      - name: Generate Xcode project
+        working-directory: ${{ env.APP_DIRECTORY }}
+        run: xcodegen generate
+      - name: Select simulator
+        id: simulator
+        run: .github/scripts/select-ios-simulator.sh
+      - name: Run unit and UI tests
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+        shell: bash
+        run: |
+          set -o pipefail
+          test_log="$RUNNER_TEMP/pigeon-xcode-test.log"
+          xcodebuild test \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -destination "${{ steps.simulator.outputs.destination }}" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$TEST_RESULT_BUNDLE" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$test_log"
+          .github/scripts/fail-on-first-party-warnings.sh "$test_log"
+      - name: Upload native test result bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Clean Release build
+        env:
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          set -o pipefail
+          build_log="$RUNNER_TEMP/pigeon-xcode-release.log"
+          xcodebuild clean build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "${{ steps.simulator.outputs.destination }}" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$build_log"
+          .github/scripts/fail-on-first-party-warnings.sh "$build_log"

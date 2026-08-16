@@ -116,6 +116,10 @@ final class ReaderAppModel {
 		!serverURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty && !isConnecting
 	}
 
+	var syncHealthService: (any SyncHealthServicing)? {
+		apiClient
+	}
+
 	// These library projections keep the existing feed-management screens working while
 	// navigation is sourced from the newer Reader API snapshot.
 	var folders: [FeedFolder] {

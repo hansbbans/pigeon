@@ -114,6 +114,7 @@ struct ArticleReaderView: View {
 					}
 				}
 			}
+			ReaderSettingsToolbarItem()
 		}
 		.task(id: current.feedKey) {
 			selectedMode = current.safeOriginalURL == nil ? .feedContent : model.readerMode(for: current.feedKey)
@@ -220,7 +221,7 @@ struct ArticleReaderView: View {
 		guard selectedMode == .readerView else {
 			return
 		}
-		guard let originalURL = article.safeOriginalURL else {
+		guard article.safeOriginalURL != nil else {
 			readerViewState = .unavailable
 			return
 		}

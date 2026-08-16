@@ -6,9 +6,10 @@ import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
 import { renderBrowserAppHtml } from './browser-app';
-import { handleStatusRequest } from './status';
+import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
+import { handleFeedDiscovery } from './feed-discovery';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -31,6 +32,12 @@ export default {
 			return handleSubscribe(request, env);
 		}
 
+		if (path === '/feeds/discover' && request.method === 'POST') {
+			const migrationError = await ensureSchemaReady(env);
+			if (migrationError) return migrationError;
+			return handleFeedDiscovery(request, env);
+		}
+
 		if (path === '/feeds') {
 			const migrationError = await ensureSchemaReady(env);
 			if (migrationError) return migrationError;
@@ -45,6 +52,10 @@ export default {
 
 		if (path === '/app/status') {
 			return handleStatusRequest(request, env);
+		}
+
+		if (path === '/app/status/retry' && request.method === 'POST') {
+			return handleStatusRetryRequest(request, env);
 		}
 
 		if (path === '/api/v1/recommendations' || path === '/api/v1/engagement') {

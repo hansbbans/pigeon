@@ -66,6 +66,20 @@ const RELATIVE_LINK_FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
     </item>
   </channel>
 </rss>`;
+const RELATIVE_MEDIA_FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>Relative Media Feed</title>
+    <link>https://example.com/articles/</link>
+    <item>
+      <guid>media-1</guid>
+      <title>Media item</title>
+      <description><![CDATA[<p>Article body</p>]]></description>
+      <media:content url="../images/hero.jpg" type="image/jpeg" title="Hero image" />
+      <enclosure url="../audio/episode.mp3" type="audio/mpeg" />
+    </item>
+  </channel>
+</rss>`;
 
 const originalFetch = globalThis.fetch;
 
@@ -150,14 +164,26 @@ function migrationFeedColumns(): Array<{ name: string }> {
 }
 
 function migrationItemColumns(): Array<{ name: string }> {
-	return [{ name: 'original_url' }];
+	return [{ name: 'original_url' }, { name: 'content_pruned_at' }];
 }
 
 function isMigrationSql(sql: string): boolean {
 	return (
 		sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
 		sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+		sql.startsWith('ALTER TABLE feeds ADD COLUMN ') ||
+		sql.startsWith('ALTER TABLE items ADD COLUMN ') ||
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due') ||
+		sql.startsWith('CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS feed_url_aliases') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_refresh_activity_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS item_statuses') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
+		sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
+		sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
 		sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 		sql.includes('CREATE TABLE IF NOT EXISTS engagement_events') ||
@@ -185,7 +211,13 @@ class FeedStoreStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {
-			const feed = this.store.feeds.get(this.boundValues[0] as string);
+			const [feedKey, canonicalUrl, sourceUrl] = this.boundValues as string[];
+			const feed =
+				this.store.feeds.get(feedKey) ??
+				[...this.store.feeds.values()].find(
+					(candidate) =>
+						candidate.canonical_url === canonicalUrl || candidate.source_url === sourceUrl,
+				);
 			if (!feed) {
 				return null;
 			}
@@ -204,6 +236,17 @@ class FeedStoreStatement {
 			}
 
 			return { rowid: feed.rowid } as T;
+		}
+
+		if (this.sql.includes('FROM feed_url_aliases a')) {
+			const feedKey = this.store.aliases.get(this.boundValues[0] as string);
+			const feed = feedKey ? this.store.feeds.get(feedKey) : undefined;
+			if (!feed) return null;
+			return {
+				rowid: feed.rowid,
+				feed_key: feed.feed_key,
+				display_name: feed.display_name,
+			} as T;
 		}
 
 		throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -227,12 +270,23 @@ class FeedStoreStatement {
 		}
 
 		if (this.sql.startsWith('INSERT INTO feeds')) {
-			const [feedKey, displayName, sourceUrl, siteUrl, category, iconUrl] = this.boundValues;
+			const [
+				feedKey,
+				displayName,
+				sourceUrl,
+				canonicalUrl,
+				feedFormat,
+				siteUrl,
+				category,
+				iconUrl,
+			] = this.boundValues;
 			this.store.feeds.set(feedKey as string, {
 				rowid: this.store.nextRowId++,
 				feed_key: feedKey as string,
 				display_name: displayName as string,
 				source_url: sourceUrl as string,
+				canonical_url: canonicalUrl as string,
+				feed_format: feedFormat as string,
 				site_url: (siteUrl as string | null) ?? null,
 				category: (category as string | null) ?? null,
 				icon_url: iconUrl as string,
@@ -241,16 +295,24 @@ class FeedStoreStatement {
 			return;
 		}
 
-		if (
-			this.sql.includes('SET display_name = ?, source_url = ?, site_url = COALESCE(?, site_url), is_active = 1')
-		) {
-			const [displayName, sourceUrl, siteUrl, feedKey] = this.boundValues;
+		if (this.sql.includes('SET display_name = ?, source_url = ?, canonical_url = ?')) {
+			const [displayName, sourceUrl, canonicalUrl, feedFormat, siteUrl, , feedKey] = this.boundValues;
 			const feed = this.store.feeds.get(feedKey as string);
 			if (feed) {
 				feed.display_name = displayName as string;
 				feed.source_url = sourceUrl as string;
+				feed.canonical_url = canonicalUrl as string;
+				feed.feed_format = feedFormat as string;
 				feed.site_url = (siteUrl as string | null) ?? feed.site_url;
 				feed.is_active = 1;
+			}
+			return;
+		}
+
+		if (this.sql.startsWith('INSERT OR IGNORE INTO feed_url_aliases')) {
+			const [aliasUrl, feedKey] = this.boundValues;
+			if (!this.store.aliases.has(aliasUrl as string)) {
+				this.store.aliases.set(aliasUrl as string, feedKey as string);
 			}
 			return;
 		}
@@ -264,6 +326,8 @@ interface StoredFeed {
 	feed_key: string;
 	display_name: string;
 	source_url: string;
+	canonical_url: string;
+	feed_format: string;
 	site_url: string | null;
 	category: string | null;
 	icon_url: string;
@@ -272,10 +336,15 @@ interface StoredFeed {
 
 class SubscriptionStore {
 	readonly feeds = new Map<string, StoredFeed>();
+	readonly aliases = new Map<string, string>();
 	nextRowId = 1;
 
 	prepare(sql: string): FeedStoreStatement {
 		return new FeedStoreStatement(sql, this);
+	}
+
+	async batch(statements: FeedStoreStatement[]): Promise<void> {
+		for (const statement of statements) await statement.run();
 	}
 }
 
@@ -403,6 +472,29 @@ test('fetchAndStoreRssFeed resolves relative RSS item and content links against 
 	assert.equal(insert.values[insert.values.length - 1], 'https://example.com/blog/posts/relative-item');
 	assert.match(insert.values[6] as string, /href="https:\/\/example\.com\/blog\/about"/);
 	assert.match(insert.values[6] as string, /src="https:\/\/example\.com\/blog\/images\/hero\.jpg"/);
+});
+
+test('fetchAndStoreRssFeed preserves relative media and enclosure links in article content', async () => {
+	installFeedFetch(RELATIVE_MEDIA_FEED_XML);
+	const db = new RecordingDb();
+	const env = {
+		DB: db,
+		BASE_URL: 'https://pigeon.example',
+		ITEMS_PER_FEED: '25',
+		API_PASSWORD: 'secret-password',
+	};
+
+	await fetchAndStoreRssFeed(env as never, {
+		feed_key: 'relative-media-feed',
+		source_url: 'https://example.com/feed.xml',
+		etag: null,
+		last_modified: null,
+	});
+
+	const insert = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
+	assert.ok(insert);
+	assert.match(insert.values[6] as string, /src="https:\/\/example\.com\/images\/hero\.jpg"/);
+	assert.match(insert.values[6] as string, /href="https:\/\/example\.com\/audio\/episode\.mp3"/);
 });
 
 test('unwrapFeedBlitzUrl tolerates malformed numeric HTML entities', () => {

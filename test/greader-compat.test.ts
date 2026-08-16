@@ -130,7 +130,19 @@ function isMigrationSql(sql: string): boolean {
 	return (
 		sql.startsWith('CREATE TABLE IF NOT EXISTS _meta') ||
 		sql.startsWith('INSERT OR IGNORE INTO _meta') ||
+		sql.startsWith('ALTER TABLE feeds ADD COLUMN ') ||
+		sql.startsWith('ALTER TABLE items ADD COLUMN ') ||
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due') ||
+		sql.startsWith('CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS feed_url_aliases') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_refresh_activity_') ||
+		sql.startsWith('CREATE TABLE IF NOT EXISTS item_statuses') ||
+		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
+		sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
+		sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
 		sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 		sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 		sql.includes('CREATE TABLE IF NOT EXISTS engagement_events') ||

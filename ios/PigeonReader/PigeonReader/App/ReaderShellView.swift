@@ -18,14 +18,6 @@ struct ReaderShellView: View {
 			}
 		}
 		.navigationSplitViewStyle(.balanced)
-		.toolbar {
-			ToolbarItem(placement: .topBarTrailing) {
-				Button("Settings", systemImage: "gearshape") {
-					model.isShowingSettings = true
-				}
-				.keyboardShortcut(",", modifiers: .command)
-			}
-		}
 		.sheet(isPresented: $model.isShowingSettings) {
 			SettingsView()
 		}

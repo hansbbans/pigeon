@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v8
+-- D1 Schema v9
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '9');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -27,8 +27,36 @@ CREATE TABLE IF NOT EXISTS feeds (
   is_active INTEGER DEFAULT 1,
   custom_title TEXT,
   category TEXT,
-  icon_url TEXT
+  icon_url TEXT,
+  canonical_url TEXT,
+  feed_format TEXT,
+  next_fetch_at TEXT,
+  last_attempt_at TEXT,
+  last_success_at TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_http_status INTEGER,
+  retry_after_at TEXT,
+  content_hash TEXT,
+  conditional_checked_at TEXT,
+  refresh_lease_until TEXT,
+  refresh_lease_token TEXT,
+  last_refresh_outcome TEXT,
+  last_fetch_duration_ms INTEGER
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feeds_canonical_url
+  ON feeds(canonical_url)
+  WHERE canonical_url IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS feed_url_aliases (
+  alias_url TEXT PRIMARY KEY,
+  feed_key TEXT NOT NULL,
+  canonical_url TEXT NOT NULL,
+  discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (feed_key) REFERENCES feeds(feed_key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_feed_url_aliases_feed ON feed_url_aliases(feed_key);
 
 CREATE TABLE IF NOT EXISTS feed_tags (
   feed_key TEXT NOT NULL,
@@ -54,6 +82,7 @@ CREATE TABLE IF NOT EXISTS items (
   received_at TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   content_size INTEGER,
+  content_pruned_at TEXT,
   is_read INTEGER DEFAULT 0,
   is_starred INTEGER DEFAULT 0,
   FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
@@ -66,6 +95,73 @@ CREATE INDEX IF NOT EXISTS idx_items_unread ON items(is_read, feed_key);
 CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch
   ON feeds(source_type, last_fetched_at)
   WHERE source_type = 'rss' AND is_active = 1;
+CREATE INDEX IF NOT EXISTS idx_feeds_refresh_due
+  ON feeds(next_fetch_at, last_attempt_at)
+  WHERE source_type = 'rss' AND is_active = 1;
+
+CREATE TABLE IF NOT EXISTS item_statuses (
+  account_id TEXT NOT NULL DEFAULT 'default',
+  item_id TEXT NOT NULL,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  is_starred INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  version INTEGER NOT NULL DEFAULT 1,
+  mutation_id TEXT,
+  PRIMARY KEY (account_id, item_id),
+  FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE,
+  CHECK (is_read IN (0, 1)),
+  CHECK (is_starred IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_statuses_sync
+  ON item_statuses(account_id, version, item_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_items_insert_status
+AFTER INSERT ON items
+WHEN NEW.id IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
+  VALUES ('default', NEW.id, COALESCE(NEW.is_read, 0), COALESCE(NEW.is_starred, 0), datetime('now'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_items_update_status
+AFTER UPDATE OF is_read, is_starred ON items
+WHEN COALESCE(OLD.is_read, 0) <> COALESCE(NEW.is_read, 0)
+  OR COALESCE(OLD.is_starred, 0) <> COALESCE(NEW.is_starred, 0)
+BEGIN
+  INSERT INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at, version)
+  VALUES ('default', NEW.id, COALESCE(NEW.is_read, 0), COALESCE(NEW.is_starred, 0), datetime('now'), 1)
+  ON CONFLICT(account_id, item_id) DO UPDATE SET
+    is_read = excluded.is_read,
+    is_starred = excluded.is_starred,
+    updated_at = excluded.updated_at,
+    version = item_statuses.version + 1;
+END;
+
+CREATE TABLE IF NOT EXISTS refresh_activity (
+  id TEXT PRIMARY KEY,
+  feed_key TEXT NOT NULL,
+  attempted_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  http_status INTEGER,
+  duration_ms INTEGER NOT NULL,
+  items_added INTEGER NOT NULL DEFAULT 0,
+  response_bytes INTEGER,
+  error_code TEXT,
+  error_message TEXT,
+  retry_at TEXT,
+  FOREIGN KEY (feed_key) REFERENCES feeds(feed_key) ON DELETE CASCADE,
+  CHECK (outcome IN (
+    'success', 'not_modified', 'unchanged', 'rate_limited', 'http_error',
+    'parse_error', 'network_error', 'rejected', 'lease_lost'
+  ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed
+  ON refresh_activity(feed_key, attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_refresh_activity_attempted
+  ON refresh_activity(attempted_at DESC);
 
 -- Custom parsing rules (Phase 4)
 CREATE TABLE IF NOT EXISTS parsing_rules (

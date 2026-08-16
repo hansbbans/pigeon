@@ -19,6 +19,19 @@ struct SettingsView: View {
 						.foregroundStyle(.secondary)
 				}
 
+				if let syncHealthService = model.syncHealthService {
+					Section("Sync") {
+						NavigationLink {
+							SyncHealthView(service: syncHealthService)
+						} label: {
+							Label("Sync Health", systemImage: "heart.text.square")
+						}
+						Text("See which feeds are healthy, delayed, or failing, and retry recoverable failures.")
+							.font(.footnote)
+							.foregroundStyle(.secondary)
+					}
+				}
+
 				Section("Reading") {
 					LabeledContent("Text size") {
 						Text(typography.textScale, format: .percent.precision(.fractionLength(0)))
