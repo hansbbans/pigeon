@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WebKit
 @testable import PigeonReader
 
 struct StructuredHTMLSanitizerTests {
@@ -117,6 +118,58 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("max-width: 100% !important"))
 	}
 
+	@Test
+	func renderingShellDoesNotStyleNewsletterLayoutCellsAsDataCells() {
+		let shell = StructuredHTMLJavaScript.renderingShell
+
+		#expect(shell.contains("th, td { border: 1px") == false)
+		#expect(shell.contains("pigeon-layout-table"))
+		#expect(shell.contains("pigeon-data-table"))
+	}
+
+	@MainActor
+	@Test
+	func renderingShellSeparatesNewsletterLayoutTablesFromDataTables() async throws {
+		let webView = WKWebView()
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		let result = try await webView.evaluateJavaScript("""
+			JSON.stringify((() => {
+				const host = document.createElement("div");
+				host.innerHTML = `
+					<table id="layout"><tr><td><table><tr><td>Newsletter copy</td></tr></table></td></tr></table>
+					<table id="data"><caption>Totals</caption><tr><th>Week</th><td>42</td></tr></table>
+				`;
+				document.getElementById("pigeon-content").replaceChildren(host);
+				__pigeonPrepareTables(host);
+				const layout = document.getElementById("layout");
+				const data = document.getElementById("data");
+				const layoutCell = layout.rows[0].cells[0];
+				const dataCell = data.rows[0].cells[0];
+				return {
+					layoutClass: layout.className,
+					dataClass: data.className,
+					layoutParentClass: layout.parentElement.className,
+					dataParentClass: data.parentElement.className,
+					layoutBorderWidth: getComputedStyle(layoutCell).borderTopWidth,
+					dataBorderWidth: getComputedStyle(dataCell).borderTopWidth,
+				};
+			})())
+			""")
+		let json = try #require(result as? String)
+		let data = try #require(json.data(using: .utf8))
+		let values = try #require(JSONSerialization.jsonObject(with: data) as? [String: String])
+
+		#expect(values["layoutClass"] == "pigeon-layout-table")
+		#expect(values["dataClass"] == "pigeon-data-table")
+		#expect(values["layoutParentClass"] != "table-scroll")
+		#expect(values["dataParentClass"] == "table-scroll")
+		#expect(values["layoutBorderWidth"] == "0px")
+		#expect(values["dataBorderWidth"] == "1px")
+	}
+
 	@Test func renderingShellSupportsExplicitThemesBlockedImagesAndTheAuthenticatedProxyScheme() {
 		let shell = StructuredHTMLJavaScript.renderingShell
 
@@ -129,5 +182,32 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("Load this remote image"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
 		#expect(shell.contains("pigeon-image://proxy?url="))
+	}
+}
+
+@MainActor
+private final class StructuredHTMLNavigationWaiter: NSObject, WKNavigationDelegate {
+	private var continuation: CheckedContinuation<Void, any Error>?
+
+	func load(_ html: String, in webView: WKWebView) async throws {
+		try await withCheckedThrowingContinuation { continuation in
+			self.continuation = continuation
+			webView.loadHTMLString(html, baseURL: nil)
+		}
+	}
+
+	func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+		continuation?.resume()
+		continuation = nil
+	}
+
+	func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+		continuation?.resume(throwing: error)
+		continuation = nil
+	}
+
+	func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+		continuation?.resume(throwing: error)
+		continuation = nil
 	}
 }
