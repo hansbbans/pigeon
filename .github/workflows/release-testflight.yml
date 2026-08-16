@@ -115,7 +115,7 @@ jobs:
         id: simulator
         run: .github/scripts/select-ios-simulator.sh
 
-      - name: Run Pigeon Reader tests
+      - name: Run Pigeon tests
         run: |
           set -o pipefail
           xcodebuild test \

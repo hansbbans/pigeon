@@ -17,7 +17,7 @@ struct SettingsView: View {
 			Form {
 				Section("Connection") {
 					LabeledContent("Server", value: model.session?.baseURL.absoluteString ?? "Not connected")
-					Text("Your password is never stored here. Pigeon Reader keeps only the ClientLogin token in Keychain.")
+					Text("Your password is never stored here. Pigeon keeps only the ClientLogin token in Keychain.")
 						.font(.footnote)
 						.foregroundStyle(.secondary)
 				}

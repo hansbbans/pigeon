@@ -1,6 +1,6 @@
-# Pigeon Reader
+# Pigeon
 
-Pigeon Reader is a focused native iPhone/iPad client for the existing Pigeon Worker. It uses the same Google Reader-compatible ClientLogin and edit-tag APIs as Reeder Classic and NetNewsWire, then adds a small authenticated API for recommendations and richer reading signals.
+Pigeon is a focused native iPhone/iPad client for the existing Pigeon Worker. It uses the same Google Reader-compatible ClientLogin and edit-tag APIs as Reeder Classic and NetNewsWire, then adds a small authenticated API for recommendations and richer reading signals.
 
 The sidebar includes For You, Unread, Starred, synchronized folders, and individual feeds. Use the add button to subscribe by URL. A feed's context menu supports renaming, moving to an existing or new folder, and unsubscribing; a folder's context menu supports renaming and deletion. These operations use Pigeon's existing Google Reader-compatible subscription endpoints, so the library remains shared with other reader apps. Because Google Reader labels do not retain empty folders, a new folder is created when its first feed is assigned.
 

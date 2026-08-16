@@ -50,6 +50,8 @@ jobs:
       - name: Generate Xcode project
         working-directory: ${{ env.APP_DIRECTORY }}
         run: xcodegen generate
+      - name: Verify product display names
+        run: bash .github/scripts/verify-product-display-names.sh
       - name: Verify signing profile mapping
         run: bash .github/scripts/verify-provisioning-profile-mapping.sh
       - name: Select simulator

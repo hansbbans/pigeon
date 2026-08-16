@@ -8,7 +8,7 @@ Each run checks out trusted `main`, runs the Worker tests and TypeScript check, 
 
 Create or confirm these Apple resources before the first run:
 
-- App Store Connect app: `Pigeon Reader`
+- App Store Connect app (current external record): `Pigeon Reader` — the app now displays as `Pigeon`; rename the App Store Connect record separately when authorized.
 - Explicit App ID: `com.hans.pigeon.reader`
 - Embedded WidgetKit App ID: `com.hans.pigeon.reader.widgets`
 - Embedded Share Extension App ID: `com.hans.pigeon.reader.share`
