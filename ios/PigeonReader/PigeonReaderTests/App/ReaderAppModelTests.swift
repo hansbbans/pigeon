@@ -214,6 +214,38 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .detail)
 	}
 
+	@Test func failedNavigationRefreshStillShowsConnectedFeedNavigationWhenForYouLoads() async throws {
+		let subscriptions = [makeSubscription(id: "feed/7", key: "alpha", title: "Alpha", folder: "Newsletters")]
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData(subscriptions),
+			recommendationsData: try responseData(items: (0..<30).map { makeArticle(id: "recommendation-\($0)") }),
+		)
+		let model = try makeModel(httpClient: client)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.articles(for: .forYou).count == 30)
+		#expect(model.subscriptions == subscriptions)
+		#expect(model.folderNavigationItems.map(\.title) == ["Newsletters"])
+		if let folder = model.folderNavigationItems.first {
+			#expect(model.feedNavigationItems(in: folder).map(\.title) == ["Alpha"])
+		}
+	}
+
+	@Test func emptyAccountKeepsSmartNavigationWhenForYouLoads() async throws {
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData([]),
+			recommendationsData: try responseData(items: (0..<30).map { makeArticle(id: "recommendation-\($0)") }),
+		)
+		let model = try makeModel(httpClient: client)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.articles(for: .forYou).count == 30)
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.uncategorizedFeedNavigationItems.isEmpty)
+	}
+
 	@Test func cancelledReadMutationDoesNotSetErrorMessage() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -1130,5 +1162,51 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 			return htmlDocument
 		}
 		throw ReaderViewError.extractionFailed
+	}
+}
+
+private actor StartupHTTPClient: HTTPClient {
+	private let subscriptionsData: Data
+	private let recommendationsData: Data
+	private var subscriptionRequestCount = 0
+
+	init(subscriptionsData: Data, recommendationsData: Data) {
+		self.subscriptionsData = subscriptionsData
+		self.recommendationsData = recommendationsData
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+
+		let data: Data
+		let statusCode: Int
+		switch url.path {
+		case "/api/v1/sync":
+			data = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
+			statusCode = 200
+		case "/reader/api/0/subscription/list":
+			subscriptionRequestCount += 1
+			data = subscriptionsData
+			statusCode = subscriptionRequestCount == 1 ? 503 : 200
+		case "/reader/api/0/unread-count":
+			data = Data(#"{"unreadcounts":[]}"#.utf8)
+			statusCode = 200
+		case "/reader/api/0/stream/items/ids":
+			data = Data(#"{"itemRefs":[]}"#.utf8)
+			statusCode = 200
+		case "/api/v1/recommendations":
+			data = recommendationsData
+			statusCode = 200
+		default:
+			data = Data("not found".utf8)
+			statusCode = 404
+		}
+
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
 	}
 }

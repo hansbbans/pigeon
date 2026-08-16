@@ -892,6 +892,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
+			restoreNavigationFromSubscriptionsIfNeeded()
 			try await offlineStore.saveSubscriptions(loaded, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
@@ -901,6 +902,40 @@ final class ReaderAppModel {
 			}
 			errorMessage = error.localizedDescription
 		}
+	}
+
+	private func restoreNavigationFromSubscriptionsIfNeeded() {
+		guard subscriptions.isEmpty == false,
+			navigation.folderItems.isEmpty,
+			navigation.uncategorizedFeedItems.isEmpty else {
+			return
+		}
+
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map { category in
+					ReaderSubscriptionCategory(id: category.id, label: category.label)
+				},
+				url: subscription.url.absoluteString,
+				iconURL: subscription.iconUrl,
+			)
+		}
+		let smartCounts = ReaderNavigationSmartCounts(
+			forYou: navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount ?? 0,
+			today: navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0,
+			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
+			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
+		)
+		setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: readerSubscriptions,
+				unreadCounts: [],
+				smartCounts: smartCounts,
+			),
+			markAsLoaded: true,
+		)
 	}
 
 	func setSubscriptions(_ newSubscriptions: [FeedSubscription]) {
@@ -1646,6 +1681,7 @@ final class ReaderAppModel {
 			hasLoadedNavigation = true
 		}
 		subscriptions = sortedSubscriptions(snapshot.subscriptions)
+		restoreNavigationFromSubscriptionsIfNeeded()
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
