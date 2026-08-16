@@ -64,6 +64,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader
+        PROVISIONING_PROFILE_SPECIFIER: "$(PIGEON_READER_PROFILE_NAME)"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: PigeonReader/Resources/PigeonReader.entitlements
@@ -88,6 +89,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.widgets
+        PROVISIONING_PROFILE_SPECIFIER: "$(PIGEON_WIDGETS_PROFILE_NAME)"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: PigeonWidgets/PigeonWidgets.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
@@ -114,6 +116,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.share
+        PROVISIONING_PROFILE_SPECIFIER: "$(PIGEON_SHARE_PROFILE_NAME)"
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: PigeonShareExtension/PigeonShareExtension.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
