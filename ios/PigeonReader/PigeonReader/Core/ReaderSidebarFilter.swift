@@ -1,6 +1,6 @@
 import Foundation
 
-enum ReaderSidebarFilter: String, CaseIterable, Hashable, Identifiable, Sendable {
+nonisolated enum ReaderSidebarFilter: String, CaseIterable, Hashable, Identifiable, Sendable {
 	case all
 	case unread
 

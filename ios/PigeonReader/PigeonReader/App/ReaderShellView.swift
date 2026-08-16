@@ -22,9 +22,23 @@ struct ReaderShellView: View {
 			SettingsView()
 		}
 		.safeAreaInset(edge: .top) {
-			if let errorMessage = model.errorMessage {
-				ReaderErrorBanner(message: errorMessage, dismiss: model.clearError)
+			VStack(spacing: 0) {
+				if model.isOffline {
+					Label("Offline — showing your saved library", systemImage: "wifi.slash")
+						.font(.footnote.weight(.medium))
+						.foregroundStyle(.secondary)
+						.frame(maxWidth: .infinity)
+						.padding(.vertical, 7)
+						.background(.bar)
+						.accessibilityIdentifier("offline-library-banner")
+				}
+				if let errorMessage = model.errorMessage {
+					ReaderErrorBanner(message: errorMessage, dismiss: model.clearError)
+				}
 			}
+		}
+		.task(id: model.session?.storageIdentity) {
+			await model.prepareOfflineLibrary()
 		}
 	}
 }

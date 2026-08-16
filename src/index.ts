@@ -58,7 +58,12 @@ export default {
 			return handleStatusRetryRequest(request, env);
 		}
 
-		if (path === '/api/v1/recommendations' || path === '/api/v1/engagement') {
+		if (
+			path === '/api/v1/recommendations' ||
+			path === '/api/v1/engagement' ||
+			path === '/api/v1/sync' ||
+			path === '/api/v1/mutations'
+		) {
 			return handleNativeApiRequest(request, env);
 		}
 

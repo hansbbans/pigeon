@@ -211,6 +211,12 @@ class FakePreparedStatement {
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_item_statuses_') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO item_statuses') ||
 			this.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS sync_changes') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_') ||
+			this.sql.startsWith('CREATE TABLE IF NOT EXISTS mutation_receipts') ||
+			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_') ||
+			this.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_sync_') ||
+			this.sql.startsWith('INSERT INTO sync_changes') ||
 			this.sql.startsWith('CREATE TABLE IF NOT EXISTS feed_tags') ||
 			this.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_feed_tags_label') ||
 			this.sql.startsWith('INSERT OR IGNORE INTO feed_tags') ||

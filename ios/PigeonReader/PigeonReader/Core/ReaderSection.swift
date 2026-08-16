@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-enum ReaderSection: String, CaseIterable, Hashable, Identifiable, Sendable {
+nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
 	case forYou
 	case unread
 	case starred

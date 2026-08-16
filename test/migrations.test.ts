@@ -238,12 +238,14 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '9');
+	assert.equal(db.state.schemaVersion, '10');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
+	assert.equal(db.state.hasSyncChangesTable, true);
+	assert.equal(db.state.hasMutationReceiptsTable, true);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);
 	assert.ok(operationIndex(db.state, 'create-feed_tags') !== -1);
@@ -265,11 +267,13 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '9');
+	assert.equal(db.state.schemaVersion, '10');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
+	assert.equal(db.state.hasSyncChangesTable, true);
+	assert.equal(db.state.hasMutationReceiptsTable, true);
 	assert.equal(db.batches.length, 1);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);
@@ -294,11 +298,13 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '9');
+	assert.equal(db.state.schemaVersion, '10');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
+	assert.equal(db.state.hasSyncChangesTable, true);
+	assert.equal(db.state.hasMutationReceiptsTable, true);
 	assert.equal(db.batches.length, 1);
 	assert.ok(operationIndex(db.state, 'add-site_url') !== -1);
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);

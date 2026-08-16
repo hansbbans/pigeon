@@ -81,6 +81,31 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
+	func incrementalSync(cursor: String?, limit: Int = 200) async throws -> IncrementalSyncPage {
+		var components = try endpointComponents(path: "api/v1/sync")
+		var queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200)))]
+		if let cursor, cursor.isEmpty == false {
+			queryItems.append(URLQueryItem(name: "cursor", value: cursor))
+		}
+		components.queryItems = queryItems
+		let (data, _) = try await requestJSON(components: components)
+		return try decoder.decode(IncrementalSyncPage.self, from: data)
+	}
+
+	func sendMutations(_ mutations: [OfflineMutation]) async throws -> OfflineMutationBatchResponse {
+		guard mutations.isEmpty == false else {
+			return OfflineMutationBatchResponse(results: [])
+		}
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/mutations"))
+		request.httpMethod = "POST"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.setValue("pigeon-reader/1", forHTTPHeaderField: "X-Pigeon-Client")
+		request.httpBody = try JSONEncoder().encode(OfflineMutationEnvelope(mutations: Array(mutations.prefix(100))))
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		return try decoder.decode(OfflineMutationBatchResponse.self, from: data)
+	}
+
 	func navigationSnapshot(
 		now: Date = .now,
 		dayBounds: ReaderLocalDayBounds? = nil,

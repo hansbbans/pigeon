@@ -1,10 +1,10 @@
 import Foundation
 
-struct ReaderSubscriptionListResponse: Decodable, Sendable {
+nonisolated struct ReaderSubscriptionListResponse: Decodable, Sendable {
 	let subscriptions: [ReaderSubscription]
 }
 
-struct ReaderSubscription: Decodable, Sendable {
+nonisolated struct ReaderSubscription: Decodable, Sendable {
 	let id: String
 	let title: String
 	let categories: [ReaderSubscriptionCategory]
@@ -43,12 +43,12 @@ struct ReaderSubscription: Decodable, Sendable {
 	}
 }
 
-struct ReaderSubscriptionCategory: Decodable, Sendable, Hashable {
+nonisolated struct ReaderSubscriptionCategory: Decodable, Sendable, Hashable {
 	let id: String
 	let label: String?
 }
 
-struct ReaderUnreadCountResponse: Decodable, Sendable {
+nonisolated struct ReaderUnreadCountResponse: Decodable, Sendable {
 	let unreadCounts: [ReaderUnreadCount]
 
 	private enum CodingKeys: String, CodingKey {
@@ -56,27 +56,27 @@ struct ReaderUnreadCountResponse: Decodable, Sendable {
 	}
 }
 
-struct ReaderUnreadCount: Decodable, Sendable, Hashable {
+nonisolated struct ReaderUnreadCount: Decodable, Sendable, Hashable {
 	let id: String
 	let count: Int
 }
 
-struct ReaderStreamContentsResponse: Decodable, Sendable {
+nonisolated struct ReaderStreamContentsResponse: Decodable, Sendable {
 	let id: String
 	let items: [ReaderStreamItem]
 	let continuation: String?
 }
 
-struct ReaderStreamItemIDsResponse: Decodable, Sendable {
+nonisolated struct ReaderStreamItemIDsResponse: Decodable, Sendable {
 	let itemRefs: [ReaderStreamItemReference]
 	let continuation: String?
 }
 
-struct ReaderStreamItemReference: Decodable, Sendable {
+nonisolated struct ReaderStreamItemReference: Decodable, Sendable {
 	let id: String
 }
 
-struct ReaderStreamItem: Decodable, Sendable, Hashable {
+nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let id: String
 	let categories: [String]
 	let title: String
@@ -118,15 +118,15 @@ struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	}
 }
 
-struct ReaderStreamContent: Decodable, Sendable, Hashable {
+nonisolated struct ReaderStreamContent: Decodable, Sendable, Hashable {
 	let content: String
 }
 
-struct ReaderAlternateLink: Decodable, Sendable, Hashable {
+nonisolated struct ReaderAlternateLink: Decodable, Sendable, Hashable {
 	let href: String
 }
 
-struct ReaderStreamOrigin: Decodable, Sendable, Hashable {
+nonisolated struct ReaderStreamOrigin: Decodable, Sendable, Hashable {
 	let streamID: String
 	let title: String
 	let htmlURL: String?
@@ -138,14 +138,14 @@ struct ReaderStreamOrigin: Decodable, Sendable, Hashable {
 	}
 }
 
-struct ReaderNavigationSmartCounts: Equatable, Sendable {
+nonisolated struct ReaderNavigationSmartCounts: Equatable, Sendable {
 	let forYou: Int
 	let today: Int
 	let unread: Int
 	let starred: Int
 }
 
-struct ReaderNavigationSnapshot: Sendable {
+nonisolated struct ReaderNavigationSnapshot: Sendable {
 	let subscriptions: [ReaderSubscription]
 	let unreadCounts: [ReaderUnreadCount]
 	let starredUnreadCount: Int?

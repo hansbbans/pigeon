@@ -1,6 +1,6 @@
 import Foundation
 
-enum ReaderNavigationCatalog {
+nonisolated enum ReaderNavigationCatalog {
 	static func make(
 		subscriptions: [ReaderSubscription],
 		unreadCounts: [ReaderUnreadCount],

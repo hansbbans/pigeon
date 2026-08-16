@@ -11,7 +11,9 @@ enum PreviewData {
 		let model = ReaderAppModel(
 			sessionStore: PreviewSessionStore(session: session),
 			httpClient: PreviewHTTPClient(),
-			readwiseTokenStore: PreviewReadwiseTokenStore()
+			readwiseTokenStore: PreviewReadwiseTokenStore(),
+			offlineStore: OfflineLibraryStore.inMemory(),
+			offlineSynchronizationEnabled: false,
 		)
 		model.setArticles(articles, for: .forYou)
 		model.setArticles(articles.filter { $0.isRead == false }, for: .unread)

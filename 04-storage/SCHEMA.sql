@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v9
+-- D1 Schema v10
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '9');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '10');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -162,6 +162,91 @@ CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed
   ON refresh_activity(feed_key, attempted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_refresh_activity_attempted
   ON refresh_activity(attempted_at DESC);
+
+-- Ordered change log for bounded, cursor-based native synchronization.
+CREATE TABLE IF NOT EXISTS sync_changes (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  operation TEXT NOT NULL DEFAULT 'upsert',
+  changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (entity_type IN ('feed', 'article', 'status')),
+  CHECK (operation IN ('upsert', 'delete'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_changes_sequence ON sync_changes(sequence);
+
+CREATE TABLE IF NOT EXISTS mutation_receipts (
+  account_id TEXT NOT NULL DEFAULT 'default',
+  mutation_id TEXT NOT NULL,
+  mutation_kind TEXT NOT NULL,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+  result_json TEXT NOT NULL,
+  PRIMARY KEY (account_id, mutation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mutation_receipts_applied
+  ON mutation_receipts(account_id, applied_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_feed_insert
+AFTER INSERT ON feeds
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_feed_update
+AFTER UPDATE OF display_name, custom_title, source_url, site_url, icon_url, is_active ON feeds
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_feed_delete
+AFTER DELETE ON feeds
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('feed', OLD.feed_key, 'delete');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_feed_tag_insert
+AFTER INSERT ON feed_tags
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', NEW.feed_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_feed_tag_delete
+AFTER DELETE ON feed_tags
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('feed', OLD.feed_key);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_article_insert
+AFTER INSERT ON items
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_article_update
+AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at ON items
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_article_delete
+AFTER DELETE ON items
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('article', OLD.id, 'delete');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_status_insert
+AFTER INSERT ON item_statuses
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_sync_status_update
+AFTER UPDATE OF is_read, is_starred, version, mutation_id ON item_statuses
+BEGIN
+  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
+END;
 
 -- Custom parsing rules (Phase 4)
 CREATE TABLE IF NOT EXISTS parsing_rules (

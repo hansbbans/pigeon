@@ -9,6 +9,8 @@ struct ArticleReaderView: View {
 	@State private var selectedMode = ReaderMode.feedContent
 	@State private var readerDocument: ReaderViewDocument?
 	@State private var readerViewState = ReaderViewLoadState.idle
+	@State private var scrollPosition = ScrollPosition()
+	@State private var pendingRestoredDepth: Double?
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -56,12 +58,20 @@ struct ArticleReaderView: View {
 						.frame(maxWidth: .infinity, alignment: .center)
 						.clipped()
 					}
+					.scrollPosition($scrollPosition)
 					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-					.onScrollGeometryChange(for: CGFloat.self) { geometry in
+					.onScrollGeometryChange(for: ArticleScrollGeometry.self) { geometry in
 						let maximumOffset = max(geometry.contentSize.height - geometry.containerSize.height, 1)
-						return min(max(geometry.contentOffset.y / maximumOffset, 0), 1)
-					} action: { _, depth in
+						return ArticleScrollGeometry(offset: geometry.contentOffset.y, maximumOffset: maximumOffset)
+					} action: { _, geometry in
+						if let pendingRestoredDepth, geometry.maximumOffset > 1 {
+							scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+							self.pendingRestoredDepth = nil
+							return
+						}
+						let depth = min(max(geometry.offset / geometry.maximumOffset, 0), 1)
 						model.recordScrollDepth(itemId: current.id, depth: depth)
+						model.setArticleScrollOffset(depth, for: current.id)
 					}
 				}
 				.background(.background)
@@ -125,6 +135,7 @@ struct ArticleReaderView: View {
 			await loadReaderViewIfNeeded(for: current)
 		}
 		.task(id: current.id) {
+			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
@@ -284,4 +295,9 @@ struct ArticleReaderView: View {
 	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
 		try await model.saveToReader(destination)
 	}
+}
+
+private struct ArticleScrollGeometry: Equatable {
+	let offset: CGFloat
+	let maximumOffset: CGFloat
 }
