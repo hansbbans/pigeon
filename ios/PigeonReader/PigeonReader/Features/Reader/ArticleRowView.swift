@@ -24,6 +24,7 @@ struct ArticleRowView: View {
 		}
 		.padding(.vertical, density == .titleOnly ? 1 : 3)
 		.frame(maxWidth: .infinity, alignment: .leading)
+		.opacity(article.isRead ? 0.55 : 1)
 		.accessibilityElement(children: .combine)
 		.accessibilityValue(article.isRead ? "Read" : "Unread")
 	}
@@ -31,11 +32,6 @@ struct ArticleRowView: View {
 	private var storyText: some View {
 		VStack(alignment: .leading, spacing: density == .compact ? 2 : 4) {
 			HStack(alignment: .firstTextBaseline, spacing: 7) {
-				if !article.isRead {
-					Image(systemName: "circle.fill")
-						.font(.system(size: 7, weight: .bold))
-						.accessibilityHidden(true)
-				}
 				Text(article.title)
 					.font(.body.weight(.semibold))
 					.lineLimit(density == .titleOnly ? 1 : 2)
