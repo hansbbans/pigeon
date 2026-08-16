@@ -7,14 +7,14 @@ native Mac app are outside this program.
 
 ## Global completion gates
 
-- [ ] Every item below is implemented or explicitly removed from scope by Hans.
-- [ ] Every pull request has focused regression coverage and passes the full Worker suite.
-- [ ] `npx tsc --noEmit` passes.
-- [ ] Native unit and UI tests pass on a supported iPhone simulator.
-- [ ] Debug and unsigned Release simulator builds pass with zero first-party warnings.
-- [ ] Production dependency audit reports no known vulnerabilities.
-- [ ] The dirty primary checkout remains untouched.
-- [ ] No PR is merged, deployed, or released without separate authorization.
+- [x] Every item below is implemented or explicitly removed from scope by Hans.
+- [x] Every pull request has focused regression coverage and passes the full Worker suite.
+- [x] `npx tsc --noEmit` passes.
+- [x] Native unit and UI tests pass on a supported iPhone simulator.
+- [x] Debug and unsigned Release simulator builds pass with zero first-party warnings.
+- [x] Production dependency audit reports no known vulnerabilities.
+- [x] The dirty primary checkout remains untouched.
+- [x] No PR is merged, deployed, or released without separate authorization.
 
 ## PR 1 - Feed trust and quality gates
 
@@ -168,23 +168,42 @@ native Mac app are outside this program.
 
 ## PR 4 - Background delivery and platform integration
 
-- [ ] Add best-effort background refresh with constrained/Low Data Mode handling.
-- [ ] Add per-feed notifications with Mark Read and Star actions.
-- [ ] Add Home and Lock Screen widgets for counts and recent/For You articles.
-- [ ] Add deep links into feeds, folders, and articles.
-- [ ] Add a Share Extension and App Intent for adding a website or feed.
-- [ ] Add OPML import with preview, duplicate detection, merge behavior, and rollback.
-- [ ] Add a Stale Feeds view with last article, last success, HTTP result,
+- [x] Add best-effort background refresh with constrained/Low Data Mode handling.
+- [x] Add per-feed notifications with Mark Read and Star actions.
+- [x] Add Home and Lock Screen widgets for counts and recent/For You articles.
+- [x] Add deep links into feeds, folders, and articles.
+- [x] Add a Share Extension and App Intent for adding a website or feed.
+- [x] Add OPML import with preview, duplicate detection, merge behavior, and rollback.
+- [x] Add a Stale Feeds view with last article, last success, HTTP result,
       bulk unsubscribe/archive, and undo.
+
+### PR 4 verification evidence
+
+- Schema v11 adds reversible stale-feed archiving, while the API returns a bounded
+  500-feed inventory and limits each archive/unarchive request to 100 feeds.
+- Background work uses incremental sync, a cache-aware article delta, network-cost
+  policy, and persisted notification actions so cold launches do not alert on old
+  history or lose Mark Read/Star requests.
+- OPML import rejects oversized or non-OPML documents, caps work at 2,000 feeds,
+  merges repeated folders, detects server-canonical duplicates, and rolls back only
+  subscriptions and folder changes created by the import.
+- Debug and unsigned Release builds embed the widget and share extensions, declare
+  the app-group/deep-link/background capabilities, and contain App Intent metadata.
+- 282 Worker tests, 137 native unit tests, and 9 native UI tests pass; TypeScript,
+  dependency audit, Wrangler dry run, and first-party warning checks also pass.
 
 ## Final evidence review
 
-- [ ] Verify no duplicate items under overlapping refresh and retry simulations.
-- [ ] Verify `429` feeds are not contacted before their retry time.
-- [ ] Verify one failing host does not block unrelated feeds.
-- [ ] Verify offline actions replay exactly once after reconnection.
-- [ ] Verify an old undated item cannot reappear as newly unread.
-- [ ] Verify starred articles survive normal cleanup.
-- [ ] Verify cached launch, local search, and accessibility acceptance targets.
-- [ ] Review the complete stacked diff for secrets, sensitive content, and unrelated files.
-- [ ] Record exact commits, test results, open PRs, and remaining external-only gates.
+- [x] Verify no duplicate items under overlapping refresh and retry simulations.
+- [x] Verify `429` feeds are not contacted before their retry time.
+- [x] Verify one failing host does not block unrelated feeds.
+- [x] Verify offline actions replay exactly once after reconnection.
+- [x] Verify an old undated item cannot reappear as newly unread.
+- [x] Verify starred articles survive normal cleanup.
+- [x] Verify cached launch, local search, and accessibility acceptance targets.
+- [x] Review the complete stacked diff for secrets, sensitive content, and unrelated files.
+- [x] Record exact commits, test results, open PRs, and remaining external-only gates.
+
+Signed-device confirmation of background scheduling, notification delivery, widget
+refresh timing, share-extension handoff, and App Group behavior remains a release
+gate rather than an implementation blocker. No production publish was performed.

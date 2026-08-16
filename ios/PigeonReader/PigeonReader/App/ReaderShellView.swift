@@ -21,6 +21,9 @@ struct ReaderShellView: View {
 		.sheet(isPresented: $model.isShowingSettings) {
 			SettingsView()
 		}
+		.sheet(item: $model.pendingFeedRequest) { request in
+			AddFeedView(initialURL: request.url.absoluteString)
+		}
 		.safeAreaInset(edge: .top) {
 			VStack(spacing: 0) {
 				if model.isOffline {
@@ -38,7 +41,17 @@ struct ReaderShellView: View {
 			}
 		}
 		.task(id: model.session?.storageIdentity) {
+			model.configurePlatformServices()
 			await model.prepareOfflineLibrary()
+			model.writeWidgetSnapshot()
+			if let action = ReaderNotificationManager.shared.consumePendingAction() {
+				await model.handleNotificationAction(action)
+			}
+		}
+		.onReceive(NotificationCenter.default.publisher(for: .pigeonReaderNotificationAction)) { notification in
+			guard let action = ReaderNotificationManager.shared.consumePendingAction()
+				?? notification.object as? ReaderNotificationAction else { return }
+			Task { await model.handleNotificationAction(action) }
 		}
 	}
 }

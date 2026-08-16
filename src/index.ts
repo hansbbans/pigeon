@@ -62,7 +62,10 @@ export default {
 			path === '/api/v1/recommendations' ||
 			path === '/api/v1/engagement' ||
 			path === '/api/v1/sync' ||
-			path === '/api/v1/mutations'
+			path === '/api/v1/mutations' ||
+			path === '/api/v1/personalization' ||
+			path === '/api/v1/image-proxy' ||
+			path === '/api/v1/stale-feeds'
 		) {
 			return handleNativeApiRequest(request, env);
 		}

@@ -10,6 +10,7 @@ struct SettingsView: View {
 	@State private var isShowingClearOfflineConfirmation = false
 
 	var body: some View {
+		@Bindable var model = model
 		@Bindable var typography = model.readerTypography
 
 		NavigationStack {
@@ -31,7 +32,32 @@ struct SettingsView: View {
 						Text("See which feeds are healthy, delayed, or failing, and retry recoverable failures.")
 							.font(.footnote)
 							.foregroundStyle(.secondary)
+						NavigationLink {
+							StaleFeedsView()
+						} label: {
+							Label("Stale Feeds", systemImage: "archivebox")
+						}
 					}
+				}
+
+				Section("Delivery and Import") {
+					NavigationLink {
+						FeedNotificationSettingsView()
+					} label: {
+						Label("Feed Notifications", systemImage: "bell")
+					}
+					NavigationLink {
+						OPMLImportView()
+					} label: {
+						Label("Import OPML", systemImage: "square.and.arrow.down")
+					}
+					Toggle("Refresh on Low Data Mode", isOn: $model.allowsLowDataBackgroundRefresh)
+					if let refreshedAt = model.lastBackgroundRefreshAt {
+						LabeledContent("Background refresh") { Text(refreshedAt, style: .relative) }
+					}
+					Text("Background delivery is best effort. By default Pigeon waits for an unconstrained connection; iOS decides when the app and widgets may refresh.")
+						.font(.footnote)
+						.foregroundStyle(.secondary)
 				}
 
 				Section("Offline Library") {

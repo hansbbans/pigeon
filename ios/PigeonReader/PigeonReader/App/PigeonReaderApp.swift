@@ -5,6 +5,8 @@ struct PigeonReaderApp: App {
 	@State private var model: ReaderAppModel
 
 	init() {
+		BackgroundRefreshManager.shared.register()
+		_ = ReaderNotificationManager.shared
 		#if DEBUG
 		if ProcessInfo.processInfo.arguments.contains("-reader-reset-reader-state") {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
@@ -41,6 +43,9 @@ struct PigeonReaderApp: App {
 		WindowGroup {
 			RootView()
 				.environment(model)
+				.onOpenURL { url in
+					Task { await model.handleDeepLink(url) }
+				}
 		}
 	}
 }

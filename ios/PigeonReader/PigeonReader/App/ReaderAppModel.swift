@@ -1,6 +1,12 @@
 import Foundation
 import Observation
 import SwiftUI
+import WidgetKit
+
+struct PendingFeedRequest: Identifiable, Equatable {
+	let id = UUID()
+	let url: URL
+}
 
 @MainActor
 @Observable
@@ -23,6 +29,12 @@ final class ReaderAppModel {
 	private struct CollectionFreshness: Sendable {
 		let updatedAt: Date
 		let isCached: Bool
+	}
+
+	private enum StaleFeedUndo: Sendable {
+		case archive([String])
+		case unarchive([String])
+		case unsubscribe([FeedSubscription])
 	}
 
 	var session: PigeonSession?
@@ -95,6 +107,16 @@ final class ReaderAppModel {
 	private(set) var isOffline = false
 	private(set) var personalization: PersonalizationSnapshot?
 	private(set) var isLoadingPersonalization = false
+	var pendingFeedRequest: PendingFeedRequest?
+	private(set) var staleFeedSnapshot: StaleFeedSnapshot?
+	private(set) var isLoadingStaleFeeds = false
+	private(set) var staleFeedUndoTitle: String?
+	private var staleFeedUndo: StaleFeedUndo?
+	private(set) var lastBackgroundRefreshAt: Date?
+	var allowsLowDataBackgroundRefresh: Bool {
+		didSet { UserDefaults.standard.set(allowsLowDataBackgroundRefresh, forKey: Self.lowDataBackgroundKey) }
+	}
+	private static let lowDataBackgroundKey = "pigeon.background.allows-low-data.v1"
 
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
@@ -118,6 +140,7 @@ final class ReaderAppModel {
 		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
+		self.allowsLowDataBackgroundRefresh = UserDefaults.standard.bool(forKey: Self.lowDataBackgroundKey)
 		do {
 			hasReadwiseToken = try readwiseTokenStore.load()?.isEmpty == false
 		} catch {
@@ -311,6 +334,13 @@ final class ReaderAppModel {
 			isOffline = false
 			personalization = nil
 			isLoadingPersonalization = false
+			pendingFeedRequest = nil
+			staleFeedSnapshot = nil
+			isLoadingStaleFeeds = false
+			staleFeedUndo = nil
+			staleFeedUndoTitle = nil
+			lastBackgroundRefreshAt = nil
+			writeWidgetSnapshot()
 			errorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
@@ -359,6 +389,133 @@ final class ReaderAppModel {
 		} catch {
 			errorMessage = error.localizedDescription
 		}
+	}
+
+	func configurePlatformServices() {
+		let background = BackgroundRefreshManager.shared
+		background.refreshHandler = { [weak self] in
+			guard let self else { return false }
+			return await self.performBackgroundRefresh()
+		}
+		background.schedule()
+		_ = ReaderNotificationManager.shared
+		consumePendingFeedRequest()
+	}
+
+	func performBackgroundRefresh() async -> Bool {
+		let background = BackgroundRefreshManager.shared
+		guard BackgroundRefreshPolicy.shouldRefresh(
+			pathIsSatisfied: background.pathIsSatisfied,
+			isConstrained: background.pathIsConstrained,
+			allowsLowDataMode: allowsLowDataBackgroundRefresh
+		), session != nil else { return false }
+		let cachedArticles: [Recommendation]
+		if let accountID = session?.storageIdentity,
+			let cached = try? await offlineStore.loadSnapshot(accountID: accountID) {
+			cachedArticles = cached.articlesByCollection.values.flatMap { $0 }
+		} else {
+			cachedArticles = []
+		}
+		let knownIDs = BackgroundRefreshArticlePlanner.knownIDs(
+			inMemory: articleCache.values.flatMap { $0 },
+			cached: cachedArticles,
+		)
+		await prepareOfflineLibrary()
+		guard Task.isCancelled == false, isOffline == false else { return false }
+		let newlyArrived = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: knownIDs,
+			current: articleCache.values.flatMap { $0 },
+		)
+		for article in newlyArrived.prefix(20) {
+			await ReaderNotificationManager.shared.postNewArticle(article)
+		}
+		lastBackgroundRefreshAt = .now
+		writeWidgetSnapshot()
+		return true
+	}
+
+	func handleDeepLink(_ url: URL) async {
+		guard let link = PigeonDeepLink(url: url) else { return }
+		switch link {
+		case .add(let url):
+			pendingFeedRequest = PendingFeedRequest(url: url)
+		case .feed(let id):
+			if navigation.items.contains(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) == false {
+				await prepareOfflineLibrary()
+			}
+			if let item = navigation.items.first(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) {
+				select(item: item)
+				await load(collection: item)
+			}
+		case .folder(let id):
+			if navigation.folderItems.contains(where: { $0.id == id || $0.title == id || $0.streamID == id }) == false {
+				await prepareOfflineLibrary()
+			}
+			if let item = navigation.folderItems.first(where: { $0.id == id || $0.title == id || $0.streamID == id }) {
+				navigation.expandFolder(item.id)
+				select(item: item)
+				await load(collection: item)
+			}
+		case .article(let id):
+			if article(withId: id) == nil { await prepareOfflineLibrary() }
+			guard let article = article(withId: id) else { return }
+			if let collectionID = articleCache.first(where: { $0.value.contains(where: { $0.id == article.id || $0.readerId == article.readerId }) })?.key {
+				select(collectionID: collectionID)
+			}
+			select(article: article)
+		}
+	}
+
+	func consumePendingFeedRequest() {
+		if let url = PendingFeedStore.consume() {
+			pendingFeedRequest = PendingFeedRequest(url: url)
+		}
+	}
+
+	func handleNotificationAction(_ action: ReaderNotificationAction) async {
+		let articleID: String
+		switch action {
+		case .open(let id), .markRead(let id), .star(let id): articleID = id
+		}
+		if article(withId: articleID) == nil { await prepareOfflineLibrary() }
+		guard let article = article(withId: articleID) else { return }
+		switch action {
+		case .open:
+			await handleDeepLink(PigeonDeepLink.article(articleID).url)
+		case .markRead:
+			await setRead(article, read: true)
+		case .star:
+			await setStarred(article, starred: true)
+		}
+		writeWidgetSnapshot()
+	}
+
+	func writeWidgetSnapshot() {
+		let allArticles = Dictionary(
+			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
+			uniquingKeysWith: { first, _ in first },
+		).values
+		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map(Self.widgetArticle)
+		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map(Self.widgetArticle)
+		let snapshot = PigeonWidgetSnapshot(
+			generatedAt: .now,
+			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
+			starredCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? allArticles.count(where: \.isStarred),
+			recent: Array(recent),
+			forYou: Array(forYou),
+		)
+		snapshot.save()
+		WidgetCenter.shared.reloadAllTimelines()
+	}
+
+	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {
+		PigeonWidgetArticle(
+			id: article.id,
+			title: article.title,
+			source: article.source,
+			receivedAt: article.receivedAt,
+			deepLink: PigeonDeepLink.article(article.id).url,
+		)
 	}
 
 	func exportPersonalization() async -> String? {
@@ -699,6 +856,7 @@ final class ReaderAppModel {
 				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
 			}
 			try await offlineStore.saveNavigation(navigation, accountID: apiClient.session.storageIdentity)
+			writeWidgetSnapshot()
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -778,6 +936,112 @@ final class ReaderAppModel {
 			await loadLibrary(force: true)
 			return false
 		}
+	}
+
+	func importOPML(_ preview: OPMLImportPreview) async throws -> OPMLImportResult {
+		guard let apiClient else { throw PigeonError.authenticationFailed }
+		let result = try await OPMLImportCoordinator.importPreview(preview, service: apiClient)
+		await loadLibrary(force: true)
+		await loadNavigation(force: true)
+		return result
+	}
+
+	func loadStaleFeeds(days: Int = 90) async {
+		guard let apiClient else { return }
+		isLoadingStaleFeeds = true
+		defer { isLoadingStaleFeeds = false }
+		do {
+			staleFeedSnapshot = try await apiClient.staleFeeds(days: days)
+		} catch let error where isCancellation(error) {
+			return
+		} catch {
+			errorMessage = error.localizedDescription
+		}
+	}
+
+	func archiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
+		guard let apiClient, feeds.isEmpty == false else { return false }
+		let keys = feeds.map(\.feedKey)
+		do {
+			try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+			staleFeedUndo = .archive(keys)
+			staleFeedUndoTitle = keys.count == 1 ? "Undo Archive" : "Undo Archive \(keys.count) Feeds"
+			await loadStaleFeeds()
+			return true
+		} catch {
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	func unarchiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
+		guard let apiClient, feeds.isEmpty == false else { return false }
+		let keys = feeds.map(\.feedKey)
+		do {
+			try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+			staleFeedUndo = .unarchive(keys)
+			staleFeedUndoTitle = keys.count == 1 ? "Undo Restore" : "Undo Restore \(keys.count) Feeds"
+			await loadStaleFeeds()
+			return true
+		} catch {
+			errorMessage = error.localizedDescription
+			return false
+		}
+	}
+
+	func unsubscribeStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
+		let selectedIDs = Set(feeds.map(\.streamId))
+		let selectedKeys = Set(feeds.map(\.feedKey))
+		let removed = subscriptions.filter { selectedIDs.contains($0.id) || selectedKeys.contains($0.feedKey) }
+		guard removed.isEmpty == false else { return false }
+		for subscription in removed {
+			guard await enqueueOfflineMutation(OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)) else { return false }
+		}
+		subscriptions.removeAll { subscription in
+			removed.contains(where: { $0.id == subscription.id })
+		}
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		}
+		staleFeedUndo = .unsubscribe(removed)
+		staleFeedUndoTitle = removed.count == 1 ? "Undo Unsubscribe" : "Undo Unsubscribe \(removed.count) Feeds"
+		await replayPendingMutations()
+		await loadNavigation(force: true)
+		await loadStaleFeeds()
+		return true
+	}
+
+	func undoStaleFeedAction() async {
+		guard let apiClient, let undo = staleFeedUndo else { return }
+		switch undo {
+		case .archive(let keys):
+			do {
+				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+			} catch {
+				errorMessage = error.localizedDescription
+				return
+			}
+		case .unarchive(let keys):
+			do {
+				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+			} catch {
+				errorMessage = error.localizedDescription
+				return
+			}
+		case .unsubscribe(let removed):
+			for subscription in removed {
+				guard await enqueueOfflineMutation(OfflineMutation(kind: .restoreFeed, feedId: subscription.id)) else { return }
+			}
+			setSubscriptions(subscriptions + removed)
+			if let accountID = session?.storageIdentity {
+				try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			}
+			await replayPendingMutations()
+			await loadNavigation(force: true)
+		}
+		staleFeedUndo = nil
+		staleFeedUndoTitle = nil
+		await loadStaleFeeds()
 	}
 
 	@discardableResult
@@ -1424,6 +1688,7 @@ final class ReaderAppModel {
 		isOffline = false
 		personalization = nil
 		isLoadingPersonalization = false
+		writeWidgetSnapshot()
 	}
 
 	private func scheduleRestorationSave() {
@@ -1517,6 +1782,7 @@ final class ReaderAppModel {
 			}
 			try await offlineStore.saveNavigation(navigation, accountID: accountID)
 			scheduleRestorationSave()
+			writeWidgetSnapshot()
 		} catch {
 			errorMessage = error.localizedDescription
 		}

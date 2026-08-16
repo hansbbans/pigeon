@@ -1,6 +1,6 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '10';
+const REQUIRED_SCHEMA_VERSION = '11';
 
 const migrationPromises = new WeakMap<D1Database, Promise<void>>();
 
@@ -61,6 +61,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	await addColumnIfMissing(db, feedColumns, 'feeds', 'refresh_lease_token TEXT');
 	await addColumnIfMissing(db, feedColumns, 'feeds', 'last_refresh_outcome TEXT');
 	await addColumnIfMissing(db, feedColumns, 'feeds', 'last_fetch_duration_ms INTEGER');
+	await addColumnIfMissing(db, feedColumns, 'feeds', 'stale_archived INTEGER NOT NULL DEFAULT 0');
 
 	await db
 		.prepare(

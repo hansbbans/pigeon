@@ -64,6 +64,7 @@ nonisolated enum OfflineMutationKind: String, Codable, Sendable {
 	case renameFeed = "rename_feed"
 	case moveFeed = "move_feed"
 	case unsubscribeFeed = "unsubscribe_feed"
+	case restoreFeed = "restore_feed"
 }
 
 nonisolated enum OfflineMutationScope: String, Codable, Sendable {

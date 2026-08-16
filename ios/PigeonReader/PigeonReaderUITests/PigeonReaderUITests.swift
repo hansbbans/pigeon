@@ -86,19 +86,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testSyncHealthShowsFeedDiagnosticsAndManualRetry() throws {
-		app.terminate()
-		app.launchArguments = [
-			"-reader-sample-data",
-			"-reader-show-sidebar",
-			"-reader-reset-reader-state",
-		]
-		app.launch()
-		let back = app.buttons.firstMatch
-		XCTAssertTrue(back.waitForExistence(timeout: 5))
-		back.tap()
-		let settings = app.descendants(matching: .any)["Settings"]
-		XCTAssertTrue(settings.waitForExistence(timeout: 5))
-		settings.tap()
+		openSettings()
 		let syncHealth = app.buttons["Sync Health"]
 		XCTAssertTrue(syncHealth.waitForExistence(timeout: 5))
 		syncHealth.tap()
@@ -112,6 +100,19 @@ final class PigeonReaderUITests: XCTestCase {
 		retry.tap()
 		XCTAssertTrue(app.staticTexts["Design Weekly"].waitForExistence(timeout: 5))
 		attachScreenshot(named: "sync-health")
+	}
+
+	func testPlatformDeliveryAndImportSettingsAreReachable() throws {
+		openSettings()
+		XCTAssertTrue(app.buttons["Stale Feeds"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Feed Notifications"].exists)
+		XCTAssertTrue(app.buttons["Import OPML"].exists)
+		XCTAssertTrue(app.switches["Refresh on Low Data Mode"].exists)
+
+		app.buttons["Feed Notifications"].tap()
+		XCTAssertTrue(app.navigationBars["Feed Notifications"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.switches["Dense Discovery"].exists)
+		attachScreenshot(named: "platform-delivery-settings")
 	}
 
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
@@ -148,6 +149,22 @@ final class PigeonReaderUITests: XCTestCase {
 			}
 		}
 		XCTFail("The linked fixture image did not open its image dialog.")
+	}
+
+	private func openSettings() {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+		let back = app.buttons.firstMatch
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+		let settings = app.descendants(matching: .any)["Settings"]
+		XCTAssertTrue(settings.waitForExistence(timeout: 5))
+		settings.tap()
 	}
 
 	private func tapNormalLink() throws {
