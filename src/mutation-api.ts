@@ -13,7 +13,8 @@ type MutationKind =
 	| 'feedback'
 	| 'rename_feed'
 	| 'move_feed'
-	| 'unsubscribe_feed';
+	| 'unsubscribe_feed'
+	| 'restore_feed';
 
 interface ClientMutation {
 	id: string;
@@ -131,7 +132,7 @@ function validateMutationBatch(value: unknown): ClientMutation[] {
 			}
 			mutation.feedback = raw.feedback;
 		}
-		if (kind === 'rename_feed' || kind === 'move_feed' || kind === 'unsubscribe_feed') {
+		if (kind === 'rename_feed' || kind === 'move_feed' || kind === 'unsubscribe_feed' || kind === 'restore_feed') {
 			mutation.feedId = requiredString(raw.feedId, `mutations[${index}].feedId`, 300);
 		}
 		if (kind === 'rename_feed') {
@@ -186,6 +187,10 @@ async function mutationStatements(
 	case 'unsubscribe_feed': {
 		const feed = await resolveFeed(env.DB, mutation.feedId as string);
 		return [env.DB.prepare('UPDATE feeds SET is_active = 0 WHERE feed_key = ?').bind(feed.feed_key)];
+	}
+	case 'restore_feed': {
+		const feed = await resolveFeed(env.DB, mutation.feedId as string);
+		return [env.DB.prepare('UPDATE feeds SET is_active = 1 WHERE feed_key = ?').bind(feed.feed_key)];
 	}
 	}
 }
@@ -317,6 +322,7 @@ function isMutationKind(value: string): value is MutationKind {
 		'rename_feed',
 		'move_feed',
 		'unsubscribe_feed',
+		'restore_feed',
 	].includes(value);
 }
 

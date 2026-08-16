@@ -10,8 +10,11 @@ Create or confirm these Apple resources before the first run:
 
 - App Store Connect app: `Pigeon Reader`
 - Explicit App ID: `com.hans.pigeon.reader`
+- Embedded WidgetKit App ID: `com.hans.pigeon.reader.widgets`
+- Embedded Share Extension App ID: `com.hans.pigeon.reader.share`
+- App Group capability: `group.com.hans.pigeon.reader` on all three App IDs
 - An Apple Distribution certificate with its private key, exported as a password-protected `.p12`
-- An App Store Connect provisioning profile for `com.hans.pigeon.reader`, created with that distribution certificate
+- App Store Connect provisioning profiles for all three App IDs, created with that distribution certificate and including the App Group capability
 - An App Store Connect team API key with permission to upload builds
 
 The profile must be an App Store profile, not a development or Ad Hoc profile. If app capabilities change later, regenerate the profile before releasing.
@@ -28,7 +31,9 @@ Add these Actions secrets to the repository or the `testflight` environment:
 - `APP_STORE_CONNECT_PRIVATE_KEY`: complete contents of the downloaded `.p8` API key
 - `BUILD_CERTIFICATE_BASE64`: base64-encoded Apple Distribution `.p12`
 - `P12_PASSWORD`: password used when exporting the `.p12`
-- `APP_PROVISION_PROFILE_BASE64`: base64-encoded App Store provisioning profile for `com.hans.pigeon.reader`
+- `APP_PROVISION_PROFILE_BASE64`: base64-encoded App Store provisioning profile for `com.hans.pigeon.reader` with the App Group capability
+- `APP_PROVISION_PROFILE_WIDGETS_BASE64`: base64-encoded App Store provisioning profile for `com.hans.pigeon.reader.widgets` with the App Group capability
+- `APP_PROVISION_PROFILE_SHARE_BASE64`: base64-encoded App Store provisioning profile for `com.hans.pigeon.reader.share` with the App Group capability
 
 Example secret-loading commands, run from a trusted Mac without printing the credential contents:
 
@@ -40,6 +45,8 @@ gh secret set P12_PASSWORD
 gh secret set APP_STORE_CONNECT_PRIVATE_KEY < AuthKey_EXAMPLE.p8
 base64 < PigeonDistribution.p12 | tr -d '\n' | gh secret set BUILD_CERTIFICATE_BASE64
 base64 < PigeonReader.mobileprovision | tr -d '\n' | gh secret set APP_PROVISION_PROFILE_BASE64
+base64 < PigeonWidgets.mobileprovision | tr -d '\n' | gh secret set APP_PROVISION_PROFILE_WIDGETS_BASE64
+base64 < PigeonShareExtension.mobileprovision | tr -d '\n' | gh secret set APP_PROVISION_PROFILE_SHARE_BASE64
 ```
 
 ## Self-hosted runner

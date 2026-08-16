@@ -81,6 +81,25 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
+	func staleFeeds(days: Int = 90) async throws -> StaleFeedSnapshot {
+		var components = try endpointComponents(path: "api/v1/stale-feeds")
+		components.queryItems = [URLQueryItem(name: "days", value: String(min(max(days, 30), 730)))]
+		let (data, _) = try await requestJSON(components: components)
+		return try decoder.decode(StaleFeedSnapshot.self, from: data)
+	}
+
+	func setStaleFeedsArchived(_ feedKeys: [String], action: StaleFeedArchiveAction) async throws {
+		guard feedKeys.isEmpty == false else { return }
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/stale-feeds"))
+		request.httpMethod = "POST"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(
+			StaleFeedArchiveRequest(action: action, feedKeys: Array(feedKeys.prefix(100)))
+		)
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
 	func incrementalSync(cursor: String?, limit: Int = 200) async throws -> IncrementalSyncPage {
 		var components = try endpointComponents(path: "api/v1/sync")
 		var queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200)))]

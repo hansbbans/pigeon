@@ -33,13 +33,17 @@ struct LibraryManagementView: View {
 	}
 }
 
-private struct AddFeedView: View {
+struct AddFeedView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.dismiss) private var dismiss
-	@State private var urlText = ""
+	@State private var urlText: String
 	@State private var selectedFolder = ""
 	@State private var newFolder = ""
 	@State private var isSaving = false
+
+	init(initialURL: String = "") {
+		_urlText = State(initialValue: initialURL)
+	}
 
 	var body: some View {
 		NavigationStack {

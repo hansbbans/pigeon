@@ -710,4 +710,13 @@ test('handleGreaderRequest wires quick-add requests through to subscription crea
 	assert.equal(payload.numResults, 1);
 	assert.equal(payload.streamId, 'feed/1');
 	assert.equal(payload.streamName, 'Example Feed');
+	assert.equal(payload.isNew, true);
+
+	const duplicateResponse = await handleGreaderRequest(
+		new Request(request.url, { headers: request.headers }),
+		env as never,
+	);
+	const duplicatePayload = await duplicateResponse.json();
+	assert.equal(duplicatePayload.streamId, 'feed/1');
+	assert.equal(duplicatePayload.isNew, false);
 });

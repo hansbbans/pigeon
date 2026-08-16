@@ -214,6 +214,28 @@ test('feed rename, move, and unsubscribe mutations are durable and idempotent', 
 	state.database.close();
 });
 
+test('a durable restore mutation reverses an unsubscribe exactly once', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const request = (id: string, kind: string) => new Request('https://pigeon.example/api/v1/mutations', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ mutations: [{ id, kind, itemIds: [], feedId: 'feed/7' }] }),
+	});
+	await handleMutationBatch(request('unsubscribe-once', 'unsubscribe_feed'), state.env);
+	await handleMutationBatch(request('restore-once', 'restore_feed'), state.env);
+	await handleMutationBatch(request('restore-once', 'restore_feed'), state.env);
+	assert.equal(
+		(state.database.prepare("SELECT is_active FROM feeds WHERE feed_key = 'design-weekly'").get() as { is_active: number }).is_active,
+		1,
+	);
+	assert.equal(
+		(state.database.prepare("SELECT COUNT(*) AS count FROM mutation_receipts WHERE mutation_id = 'restore-once'").get() as { count: number }).count,
+		1,
+	);
+	state.database.close();
+});
+
 test('mutation batches reject requests beyond their action and item bounds', async () => {
 	const state = fixture();
 	const request = (mutations: unknown[]) => new Request('https://pigeon.example/api/v1/mutations', {

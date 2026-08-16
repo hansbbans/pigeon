@@ -28,7 +28,7 @@ export async function subscribeToFeed(
 	env: Env,
 	feedUrl: string,
 	category?: string | null
-): Promise<{ feed_key: string; display_name: string; rowid: number }> {
+): Promise<{ feed_key: string; display_name: string; rowid: number; wasCreated: boolean }> {
 	let discovery: Awaited<ReturnType<typeof discoverFeeds>>;
 	try {
 		discovery = await discoverFeeds(feedUrl);
@@ -96,6 +96,7 @@ export async function subscribeToFeed(
 			rowid: existing.rowid,
 			feed_key: existing.feed_key,
 			display_name: feedTitle,
+			wasCreated: false,
 		};
 	}
 
@@ -139,6 +140,7 @@ export async function subscribeToFeed(
 		feed_key: feedKey,
 		display_name: feedTitle,
 		rowid: inserted.rowid,
+		wasCreated: true,
 	};
 }
 

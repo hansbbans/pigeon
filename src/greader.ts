@@ -424,6 +424,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		title: f.custom_title || f.display_name,
 		categories: (tagsByFeedKey.get(f.feed_key) ?? []).map((label) => ({ id: `user/-/label/${label}`, label })),
 		url: `${env.BASE_URL}/feed/${f.feed_key}`,
+		sourceUrl: f.source_url,
 		htmlUrl: f.site_url || f.source_url || env.BASE_URL,
 		iconUrl: f.icon_url || '',
 	}));
@@ -1221,6 +1222,7 @@ async function handleQuickAdd(request: Request, env: Env): Promise<Response> {
 			numResults: 1,
 			streamId: `feed/${result.rowid}`,
 			streamName: result.display_name,
+			isNew: result.wasCreated,
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

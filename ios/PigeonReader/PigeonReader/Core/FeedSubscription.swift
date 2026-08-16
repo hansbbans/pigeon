@@ -10,8 +10,27 @@ nonisolated struct FeedSubscription: Codable, Equatable, Hashable, Identifiable,
 	var title: String
 	var categories: [FeedCategory]
 	let url: URL
+	let sourceUrl: URL?
 	let htmlUrl: URL?
 	let iconUrl: String?
+
+	init(
+		id: String,
+		title: String,
+		categories: [FeedCategory],
+		url: URL,
+		sourceUrl: URL? = nil,
+		htmlUrl: URL?,
+		iconUrl: String?
+	) {
+		self.id = id
+		self.title = title
+		self.categories = categories
+		self.url = url
+		self.sourceUrl = sourceUrl
+		self.htmlUrl = htmlUrl
+		self.iconUrl = iconUrl
+	}
 
 	var feedKey: String {
 		url.lastPathComponent
@@ -38,4 +57,13 @@ nonisolated struct QuickAddResponse: Codable, Sendable {
 	let numResults: Int
 	let streamId: String
 	let streamName: String
+	let isNew: Bool?
+
+	init(query: String, numResults: Int, streamId: String, streamName: String, isNew: Bool? = nil) {
+		self.query = query
+		self.numResults = numResults
+		self.streamId = streamId
+		self.streamName = streamName
+		self.isNew = isNew
+	}
 }

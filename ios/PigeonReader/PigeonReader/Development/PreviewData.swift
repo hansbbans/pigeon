@@ -18,6 +18,18 @@ enum PreviewData {
 		model.setArticles(articles, for: .forYou)
 		model.setArticles(articles.filter { $0.isRead == false }, for: .unread)
 		model.setArticles(articles.filter(\.isStarred), for: .starred)
+		model.setSubscriptions([
+			FeedSubscription(
+				id: "feed/1", title: "Dense Discovery", categories: [FeedCategory(id: "user/-/label/Design", label: "Design")],
+				url: baseURL.appending(path: "feed/dense-discovery"), sourceUrl: URL(string: "https://www.densediscovery.com/feed"),
+				htmlUrl: URL(string: "https://www.densediscovery.com"), iconUrl: nil,
+			),
+			FeedSubscription(
+				id: "feed/2", title: "Marginal Revolution", categories: [FeedCategory(id: "user/-/label/Design", label: "Design")],
+				url: baseURL.appending(path: "feed/marginal-revolution"), sourceUrl: URL(string: "https://marginalrevolution.com/feed"),
+				htmlUrl: URL(string: "https://marginalrevolution.com"), iconUrl: nil,
+			),
+		])
 		model.setNavigation(
 			ReaderNavigationCatalog.make(
 				subscriptions: [

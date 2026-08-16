@@ -171,7 +171,7 @@ struct PigeonAPIClientTests {
 	@Test func subscriptionsDecodeFoldersAndDeriveFeedKey() async throws {
 		let response = Data(
 			"""
-			{"subscriptions":[{"id":"feed/7","title":"Daily","categories":[{"id":"user/-/label/News","label":"News"}],"url":"https://pigeon.test/feed/daily","htmlUrl":"https://example.com","iconUrl":""}]}
+			{"subscriptions":[{"id":"feed/7","title":"Daily","categories":[{"id":"user/-/label/News","label":"News"}],"url":"https://pigeon.test/feed/daily","sourceUrl":"https://example.com/feed.xml","htmlUrl":"https://example.com","iconUrl":""}]}
 			""".utf8,
 		)
 		let mock = MockHTTPClient(responseData: response)
@@ -182,6 +182,7 @@ struct PigeonAPIClientTests {
 
 		let subscription = try #require(subscriptions.first)
 		#expect(subscription.feedKey == "daily")
+		#expect(subscription.sourceUrl?.absoluteString == "https://example.com/feed.xml")
 		#expect(subscription.folderNames == ["News"])
 		let request = try #require(await mock.lastRequest())
 		#expect(request.url.path == "/reader/api/0/subscription/list")

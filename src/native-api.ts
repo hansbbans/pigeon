@@ -6,6 +6,7 @@ import { handleIncrementalSync } from './sync-api';
 import { handleMutationBatch } from './mutation-api';
 import { handleImageProxy } from './image-proxy';
 import { handlePersonalization } from './personalization-api';
+import { handleStaleFeeds } from './stale-feeds-api';
 import type { Env } from './types';
 
 export async function handleNativeApiRequest(request: Request, env: Env): Promise<Response> {
@@ -39,6 +40,9 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	}
 	if (path === '/api/v1/personalization') {
 		return handlePersonalization(request, env);
+	}
+	if (path === '/api/v1/stale-feeds') {
+		return handleStaleFeeds(request, env);
 	}
 
 	return new Response('Not found', { status: 404 });

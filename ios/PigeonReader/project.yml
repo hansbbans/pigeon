@@ -25,6 +25,10 @@ targets:
       - path: PigeonReader/Resources/Readability.js
     dependencies:
       - sdk: libsqlite3.tbd
+      - target: PigeonWidgets
+        embed: true
+      - target: PigeonShareExtension
+        embed: true
     info:
       path: PigeonReader/Resources/Info.plist
       properties:
@@ -34,6 +38,14 @@ targets:
         LSApplicationCategoryType: public.app-category.news
         ITSAppUsesNonExemptEncryption: false
         UIApplicationSupportsIndirectInputEvents: true
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.hans.pigeon.reader.refresh
+        CFBundleURLTypes:
+          - CFBundleURLName: com.hans.pigeon.reader
+            CFBundleURLSchemes:
+              - pigeon
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -54,10 +66,58 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: PigeonReader/Resources/PigeonReader.entitlements
     scheme:
       testTargets:
         - PigeonReaderTests
         - PigeonReaderUITests
+  PigeonWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PigeonWidgets
+      - path: PigeonReader/Shared/PigeonSharedData.swift
+    info:
+      path: PigeonWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Pigeon Widgets
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.widgets
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: PigeonWidgets/PigeonWidgets.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+  PigeonShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PigeonShareExtension
+      - path: PigeonReader/Shared/PigeonSharedData.swift
+    info:
+      path: PigeonShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Add to Pigeon
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+              NSExtensionActivationSupportsText: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader.share
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: PigeonShareExtension/PigeonShareExtension.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
   PigeonReaderTests:
     type: bundle.unit-test
     platform: iOS
