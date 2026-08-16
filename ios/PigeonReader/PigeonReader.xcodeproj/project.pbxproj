@@ -1065,6 +1065,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader.share;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_SHARE_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1232,6 +1233,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader.share;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_SHARE_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1304,6 +1306,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader.widgets;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_WIDGETS_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -1323,6 +1326,7 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_READER_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1341,6 +1345,7 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_READER_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -1359,6 +1364,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.hans.pigeon.reader.widgets;
+				PROVISIONING_PROFILE_SPECIFIER = "$(PIGEON_WIDGETS_PROFILE_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";

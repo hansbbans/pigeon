@@ -371,9 +371,9 @@ jobs:
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
             CODE_SIGN_STYLE=Manual
             CODE_SIGN_IDENTITY='Apple Distribution'
-            PigeonReader_PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
-            PigeonWidgets_PROVISIONING_PROFILE_SPECIFIER="$WIDGETS_PROFILE_NAME"
-            PigeonShareExtension_PROVISIONING_PROFILE_SPECIFIER="$SHARE_PROFILE_NAME"
+            PIGEON_READER_PROFILE_NAME="$PROFILE_NAME"
+            PIGEON_WIDGETS_PROFILE_NAME="$WIDGETS_PROFILE_NAME"
+            PIGEON_SHARE_PROFILE_NAME="$SHARE_PROFILE_NAME"
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
           )
           xcodebuild "${archive_arguments[@]}"
