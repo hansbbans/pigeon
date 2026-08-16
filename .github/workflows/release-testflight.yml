@@ -66,6 +66,16 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Require the dispatched main commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ "$checked_out_sha" != "$GITHUB_SHA" ]]; then
+            echo "main advanced between dispatch and checkout; refusing to release a different commit." >&2
+            exit 1
+          fi
+
       - name: Require a main-branch dispatch
         shell: bash
         run: |
