@@ -4,18 +4,46 @@ import Testing
 
 struct ReaderModeTests {
 	@Test
-	func defaultsToFeedContentAndPersistsPerFeed() throws {
+	func defaultsToFeedContentAndPersistsGlobalAndPerFeedModes() throws {
 		let suiteName = "pigeon-reader-mode-\(UUID().uuidString)"
 		let defaults = try #require(UserDefaults(suiteName: suiteName))
 		defer { defaults.removePersistentDomain(forName: suiteName) }
 		let store = ReaderModeStore(defaults: defaults)
 
+		#expect(store.defaultArticleView == .feedContent)
 		#expect(store.mode(for: "feed/one") == .feedContent)
 		store.setMode(.readerView, for: "feed/one")
 		store.setMode(.website, for: "feed/two")
 		#expect(store.mode(for: "feed/one") == .readerView)
 		#expect(store.mode(for: "feed/two") == .website)
 		#expect(store.mode(for: "feed/three") == .feedContent)
+
+		store.setDefaultArticleView(.readerView)
+		#expect(store.defaultArticleView == .readerView)
+		#expect(store.mode(for: "feed/one") == .readerView)
+		#expect(store.mode(for: "feed/two") == .website)
+		#expect(store.mode(for: "feed/three") == .readerView)
+		#expect(ReaderModeStore(defaults: defaults).defaultArticleView == .readerView)
+
+		store.setDefaultArticleView(.feedContent)
+		#expect(store.mode(for: "feed/two") == .website)
+		#expect(store.mode(for: "feed/three") == .feedContent)
+	}
+
+	@Test
+	func defaultArticleViewRejectsWebsiteAndInvalidStoredValues() throws {
+		let suiteName = "pigeon-reader-mode-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+
+		defaults.set(ReaderMode.website.rawValue, forKey: ReaderModeStore.defaultArticleViewKey)
+		#expect(store.defaultArticleView == .feedContent)
+		store.setDefaultArticleView(.website)
+		#expect(store.defaultArticleView == .feedContent)
+
+		defaults.set("not-a-reader-mode", forKey: ReaderModeStore.defaultArticleViewKey)
+		#expect(store.defaultArticleView == .feedContent)
 	}
 
 	@Test

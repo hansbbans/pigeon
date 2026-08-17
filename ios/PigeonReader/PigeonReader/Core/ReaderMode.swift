@@ -5,6 +5,8 @@ enum ReaderMode: String, CaseIterable, Identifiable, Sendable {
 	case readerView = "reader-view"
 	case website
 
+	static let defaultArticleViewChoices: [ReaderMode] = [.feedContent, .readerView]
+
 	var id: Self { self }
 
 	var title: String {

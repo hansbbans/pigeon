@@ -287,6 +287,26 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "feed-content-after-website")
 	}
 
+	func testDefaultArticleViewSettingOffersOnlyFeedContentAndReaderView() throws {
+		openSettings()
+		let picker = app.descendants(matching: .any)["default-article-view-picker"]
+		for _ in 0..<6 {
+			if picker.exists { break }
+			app.swipeUp()
+		}
+		XCTAssertTrue(picker.waitForExistence(timeout: 5))
+		XCTAssertTrue(picker.label.contains("Feed Content"))
+
+		picker.tap()
+		XCTAssertTrue(app.buttons["Feed Content"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Reader View"].exists)
+		XCTAssertFalse(app.buttons["Website"].exists)
+
+		app.buttons["Reader View"].tap()
+		XCTAssertTrue(picker.waitForExistence(timeout: 5))
+		XCTAssertTrue(picker.label.contains("Reader View"))
+	}
+
 	func testReaderViewSuccess() throws {
 		app.terminate()
 		app.launchArguments = [

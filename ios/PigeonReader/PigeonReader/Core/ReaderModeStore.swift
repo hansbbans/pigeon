@@ -50,6 +50,8 @@ enum ReaderModeIdentity {
 }
 
 struct ReaderModeStore {
+	static let defaultArticleViewKey = "pigeon.reader.default-article-view.v1"
+
 	private let defaults: UserDefaults
 	private let keyPrefix = "pigeon.reader.mode."
 
@@ -57,12 +59,26 @@ struct ReaderModeStore {
 		self.defaults = defaults
 	}
 
+	var defaultArticleView: ReaderMode {
+		guard let rawValue = defaults.string(forKey: Self.defaultArticleViewKey),
+			let mode = ReaderMode(rawValue: rawValue),
+			ReaderMode.defaultArticleViewChoices.contains(mode) else {
+			return .feedContent
+		}
+		return mode
+	}
+
+	func setDefaultArticleView(_ mode: ReaderMode) {
+		let normalizedMode = ReaderMode.defaultArticleViewChoices.contains(mode) ? mode : .feedContent
+		defaults.set(normalizedMode.rawValue, forKey: Self.defaultArticleViewKey)
+	}
+
 	func mode(for feedID: String) -> ReaderMode {
 		mode(for: [feedID])
 	}
 
 	func mode(for feedIDs: [String]) -> ReaderMode {
-		storedMode(for: feedIDs) ?? .feedContent
+		storedMode(for: feedIDs) ?? defaultArticleView
 	}
 
 	func mode(for feedID: String, session: PigeonSession) -> ReaderMode {
@@ -70,7 +86,7 @@ struct ReaderModeStore {
 	}
 
 	func mode(for feedIDs: [String], session: PigeonSession) -> ReaderMode {
-		storedMode(for: feedIDs, session: session) ?? .feedContent
+		storedMode(for: feedIDs, session: session) ?? defaultArticleView
 	}
 
 	func storedMode(for feedIDs: [String]) -> ReaderMode? {

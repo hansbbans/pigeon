@@ -10,6 +10,7 @@ struct PigeonReaderApp: App {
 		#if DEBUG
 		if ProcessInfo.processInfo.arguments.contains("-reader-reset-reader-state") {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
+			UserDefaults.standard.removeObject(forKey: ReaderModeStore.defaultArticleViewKey)
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.text-scale")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.line-height")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.horizontal-margin")
