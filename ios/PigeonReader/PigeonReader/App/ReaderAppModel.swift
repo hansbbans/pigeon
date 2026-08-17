@@ -1170,23 +1170,30 @@ final class ReaderAppModel {
 	}
 
 	@discardableResult
-	func moveFeed(_ subscription: FeedSubscription, to folderName: String?) async -> Bool {
-		let folder = normalizedFolderName(folderName)
-		if folderName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, folder == nil {
+	func moveFeed(_ subscription: FeedSubscription, toFolderNames folderNames: [String]) async -> Bool {
+		guard let normalizedFolders = normalizedFolderNames(folderNames) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
 		let mutation = OfflineMutation(
 			kind: .moveFeed,
 			feedId: subscription.id,
-			folders: folder.map { [$0] } ?? [],
+			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { item in
-			item.categories = folder.map { [FeedCategory(id: "user/-/label/\($0)", label: $0)] } ?? []
+			item.categories = normalizedFolders.map {
+				FeedCategory(id: "user/-/label/\($0)", label: $0)
+			}
 		}
+		rebuildNavigationFromSubscriptions()
 		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			do {
+				try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+				try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			} catch {
+				errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+			}
 		}
 		await replayPendingMutations()
 		return true
@@ -1919,6 +1926,51 @@ final class ReaderAppModel {
 			return nil
 		}
 		return trimmed
+	}
+
+	private func normalizedFolderNames(_ names: [String]) -> [String]? {
+		var normalized: [String] = []
+		for rawName in names {
+			guard let name = normalizedFolderName(rawName) else {
+				return nil
+			}
+			if normalized.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) == false {
+				normalized.append(name)
+			}
+		}
+		return normalized.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+	}
+
+	private func rebuildNavigationFromSubscriptions() {
+		var feedCounts: [String: Int] = [:]
+		for item in navigation.items where item.kind == .feed {
+			feedCounts[item.streamID] = max(feedCounts[item.streamID, default: 0], item.unreadCount)
+		}
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map {
+					ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+				},
+				url: subscription.url.absoluteString,
+				iconURL: subscription.iconUrl,
+			)
+		}
+		let smartCounts = ReaderNavigationSmartCounts(
+			forYou: navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount ?? 0,
+			today: navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0,
+			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
+			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
+		)
+		setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: readerSubscriptions,
+				unreadCounts: feedCounts.map { ReaderUnreadCount(id: $0.key, count: $0.value) },
+				smartCounts: smartCounts,
+			),
+			markAsLoaded: true,
+		)
 	}
 
 	private func updateSubscription(id: String, update: (inout FeedSubscription) -> Void) {

@@ -25,9 +25,14 @@ enum PreviewData {
 				htmlUrl: URL(string: "https://www.densediscovery.com"), iconUrl: nil,
 			),
 			FeedSubscription(
-				id: "feed/2", title: "Marginal Revolution", categories: [FeedCategory(id: "user/-/label/Design", label: "Design")],
+				id: "feed/2", title: "Marginal Revolution", categories: [FeedCategory(id: "user/-/label/Technology", label: "Technology")],
 				url: baseURL.appending(path: "feed/marginal-revolution"), sourceUrl: URL(string: "https://marginalrevolution.com/feed"),
 				htmlUrl: URL(string: "https://marginalrevolution.com"), iconUrl: nil,
+			),
+			FeedSubscription(
+				id: "feed/3", title: "Stratechery", categories: [],
+				url: baseURL.appending(path: "feed/stratechery"), sourceUrl: URL(string: "https://stratechery.com/feed"),
+				htmlUrl: URL(string: "https://stratechery.com"), iconUrl: nil,
 			),
 		])
 		model.setNavigation(
@@ -42,7 +47,7 @@ enum PreviewData {
 					ReaderSubscription(
 						id: "feed/2",
 						title: "Marginal Revolution",
-						categories: [ReaderSubscriptionCategory(id: "user/-/label/Design", label: "Design")],
+						categories: [ReaderSubscriptionCategory(id: "user/-/label/Technology", label: "Technology")],
 						url: "https://pigeon.preview/feed/marginal-revolution",
 					),
 					ReaderSubscription(
@@ -54,7 +59,8 @@ enum PreviewData {
 				unreadCounts: [
 					ReaderUnreadCount(id: "feed/1", count: 1),
 					ReaderUnreadCount(id: "feed/2", count: 1),
-					ReaderUnreadCount(id: "user/-/label/Design", count: 2),
+					ReaderUnreadCount(id: "user/-/label/Design", count: 1),
+					ReaderUnreadCount(id: "user/-/label/Technology", count: 1),
 					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: 2),
 				],
 				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 1, unread: 2, starred: 1),

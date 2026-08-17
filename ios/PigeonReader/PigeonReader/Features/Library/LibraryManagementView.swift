@@ -3,14 +3,14 @@ import SwiftUI
 enum LibraryEditorRoute: Identifiable {
 	case addFeed
 	case renameFeed(FeedSubscription)
-	case moveFeed(FeedSubscription)
+	case editFeed(FeedSubscription)
 	case renameFolder(String)
 
 	var id: String {
 		switch self {
 		case .addFeed: "add-feed"
 		case .renameFeed(let feed): "rename-feed:\(feed.id)"
-		case .moveFeed(let feed): "move-feed:\(feed.id)"
+		case .editFeed(let feed): "edit-feed:\(feed.id)"
 		case .renameFolder(let name): "rename-folder:\(name)"
 		}
 	}
@@ -25,8 +25,8 @@ struct LibraryManagementView: View {
 			AddFeedView()
 		case .renameFeed(let feed):
 			RenameFeedView(subscription: feed)
-		case .moveFeed(let feed):
-			MoveFeedView(subscription: feed)
+		case .editFeed(let feed):
+			EditFeedFoldersView(subscription: feed)
 		case .renameFolder(let name):
 			RenameFolderView(originalName: name)
 		}
@@ -141,53 +141,100 @@ private struct RenameFeedView: View {
 	}
 }
 
-private struct MoveFeedView: View {
+private struct EditFeedFoldersView: View {
 	let subscription: FeedSubscription
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.dismiss) private var dismiss
-	@State private var selectedFolder: String
+	@State private var selectedFolders: Set<String>
 	@State private var newFolder = ""
 	@State private var isSaving = false
 
 	init(subscription: FeedSubscription) {
 		self.subscription = subscription
-		_selectedFolder = State(initialValue: subscription.folderNames.first ?? "")
+		_selectedFolders = State(initialValue: Set(subscription.folderNames))
 	}
 
 	var body: some View {
 		NavigationStack {
 			Form {
-				Section("Move \(subscription.title)") {
-					Picker("Folder", selection: $selectedFolder) {
-						Text("No Folder").tag("")
+				Section {
+					if model.folders.isEmpty {
+						Text("No folders yet")
+							.foregroundStyle(.secondary)
+					} else {
 						ForEach(model.folders) { folder in
-							Text(folder.name).tag(folder.name)
+							Toggle(folder.name, isOn: folderSelection(for: folder.name))
+								.accessibilityIdentifier("feed-folder-toggle-\(folder.name)")
 						}
 					}
+				} header: {
+					Text("Folders")
+				} footer: {
+					Text("Turn every folder off to leave this feed uncategorized.")
 				}
-				Section("New Folder") {
-					TextField("Folder name", text: $newFolder)
+				Section {
+					TextField("New folder name", text: $newFolder)
+						.textInputAutocapitalization(.words)
+						.autocorrectionDisabled()
+						.accessibilityIdentifier("new-feed-folder-name")
+					if newFolderIsInvalid {
+						Text("Folder names must be between 1 and 80 characters.")
+							.font(.footnote)
+							.foregroundStyle(.red)
+					}
+				} header: {
+					Text("Create Folder")
+				} footer: {
+					Text("A new folder is created and assigned when you save.")
 				}
 			}
-			.navigationTitle("Move Feed")
+			.navigationTitle("Edit Feed")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
 				ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
 				ToolbarItem(placement: .confirmationAction) {
-					Button("Move") { save() }
-						.disabled(isSaving)
+					Button("Save") { save() }
+						.accessibilityIdentifier("save-feed-folders")
+						.disabled(isSaving || newFolderIsInvalid)
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
 		}
 	}
 
+	private var trimmedNewFolder: String {
+		newFolder.trimmingCharacters(in: .whitespacesAndNewlines)
+	}
+
+	private var newFolderIsInvalid: Bool {
+		newFolder.isEmpty == false && (trimmedNewFolder.isEmpty || trimmedNewFolder.count > 80)
+	}
+
+	private func folderSelection(for name: String) -> Binding<Bool> {
+		Binding(
+			get: { selectedFolders.contains(name) },
+			set: { isSelected in
+				if isSelected {
+					selectedFolders.insert(name)
+				} else {
+					selectedFolders.remove(name)
+				}
+			},
+		)
+	}
+
 	private func save() {
 		isSaving = true
-		let typedFolder = newFolder.trimmingCharacters(in: .whitespacesAndNewlines)
-		let destination = typedFolder.isEmpty ? (selectedFolder.isEmpty ? nil : selectedFolder) : typedFolder
+		var destinations = Array(selectedFolders)
+		if trimmedNewFolder.isEmpty == false {
+			destinations.append(trimmedNewFolder)
+		}
 		Task {
-			if await model.moveFeed(subscription, to: destination) { dismiss() } else { isSaving = false }
+			if await model.moveFeed(subscription, toFolderNames: destinations) {
+				dismiss()
+			} else {
+				isSaving = false
+			}
 		}
 	}
 }
