@@ -152,6 +152,26 @@ enum StructuredHTMLJavaScript {
 		return urls;
 	}
 
+	function __pigeonPrepareTables(root) {
+		for (const table of Array.from(root.querySelectorAll("table"))) {
+			const role = String(table.getAttribute("role") || "").toLowerCase();
+			const hasOwnHeader = Array.from(table.querySelectorAll("caption, th"))
+				.some((element) => element.closest("table") === table);
+			const isDataTable = role !== "presentation" && role !== "none"
+				&& (["table", "grid", "treegrid"].includes(role) || hasOwnHeader);
+			table.classList.remove("pigeon-data-table", "pigeon-layout-table");
+			table.classList.add(isDataTable ? "pigeon-data-table" : "pigeon-layout-table");
+
+			if (!isDataTable || (table.parentElement && table.parentElement.classList.contains("table-scroll"))) {
+				continue;
+			}
+			const wrapper = document.createElement("div");
+			wrapper.className = "table-scroll";
+			table.replaceWith(wrapper);
+			wrapper.appendChild(table);
+		}
+	}
+
 	function __pigeonMeasure() {
 		window.webkit.messageHandlers.pigeonEvent.postMessage({ kind: "height", value: Math.ceil(document.body.scrollHeight) });
 	}
@@ -185,7 +205,7 @@ enum StructuredHTMLJavaScript {
 			h2 { font-size: 1.45em; }
 			h3 { font-size: 1.24em; }
 			h4, h5, h6 { font-size: 1.08em; }
-			p, ul, ol, dl, blockquote, pre, figure, table { margin: 0 0 1.08em; }
+			p, ul, ol, dl, blockquote, pre, figure { margin: 0 0 1.08em; }
 			p { text-wrap: pretty; }
 			ul, ol { padding-left: 1.45em; }
 			li + li { margin-top: .35em; }
@@ -201,10 +221,12 @@ enum StructuredHTMLJavaScript {
 			img { display: block; height: auto !important; margin: 1.25em auto; max-width: 100% !important; object-fit: contain; width: auto; }
 			figcaption { color: #66727b; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .82em; line-height: 1.4; margin: -.7em auto 1.3em; max-width: 44em; text-align: center; }
 			.table-scroll { margin: 0 0 1.08em; max-width: 100%; overflow-x: auto; width: 100%; }
-			.table-scroll table { margin: 0; max-width: 100% !important; min-width: 0; table-layout: fixed; width: 100% !important; }
-			table { border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .84em; line-height: 1.4; max-width: 100% !important; table-layout: fixed; width: 100% !important; }
-			th, td { border: 1px solid #b7c0c6; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
-			th { background: #eef1f3; font-weight: 650; }
+			table { border-collapse: collapse; max-width: 100% !important; width: 100% !important; }
+			.pigeon-layout-table { font: inherit; line-height: inherit; margin: 0; table-layout: auto; }
+			.pigeon-layout-table > :is(thead, tbody, tfoot) > tr > :is(th, td), .pigeon-layout-table > tr > :is(th, td) { border: 0; padding: 0; }
+			.table-scroll .pigeon-data-table { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .84em; line-height: 1.4; margin: 0; min-width: 0; table-layout: fixed; }
+			.pigeon-data-table > :is(thead, tbody, tfoot) > tr > :is(th, td), .pigeon-data-table > tr > :is(th, td) { border: 1px solid #b7c0c6; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
+			.pigeon-data-table > :is(thead, tbody, tfoot) > tr > th, .pigeon-data-table > tr > th { background: #eef1f3; font-weight: 650; }
 			.pigeon-image-failure { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #5e6971; display: flex; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .8em; gap: .45em; justify-content: center; margin: 1.25em auto; min-height: 3.5em; padding: .75em; text-align: center; }
 			.pigeon-image-blocked { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #39434a; cursor: pointer; display: flex; font: 600 .82em -apple-system, BlinkMacSystemFont, sans-serif; justify-content: center; margin: 1.25em auto; min-height: 5em; padding: 1em; width: 100%; }
 			body[data-theme="light"] { color: #202124; }
@@ -213,29 +235,29 @@ enum StructuredHTMLJavaScript {
 			body[data-theme="dark"] h1, body[data-theme="dark"] h2, body[data-theme="dark"] h3, body[data-theme="dark"] h4, body[data-theme="dark"] h5, body[data-theme="dark"] h6 { color: #fafafa; }
 			body[data-theme="dark"] a { color: #75c7ff; }
 			body[data-theme="dark"] blockquote { border-inline-start-color: #71808b; color: #c3ccd2; }
-			body[data-theme="dark"] pre, body[data-theme="dark"] th, body[data-theme="dark"] .pigeon-image-failure, body[data-theme="dark"] .pigeon-image-blocked { background: #252c31; }
+			body[data-theme="dark"] pre, body[data-theme="dark"] .pigeon-data-table th, body[data-theme="dark"] .pigeon-image-failure, body[data-theme="dark"] .pigeon-image-blocked { background: #252c31; }
 			body[data-theme="dark-gray"] { background: #1c1c1e; color: #f2f2f7; }
 			body[data-theme="dark-gray"] h1, body[data-theme="dark-gray"] h2, body[data-theme="dark-gray"] h3, body[data-theme="dark-gray"] h4, body[data-theme="dark-gray"] h5, body[data-theme="dark-gray"] h6 { color: #ffffff; }
 			body[data-theme="dark-gray"] a { color: #64d2ff; }
 			body[data-theme="dark-gray"] blockquote { border-inline-start-color: #8e8e93; color: #d1d1d6; }
 			body[data-theme="dark-gray"] hr { border-top-color: #636366; }
-			body[data-theme="dark-gray"] pre, body[data-theme="dark-gray"] th, body[data-theme="dark-gray"] .pigeon-image-failure, body[data-theme="dark-gray"] .pigeon-image-blocked { background: #2c2c2e; }
-			body[data-theme="dark-gray"] th, body[data-theme="dark-gray"] td { border-color: #636366; }
+			body[data-theme="dark-gray"] pre, body[data-theme="dark-gray"] .pigeon-data-table th, body[data-theme="dark-gray"] .pigeon-image-failure, body[data-theme="dark-gray"] .pigeon-image-blocked { background: #2c2c2e; }
+			body[data-theme="dark-gray"] .pigeon-data-table th, body[data-theme="dark-gray"] .pigeon-data-table td { border-color: #636366; }
 			body[data-theme="dark-gray"] figcaption { color: #aeaeb2; }
 			body[data-theme="dark-gray"] .pigeon-image-failure, body[data-theme="dark-gray"] .pigeon-image-blocked { border-color: #636366; color: #d1d1d6; }
 			body[data-theme="sepia"] { color: #433a2c; }
 			body[data-theme="sepia"] h1, body[data-theme="sepia"] h2, body[data-theme="sepia"] h3, body[data-theme="sepia"] h4, body[data-theme="sepia"] h5, body[data-theme="sepia"] h6 { color: #2f281e; }
 			body[data-theme="sepia"] a { color: #735c17; }
 			body[data-theme="sepia"] blockquote { border-inline-start-color: #a58b62; color: #62533d; }
-			body[data-theme="sepia"] pre, body[data-theme="sepia"] th, body[data-theme="sepia"] .pigeon-image-failure, body[data-theme="sepia"] .pigeon-image-blocked { background: #ede2c9; }
+			body[data-theme="sepia"] pre, body[data-theme="sepia"] .pigeon-data-table th, body[data-theme="sepia"] .pigeon-image-failure, body[data-theme="sepia"] .pigeon-image-blocked { background: #ede2c9; }
 			@media (prefers-color-scheme: dark) {
 				body { color: #ececec; }
 				h1, h2, h3, h4, h5, h6 { color: #fafafa; }
 				a { color: #75c7ff; }
 				blockquote { border-inline-start-color: #71808b; color: #c3ccd2; }
 				hr { border-top-color: #63717a; }
-				pre, th, .pigeon-image-failure { background: #252c31; }
-				th, td { border-color: #63717a; }
+				pre, .pigeon-data-table th, .pigeon-image-failure { background: #252c31; }
+				.pigeon-data-table th, .pigeon-data-table td { border-color: #63717a; }
 				figcaption { color: #b7c1c8; }
 			}
 		</style>
@@ -275,13 +297,7 @@ enum StructuredHTMLJavaScript {
 						image.src = "pigeon-image://proxy?url=" + encodeURIComponent(source);
 					}
 				}
-				for (const table of Array.from(content.querySelectorAll("table"))) {
-					if (table.parentElement && table.parentElement.classList.contains("table-scroll")) continue;
-					const wrapper = document.createElement("div");
-					wrapper.className = "table-scroll";
-					table.replaceWith(wrapper);
-					wrapper.appendChild(table);
-				}
+				__pigeonPrepareTables(content);
 				__pigeonMeasure();
 			};
 			document.addEventListener("click", function(event) {
