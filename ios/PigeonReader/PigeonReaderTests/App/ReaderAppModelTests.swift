@@ -68,6 +68,30 @@ struct ReaderAppModelTests {
 		#expect(extractor.extractedHTML?.contains("Newsletter body") == true)
 	}
 
+	@Test func urlLessArticleDoesNotRewriteStoredFeedReaderMode() async throws {
+		let suiteName = "pigeon-reader-mode-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: ReaderModeStore(defaults: defaults),
+		)
+		let withURL = makeArticle(
+			id: "with-url",
+			feedKey: "daily",
+			originalURL: URL(string: "https://example.com/story"),
+		)
+		let withoutURL = makeArticle(id: "no-url", feedKey: "daily")
+
+		model.setReaderMode(.readerView, for: withURL)
+		#expect(model.displayReaderMode(for: withoutURL) == .feedContent)
+
+		model.setReaderMode(.feedContent, for: withoutURL)
+
+		#expect(model.readerMode(for: "daily") == .readerView)
+		#expect(model.displayReaderMode(for: withURL) == .readerView)
+	}
+
 	@Test func loadReaderViewPreservesOriginal404WhenFeedFallbackAlsoFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
@@ -149,6 +173,125 @@ struct ReaderAppModelTests {
 
 		#expect(model.articles(for: .forYou).isEmpty)
 		#expect(model.articles(for: .unread).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+	}
+
+	@Test func notInterestedFromTodayDropsTheStoryFromALoadedForYouCache() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "shared")
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.recordPreference(.notInterested, for: article)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedFromAFeedDropsForYouStoryWithADifferentItemID() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readerId = "tag:google.com,2005:reader/item/0000000000000001"
+		let forYouArticle = makeArticle(id: "item-uuid", readerId: readerId)
+		let feedArticle = makeArticle(id: readerId, feedKey: "feed/7", readerId: readerId)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setArticles([forYouArticle], for: .forYou)
+		model.setArticles([feedArticle], for: feed)
+		model.select(item: feed)
+		model.select(article: feedArticle)
+
+		await model.recordPreference(.notInterested, for: feedArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: feed).map(\.id) == [feedArticle.id])
+		#expect(model.selectedArticleID == feedArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedDoesNotCreateForYouCacheBeforeThatCollectionLoads() async throws {
+		let serverArticle = makeArticle(id: "from-server")
+		let mock = MockHTTPClient(responseData: try responseData(items: [serverArticle]))
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-today")
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+
+		await model.recordPreference(.notInterested, for: article)
+		await model.load(section: .forYou)
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["from-server"])
+	}
+
+	@Test func starringInsertsIntoLoadedStarredCacheInNewestOrder() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let older = makeArticle(id: "already-starred", isStarred: true, receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", receivedAt: 1_786_272_100)
+		model.setArticles([older], for: .starred)
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+		#expect(model.allArticles(for: .starred).allSatisfy(\.isStarred))
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+	}
+
+	@Test func starringAnEmptyLoadedStarredCollectionShowsTheNewStory() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([], for: .starred)
+		model.setArticles([article], for: .forYou)
+		model.select(section: .forYou)
+
+		await model.setStarred(article, starred: true)
+		model.select(section: .starred)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed"])
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed"])
+	}
+
+	@Test func starringDoesNotCreateStarredCacheBeforeThatCollectionLoads() async throws {
+		let serverStarred = makeArticle(id: "from-server", isStarred: true)
+		let mock = MockHTTPClient(responseData: try responseData(items: [serverStarred]))
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+		await model.load(section: .starred)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-server"])
+	}
+
+	@Test func unstarringRemovesTheStoryFromStarredAndClosesItIfOpen() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let kept = makeArticle(id: "kept", isStarred: true)
+		let removed = makeArticle(id: "removed", isStarred: true)
+		model.setArticles([kept, removed], for: .starred)
+		model.setArticles([removed], for: .forYou)
+		model.select(section: .starred)
+		model.select(article: removed)
+
+		await model.setStarred(removed, starred: false)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["kept"])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
 		#expect(model.selectedArticleID == nil)
 		#expect(model.preferredCompactColumn == .content)
 	}
@@ -512,18 +655,26 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
 	}
 
-	@Test func articleFilterDefaultsToUnreadAndStaysPerCollection() throws {
+	@Test func articleFilterDefaultsToUnreadExceptStarredWhichKeepsReadStories() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let state = try makeNavigationState(unreadCount: 1)
 		model.setNavigation(state)
 		let folder = try #require(model.folderNavigationItems.first)
 		let feed = try #require(model.feedNavigationItems(in: folder).first)
 		let forYou = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .starred }))
+		let readStarred = makeArticle(id: "kept-starred", isRead: true)
+		model.setArticles([readStarred], for: starred)
 
 		#expect(model.articleFilter == .unread)
 		#expect(model.articleFilter(for: forYou) == .unread)
 		#expect(model.articleFilter(for: folder) == .unread)
 		#expect(model.articleFilter(for: feed) == .unread)
+		#expect(model.articleFilter(for: starred) == .all)
+		model.select(item: starred)
+		#expect(model.articleFilter == .all)
+		#expect(model.articles(for: starred).map(\.id) == [readStarred.id])
+		#expect(model.isArticleFilterEmpty(for: starred) == false)
 
 		model.select(item: feed)
 		model.articleFilter = .all
@@ -535,6 +686,25 @@ struct ReaderAppModelTests {
 		#expect(model.articleFilter(for: feed) == .all)
 		#expect(model.articleFilter(for: folder) == .read)
 		#expect(model.articleFilter(for: forYou) == .unread)
+		#expect(model.articleFilter(for: starred) == .all)
+	}
+
+	@Test func starredKeepsAStoryAfterExplicitOpenMarksItRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		var article = makeArticle(id: "saved")
+		article.isStarred = true
+		model.setNavigation(ReaderNavigationState(items: [starred]))
+		model.setArticles([article], for: starred)
+		model.select(item: starred)
+		model.select(article: article)
+
+		#expect(model.articleFilter == .all)
+		await model.recordExplicitOpen(for: article)
+
+		#expect(model.allArticles(for: starred).first?.isRead == true)
+		#expect(model.articles(for: starred).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
 	}
 
 	@Test func articleFilterPersistsPerCollectionAcrossModelInstances() throws {
@@ -548,6 +718,7 @@ struct ReaderAppModelTests {
 		let folder = try #require(firstModel.folderNavigationItems.first)
 		let feed = try #require(firstModel.feedNavigationItems(in: folder).first)
 		let forYou = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		firstModel.select(item: feed)
 		firstModel.articleFilter = .all
@@ -560,12 +731,14 @@ struct ReaderAppModelTests {
 		#expect(defaults.string(forKey: sessionKeyPrefix + feed.id) == "unread")
 		#expect(defaults.string(forKey: sessionKeyPrefix + folder.id) == "read")
 		#expect(defaults.string(forKey: sessionKeyPrefix + forYou.id) == nil)
+		#expect(defaults.string(forKey: sessionKeyPrefix + starred.id) == nil)
 
 		let restoredModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: ReaderArticleFilterStore(defaults: defaults))
 		restoredModel.setNavigation(state)
 		let restoredFolder = try #require(restoredModel.folderNavigationItems.first)
 		let restoredFeed = try #require(restoredModel.feedNavigationItems(in: restoredFolder).first)
 		let restoredForYou = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let restoredStarred = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		restoredModel.select(item: restoredFeed)
 		#expect(restoredModel.articleFilter == .unread)
@@ -573,9 +746,12 @@ struct ReaderAppModelTests {
 		#expect(restoredModel.articleFilter == .read)
 		restoredModel.select(item: restoredForYou)
 		#expect(restoredModel.articleFilter == .unread)
+		restoredModel.select(item: restoredStarred)
+		#expect(restoredModel.articleFilter == .all)
 		#expect(restoredModel.articleFilter(for: restoredFeed) == .unread)
 		#expect(restoredModel.articleFilter(for: restoredFolder) == .read)
 		#expect(restoredModel.articleFilter(for: restoredForYou) == .unread)
+		#expect(restoredModel.articleFilter(for: restoredStarred) == .all)
 	}
 
 	@Test func articleFilterRestoresAfterDisconnectAndReconnectToSameIdentity() async throws {
@@ -1103,9 +1279,46 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
+	@Test func readerModeFollowsAFeedAcrossForYouAndStreamKeys() throws {
+		let suiteName = "pigeon-reader-mode-model-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "alpha") == .feedContent)
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setReaderMode(.readerView, for: "alpha")
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+		#expect(store.mode(for: "feed/7", session: try #require(model.session)) == .readerView)
+
+		model.setReaderMode(.website, for: "feed/7")
+		#expect(model.readerMode(for: "alpha") == .website)
+		#expect(store.mode(for: "alpha", session: try #require(model.session)) == .website)
+	}
+
+	@Test func readerModeFindsALegacyKeyAfterNavigationLoads() throws {
+		let suiteName = "pigeon-reader-mode-legacy-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		store.setMode(.website, for: "alpha")
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "feed/7") == .website)
+		#expect(model.readerMode(for: "alpha") == .website)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		readerModeStore: ReaderModeStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
@@ -1117,6 +1330,7 @@ struct ReaderAppModelTests {
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
+			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
@@ -1163,11 +1377,13 @@ struct ReaderAppModelTests {
 	private func makeArticle(
 		id: String,
 		isRead: Bool = false,
+		isStarred: Bool = false,
 		receivedAt: TimeInterval = 1_786_272_000,
 		score: Int = 50,
 		feedKey: String = "daily",
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
+		originalURL: URL? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
@@ -1177,10 +1393,10 @@ struct ReaderAppModelTests {
 			title: "Story \(id)",
 			html: "<p>Body</p>",
 			text: "Body",
-			originalURL: nil,
+			originalURL: originalURL,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
-			isStarred: false,
+			isStarred: isStarred,
 			score: score,
 			confidence: 0,
 			sampleCount: 0,

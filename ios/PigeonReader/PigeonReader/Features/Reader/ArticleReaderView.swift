@@ -34,7 +34,7 @@ struct ArticleReaderView: View {
 					.padding(.vertical, 16)
 					Divider()
 
-					ArticleWebsiteView(url: originalURL)
+					ArticleWebsiteView(articleID: current.id, url: originalURL)
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 				}
 			} else {
@@ -78,6 +78,7 @@ struct ArticleReaderView: View {
 						}
 					}
 					.accessibilityIdentifier("article-reader-scroll-view")
+					.id(ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode))
 					.scrollPosition($scrollPosition)
 					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 					.onScrollGeometryChange(for: ArticleScrollGeometry.self) { geometry in
@@ -157,8 +158,8 @@ struct ArticleReaderView: View {
 			}
 			ReaderSettingsToolbarItem()
 		}
-		.task(id: current.feedKey) {
-			selectedMode = current.safeOriginalURL == nil ? .feedContent : model.readerMode(for: current.feedKey)
+		.task(id: readerModeTaskID(for: current)) {
+			selectedMode = model.displayReaderMode(for: current)
 			readerDocument = nil
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
@@ -167,8 +168,11 @@ struct ArticleReaderView: View {
 		}
 		.task(id: current.id) {
 			boundaryNavigationInProgress = false
-			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
+		}
+		.task(id: ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode)) {
+			scrollPosition = ScrollPosition()
+			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
 			guard scenePhase == .active else {
@@ -177,7 +181,6 @@ struct ArticleReaderView: View {
 			await model.monitorActiveReading(for: current.id)
 		}
 		.onChange(of: selectedMode) { _, newMode in
-			model.setReaderMode(newMode, for: current.feedKey)
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
@@ -259,11 +262,16 @@ struct ArticleReaderView: View {
 		"\(article.id)|\(selectedMode.rawValue)|\(article.safeOriginalURL?.absoluteString ?? "none")"
 	}
 
+	private func readerModeTaskID(for article: Recommendation) -> String {
+		"\(article.id)|\(article.feedKey)|\(article.safeOriginalURL?.absoluteString ?? "none")"
+	}
+
 	private func selectMode(_ mode: ReaderMode) {
 		guard mode == .feedContent || currentArticle.safeOriginalURL != nil else {
 			return
 		}
 		selectedMode = mode
+		model.setReaderMode(mode, for: currentArticle)
 	}
 
 	private func loadReaderViewIfNeeded(for article: Recommendation) async {

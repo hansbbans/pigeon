@@ -574,18 +574,45 @@ final class ReaderAppModel {
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
-		if let rawValue = restoredReaderModes[feedID], let mode = ReaderMode(rawValue: rawValue) {
-			return mode
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			if let rawValue = restoredReaderModes[alias], let mode = ReaderMode(rawValue: rawValue) {
+				return mode
+			}
 		}
-		guard let session else { return .feedContent }
-		return readerModeStore.mode(for: feedID, session: session)
+		if let session, let stored = readerModeStore.storedMode(for: aliases, session: session) {
+			return stored
+		}
+		return readerModeStore.storedMode(for: aliases) ?? .feedContent
+	}
+
+	func displayReaderMode(for article: Recommendation) -> ReaderMode {
+		ReaderMode.displayMode(stored: readerMode(for: article.feedKey), hasOriginalURL: article.safeOriginalURL != nil)
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
 		guard let session else { return }
-		restoredReaderModes[feedID] = mode.rawValue
-		readerModeStore.setMode(mode, for: feedID, session: session)
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			restoredReaderModes[alias] = mode.rawValue
+		}
+		readerModeStore.setMode(mode, for: aliases, session: session)
 		scheduleRestorationSave()
+	}
+
+	func setReaderMode(_ mode: ReaderMode, for article: Recommendation) {
+		guard ReaderMode.shouldPersistSelection(hasOriginalURL: article.safeOriginalURL != nil) else {
+			return
+		}
+		setReaderMode(mode, for: article.feedKey)
+	}
+
+	private func readerModeAliases(for feedID: String) -> [String] {
+		ReaderModeIdentity.aliases(
+			for: feedID,
+			navigationItems: navigation.items,
+			subscriptions: subscriptions,
+		)
 	}
 
 	func articleScrollOffset(for articleID: String) -> Double {
@@ -1348,7 +1375,7 @@ final class ReaderAppModel {
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
 		guard let session else {
-			return ReaderArticleFilterStore.defaultFilter
+			return ReaderArticleFilterStore.defaultFilter(for: collectionID)
 		}
 		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
 		return articleFilters[key] ?? articleFilterStore.filter(for: collectionID, session: session)
@@ -1687,7 +1714,7 @@ final class ReaderAppModel {
 			feedback: type.rawValue,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return }
-		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
+		guard type == .notInterested, articleCache[ReaderSection.forYou.rawValue] != nil else {
 			await replayPendingMutations()
 			return
 		}
@@ -2124,11 +2151,47 @@ final class ReaderAppModel {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
+			let starredID = ReaderSection.starred.rawValue
+			let hadStarredCache = articleCache[starredID] != nil
+			syncStarredMembership(for: article, starred: value)
+			if hadStarredCache {
+				changedCollections.insert(starredID)
+			}
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
+			reconcileCurrentArticleSelection()
 		}
 
 		await persistCollections(changedCollections)
 		await replayPendingMutations()
+	}
+
+	private func syncStarredMembership(for article: Recommendation, starred: Bool) {
+		let starredID = ReaderSection.starred.rawValue
+		guard var starredArticles = articleCache[starredID] else {
+			return
+		}
+
+		if starred {
+			if let index = starredArticles.firstIndex(where: { articlesMatch($0, article) }) {
+				starredArticles[index].isStarred = true
+			} else {
+				var copy = cachedArticle(matching: article) ?? article
+				copy.isStarred = true
+				starredArticles.append(copy)
+			}
+			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles)
+		} else {
+			articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		}
+	}
+
+	private func cachedArticle(matching article: Recommendation) -> Recommendation? {
+		for cachedArticles in articleCache.values {
+			if let match = cachedArticles.first(where: { articlesMatch($0, article) }) {
+				return match
+			}
+		}
+		return nil
 	}
 
 }
