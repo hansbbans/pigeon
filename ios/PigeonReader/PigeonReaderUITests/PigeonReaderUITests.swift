@@ -115,6 +115,43 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testLongPressFeedAssignsExistingAndCreatesNewFolder() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let feed = app.staticTexts["Stratechery"]
+		if feed.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		feed.press(forDuration: 1.2)
+		let editFeed = app.buttons["Edit Feed"]
+		XCTAssertTrue(editFeed.waitForExistence(timeout: 5))
+		editFeed.tap()
+
+		XCTAssertTrue(app.navigationBars["Edit Feed"].waitForExistence(timeout: 5))
+		let designFolder = app.switches["Design"]
+		XCTAssertTrue(designFolder.waitForExistence(timeout: 5))
+		designFolder.tap()
+		let newFolder = app.textFields["new-feed-folder-name"]
+		XCTAssertTrue(newFolder.exists)
+		newFolder.tap()
+		newFolder.typeText("Reading")
+		app.buttons["save-feed-folders"].tap()
+
+		XCTAssertTrue(app.staticTexts["Reading"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Design"].exists)
+		XCTAssertFalse(app.navigationBars["Edit Feed"].exists)
+		attachScreenshot(named: "feed-folder-edit")
+	}
+
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
 		app.terminate()
 		app.launchArguments = [
@@ -127,10 +164,49 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
-		XCTAssertTrue(app.buttons["Find in Article"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Next Unread"].exists)
+		XCTAssertFalse(app.buttons["Find in Article"].exists)
+		XCTAssertFalse(app.buttons["Next Unread"].exists)
+		XCTAssertFalse(app.navigationBars.buttons["Back"].exists)
 		XCTAssertTrue(app.buttons["Share"].exists)
+		let readButton = app.buttons["Mark unread"].exists ? app.buttons["Mark unread"] : app.buttons["Mark read"]
+		XCTAssertTrue(readButton.exists)
+		XCTAssertTrue(app.buttons["Unstar"].exists)
+		XCTAssertTrue(app.buttons["More like this"].exists)
+		XCTAssertFalse(app.buttons["Larger text"].exists)
+		XCTAssertFalse(app.buttons["Smaller text"].exists)
 		attachScreenshot(named: "accessibility-large-text-reader")
+	}
+
+	func testReaderBoundarySwipeMovesWithinDisplayedCollection() throws {
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		XCTAssertTrue(reader.waitForExistence(timeout: 5))
+		let nextTitle = app.staticTexts["A short note on cities, attention, and useful density"]
+		XCTAssertFalse(nextTitle.exists)
+
+		reader.swipeUp()
+		XCTAssertFalse(nextTitle.exists, "An ordinary scroll that starts away from the boundary must not navigate")
+
+		// First reach the bottom of the long sample article. The next fresh upward
+		// swipe starts at that boundary and selects the next displayed article.
+		for _ in 0..<11 where nextTitle.exists == false {
+			reader.swipeUp()
+		}
+
+		if nextTitle.waitForExistence(timeout: 1) == false {
+			// Use one explicit touch drag after reaching the bottom so this test
+			// exercises the reader's boundary recognizer, not a programmatic route.
+			let start = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+			let end = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15))
+			start.press(forDuration: 0.1, thenDragTo: end)
+		}
+
+		XCTAssertTrue(nextTitle.waitForExistence(timeout: 5))
+		XCTAssertFalse(app.staticTexts["Designing calmer tools for people who read every day"].exists)
+
+		reader.swipeDown()
+
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		XCTAssertFalse(nextTitle.exists)
 	}
 
 	private func tapLinkedImage() throws {
