@@ -92,6 +92,7 @@ final class ReaderAppModel {
 	private var activeNavigationLoadID: UUID?
 	private var activeNavigationLoadIDs: Set<UUID> = []
 	private var activeLibraryLoadID: UUID?
+	private var activeOfflinePreparationID: UUID?
 	private var preparedOfflineAccountID: String?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
@@ -348,6 +349,7 @@ final class ReaderAppModel {
 			activeNavigationLoadID = nil
 			activeNavigationLoadIDs.removeAll()
 			activeLibraryLoadID = nil
+			activeOfflinePreparationID = nil
 			isLoadingLibrary = false
 			hasLoadedNavigation = false
 			preferredCompactColumn = .sidebar
@@ -602,38 +604,67 @@ final class ReaderAppModel {
 	func prepareOfflineLibrary() async {
 		guard offlineSynchronizationEnabled, let session, let apiClient else { return }
 		let accountID = session.storageIdentity
-		if preparedOfflineAccountID != accountID {
+		let needsSnapshot = preparedOfflineAccountID != accountID
+		if needsSnapshot {
 			resetInMemoryLibraryForAccountChange()
+		}
+		let preparationID = UUID()
+		activeOfflinePreparationID = preparationID
+		defer {
+			if activeOfflinePreparationID == preparationID {
+				activeOfflinePreparationID = nil
+				isSynchronizingOfflineLibrary = false
+			}
+		}
+		if needsSnapshot {
 			do {
 				let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
-				guard self.session?.storageIdentity == accountID else { return }
+				guard activeOfflinePreparationID == preparationID,
+					self.session?.storageIdentity == accountID else { return }
 				applyCachedSnapshot(snapshot)
 				preparedOfflineAccountID = accountID
 			} catch {
+				guard activeOfflinePreparationID == preparationID,
+					self.session?.storageIdentity == accountID else { return }
 				errorMessage = error.localizedDescription
 				return
 			}
 		}
 
 		isSynchronizingOfflineLibrary = true
-		defer { isSynchronizingOfflineLibrary = false }
 		do {
 			_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
-			try await synchronizeIncrementally(accountID: accountID, apiClient: apiClient)
-			guard self.session?.storageIdentity == accountID else { return }
+			try await synchronizeIncrementally(
+				accountID: accountID,
+				apiClient: apiClient,
+				preparationID: preparationID,
+			)
+			guard activeOfflinePreparationID == preparationID,
+				self.session?.storageIdentity == accountID else { return }
 			isOffline = false
 			await loadNavigation(force: true)
+			guard activeOfflinePreparationID == preparationID else { return }
 			await loadLibrary(force: true)
+			guard activeOfflinePreparationID == preparationID else { return }
 			await load(collection: selectedCollection, force: true)
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			guard self.session?.storageIdentity == accountID else { return }
-			isOffline = true
-			if articleCache.isEmpty && navigation.items == ReaderNavigationState.initial.items {
+			guard activeOfflinePreparationID == preparationID,
+				self.session?.storageIdentity == accountID else { return }
+			if isConnectivityFailure(error) {
+				isOffline = true
+			} else {
+				isOffline = false
+				errorMessage = error.localizedDescription
+			}
+			if isConnectivityFailure(error),
+				articleCache.isEmpty && navigation.items == ReaderNavigationState.initial.items {
 				errorMessage = error.localizedDescription
 			}
 		}
+		guard activeOfflinePreparationID == preparationID,
+			self.session?.storageIdentity == accountID else { return }
 		await refreshOfflineStorageStats()
 	}
 
@@ -851,6 +882,7 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
+			isOffline = false
 			try await offlineStore.saveNavigation(navigation, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
 			return
@@ -914,6 +946,7 @@ final class ReaderAppModel {
 				return
 			}
 			setArticles(loadedArticles, for: collection.id)
+			isOffline = false
 			collectionFreshness[collection.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 			try await offlineStore.saveArticles(
 				loadedArticles,
@@ -965,6 +998,7 @@ final class ReaderAppModel {
 				return
 			}
 			setSubscriptions(loaded)
+			isOffline = false
 			restoreNavigationFromSubscriptionsIfNeeded()
 			try await offlineStore.saveSubscriptions(loaded, accountID: apiClient.session.storageIdentity)
 		} catch let error where isCancellation(error) {
@@ -1342,7 +1376,15 @@ final class ReaderAppModel {
 	}
 
 	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
-		articleCache[collectionID] = sortOrder(for: collectionID).sorted(newArticles)
+		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
+			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
+		}
+		let sortedArticles = sortOrder(for: collectionID).sorted(newArticles)
+		articleCache[collectionID] = sortedArticles
+		if let previouslySelectedArticle,
+			let refreshedSelectedArticle = sortedArticles.first(where: { articlesMatch($0, previouslySelectedArticle) }) {
+			selectedArticleIDs[collectionID] = refreshedSelectedArticle.id
+		}
 		reconcileSelection(for: collectionID)
 	}
 
@@ -1711,22 +1753,33 @@ final class ReaderAppModel {
 		await replayPendingMutations()
 	}
 
-	private func synchronizeIncrementally(accountID: String, apiClient: PigeonAPIClient) async throws {
+	private func synchronizeIncrementally(
+		accountID: String,
+		apiClient: PigeonAPIClient,
+		preparationID: UUID,
+	) async throws {
 		var cursor = try await offlineStore.loadSnapshot(accountID: accountID).cursor
+		guard activeOfflinePreparationID == preparationID,
+			session?.storageIdentity == accountID else { return }
 		var seenCursors = Set<String>()
 		while true {
 			try Task.checkCancellation()
 			let page = try await apiClient.incrementalSync(cursor: cursor)
+			guard activeOfflinePreparationID == preparationID,
+				session?.storageIdentity == accountID else { return }
 			guard seenCursors.insert(page.cursor).inserted || page.hasMore == false else {
 				throw PigeonError.invalidResponse
 			}
 			try await offlineStore.apply(page, accountID: accountID)
+			guard activeOfflinePreparationID == preparationID,
+				session?.storageIdentity == accountID else { return }
 			cursor = page.cursor
 			if page.hasMore == false { break }
 		}
 		_ = try? await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 500)
 		let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
-		guard session?.storageIdentity == accountID else { return }
+		guard activeOfflinePreparationID == preparationID,
+			session?.storageIdentity == accountID else { return }
 		applyCachedSnapshot(snapshot)
 	}
 
@@ -1802,6 +1855,8 @@ final class ReaderAppModel {
 		preferredCompactColumn = .sidebar
 		hasLoadedNavigation = false
 		offlineStorageStats = .empty
+		activeOfflinePreparationID = nil
+		isSynchronizingOfflineLibrary = false
 		isOffline = false
 		personalization = nil
 		isLoadingPersonalization = false
@@ -1882,7 +1937,13 @@ final class ReaderAppModel {
 		} catch let error where isCancellation(error) {
 			// The action is durable already. Cancellation must never roll it back.
 		} catch {
-			isOffline = true
+			guard self.session?.storageIdentity == accountID else { return }
+			if isConnectivityFailure(error) {
+				isOffline = true
+			} else {
+				isOffline = false
+				errorMessage = error.localizedDescription
+			}
 		}
 		await refreshOfflineStorageStats()
 	}

@@ -137,6 +137,31 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func refreshPreservesOpenArticleWhenCollectionRekeysTheSameLogicalArticle() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let initiallyLoaded = makeArticle(id: "recommendation-id", readerId: "stable-reader-id")
+		let refreshed = makeArticle(id: "stream-id", readerId: initiallyLoaded.readerId)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+
+		let initialLoad = Task { await model.load(collection: collection, force: true) }
+		let initialRequest = await controlled.nextRequest()
+		await controlled.resolve(initialRequest, data: try responseData(items: [initiallyLoaded]))
+		await initialLoad.value
+		model.select(item: collection)
+		model.select(article: initiallyLoaded)
+
+		let refresh = Task { await model.load(collection: collection, force: true) }
+		let refreshRequest = await controlled.nextRequest()
+		await controlled.resolve(refreshRequest, data: try responseData(items: [refreshed]))
+		await refresh.value
+
+		#expect(model.selectedArticleID == refreshed.id)
+		#expect(model.selectedArticle?.id == refreshed.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let article = makeArticle(id: "shared")
@@ -166,13 +191,61 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		#expect(model.allArticles(for: .starred).first?.isRead == true)
 
-		await controlled.resolve(request, statusCode: 500)
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
 		await mutation.value
 
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		#expect(model.allArticles(for: .starred).first?.isRead == true)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 		#expect(model.isOffline)
+	}
+
+	@Test func onlineServerFailureKeepsQueuedMutationWithoutOfflineBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let article = makeArticle(id: "server-error", isRead: false)
+		model.setArticles([article], for: .forYou)
+
+		let mutation = Task { await model.setRead(article, read: true) }
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: Data("server unavailable".utf8), statusCode: 503)
+		await mutation.value
+
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline == false)
+		#expect(model.errorMessage != nil)
+	}
+
+	@Test func onlineServerFailureDoesNotShowOfflineBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		let startup = Task { await model.prepareOfflineLibrary() }
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: Data("server unavailable".utf8), statusCode: 503)
+		await startup.value
+
+		#expect(model.isOffline == false)
+		#expect(model.errorMessage != nil)
+	}
+
+	@Test func successfulCollectionRefreshClearsStaleOfflineState() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let article = makeArticle(id: "cached", isRead: false)
+
+		let startup = Task { await model.prepareOfflineLibrary() }
+		let failedSyncRequest = await controlled.nextRequest()
+		await controlled.fail(failedSyncRequest, with: URLError(.notConnectedToInternet))
+		await startup.value
+		#expect(model.isOffline)
+
+		let refresh = Task { await model.load(section: .forYou, force: true) }
+		let refreshRequest = await controlled.nextRequest()
+		await controlled.resolve(refreshRequest, data: try responseData(items: [article]))
+		await refresh.value
+
+		#expect(model.isOffline == false)
 	}
 
 	@Test func cachedLibraryAndReadingPositionRestoreBeforeAnOfflineRefreshFails() async throws {
@@ -361,6 +434,14 @@ struct ReaderAppModelTests {
 		#expect(isCancellation(URLError(.notConnectedToInternet)) == false)
 		#expect(isCancellation(PigeonError.invalidResponse) == false)
 		#expect(isCancellation(PigeonError.server(statusCode: 503, message: "down")) == false)
+	}
+
+	@Test func connectivityFailureClassificationSeparatesTransportFromServerErrors() {
+		#expect(isConnectivityFailure(URLError(.notConnectedToInternet)))
+		#expect(isConnectivityFailure(URLError(.networkConnectionLost)))
+		#expect(isConnectivityFailure(PigeonError.server(statusCode: 503, message: "down")) == false)
+		#expect(isConnectivityFailure(PigeonError.authenticationFailed) == false)
+		#expect(isConnectivityFailure(PigeonError.invalidResponse) == false)
 	}
 
 	@Test func olderLoadCannotReplaceASectionWithStaleResults() async throws {
@@ -778,7 +859,7 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
 		#expect(model.selectedArticleID == boundary.id)
 
-		await controlled.resolve(request, statusCode: 500)
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
 		await mutation.value
 
 		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == true)
@@ -968,7 +1049,7 @@ struct ReaderAppModelTests {
 		)
 		#expect(envelope.mutations.count == 1)
 		#expect(Set(envelope.mutations[0].itemIds) == Set([first.readerId, second.readerId]))
-		await controlled.resolve(request, statusCode: 500)
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
 		await mutation.value
 
 		for item in state.items {
@@ -993,7 +1074,7 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 		#expect(model.subscriptions.first?.title == "Renamed")
 
-		await controlled.resolve(request, statusCode: 500)
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
 		let succeeded = await mutation.value
 
 		#expect(succeeded)
@@ -1053,7 +1134,7 @@ struct ReaderAppModelTests {
 		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
 		#expect(snapshot.subscriptions.first?.folderNames == ["Reading", "Research"])
 
-		await controlled.resolve(request, statusCode: 500)
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
 		#expect(await edit.value)
 		let pending = try await store.pendingMutations(
 			accountID: try #require(model.session).storageIdentity,
@@ -1101,6 +1182,47 @@ struct ReaderAppModelTests {
 		await olderLoad.value
 
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
+	}
+
+	@Test func olderOfflinePreparationCannotOverwriteNewerResult() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		func resolveSuccessfulStartupRequest(_ request: ControlledHTTPClient.PendingRequest) async throws {
+			let data: Data
+			switch request.request.url?.path {
+			case "/api/v1/sync":
+				data = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
+			case "/reader/api/0/subscription/list":
+				data = try subscriptionsData([])
+			case "/reader/api/0/unread-count":
+				data = Data(#"{"unreadcounts":[]}"#.utf8)
+			case "/reader/api/0/stream/items/ids":
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+			case "/api/v1/recommendations":
+				data = try responseData(items: [])
+			default:
+				Issue.record("Unexpected startup request: \(request.request.url?.path ?? "missing path")")
+				return
+			}
+			await controlled.resolve(request, data: data)
+		}
+
+		let older = Task { await model.prepareOfflineLibrary() }
+		let olderSyncRequest = await controlled.nextRequest()
+		let newer = Task { await model.prepareOfflineLibrary() }
+		let newerSyncRequest = await controlled.nextRequest()
+
+		await controlled.resolve(newerSyncRequest, data: Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8))
+		for _ in 0..<6 {
+			try await resolveSuccessfulStartupRequest(await controlled.nextRequest())
+		}
+		await newer.value
+
+		await controlled.fail(olderSyncRequest, with: URLError(.notConnectedToInternet))
+		await older.value
+
+		#expect(model.isOffline == false)
 	}
 
 	private func makeModel(
