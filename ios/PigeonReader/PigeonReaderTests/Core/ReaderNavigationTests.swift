@@ -3,6 +3,31 @@ import Testing
 @testable import PigeonReader
 
 struct ReaderNavigationTests {
+	@Test func readerBoundaryNavigationRequiresAFreshDirectionalBoundarySwipe() {
+		let atBottom = ReaderBoundaryNavigationState(isAtTop: false, isAtBottom: true)
+		let atTop = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: false)
+
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: -100) == .next)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atTop, translationX: 0, translationY: 100) == .previous)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: 100) == nil)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atTop, translationX: 0, translationY: -100) == nil)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atTop, translationX: 100, translationY: -120) == nil)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 120, translationY: -100) == nil)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: -30) == nil)
+	}
+
+	@Test func readerBoundaryNavigationSupportsShortContentAndStopsAtCollectionEnds() {
+		let shortContent = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: shortContent, translationX: 0, translationY: -100) == .next)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: shortContent, translationX: 0, translationY: 100) == .previous)
+
+		#expect(ReaderBoundaryNavigation.targetIndex(currentIndex: 0, count: 3, direction: .next) == 1)
+		#expect(ReaderBoundaryNavigation.targetIndex(currentIndex: 1, count: 3, direction: .previous) == 0)
+		#expect(ReaderBoundaryNavigation.targetIndex(currentIndex: 0, count: 3, direction: .previous) == nil)
+		#expect(ReaderBoundaryNavigation.targetIndex(currentIndex: 2, count: 3, direction: .next) == nil)
+		#expect(ReaderBoundaryNavigation.targetIndex(currentIndex: 4, count: 3, direction: .next) == nil)
+	}
+
 	@Test func navigationPayloadDecodesAndMapsSmartFoldersFeedsAndCountsWithoutFolderDoubleCounting() throws {
 		let payload = Data(
 			"""

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ReaderSidebarView: View {
 	@Environment(ReaderAppModel.self) private var model
+	@State private var editorRoute: LibraryEditorRoute?
 
 	var body: some View {
 		@Bindable var model = model
@@ -42,13 +43,7 @@ struct ReaderSidebarView: View {
 
 						if model.isFolderExpanded(folder) {
 							ForEach(model.visibleFeedNavigationItems(in: folder)) { feed in
-								ReaderNavigationRowView(
-									item: feed,
-									isSelected: model.selectedNavigationID == feed.id,
-									indentation: 28,
-									onSelect: { model.select(item: feed) },
-								)
-								.tag(feed.id)
+								feedRow(feed, indentation: 28)
 							}
 						}
 					}
@@ -58,12 +53,7 @@ struct ReaderSidebarView: View {
 			if model.visibleUncategorizedFeedNavigationItems.isEmpty == false {
 				Section("Feeds") {
 					ForEach(model.visibleUncategorizedFeedNavigationItems) { feed in
-						ReaderNavigationRowView(
-							item: feed,
-							isSelected: model.selectedNavigationID == feed.id,
-							onSelect: { model.select(item: feed) },
-						)
-						.tag(feed.id)
+						feedRow(feed)
 					}
 				}
 			}
@@ -88,6 +78,28 @@ struct ReaderSidebarView: View {
 		}
 		.refreshable {
 			await model.prepareOfflineLibrary()
+		}
+		.sheet(item: $editorRoute) { route in
+			LibraryManagementView(route: route)
+		}
+	}
+
+	private func feedRow(_ feed: ReaderNavigationItem, indentation: CGFloat = 0) -> some View {
+		ReaderNavigationRowView(
+			item: feed,
+			isSelected: model.selectedNavigationID == feed.id,
+			indentation: indentation,
+			onSelect: { model.select(item: feed) },
+		)
+		.tag(feed.id)
+		.contextMenu {
+			Button("Edit Feed", systemImage: "pencil") {
+				guard let subscription = model.subscription(id: feed.streamID) else {
+					model.errorMessage = "This feed is not available to edit yet. Refresh your library and try again."
+					return
+				}
+				editorRoute = .editFeed(subscription)
+			}
 		}
 	}
 }

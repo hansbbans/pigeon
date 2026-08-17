@@ -11,9 +11,8 @@ struct ArticleReaderView: View {
 	@State private var readerViewState = ReaderViewLoadState.idle
 	@State private var scrollPosition = ScrollPosition()
 	@State private var pendingRestoredDepth: Double?
-	@State private var findText = ""
-	@State private var activeFindQuery = ""
-	@State private var isShowingFind = false
+	@State private var scrollBoundary = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
+	@State private var boundaryNavigationInProgress = false
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -64,19 +63,33 @@ struct ArticleReaderView: View {
 						.frame(width: columnWidth, alignment: .leading)
 						.frame(maxWidth: .infinity, alignment: .center)
 						.clipped()
+						.background {
+							ReaderBoundarySwipeRecognizer(
+								boundaryState: { scrollBoundary },
+								onSwipe: { startedAt, translationX, translationY in
+									handleBoundarySwipe(
+										startedAt: startedAt,
+										translationX: translationX,
+										translationY: translationY,
+										article: current,
+									)
+								},
+							)
+						}
 					}
+					.accessibilityIdentifier("article-reader-scroll-view")
 					.scrollPosition($scrollPosition)
 					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 					.onScrollGeometryChange(for: ArticleScrollGeometry.self) { geometry in
-						let maximumOffset = max(geometry.contentSize.height - geometry.containerSize.height, 1)
-						return ArticleScrollGeometry(offset: geometry.contentOffset.y, maximumOffset: maximumOffset)
+						ArticleScrollGeometry(geometry)
 					} action: { _, geometry in
+						scrollBoundary = geometry.boundaryState
 						if let pendingRestoredDepth, geometry.maximumOffset > 1 {
 							scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
 							self.pendingRestoredDepth = nil
 							return
 						}
-						let depth = min(max(geometry.offset / geometry.maximumOffset, 0), 1)
+						let depth = min(max(geometry.offset / max(geometry.maximumOffset, 1), 0), 1)
 						model.recordScrollDepth(itemId: current.id, depth: depth)
 						model.setArticleScrollOffset(depth, for: current.id)
 					}
@@ -88,19 +101,9 @@ struct ArticleReaderView: View {
 		.preferredColorScheme(preferredColorScheme)
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
+		.navigationBarBackButtonHidden(true)
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
-				Button("Find in Article", systemImage: "magnifyingglass") {
-					isShowingFind = true
-				}
-				.keyboardShortcut("f", modifiers: .command)
-
-				Button("Next Unread", systemImage: "arrow.right.to.line") {
-					_ = model.selectNextUnread(after: current)
-				}
-				.keyboardShortcut("n", modifiers: .command)
-				.accessibilityHint("Opens the next cached unread article, including articles from other feeds")
-
 				if let shareURL = current.safeOriginalURL {
 					ShareLink(item: shareURL, subject: Text(current.title)) {
 						Label("Share", systemImage: "square.and.arrow.up")
@@ -109,7 +112,7 @@ struct ArticleReaderView: View {
 					.accessibilityHint("Opens the system share sheet")
 				}
 
-				Button(current.isRead ? "Mark unread" : "Mark read", systemImage: current.isRead ? "envelope.badge" : "checkmark.circle") {
+				Button(current.isRead ? "Mark unread" : "Mark read", systemImage: current.isRead ? "circle" : "largecircle.fill.circle") {
 					Task { await model.setRead(current, read: !current.isRead) }
 				}
 				.keyboardShortcut("u", modifiers: .command)
@@ -120,14 +123,6 @@ struct ArticleReaderView: View {
 				.keyboardShortcut("s", modifiers: .command)
 
 				Menu("Reading controls", systemImage: "textformat.size") {
-					Button("Larger text", systemImage: "textformat.size.larger") {
-						model.readerTypography.increaseTextScale()
-					}
-					.disabled(model.readerTypography.textScale >= ReaderTypographySettings.textScaleRange.upperBound)
-					Button("Smaller text", systemImage: "textformat.size.smaller") {
-						model.readerTypography.decreaseTextScale()
-					}
-					.disabled(model.readerTypography.textScale <= ReaderTypographySettings.textScaleRange.lowerBound)
 					Button("Looser lines", systemImage: "arrow.down.to.line") {
 						model.readerTypography.increaseLineHeight()
 					}
@@ -150,10 +145,11 @@ struct ArticleReaderView: View {
 					}
 				}
 
+				Button("More like this", systemImage: "plus.circle") {
+					Task { await model.recordPreference(.moreLikeThis, for: current) }
+				}
+
 				Menu("Preferences", systemImage: "hand.thumbsup") {
-					Button("More like this", systemImage: "plus.circle") {
-						Task { await model.recordPreference(.moreLikeThis, for: current) }
-					}
 					Button("Not interested", systemImage: "hand.thumbsdown") {
 						Task { await model.recordPreference(.notInterested, for: current) }
 					}
@@ -170,6 +166,7 @@ struct ArticleReaderView: View {
 			await loadReaderViewIfNeeded(for: current)
 		}
 		.task(id: current.id) {
+			boundaryNavigationInProgress = false
 			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
 		}
@@ -184,15 +181,6 @@ struct ArticleReaderView: View {
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
-		}
-		.alert("Find in Article", isPresented: $isShowingFind) {
-			TextField("Text to find", text: $findText)
-			Button("Find") {
-				activeFindQuery = findText.trimmingCharacters(in: .whitespacesAndNewlines)
-			}
-			Button("Cancel", role: .cancel) {}
-		} message: {
-			Text("Pigeon highlights the next match in the open article.")
 		}
 	}
 
@@ -209,7 +197,6 @@ struct ArticleReaderView: View {
 				lineHeight: model.readerTypography.lineHeight,
 				theme: model.readerTypography.theme,
 				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-				findQuery: activeFindQuery,
 				imageProxySession: model.session,
 				openedDestination: openInlineDestination,
 				saveToReader: saveInlineDestination,
@@ -254,7 +241,6 @@ struct ArticleReaderView: View {
 						lineHeight: model.readerTypography.lineHeight,
 						theme: model.readerTypography.theme,
 						remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-						findQuery: activeFindQuery,
 						imageProxySession: model.session,
 						openedDestination: openInlineDestination,
 						saveToReader: saveInlineDestination,
@@ -324,7 +310,6 @@ struct ArticleReaderView: View {
 					lineHeight: model.readerTypography.lineHeight,
 					theme: model.readerTypography.theme,
 					remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-					findQuery: activeFindQuery,
 					imageProxySession: model.session,
 					openedDestination: openInlineDestination,
 					saveToReader: saveInlineDestination,
@@ -332,6 +317,46 @@ struct ArticleReaderView: View {
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
+	private func handleBoundarySwipe(
+		startedAt: ReaderBoundaryNavigationState,
+		translationX: CGFloat,
+		translationY: CGFloat,
+		article: Recommendation,
+	) {
+		guard let direction = ReaderBoundaryNavigation.direction(
+			startedAt: startedAt,
+			translationX: Double(translationX),
+			translationY: Double(translationY),
+		) else {
+			return
+		}
+		navigateFromBoundary(direction, from: article)
+	}
+
+	private func navigateFromBoundary(
+		_ direction: ReaderBoundaryNavigationDirection,
+		from current: Recommendation,
+	) {
+		guard boundaryNavigationInProgress == false else {
+			return
+		}
+		let displayedArticles = model.articles(for: model.selectedCollection)
+		guard let currentIndex = displayedArticles.firstIndex(where: { $0.id == current.id }),
+			let targetIndex = ReaderBoundaryNavigation.targetIndex(
+				currentIndex: currentIndex,
+				count: displayedArticles.count,
+				direction: direction,
+			),
+			let target = displayedArticles[safe: targetIndex] else {
+			return
+		}
+
+		boundaryNavigationInProgress = true
+		pendingRestoredDepth = model.articleScrollOffset(for: target.id)
+		scrollPosition = ScrollPosition()
+		model.select(article: target)
 	}
 
 	private func openOriginal() {
@@ -372,7 +397,35 @@ struct ArticleReaderView: View {
 	}
 }
 
+private extension Collection {
+	subscript(safe index: Index) -> Element? {
+		indices.contains(index) ? self[index] : nil
+	}
+}
+
 private struct ArticleScrollGeometry: Equatable {
 	let offset: CGFloat
 	let maximumOffset: CGFloat
+	let visibleMinY: CGFloat
+	let visibleMaxY: CGFloat
+	let contentHeight: CGFloat
+
+	init(_ geometry: ScrollGeometry) {
+		offset = geometry.contentOffset.y
+		maximumOffset = max(
+			geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height,
+			0,
+		)
+		visibleMinY = geometry.visibleRect.minY
+		visibleMaxY = geometry.visibleRect.maxY
+		contentHeight = geometry.contentSize.height
+	}
+
+	var boundaryState: ReaderBoundaryNavigationState {
+		let boundaryTolerance = 2.0
+		return ReaderBoundaryNavigationState(
+			isAtTop: offset <= boundaryTolerance || visibleMinY <= boundaryTolerance,
+			isAtBottom: offset >= maximumOffset - boundaryTolerance || visibleMaxY >= contentHeight - boundaryTolerance,
+		)
+	}
 }

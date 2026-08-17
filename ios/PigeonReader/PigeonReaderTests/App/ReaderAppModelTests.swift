@@ -1002,6 +1002,86 @@ struct ReaderAppModelTests {
 		#expect(model.isOffline)
 	}
 
+	@Test func multiFolderFeedEditQueuesEveryFolderAndPersistsOptimisticSubscription() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let subscription = FeedSubscription(
+			id: "feed/1",
+			title: "Daily",
+			categories: [
+				FeedCategory(id: "user/-/label/Design", label: "Design"),
+				FeedCategory(id: "user/-/label/Reading", label: "Reading"),
+			],
+			url: try #require(URL(string: "https://pigeon.test/feed/daily")),
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+		model.setSubscriptions([subscription])
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: [
+					ReaderSubscription(
+						id: subscription.id,
+						title: subscription.title,
+						categories: subscription.categories.map {
+							ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+						},
+						url: subscription.url.absoluteString,
+					),
+				],
+				unreadCounts: [ReaderUnreadCount(id: subscription.id, count: 3)],
+				smartCounts: ReaderNavigationSmartCounts(forYou: 3, today: 1, unread: 3, starred: 0),
+			),
+		)
+
+		let edit = Task {
+			await model.moveFeed(subscription, toFolderNames: ["Reading", "Research", "Reading"])
+		}
+		let request = await controlled.nextRequest()
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations.count == 1)
+		#expect(envelope.mutations[0].kind == .moveFeed)
+		#expect(envelope.mutations[0].feedId == subscription.id)
+		#expect(envelope.mutations[0].folders == ["Reading", "Research"])
+		#expect(model.subscriptions.first?.folderNames == ["Reading", "Research"])
+		#expect(model.folderNavigationItems.map(\.title) == ["Reading", "Research"])
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.folderNames == ["Reading", "Research"])
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await edit.value)
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.map(\.mutation.folders) == [["Reading", "Research"]])
+		#expect(model.subscriptions.first?.folderNames == ["Reading", "Research"])
+		#expect(model.isOffline)
+	}
+
+	@Test func multiFolderFeedEditRejectsInvalidFolderNamesBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		model.setSubscriptions([subscription])
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Research", " "])
+
+		#expect(succeeded == false)
+		#expect(model.errorMessage == "Folder names must be between 1 and 80 characters.")
+		#expect(model.subscriptions.first?.folderNames == ["Design"])
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
+	}
+
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
