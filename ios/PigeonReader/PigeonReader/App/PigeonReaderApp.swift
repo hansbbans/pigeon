@@ -18,6 +18,8 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")
+			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.nextKey)
+			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.previousKey)
 			UserDefaults.standard.removeObject(forKey: ReaderSmartViewStore.key)
 			ReaderArticleFilterStore().removeAll()
 		}
@@ -47,6 +49,21 @@ struct PigeonReaderApp: App {
 				.onOpenURL { url in
 					Task { await model.handleDeepLink(url) }
 				}
+		}
+		.commands {
+			CommandGroup(after: .toolbar) {
+				Button("Previous Article", systemImage: "chevron.up") {
+					_ = model.navigateArticle(.previous)
+				}
+				.keyboardShortcut(model.keyboardShortcuts.previous.keyboardShortcut)
+				.disabled(model.canNavigateArticle(.previous) == false)
+
+				Button("Next Article", systemImage: "chevron.down") {
+					_ = model.navigateArticle(.next)
+				}
+				.keyboardShortcut(model.keyboardShortcuts.next.keyboardShortcut)
+				.disabled(model.canNavigateArticle(.next) == false)
+			}
 		}
 	}
 }

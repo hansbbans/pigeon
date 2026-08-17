@@ -12,6 +12,7 @@ struct SettingsView: View {
 	var body: some View {
 		@Bindable var model = model
 		@Bindable var typography = model.readerTypography
+		@Bindable var keyboardShortcuts = model.keyboardShortcuts
 
 		NavigationStack {
 			Form {
@@ -181,6 +182,25 @@ struct SettingsView: View {
 						}
 					}
 					Text(remoteImageExplanation(for: typography.remoteImagePolicy))
+						.font(.footnote)
+						.foregroundStyle(.secondary)
+				}
+
+				Section("Keyboard Shortcuts") {
+					Picker("Next article", selection: $keyboardShortcuts.next) {
+						ForEach(ReaderArticleKeyboardShortcut.allCases) { shortcut in
+							Text(shortcut.title).tag(shortcut)
+						}
+					}
+					Picker("Previous article", selection: $keyboardShortcuts.previous) {
+						ForEach(ReaderArticleKeyboardShortcut.allCases) { shortcut in
+							Text(shortcut.title).tag(shortcut)
+						}
+					}
+					Button("Reset article shortcuts", systemImage: "arrow.counterclockwise") {
+						keyboardShortcuts.reset()
+					}
+					Text("Use these shortcuts with an external keyboard while an article is selected. If both actions are assigned the same key, Pigeon swaps the other action to keep them distinct.")
 						.font(.footnote)
 						.foregroundStyle(.secondary)
 				}
