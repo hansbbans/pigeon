@@ -255,7 +255,61 @@ struct PigeonAPIClientTests {
 		}
 	}
 
-	@Test func folderRecommendationsUseBoundedItemContentRequestsAcrossContinuationPages() async throws {
+	@Test func folderRecommendationsReturnOneBoundedPageAndExposeContinuation() async throws {
+		let mock = FolderLoadingHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		let firstPage = try await client.recommendationsPage(from: "user/-/label/News")
+
+		#expect(firstPage.items.count == 21)
+		let expectedTitles = ["Newest"] + stride(from: 20, through: 1, by: -1).map { "Story \($0)" } + ["Older"]
+		#expect(firstPage.items.map(\.title) == Array(expectedTitles.dropLast()))
+		#expect(firstPage.continuation == "folder-page-2")
+
+		var requests = await mock.requests()
+		let itemIDRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }
+		#expect(itemIDRequests.count == 1)
+		#expect(itemIDRequests.allSatisfy { request in
+			let queryItems = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+			return queryItems.first(where: { $0.name == "s" })?.value == "user/-/label/News"
+				&& queryItems.first(where: { $0.name == "n" })?.value == "50"
+		})
+
+		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 3)
+		#expect(contentRequests.allSatisfy { $0.method == "POST" })
+		let contentRequestIDs = contentRequests.map { Self.formValues(from: $0.body, named: "i") }
+		let expectedContentRequestIDs: [[String]] = [
+			Array((12...21).reversed()).map(String.init),
+			Array((2...11).reversed()).map(String.init),
+			["1"],
+		]
+		#expect(contentRequestIDs == expectedContentRequestIDs)
+		#expect(contentRequestIDs.allSatisfy { $0.count <= 10 })
+		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/contents" }) == false)
+
+		let secondPage = try await client.recommendationsPage(
+			from: "user/-/label/News",
+			continuation: firstPage.continuation,
+		)
+
+		#expect(secondPage.items.map(\.title) == ["Older"])
+		#expect(secondPage.continuation == nil)
+		requests = await mock.requests()
+		let allItemIDRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }
+		#expect(allItemIDRequests.count == 2)
+		let secondItemIDRequest = try #require(allItemIDRequests.dropFirst().first)
+		#expect(URLComponents(url: secondItemIDRequest.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "c" })?.value == "folder-page-2")
+		let allContentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(allContentRequests.count == 4)
+		#expect(Self.formValues(from: allContentRequests.last?.body, named: "i") == ["0"])
+	}
+
+	@Test func legacyRecommendationsEntryPointDoesNotDrainFolderContinuations() async throws {
 		let mock = FolderLoadingHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let client = PigeonAPIClient(
@@ -265,29 +319,10 @@ struct PigeonAPIClientTests {
 
 		let recommendations = try await client.recommendations(from: "user/-/label/News")
 
-		#expect(recommendations.count == 22)
-		let expectedTitles = ["Newest"] + stride(from: 20, through: 1, by: -1).map { "Story \($0)" } + ["Older"]
-		#expect(recommendations.map(\.title) == expectedTitles)
+		#expect(recommendations.count == 21)
 		let requests = await mock.requests()
-		let itemIDRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }
-		#expect(itemIDRequests.count == 2)
-		#expect(itemIDRequests.allSatisfy { request in
-			let queryItems = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-			return queryItems.first(where: { $0.name == "s" })?.value == "user/-/label/News"
-				&& queryItems.first(where: { $0.name == "n" })?.value == "50"
-		})
-		let secondItemIDRequest = try #require(itemIDRequests.dropFirst().first)
-		#expect(URLComponents(url: secondItemIDRequest.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "c" })?.value == "folder-page-2")
-
-		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
-		#expect(contentRequests.count == 3)
-		#expect(contentRequests.allSatisfy { $0.method == "POST" })
-		let contentRequestIDs = contentRequests.map { Self.formValues(from: $0.body, named: "i") }
-		let expectedFirstContentRequestIDs = Array((2...21).reversed()).map { String($0) }
-		let expectedContentRequestIDs: [[String]] = [expectedFirstContentRequestIDs, ["1"], ["0"]]
-		#expect(contentRequestIDs == expectedContentRequestIDs)
-		#expect(contentRequestIDs.allSatisfy { $0.count <= 20 })
-		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/contents" }) == false)
+		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }.count == 1)
+		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }.count == 3)
 	}
 
 	private static func formValues(from body: Data?, named name: String) -> [String] {

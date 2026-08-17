@@ -342,21 +342,13 @@ struct ArticleReaderView: View {
 		guard boundaryNavigationInProgress == false else {
 			return
 		}
-		let displayedArticles = model.articles(for: model.selectedCollection)
-		guard let currentIndex = displayedArticles.firstIndex(where: { $0.id == current.id }),
-			let targetIndex = ReaderBoundaryNavigation.targetIndex(
-				currentIndex: currentIndex,
-				count: displayedArticles.count,
-				direction: direction,
-			),
-			let target = displayedArticles[safe: targetIndex] else {
+		guard let target = model.navigateArticle(direction, from: current) else {
 			return
 		}
 
 		boundaryNavigationInProgress = true
 		pendingRestoredDepth = model.articleScrollOffset(for: target.id)
 		scrollPosition = ScrollPosition()
-		model.select(article: target)
 	}
 
 	private func openOriginal() {
@@ -394,12 +386,6 @@ struct ArticleReaderView: View {
 		case .system, .light, .dark:
 			Color(uiColor: .systemBackground)
 		}
-	}
-}
-
-private extension Collection {
-	subscript(safe index: Index) -> Element? {
-		indices.contains(index) ? self[index] : nil
 	}
 }
 

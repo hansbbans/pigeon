@@ -6,9 +6,14 @@ struct RecommendationsResponse: Codable, Sendable {
 	let items: [Recommendation]
 }
 
+struct ReaderRecommendationsPage: Sendable {
+	let items: [Recommendation]
+	let continuation: String?
+}
+
 struct PigeonAPIClient: Sendable {
 	private static let streamItemIDPageLimit = 50
-	private static let streamItemContentChunkSize = 20
+	private static let streamItemContentChunkSize = 10
 
 	let session: PigeonSession
 	private let httpClient: any HTTPClient
@@ -264,8 +269,24 @@ struct PigeonAPIClient: Sendable {
 	}
 
 	func recommendations(from streamID: String, dayBounds: ReaderLocalDayBounds? = nil) async throws -> [Recommendation] {
-		let items = try await streamItems(streamID: streamID, dayBounds: dayBounds)
-		return items.map { recommendation(from: $0, fallbackStreamID: streamID) }
+		let page = try await recommendationsPage(from: streamID, dayBounds: dayBounds)
+		return page.items
+	}
+
+	func recommendationsPage(
+		from streamID: String,
+		dayBounds: ReaderLocalDayBounds? = nil,
+		continuation: String? = nil,
+	) async throws -> ReaderRecommendationsPage {
+		let page = try await streamItemsPage(
+			streamID: streamID,
+			dayBounds: dayBounds,
+			continuation: continuation,
+		)
+		return ReaderRecommendationsPage(
+			items: page.items.map { recommendation(from: $0, fallbackStreamID: streamID) },
+			continuation: page.continuation,
+		)
 	}
 
 	func unreadCount(in streamID: String) async throws -> Int {
@@ -376,62 +397,57 @@ struct PigeonAPIClient: Sendable {
 		return String(decoding: data, as: UTF8.self)
 	}
 
-	private func streamItems(
+	private struct ReaderStreamPage: Sendable {
+		let items: [ReaderStreamItem]
+		let continuation: String?
+	}
+
+	private func streamItemsPage(
 		streamID: String,
 		excludeTag: String? = nil,
 		dayBounds: ReaderLocalDayBounds? = nil,
-	) async throws -> [ReaderStreamItem] {
+		continuation: String? = nil,
+	) async throws -> ReaderStreamPage {
+		try Task.checkCancellation()
+		let page = try await streamItemIDs(
+			streamID: streamID,
+			excludeTag: excludeTag,
+			olderThanUnix: dayBounds.map { max($0.startSeconds - 1, 0) },
+			limit: Self.streamItemIDPageLimit,
+			continuation: continuation,
+		)
+		let newItemIDs = page.itemRefs.map(\.id)
 		var items: [ReaderStreamItem] = []
-		var continuation: String?
-		var seenContinuations = Set<String>()
 		var seenItemIDs = Set<String>()
-		let olderThanUnix = dayBounds.map { max($0.startSeconds - 1, 0) }
+		let uniqueItemIDs = newItemIDs.filter { itemID in
+			seenItemIDs.insert(Self.normalizedItemID(itemID)).inserted
+		}
 
-		while true {
+		for startIndex in stride(from: 0, to: uniqueItemIDs.count, by: Self.streamItemContentChunkSize) {
 			try Task.checkCancellation()
-			let page = try await streamItemIDs(
-				streamID: streamID,
-				excludeTag: excludeTag,
-				olderThanUnix: olderThanUnix,
-				limit: Self.streamItemIDPageLimit,
-				continuation: continuation,
+			let endIndex = min(startIndex + Self.streamItemContentChunkSize, uniqueItemIDs.count)
+			let itemIDChunk = Array(uniqueItemIDs[startIndex..<endIndex])
+			let contentPage = try await streamItemContents(itemIDs: itemIDChunk)
+			let itemsByID = Dictionary(
+				contentPage.items.map { (Self.normalizedItemID($0.id), $0) },
+				uniquingKeysWith: { first, _ in first },
 			)
-			let newItemIDs = page.itemRefs.map(\.id).filter { itemID in
-				seenItemIDs.insert(Self.normalizedItemID(itemID)).inserted
-			}
 
-			for startIndex in stride(from: 0, to: newItemIDs.count, by: Self.streamItemContentChunkSize) {
-				try Task.checkCancellation()
-				let endIndex = min(startIndex + Self.streamItemContentChunkSize, newItemIDs.count)
-				let itemIDChunk = Array(newItemIDs[startIndex..<endIndex])
-				let contentPage = try await streamItemContents(itemIDs: itemIDChunk)
-				let itemsByID = Dictionary(
-					contentPage.items.map { (Self.normalizedItemID($0.id), $0) },
-					uniquingKeysWith: { first, _ in first },
-				)
-
-				for itemID in itemIDChunk {
-					guard let item = itemsByID[Self.normalizedItemID(itemID)] else {
+			for itemID in itemIDChunk {
+				guard let item = itemsByID[Self.normalizedItemID(itemID)] else {
+					continue
+				}
+				if let dayBounds {
+					let date = Date(timeIntervalSince1970: TimeInterval(item.published))
+					guard dayBounds.contains(date) else {
 						continue
 					}
-					if let dayBounds {
-						let date = Date(timeIntervalSince1970: TimeInterval(item.published))
-						guard dayBounds.contains(date) else {
-							continue
-						}
-					}
-					items.append(item)
 				}
+				items.append(item)
 			}
-
-			if page.continuation == nil {
-				return items
-			}
-			guard let nextContinuation = page.continuation, seenContinuations.insert(nextContinuation).inserted else {
-				return items
-			}
-			continuation = nextContinuation
 		}
+
+		return ReaderStreamPage(items: items, continuation: page.continuation)
 	}
 
 	private static func normalizedItemID(_ itemID: String) -> String {
