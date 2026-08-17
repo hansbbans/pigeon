@@ -1064,6 +1064,24 @@ struct ReaderAppModelTests {
 		#expect(model.isOffline)
 	}
 
+	@Test func multiFolderFeedEditRejectsInvalidFolderNamesBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		model.setSubscriptions([subscription])
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Research", " "])
+
+		#expect(succeeded == false)
+		#expect(model.errorMessage == "Folder names must be between 1 and 80 characters.")
+		#expect(model.subscriptions.first?.folderNames == ["Design"])
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
+	}
+
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)

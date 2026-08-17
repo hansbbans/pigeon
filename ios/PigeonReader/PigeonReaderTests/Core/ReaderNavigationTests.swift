@@ -12,6 +12,7 @@ struct ReaderNavigationTests {
 		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: 100) == nil)
 		#expect(ReaderBoundaryNavigation.direction(startedAt: atTop, translationX: 0, translationY: -100) == nil)
 		#expect(ReaderBoundaryNavigation.direction(startedAt: atTop, translationX: 100, translationY: -120) == nil)
+		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 120, translationY: -100) == nil)
 		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: -30) == nil)
 	}
 
