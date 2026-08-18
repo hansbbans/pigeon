@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.1.0] - 2026-08-18
+
+### Changed
+
+- Large cached libraries now reuse each article while rebuilding folders and feeds at launch, making the first article list available much faster without changing its order or freshness.
+
 ## [0.1.0.0] - 2026-08-17
 
 ### Added
