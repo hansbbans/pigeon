@@ -20,6 +20,10 @@ nonisolated enum BackgroundRefreshArticlePlanner {
 	}
 }
 
+nonisolated enum BackgroundRefreshRegistrationPolicy {
+	static let launchQueue = DispatchQueue.main
+}
+
 @MainActor
 final class BackgroundRefreshManager {
 	static let shared = BackgroundRefreshManager()
@@ -46,7 +50,10 @@ final class BackgroundRefreshManager {
 
 	func register() {
 		guard registered == false else { return }
-		registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.taskIdentifier, using: nil) { task in
+		registered = BGTaskScheduler.shared.register(
+			forTaskWithIdentifier: Self.taskIdentifier,
+			using: BackgroundRefreshRegistrationPolicy.launchQueue,
+		) { task in
 			guard let refreshTask = task as? BGAppRefreshTask else {
 				task.setTaskCompleted(success: false)
 				return
