@@ -149,6 +149,24 @@ struct OfflineLibraryStoreTests {
 		#expect(cached.html == "<p>Safe</p>")
 	}
 
+	@Test func snapshotDecodesEachCachedArticlePayloadOnlyOnceAcrossCollections() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<3).map { index in
+			makeArticle(id: "shared-\(index)", feedKey: "feed-\(index)", receivedAt: TimeInterval(300 - index))
+		}
+		try await store.saveArticles(articles, collectionID: "folder/one", accountID: "account-a")
+		try await store.saveArticles(Array(articles.reversed()), collectionID: "folder/two", accountID: "account-a")
+		try await store.saveArticles([articles[1], articles[2], articles[0]], collectionID: "folder/three", accountID: "account-a")
+
+		await store.resetSnapshotArticleDecodeCount()
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+
+		#expect(await store.snapshotArticleDecodeCountForTesting() == articles.count)
+		#expect(snapshot.articlesByCollection["folder/one"]?.map(\.id) == ["shared-0", "shared-1", "shared-2"])
+		#expect(snapshot.articlesByCollection["folder/two"]?.map(\.id) == ["shared-2", "shared-1", "shared-0"])
+		#expect(snapshot.articlesByCollection["folder/three"]?.map(\.id) == ["shared-1", "shared-2", "shared-0"])
+	}
+
 	@Test func lostMutationResponseCanReplayAsAlreadyAppliedExactlyOnce() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let mutation = OfflineMutation(
@@ -232,6 +250,7 @@ struct OfflineLibraryStoreTests {
 
 	private func makeArticle(
 		id: String = "article-1",
+		feedKey: String = "daily",
 		score: Int = 80,
 		html: String = "<p>Cached body</p>",
 		receivedAt: TimeInterval = 300,
@@ -241,7 +260,7 @@ struct OfflineLibraryStoreTests {
 		Recommendation(
 			id: id,
 			readerId: id == "article-1" ? "reader-1" : "reader-\(id)",
-			feedKey: "daily",
+			feedKey: feedKey,
 			source: "Daily",
 			title: "Story \(id)",
 			html: html,
