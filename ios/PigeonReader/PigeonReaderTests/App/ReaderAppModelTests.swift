@@ -137,6 +137,21 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func refreshKeepsTheOpenArticleWhenTheFetchedPageOmitsIt() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let openArticle = makeArticle(id: "open")
+		let refreshedArticle = makeArticle(id: "refreshed")
+
+		model.setArticles([openArticle], for: .forYou)
+		model.select(article: openArticle)
+		model.setArticles([refreshedArticle], for: .forYou)
+
+		#expect(model.selectedArticleID == openArticle.id)
+		#expect(model.selectedArticle?.id == openArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.allArticles(for: .forYou).map(\.id).contains(openArticle.id))
+	}
+
 	@Test func articleShortcutsFollowTheDisplayedCollectionOrderAndStopAtBoundaries() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou)

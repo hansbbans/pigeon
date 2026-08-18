@@ -1616,8 +1616,26 @@ final class ReaderAppModel {
 	}
 
 	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
-		articleCache[collectionID] = sortOrder(for: collectionID).sorted(newArticles)
+		articleCache[collectionID] = sortOrder(for: collectionID).sorted(
+			articlesPreservingOpenSelection(newArticles, for: collectionID),
+		)
 		reconcileSelection(for: collectionID)
+	}
+
+	private func articlesPreservingOpenSelection(
+		_ incomingArticles: [Recommendation],
+		for collectionID: String,
+	) -> [Recommendation] {
+		guard
+			selectedNavigationID == collectionID,
+			let selectedArticleID,
+			let activeArticle = articleCache[collectionID]?.first(where: { $0.id == selectedArticleID }),
+			incomingArticles.contains(where: { $0.id == selectedArticleID }) == false
+		else {
+			return incomingArticles
+		}
+
+		return incomingArticles + [activeArticle]
 	}
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
