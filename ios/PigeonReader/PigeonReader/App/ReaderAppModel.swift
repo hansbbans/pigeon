@@ -112,6 +112,7 @@ final class ReaderAppModel {
 	private var activeOfflinePreparationID: UUID?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
+	private var hasAppliedCompactColumnRestoration = false
 	private var restoredReaderModes: [String: String] = [:]
 	private var articleScrollOffsets: [String: Double] = [:]
 	private var collectionFreshness: [String: CollectionFreshness] = [:]
@@ -954,6 +955,15 @@ final class ReaderAppModel {
 		selectedArticleIDs[selectedNavigationID] = article.id
 		preferredCompactColumn = .detail
 		scheduleRestorationSave()
+	}
+
+	/// Returns the compact column from the article to the feed list.
+	///
+	/// NavigationSplitView on iPhone restores `.detail` without a poppable
+	/// stack, so the system back button and interactive pop gesture do nothing.
+	/// Views must call this instead of relying on the hidden system back item.
+	func showFeedColumn() {
+		preferredCompactColumn = .content
 	}
 
 	func loadNavigation(
@@ -2094,7 +2104,10 @@ final class ReaderAppModel {
 			sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
 			restoredReaderModes = restoration.readerModes
 			articleScrollOffsets = restoration.articleScrollOffsets
-			preferredCompactColumn = compactColumn(from: restoration.compactColumn)
+			if hasAppliedCompactColumnRestoration == false {
+				preferredCompactColumn = compactColumn(from: restoration.compactColumn)
+				hasAppliedCompactColumnRestoration = true
+			}
 			selectedNavigationID = restoration.selectedNavigationID
 		}
 
@@ -2153,6 +2166,7 @@ final class ReaderAppModel {
 		navigation = .initial
 		sidebarFilter = .all
 		preferredCompactColumn = .sidebar
+		hasAppliedCompactColumnRestoration = false
 		hasLoadedNavigation = false
 		offlineStorageStats = .empty
 		isOffline = false

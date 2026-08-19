@@ -4,6 +4,7 @@ import SwiftUI
 struct ArticleReaderView: View {
 	let article: Recommendation
 	@Environment(ReaderAppModel.self) private var model
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 	@Environment(\.openURL) private var openURL
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var selectedMode = ReaderMode.feedContent
@@ -74,6 +75,7 @@ struct ArticleReaderView: View {
 										article: current,
 									)
 								},
+								onBackSwipe: showFeedIfCompact,
 							)
 						}
 					}
@@ -102,7 +104,24 @@ struct ArticleReaderView: View {
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
 		.navigationBarBackButtonHidden(true)
+		.background {
+			if horizontalSizeClass == .compact {
+				ReaderBackSwipeRecognizer(onBack: showFeedIfCompact)
+			}
+		}
 		.toolbar {
+			if horizontalSizeClass == .compact {
+				ToolbarItem(placement: .topBarLeading) {
+					Button {
+						showFeedIfCompact()
+					} label: {
+						Label(model.selectedCollection.title, systemImage: "chevron.backward")
+					}
+					.accessibilityIdentifier("article-back-to-feed")
+					.accessibilityLabel(ReaderAccessibilityText.backToFeed(for: model.selectedCollection.title))
+				}
+			}
+
 			ToolbarItemGroup(placement: .topBarTrailing) {
 				if let shareURL = current.safeOriginalURL {
 					ShareLink(item: shareURL, subject: Text(current.title)) {
@@ -317,6 +336,13 @@ struct ArticleReaderView: View {
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
+	private func showFeedIfCompact() {
+		guard horizontalSizeClass == .compact else {
+			return
+		}
+		model.showFeedColumn()
 	}
 
 	private func handleBoundarySwipe(

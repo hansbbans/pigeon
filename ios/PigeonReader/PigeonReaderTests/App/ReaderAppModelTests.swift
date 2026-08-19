@@ -135,6 +135,12 @@ struct ReaderAppModelTests {
 		model.select(section: .forYou)
 		#expect(model.selectedArticleID == forYouArticle.id)
 		#expect(model.preferredCompactColumn == .content)
+
+		model.select(article: forYouArticle)
+		#expect(model.preferredCompactColumn == .detail)
+		model.showFeedColumn()
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.selectedArticleID == forYouArticle.id)
 	}
 
 	@Test func refreshKeepsTheOpenArticleWhenTheFetchedPageOmitsIt() throws {
@@ -306,6 +312,14 @@ struct ReaderAppModelTests {
 		#expect(model.readerMode(for: article.feedKey) == .readerView)
 		#expect(model.articleScrollOffset(for: article.id) == 0.72)
 		#expect(model.preferredCompactColumn == .detail)
+
+		model.showFeedColumn()
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.selectedArticleID == article.id)
+
+		_ = await model.cleanupOfflineBodies()
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.selectedArticleID == article.id)
 	}
 
 	@Test func serverSyncFailureSurfacesAnErrorWithoutShowingOffline() async throws {

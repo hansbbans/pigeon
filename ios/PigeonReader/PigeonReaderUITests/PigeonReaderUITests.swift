@@ -166,7 +166,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		XCTAssertFalse(app.buttons["Find in Article"].exists)
 		XCTAssertFalse(app.buttons["Next Unread"].exists)
-		XCTAssertFalse(app.navigationBars.buttons["Back"].exists)
+		XCTAssertTrue(app.buttons["article-back-to-feed"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Share"].exists)
 		let readButton = app.buttons["Mark unread"].exists ? app.buttons["Mark unread"] : app.buttons["Mark read"]
 		XCTAssertTrue(readButton.exists)
@@ -175,6 +175,17 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(app.buttons["Larger text"].exists)
 		XCTAssertFalse(app.buttons["Smaller text"].exists)
 		attachScreenshot(named: "accessibility-large-text-reader")
+	}
+
+	func testBackFromOpenedArticleReturnsToTheFeed() throws {
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
+		let back = app.buttons["article-back-to-feed"]
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+
+		XCTAssertTrue(app.navigationBars["For You"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Filter"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "back-from-article-to-feed")
 	}
 
 	func testReaderBoundarySwipeMovesWithinDisplayedCollection() throws {
