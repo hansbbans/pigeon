@@ -15,7 +15,7 @@ Create or confirm these Apple resources before the first run:
 - App Group capability: `group.com.hans.pigeon.reader` on all three App IDs
 - An Apple Distribution certificate with its private key, exported as a password-protected `.p12`
 - App Store Connect provisioning profiles for all three App IDs, created with that distribution certificate and including the App Group capability
-- An App Store Connect team API key with permission to upload builds
+- An App Store Connect team API key with permission to upload builds and read/manage TestFlight builds, beta groups, and testers
 
 The profile must be an App Store profile, not a development or Ad Hoc profile. If app capabilities change later, regenerate the profile before releasing.
 
@@ -57,4 +57,13 @@ The workflow creates a uniquely named temporary keychain and release directory f
 
 ## Release
 
-From GitHub Actions, select `Release to TestFlight` on `main` and choose `Run workflow`. The optional marketing version overrides the checked-in `1.0`; the build number is generated from the GitHub run number and retry count. A successful upload still needs to finish processing in App Store Connect before it appears to testers.
+From GitHub Actions, select `Release to TestFlight` on `main` and choose `Run workflow`. The optional marketing version overrides the checked-in `1.0`; the build number is generated from the GitHub run number and retry count.
+
+The workflow has two jobs:
+
+1. `upload` runs the tests, archive, export, and exactly one TestFlight upload. It records the marketing version and archive build number as job outputs and removes the temporary keychain, profiles, certificate, private-key file, and release directory in its final cleanup step.
+2. `verify` runs only after a successful upload. The repository-owned `scripts/app-store-connect-verify.mjs` creates a short-lived App Store Connect JWT with the existing key, issuer, and private-key secrets; resolves the app by `com.hans.pigeon.reader`; polls the exact workflow-derived build until it is `VALID`; fails immediately for `FAILED` or `INVALID` and clearly on timeout; resolves the exact `Pigeon Internal` group; attaches the build through the official beta-group/build relationship when necessary; verifies that relationship and at least one tester; and writes the app, bundle, version, build, processing, group, and tester evidence to the step summary.
+
+The API verifier retries transient `429` and `5xx` reads, honors `Retry-After` when present, and uses a JWT lifetime below App Store Connect's limit. Relationship attachment is idempotent: after a conflict or ambiguous server response it re-reads the group's builds with bounded backoff and accepts the operation only when the exact build is present. After a successful attach it waits for the same exact relationship to propagate. A group with `hasAccessToAllBuilds` does not receive a duplicate attach request, but it is still polled until the exact build is listed; an absent relationship is never summarized as covered.
+
+If verification fails after the upload job succeeds, rerun only the failed `verify` job. GitHub Actions retains the successful upload job and its outputs, so verification retries do not upload a second build. Do not rerun the entire workflow after an upload has succeeded unless a new build is intentionally authorized. This path uses the App Store Connect API directly; it has no browser login, cookie import, or third-party release service. A successful upload still needs the verification job to finish before it is reported as available to testers.
