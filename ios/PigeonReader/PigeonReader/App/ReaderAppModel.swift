@@ -1626,13 +1626,31 @@ final class ReaderAppModel {
 		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
 			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
 		}
-		let sortedArticles = sortOrder(for: collectionID).sorted(newArticles)
+		let sortedArticles = sortOrder(for: collectionID).sorted(
+			articlesPreservingOpenSelection(newArticles, for: collectionID),
+		)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
 			let refreshedSelectedArticle = sortedArticles.first(where: { articlesMatch($0, previouslySelectedArticle) }) {
 			selectedArticleIDs[collectionID] = refreshedSelectedArticle.id
 		}
 		reconcileSelection(for: collectionID)
+	}
+
+	private func articlesPreservingOpenSelection(
+		_ incomingArticles: [Recommendation],
+		for collectionID: String,
+	) -> [Recommendation] {
+		guard
+			selectedNavigationID == collectionID,
+			let selectedArticleID,
+			let activeArticle = articleCache[collectionID]?.first(where: { $0.id == selectedArticleID }),
+			incomingArticles.contains(where: { articlesMatch($0, activeArticle) }) == false
+		else {
+			return incomingArticles
+		}
+
+		return incomingArticles + [activeArticle]
 	}
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {

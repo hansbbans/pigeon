@@ -3,6 +3,10 @@ import Testing
 @testable import PigeonReader
 
 struct PlatformIntegrationTests {
+	@Test func backgroundRefreshLaunchHandlerRunsOnTheMainQueue() {
+		#expect(BackgroundRefreshRegistrationPolicy.launchQueue === DispatchQueue.main)
+	}
+
 	@Test func backgroundRefreshSkipsOfflineAndConstrainedNetworksByDefault() {
 		#expect(BackgroundRefreshPolicy.shouldRefresh(pathIsSatisfied: false, isConstrained: false, allowsLowDataMode: true) == false)
 		#expect(BackgroundRefreshPolicy.shouldRefresh(pathIsSatisfied: true, isConstrained: true, allowsLowDataMode: false) == false)
