@@ -137,6 +137,31 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func refreshPreservesOpenArticleWhenCollectionRekeysTheSameLogicalArticle() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let initiallyLoaded = makeArticle(id: "recommendation-id", readerId: "stable-reader-id")
+		let refreshed = makeArticle(id: "stream-id", readerId: initiallyLoaded.readerId)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+
+		let initialLoad = Task { await model.load(collection: collection, force: true) }
+		let initialRequest = await controlled.nextRequest()
+		await controlled.resolve(initialRequest, data: try responseData(items: [initiallyLoaded]))
+		await initialLoad.value
+		model.select(item: collection)
+		model.select(article: initiallyLoaded)
+
+		let refresh = Task { await model.load(collection: collection, force: true) }
+		let refreshRequest = await controlled.nextRequest()
+		await controlled.resolve(refreshRequest, data: try responseData(items: [refreshed]))
+		await refresh.value
+
+		#expect(model.selectedArticleID == refreshed.id)
+		#expect(model.selectedArticle?.id == refreshed.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
 	@Test func articleShortcutsFollowTheDisplayedCollectionOrderAndStopAtBoundaries() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou)

@@ -14,6 +14,13 @@ All notable changes to Pigeon are documented in this file.
 - Large folders, feeds, and Today load one bounded page at a time with an explicit Load More action instead of downloading the entire collection at once.
 - Folder pagination is restored safely after relaunch, and an older page request can no longer overwrite a newer refresh.
 
+## [0.0.2.0] - 2026-08-17
+
+### Fixed
+
+- Keep the article you are reading open when a refresh updates its server identifier.
+- Keep iPhone and iPad library status accurate when the server is reachable, recover stale offline banners after a successful refresh, and preserve cached and queued reading when connectivity genuinely drops.
+
 ## [0.0.1.0] - 2026-08-16
 
 ### Fixed
