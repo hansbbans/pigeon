@@ -78,6 +78,7 @@ struct ArticleListView: View {
 					loadMoreControls(for: collection, isSearchActive: isSearchActive)
 				}
 				.listStyle(.plain)
+				.accessibilityIdentifier("article-list")
 			}
 		}
 		.navigationTitle(collection.title)

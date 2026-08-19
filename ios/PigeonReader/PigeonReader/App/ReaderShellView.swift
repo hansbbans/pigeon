@@ -2,22 +2,34 @@ import SwiftUI
 
 struct ReaderShellView: View {
 	@Environment(ReaderAppModel.self) private var model
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
 	var body: some View {
 		@Bindable var model = model
 
-		NavigationSplitView(preferredCompactColumn: $model.preferredCompactColumn) {
-			ReaderSidebarView()
-		} content: {
-			ArticleListView(collection: model.selectedCollection)
-		} detail: {
-			if let article = model.selectedArticle {
-				ArticleReaderView(article: article)
+		Group {
+			if horizontalSizeClass != .regular, model.preferredCompactColumn == .detail, let article = model.selectedArticle {
+				// NavigationSplitView that launches on `.detail` has no stack to pop, so
+				// the system back item and interactive pop do nothing. Own the article
+				// on compact and return to the split view when the reader asks.
+				NavigationStack {
+					ArticleReaderView(article: article)
+				}
 			} else {
-				ReaderPlaceholderView(collection: model.selectedCollection)
+				NavigationSplitView(preferredCompactColumn: $model.preferredCompactColumn) {
+					ReaderSidebarView()
+				} content: {
+					ArticleListView(collection: model.selectedCollection)
+				} detail: {
+					if let article = model.selectedArticle {
+						ArticleReaderView(article: article)
+					} else {
+						ReaderPlaceholderView(collection: model.selectedCollection)
+					}
+				}
+				.navigationSplitViewStyle(.balanced)
 			}
 		}
-		.navigationSplitViewStyle(.balanced)
 		.sheet(isPresented: $model.isShowingSettings) {
 			SettingsView()
 		}

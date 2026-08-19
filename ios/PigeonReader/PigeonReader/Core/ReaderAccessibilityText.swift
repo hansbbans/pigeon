@@ -7,6 +7,10 @@ enum ReaderAccessibilityText {
 		"Filter \(collectionTitle) stories"
 	}
 
+	static func backToFeed(for collectionTitle: String) -> String {
+		"Back to \(collectionTitle)"
+	}
+
 	static let filterCollections = "Filter collections"
 	static let filterStoriesHint = "Choose all, unread, or read stories in this collection."
 	static let filterCollectionsHint = "Choose all collections or only collections with unread stories."

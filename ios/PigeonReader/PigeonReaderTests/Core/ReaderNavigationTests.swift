@@ -16,6 +16,14 @@ struct ReaderNavigationTests {
 		#expect(ReaderBoundaryNavigation.direction(startedAt: atBottom, translationX: 0, translationY: -30) == nil)
 	}
 
+	@Test func leadingEdgeSwipeReturnsToTheFeedAndIgnoresVerticalArticleNavigation() {
+		#expect(ReaderBoundaryNavigation.isBackToFeedSwipe(startX: 12, translationX: 100, translationY: 10))
+		#expect(ReaderBoundaryNavigation.isBackToFeedSwipe(startX: 0, translationX: 80, translationY: 0))
+		#expect(ReaderBoundaryNavigation.isBackToFeedSwipe(startX: 40, translationX: 100, translationY: 0) == false)
+		#expect(ReaderBoundaryNavigation.isBackToFeedSwipe(startX: 12, translationX: 40, translationY: 0) == false)
+		#expect(ReaderBoundaryNavigation.isBackToFeedSwipe(startX: 12, translationX: 80, translationY: 90) == false)
+	}
+
 	@Test func readerBoundaryNavigationSupportsShortContentAndStopsAtCollectionEnds() {
 		let shortContent = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
 		#expect(ReaderBoundaryNavigation.direction(startedAt: shortContent, translationX: 0, translationY: -100) == .next)
@@ -87,6 +95,7 @@ struct ReaderNavigationTests {
 
 	@Test func accessibilityCopyInterpolatesCollectionTitles() {
 		#expect(ReaderAccessibilityText.sortStories(for: "Design") == "Sort Design stories")
+		#expect(ReaderAccessibilityText.backToFeed(for: "For You") == "Back to For You")
 	}
 
 	@MainActor

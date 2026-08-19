@@ -4,6 +4,7 @@ import SwiftUI
 struct ArticleReaderView: View {
 	let article: Recommendation
 	@Environment(ReaderAppModel.self) private var model
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 	@Environment(\.openURL) private var openURL
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var selectedMode = ReaderMode.feedContent
@@ -21,6 +22,7 @@ struct ArticleReaderView: View {
 	var body: some View {
 		let current = currentArticle
 		VStack(spacing: 0) {
+			compactBackBar
 			if selectedMode == .website, let originalURL = current.safeOriginalURL {
 				VStack(spacing: 0) {
 					ArticleReaderHeaderView(
@@ -74,6 +76,7 @@ struct ArticleReaderView: View {
 										article: current,
 									)
 								},
+								onBackSwipe: showFeedIfCompact,
 							)
 						}
 					}
@@ -102,6 +105,11 @@ struct ArticleReaderView: View {
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
 		.navigationBarBackButtonHidden(true)
+		.background {
+			if isCompactReader {
+				ReaderBackSwipeRecognizer(onBack: showFeedIfCompact)
+			}
+		}
 		.toolbar {
 			ToolbarItemGroup(placement: .topBarTrailing) {
 				if let shareURL = current.safeOriginalURL {
@@ -317,6 +325,35 @@ struct ArticleReaderView: View {
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
+	private var isCompactReader: Bool {
+		horizontalSizeClass != .regular
+	}
+
+	@ViewBuilder
+	private var compactBackBar: some View {
+		if isCompactReader {
+			HStack {
+				Button(action: showFeedIfCompact) {
+					Label(model.selectedCollection.title, systemImage: "chevron.backward")
+				}
+				.accessibilityIdentifier("article-back-to-feed")
+				.accessibilityLabel(ReaderAccessibilityText.backToFeed(for: model.selectedCollection.title))
+				Spacer(minLength: 0)
+			}
+			.padding(.horizontal, 16)
+			.padding(.vertical, 10)
+			.frame(maxWidth: .infinity, alignment: .leading)
+			.background(.bar)
+		}
+	}
+
+	private func showFeedIfCompact() {
+		guard isCompactReader else {
+			return
+		}
+		model.showFeedColumn()
 	}
 
 	private func handleBoundarySwipe(

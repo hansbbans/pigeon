@@ -17,6 +17,21 @@ nonisolated struct ReaderBoundaryNavigationState: Equatable, Sendable {
 /// gesture.
 nonisolated enum ReaderBoundaryNavigation {
 	static let minimumVerticalTranslation = 80.0
+	static let minimumHorizontalTranslation = 80.0
+	static let backSwipeEdgeWidth = 32.0
+
+	/// A leading-edge swipe that should leave the article and return to the feed.
+	static func isBackToFeedSwipe(
+		startX: Double,
+		translationX: Double,
+		translationY: Double,
+		edgeWidth: Double = backSwipeEdgeWidth,
+		minimumHorizontalTranslation: Double = minimumHorizontalTranslation,
+	) -> Bool {
+		startX <= edgeWidth
+			&& translationX >= minimumHorizontalTranslation
+			&& abs(translationY) < translationX
+	}
 
 	static func direction(
 		startedAt state: ReaderBoundaryNavigationState,
