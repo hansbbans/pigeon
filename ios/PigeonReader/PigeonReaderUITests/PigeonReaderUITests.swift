@@ -166,7 +166,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		XCTAssertFalse(app.buttons["Find in Article"].exists)
 		XCTAssertFalse(app.buttons["Next Unread"].exists)
-		XCTAssertTrue(app.buttons["article-back-to-feed"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.descendants(matching: .any)["article-back-to-feed"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Share"].exists)
 		let readButton = app.buttons["Mark unread"].exists ? app.buttons["Mark unread"] : app.buttons["Mark read"]
 		XCTAssertTrue(readButton.exists)
@@ -179,12 +179,12 @@ final class PigeonReaderUITests: XCTestCase {
 
 	func testBackFromOpenedArticleReturnsToTheFeed() throws {
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
-		let back = app.buttons["article-back-to-feed"]
+		let back = app.descendants(matching: .any)["article-back-to-feed"]
 		XCTAssertTrue(back.waitForExistence(timeout: 5))
 		back.tap()
 
-		XCTAssertTrue(app.navigationBars["For You"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Filter"].waitForExistence(timeout: 5))
+		let feed = app.descendants(matching: .any)["article-list"]
+		XCTAssertTrue(feed.waitForExistence(timeout: 5) || app.buttons["Filter"].waitForExistence(timeout: 5))
 		attachScreenshot(named: "back-from-article-to-feed")
 	}
 

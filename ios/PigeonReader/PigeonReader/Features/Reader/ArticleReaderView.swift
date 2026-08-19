@@ -22,6 +22,7 @@ struct ArticleReaderView: View {
 	var body: some View {
 		let current = currentArticle
 		VStack(spacing: 0) {
+			compactBackBar
 			if selectedMode == .website, let originalURL = current.safeOriginalURL {
 				VStack(spacing: 0) {
 					ArticleReaderHeaderView(
@@ -105,23 +106,11 @@ struct ArticleReaderView: View {
 		.navigationBarTitleDisplayMode(.inline)
 		.navigationBarBackButtonHidden(true)
 		.background {
-			if horizontalSizeClass == .compact {
+			if isCompactReader {
 				ReaderBackSwipeRecognizer(onBack: showFeedIfCompact)
 			}
 		}
 		.toolbar {
-			if horizontalSizeClass == .compact {
-				ToolbarItem(placement: .topBarLeading) {
-					Button {
-						showFeedIfCompact()
-					} label: {
-						Label(model.selectedCollection.title, systemImage: "chevron.backward")
-					}
-					.accessibilityIdentifier("article-back-to-feed")
-					.accessibilityLabel(ReaderAccessibilityText.backToFeed(for: model.selectedCollection.title))
-				}
-			}
-
 			ToolbarItemGroup(placement: .topBarTrailing) {
 				if let shareURL = current.safeOriginalURL {
 					ShareLink(item: shareURL, subject: Text(current.title)) {
@@ -338,8 +327,30 @@ struct ArticleReaderView: View {
 		.frame(maxWidth: .infinity, alignment: .leading)
 	}
 
+	private var isCompactReader: Bool {
+		horizontalSizeClass != .regular
+	}
+
+	@ViewBuilder
+	private var compactBackBar: some View {
+		if isCompactReader {
+			HStack {
+				Button(action: showFeedIfCompact) {
+					Label(model.selectedCollection.title, systemImage: "chevron.backward")
+				}
+				.accessibilityIdentifier("article-back-to-feed")
+				.accessibilityLabel(ReaderAccessibilityText.backToFeed(for: model.selectedCollection.title))
+				Spacer(minLength: 0)
+			}
+			.padding(.horizontal, 16)
+			.padding(.vertical, 10)
+			.frame(maxWidth: .infinity, alignment: .leading)
+			.background(.bar)
+		}
+	}
+
 	private func showFeedIfCompact() {
-		guard horizontalSizeClass == .compact else {
+		guard isCompactReader else {
 			return
 		}
 		model.showFeedColumn()
