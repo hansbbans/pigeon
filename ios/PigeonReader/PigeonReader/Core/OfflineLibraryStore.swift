@@ -10,6 +10,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	nonisolated(unsafe) private var database: OpaquePointer?
 	private let encoder: JSONEncoder
 	private let decoder: JSONDecoder
+	#if DEBUG
+	private var snapshotArticleDecodeCount = 0
+	#endif
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
 		self.databaseURL = databaseURL
@@ -72,9 +75,12 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}
 
 		var articlesByCollection: [String: [Recommendation]] = [:]
+		// A cached article can belong to many collections; decode its payload once,
+		// then reuse the value while preserving the membership query's order.
+		var decodedArticlesByID: [String: Recommendation] = [:]
 		try query(
 			"""
-			SELECT ca.collection_id, a.payload
+			SELECT ca.collection_id, ca.article_id, a.payload
 			FROM cached_collection_articles ca
 			JOIN cached_articles a
 			  ON a.account_id = ca.account_id AND a.id = ca.article_id
@@ -85,9 +91,22 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			database: database,
 		) { statement in
 			guard let collectionID = string(at: 0, statement: statement),
-				let payload = data(at: 1, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload) else {
+				let articleID = string(at: 1, statement: statement),
+				let payload = data(at: 2, statement: statement) else {
 				return
+			}
+			let article: Recommendation
+			if let cachedArticle = decodedArticlesByID[articleID] {
+				article = cachedArticle
+			} else {
+				guard let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
+					return
+				}
+				decodedArticlesByID[articleID] = decodedArticle
+				article = decodedArticle
+				#if DEBUG
+				snapshotArticleDecodeCount += 1
+				#endif
 			}
 			articlesByCollection[collectionID, default: []].append(article)
 		}
@@ -107,6 +126,16 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			lastSyncAt: syncState?.1,
 		)
 	}
+
+	#if DEBUG
+	func resetSnapshotArticleDecodeCount() {
+		snapshotArticleDecodeCount = 0
+	}
+
+	func snapshotArticleDecodeCountForTesting() -> Int {
+		snapshotArticleDecodeCount
+	}
+	#endif
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) throws {
 		let database = try openDatabase()
