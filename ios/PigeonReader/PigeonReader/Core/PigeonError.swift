@@ -82,15 +82,25 @@ nonisolated func isCancellation(_ error: Error) -> Bool {
 }
 
 nonisolated func isConnectivityFailure(_ error: Error) -> Bool {
-	let nsError = error as NSError
-	guard nsError.domain == NSURLErrorDomain else { return false }
-	let code = URLError.Code(rawValue: nsError.code)
+	let code: URLError.Code
+	if let urlError = error as? URLError {
+		code = urlError.code
+	} else {
+		let nsError = error as NSError
+		guard nsError.domain == NSURLErrorDomain else { return false }
+		code = URLError.Code(rawValue: nsError.code)
+	}
+
 	switch code {
 	case .notConnectedToInternet,
 		.networkConnectionLost,
-		.dataNotAllowed,
+		.timedOut,
+		.cannotFindHost,
+		.cannotConnectToHost,
+		.dnsLookupFailed,
 		.internationalRoamingOff,
-		.callIsActive:
+		.callIsActive,
+		.dataNotAllowed:
 		return true
 	default:
 		return false

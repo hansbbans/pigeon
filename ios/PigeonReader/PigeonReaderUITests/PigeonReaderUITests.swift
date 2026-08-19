@@ -180,7 +180,11 @@ final class PigeonReaderUITests: XCTestCase {
 	func testReaderBoundarySwipeMovesWithinDisplayedCollection() throws {
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
-		let nextTitle = app.staticTexts["A short note on cities, attention, and useful density"]
+		// On iPad, the article list remains visible beside the reader. Scope the
+		// assertions to the reader so a visible list row is not mistaken for the
+		// currently selected article.
+		let nextTitle = reader.staticTexts["A short note on cities, attention, and useful density"]
+		let currentTitle = reader.staticTexts["Designing calmer tools for people who read every day"]
 		XCTAssertFalse(nextTitle.exists)
 
 		reader.swipeUp()
@@ -201,11 +205,11 @@ final class PigeonReaderUITests: XCTestCase {
 		}
 
 		XCTAssertTrue(nextTitle.waitForExistence(timeout: 5))
-		XCTAssertFalse(app.staticTexts["Designing calmer tools for people who read every day"].exists)
+		XCTAssertFalse(currentTitle.exists)
 
 		reader.swipeDown()
 
-		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		XCTAssertTrue(currentTitle.waitForExistence(timeout: 5))
 		XCTAssertFalse(nextTitle.exists)
 	}
 

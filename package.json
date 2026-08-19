@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
 	"test": "tsx --test test/*.test.ts",
+	"test:testflight": "node --test test/app-store-connect-verify.test.mjs",
 	"typecheck": "tsc --noEmit",
 	"audit": "npm audit --audit-level=high",
 	"check": "npm test && npm run typecheck && npm run audit"

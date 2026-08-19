@@ -22,21 +22,25 @@ struct ArticleListView: View {
 				ProgressView("Searching saved stories")
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
-				if isSearchActive {
-					ContentUnavailableView.search(text: searchText)
-				} else if isFilteredEmpty {
-					ContentUnavailableView(
-						filteredEmptyTitle,
-						systemImage: filteredEmptySystemImage,
-						description: Text(filteredEmptyDescription),
-					)
-				} else {
-					ContentUnavailableView(
-						emptyTitle,
-						systemImage: emptySystemImage,
-						description: Text(emptyDescription),
-					)
+				VStack {
+					if isSearchActive {
+						ContentUnavailableView.search(text: searchText)
+					} else if isFilteredEmpty {
+						ContentUnavailableView(
+							filteredEmptyTitle,
+							systemImage: filteredEmptySystemImage,
+							description: Text(filteredEmptyDescription),
+						)
+					} else {
+						ContentUnavailableView(
+							emptyTitle,
+							systemImage: emptySystemImage,
+							description: Text(emptyDescription),
+						)
+					}
+					loadMoreControls(for: collection, isSearchActive: isSearchActive)
 				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else {
 				List {
 					ForEach(articles) { article in
@@ -71,6 +75,7 @@ struct ArticleListView: View {
 						.frame(maxWidth: .infinity, alignment: .center)
 						.listRowSeparator(.hidden)
 						.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
+					loadMoreControls(for: collection, isSearchActive: isSearchActive)
 				}
 				.listStyle(.plain)
 			}
@@ -162,6 +167,37 @@ struct ArticleListView: View {
 				.disabled(isLoading)
 			}
 			ReaderSettingsToolbarItem()
+		}
+	}
+
+	@ViewBuilder
+	private func loadMoreControls(for collection: ReaderNavigationItem, isSearchActive: Bool) -> some View {
+		if isSearchActive == false {
+			if let error = model.loadMoreError(for: collection) {
+				Text("Could not load more articles: \(error)")
+					.font(.footnote)
+					.foregroundStyle(.red)
+					.frame(maxWidth: .infinity, alignment: .center)
+					.listRowSeparator(.hidden)
+			}
+			if model.canLoadMore(collection: collection) {
+				Button {
+					Task { await model.loadMore(collection: collection) }
+				} label: {
+					if model.isLoadingMore(collection: collection) {
+						HStack {
+							ProgressView()
+							Text("Loading more articles…")
+						}
+					} else {
+						Label("Load More Articles", systemImage: "arrow.down.circle")
+					}
+				}
+				.frame(maxWidth: .infinity)
+				.disabled(model.isLoading(collection: collection) || model.isLoadingMore(collection: collection))
+				.listRowSeparator(.hidden)
+				.accessibilityHint("Loads older articles in this collection")
+			}
 		}
 	}
 

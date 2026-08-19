@@ -162,6 +162,59 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .detail)
 	}
 
+	@Test func articleShortcutsFollowTheDisplayedCollectionOrderAndStopAtBoundaries() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let first = makeArticle(id: "first", receivedAt: 1)
+		let middle = makeArticle(id: "middle", receivedAt: 2)
+		let last = makeArticle(id: "last", receivedAt: 3)
+		let unrelated = makeArticle(id: "unrelated", receivedAt: 4)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([last, first, middle], for: collection)
+		model.setArticles([unrelated], for: otherCollection)
+		model.select(item: collection)
+		model.select(article: middle)
+
+		#expect(model.navigateArticle(.next)?.id == "last")
+		#expect(model.selectedArticleID == "last")
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.selectedArticleID == "last")
+		#expect(model.navigateArticle(.previous)?.id == "middle")
+		#expect(model.navigateArticle(.previous)?.id == "first")
+		#expect(model.navigateArticle(.previous) == nil)
+		#expect(model.selectedArticleID == "first")
+	}
+
+	@Test func articleShortcutsFollowVisibleLibrarySearchResultsAcrossCollections() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let current = makeArticle(id: "current", receivedAt: 1)
+		let other = makeArticle(id: "other", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([current], for: collection)
+		model.setArticles([other], for: otherCollection)
+		try await store.saveArticles([current], collectionID: collection.id, accountID: accountID)
+		try await store.saveArticles([other], collectionID: otherCollection.id, accountID: accountID)
+		model.select(item: collection)
+		model.select(article: current)
+
+		await model.searchArticles(query: "Story", scope: .library, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [current.id, other.id])
+		model.select(item: otherCollection)
+		model.select(article: current)
+		#expect(model.navigateArticle(.next)?.id == other.id)
+		#expect(model.selectedArticleID == other.id)
+	}
+
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let article = makeArticle(id: "shared")
@@ -191,60 +244,12 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		#expect(model.allArticles(for: .starred).first?.isRead == true)
 
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		#expect(model.allArticles(for: .starred).first?.isRead == true)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
-		#expect(model.isOffline)
-	}
-
-	@Test func onlineServerFailureKeepsQueuedMutationWithoutOfflineBanner() async throws {
-		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled)
-		let article = makeArticle(id: "server-error", isRead: false)
-		model.setArticles([article], for: .forYou)
-
-		let mutation = Task { await model.setRead(article, read: true) }
-		let request = await controlled.nextRequest()
-		await controlled.resolve(request, data: Data("server unavailable".utf8), statusCode: 503)
-		await mutation.value
-
-		#expect(model.offlineStorageStats.pendingMutationCount == 1)
-		#expect(model.isOffline == false)
-		#expect(model.errorMessage != nil)
-	}
-
-	@Test func onlineServerFailureDoesNotShowOfflineBanner() async throws {
-		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled)
-
-		let startup = Task { await model.prepareOfflineLibrary() }
-		let request = await controlled.nextRequest()
-		await controlled.resolve(request, data: Data("server unavailable".utf8), statusCode: 503)
-		await startup.value
-
-		#expect(model.isOffline == false)
-		#expect(model.errorMessage != nil)
-	}
-
-	@Test func successfulCollectionRefreshClearsStaleOfflineState() async throws {
-		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled)
-		let article = makeArticle(id: "cached", isRead: false)
-
-		let startup = Task { await model.prepareOfflineLibrary() }
-		let failedSyncRequest = await controlled.nextRequest()
-		await controlled.fail(failedSyncRequest, with: URLError(.notConnectedToInternet))
-		await startup.value
-		#expect(model.isOffline)
-
-		let refresh = Task { await model.load(section: .forYou, force: true) }
-		let refreshRequest = await controlled.nextRequest()
-		await controlled.resolve(refreshRequest, data: try responseData(items: [article]))
-		await refresh.value
-
 		#expect(model.isOffline == false)
 	}
 
@@ -285,6 +290,123 @@ struct ReaderAppModelTests {
 		#expect(model.readerMode(for: article.feedKey) == .readerView)
 		#expect(model.articleScrollOffset(for: article.id) == 0.72)
 		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func serverSyncFailureSurfacesAnErrorWithoutShowingOffline() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("server unavailable".utf8), statusCode: 503)
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.isOffline == false)
+		#expect(model.errorMessage != nil)
+	}
+
+	@Test func connectivitySyncFailureStillShowsOffline() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet))
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.isOffline)
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func successfulCollectionLoadClearsStaleOfflineState() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let syncRequest = await controlled.nextRequest()
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.isOffline)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let collectionRequest = await controlled.nextRequest()
+		await controlled.resolve(collectionRequest, data: try responseData(items: [makeArticle(id: "live")]))
+		await load.value
+
+		#expect(model.isOffline == false)
+		#expect(model.articles(for: .forYou).map(\.id) == ["live"])
+	}
+
+	@Test func olderOfflinePreparationCannotOverwriteNewerSuccessfulPreparation() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let syncData = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
+
+		let older = Task { await model.prepareOfflineLibrary() }
+		let olderSync = await controlled.nextRequest()
+		#expect(olderSync.request.url?.path == "/api/v1/sync")
+
+		let newer = Task { await model.prepareOfflineLibrary() }
+		let newerSync = await controlled.nextRequest()
+		#expect(newerSync.request.url?.path == "/api/v1/sync")
+		await controlled.resolve(newerSync, data: syncData)
+
+		// A successful preparation refreshes navigation, the subscription library, and
+		// the selected collection before it completes. Resolve those live requests so
+		// the older failure below is observed only after the newer preparation is done.
+		for _ in 0..<6 {
+			let request = await controlled.nextRequest()
+			let path = request.request.url?.path
+			let data: Data
+			switch path {
+			case "/reader/api/0/subscription/list":
+				data = try subscriptionsData([])
+			case "/api/v1/recommendations":
+				data = try responseData(items: [])
+			default:
+				data = Data(#"{"itemRefs":[],"unreadcounts":[]}"#.utf8)
+			}
+			await controlled.resolve(request, data: data)
+		}
+		await newer.value
+		#expect(model.isOffline == false)
+
+		await controlled.fail(olderSync, with: URLError(.notConnectedToInternet))
+		await older.value
+
+		#expect(model.isOffline == false)
+	}
+
+	@Test func olderSuccessfulPreparationCannotClearNewerOfflineFailure() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let syncData = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
+
+		let older = Task { await model.prepareOfflineLibrary() }
+		let olderSync = await controlled.nextRequest()
+		await controlled.resolve(olderSync, data: syncData)
+
+		var olderNavigationRequests: [ControlledHTTPClient.PendingRequest] = []
+		for _ in 0..<4 {
+			olderNavigationRequests.append(await controlled.nextRequest())
+		}
+
+		let newer = Task { await model.prepareOfflineLibrary() }
+		let newerSync = await controlled.nextRequest()
+		await controlled.fail(newerSync, with: URLError(.notConnectedToInternet))
+		await newer.value
+		#expect(model.isOffline)
+
+		for request in olderNavigationRequests {
+			let path = request.request.url?.path
+			let data: Data
+			switch path {
+			case "/reader/api/0/subscription/list":
+				data = try subscriptionsData([])
+			default:
+				data = Data(#"{"itemRefs":[],"unreadcounts":[]}"#.utf8)
+			}
+			await controlled.resolve(request, data: data)
+		}
+		await older.value
+
+		#expect(model.isOffline)
 	}
 
 	@Test func failedNavigationRefreshStillShowsConnectedFeedNavigationWhenForYouLoads() async throws {
@@ -370,6 +492,169 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
+	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
+		let httpClient = PaginationHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		let collection = makePaginationCollection()
+		let accountID = try #require(model.session?.storageIdentity)
+
+		await model.load(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
+		#expect(model.canLoadMore(collection: collection))
+		let initialRequests = await httpClient.requests()
+		#expect(initialRequests.filter { $0.path == "/reader/api/0/stream/items/ids" }.count == 1)
+		#expect(initialRequests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 1)
+
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let persisted = try await store.loadSnapshot(accountID: accountID)
+		#expect(persisted.articlesByCollection[collection.id]?.map(\.id) == ["newest", "middle", "older"])
+
+		await model.refresh(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
+		#expect(model.canLoadMore(collection: collection))
+		let requests = await httpClient.requests()
+		let itemIDRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(itemIDRequests.count == 3)
+		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil])
+		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 3)
+	}
+
+	@Test func repeatedFolderContinuationStopsWithoutAppendingDuplicateArticlesOrRequestingAgain() async throws {
+		let httpClient = PaginationHTTPClient(repeatsContinuation: true)
+		let model = try makeModel(httpClient: httpClient)
+		let collection = makePaginationCollection()
+
+		await model.load(collection: collection)
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let requestCount = await httpClient.requests().count
+
+		await model.loadMore(collection: collection)
+
+		#expect(await httpClient.requests().count == requestCount)
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+	}
+
+	@Test func failedFolderRefreshKeepsThePreviousContinuationAvailable() async throws {
+		let httpClient = PaginationHTTPClient()
+		let model = try makeModel(httpClient: httpClient)
+		let collection = makePaginationCollection()
+
+		await model.load(collection: collection)
+		await httpClient.failNextItemIDRequest()
+		await model.refresh(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
+		#expect(model.canLoadMore(collection: collection))
+	}
+
+	@Test func supersededLoadMoreCannotOverwriteRefreshOrOfflineState() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		let initialLoad = Task { await model.load(collection: collection, force: true) }
+		let initialIDs = await controlled.nextRequest()
+		await controlled.resolve(initialIDs, data: streamIDsData(ids: ["initial"], continuation: "old-next"))
+		let initialContents = await controlled.nextRequest()
+		await controlled.resolve(initialContents, data: streamContentsData(ids: ["initial"]))
+		await initialLoad.value
+		#expect(model.errorMessage == nil)
+		#expect(model.allArticles(for: collection).map(\.id) == ["initial"])
+		#expect(model.canLoadMore(collection: collection))
+
+		await store.pauseNextArticleSave()
+		let loadMore = Task { await model.loadMore(collection: collection) }
+		let staleIDs = await controlled.nextRequest()
+		await controlled.resolve(staleIDs, data: streamIDsData(ids: ["stale"], continuation: nil))
+		let staleContents = await controlled.nextRequest()
+		await controlled.resolve(staleContents, data: streamContentsData(ids: ["stale"]))
+		await store.waitUntilArticleSaveIsPaused()
+
+		let refresh = Task { await model.refresh(collection: collection) }
+		let freshIDs = await controlled.nextRequest()
+		await controlled.resolve(freshIDs, data: streamIDsData(ids: ["fresh"], continuation: "fresh-next"))
+		let freshContents = await controlled.nextRequest()
+		await controlled.resolve(freshContents, data: streamContentsData(ids: ["fresh"]))
+
+		// Let the superseded write finish only after the refresh has invalidated it and
+		// received its newer page. The current refresh must be the final durable writer.
+		await store.resumeArticleSave()
+		await loadMore.value
+		await refresh.value
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["fresh"])
+		#expect(model.canLoadMore(collection: collection))
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == ["fresh"])
+		#expect(snapshot.navigation?.item(withID: collection.id)?.unreadCount == 1)
+	}
+
+	@Test func restoredCachedFolderResolvesPaginationOnceWhenSelectedOnline() async throws {
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let session = PigeonSession(baseURL: baseURL, token: "cached-folder-account")
+		let store = OfflineLibraryStore.inMemory()
+		let subscription = makeSubscription(id: "feed/7", key: "alpha", title: "Alpha", folder: "News")
+		let readerSubscription = ReaderSubscription(
+			id: subscription.id,
+			title: subscription.title,
+			categories: [ReaderSubscriptionCategory(id: "user/-/label/News", label: "News")],
+			url: subscription.url.absoluteString,
+		)
+		let navigation = ReaderNavigationCatalog.make(
+			subscriptions: [readerSubscription],
+			unreadCounts: [],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 0, starred: 0),
+		)
+		let cachedArticle = makeArticle(id: "cached-folder")
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: ReaderSection.forYou.rawValue,
+			selectedArticleIDs: [:],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+		)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveArticles([cachedArticle], collectionID: "user/-/label/News", accountID: accountID)
+		try await store.saveRestoration(restoration, accountID: accountID)
+
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData([subscription]),
+			recommendationsData: try responseData(items: [makeArticle(id: "for-you")]),
+			folderItemID: "live-folder",
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+		let folder = try #require(model.folderNavigationItems.first)
+		#expect(model.articles(for: folder).map(\.id) == [cachedArticle.id])
+
+		model.select(item: folder)
+		await model.load(collection: folder)
+		#expect(await client.folderPageRequestCount() == 1)
+		#expect(model.articles(for: folder).map(\.id) == ["live-folder"])
+
+		await model.load(collection: folder)
+		#expect(await client.folderPageRequestCount() == 1)
+	}
+
 	@Test func cloudflareResourceLimitStillSurfacesOnLoad() async throws {
 		let payload = Data(
 			"""
@@ -436,12 +721,30 @@ struct ReaderAppModelTests {
 		#expect(isCancellation(PigeonError.server(statusCode: 503, message: "down")) == false)
 	}
 
-	@Test func connectivityFailureClassificationSeparatesTransportFromServerErrors() {
-		#expect(isConnectivityFailure(URLError(.notConnectedToInternet)))
-		#expect(isConnectivityFailure(URLError(.networkConnectionLost)))
+	@Test func isConnectivityFailureMatchesReachabilityErrorsButNotServerOrDecodeErrors() {
+		let connectivityCodes: [URLError.Code] = [
+			.notConnectedToInternet,
+			.networkConnectionLost,
+			.timedOut,
+			.cannotFindHost,
+			.cannotConnectToHost,
+			.dnsLookupFailed,
+			.internationalRoamingOff,
+			.callIsActive,
+			.dataNotAllowed,
+		]
+		for code in connectivityCodes {
+			#expect(isConnectivityFailure(URLError(code)))
+		}
+		#expect(isConnectivityFailure(NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)))
+		#expect(isConnectivityFailure(URLError(.badServerResponse)) == false)
 		#expect(isConnectivityFailure(PigeonError.server(statusCode: 503, message: "down")) == false)
 		#expect(isConnectivityFailure(PigeonError.authenticationFailed) == false)
 		#expect(isConnectivityFailure(PigeonError.invalidResponse) == false)
+		let decodingError = DecodingError.dataCorrupted(
+			.init(codingPath: [], debugDescription: "bad payload")
+		)
+		#expect(isConnectivityFailure(decodingError) == false)
 	}
 
 	@Test func olderLoadCannotReplaceASectionWithStaleResults() async throws {
@@ -859,7 +1162,7 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
 		#expect(model.selectedArticleID == boundary.id)
 
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
 		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == true)
@@ -1049,7 +1352,7 @@ struct ReaderAppModelTests {
 		)
 		#expect(envelope.mutations.count == 1)
 		#expect(Set(envelope.mutations[0].itemIds) == Set([first.readerId, second.readerId]))
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
 		for item in state.items {
@@ -1061,7 +1364,7 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == boundary.id)
 		#expect(model.preferredCompactColumn == .detail)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
-		#expect(model.isOffline)
+		#expect(model.isOffline == false)
 	}
 
 	@Test func offlineFeedRenameStaysVisibleAndQueuedWhenRequestFails() async throws {
@@ -1074,13 +1377,13 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 		#expect(model.subscriptions.first?.title == "Renamed")
 
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await controlled.resolve(request, statusCode: 500)
 		let succeeded = await mutation.value
 
 		#expect(succeeded)
 		#expect(model.subscriptions.first?.title == "Renamed")
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
-		#expect(model.isOffline)
+		#expect(model.isOffline == false)
 	}
 
 	@Test func multiFolderFeedEditQueuesEveryFolderAndPersistsOptimisticSubscription() async throws {
@@ -1134,7 +1437,7 @@ struct ReaderAppModelTests {
 		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
 		#expect(snapshot.subscriptions.first?.folderNames == ["Reading", "Research"])
 
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await controlled.resolve(request, statusCode: 500)
 		#expect(await edit.value)
 		let pending = try await store.pendingMutations(
 			accountID: try #require(model.session).storageIdentity,
@@ -1142,7 +1445,7 @@ struct ReaderAppModelTests {
 		)
 		#expect(pending.map(\.mutation.folders) == [["Reading", "Research"]])
 		#expect(model.subscriptions.first?.folderNames == ["Reading", "Research"])
-		#expect(model.isOffline)
+		#expect(model.isOffline == false)
 	}
 
 	@Test func multiFolderFeedEditRejectsInvalidFolderNamesBeforeQueueing() async throws {
@@ -1184,45 +1487,20 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
-	@Test func olderOfflinePreparationCannotOverwriteNewerResult() async throws {
+	@Test func disconnectedLibraryLoadCannotRestoreThePreviousAccountsSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 
-		func resolveSuccessfulStartupRequest(_ request: ControlledHTTPClient.PendingRequest) async throws {
-			let data: Data
-			switch request.request.url?.path {
-			case "/api/v1/sync":
-				data = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
-			case "/reader/api/0/subscription/list":
-				data = try subscriptionsData([])
-			case "/reader/api/0/unread-count":
-				data = Data(#"{"unreadcounts":[]}"#.utf8)
-			case "/reader/api/0/stream/items/ids":
-				data = Data(#"{"itemRefs":[]}"#.utf8)
-			case "/api/v1/recommendations":
-				data = try responseData(items: [])
-			default:
-				Issue.record("Unexpected startup request: \(request.request.url?.path ?? "missing path")")
-				return
-			}
-			await controlled.resolve(request, data: data)
-		}
+		let load = Task { await model.loadLibrary(force: true) }
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		await controlled.resolve(request, data: try subscriptionsData([
+			makeSubscription(id: "feed/old", key: "old", title: "Old account", folder: nil),
+		]))
+		await load.value
 
-		let older = Task { await model.prepareOfflineLibrary() }
-		let olderSyncRequest = await controlled.nextRequest()
-		let newer = Task { await model.prepareOfflineLibrary() }
-		let newerSyncRequest = await controlled.nextRequest()
-
-		await controlled.resolve(newerSyncRequest, data: Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8))
-		for _ in 0..<6 {
-			try await resolveSuccessfulStartupRequest(await controlled.nextRequest())
-		}
-		await newer.value
-
-		await controlled.fail(olderSyncRequest, with: URLError(.notConnectedToInternet))
-		await older.value
-
-		#expect(model.isOffline == false)
+		#expect(model.session == nil)
+		#expect(model.subscriptions.isEmpty)
 	}
 
 	private func makeModel(
@@ -1242,6 +1520,7 @@ struct ReaderAppModelTests {
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
+			keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,
 		)
 	}
@@ -1271,6 +1550,20 @@ struct ReaderAppModelTests {
 				unread: unreadCount,
 				starred: unreadCount,
 			),
+		)
+	}
+
+	private func makePaginationCollection() -> ReaderNavigationItem {
+		ReaderNavigationItem(
+			id: "user/-/label/News",
+			title: "News",
+			streamID: "user/-/label/News",
+			kind: .folder,
+			unreadCount: 3,
+			parentID: nil,
+			feedKey: nil,
+			iconURL: nil,
+			smartSection: nil,
 		)
 	}
 
@@ -1333,6 +1626,123 @@ struct ReaderAppModelTests {
 	private func subscriptionsData(_ subscriptions: [FeedSubscription]) throws -> Data {
 		try JSONEncoder().encode(SubscriptionListResponse(subscriptions: subscriptions))
 	}
+
+	private func streamIDsData(ids: [String], continuation: String?) -> Data {
+		let itemRefs = ids.map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
+		let continuationField = continuation.map { ",\"continuation\":\"\($0)\"" } ?? ""
+		return Data("{\"itemRefs\":[\(itemRefs)]\(continuationField)}".utf8)
+	}
+
+	private func streamContentsData(ids: [String]) -> Data {
+		let published = Int(Date.now.timeIntervalSince1970)
+		let items = ids.map {
+			"{\"id\":\"\($0)\",\"categories\":[],\"title\":\"\($0)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
+		}.joined(separator: ",")
+		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+	}
+}
+
+private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
+	private let base = OfflineLibraryStore.inMemory()
+	private var shouldPauseNextArticleSave = false
+	private var articleSaveIsPaused = false
+	private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+	private var resumeContinuation: CheckedContinuation<Void, Never>?
+
+	func pauseNextArticleSave() {
+		shouldPauseNextArticleSave = true
+	}
+
+	func waitUntilArticleSaveIsPaused() async {
+		if articleSaveIsPaused { return }
+		await withCheckedContinuation { continuation in
+			pauseWaiters.append(continuation)
+		}
+	}
+
+	func resumeArticleSave() {
+		resumeContinuation?.resume()
+		resumeContinuation = nil
+	}
+
+	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot {
+		try await base.loadSnapshot(accountID: accountID)
+	}
+
+	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {
+		try await base.saveNavigation(navigation, accountID: accountID)
+	}
+
+	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws {
+		try await base.saveSubscriptions(subscriptions, accountID: accountID)
+	}
+
+	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws {
+		if shouldPauseNextArticleSave {
+			shouldPauseNextArticleSave = false
+			articleSaveIsPaused = true
+			let waiters = pauseWaiters
+			pauseWaiters.removeAll()
+			for waiter in waiters {
+				waiter.resume()
+			}
+			await withCheckedContinuation { continuation in
+				resumeContinuation = continuation
+			}
+			articleSaveIsPaused = false
+		}
+		try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws {
+		try await base.saveRestoration(restoration, accountID: accountID)
+	}
+
+	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws {
+		try await base.enqueue(mutation, accountID: accountID)
+	}
+
+	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation] {
+		try await base.pendingMutations(accountID: accountID, limit: limit)
+	}
+
+	func markMutationApplied(id: String, accountID: String) async throws {
+		try await base.markMutationApplied(id: id, accountID: accountID)
+	}
+
+	func recordMutationFailure(id: String, message: String, accountID: String) async throws {
+		try await base.recordMutationFailure(id: id, message: message, accountID: accountID)
+	}
+
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
+		try await base.apply(page, accountID: accountID)
+	}
+
+	func storageStats(accountID: String) async throws -> OfflineStorageStats {
+		try await base.storageStats(accountID: accountID)
+	}
+
+	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int {
+		try await base.cleanupReadBodies(accountID: accountID, keepingNewest: count)
+	}
+
+	func clearCachedArticles(accountID: String) async throws {
+		try await base.clearCachedArticles(accountID: accountID)
+	}
+
+	func searchArticles(
+		query: String,
+		collectionID: String?,
+		accountID: String,
+		limit: Int,
+	) async throws -> [Recommendation] {
+		try await base.searchArticles(
+			query: query,
+			collectionID: collectionID,
+			accountID: accountID,
+			limit: limit,
+		)
+	}
 }
 
 @MainActor
@@ -1370,11 +1780,14 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 private actor StartupHTTPClient: HTTPClient {
 	private let subscriptionsData: Data
 	private let recommendationsData: Data
+	private let folderItemID: String?
 	private var subscriptionRequestCount = 0
+	private var folderPageRequests = 0
 
-	init(subscriptionsData: Data, recommendationsData: Data) {
+	init(subscriptionsData: Data, recommendationsData: Data, folderItemID: String? = nil) {
 		self.subscriptionsData = subscriptionsData
 		self.recommendationsData = recommendationsData
+		self.folderItemID = folderItemID
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -1396,7 +1809,20 @@ private actor StartupHTTPClient: HTTPClient {
 			data = Data(#"{"unreadcounts":[]}"#.utf8)
 			statusCode = 200
 		case "/reader/api/0/stream/items/ids":
-			data = Data(#"{"itemRefs":[]}"#.utf8)
+			let streamID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "s" })?.value
+			if streamID == "user/-/label/News", let folderItemID {
+				folderPageRequests += 1
+				data = Data("{\"itemRefs\":[{\"id\":\"\(folderItemID)\"}],\"continuation\":\"folder-next\"}".utf8)
+			} else {
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+			}
+			statusCode = 200
+		case "/reader/api/0/stream/items/contents":
+			if let folderItemID {
+				data = Data("{\"id\":\"user/-/label/News\",\"updated\":0,\"items\":[{\"id\":\"\(folderItemID)\",\"categories\":[],\"title\":\"Live folder\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}]}".utf8)
+			} else {
+				data = Data(#"{"items":[]}"#.utf8)
+			}
 			statusCode = 200
 		case "/api/v1/recommendations":
 			data = recommendationsData
@@ -1410,5 +1836,100 @@ private actor StartupHTTPClient: HTTPClient {
 			throw PigeonError.invalidResponse
 		}
 		return (data, response)
+	}
+
+	func folderPageRequestCount() -> Int {
+		folderPageRequests
+	}
+}
+
+private actor PaginationHTTPClient: HTTPClient {
+	struct RequestSnapshot: Sendable {
+		let path: String
+		let query: [String: String]
+		let method: String?
+		let body: Data?
+	}
+
+	private let repeatsContinuation: Bool
+	private var capturedRequests: [RequestSnapshot] = []
+	private var shouldFailNextItemIDRequest = false
+
+	init(repeatsContinuation: Bool = false) {
+		self.repeatsContinuation = repeatsContinuation
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		let query = queryItems.reduce(into: [String: String]()) { result, item in
+			if let value = item.value { result[item.name] = value }
+		}
+		capturedRequests.append(RequestSnapshot(path: url.path, query: query, method: request.httpMethod, body: request.httpBody))
+		if url.path == "/reader/api/0/stream/items/ids", shouldFailNextItemIDRequest {
+			shouldFailNextItemIDRequest = false
+			throw URLError(.notConnectedToInternet)
+		}
+
+		let data: Data
+		switch url.path {
+		case "/reader/api/0/stream/items/ids":
+			guard query["s"] == "user/-/label/News" else {
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+				return (data, try Self.response(for: url, statusCode: 200))
+			}
+			switch query["c"] {
+			case nil:
+				data = Data(#"{"itemRefs":[{"id":"newest"},{"id":"middle"}],"continuation":"page-2"}"#.utf8)
+			case "page-2":
+				let continuation = repeatsContinuation ? ",\"continuation\":\"page-2\"" : ""
+				data = Data("{\"itemRefs\":[{\"id\":\"older\"}]\(continuation)}".utf8)
+			default:
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+			}
+		case "/reader/api/0/stream/items/contents":
+			data = Self.contentsResponse(for: Self.formValues(from: request.httpBody, named: "i"))
+		default:
+			data = Data(#"{"error":"not found"}"#.utf8)
+		}
+
+		let statusCode = url.path == "/reader/api/0/stream/items/contents" || url.path == "/reader/api/0/stream/items/ids" ? 200 : 404
+		return (data, try Self.response(for: url, statusCode: statusCode))
+	}
+
+	func requests() -> [RequestSnapshot] {
+		capturedRequests
+	}
+
+	func failNextItemIDRequest() {
+		shouldFailNextItemIDRequest = true
+	}
+
+	private static func contentsResponse(for ids: [String]) -> Data {
+		let items = ids.map { id in
+			let published: Int
+			switch id {
+			case "newest": published = 1_786_272_003
+			case "middle": published = 1_786_272_002
+			default: published = 1_786_272_001
+			}
+			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+		}.joined(separator: ",")
+		return Data("{\"id\":\"user/-/label/News\",\"updated\":0,\"items\":[\(items)]}".utf8)
+	}
+
+	private static func formValues(from body: Data?, named name: String) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems.filter { $0.name == name }.compactMap(\.value)
+	}
+
+	private static func response(for url: URL, statusCode: Int) throws -> HTTPURLResponse {
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return response
 	}
 }
