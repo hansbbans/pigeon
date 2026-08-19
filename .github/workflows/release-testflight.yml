@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  upload:
     name: Build and upload
     runs-on:
       - self-hosted
@@ -37,6 +37,9 @@ jobs:
       - pigeon-ci
     timeout-minutes: 90
     environment: testflight
+    outputs:
+      marketing_version: ${{ steps.release_metadata.outputs.marketing_version }}
+      build_number: ${{ steps.release_metadata.outputs.build_number }}
     env:
       APP_DIRECTORY: ios/PigeonReader
       BUNDLE_ID: com.hans.pigeon.reader
@@ -57,7 +60,7 @@ jobs:
       WIDGETS_PROFILE_SOURCE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/PigeonWidgets.mobileprovision
       SHARE_PROFILE_SOURCE_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/PigeonShareExtension.mobileprovision
       PROFILE_MANIFEST_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/installed-profile.tsv
-      AUTH_KEY_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/AuthKey_${{ secrets.APP_STORE_CONNECT_KEY_ID }}.p8
+      AUTH_KEY_PATH: ${{ github.workspace }}/.release/pigeon-testflight-${{ github.run_id }}-${{ github.run_attempt }}/AuthKey.p8
 
     steps:
       - name: Check out main
@@ -105,6 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           npm test
+          npm run test:testflight
           npx tsc --noEmit
 
       - name: Generate Xcode project
@@ -397,18 +401,29 @@ jobs:
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
 
-      - name: Summarize uploaded build
+      - name: Record uploaded build metadata
+        id: release_metadata
         shell: bash
         run: |
           set -euo pipefail
           archive_info="$ARCHIVE_PATH/Info.plist"
           version="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$archive_info")"
           build="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$archive_info")"
+          expected_build="${{ steps.build_number.outputs.value }}"
+          if [[ "$build" != "$expected_build" ]]; then
+            echo "The archived build number $build does not match the workflow-derived build number $expected_build." >&2
+            exit 1
+          fi
+          {
+            echo "marketing_version=$version"
+            echo "build_number=$build"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### Pigeon TestFlight upload"
             echo "- Version: $version ($build)"
+            echo "- Bundle ID: $BUNDLE_ID"
             echo "- Commit: $GITHUB_SHA"
-            echo "- App Store Connect processing happens after this upload completes."
+            echo "- Upload: accepted by xcodebuild export; downstream App Store Connect API verification is required."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up release assets
@@ -439,3 +454,52 @@ jobs:
 
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null
           rm -rf "$RELEASE_ROOT"
+
+  verify:
+    name: Verify App Store Connect build
+    needs: upload
+    if: ${{ needs.upload.result == 'success' }}
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - pigeon-ci
+    timeout-minutes: 30
+    environment: testflight
+    env:
+      BUNDLE_ID: com.hans.pigeon.reader
+      MARKETING_VERSION: ${{ needs.upload.outputs.marketing_version }}
+      BUILD_NUMBER: ${{ needs.upload.outputs.build_number }}
+      BETA_GROUP_NAME: Pigeon Internal
+      ASC_TIMEOUT_SECONDS: "900"
+      ASC_POLL_INTERVAL_SECONDS: "15"
+
+    steps:
+      - name: Check out the uploaded commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Verify exact build and TestFlight group availability
+        shell: bash
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${APP_STORE_CONNECT_KEY_ID:?Missing APP_STORE_CONNECT_KEY_ID secret}"
+          : "${APP_STORE_CONNECT_ISSUER_ID:?Missing APP_STORE_CONNECT_ISSUER_ID secret}"
+          : "${APP_STORE_CONNECT_PRIVATE_KEY:?Missing APP_STORE_CONNECT_PRIVATE_KEY secret}"
+
+          if ! verification_summary="$(node scripts/app-store-connect-verify.mjs 2>&1)"; then
+            {
+              echo "### Pigeon App Store Connect verification"
+              echo "- Status: failed"
+              printf '%s\n' "$verification_summary"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$verification_summary" >&2
+            exit 1
+          fi
+          printf '%s\n' "$verification_summary" | tee -a "$GITHUB_STEP_SUMMARY"

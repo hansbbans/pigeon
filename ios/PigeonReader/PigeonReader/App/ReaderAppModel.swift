@@ -739,8 +739,14 @@ final class ReaderAppModel {
 				preparationID: preparationID,
 				generation: preparationGeneration,
 			) else { return }
-			isOffline = isConnectivityFailure(error)
-			if articleCache.isEmpty && navigation.items == ReaderNavigationState.initial.items {
+			if isConnectivityFailure(error) {
+				isOffline = true
+			} else {
+				isOffline = false
+				errorMessage = error.localizedDescription
+			}
+			if isConnectivityFailure(error),
+				articleCache.isEmpty && navigation.items == ReaderNavigationState.initial.items {
 				errorMessage = error.localizedDescription
 			}
 		}
@@ -1235,6 +1241,7 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLibraryLoadID == loadID else {
 				return
 			}
+			isOffline = false
 			setSubscriptions(loaded)
 			restoreNavigationFromSubscriptionsIfNeeded()
 			try await offlineStore.saveSubscriptions(loaded, accountID: context.accountID)
@@ -1616,9 +1623,17 @@ final class ReaderAppModel {
 	}
 
 	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
-		articleCache[collectionID] = sortOrder(for: collectionID).sorted(
+		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
+			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
+		}
+		let sortedArticles = sortOrder(for: collectionID).sorted(
 			articlesPreservingOpenSelection(newArticles, for: collectionID),
 		)
+		articleCache[collectionID] = sortedArticles
+		if let previouslySelectedArticle,
+			let refreshedSelectedArticle = sortedArticles.first(where: { articlesMatch($0, previouslySelectedArticle) }) {
+			selectedArticleIDs[collectionID] = refreshedSelectedArticle.id
+		}
 		reconcileSelection(for: collectionID)
 	}
 
@@ -1630,7 +1645,7 @@ final class ReaderAppModel {
 			selectedNavigationID == collectionID,
 			let selectedArticleID,
 			let activeArticle = articleCache[collectionID]?.first(where: { $0.id == selectedArticleID }),
-			incomingArticles.contains(where: { $0.id == selectedArticleID }) == false
+			incomingArticles.contains(where: { articlesMatch($0, activeArticle) }) == false
 		else {
 			return incomingArticles
 		}

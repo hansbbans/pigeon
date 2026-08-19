@@ -152,6 +152,32 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).map(\.id).contains(openArticle.id))
 	}
 
+	@Test func refreshPreservesOpenArticleWhenCollectionRekeysTheSameLogicalArticle() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let initiallyLoaded = makeArticle(id: "recommendation-id", readerId: "stable-reader-id")
+		let refreshed = makeArticle(id: "stream-id", readerId: initiallyLoaded.readerId)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+
+		let initialLoad = Task { await model.load(collection: collection, force: true) }
+		let initialRequest = await controlled.nextRequest()
+		await controlled.resolve(initialRequest, data: try responseData(items: [initiallyLoaded]))
+		await initialLoad.value
+		model.select(item: collection)
+		model.select(article: initiallyLoaded)
+
+		let refresh = Task { await model.load(collection: collection, force: true) }
+		let refreshRequest = await controlled.nextRequest()
+		await controlled.resolve(refreshRequest, data: try responseData(items: [refreshed]))
+		await refresh.value
+
+		#expect(model.selectedArticleID == refreshed.id)
+		#expect(model.selectedArticle?.id == refreshed.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.allArticles(for: collection).map(\.id) == [refreshed.id])
+	}
+
 	@Test func articleShortcutsFollowTheDisplayedCollectionOrderAndStopAtBoundaries() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou)
@@ -321,6 +347,57 @@ struct ReaderAppModelTests {
 
 		#expect(model.isOffline == false)
 		#expect(model.articles(for: .forYou).map(\.id) == ["live"])
+	}
+
+	@Test func cachedSelectedFolderArticlesAreAvailableBeforeOfflinePreparationSyncFinishes() async throws {
+		let session = try makeSession(token: "cached-folder-preparation")
+		let store = OfflineLibraryStore.inMemory()
+		let subscription = makeSubscription(id: "feed/7", key: "alpha", title: "Alpha", folder: "News")
+		let readerSubscription = ReaderSubscription(
+			id: subscription.id,
+			title: subscription.title,
+			categories: [ReaderSubscriptionCategory(id: "user/-/label/News", label: "News")],
+			url: subscription.url.absoluteString,
+		)
+		let folderID = "user/-/label/News"
+		let cachedArticles = (0..<5).map { makeArticle(id: "cached-folder-\($0)") }
+		let navigation = ReaderNavigationCatalog.make(
+			subscriptions: [readerSubscription],
+			unreadCounts: [],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 0, starred: 0),
+		)
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: folderID,
+			selectedArticleIDs: [folderID: cachedArticles[0].id],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+		)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveArticles(cachedArticles, collectionID: folderID, accountID: accountID)
+		try await store.saveRestoration(restoration, accountID: accountID)
+
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let started = DispatchTime.now().uptimeNanoseconds
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let syncRequest = await controlled.nextRequest()
+		let elapsed = DispatchTime.now().uptimeNanoseconds - started
+		let folder = try #require(model.folderNavigationItems.first)
+
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		#expect(model.articles(for: folder).map(\.id) == cachedArticles.map(\.id))
+		print("ReaderAppModel cached selected-folder availability: \(String(format: "%.1f", Double(elapsed) / 1_000_000)) ms before sync response")
+
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.isOffline)
 	}
 
 	@Test func olderOfflinePreparationCannotOverwriteNewerSuccessfulPreparation() async throws {
