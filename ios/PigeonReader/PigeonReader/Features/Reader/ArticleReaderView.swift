@@ -112,6 +112,7 @@ struct ArticleReaderView: View {
 		}
 		.safeAreaInset(edge: .bottom, spacing: 0) {
 			ArticleReaderControlsBar(article: current)
+				.id(current.id)
 		}
 		.toolbar {
 			ReaderSettingsToolbarItem()

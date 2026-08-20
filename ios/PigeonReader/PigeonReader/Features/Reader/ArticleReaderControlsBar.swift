@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable {
@@ -44,13 +45,83 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 	}
 }
 
+nonisolated struct ArticleReaderControlsSaveTaskID: Equatable, Sendable {
+	let articleID: String
+	let requestID: UUID?
+}
+
+struct ArticleReaderControlsSaveRequest: Equatable, Sendable {
+	let articleID: String
+	let readwiseRequest: ReadwiseSaveRequest
+
+	var id: UUID {
+		readwiseRequest.id
+	}
+}
+
+@MainActor
+@Observable
+final class ArticleReaderControlsSaveState {
+	private(set) var request: ArticleReaderControlsSaveRequest?
+	private(set) var saveMessage: String?
+	var isShowingSaveMessage = false
+
+	var isSaving: Bool {
+		request != nil
+	}
+
+	@discardableResult
+	func begin(articleID: String, destination: OutboundDestination) -> ArticleReaderControlsSaveRequest {
+		let request = ArticleReaderControlsSaveRequest(
+			articleID: articleID,
+			readwiseRequest: ReadwiseSaveRequest(destination: destination),
+		)
+		self.request = request
+		saveMessage = nil
+		isShowingSaveMessage = false
+		return request
+	}
+
+	func articleDidChange(to articleID: String) {
+		guard request?.articleID != articleID else {
+			return
+		}
+
+		request = nil
+		saveMessage = nil
+		isShowingSaveMessage = false
+	}
+
+	func present(_ message: String) {
+		saveMessage = message
+		isShowingSaveMessage = true
+	}
+
+	@discardableResult
+	func complete(_ request: ArticleReaderControlsSaveRequest, with message: String) -> Bool {
+		guard self.request == request else {
+			return false
+		}
+
+		self.request = nil
+		present(message)
+		return true
+	}
+
+	func cancel(_ request: ArticleReaderControlsSaveRequest) {
+		guard self.request == request else {
+			return
+		}
+
+		self.request = nil
+	}
+}
+
 struct ArticleReaderControlsBar: View {
 	let article: Recommendation
 
 	@Environment(ReaderAppModel.self) private var model
-	@State private var isSavingToReadwise = false
-	@State private var saveMessage: String?
-	@State private var isShowingSaveMessage = false
+	@State private var saveState = ArticleReaderControlsSaveState()
 
 	var body: some View {
 		VStack(spacing: 0) {
@@ -72,10 +143,17 @@ struct ArticleReaderControlsBar: View {
 		.background(.bar)
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("article-reader-controls")
-		.alert("Readwise Reader", isPresented: $isShowingSaveMessage) {
+		.task(id: saveTaskID) {
+			let taskID = saveTaskID
+			await performReadwiseSave(for: taskID)
+		}
+		.onChange(of: article.id) { _, newArticleID in
+			saveState.articleDidChange(to: newArticleID)
+		}
+		.alert("Readwise Reader", isPresented: $saveState.isShowingSaveMessage) {
 			Button("OK") {}
 		} message: {
-			Text(saveMessage ?? "")
+			Text(saveState.saveMessage ?? "")
 		}
 	}
 
@@ -155,7 +233,7 @@ struct ArticleReaderControlsBar: View {
 			Button(ArticleReaderControl.shareToReadwise.title, systemImage: ArticleReaderControl.shareToReadwise.systemImage) {
 				shareToReadwise()
 			}
-			.disabled(article.safeOriginalURL == nil || isSavingToReadwise)
+			.disabled(article.safeOriginalURL == nil || saveState.isSaving)
 			.accessibilityHint("Saves this article to Readwise Reader")
 			.accessibilityIdentifier("article-share-to-readwise")
 		}
@@ -168,30 +246,43 @@ struct ArticleReaderControlsBar: View {
 
 	private func shareToReadwise() {
 		guard let url = article.safeOriginalURL, let destination = OutboundDestination(url: url) else {
-			presentSaveMessage("This article does not have an original web address.")
+			saveState.present("This article does not have an original web address.")
 			return
 		}
 
-		Task {
-			isSavingToReadwise = true
-			defer { isSavingToReadwise = false }
-			do {
-				switch try await model.saveToReader(destination) {
-				case .saved:
-					presentSaveMessage("Saved to Reader.")
-				case .alreadyInFlight:
-					presentSaveMessage("This article is already being saved.")
-				}
-			} catch is CancellationError {
-				// Leaving the article is a normal cancellation.
-			} catch {
-				presentSaveMessage(error.localizedDescription)
-			}
-		}
+		saveState.begin(articleID: article.id, destination: destination)
 	}
 
-	private func presentSaveMessage(_ message: String) {
-		saveMessage = message
-		isShowingSaveMessage = true
+	private var saveTaskID: ArticleReaderControlsSaveTaskID {
+		ArticleReaderControlsSaveTaskID(articleID: article.id, requestID: saveState.request?.id)
+	}
+
+	private func performReadwiseSave(for taskID: ArticleReaderControlsSaveTaskID) async {
+		guard let request = saveState.request,
+			request.articleID == article.id,
+			request.articleID == taskID.articleID,
+			request.id == taskID.requestID else {
+			return
+		}
+		defer { saveState.cancel(request) }
+
+		do {
+			try Task.checkCancellation()
+			switch try await model.saveToReader(request.readwiseRequest.destination) {
+			case .saved:
+				try Task.checkCancellation()
+				_ = saveState.complete(request, with: "Saved to Reader.")
+			case .alreadyInFlight:
+				try Task.checkCancellation()
+				_ = saveState.complete(request, with: "This article is already being saved.")
+			}
+		} catch is CancellationError {
+			// Leaving the article is a normal cancellation.
+		} catch {
+			guard Task.isCancelled == false else {
+				return
+			}
+			_ = saveState.complete(request, with: error.localizedDescription)
+		}
 	}
 }
