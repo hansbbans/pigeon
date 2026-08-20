@@ -95,7 +95,7 @@ Main files:
 Pigeon includes two authenticated Reader clients backed by the Google Reader style API:
 
 - `/app` is the browser Reader. It supports Today, unread filtering, folders, feeds, keyboard navigation, article triage, and Mark All Read for a selected feed or folder.
-- `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, long-press multi-folder feed organization, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, unread counts, bulk Mark Above/Below triage, and direct Readwise saves.
+- `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, long-press multi-folder feed organization, leading-edge swipe back to the feed, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, unread counts, bulk Mark Above/Below triage, and direct Readwise saves.
 
 The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
 

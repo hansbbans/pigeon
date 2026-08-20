@@ -76,6 +76,7 @@ struct ArticleReaderView: View {
 										article: current,
 									)
 								},
+								onBackSwipe: showFeedIfCompact,
 							)
 						}
 					}

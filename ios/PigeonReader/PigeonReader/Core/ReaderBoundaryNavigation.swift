@@ -21,6 +21,7 @@ nonisolated enum ReaderBoundaryNavigation {
 	static let backSwipeEdgeWidth = 32.0
 
 	/// A leading-edge swipe that should leave the article and return to the feed.
+	/// `startX` is measured from the leading edge of the screen.
 	static func isBackToFeedSwipe(
 		startX: Double,
 		translationX: Double,

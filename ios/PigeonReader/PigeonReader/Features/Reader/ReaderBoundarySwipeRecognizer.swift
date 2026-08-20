@@ -4,14 +4,15 @@ import UIKit
 /// Installs a simultaneous pan recognizer on the native scroll view that owns
 /// the reader content. Attaching to the scroll view keeps next/previous article
 /// swipes observable when a tall, non-scrolling WKWebView is under the user's
-/// finger. Back-to-feed is handled only by `ReaderBackSwipeRecognizer` so an
-/// ordinary reading pan cannot dismiss the article.
+/// finger. A leading-edge swipe on the same recognizer returns to the feed so
+/// the gesture is observed on the view that actually receives the touch.
 struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	let boundaryState: () -> ReaderBoundaryNavigationState
 	let onSwipe: (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void
+	var onBackSwipe: (() -> Void)?
 
 	func makeCoordinator() -> Coordinator {
-		Coordinator(boundaryState: boundaryState, onSwipe: onSwipe)
+		Coordinator(boundaryState: boundaryState, onSwipe: onSwipe, onBackSwipe: onBackSwipe)
 	}
 
 	func makeUIView(context: Context) -> AttachmentView {
@@ -27,6 +28,7 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	func updateUIView(_ uiView: AttachmentView, context: Context) {
 		context.coordinator.boundaryState = boundaryState
 		context.coordinator.onSwipe = onSwipe
+		context.coordinator.onBackSwipe = onBackSwipe
 		context.coordinator.scheduleAttachment(from: uiView)
 	}
 
@@ -52,8 +54,10 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	final class Coordinator: NSObject, UIGestureRecognizerDelegate {
 		var boundaryState: () -> ReaderBoundaryNavigationState
 		var onSwipe: (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void
+		var onBackSwipe: (() -> Void)?
 		private weak var attachedScrollView: UIScrollView?
 		private var boundaryAtStart: ReaderBoundaryNavigationState?
+		private var startX: CGFloat?
 
 		private lazy var panGesture: UIPanGestureRecognizer = {
 			let gesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -65,9 +69,11 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 		init(
 			boundaryState: @escaping () -> ReaderBoundaryNavigationState,
 			onSwipe: @escaping (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void,
+			onBackSwipe: (() -> Void)?,
 		) {
 			self.boundaryState = boundaryState
 			self.onSwipe = onSwipe
+			self.onBackSwipe = onBackSwipe
 		}
 
 		func scheduleAttachment(from view: UIView) {
@@ -81,6 +87,7 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 			attachedScrollView?.removeGestureRecognizer(panGesture)
 			attachedScrollView = nil
 			boundaryAtStart = nil
+			startX = nil
 		}
 
 		private func attach(to scrollView: UIScrollView?) {
@@ -93,15 +100,34 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 
 		@objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
 			switch gesture.state {
-			case .began:
-				boundaryAtStart = boundaryState()
+			case .began, .changed:
+				if boundaryAtStart == nil {
+					boundaryAtStart = boundaryState()
+				}
+				if startX == nil {
+					let reference = gesture.view?.window ?? gesture.view
+					startX = gesture.location(in: reference).x - gesture.translation(in: reference).x
+				}
 			case .ended:
-				defer { boundaryAtStart = nil }
-				guard let view = gesture.view, let boundaryAtStart else { return }
+				defer {
+					boundaryAtStart = nil
+					startX = nil
+				}
+				guard let view = gesture.view else { return }
 				let translation = gesture.translation(in: view)
+				if let startX, ReaderBoundaryNavigation.isBackToFeedSwipe(
+					startX: Double(startX),
+					translationX: Double(translation.x),
+					translationY: Double(translation.y),
+				) {
+					onBackSwipe?()
+					return
+				}
+				guard let boundaryAtStart else { return }
 				onSwipe(boundaryAtStart, translation.x, translation.y)
 			case .cancelled, .failed:
 				boundaryAtStart = nil
+				startX = nil
 			default:
 				break
 			}
@@ -116,11 +142,13 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	}
 }
 
-/// A screen-edge pan that returns from a restored article to the feed list.
+/// A leading-edge pan that returns from a compact article to the feed list.
 ///
 /// Hiding the system back button also disables interactive pop. Restoring
 /// NavigationSplitView to `.detail` on iPhone has no stack to pop, so this
-/// recognizer drives `showFeedColumn()` instead.
+/// recognizer drives `showFeedColumn()` instead. The gesture is installed on
+/// the hosting view — an ancestor of the reader — so article touches reach it.
+/// Other pans wait for this edge swipe to fail, matching system back.
 struct ReaderBackSwipeRecognizer: UIViewRepresentable {
 	let onBack: () -> Void
 
@@ -170,7 +198,7 @@ struct ReaderBackSwipeRecognizer: UIViewRepresentable {
 		func scheduleAttachment(from view: UIView) {
 			DispatchQueue.main.async { [weak self, weak view] in
 				guard let self, let view else { return }
-				self.attach(to: view.superview ?? view.window)
+				self.attach(to: view.enclosingHostView())
 			}
 		}
 
@@ -203,7 +231,14 @@ struct ReaderBackSwipeRecognizer: UIViewRepresentable {
 			_ gestureRecognizer: UIGestureRecognizer,
 			shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer,
 		) -> Bool {
-			true
+			false
+		}
+
+		func gestureRecognizer(
+			_ gestureRecognizer: UIGestureRecognizer,
+			shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer,
+		) -> Bool {
+			gestureRecognizer === edgeGesture && otherGestureRecognizer is UIPanGestureRecognizer
 		}
 	}
 }
@@ -218,5 +253,18 @@ private extension UIView {
 			candidate = view.superview
 		}
 		return nil
+	}
+
+	/// The view that should own the compact back-swipe: a view-controller view
+	/// that is an ancestor of the article, so reader touches reach the gesture.
+	func enclosingHostView() -> UIView? {
+		var responder: UIResponder? = self
+		while let current = responder {
+			if let viewController = current as? UIViewController, viewController.view.window != nil {
+				return viewController.view
+			}
+			responder = current.next
+		}
+		return superview ?? window
 	}
 }
