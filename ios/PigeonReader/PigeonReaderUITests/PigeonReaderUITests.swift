@@ -202,6 +202,23 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "back-from-article-to-feed")
 	}
 
+	func testLeadingEdgeSwipeFromOpenedArticleReturnsToTheFeed() throws {
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		XCTAssertTrue(reader.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.descendants(matching: .any)["article-back-to-feed"].waitForExistence(timeout: 5))
+
+		let start = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.45))
+		let end = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.45))
+		start.press(forDuration: 0.05, thenDragTo: end)
+
+		let feed = app.descendants(matching: .any)["article-list"]
+		XCTAssertTrue(
+			feed.waitForExistence(timeout: 5) || app.buttons["Filter"].waitForExistence(timeout: 5),
+			"A leading-edge swipe must return to the feed, not only the back button",
+		)
+		attachScreenshot(named: "swipe-back-from-article-to-feed")
+	}
+
 	func testReaderBoundarySwipeMovesWithinDisplayedCollection() throws {
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
