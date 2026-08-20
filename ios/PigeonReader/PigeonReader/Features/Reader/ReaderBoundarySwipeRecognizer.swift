@@ -2,15 +2,16 @@ import SwiftUI
 import UIKit
 
 /// Installs a simultaneous pan recognizer on the native scroll view that owns
-/// the reader content. Attaching to the scroll view keeps the gesture observable
-/// when a tall, non-scrolling WKWebView is under the user's finger.
+/// the reader content. Attaching to the scroll view keeps next/previous article
+/// swipes observable when a tall, non-scrolling WKWebView is under the user's
+/// finger. Back-to-feed is handled only by `ReaderBackSwipeRecognizer` so an
+/// ordinary reading pan cannot dismiss the article.
 struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	let boundaryState: () -> ReaderBoundaryNavigationState
 	let onSwipe: (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void
-	var onBackSwipe: (() -> Void)?
 
 	func makeCoordinator() -> Coordinator {
-		Coordinator(boundaryState: boundaryState, onSwipe: onSwipe, onBackSwipe: onBackSwipe)
+		Coordinator(boundaryState: boundaryState, onSwipe: onSwipe)
 	}
 
 	func makeUIView(context: Context) -> AttachmentView {
@@ -26,7 +27,6 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	func updateUIView(_ uiView: AttachmentView, context: Context) {
 		context.coordinator.boundaryState = boundaryState
 		context.coordinator.onSwipe = onSwipe
-		context.coordinator.onBackSwipe = onBackSwipe
 		context.coordinator.scheduleAttachment(from: uiView)
 	}
 
@@ -52,10 +52,8 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	final class Coordinator: NSObject, UIGestureRecognizerDelegate {
 		var boundaryState: () -> ReaderBoundaryNavigationState
 		var onSwipe: (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void
-		var onBackSwipe: (() -> Void)?
 		private weak var attachedScrollView: UIScrollView?
 		private var boundaryAtStart: ReaderBoundaryNavigationState?
-		private var startX: CGFloat?
 
 		private lazy var panGesture: UIPanGestureRecognizer = {
 			let gesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
@@ -67,11 +65,9 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 		init(
 			boundaryState: @escaping () -> ReaderBoundaryNavigationState,
 			onSwipe: @escaping (ReaderBoundaryNavigationState, CGFloat, CGFloat) -> Void,
-			onBackSwipe: (() -> Void)?,
 		) {
 			self.boundaryState = boundaryState
 			self.onSwipe = onSwipe
-			self.onBackSwipe = onBackSwipe
 		}
 
 		func scheduleAttachment(from view: UIView) {
@@ -85,7 +81,6 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 			attachedScrollView?.removeGestureRecognizer(panGesture)
 			attachedScrollView = nil
 			boundaryAtStart = nil
-			startX = nil
 		}
 
 		private func attach(to scrollView: UIScrollView?) {
@@ -100,27 +95,13 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 			switch gesture.state {
 			case .began:
 				boundaryAtStart = boundaryState()
-				startX = gesture.location(in: gesture.view).x
 			case .ended:
-				defer {
-					boundaryAtStart = nil
-					startX = nil
-				}
-				guard let view = gesture.view else { return }
+				defer { boundaryAtStart = nil }
+				guard let view = gesture.view, let boundaryAtStart else { return }
 				let translation = gesture.translation(in: view)
-				if let startX, ReaderBoundaryNavigation.isBackToFeedSwipe(
-					startX: Double(startX),
-					translationX: Double(translation.x),
-					translationY: Double(translation.y),
-				) {
-					onBackSwipe?()
-					return
-				}
-				guard let boundaryAtStart else { return }
 				onSwipe(boundaryAtStart, translation.x, translation.y)
 			case .cancelled, .failed:
 				boundaryAtStart = nil
-				startX = nil
 			default:
 				break
 			}

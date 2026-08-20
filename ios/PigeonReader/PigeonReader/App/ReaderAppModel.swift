@@ -113,6 +113,7 @@ final class ReaderAppModel {
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
 	private var hasAppliedCompactColumnRestoration = false
+	private var temporarilyUnavailableSelectedCollection: ReaderNavigationItem?
 	private var restoredReaderModes: [String: String] = [:]
 	private var articleScrollOffsets: [String: Double] = [:]
 	private var collectionFreshness: [String: CollectionFreshness] = [:]
@@ -219,7 +220,14 @@ final class ReaderAppModel {
 	}
 
 	var selectedCollection: ReaderNavigationItem {
-		navigation.item(withID: selectedNavigationID) ?? .smart(selectedSection)
+		if let item = navigation.item(withID: selectedNavigationID) {
+			return item
+		}
+		if let temporarilyUnavailableSelectedCollection,
+			temporarilyUnavailableSelectedCollection.id == selectedNavigationID {
+			return temporarilyUnavailableSelectedCollection
+		}
+		return .smart(selectedSection)
 	}
 
 	var smartNavigationItems: [ReaderNavigationItem] {
@@ -397,6 +405,7 @@ final class ReaderAppModel {
 			sidebarFilter = .all
 			selectedNavigationID = firstEnabledSmartSection.rawValue
 			navigation = .initial
+			temporarilyUnavailableSelectedCollection = nil
 			isLoadingNavigation = false
 			activeNavigationLoadID = nil
 			activeNavigationLoadIDs.removeAll()
@@ -885,6 +894,10 @@ final class ReaderAppModel {
 
 	func setNavigation(_ state: ReaderNavigationState, markAsLoaded: Bool = false) {
 		let previousSelection = selectedNavigationID
+		let previousCollection = navigation.item(withID: previousSelection)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelection
+				? temporarilyUnavailableSelectedCollection
+				: nil)
 		var next = state
 		next.preserveExpansion(from: navigation)
 		navigation = next
@@ -892,8 +905,15 @@ final class ReaderAppModel {
 			hasLoadedNavigation = true
 		}
 		if navigation.item(withID: previousSelection) == nil {
-			select(section: firstEnabledSmartSection)
+			if let previousCollection {
+				temporarilyUnavailableSelectedCollection = previousCollection
+				reconcileCurrentArticleSelection()
+			} else {
+				temporarilyUnavailableSelectedCollection = nil
+				select(section: firstEnabledSmartSection)
+			}
 		} else {
+			temporarilyUnavailableSelectedCollection = nil
 			reconcileSelectedSmartViewIfNeeded()
 			reconcileCurrentArticleSelection()
 		}
@@ -901,8 +921,14 @@ final class ReaderAppModel {
 	}
 
 	private func select(collectionID: String) {
+		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
+		if selectedNavigationID != collectionID {
+			temporarilyUnavailableSelectedCollection = nil
+		}
 		selectedNavigationID = collectionID
-		preferredCompactColumn = .content
+		if isReselectingOpenCollection == false {
+			preferredCompactColumn = .content
+		}
 		reconcileSelection(for: collectionID)
 		scheduleRestorationSave()
 	}
@@ -1700,21 +1726,31 @@ final class ReaderAppModel {
 			return
 		}
 
-		guard articleCache[collectionID]?.contains(where: { $0.id == rememberedID }) == true else {
-			selectedArticleIDs[collectionID] = nil
-			if selectedNavigationID == collectionID {
-				selectedArticleID = nil
-				preferredCompactColumn = .content
+		if let cached = articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID }) {
+			guard selectedNavigationID == collectionID else {
+				return
 			}
+			selectedArticleID = cached.id
+			selectedArticleIDs[collectionID] = cached.id
 			return
 		}
 
-		guard selectedNavigationID == collectionID else {
+		// Unread/Today membership and first-page refreshes can drop the open row
+		// from this collection while the story is still in memory. Keep reading.
+		if isReadingOpenArticle,
+			selectedNavigationID == collectionID,
+			let found = article(withId: rememberedID) {
+			let kept = preserveOpenArticle(found, in: collectionID)
+			selectedArticleID = kept.id
+			selectedArticleIDs[collectionID] = kept.id
 			return
 		}
-		// Keep the article open while a read-state or filter change removes its row.
-		// Selection is cleared only when the underlying cached article disappears.
-		selectedArticleID = rememberedID
+
+		selectedArticleIDs[collectionID] = nil
+		if selectedNavigationID == collectionID {
+			selectedArticleID = nil
+			preferredCompactColumn = .content
+		}
 	}
 
 	private func reconcileCurrentArticleSelection() {
@@ -2084,8 +2120,34 @@ final class ReaderAppModel {
 		applyCachedSnapshot(snapshot)
 	}
 
+	private var isReadingOpenArticle: Bool {
+		preferredCompactColumn == .detail && selectedArticle != nil
+	}
+
+	@discardableResult
+	private func preserveOpenArticle(_ article: Recommendation, in collectionID: String) -> Recommendation {
+		if let existing = articleCache[collectionID]?.first(where: { articlesMatch($0, article) }) {
+			return existing
+		}
+		var cached = articleCache[collectionID] ?? []
+		cached.append(article)
+		let sorted = sortOrder(for: collectionID).sorted(cached)
+		articleCache[collectionID] = sorted
+		return sorted.first(where: { articlesMatch($0, article) }) ?? article
+	}
+
 	private func applyCachedSnapshot(_ snapshot: CachedLibrarySnapshot) {
 		guard let session else { return }
+		let openArticle = selectedArticle
+		let preserveOpenReader = preferredCompactColumn == .detail
+			&& openArticle != nil
+		let preservedNavigationID = selectedNavigationID
+		let preservedSelectedArticleIDs = selectedArticleIDs
+		let preservedCollection = navigation.item(withID: preservedNavigationID)
+			?? (temporarilyUnavailableSelectedCollection?.id == preservedNavigationID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
+
 		libraryGeneration = UUID()
 		resetStreamPagination()
 		resolvedPaginationCollections.removeAll()
@@ -2100,7 +2162,11 @@ final class ReaderAppModel {
 					result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
 				}
 			}
-			selectedArticleIDs = restoration.selectedArticleIDs
+			if preserveOpenReader == false {
+				selectedArticleIDs = restoration.selectedArticleIDs
+				selectedNavigationID = restoration.selectedNavigationID
+				temporarilyUnavailableSelectedCollection = nil
+			}
 			sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
 			restoredReaderModes = restoration.readerModes
 			articleScrollOffsets = restoration.articleScrollOffsets
@@ -2108,7 +2174,6 @@ final class ReaderAppModel {
 				preferredCompactColumn = compactColumn(from: restoration.compactColumn)
 				hasAppliedCompactColumnRestoration = true
 			}
-			selectedNavigationID = restoration.selectedNavigationID
 		}
 
 		if let cachedNavigation = snapshot.navigation {
@@ -2131,8 +2196,24 @@ final class ReaderAppModel {
 			}
 		}
 
+		if preserveOpenReader, let openArticle {
+			selectedNavigationID = preservedNavigationID
+			selectedArticleIDs = preservedSelectedArticleIDs
+			temporarilyUnavailableSelectedCollection = navigation.item(withID: preservedNavigationID) == nil
+				? preservedCollection
+				: nil
+			let kept = preserveOpenArticle(openArticle, in: preservedNavigationID)
+			selectedArticleIDs[preservedNavigationID] = kept.id
+			selectedArticleID = kept.id
+			preferredCompactColumn = .detail
+			return
+		}
+
 		if navigation.item(withID: selectedNavigationID) == nil {
+			temporarilyUnavailableSelectedCollection = nil
 			selectedNavigationID = firstEnabledSmartSection.rawValue
+		} else {
+			temporarilyUnavailableSelectedCollection = nil
 		}
 		reconcileSelectedSmartViewIfNeeded()
 		selectedArticleID = selectedArticleIDs[selectedNavigationID]
@@ -2164,6 +2245,7 @@ final class ReaderAppModel {
 		selectedArticleID = nil
 		selectedNavigationID = firstEnabledSmartSection.rawValue
 		navigation = .initial
+		temporarilyUnavailableSelectedCollection = nil
 		sidebarFilter = .all
 		preferredCompactColumn = .sidebar
 		hasAppliedCompactColumnRestoration = false

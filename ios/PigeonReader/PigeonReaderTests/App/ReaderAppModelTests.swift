@@ -158,6 +158,266 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).map(\.id).contains(openArticle.id))
 	}
 
+	@Test func snapshotApplyKeepsTheOpenArticleWhenTheCollectionOmitsIt() async throws {
+		let session = try makeSession(token: "keep-open-snapshot")
+		let store = OfflineLibraryStore.inMemory()
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		let article = makeArticle(id: "reading-now")
+		let other = makeArticle(id: "still-unread")
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [unread]), accountID: accountID)
+		try await store.saveArticles([article, other], collectionID: unread.id, accountID: accountID)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: unread.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+		model.select(item: unread)
+		model.select(article: article)
+		#expect(model.preferredCompactColumn == .detail)
+
+		// Incremental sync rebuilds Unread without the story that was just marked read,
+		// and a stale restoration would otherwise send the reader back to the feed list.
+		try await store.saveArticles([other], collectionID: unread.id, accountID: accountID)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: unread.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+		_ = await model.cleanupOfflineBodies()
+
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.allArticles(for: .unread).map(\.id).contains(article.id))
+	}
+
+	@Test func firstSyncWithoutRestorationKeepsAnArticleOpenedWhileSyncIsInFlight() async throws {
+		let session = try makeSession(token: "keep-open-first-sync")
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let article = makeArticle(id: "opened-during-first-sync")
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([article], for: collection)
+		model.select(item: collection)
+		model.select(article: article)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await controlled.resolve(syncRequest, data: Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8))
+		let firstPostSyncRequest = await controlled.nextRequest()
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		func postSyncData(for request: ControlledHTTPClient.PendingRequest) throws -> Data {
+			let data: Data
+			switch request.request.url?.path {
+			case "/reader/api/0/subscription/list":
+				data = try subscriptionsData([])
+			case "/reader/api/0/unread-count":
+				data = Data(#"{"unreadcounts":[]}"#.utf8)
+			case "/reader/api/0/stream/items/ids":
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+			case "/api/v1/recommendations":
+				data = try responseData(items: [])
+			default:
+				data = Data()
+			}
+			return data
+		}
+		await controlled.resolve(firstPostSyncRequest, data: try postSyncData(for: firstPostSyncRequest))
+		for _ in 0..<5 {
+			let request = await controlled.nextRequest()
+			await controlled.resolve(request, data: try postSyncData(for: request))
+		}
+		await preparation.value
+
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.allArticles(for: collection).map(\.id).contains(article.id))
+	}
+
+	@Test func reselectingTheOpenCollectionDoesNotLeaveTheArticle() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "open")
+		model.setArticles([article], for: .unread)
+		model.select(section: .unread)
+		model.select(article: article)
+
+		model.select(section: .unread)
+
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func navigationRefreshDoesNotLeaveAnOpenArticleWhenTheCollectionRowIsMissing() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let article = makeArticle(id: "open-feed-article", feedKey: "alpha")
+		model.setNavigation(ReaderNavigationState(items: [feed, .smart(.forYou)]))
+		model.select(item: feed)
+		model.setArticles([article], for: feed)
+		model.select(article: article)
+
+		model.setNavigation(ReaderNavigationState(items: [.smart(.forYou)]), markAsLoaded: true)
+
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func navigationRefreshKeepsTheSelectedCollectionUntilItReturnsOrChanges() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let refreshedFeed = ReaderNavigationItem(
+			id: feed.id,
+			title: "Alpha (refreshed)",
+			streamID: feed.streamID,
+			kind: feed.kind,
+			unreadCount: 4,
+			parentID: feed.parentID,
+			feedKey: feed.feedKey,
+			iconURL: feed.iconURL,
+			smartSection: feed.smartSection,
+		)
+		let forYou = ReaderNavigationItem.smart(.forYou)
+
+		model.setNavigation(ReaderNavigationState(items: [forYou, feed]))
+		model.select(item: feed)
+		model.setNavigation(ReaderNavigationState(items: [forYou]), markAsLoaded: true)
+
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.selectedCollection.id == feed.id)
+		#expect(model.selectedCollection.title == feed.title)
+
+		model.setNavigation(ReaderNavigationState(items: [forYou, refreshedFeed]), markAsLoaded: true)
+		#expect(model.selectedCollection.title == refreshedFeed.title)
+		#expect(model.selectedCollection.unreadCount == refreshedFeed.unreadCount)
+
+		model.setNavigation(ReaderNavigationState(items: [forYou]), markAsLoaded: true)
+		model.select(section: .forYou)
+		#expect(model.selectedNavigationID == forYou.id)
+		#expect(model.selectedCollection.id == forYou.id)
+	}
+
+	@Test func snapshotApplyKeepsTheSelectedCollectionWhenItsNavigationRowIsMissing() async throws {
+		let session = try makeSession(token: "keep-selected-collection")
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = session.storageIdentity
+		let forYou = ReaderNavigationItem.smart(.forYou)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let refreshedFeed = ReaderNavigationItem(
+			id: feed.id,
+			title: "Alpha (refreshed)",
+			streamID: feed.streamID,
+			kind: feed.kind,
+			unreadCount: 4,
+			parentID: feed.parentID,
+			feedKey: feed.feedKey,
+			iconURL: feed.iconURL,
+			smartSection: feed.smartSection,
+		)
+		let article = makeArticle(id: "open-feed-article", feedKey: "alpha")
+		try await store.saveNavigation(ReaderNavigationState(items: [forYou, feed]), accountID: accountID)
+		try await store.saveArticles([article], collectionID: feed.id, accountID: accountID)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: feed.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: ReaderRestoredCompactColumn.content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+		model.select(item: feed)
+		model.select(article: article)
+
+		try await store.saveNavigation(ReaderNavigationState(items: [forYou]), accountID: accountID)
+		_ = await model.cleanupOfflineBodies()
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.selectedCollection.id == feed.id)
+		#expect(model.selectedCollection.title == feed.title)
+		#expect(model.preferredCompactColumn == .detail)
+
+		try await store.saveNavigation(ReaderNavigationState(items: [forYou, refreshedFeed]), accountID: accountID)
+		_ = await model.cleanupOfflineBodies()
+		#expect(model.selectedCollection.title == refreshedFeed.title)
+		#expect(model.selectedCollection.unreadCount == refreshedFeed.unreadCount)
+	}
+
 	@Test func refreshPreservesOpenArticleWhenCollectionRekeysTheSameLogicalArticle() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)

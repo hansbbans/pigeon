@@ -2,6 +2,13 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.2.0] - 2026-08-20
+
+### Fixed
+
+- Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
+- Ordinary reading pans no longer count as back-to-feed; only the leading-edge swipe leaves the article.
+
 ## [0.1.1.0] - 2026-08-18
 
 ### Changed
