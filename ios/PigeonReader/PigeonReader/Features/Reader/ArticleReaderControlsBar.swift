@@ -53,19 +53,22 @@ struct ArticleReaderControlsBar: View {
 	@State private var isShowingSaveMessage = false
 
 	var body: some View {
-		HStack(spacing: 0) {
-			markReadButton
-			recEngineButton
-			shareButton
-			readingControlsButton
-			shareToReadwiseButton
+		VStack(spacing: 0) {
+			Divider()
+			HStack(spacing: 0) {
+				markReadButton
+				recEngineButton
+				shareButton
+				readingControlsButton
+				shareToReadwiseButton
+			}
+			.labelStyle(.iconOnly)
+			.buttonStyle(.borderless)
+			.imageScale(.large)
+			.frame(maxWidth: .infinity)
+			.padding(.horizontal, 6)
+			.padding(.vertical, 8)
 		}
-		.labelStyle(.iconOnly)
-		.buttonStyle(.borderless)
-		.imageScale(.large)
-		.frame(maxWidth: .infinity)
-		.padding(.horizontal, 6)
-		.padding(.vertical, 8)
 		.background(.bar)
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("article-reader-controls")
