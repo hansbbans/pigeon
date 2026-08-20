@@ -110,59 +110,10 @@ struct ArticleReaderView: View {
 				ReaderBackSwipeRecognizer(onBack: showFeedIfCompact)
 			}
 		}
+		.safeAreaInset(edge: .bottom, spacing: 0) {
+			ArticleReaderControlsBar(article: current)
+		}
 		.toolbar {
-			ToolbarItemGroup(placement: .topBarTrailing) {
-				if let shareURL = current.safeOriginalURL {
-					ShareLink(item: shareURL, subject: Text(current.title)) {
-						Label("Share", systemImage: "square.and.arrow.up")
-					}
-					.keyboardShortcut("s", modifiers: [.command, .shift])
-					.accessibilityHint("Opens the system share sheet")
-				}
-
-				Button(current.isRead ? "Mark unread" : "Mark read", systemImage: current.isRead ? "circle" : "largecircle.fill.circle") {
-					Task { await model.setRead(current, read: !current.isRead) }
-				}
-				.keyboardShortcut("u", modifiers: .command)
-
-				Button(current.isStarred ? "Unstar" : "Star", systemImage: current.isStarred ? "star.fill" : "star") {
-					Task { await model.setStarred(current, starred: !current.isStarred) }
-				}
-				.keyboardShortcut("s", modifiers: .command)
-
-				Menu("Reading controls", systemImage: "textformat.size") {
-					Button("Looser lines", systemImage: "arrow.down.to.line") {
-						model.readerTypography.increaseLineHeight()
-					}
-					.disabled(model.readerTypography.lineHeight >= ReaderTypographySettings.lineHeightRange.upperBound)
-					Button("Tighter lines", systemImage: "arrow.up.to.line") {
-						model.readerTypography.decreaseLineHeight()
-					}
-					.disabled(model.readerTypography.lineHeight <= ReaderTypographySettings.lineHeightRange.lowerBound)
-					Picker("Theme", selection: Binding(
-						get: { model.readerTypography.theme },
-						set: { model.readerTypography.theme = $0 },
-					)) {
-						ForEach(ReaderTheme.allCases) { theme in
-							Text(theme.title).tag(theme)
-						}
-					}
-					Divider()
-					Button("Reset reading controls", systemImage: "arrow.counterclockwise") {
-						model.readerTypography.reset()
-					}
-				}
-
-				Button("More like this", systemImage: "plus.circle") {
-					Task { await model.recordPreference(.moreLikeThis, for: current) }
-				}
-
-				Menu("Preferences", systemImage: "hand.thumbsup") {
-					Button("Not interested", systemImage: "hand.thumbsdown") {
-						Task { await model.recordPreference(.notInterested, for: current) }
-					}
-				}
-			}
 			ReaderSettingsToolbarItem()
 		}
 		.task(id: current.feedKey) {
