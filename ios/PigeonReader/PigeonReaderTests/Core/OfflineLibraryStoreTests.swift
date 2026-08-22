@@ -114,6 +114,105 @@ struct OfflineLibraryStoreTests {
 		#expect(article.isStarred)
 	}
 
+	@Test func feedSyncKeepsTheOfflineSubscriptionLibraryCurrent() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let upsert = try decodePage(
+			"""
+			{
+			  "cursor": "v1:1",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 1,
+			    "entityType": "feed",
+			    "entityId": "daily",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "feedKey": "daily",
+			      "streamId": "feed/7",
+			      "title": "Daily Brief",
+			      "feedURL": "https://example.com/feed.xml",
+			      "siteURL": "https://example.com",
+			      "iconURL": "https://example.com/icon.png",
+			      "isActive": true,
+			      "folders": ["Newsletters"]
+			    }
+			  }]
+			}
+			"""
+		)
+		try await store.apply(upsert, accountID: "account-a")
+
+		let subscription = try #require(
+			try await store.loadSnapshot(accountID: "account-a").subscriptions.first
+		)
+		#expect(subscription.id == "feed/7")
+		#expect(subscription.title == "Daily Brief")
+		#expect(subscription.folderNames == ["Newsletters"])
+		#expect(subscription.sourceUrl?.absoluteString == "https://example.com/feed.xml")
+		#expect(subscription.htmlUrl?.absoluteString == "https://example.com")
+		#expect(subscription.iconUrl == "https://example.com/icon.png")
+
+		let deletion = try decodePage(
+			"""
+			{
+			  "cursor": "v1:2",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 2,
+			    "entityType": "feed",
+			    "entityId": "daily",
+			    "operation": "delete",
+			    "changedAt": "2026-08-15T12:01:00.000Z",
+			    "payload": null
+			  }]
+			}
+			"""
+		)
+		try await store.apply(deletion, accountID: "account-a")
+
+		#expect(try await store.loadSnapshot(accountID: "account-a").subscriptions.isEmpty)
+	}
+
+	@Test func prunedServerPlaceholderIsStoredAsMissingBodyForRecovery() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let page = try decodePage(
+			"""
+			{
+			  "cursor": "v1:3",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 3,
+			    "entityType": "article",
+			    "entityId": "pruned-article",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "id": "pruned-article",
+			      "readerId": "reader-pruned",
+			      "feedKey": "daily",
+			      "source": "Daily",
+			      "title": "Pruned",
+			      "html": "<p>Download this body again</p>",
+			      "receivedAt": "2026-08-15T11:00:00.000Z",
+			      "isRead": false,
+			      "isStarred": false,
+			      "isBodyPruned": true
+			    }
+			  }]
+			}
+			"""
+		)
+
+		try await store.apply(page, accountID: "account-a")
+
+		let article = try #require(
+			try await store.loadSnapshot(accountID: "account-a")
+				.articlesByCollection[ReaderSection.unread.rawValue]?.first
+		)
+		#expect(article.html.isEmpty)
+	}
+
 	@Test func cleanupPrunesOnlyOlderReadUnstarredBodies() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let newestRead = makeArticle(id: "newest-read", receivedAt: 400)
