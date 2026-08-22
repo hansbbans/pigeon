@@ -109,7 +109,11 @@ final class ReaderAppModel {
 	private var libraryGeneration = UUID()
 	private var offlinePersistenceTask: Task<Bool, Never>?
 	private var preparedOfflineAccountID: String?
+	private var offlineSyncCursor: String?
 	private var activeOfflinePreparationID: UUID?
+	private var offlinePreparationTask: Task<Void, Never>?
+	private var offlinePreparationTaskID: UUID?
+	private var deferredInitialFeedPaginationCollectionID: String?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
 	private var hasAppliedCompactColumnRestoration = false
@@ -390,6 +394,10 @@ final class ReaderAppModel {
 
 	func disconnect() {
 		do {
+			offlinePreparationTask?.cancel()
+			offlinePreparationTask = nil
+			offlinePreparationTaskID = nil
+			deferredInitialFeedPaginationCollectionID = nil
 			libraryGeneration = UUID()
 			try sessionStore.remove()
 			session = nil
@@ -414,6 +422,7 @@ final class ReaderAppModel {
 			hasLoadedNavigation = false
 			preferredCompactColumn = .sidebar
 			preparedOfflineAccountID = nil
+			offlineSyncCursor = nil
 			activeOfflinePreparationID = nil
 			restoredReaderModes = [:]
 			articleScrollOffsets = [:]
@@ -665,8 +674,30 @@ final class ReaderAppModel {
 	}
 
 	func prepareOfflineLibrary() async {
+		guard offlineSynchronizationEnabled, session != nil, apiClient != nil else { return }
+		if let offlinePreparationTask {
+			await offlinePreparationTask.value
+			return
+		}
+
+		let taskID = UUID()
+		let task = Task { @MainActor [weak self] in
+			guard let self else { return }
+			await self.performOfflineLibraryPreparation()
+		}
+		offlinePreparationTaskID = taskID
+		offlinePreparationTask = task
+		await task.value
+		if offlinePreparationTaskID == taskID {
+			offlinePreparationTask = nil
+			offlinePreparationTaskID = nil
+		}
+	}
+
+	private func performOfflineLibraryPreparation() async {
 		guard offlineSynchronizationEnabled, let session, let apiClient else { return }
 		let accountID = session.storageIdentity
+		let isInitialPreparation = preparedOfflineAccountID != accountID
 		let preparationID = UUID()
 		activeOfflinePreparationID = preparationID
 		var preparationGeneration = libraryGeneration
@@ -710,7 +741,7 @@ final class ReaderAppModel {
 				preparationID: preparationID,
 				generation: preparationGeneration,
 			) else { return }
-			try await synchronizeIncrementally(
+			let canUseIncrementalReload = try await synchronizeIncrementally(
 				accountID: accountID,
 				apiClient: apiClient,
 				preparationID: preparationID,
@@ -723,24 +754,35 @@ final class ReaderAppModel {
 				generation: preparationGeneration,
 			) else { return }
 			isOffline = false
-			await loadNavigation(force: true)
-			guard isCurrentOfflinePreparation(
-				accountID: accountID,
-				preparationID: preparationID,
-				generation: preparationGeneration,
-			) else { return }
-			await loadLibrary(force: true)
-			guard isCurrentOfflinePreparation(
-				accountID: accountID,
-				preparationID: preparationID,
-				generation: preparationGeneration,
-			) else { return }
-			await load(collection: selectedCollection, force: true)
-			guard isCurrentOfflinePreparation(
-				accountID: accountID,
-				preparationID: preparationID,
-				generation: preparationGeneration,
-			) else { return }
+			if isInitialPreparation,
+				canUseIncrementalReload,
+				selectedCollection.kind == .feed,
+				cachedCollectionHasMissingBodies(selectedCollection.id) == false {
+				deferredInitialFeedPaginationCollectionID = selectedCollection.id
+			}
+			if canUseIncrementalReload == false {
+				await loadNavigation(force: true)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+				await loadLibrary(force: true)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+			}
+			if canUseIncrementalReload == false
+				|| (isInitialPreparation == false && selectedCollectionRequiresLivePageAfterSync) {
+				await load(collection: selectedCollection, force: true)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+			}
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -1057,6 +1099,12 @@ final class ReaderAppModel {
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
+		if offlineSynchronizationEnabled,
+			session != nil,
+			collection.id == selectedCollection.id {
+			await prepareOfflineLibrary()
+			return
+		}
 		await load(collection: collection, force: true)
 		if hasLoadedNavigation {
 			await loadNavigation(force: true)
@@ -1068,11 +1116,30 @@ final class ReaderAppModel {
 	}
 
 	func load(collection: ReaderNavigationItem, force: Bool = false) async {
+		if force == false,
+			offlineSynchronizationEnabled,
+			let session,
+			preparedOfflineAccountID != session.storageIdentity {
+			await prepareOfflineLibrary()
+			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
+			if defersPaginationResolution == false,
+				articleCache[collection.id] == nil
+				|| collection.smartSection?.usesRecommendationEndpoint == true
+				|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
+				|| collection.kind != .feed && shouldResolveCachedPagination(for: collection) {
+				await load(collection: collection, force: true)
+			}
+			return
+		}
 		guard let apiClient, let context = operationContext(for: apiClient) else {
 			return
 		}
 		if force == false, articleCache[collection.id] != nil {
-			if shouldResolveCachedPagination(for: collection) {
+			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
+			if defersPaginationResolution == false,
+				collection.smartSection?.usesRecommendationEndpoint == true
+					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
+					|| shouldResolveCachedPagination(for: collection) {
 				await load(collection: collection, force: true)
 			}
 			return
@@ -1107,10 +1174,14 @@ final class ReaderAppModel {
 				page = try await apiClient.recommendationsPage(
 					from: "user/-/state/com.google/reading-list",
 					dayBounds: todayBounds,
+					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
 				dayBounds = todayBounds
 			} else {
-				page = try await apiClient.recommendationsPage(from: collection.streamID)
+				page = try await apiClient.recommendationsPage(
+					from: collection.streamID,
+					cachedRecommendations: articleCache[collection.id] ?? [],
+				)
 				dayBounds = nil
 			}
 			try Task.checkCancellation()
@@ -1120,15 +1191,24 @@ final class ReaderAppModel {
 			isOffline = false
 			let loadedArticles = page.items
 			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles)
-			guard await persistCollectionState(
-				loadedArticles,
-				collectionID: collection.id,
-				navigation: nextNavigation,
-				context: context,
-				operationID: loadID,
-				isLoadMore: false,
-			) else {
-				return
+			let existingArticles = articleCache[collection.id] ?? []
+			let reusesUnchangedPersistedPage = collection.smartSection?.usesRecommendationEndpoint != true
+				&& page.fetchedContentCount == 0
+				&& existingArticles.count == loadedArticles.count
+				&& zip(existingArticles, loadedArticles).allSatisfy { pair in
+					articlesMatch(pair.0, pair.1)
+				}
+			if reusesUnchangedPersistedPage == false {
+				guard await persistCollectionState(
+					loadedArticles,
+					collectionID: collection.id,
+					navigation: nextNavigation,
+					context: context,
+					operationID: loadID,
+					isLoadMore: false,
+				) else {
+					return
+				}
 			}
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
@@ -1146,7 +1226,9 @@ final class ReaderAppModel {
 			if isPaginatedCollection(collection) {
 				resolvedPaginationCollections.insert(collection.id)
 			}
-			writeWidgetSnapshot()
+			if reusesUnchangedPersistedPage == false {
+				writeWidgetSnapshot()
+			}
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -1186,11 +1268,13 @@ final class ReaderAppModel {
 					from: "user/-/state/com.google/reading-list",
 					dayBounds: dayBounds,
 					continuation: continuation,
+					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
 			} else if collection.smartSection == nil {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
 					continuation: continuation,
+					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
 			} else {
 				streamContinuations[collection.id] = nil
@@ -2096,28 +2180,34 @@ final class ReaderAppModel {
 		accountID: String,
 		apiClient: PigeonAPIClient,
 		preparationID: UUID,
-	) async throws {
-		var cursor = try await offlineStore.loadSnapshot(accountID: accountID).cursor
+	) async throws -> Bool {
+		var cursor = offlineSyncCursor
+		let canUseIncrementalReload = cursor != nil && hasLoadedNavigation
 		var seenCursors = Set<String>()
+		var receivedChanges = false
 		while true {
 			try Task.checkCancellation()
-			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
 			let page = try await apiClient.incrementalSync(cursor: cursor)
-			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
 			guard seenCursors.insert(page.cursor).inserted || page.hasMore == false else {
 				throw PigeonError.invalidResponse
 			}
 			try await offlineStore.apply(page, accountID: accountID)
-			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
+			receivedChanges = receivedChanges || page.changes.isEmpty == false
 			cursor = page.cursor
+			offlineSyncCursor = page.cursor
 			if page.hasMore == false { break }
 		}
-		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
+		guard receivedChanges else { return canUseIncrementalReload }
 		_ = try? await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 500)
-		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
 		let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
-		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
-		applyCachedSnapshot(snapshot)
+		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
+		applyCachedSnapshot(snapshot, preservingPagination: true)
+		return canUseIncrementalReload
 	}
 
 	private var isReadingOpenArticle: Bool {
@@ -2136,8 +2226,12 @@ final class ReaderAppModel {
 		return sorted.first(where: { articlesMatch($0, article) }) ?? article
 	}
 
-	private func applyCachedSnapshot(_ snapshot: CachedLibrarySnapshot) {
+	private func applyCachedSnapshot(
+		_ snapshot: CachedLibrarySnapshot,
+		preservingPagination: Bool = false,
+	) {
 		guard let session else { return }
+		offlineSyncCursor = snapshot.cursor
 		let openArticle = selectedArticle
 		let preserveOpenReader = preferredCompactColumn == .detail
 			&& openArticle != nil
@@ -2149,8 +2243,10 @@ final class ReaderAppModel {
 				: nil)
 
 		libraryGeneration = UUID()
-		resetStreamPagination()
-		resolvedPaginationCollections.removeAll()
+		if preservingPagination == false {
+			resetStreamPagination()
+			resolvedPaginationCollections.removeAll()
+		}
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
@@ -2184,6 +2280,8 @@ final class ReaderAppModel {
 			}
 			navigation = restoredNavigation
 			hasLoadedNavigation = true
+		} else {
+			navigation = .initial
 		}
 		subscriptions = sortedSubscriptions(snapshot.subscriptions)
 		restoreNavigationFromSubscriptionsIfNeeded()
@@ -2223,7 +2321,9 @@ final class ReaderAppModel {
 	private func resetInMemoryLibraryForAccountChange() {
 		libraryGeneration = UUID()
 		preparedOfflineAccountID = nil
+		offlineSyncCursor = nil
 		activeOfflinePreparationID = nil
+		deferredInitialFeedPaginationCollectionID = nil
 		articleCache = [:]
 		sortOrders = [:]
 		articleFilters.removeAll()
@@ -2321,6 +2421,28 @@ final class ReaderAppModel {
 			resolvedPaginationCollections.contains(collection.id) == false else {
 			return false
 		}
+		return true
+	}
+
+	private var selectedCollectionRequiresLivePageAfterSync: Bool {
+		let collection = selectedCollection
+		guard collection.kind == .feed else { return true }
+		return cachedCollectionHasMissingBodies(collection.id)
+	}
+
+	private func cachedCollectionHasMissingBodies(_ collectionID: String) -> Bool {
+		guard let cachedArticles = articleCache[collectionID], cachedArticles.isEmpty == false else {
+			return true
+		}
+		return cachedArticles.contains(where: { $0.html.isEmpty })
+	}
+
+	private func consumeDeferredInitialFeedPagination(for collection: ReaderNavigationItem) -> Bool {
+		guard collection.kind == .feed,
+			deferredInitialFeedPaginationCollectionID == collection.id else {
+			return false
+		}
+		deferredInitialFeedPaginationCollectionID = nil
 		return true
 	}
 

@@ -423,9 +423,27 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	private func apply(_ change: IncrementalSyncChange, accountID: String, database: OpaquePointer) throws {
 		switch change.entityType {
 		case .feed:
+			let previousStreamID = try queryOne(
+				"SELECT stream_id FROM cached_feeds WHERE account_id = ? AND feed_key = ?",
+				bindings: [.text(accountID), .text(change.entityId)],
+				database: database,
+				map: { string(at: 0, statement: $0) },
+			) ?? nil
+			let previousSubscriptionIDs = try cachedSubscriptionIDs(
+				feedKey: change.entityId,
+				accountID: accountID,
+				database: database,
+			)
 			guard change.operation == .upsert, let payload = change.payload,
 				let feedKey = payload.feedKey, let streamID = payload.streamId, let title = payload.title else {
 				try execute("DELETE FROM cached_feeds WHERE account_id = ? AND feed_key = ?", bindings: [.text(accountID), .text(change.entityId)], database: database)
+				for subscriptionID in Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 }) {
+					try execute(
+						"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+						bindings: [.text(accountID), .text(subscriptionID)],
+						database: database,
+					)
+				}
 				return
 			}
 			try execute(
@@ -446,6 +464,42 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				],
 				database: database,
 			)
+			let staleSubscriptionIDs = Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 })
+				.filter { $0 != streamID }
+			for subscriptionID in staleSubscriptionIDs {
+				try execute(
+					"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+					bindings: [.text(accountID), .text(subscriptionID)],
+					database: database,
+				)
+			}
+			if payload.isActive == false {
+				try execute(
+					"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+					bindings: [.text(accountID), .text(streamID)],
+					database: database,
+				)
+			} else if let subscriptionURL = URL(string: "https://offline.invalid/feed/\(feedKey)") {
+				let subscription = FeedSubscription(
+					id: streamID,
+					title: title,
+					categories: (payload.folders ?? []).map {
+						FeedCategory(id: "user/-/label/\($0)", label: $0)
+					},
+					url: subscriptionURL,
+					sourceUrl: payload.feedURL,
+					htmlUrl: payload.siteURL,
+					iconUrl: payload.iconURL?.absoluteString,
+				)
+				try execute(
+					"""
+					INSERT INTO cached_subscriptions (account_id, id, title, payload) VALUES (?, ?, ?, ?)
+					ON CONFLICT(account_id, id) DO UPDATE SET title = excluded.title, payload = excluded.payload
+					""",
+					bindings: [.text(accountID), .text(streamID), .text(title), .blob(try encoder.encode(subscription))],
+					database: database,
+				)
+			}
 		case .article:
 			guard change.operation == .upsert, let payload = change.payload,
 				let id = payload.id, let readerID = payload.readerId, let feedKey = payload.feedKey,
@@ -457,18 +511,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			let existing = try loadArticle(id: id, accountID: accountID, database: database)
 			let serverPrunedBody = payload.isBodyPruned ?? false
 			let incomingHTML = payload.html ?? ""
-			let shouldPreserveBody = serverPrunedBody && incomingHTML.isEmpty && existing?.html.isEmpty == false
+			let shouldPreserveBody = serverPrunedBody
+				&& existing?.bodyPruned == false
+				&& existing?.article.html.isEmpty == false
+			let resolvedHTML = shouldPreserveBody
+				? (existing?.article.html ?? "")
+				: (serverPrunedBody ? "" : incomingHTML)
 			let article = sanitized(Recommendation(
 				id: id, readerId: readerID, feedKey: feedKey, source: source, author: payload.author, title: title,
-				html: shouldPreserveBody ? (existing?.html ?? "") : incomingHTML,
-				text: payload.text ?? existing?.text,
-				originalURL: payload.originalURL ?? existing?.originalURL,
+				html: resolvedHTML,
+				text: payload.text ?? existing?.article.text,
+				originalURL: payload.originalURL ?? existing?.article.originalURL,
 				receivedAt: receivedAt, isRead: payload.isRead ?? false, isStarred: payload.isStarred ?? false,
-				score: existing?.score ?? 0,
-				confidence: existing?.confidence ?? 0,
-				sampleCount: existing?.sampleCount ?? 0,
-				explanation: existing?.explanation ?? "From \(source)",
-				learningState: existing?.learningState ?? "Synced article",
+				score: existing?.article.score ?? 0,
+				confidence: existing?.article.confidence ?? 0,
+				sampleCount: existing?.article.sampleCount ?? 0,
+				explanation: existing?.article.explanation ?? "From \(source)",
+				learningState: existing?.article.learningState ?? "Synced article",
 			))
 			try upsertArticle(
 				article,
@@ -489,14 +548,44 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}
 	}
 
-	private func loadArticle(id: String, accountID: String, database: OpaquePointer) throws -> Recommendation? {
-		guard let payload = try queryOne(
-			"SELECT payload FROM cached_articles WHERE account_id = ? AND id = ?",
+	private func loadArticle(
+		id: String,
+		accountID: String,
+		database: OpaquePointer
+	) throws -> (article: Recommendation, bodyPruned: Bool)? {
+		try queryOne(
+			"SELECT payload, body_pruned FROM cached_articles WHERE account_id = ? AND id = ?",
 			bindings: [.text(accountID), .text(id)],
 			database: database,
-			map: { data(at: 0, statement: $0) },
-		) ?? nil else { return nil }
-		return try decoder.decode(Recommendation.self, from: payload)
+			map: { statement in
+				guard let payload = data(at: 0, statement: statement) else { return nil }
+				return (
+					article: try decoder.decode(Recommendation.self, from: payload),
+					bodyPruned: sqlite3_column_int64(statement, 1) != 0,
+				)
+			},
+		) ?? nil
+	}
+
+	private func cachedSubscriptionIDs(
+		feedKey: String,
+		accountID: String,
+		database: OpaquePointer
+	) throws -> [String] {
+		var ids: [String] = []
+		try query(
+			"SELECT payload FROM cached_subscriptions WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let payload = data(at: 0, statement: statement),
+				let subscription = try? decoder.decode(FeedSubscription.self, from: payload),
+				subscription.feedKey == feedKey else {
+				return
+			}
+			ids.append(subscription.id)
+		}
+		return ids
 	}
 
 	private func sanitized(_ article: Recommendation) -> Recommendation {
