@@ -2154,7 +2154,7 @@ final class ReaderAppModel {
 			feedback: type.rawValue,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return }
-		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
+		guard type == .notInterested, articleCache[ReaderSection.forYou.rawValue] != nil else {
 			await replayPendingMutations()
 			return
 		}

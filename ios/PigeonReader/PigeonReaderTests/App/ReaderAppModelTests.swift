@@ -513,6 +513,112 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func notInterestedFromTodayDropsTheStoryFromALoadedForYouCache() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let article = makeArticle(id: "shared")
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.forYou, unreadCount: 1),
+				.smart(.today, unreadCount: 1),
+			])
+		)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.recordPreference(.notInterested, for: article)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 0)
+		let accountID = try #require(model.session?.storageIdentity)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[ReaderSection.forYou.rawValue] ?? []).isEmpty)
+	}
+
+	@Test func notInterestedFromAFeedDropsForYouStoryWithADifferentItemID() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readerId = "tag:google.com,2005:reader/item/0000000000000001"
+		let forYouArticle = makeArticle(id: "item-uuid", readerId: readerId)
+		let feedArticle = makeArticle(id: readerId, feedKey: "feed/7", readerId: readerId)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.forYou, unreadCount: 1),
+				feed,
+			])
+		)
+		model.setArticles([forYouArticle], for: .forYou)
+		model.setArticles([feedArticle], for: feed)
+		model.select(item: feed)
+		model.select(article: feedArticle)
+
+		await model.recordPreference(.notInterested, for: feedArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: feed).map(\.id) == [feedArticle.id])
+		#expect(model.selectedArticleID == feedArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedDoesNotCreateForYouCacheBeforeThatCollectionLoads() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let session = try makeSession(token: "not-interested-no-foryou-cache")
+		let persistedForYou = makeArticle(id: "cached-for-you")
+		let todayArticle = makeArticle(id: "from-today")
+		try await store.saveArticles(
+			[persistedForYou],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(), session: session, offlineStore: store)
+		model.setArticles([todayArticle], for: .today)
+		model.select(section: .today)
+
+		await model.recordPreference(.notInterested, for: todayArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let snapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == [persistedForYou.id])
+	}
+
+	@Test func failedNotInterestedFromTodayKeepsForYouRemovalQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let article = makeArticle(id: "shared")
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		let mutation = Task { await model.recordPreference(.notInterested, for: article) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .forYou).isEmpty)
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+	}
+
 	@Test func offlineReadStaysOptimisticAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
