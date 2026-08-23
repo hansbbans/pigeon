@@ -2757,8 +2757,14 @@ final class ReaderAppModel {
 		guard searchResults.isEmpty == false else {
 			return
 		}
-		for index in searchResults.indices where articlesMatch(searchResults[index], article) {
-			update(&searchResults[index])
+		var updated = searchResults
+		var changed = false
+		for index in updated.indices where articlesMatch(updated[index], article) {
+			update(&updated[index])
+			changed = true
+		}
+		if changed {
+			searchResults = updated
 		}
 	}
 
