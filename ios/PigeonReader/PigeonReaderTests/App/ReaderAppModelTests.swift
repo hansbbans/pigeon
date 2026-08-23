@@ -1929,6 +1929,75 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.isEmpty)
 	}
 
+	@Test func articleDeepLinkOpensTheFeedInsteadOfAnArbitraryCachedList() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "widget-story", feedKey: "alpha")
+		let feed = try #require(model.navigation.items.first(where: { $0.kind == .feed }))
+		let folder = try #require(model.folderNavigationItems.first)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: .today)
+		model.setArticles([article], for: feed)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(PigeonDeepLink.article("widget-story", collection: nil).url)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.id == feed.id)
+		#expect(model.isFolderExpanded(folder))
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func articleDeepLinkHonorsAnExplicitForYouCollection() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "foryou-story", feedKey: "alpha")
+		let feed = try #require(model.navigation.items.first(where: { $0.kind == .feed }))
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: feed)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(
+			PigeonDeepLink.article("foryou-story", collection: ReaderSection.forYou.rawValue).url
+		)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.smartSection == .forYou)
+	}
+
+	@Test func articleDeepLinkPrefersTodayWhenTheFeedRowIsMissing() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "today-story", feedKey: "unknown-feed")
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(PigeonDeepLink.article("today-story", collection: nil).url)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.smartSection == .today)
+	}
+
+	@Test func forYouWidgetSnapshotDeepLinksStayOnForYou() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "widget-foryou", feedKey: "alpha")
+		let todayArticle = makeArticle(id: "widget-today", feedKey: "alpha", receivedAt: Date.now.timeIntervalSince1970)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([todayArticle], for: .today)
+		model.writeWidgetSnapshot()
+
+		let snapshot = PigeonWidgetSnapshot.load()
+		let forYouLink = try #require(snapshot.forYou.first?.deepLink)
+		#expect(PigeonDeepLink(url: forYouLink) == .article(article.id, collection: ReaderSection.forYou.rawValue))
+		let recentLink = try #require(snapshot.recent.first(where: { $0.id == todayArticle.id })?.deepLink)
+		#expect(PigeonDeepLink(url: recentLink) == .article(todayArticle.id, collection: ReaderSection.today.rawValue))
+	}
+
 	@Test func warmReloadBenchmarkBeforeAndAfterOptimization() async throws {
 		var baselineLaunchSamples: [Double] = []
 		var baselineRefreshSamples: [Double] = []

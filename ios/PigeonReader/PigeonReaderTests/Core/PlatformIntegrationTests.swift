@@ -40,13 +40,15 @@ struct PlatformIntegrationTests {
 		let links: [PigeonDeepLink] = [
 			.feed("feed/7"),
 			.folder("user/-/label/Design Notes"),
-			.article("article/with/slashes"),
+			.article("article/with/slashes", collection: nil),
+			.article("preview-2", collection: ReaderSection.forYou.rawValue),
 			.add(website),
 		]
 		for link in links {
 			#expect(PigeonDeepLink(url: link.url) == link)
 		}
 		#expect(PigeonDeepLink(url: try #require(URL(string: "https://example.com"))) == nil)
+		#expect(PigeonDeepLink(url: try #require(URL(string: "pigeon://article/preview-2"))) == .article("preview-2", collection: nil))
 	}
 
 	@Test @MainActor func deepLinksSelectExistingFeedFolderAndArticleDestinations() async {
@@ -55,8 +57,9 @@ struct PlatformIntegrationTests {
 		#expect(model.selectedCollection.feedKey == "dense-discovery")
 		await model.handleDeepLink(PigeonDeepLink.folder("Design").url)
 		#expect(model.selectedCollection.title == "Design")
-		await model.handleDeepLink(PigeonDeepLink.article("preview-2").url)
+		await model.handleDeepLink(PigeonDeepLink.article("preview-2", collection: nil).url)
 		#expect(model.selectedArticle?.id == "preview-2")
+		#expect(model.selectedCollection.feedKey == "marginal-revolution")
 	}
 
 	@Test func opmlPreviewPreservesNestedFoldersAndDetectsNormalizedDuplicates() throws {
