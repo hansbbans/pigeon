@@ -46,4 +46,47 @@ struct ModelDecodingTests {
 
 		#expect(links == [expectedURL])
 	}
+
+	@Test func displayAuthorIgnoresBlankNamesAndFeedTitleRepeats() {
+		#expect(Recommendation.displayAuthor(nil, source: "Daily") == nil)
+		#expect(Recommendation.displayAuthor("", source: "Daily") == nil)
+		#expect(Recommendation.displayAuthor("   ", source: "Daily") == nil)
+		#expect(Recommendation.displayAuthor("Daily", source: "Daily") == nil)
+		#expect(Recommendation.displayAuthor("daily", source: "Daily") == nil)
+		#expect(Recommendation.displayAuthor("Alice Appleseed", source: "Daily") == "Alice Appleseed")
+		#expect(Recommendation.displayAuthor("  Alice Appleseed  ", source: "Daily") == "Alice Appleseed")
+	}
+
+	@Test func greaderBlankAuthorIsNotStoredAsAByline() throws {
+		let data = Data(#"""
+		{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","author":"","published":1786272000,"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}
+		"""#.utf8)
+		let item = try JSONDecoder().decode(ReaderStreamItem.self, from: data)
+
+		#expect(item.author == nil)
+	}
+
+	@Test func articleUsesDistinctAuthorAsTheVisibleByline() {
+		let article = Recommendation(
+			id: "item-1",
+			readerId: "reader-1",
+			feedKey: "daily",
+			source: "Daily",
+			author: "Alice Appleseed",
+			title: "Story",
+			html: "<p>Body</p>",
+			text: "Body",
+			originalURL: URL(string: "https://example.com/story"),
+			receivedAt: .now,
+			isRead: false,
+			isStarred: false,
+			score: 50,
+			confidence: 0,
+			sampleCount: 0,
+			explanation: "From Daily",
+			learningState: "Reader subscription",
+		)
+
+		#expect(article.displayAuthor == "Alice Appleseed")
+	}
 }

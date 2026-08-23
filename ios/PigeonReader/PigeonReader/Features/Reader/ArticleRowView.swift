@@ -43,10 +43,10 @@ struct ArticleRowView: View {
 
 			if density != .titleOnly {
 				HStack(spacing: 6) {
-					Text(article.author ?? article.source)
+					Text(article.displayAuthor ?? article.source)
 						.font(.caption.weight(.semibold))
 						.foregroundStyle(.primary)
-					if article.author != nil {
+					if article.displayAuthor != nil {
 						Text(article.source)
 							.font(.caption)
 							.foregroundStyle(.secondary)
