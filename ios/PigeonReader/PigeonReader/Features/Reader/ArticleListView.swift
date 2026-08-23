@@ -284,10 +284,11 @@ struct ArticleListView: View {
 	}
 
 	private func olderThanButton(days: Int) -> some View {
+		let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
 		Button("Older than \(days) \(days == 1 ? "day" : "days")", systemImage: "calendar.badge.checkmark") {
-			let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
 			Task { await model.markStoriesOlderThan(cutoff, in: collection) }
 		}
+		.disabled(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
 	}
 }
 

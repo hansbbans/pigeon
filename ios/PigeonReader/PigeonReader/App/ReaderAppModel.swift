@@ -2122,9 +2122,13 @@ final class ReaderAppModel {
 		)
 	}
 
+	func canMarkStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) -> Bool {
+		markOlderThanCandidates(in: collection, olderThan: date).isEmpty == false
+	}
+
 	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false && $0.receivedAt < date } ?? [],
+			markOlderThanCandidates(in: collection, olderThan: date),
 			scope: .older,
 			undoTitle: "Mark Older Stories as Read",
 		)
@@ -2756,6 +2760,19 @@ final class ReaderAppModel {
 			}
 		}
 		subscriptions = sortedSubscriptions(subscriptions)
+	}
+
+	private func markOlderThanCandidates(
+		in collection: ReaderNavigationItem,
+		olderThan date: Date,
+	) -> [Recommendation] {
+		let displayedArticles: [Recommendation]
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			displayedArticles = searchResults
+		} else {
+			displayedArticles = articleCache[collection.id] ?? []
+		}
+		return displayedArticles.filter { $0.isRead == false && $0.receivedAt < date }
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {

@@ -1571,6 +1571,166 @@ struct ReaderAppModelTests {
 		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
+	@Test func markOlderThanDuringCollectionSearchMarksVisibleHitsNotHiddenNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let olderVisible = makeArticle(
+			id: "older-visible",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+		let newerVisible = makeArticle(
+			id: "newer-visible",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter evening",
+		)
+		let olderReadHit = makeArticle(
+			id: "older-read-hit",
+			isRead: true,
+			receivedAt: 1_786_272_000,
+			title: "Newsletter recap",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerVisible, olderVisible, olderHidden, olderReadHit], for: collection)
+		try await store.saveArticles(
+			[newerVisible, olderVisible, olderHidden, olderReadHit],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [newerVisible.id, olderVisible.id, olderReadHit.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderVisible.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderHidden.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerVisible.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderReadHit.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderVisible.readerId]))
+	}
+
+	@Test func canMarkOlderThanDuringSearchIgnoresHiddenOlderNeighbors() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerHit = makeArticle(
+			id: "newer-hit",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_100,
+			title: "Weather brief",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([newerHit, olderHidden], for: collection)
+		try await store.saveArticles([newerHit, olderHidden], collectionID: collection.id, accountID: accountID)
+
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [newerHit.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+	}
+
+	@Test func markOlderThanDuringLibrarySearchMarksHitsMissingFromTheOpenList() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let todayUnrelatedOlder = makeArticle(
+			id: "today-unrelated-older",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+		let libraryHitOlder = makeArticle(
+			id: "library-hit-older",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter extra",
+		)
+		let todayHitNewer = makeArticle(
+			id: "today-hit-newer",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter noon",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [today, unread]))
+		model.select(item: today)
+		model.setSortOrder(.newest, for: today)
+		model.setArticles([todayUnrelatedOlder, todayHitNewer], for: today)
+		model.setArticles([libraryHitOlder], for: unread)
+		try await store.saveArticles([todayUnrelatedOlder, todayHitNewer], collectionID: today.id, accountID: accountID)
+		try await store.saveArticles([libraryHitOlder], collectionID: unread.id, accountID: accountID)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .library, in: today)
+		#expect(model.searchResults.map(\.id) == [todayHitNewer.id, libraryHitOlder.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: today))
+
+		await model.markStoriesOlderThan(cutoff, in: today)
+
+		#expect(model.allArticles(for: unread).first(where: { $0.id == libraryHitOlder.id })?.isRead == true)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayHitNewer.id })?.isRead == false)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelatedOlder.id })?.isRead == false)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([libraryHitOlder.readerId]))
+	}
+
+	@Test func markOlderThanAfterClearingSearchUsesTheCollectionCacheAgain() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let olderVisible = makeArticle(
+			id: "older-visible",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([olderVisible, olderHidden], for: collection)
+		try await store.saveArticles([olderVisible, olderHidden], collectionID: collection.id, accountID: accountID)
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [olderVisible.id])
+		model.clearArticleSearch()
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderVisible.readerId, olderHidden.readerId]))
+	}
+
 	@Test func filteredBulkReadStaysQueuedAndOptimisticWhenOffline() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -2267,13 +2427,14 @@ struct ReaderAppModelTests {
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
 		html: String = "<p>Body</p>",
+		title: String? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId ?? "tag:google.com,2005:reader/item/\(id)",
 			feedKey: feedKey,
 			source: "Daily",
-			title: "Story \(id)",
+			title: title ?? "Story \(id)",
 			html: html,
 			text: "Body",
 			originalURL: nil,
