@@ -2114,9 +2114,13 @@ final class ReaderAppModel {
 		await markStoriesAsRead(.below, around: article, in: collection)
 	}
 
+	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
+		markReadOrderArticles(in: collection).contains { $0.isRead == false }
+	}
+
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false } ?? [],
+			markReadOrderArticles(in: collection).filter { $0.isRead == false },
 			scope: .all,
 			undoTitle: "Mark All as Read",
 		)
@@ -2790,6 +2794,13 @@ final class ReaderAppModel {
 			scope: boundary == .above ? .above : .below,
 			undoTitle: boundary == .above ? "Mark Above as Read" : "Mark Below as Read",
 		)
+	}
+
+	private func markReadOrderArticles(in collection: ReaderNavigationItem) -> [Recommendation] {
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			return searchResults
+		}
+		return articleCache[collection.id] ?? []
 	}
 
 	private func markArticlesAsRead(
