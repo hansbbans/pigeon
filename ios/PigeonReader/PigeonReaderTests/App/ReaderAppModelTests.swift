@@ -36,6 +36,73 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage != nil)
 	}
 
+	@Test func activeReadingMonitorDoesNotBannerWhenEngagementServerFails() async throws {
+		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		let monitor = Task {
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .milliseconds(5),
+				minimumActiveDuration: 0,
+			)
+		}
+		try await Task.sleep(for: .milliseconds(80))
+		monitor.cancel()
+		await monitor.value
+
+		#expect(model.errorMessage == nil)
+		let requests = await mock.requests()
+		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+		#expect(requests.filter { $0.url.path == "/api/v1/engagement" }.count >= 2)
+	}
+
+	@Test func activeReadingMonitorDoesNotBannerWhenTheNetworkDrops() async throws {
+		let mock = MockHTTPClient(shouldFail: true)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		let monitor = Task {
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .milliseconds(5),
+				minimumActiveDuration: 0,
+			)
+		}
+		try await Task.sleep(for: .milliseconds(40))
+		monitor.cancel()
+		await monitor.value
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func scrollDepthAnalyticsDoNotBannerWhenEngagementServerFails() async throws {
+		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		let monitor = Task {
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .seconds(3_600),
+				minimumActiveDuration: 0,
+			)
+		}
+		try await Task.sleep(for: .milliseconds(20))
+		model.recordScrollDepth(itemId: article.id, depth: 0.3)
+		try await Task.sleep(for: .milliseconds(80))
+		monitor.cancel()
+		await monitor.value
+
+		#expect(model.errorMessage == nil)
+		let requests = await mock.requests()
+		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+	}
+
 	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),

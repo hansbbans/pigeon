@@ -2048,26 +2048,30 @@ final class ReaderAppModel {
 		}
 	}
 
-	func monitorActiveReading(for articleId: String) async {
-		guard let apiClient, engagement.resume(itemId: articleId, at: .now) else {
+	func monitorActiveReading(
+		for articleId: String,
+		interval: Duration = .seconds(15),
+		minimumActiveDuration: TimeInterval = 10,
+	) async {
+		guard apiClient != nil, engagement.resume(itemId: articleId, at: .now) else {
 			return
 		}
 		defer { engagement.pause(itemId: articleId, at: .now) }
 
 		do {
 			while !Task.isCancelled {
-				try await Task.sleep(for: .seconds(15))
+				try await Task.sleep(for: interval)
 				try Task.checkCancellation()
-				if let event = engagement.activeReadingDeltaEvent(itemId: articleId, at: .now) {
-					try await apiClient.sendEngagement([event])
+				if let event = engagement.activeReadingDeltaEvent(
+					itemId: articleId,
+					at: .now,
+					minimumDuration: minimumActiveDuration,
+				) {
+					_ = await send(event, reportErrors: false)
 				}
 			}
-		} catch let error where isCancellation(error) {
-			return
-		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
-			return
 		} catch {
-			errorMessage = error.localizedDescription
+			return
 		}
 	}
 
@@ -2089,7 +2093,7 @@ final class ReaderAppModel {
 		}
 		let event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
 		Task { @MainActor [weak self] in
-			await self?.send(event)
+			await self?.send(event, reportErrors: false)
 		}
 	}
 
@@ -2845,7 +2849,7 @@ final class ReaderAppModel {
 	}
 
 	@discardableResult
-	private func send(_ event: EngagementEvent) async -> Bool {
+	private func send(_ event: EngagementEvent, reportErrors: Bool = true) async -> Bool {
 		guard let apiClient else {
 			return false
 		}
@@ -2857,7 +2861,9 @@ final class ReaderAppModel {
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
 		} catch {
-			errorMessage = error.localizedDescription
+			if reportErrors {
+				errorMessage = error.localizedDescription
+			}
 			return false
 		}
 	}
