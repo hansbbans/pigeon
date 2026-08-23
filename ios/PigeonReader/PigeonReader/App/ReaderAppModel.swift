@@ -2889,11 +2889,57 @@ final class ReaderAppModel {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
+			syncStarredMembership(for: article, starred: value)
+			if articleCache[ReaderSection.starred.rawValue] != nil {
+				changedCollections.insert(ReaderSection.starred.rawValue)
+			}
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
 
 		await persistCollections(changedCollections)
 		await replayPendingMutations()
+	}
+
+	private func syncStarredMembership(for article: Recommendation, starred: Bool) {
+		let starredID = ReaderSection.starred.rawValue
+		guard var starredArticles = articleCache[starredID] else {
+			return
+		}
+
+		if starred {
+			if let index = starredArticles.firstIndex(where: { articlesMatch($0, article) }) {
+				starredArticles[index].isStarred = true
+			} else {
+				var copy = cachedArticle(matching: article) ?? article
+				copy.isStarred = true
+				starredArticles.append(copy)
+			}
+			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles)
+			return
+		}
+
+		let removedWasSelected = selectedArticleIDs[starredID].map { remembered in
+			remembered == article.id
+				|| remembered == article.readerId
+				|| starredArticles.contains(where: { $0.id == remembered && articlesMatch($0, article) })
+		} ?? false
+		articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		if removedWasSelected {
+			selectedArticleIDs[starredID] = nil
+			if selectedNavigationID == starredID {
+				selectedArticleID = nil
+				preferredCompactColumn = .content
+			}
+		}
+	}
+
+	private func cachedArticle(matching article: Recommendation) -> Recommendation? {
+		for cachedArticles in articleCache.values {
+			if let match = cachedArticles.first(where: { articlesMatch($0, article) }) {
+				return match
+			}
+		}
+		return nil
 	}
 
 }

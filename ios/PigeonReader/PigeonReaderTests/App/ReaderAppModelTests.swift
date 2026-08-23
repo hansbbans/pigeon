@@ -513,6 +513,103 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func starringInsertsIntoLoadedStarredCacheInNewestOrder() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let older = makeArticle(id: "already-starred", isStarred: true, receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", receivedAt: 1_786_272_100)
+		model.setArticles([older], for: .starred)
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+		#expect(model.allArticles(for: .starred).allSatisfy(\.isStarred))
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+	}
+
+	@Test func starringAnEmptyLoadedStarredCollectionShowsTheNewStory() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([], for: .starred)
+		model.setArticles([article], for: .forYou)
+		model.select(section: .forYou)
+
+		await model.setStarred(article, starred: true)
+		model.select(section: .starred)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed"])
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed"])
+	}
+
+	@Test func starringDoesNotCreateStarredCacheBeforeThatCollectionLoads() async throws {
+		let serverStarred = makeArticle(id: "from-server", isStarred: true)
+		let mock = MockHTTPClient(responseData: try responseData(items: [serverStarred]))
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+		await model.load(section: .starred)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-server"])
+	}
+
+	@Test func unstarringRemovesTheStoryFromStarredAndClosesItIfOpen() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let kept = makeArticle(id: "kept", isStarred: true)
+		let removed = makeArticle(id: "removed", isStarred: true)
+		model.setArticles([kept, removed], for: .starred)
+		model.setArticles([removed], for: .forYou)
+		model.select(section: .starred)
+		model.select(article: removed)
+
+		await model.setStarred(removed, starred: false)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["kept"])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+	}
+
+	@Test func unstarringFromAnotherListDropsTheLoadedStarredRow() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "shared", isStarred: true)
+		model.setArticles([article], for: .starred)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.setStarred(article, starred: false)
+
+		#expect(model.allArticles(for: .starred).isEmpty)
+		#expect(model.allArticles(for: .today).first?.isStarred == false)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func failedStarKeepsStarredMembershipQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let existing = makeArticle(id: "already-starred", isStarred: true, receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", receivedAt: 1_786_272_100)
+		model.setArticles([existing], for: .starred)
+		model.setArticles([article], for: .forYou)
+
+		let mutation = Task { await model.setStarred(article, starred: true) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline == false)
+	}
+
 	@Test func offlineReadStaysOptimisticAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -2261,6 +2358,7 @@ struct ReaderAppModelTests {
 	private func makeArticle(
 		id: String,
 		isRead: Bool = false,
+		isStarred: Bool = false,
 		receivedAt: TimeInterval = 1_786_272_000,
 		score: Int = 50,
 		feedKey: String = "daily",
@@ -2279,7 +2377,7 @@ struct ReaderAppModelTests {
 			originalURL: nil,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
-			isStarred: false,
+			isStarred: isStarred,
 			score: score,
 			confidence: 0,
 			sampleCount: 0,
