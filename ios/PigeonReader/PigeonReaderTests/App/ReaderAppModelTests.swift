@@ -1571,6 +1571,112 @@ struct ReaderAppModelTests {
 		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
+	@Test func todayHidesYesterdayStoriesAfterLocalMidnight() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(3_600))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+
+		#expect(model.articles(for: .today).map(\.id) == [today.id])
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.allArticles(for: .unread).map(\.id) == [today.id, yesterday.id])
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveArticles([yesterday, today], collectionID: ReaderSection.today.rawValue, accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: ReaderSection.unread.rawValue, accountID: accountID)
+
+		await model.handleLocalDayChange()
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+		#expect(model.allArticles(for: .unread).map(\.id) == [today.id, yesterday.id])
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id).contains(yesterday.id) == true)
+	}
+
+	@Test func todayKeepsSameDayStoriesWhenTheLocalDayHasNotChanged() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem]))
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let morning = makeArticle(id: "morning", receivedDate: bounds.start.addingTimeInterval(60))
+		let evening = makeArticle(id: "evening", receivedDate: bounds.end.addingTimeInterval(-60))
+		model.setArticles([morning, evening], for: .today)
+
+		#expect(await model.handleLocalDayChange() == false)
+		#expect(model.allArticles(for: .today).map(\.id) == [evening.id, morning.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 2)
+	}
+
+	@Test func markAllOnTodayAfterMidnightLeavesYesterdayUnreadInOtherLists() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+		model.select(item: todayItem)
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-120))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(1_200))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+
+		await model.markAllStoriesAsRead(in: todayItem)
+
+		#expect(model.allArticles(for: .today).first(where: { $0.id == today.id })?.isRead == true)
+		#expect(model.allArticles(for: .unread).first(where: { $0.id == yesterday.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [today.readerId])
+	}
+
+	@Test func loadingTodayDropsYesterdayRowsFromAStaleCache() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem]))
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-30))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(90))
+		model.setArticles([yesterday, today], for: .today)
+
+		await model.load(section: .today)
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+	}
+
+	@Test func restoringACachedLibraryDropsYesterdayFromToday() async throws {
+		let session = try makeSession(token: "today-midnight-snapshot")
+		let store = OfflineLibraryStore.inMemory()
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-90))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(180))
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
+	}
+
 	@Test func filteredBulkReadStaysQueuedAndOptimisticWhenOffline() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
