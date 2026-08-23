@@ -121,6 +121,7 @@ private struct RenameFeedView: View {
 		NavigationStack {
 			Form {
 				TextField(fieldTitle, text: text)
+					.accessibilityIdentifier("rename-feed-name")
 			}
 			.navigationTitle(navigationTitle)
 			.navigationBarTitleDisplayMode(.inline)

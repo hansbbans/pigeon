@@ -152,6 +152,53 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "feed-folder-edit")
 	}
 
+	func testLongPressFeedOffersRenameAndUnsubscribe() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let feed = app.staticTexts["Stratechery"]
+		if feed.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		feed.press(forDuration: 1.2)
+
+		let renameFeed = app.buttons["Rename Feed"]
+		XCTAssertTrue(renameFeed.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Unsubscribe"].exists)
+		renameFeed.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Feed"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-feed-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		XCTAssertEqual(nameField.value as? String, "Stratechery")
+		app.buttons["Cancel"].tap()
+		XCTAssertFalse(app.navigationBars["Rename Feed"].waitForExistence(timeout: 2))
+
+		XCTAssertTrue(feed.waitForExistence(timeout: 5))
+		feed.press(forDuration: 1.2)
+		let unsubscribe = app.buttons["Unsubscribe"]
+		XCTAssertTrue(unsubscribe.waitForExistence(timeout: 5))
+		unsubscribe.tap()
+		let confirm = app.buttons["confirm-unsubscribe-feed"].exists
+			? app.buttons["confirm-unsubscribe-feed"]
+			: app.buttons["Unsubscribe"]
+		XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+		confirm.tap()
+
+		XCTAssertFalse(app.staticTexts["Stratechery"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["For You"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Design"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "feed-sidebar-actions")
+	}
+
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
 		app.terminate()
 		app.launchArguments = [

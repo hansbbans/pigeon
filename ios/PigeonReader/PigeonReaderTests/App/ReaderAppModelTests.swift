@@ -1708,6 +1708,81 @@ struct ReaderAppModelTests {
 		#expect(model.isOffline == false)
 	}
 
+	@Test func renamingAFeedUpdatesTheSidebarImmediatelyAndPersists() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		model.setSubscriptions([subscription])
+		model.setNavigation(try makeUncategorizedFeedNavigation(subscription: subscription, unreadCount: 2))
+		model.select(item: try #require(model.navigation.item(withID: subscription.id)))
+
+		#expect(await model.renameFeed(subscription, to: "Morning Brief"))
+		#expect(model.navigation.item(withID: subscription.id)?.title == "Morning Brief")
+		#expect(model.selectedCollection.title == "Morning Brief")
+		#expect(model.selectedCollection.id == subscription.id)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.title == "Morning Brief")
+		#expect(snapshot.navigation?.item(withID: subscription.id)?.title == "Morning Brief")
+	}
+
+	@Test func unsubscribingAFeedRemovesItFromTheSidebarAndPersists() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let daily = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		let weekly = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		model.setSubscriptions([daily, weekly])
+		model.setNavigation(try makeUncategorizedFeedNavigation(subscriptions: [daily, weekly], unreadCount: 1))
+		model.select(section: .forYou)
+
+		#expect(await model.unsubscribe(daily))
+		#expect(model.subscriptions.map(\.id) == ["feed/2"])
+		#expect(model.navigation.item(withID: daily.id) == nil)
+		#expect(model.navigation.item(withID: weekly.id)?.title == "Weekly")
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.map(\.id) == ["feed/2"])
+		#expect(snapshot.navigation?.item(withID: daily.id) == nil)
+		#expect(snapshot.navigation?.item(withID: weekly.id)?.title == "Weekly")
+	}
+
+	@Test func unsubscribingTheOpenFeedLeavesASmartViewInsteadOfAGhost() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let feedID = "feed/1::user/-/label/Design"
+		model.setSubscriptions([subscription])
+		model.setNavigation(try makeFolderFeedNavigation(subscription: subscription, unreadCount: 3))
+		let feed = try #require(model.navigation.item(withID: feedID))
+		model.setArticles([makeArticle(id: "open-feed-article", feedKey: "daily")], for: feed)
+		model.select(item: feed)
+		model.select(article: try #require(model.allArticles(for: feed).first))
+
+		#expect(await model.unsubscribe(subscription))
+		#expect(model.navigation.item(withID: feedID) == nil)
+		#expect(model.navigation.item(withID: "user/-/label/Design") == nil)
+		#expect(model.navigation.item(withID: subscription.id) == nil)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.allArticles(for: feed).isEmpty)
+	}
+
+	@Test func emptyFeedRenameIsRejectedBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		model.setSubscriptions([subscription])
+
+		#expect(await model.renameFeed(subscription, to: "   ") == false)
+		#expect(model.errorMessage == "Feed names must be between 1 and 200 characters.")
+		#expect(model.subscriptions.first?.title == "Daily")
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
+	}
+
 	@Test func offlineFeedRenameStaysVisibleAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -1890,6 +1965,62 @@ struct ReaderAppModelTests {
 				today: unreadCount,
 				unread: unreadCount,
 				starred: unreadCount,
+			),
+		)
+	}
+
+	private func makeUncategorizedFeedNavigation(
+		subscription: FeedSubscription,
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		try makeUncategorizedFeedNavigation(subscriptions: [subscription], unreadCount: unreadCount)
+	}
+
+	private func makeUncategorizedFeedNavigation(
+		subscriptions: [FeedSubscription],
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		ReaderNavigationCatalog.make(
+			subscriptions: subscriptions.map {
+				ReaderSubscription(
+					id: $0.id,
+					title: $0.title,
+					categories: $0.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+					url: $0.url.absoluteString,
+				)
+			},
+			unreadCounts: subscriptions.map { ReaderUnreadCount(id: $0.id, count: unreadCount) },
+			smartCounts: ReaderNavigationSmartCounts(
+				forYou: unreadCount,
+				today: unreadCount,
+				unread: unreadCount,
+				starred: 0,
+			),
+		)
+	}
+
+	private func makeFolderFeedNavigation(
+		subscription: FeedSubscription,
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		ReaderNavigationCatalog.make(
+			subscriptions: [
+				ReaderSubscription(
+					id: subscription.id,
+					title: subscription.title,
+					categories: subscription.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+					url: subscription.url.absoluteString,
+				),
+			],
+			unreadCounts: [
+				ReaderUnreadCount(id: subscription.id, count: unreadCount),
+				ReaderUnreadCount(id: "user/-/label/Design", count: unreadCount),
+			],
+			smartCounts: ReaderNavigationSmartCounts(
+				forYou: unreadCount,
+				today: unreadCount,
+				unread: unreadCount,
+				starred: 0,
 			),
 		)
 	}

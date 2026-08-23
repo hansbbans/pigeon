@@ -1479,9 +1479,8 @@ final class ReaderAppModel {
 		let mutation = OfflineMutation(kind: .renameFeed, feedId: subscription.id, title: title)
 		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { $0.title = title }
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-		}
+		rebuildNavigationFromSubscriptions()
+		await persistLibraryAfterSubscriptionChange()
 		await replayPendingMutations()
 		return true
 	}
@@ -1520,10 +1519,26 @@ final class ReaderAppModel {
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
 		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
 		guard await enqueueOfflineMutation(mutation) else { return false }
+		let removedFeedIDs = navigation.items
+			.filter { $0.kind == .feed && $0.streamID == subscription.id }
+			.map(\.id)
+		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		for collectionID in removedFeedIDs {
+			articleCache[collectionID] = nil
+			selectedArticleIDs[collectionID] = nil
+			resetStreamPagination(for: collectionID)
 		}
+		rebuildNavigationFromSubscriptions()
+		if wasSelectedFeed
+			|| removedFeedIDs.contains(temporarilyUnavailableSelectedCollection?.id ?? "")
+			|| navigation.item(withID: selectedNavigationID) == nil {
+			temporarilyUnavailableSelectedCollection = nil
+			if navigation.item(withID: selectedNavigationID) == nil {
+				select(section: firstEnabledSmartSection)
+			}
+		}
+		await persistLibraryAfterSubscriptionChange()
 		await replayPendingMutations()
 		return true
 	}
@@ -2552,6 +2567,19 @@ final class ReaderAppModel {
 			}
 		}
 		return normalized.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+	}
+
+	private func persistLibraryAfterSubscriptionChange() async {
+		guard let accountID = session?.storageIdentity else {
+			return
+		}
+		do {
+			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			scheduleRestorationSave()
+		} catch {
+			errorMessage = "Your library change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+		}
 	}
 
 	private func rebuildNavigationFromSubscriptions() {
