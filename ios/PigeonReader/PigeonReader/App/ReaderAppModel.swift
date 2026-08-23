@@ -587,7 +587,8 @@ final class ReaderAppModel {
 		writeWidgetSnapshot()
 	}
 
-	func writeWidgetSnapshot() {
+	@discardableResult
+	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
 		let allArticles = Dictionary(
 			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
 			uniquingKeysWith: { first, _ in first },
@@ -597,12 +598,26 @@ final class ReaderAppModel {
 		let snapshot = PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
-			starredCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? allArticles.count(where: \.isStarred),
+			starredCount: widgetStarredCount(from: allArticles),
 			recent: Array(recent),
 			forYou: Array(forYou),
 		)
 		snapshot.save()
 		WidgetCenter.shared.reloadAllTimelines()
+		return snapshot
+	}
+
+	/// The counts widget labels this as a starred total, not an unread badge.
+	/// Prefer loaded starred rows (including read ones). Fall back to unique
+	/// starred stories in memory, then the Starred unread badge if nothing
+	/// starred has been cached yet.
+	private func widgetStarredCount(from articles: some Collection<Recommendation>) -> Int {
+		let cachedStarred = articles.count(where: \.isStarred)
+		if let starredArticles = articleCache[ReaderSection.starred.rawValue] {
+			return max(starredArticles.count, cachedStarred)
+		}
+		let unreadStarredBadge = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
+		return max(cachedStarred, unreadStarredBadge)
 	}
 
 	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {

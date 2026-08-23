@@ -1513,6 +1513,61 @@ struct ReaderAppModelTests {
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
+	@Test func widgetSnapshotCountsAllStarredStoriesNotOnlyTheUnreadBadge() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 4)
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [unread, starred]))
+
+		var unreadStarred = makeArticle(id: "unread-starred")
+		unreadStarred.isStarred = true
+		var readStarred = makeArticle(id: "read-starred", isRead: true)
+		readStarred.isStarred = true
+		let unreadPlain = makeArticle(id: "unread-plain")
+		model.setArticles([unreadStarred, readStarred], for: .starred)
+		model.setArticles([unreadStarred, unreadPlain], for: .unread)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.unreadCount == 4)
+		#expect(snapshot.starredCount == 2)
+		#expect(model.navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount == 1)
+	}
+
+	@Test func widgetSnapshotUsesTheStarredUnreadBadgeBeforeAnyStarredRowsAreCached() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 6),
+				.smart(.starred, unreadCount: 3),
+			]),
+		)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.unreadCount == 6)
+		#expect(snapshot.starredCount == 3)
+	}
+
+	@Test func widgetSnapshotCountsReadStarredStoriesFromOtherListsWhenStarredIsUnloaded() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 1),
+				.smart(.starred, unreadCount: 0),
+				.smart(.today, unreadCount: 0),
+			]),
+		)
+
+		var readStarred = makeArticle(id: "saved-and-read", isRead: true)
+		readStarred.isStarred = true
+		model.setArticles([readStarred], for: .today)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.starredCount == 1)
+	}
+
 	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewInternalOnly() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let workFolderID = "user/-/label/Work"
