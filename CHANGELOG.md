@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
+- After 60% Read marks a story again after you mark it unread. Scrolling a story that is already read no longer consumes that trigger.
 - Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
 - Ordinary reading pans no longer count as back-to-feed; only the leading-edge swipe leaves the article.
 - Swiping from the leading edge of an iPhone article returns to the feed again. The gesture is recognized on the reader itself, not only the back button.

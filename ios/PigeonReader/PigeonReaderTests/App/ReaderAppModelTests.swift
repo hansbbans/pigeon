@@ -1503,6 +1503,44 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 
+	@Test func scrollThresholdReadWorksAgainAfterMarkUnread() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "scroll-unread")
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		model.recordScrollDepth(itemId: article.id, depth: 0.6)
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		let readArticle = try #require(model.allArticles(for: .forYou).first)
+		await model.setRead(readArticle, read: false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		model.recordScrollDepth(itemId: article.id, depth: 0.61)
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test func scrollingAnAlreadyReadStoryDoesNotBlockLaterScrollRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "already-read", isRead: true)
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		model.recordScrollDepth(itemId: article.id, depth: 0.8)
+		await Task.yield()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		let readArticle = try #require(model.allArticles(for: .forYou).first)
+		await model.setRead(readArticle, read: false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		model.recordScrollDepth(itemId: article.id, depth: 0.8)
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
 	@Test func bulkReadUndoQueuesAReverseMutationAndRestoresEveryStory() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(statusCode: 500), offlineStore: store)

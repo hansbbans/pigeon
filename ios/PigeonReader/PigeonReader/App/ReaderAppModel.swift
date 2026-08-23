@@ -2074,11 +2074,18 @@ final class ReaderAppModel {
 	func recordScrollDepth(itemId: String, depth: Double) {
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
-			scrollReadTriggered.insert(itemId).inserted,
 			let article = article(withId: itemId),
-			article.isRead == false {
+			article.isRead == false,
+			scrollReadTriggered.insert(itemId).inserted
+		{
 			Task { @MainActor [weak self] in
 				await self?.setRead(article, read: true)
+				guard let self else {
+					return
+				}
+				if self.article(withId: itemId)?.isRead == false {
+					self.forgetScrollRead(for: article)
+				}
 			}
 		}
 		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
@@ -2823,6 +2830,9 @@ final class ReaderAppModel {
 
 		var changedCollections = Set<String>()
 		for target in targets {
+			if read == false {
+				forgetScrollRead(for: target)
+			}
 			for collectionID in Array(articleCache.keys) {
 				guard var cachedArticles = articleCache[collectionID] else {
 					continue
@@ -2862,6 +2872,11 @@ final class ReaderAppModel {
 		}
 	}
 
+	private func forgetScrollRead(for article: Recommendation) {
+		scrollReadTriggered.remove(article.id)
+		scrollReadTriggered.remove(article.readerId)
+	}
+
 	private func optimisticallyUpdateState(
 		article: Recommendation,
 		value: Bool,
@@ -2886,6 +2901,9 @@ final class ReaderAppModel {
 			changedCollections.insert(collectionID)
 		}
 		if mutationName == "read" {
+			if value == false {
+				forgetScrollRead(for: article)
+			}
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
