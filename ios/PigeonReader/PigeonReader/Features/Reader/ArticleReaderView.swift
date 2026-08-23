@@ -36,7 +36,7 @@ struct ArticleReaderView: View {
 					.padding(.vertical, 16)
 					Divider()
 
-					ArticleWebsiteView(url: originalURL)
+					ArticleWebsiteView(articleID: current.id, url: originalURL)
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 				}
 			} else {
