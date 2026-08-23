@@ -45,6 +45,73 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 	}
 }
 
+nonisolated enum ArticleShareItem: Equatable, Sendable {
+	case url(URL)
+	case text(String)
+
+	static func make(from article: Recommendation) -> Self? {
+		if let url = article.safeOriginalURL {
+			return .url(url)
+		}
+
+		let text = shareText(for: article)
+		return text.isEmpty ? nil : .text(text)
+	}
+
+	private static func shareText(for article: Recommendation) -> String {
+		var lines: [String] = []
+		let title = article.title.trimmingCharacters(in: .whitespacesAndNewlines)
+		if title.isEmpty == false {
+			lines.append(title)
+		}
+
+		let source = article.source.trimmingCharacters(in: .whitespacesAndNewlines)
+		if source.isEmpty == false, source != title {
+			lines.append(source)
+		}
+
+		let body: String
+		if let text = article.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false {
+			body = text
+		} else {
+			body = Self.plainText(fromHTML: article.html)
+		}
+		if body.isEmpty == false, body != title {
+			if lines.isEmpty == false {
+				lines.append("")
+			}
+			lines.append(body)
+		}
+
+		return lines.joined(separator: "\n")
+	}
+
+	private static func plainText(fromHTML html: String) -> String {
+		var text = html.replacingOccurrences(
+			of: #"</?(?:p|div|br|h[1-6]|li|tr|blockquote)[^>]*>"#,
+			with: "\n",
+			options: [.regularExpression, .caseInsensitive],
+		)
+		text = text.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+		let decoded = [
+			"&nbsp;": " ",
+			"&amp;": "&",
+			"&lt;": "<",
+			"&gt;": ">",
+			"&quot;": "\"",
+			"&#39;": "'",
+			"&apos;": "'",
+		].reduce(text) { result, pair in
+			result.replacingOccurrences(of: pair.key, with: pair.value)
+		}
+		return decoded
+			.components(separatedBy: .newlines)
+			.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+			.filter { $0.isEmpty == false }
+			.joined(separator: "\n\n")
+	}
+}
+
 nonisolated struct ArticleReaderControlsSaveTaskID: Equatable, Sendable {
 	let articleID: String
 	let requestID: UUID?
@@ -159,17 +226,28 @@ struct ArticleReaderControlsBar: View {
 
 	private var shareButton: some View {
 		controlSlot {
-			if let shareURL = article.safeOriginalURL {
-				ShareLink(item: shareURL, subject: Text(article.title)) {
-					Label(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage)
+			switch ArticleShareItem.make(from: article) {
+			case .url(let url):
+				ShareLink(item: url, subject: Text(article.title)) {
+					shareLabel
 				}
 				.keyboardShortcut("s", modifiers: [.command, .shift])
 				.accessibilityHint("Opens the system share sheet")
-			} else {
+			case .text(let text):
+				ShareLink(item: text, subject: Text(article.title)) {
+					shareLabel
+				}
+				.keyboardShortcut("s", modifiers: [.command, .shift])
+				.accessibilityHint("Opens the system share sheet")
+			case nil:
 				Button(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage) {}
 					.disabled(true)
 			}
 		}
+	}
+
+	private var shareLabel: some View {
+		Label(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage)
 	}
 
 	private var markReadButton: some View {
