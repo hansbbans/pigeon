@@ -757,7 +757,8 @@ final class ReaderAppModel {
 			if isInitialPreparation,
 				canUseIncrementalReload,
 				selectedCollection.kind == .feed,
-				cachedCollectionHasMissingBodies(selectedCollection.id) == false {
+				cachedCollectionHasMissingBodies(selectedCollection.id) == false,
+				hasCachedPaginationContinuation(selectedCollection.id) {
 				deferredInitialFeedPaginationCollectionID = selectedCollection.id
 			}
 			if canUseIncrementalReload == false {
@@ -1198,18 +1199,18 @@ final class ReaderAppModel {
 				&& zip(existingArticles, loadedArticles).allSatisfy { pair in
 					articlesMatch(pair.0, pair.1)
 				}
-			if reusesUnchangedPersistedPage == false {
 				guard await persistCollectionState(
 					loadedArticles,
 					collectionID: collection.id,
 					navigation: nextNavigation,
+					continuation: page.continuation,
 					context: context,
 					operationID: loadID,
 					isLoadMore: false,
+					persistArticles: reusesUnchangedPersistedPage == false,
 				) else {
 					return
 				}
-			}
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
@@ -1310,6 +1311,7 @@ final class ReaderAppModel {
 				combinedArticles,
 				collectionID: collection.id,
 				navigation: nextNavigation,
+				continuation: nextStreamContinuation,
 				context: context,
 				operationID: loadID,
 				isLoadMore: true,
@@ -2288,6 +2290,12 @@ final class ReaderAppModel {
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
+		for (collectionID, continuation) in snapshot.continuationsByCollection {
+			guard preservingPagination == false || streamContinuations[collectionID] == nil else { continue }
+			streamContinuations[collectionID] = continuation
+			seenStreamContinuations[collectionID] = [continuation]
+			resolvedPaginationCollections.insert(collectionID)
+		}
 		if let updatedAt = snapshot.lastSyncAt {
 			collectionFreshness = snapshot.articlesByCollection.keys.reduce(into: [:]) { result, collectionID in
 				result[collectionID] = CollectionFreshness(updatedAt: updatedAt, isCached: true)
@@ -2437,6 +2445,11 @@ final class ReaderAppModel {
 		return cachedArticles.contains(where: { $0.html.isEmpty })
 	}
 
+	private func hasCachedPaginationContinuation(_ collectionID: String) -> Bool {
+		guard let continuation = streamContinuations[collectionID] else { return false }
+		return continuation.isEmpty == false
+	}
+
 	private func consumeDeferredInitialFeedPagination(for collection: ReaderNavigationItem) -> Bool {
 		guard collection.kind == .feed,
 			deferredInitialFeedPaginationCollectionID == collection.id else {
@@ -2463,9 +2476,11 @@ final class ReaderAppModel {
 		_ articles: [Recommendation],
 		collectionID: String,
 		navigation: ReaderNavigationState,
+		continuation: String?,
 		context: OperationContext,
 		operationID: UUID,
 		isLoadMore: Bool,
+		persistArticles: Bool = true,
 	) async -> Bool {
 		let predecessor = offlinePersistenceTask
 		let task = Task { @MainActor [weak self] in
@@ -2483,20 +2498,35 @@ final class ReaderAppModel {
 			}
 
 			do {
-				try await self.offlineStore.saveArticles(
-					articles,
+				if persistArticles {
+					try await self.offlineStore.saveArticles(
+						articles,
+						collectionID: collectionID,
+						accountID: context.accountID,
+					)
+					guard self.isCurrentCollectionOperation(
+						context,
+						collectionID: collectionID,
+						operationID: operationID,
+						isLoadMore: isLoadMore,
+					) else {
+						return false
+					}
+					try await self.offlineStore.saveNavigation(navigation, accountID: context.accountID)
+					guard self.isCurrentCollectionOperation(
+						context,
+						collectionID: collectionID,
+						operationID: operationID,
+						isLoadMore: isLoadMore,
+					) else {
+						return false
+					}
+				}
+				try await self.offlineStore.saveCollectionContinuation(
+					continuation,
 					collectionID: collectionID,
 					accountID: context.accountID,
 				)
-				guard self.isCurrentCollectionOperation(
-					context,
-					collectionID: collectionID,
-					operationID: operationID,
-					isLoadMore: isLoadMore,
-				) else {
-					return false
-				}
-				try await self.offlineStore.saveNavigation(navigation, accountID: context.accountID)
 				guard self.isCurrentCollectionOperation(
 					context,
 					collectionID: collectionID,

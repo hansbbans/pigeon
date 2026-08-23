@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import PigeonReader
 
@@ -213,6 +214,60 @@ struct OfflineLibraryStoreTests {
 		#expect(article.html.isEmpty)
 	}
 
+	@Test func persistedPrunedPlaceholderIsMissingAfterReopenAndAnUnrelatedSyncChange() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-pruned-placeholder-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let placeholder = makeArticle(
+			id: "pruned-placeholder",
+			html: "<p>This older read article is no longer stored offline.</p>",
+			receivedAt: 100,
+		)
+
+		do {
+			let store = OfflineLibraryStore(databaseURL: databaseURL)
+			try await store.saveArticles([placeholder], collectionID: "feed/7", accountID: "account-a")
+		}
+		try markBodyPruned(
+			in: databaseURL,
+			accountID: "account-a",
+			articleID: placeholder.id,
+		)
+
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let unrelatedChange = try decodePage(
+			"""
+			{
+			  "cursor": "v1:4",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 4,
+			    "entityType": "feed",
+			    "entityId": "other",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "feedKey": "other",
+			      "streamId": "feed/8",
+			      "title": "Other",
+			      "isActive": true,
+			      "folders": []
+			    }
+			  }]
+			}
+			"""
+		)
+		try await store.apply(unrelatedChange, accountID: "account-a")
+
+		let article = try #require(
+			try await store.loadSnapshot(accountID: "account-a")
+				.articlesByCollection["feed/7"]?.first
+		)
+		#expect(article.id == placeholder.id)
+		#expect(article.html.isEmpty)
+	}
+
 	@Test func cleanupPrunesOnlyOlderReadUnstarredBodies() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let newestRead = makeArticle(id: "newest-read", receivedAt: 400)
@@ -392,4 +447,39 @@ struct OfflineLibraryStoreTests {
 		}
 		return try decoder.decode(IncrementalSyncPage.self, from: Data(json.utf8))
 	}
+
+	private func markBodyPruned(in databaseURL: URL, accountID: String, articleID: String) throws {
+		var database: OpaquePointer?
+		guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+			let database else {
+			throw TestSQLiteError.openFailed
+		}
+		defer { sqlite3_close(database) }
+
+		var statement: OpaquePointer?
+		guard sqlite3_prepare_v2(
+			database,
+			"UPDATE cached_articles SET body_pruned = 1 WHERE account_id = ? AND id = ?",
+			-1,
+			&statement,
+			nil,
+		) == SQLITE_OK,
+			let statement else {
+			throw TestSQLiteError.prepareFailed
+		}
+		defer { sqlite3_finalize(statement) }
+		guard accountID.withCString({ sqlite3_bind_text(statement, 1, $0, -1, testSQLiteTransient) }) == SQLITE_OK,
+			articleID.withCString({ sqlite3_bind_text(statement, 2, $0, -1, testSQLiteTransient) }) == SQLITE_OK,
+			sqlite3_step(statement) == SQLITE_DONE else {
+			throw TestSQLiteError.updateFailed
+		}
+	}
+}
+
+nonisolated(unsafe) private let testSQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private enum TestSQLiteError: Error {
+	case openFailed
+	case prepareFailed
+	case updateFailed
 }

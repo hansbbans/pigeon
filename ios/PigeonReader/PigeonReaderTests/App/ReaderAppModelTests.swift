@@ -776,7 +776,7 @@ struct ReaderAppModelTests {
 		let client = MockHTTPClient(
 			responseData: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
 		)
-		let fixture = try await makeWarmFeedModel(httpClient: client)
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
 
 		await fixture.model.prepareOfflineLibrary()
 		await fixture.model.load(collection: fixture.collection)
@@ -784,6 +784,24 @@ struct ReaderAppModelTests {
 
 		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
 		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
+	}
+
+	@Test func cachedFeedRestoresContinuationAndLoadsMoreAfterSyncOnlyPreparation() async throws {
+		let client = PaginationHTTPClient(streamID: "feed/7")
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
+
+		await fixture.model.prepareOfflineLibrary()
+		await fixture.model.load(collection: fixture.collection)
+
+		#expect(fixture.model.canLoadMore(collection: fixture.collection))
+		#expect(await client.requests().map(\.path) == ["/api/v1/sync"])
+
+		await fixture.model.loadMore(collection: fixture.collection)
+
+		#expect(fixture.model.allArticles(for: fixture.collection).contains(where: { $0.id == "older" }))
+		#expect(fixture.model.canLoadMore(collection: fixture.collection) == false)
+		let pageRequests = await client.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(pageRequests.map { $0.query["c"] } == ["page-2"])
 	}
 
 	@Test func deletingTheLastFeedDuringSyncClearsItsNavigationAndSelection() async throws {
@@ -2030,7 +2048,8 @@ struct ReaderAppModelTests {
 
 	private func makeWarmFeedModel(
 		httpClient: any HTTPClient,
-		cachedHTML: String = "<p>Body</p>"
+		cachedHTML: String = "<p>Body</p>",
+		continuation: String? = nil,
 	) async throws -> (model: ReaderAppModel, collection: ReaderNavigationItem) {
 		let session = try makeSession(token: "warm-feed-token")
 		let store = OfflineLibraryStore.inMemory()
@@ -2056,6 +2075,11 @@ struct ReaderAppModelTests {
 		)
 		try await store.saveArticles(
 			[makeArticle(id: "cached-feed-article", feedKey: "daily", html: cachedHTML)],
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
+		try await store.saveCollectionContinuation(
+			continuation,
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
@@ -2432,6 +2456,10 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
 	}
 
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws {
+		try await base.saveCollectionContinuation(continuation, collectionID: collectionID, accountID: accountID)
+	}
+
 	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws {
 		try await base.saveRestoration(restoration, accountID: accountID)
 	}
@@ -2590,11 +2618,13 @@ private actor PaginationHTTPClient: HTTPClient {
 	}
 
 	private let repeatsContinuation: Bool
+	private let streamID: String
 	private var capturedRequests: [RequestSnapshot] = []
 	private var shouldFailNextItemIDRequest = false
 
-	init(repeatsContinuation: Bool = false) {
+	init(repeatsContinuation: Bool = false, streamID: String = "user/-/label/News") {
 		self.repeatsContinuation = repeatsContinuation
+		self.streamID = streamID
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -2614,7 +2644,7 @@ private actor PaginationHTTPClient: HTTPClient {
 		let data: Data
 		switch url.path {
 		case "/reader/api/0/stream/items/ids":
-			guard query["s"] == "user/-/label/News" else {
+			guard query["s"] == streamID else {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 				return (data, try Self.response(for: url, statusCode: 200))
 			}
@@ -2628,7 +2658,10 @@ private actor PaginationHTTPClient: HTTPClient {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 			}
 		case "/reader/api/0/stream/items/contents":
-			data = Self.contentsResponse(for: Self.formValues(from: request.httpBody, named: "i"))
+			data = Self.contentsResponse(
+				for: Self.formValues(from: request.httpBody, named: "i"),
+				streamID: streamID,
+			)
 		default:
 			data = Data(#"{"error":"not found"}"#.utf8)
 		}
@@ -2645,7 +2678,7 @@ private actor PaginationHTTPClient: HTTPClient {
 		shouldFailNextItemIDRequest = true
 	}
 
-	private static func contentsResponse(for ids: [String]) -> Data {
+	private static func contentsResponse(for ids: [String], streamID: String) -> Data {
 		let items = ids.map { id in
 			let published: Int
 			switch id {
@@ -2653,9 +2686,9 @@ private actor PaginationHTTPClient: HTTPClient {
 			case "middle": published = 1_786_272_002
 			default: published = 1_786_272_001
 			}
-			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
 		}.joined(separator: ",")
-		return Data("{\"id\":\"user/-/label/News\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		return Data("{\"id\":\"\(streamID)\",\"updated\":0,\"items\":[\(items)]}".utf8)
 	}
 
 	private static func formValues(from body: Data?, named name: String) -> [String] {

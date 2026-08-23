@@ -73,6 +73,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		) { statement in
 			(string(at: 0, statement: statement), date(at: 1, statement: statement))
 		}
+		var continuationsByCollection: [String: String] = [:]
+		try query(
+			"SELECT collection_id, continuation FROM cached_collection_pagination WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				let continuation = string(at: 1, statement: statement),
+				continuation.isEmpty == false else {
+				return
+			}
+			continuationsByCollection[collectionID] = continuation
+		}
 
 		var articlesByCollection: [String: [Recommendation]] = [:]
 		// A cached article can belong to many collections; decode its payload once,
@@ -80,7 +93,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		var decodedArticlesByID: [String: Recommendation] = [:]
 		try query(
 			"""
-			SELECT ca.collection_id, ca.article_id, a.payload
+			SELECT ca.collection_id, ca.article_id, a.body_pruned, a.payload
 			FROM cached_collection_articles ca
 			JOIN cached_articles a
 			  ON a.account_id = ca.account_id AND a.id = ca.article_id
@@ -92,7 +105,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		) { statement in
 			guard let collectionID = string(at: 0, statement: statement),
 				let articleID = string(at: 1, statement: statement),
-				let payload = data(at: 2, statement: statement) else {
+				let payload = data(at: 3, statement: statement) else {
 				return
 			}
 			let article: Recommendation
@@ -102,8 +115,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				guard let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
 					return
 				}
-				decodedArticlesByID[articleID] = decodedArticle
-				article = decodedArticle
+				let resolvedArticle = sqlite3_column_int64(statement, 2) != 0
+					? replacingHTML(in: decodedArticle, with: "")
+					: decodedArticle
+				decodedArticlesByID[articleID] = resolvedArticle
+				article = resolvedArticle
 				#if DEBUG
 				snapshotArticleDecodeCount += 1
 				#endif
@@ -121,6 +137,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			navigation: derivedNavigation,
 			subscriptions: subscriptions,
 			articlesByCollection: articlesByCollection,
+			continuationsByCollection: continuationsByCollection,
 			restoration: restoration,
 			cursor: syncState?.0,
 			lastSyncAt: syncState?.1,
@@ -184,6 +201,29 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					collectionID: collectionID,
 					articleID: article.id,
 					position: position,
+					database: database,
+				)
+			}
+		}
+	}
+
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) throws {
+		let database = try openDatabase()
+		try transaction(database) {
+			if let continuation, continuation.isEmpty == false {
+				try execute(
+					"""
+					INSERT INTO cached_collection_pagination (account_id, collection_id, continuation)
+					VALUES (?, ?, ?)
+					ON CONFLICT(account_id, collection_id) DO UPDATE SET continuation = excluded.continuation
+					""",
+					bindings: [.text(accountID), .text(collectionID), .text(continuation)],
+					database: database,
+				)
+			} else {
+				try execute(
+					"DELETE FROM cached_collection_pagination WHERE account_id = ? AND collection_id = ?",
+					bindings: [.text(accountID), .text(collectionID)],
 					database: database,
 				)
 			}
@@ -360,6 +400,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		try transaction(database) {
 			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_collection_pagination WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 		}
 	}
 
@@ -588,7 +629,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		return ids
 	}
 
-	private func sanitized(_ article: Recommendation) -> Recommendation {
+	private func replacingHTML(in article: Recommendation, with html: String) -> Recommendation {
 		Recommendation(
 			id: article.id,
 			readerId: article.readerId,
@@ -596,7 +637,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			source: article.source,
 			author: article.author,
 			title: article.title,
-			html: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
+			html: html,
 			text: article.text,
 			originalURL: article.originalURL,
 			receivedAt: article.receivedAt,
@@ -607,6 +648,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			sampleCount: article.sampleCount,
 			explanation: article.explanation,
 			learningState: article.learningState,
+		)
+	}
+
+	private func sanitized(_ article: Recommendation) -> Recommendation {
+		replacingHTML(
+			in: article,
+			with: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
 		)
 	}
 
@@ -826,6 +874,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			"CREATE INDEX IF NOT EXISTS idx_cached_articles_feed ON cached_articles(account_id, feed_key, received_at DESC)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_articles (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, article_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (account_id, collection_id, article_id))",
 			"CREATE INDEX IF NOT EXISTS idx_cached_collection_order ON cached_collection_articles(account_id, collection_id, position)",
+			"CREATE TABLE IF NOT EXISTS cached_collection_pagination (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, continuation TEXT NOT NULL, PRIMARY KEY (account_id, collection_id))",
 			"CREATE TABLE IF NOT EXISTS sync_state (account_id TEXT PRIMARY KEY, cursor TEXT, last_sync_at REAL)",
 			"CREATE TABLE IF NOT EXISTS pending_actions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at REAL NOT NULL, UNIQUE (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_pending_actions_account ON pending_actions(account_id, sequence)",
