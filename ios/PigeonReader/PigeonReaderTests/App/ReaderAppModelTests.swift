@@ -1892,6 +1892,110 @@ struct ReaderAppModelTests {
 		#expect(pending.isEmpty)
 	}
 
+	@Test func movingTheOpenFeedKeepsStoriesAndAvoidsAGhostCollection() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let feed = try #require(model.uncategorizedFeedNavigationItems.first)
+		model.select(item: feed)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.selectedCollection.id == moved.id)
+		#expect(model.navigation.item(withID: model.selectedCollection.id) != nil)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect(model.uncategorizedFeedNavigationItems.isEmpty)
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[feed.id] ?? []).isEmpty)
+		#expect(snapshot.navigation?.item(withID: moved.id) != nil)
+	}
+
+	@Test func movingAFeedFromAnotherListRemapsItsCacheToTheNewSidebarRow() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		let feed = try #require(model.feedNavigationItems(in: design).first)
+		model.select(section: .forYou)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[feed.id] ?? []).isEmpty)
+	}
+
+	@Test func movingTheLastFeedOutOfTheOpenFolderLeavesASmartView() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		let feed = try #require(model.feedNavigationItems(in: design).first)
+		model.select(item: design)
+		model.setArticles([article], for: design)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.folderNavigationItems.contains(where: { $0.title == "Design" }) == false)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.navigation.item(withID: model.selectedCollection.id) != nil)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect((model.allArticles(for: design)).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[design.id] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedOutOfALoadedFolderDropsThoseStories() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let daily = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let stay = makeSubscription(id: "feed/2", key: "stay", title: "Stay", folder: "Design")
+		let dailyArticle = makeArticle(id: "daily-1", feedKey: "feed/1")
+		let stayArticle = makeArticle(id: "stay-1", feedKey: "feed/2")
+		installFeedLibrary(model, subscriptions: [daily, stay])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		model.select(item: design)
+		model.setArticles([dailyArticle, stayArticle], for: design)
+
+		let succeeded = await model.moveFeed(daily, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.selectedCollection.id == design.id)
+		#expect(model.allArticles(for: design).map(\.id) == ["stay-1"])
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		#expect(model.feedNavigationItems(in: reading).map(\.title) == ["Daily"])
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[design.id]?.map(\.id) == ["stay-1"])
+	}
+
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -2247,6 +2351,36 @@ struct ReaderAppModelTests {
 			feedKey: nil,
 			iconURL: nil,
 			smartSection: nil,
+		)
+	}
+
+	private func installFeedLibrary(
+		_ model: ReaderAppModel,
+		subscriptions: [FeedSubscription],
+		unreadCount: Int = 1,
+	) {
+		model.setSubscriptions(subscriptions)
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: subscriptions.map { subscription in
+					ReaderSubscription(
+						id: subscription.id,
+						title: subscription.title,
+						categories: subscription.categories.map {
+							ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+						},
+						url: subscription.url.absoluteString,
+					)
+				},
+				unreadCounts: subscriptions.map { ReaderUnreadCount(id: $0.id, count: unreadCount) },
+				smartCounts: ReaderNavigationSmartCounts(
+					forYou: unreadCount,
+					today: unreadCount,
+					unread: unreadCount,
+					starred: 0,
+				),
+			),
+			markAsLoaded: true,
 		)
 	}
 
