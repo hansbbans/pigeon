@@ -45,6 +45,42 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 	}
 }
 
+nonisolated enum ArticleReaderReadingAdjustment: Int, CaseIterable, Identifiable, Sendable {
+	case largerText
+	case smallerText
+	case looserLines
+	case tighterLines
+
+	var id: Int { rawValue }
+
+	var title: String {
+		switch self {
+		case .largerText: "Larger text"
+		case .smallerText: "Smaller text"
+		case .looserLines: "Looser lines"
+		case .tighterLines: "Tighter lines"
+		}
+	}
+
+	var systemImage: String {
+		switch self {
+		case .largerText: "textformat.size.larger"
+		case .smallerText: "textformat.size.smaller"
+		case .looserLines: "arrow.down.to.line"
+		case .tighterLines: "arrow.up.to.line"
+		}
+	}
+
+	func isEnabled(textScale: Double, lineHeight: Double) -> Bool {
+		switch self {
+		case .largerText: textScale < ReaderTypographySettings.textScaleRange.upperBound
+		case .smallerText: textScale > ReaderTypographySettings.textScaleRange.lowerBound
+		case .looserLines: lineHeight < ReaderTypographySettings.lineHeightRange.upperBound
+		case .tighterLines: lineHeight > ReaderTypographySettings.lineHeightRange.lowerBound
+		}
+	}
+}
+
 nonisolated struct ArticleReaderControlsSaveTaskID: Equatable, Sendable {
 	let articleID: String
 	let requestID: UUID?
@@ -204,14 +240,17 @@ struct ArticleReaderControlsBar: View {
 	private var readingControlsButton: some View {
 		controlSlot {
 			Menu(ArticleReaderControl.readingControls.title, systemImage: ArticleReaderControl.readingControls.systemImage) {
-				Button("Looser lines", systemImage: "arrow.down.to.line") {
-					model.readerTypography.increaseLineHeight()
+				ForEach(ArticleReaderReadingAdjustment.allCases) { adjustment in
+					Button(adjustment.title, systemImage: adjustment.systemImage) {
+						applyReadingAdjustment(adjustment)
+					}
+					.disabled(
+						adjustment.isEnabled(
+							textScale: model.readerTypography.textScale,
+							lineHeight: model.readerTypography.lineHeight,
+						) == false
+					)
 				}
-				.disabled(model.readerTypography.lineHeight >= ReaderTypographySettings.lineHeightRange.upperBound)
-				Button("Tighter lines", systemImage: "arrow.up.to.line") {
-					model.readerTypography.decreaseLineHeight()
-				}
-				.disabled(model.readerTypography.lineHeight <= ReaderTypographySettings.lineHeightRange.lowerBound)
 				Picker("Theme", selection: Binding(
 					get: { model.readerTypography.theme },
 					set: { model.readerTypography.theme = $0 },
@@ -242,6 +281,15 @@ struct ArticleReaderControlsBar: View {
 	private func controlSlot<Content: View>(@ViewBuilder content: () -> Content) -> some View {
 		content()
 			.frame(maxWidth: .infinity, minHeight: 44)
+	}
+
+	private func applyReadingAdjustment(_ adjustment: ArticleReaderReadingAdjustment) {
+		switch adjustment {
+		case .largerText: model.readerTypography.increaseTextScale()
+		case .smallerText: model.readerTypography.decreaseTextScale()
+		case .looserLines: model.readerTypography.increaseLineHeight()
+		case .tighterLines: model.readerTypography.decreaseLineHeight()
+		}
 	}
 
 	private func shareToReadwise() {
