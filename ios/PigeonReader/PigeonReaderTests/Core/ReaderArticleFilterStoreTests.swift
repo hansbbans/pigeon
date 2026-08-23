@@ -13,6 +13,10 @@ struct ReaderArticleFilterStoreTests {
 
 		#expect(store.filter(for: "feed/one", session: session) == .unread)
 		#expect(store.filter(for: "forYou", session: session) == .unread)
+		#expect(store.filter(for: ReaderSection.starred.rawValue, session: session) == .all)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: ReaderSection.starred.rawValue) == .all)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: ReaderSection.forYou.rawValue) == .unread)
+		#expect(ReaderArticleFilterStore.defaultFilter(for: "feed/one") == .unread)
 		store.setFilter(.unread, for: "feed/one", session: session)
 		store.setFilter(.all, for: "feed/two", session: session)
 		store.setFilter(.read, for: "user/-/label/Work", session: session)
