@@ -255,6 +255,26 @@ struct PigeonAPIClientTests {
 		}
 	}
 
+	@Test func unreadStreamRecommendationsExcludeReadItems() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"itemRefs":[]}"#.utf8))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		_ = try await client.recommendationsPage(
+			from: "user/-/state/com.google/reading-list",
+			excludeTag: "user/-/state/com.google/read",
+		)
+
+		let request = try #require(await mock.lastRequest())
+		let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(request.url.path == "/reader/api/0/stream/items/ids")
+		#expect(query.first(where: { $0.name == "s" })?.value == "user/-/state/com.google/reading-list")
+		#expect(query.first(where: { $0.name == "xt" })?.value == "user/-/state/com.google/read")
+	}
+
 	@Test func folderRecommendationsReturnOneBoundedPageAndExposeContinuation() async throws {
 		let mock = FolderLoadingHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))

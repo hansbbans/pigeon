@@ -46,6 +46,10 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 	}
 
 	var usesRecommendationEndpoint: Bool {
-		self != .today
+		self == .forYou
+	}
+
+	var streamExcludeTag: String? {
+		self == .unread ? "user/-/state/com.google/read" : nil
 	}
 }

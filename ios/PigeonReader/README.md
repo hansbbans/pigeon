@@ -6,7 +6,7 @@ The sidebar includes For You, Unread, Starred, synchronized folders, and individ
 
 Story rows support native leading/trailing swipes for read and star state, with the same actions in their context menus. In the reader, a leading-edge swipe to the right returns to the feed list on iPhone. A fresh upward swipe that starts at the bottom opens the next article in the selected collection, and a fresh downward swipe that starts at the top opens the previous article. Navigation stops at the collection's ends, and ordinary scrolling does not navigate when it merely reaches a boundary. Website mode keeps normal page scrolling. Selecting a section or feed never opens its first story automatically. On iPad, an external keyboard can move to the next or previous visible article; J and K are the defaults, and both shortcuts are configurable in Settings.
 
-Large folders, feeds, and Today show a bounded first page, then offer Load More for older articles instead of downloading the whole collection at once. Search stays scoped to saved articles, and server-side errors are surfaced as errors rather than treated as connectivity failures.
+Large folders, feeds, Today, and Starred show a bounded first page, then offer Load More for older articles instead of downloading the whole collection at once. For You stays a single recommendation page. Search stays scoped to saved articles, and server-side errors are surfaced as errors rather than treated as connectivity failures.
 
 Story titles and article text use the bundled Bookerly reading faces with Dynamic Type scaling. Navigation, controls, source names, dates, and other interface metadata continue to use Apple's system font for native clarity.
 
