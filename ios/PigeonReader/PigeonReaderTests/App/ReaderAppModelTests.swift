@@ -513,6 +513,127 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .content)
 	}
 
+	@Test func markingUnreadInsertsIntoLoadedUnreadCacheInNewestOrder() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let older = makeArticle(id: "already-unread", receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", isRead: true, receivedAt: 1_786_272_100)
+		model.setArticles([older], for: .unread)
+		model.setArticles([article], for: .today)
+
+		await model.setRead(article, read: false)
+
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		#expect(model.articles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+	}
+
+	@Test func markingUnreadOnEmptyLoadedUnreadShowsTheStory() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "from-feed", isRead: true)
+		model.setArticles([], for: .unread)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+
+		await model.setRead(article, read: false)
+		model.select(section: .unread)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed"])
+		#expect(model.articles(for: .unread).map(\.id) == ["from-feed"])
+	}
+
+	@Test func markingUnreadDoesNotCreateUnreadCacheBeforeThatCollectionLoads() async throws {
+		let serverUnread = makeArticle(id: "from-server")
+		let mock = MockHTTPClient(responseData: try responseData(items: [serverUnread]))
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-feed", isRead: true)
+		model.setArticles([article], for: .today)
+
+		await model.setRead(article, read: false)
+		await model.load(section: .unread)
+
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-server"])
+	}
+
+	@Test func markingUnreadFromAnotherListKeepsThatListSelected() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "shared", isRead: true)
+		model.setArticles([], for: .unread)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.setRead(article, read: false)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["shared"])
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func markingReadKeepsTheUnreadCacheRowForTheAllFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "shared")
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+
+		await model.setRead(article, read: true)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["shared"])
+		#expect(model.allArticles(for: .unread).first?.isRead == true)
+		#expect(model.articles(for: .unread).isEmpty)
+		model.setArticleFilter(.all, for: .unread)
+		#expect(model.articles(for: .unread).map(\.id) == ["shared"])
+	}
+
+	@Test func undoingMarkAllOnTodayInsertsMissingStoriesIntoLoadedUnread() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let alreadyUnread = makeArticle(id: "already-unread", receivedAt: 1_786_272_000)
+		let fromToday = makeArticle(id: "from-today", receivedAt: 1_786_272_100)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [
+			ReaderNavigationItem.smart(.unread, unreadCount: 1),
+			today,
+		]))
+		model.setArticles([alreadyUnread], for: .unread)
+		model.setArticles([fromToday], for: today)
+		model.select(item: today)
+
+		await model.markAllStoriesAsRead(in: today)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["already-unread"])
+		#expect(model.allArticles(for: .unread).first?.isRead == false)
+		#expect(model.allArticles(for: today).first?.isRead == true)
+
+		await model.undoLastBulkRead()
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-today", "already-unread"])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		#expect(model.allArticles(for: today).first?.isRead == false)
+	}
+
+	@Test func failedMarkUnreadKeepsUnreadMembershipQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let existing = makeArticle(id: "already-unread", receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", isRead: true, receivedAt: 1_786_272_100)
+		model.setArticles([existing], for: .unread)
+		model.setArticles([article], for: .today)
+
+		let mutation = Task { await model.setRead(article, read: false) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline == false)
+	}
+
 	@Test func offlineReadStaysOptimisticAndQueuedWhenRequestFails() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
