@@ -68,7 +68,11 @@ struct ArticleBodyView: View {
 
 		renderedContent(textScale: renderedTextScale)
 		.sheet(item: $imageSelection) { selection in
-			ZoomableImageView(url: selection.url)
+			ZoomableImageView(
+				url: selection.url,
+				remoteImagePolicy: remoteImagePolicy,
+				imageProxySession: imageProxySession,
+			)
 		}
 		.confirmationDialog(
 			"Open article link",

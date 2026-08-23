@@ -182,6 +182,8 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("Load this remote image"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
 		#expect(shell.contains("pigeon-image://proxy?url="))
+		#expect(shell.contains("image.dataset.pigeonOriginalSrc"))
+		#expect(shell.contains("image.dataset.pigeonOriginalSrc || image.currentSrc || image.src"))
 	}
 }
 
