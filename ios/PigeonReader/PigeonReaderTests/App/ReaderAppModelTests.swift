@@ -804,6 +804,23 @@ struct ReaderAppModelTests {
 		#expect(pageRequests.map { $0.query["c"] } == ["page-2"])
 	}
 
+	@Test func cachedFeedWithoutPersistedContinuationResolvesPaginationOnceAfterUpgrade() async throws {
+		let client = PaginationHTTPClient(streamID: "feed/7")
+		let fixture = try await makeWarmFeedModel(httpClient: client)
+
+		await fixture.model.load(collection: fixture.collection)
+
+		#expect(fixture.model.canLoadMore(collection: fixture.collection))
+		let requests = await client.requests()
+		#expect(requests.map(\.path) == [
+			"/api/v1/sync",
+			"/reader/api/0/stream/items/ids",
+			"/reader/api/0/stream/items/contents",
+		])
+		let pageRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(pageRequests.map { $0.query["c"] } == [nil])
+	}
+
 	@Test func deletingTheLastFeedDuringSyncClearsItsNavigationAndSelection() async throws {
 		let deletion = Data(
 			#"{"cursor":"warm-cursor-2","hasMore":false,"changes":[{"sequence":2,"entityType":"feed","entityId":"daily","operation":"delete","changedAt":"2026-08-21T12:00:00.000Z","payload":null}]}"#.utf8
@@ -2144,6 +2161,11 @@ struct ReaderAppModelTests {
 			accountID: session.storageIdentity,
 		)
 		try await store.saveArticles(articles, collectionID: collection.id, accountID: session.storageIdentity)
+		try await store.saveCollectionContinuation(
+			"page-2",
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
 		try await store.apply(
 			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
 			accountID: session.storageIdentity,

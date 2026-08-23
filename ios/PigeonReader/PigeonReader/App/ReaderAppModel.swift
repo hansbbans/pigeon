@@ -1125,9 +1125,9 @@ final class ReaderAppModel {
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				articleCache[collection.id] == nil
-				|| collection.smartSection?.usesRecommendationEndpoint == true
-				|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
-				|| collection.kind != .feed && shouldResolveCachedPagination(for: collection) {
+					|| collection.smartSection?.usesRecommendationEndpoint == true
+					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
+					|| shouldResolveCachedPagination(for: collection) {
 				await load(collection: collection, force: true)
 			}
 			return
