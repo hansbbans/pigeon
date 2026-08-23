@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.3.0] - 2026-08-23
+
+### Fixed
+
+- Reader mode now follows a feed across For You `feed_key` and stream `feed/{rowid}` identities, so choosing Reader View or Website in one list applies in the other.
+
 ## [0.1.2.0] - 2026-08-20
 
 ### Fixed

@@ -2186,9 +2186,71 @@ struct ReaderAppModelTests {
 		return (model, client, store, collection)
 	}
 
+	@Test func readerModeFollowsAFeedAcrossForYouAndStreamKeys() throws {
+		let suiteName = "pigeon-reader-mode-model-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "alpha") == .feedContent)
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setReaderMode(.readerView, for: "alpha")
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+		#expect(store.mode(for: "feed/7", session: try #require(model.session)) == .readerView)
+
+		model.setReaderMode(.website, for: "feed/7")
+		#expect(model.readerMode(for: "alpha") == .website)
+		#expect(store.mode(for: "alpha", session: try #require(model.session)) == .website)
+	}
+
+	@Test func readerModeFindsALegacyKeyAfterNavigationLoads() throws {
+		let suiteName = "pigeon-reader-mode-legacy-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		store.setMode(.website, for: "alpha")
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "feed/7") == .website)
+		#expect(model.readerMode(for: "alpha") == .website)
+	}
+
+	@Test func urlLessArticleDoesNotRewriteStoredFeedReaderMode() throws {
+		let suiteName = "pigeon-reader-mode-urlless-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: ReaderModeStore(defaults: defaults),
+		)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+		let withURL = makeArticle(
+			id: "with-url",
+			feedKey: "alpha",
+			originalURL: URL(string: "https://example.com/story"),
+		)
+		let withoutURL = makeArticle(id: "no-url", feedKey: "feed/7")
+
+		model.setReaderMode(.readerView, for: withURL)
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+
+		model.setReaderMode(.feedContent, for: withoutURL)
+
+		#expect(model.readerMode(for: "alpha") == .readerView)
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		readerModeStore: ReaderModeStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
@@ -2200,6 +2262,7 @@ struct ReaderAppModelTests {
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
+			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
@@ -2267,6 +2330,7 @@ struct ReaderAppModelTests {
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
 		html: String = "<p>Body</p>",
+		originalURL: URL? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
@@ -2276,7 +2340,7 @@ struct ReaderAppModelTests {
 			title: "Story \(id)",
 			html: html,
 			text: "Body",
-			originalURL: nil,
+			originalURL: originalURL,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
 			isStarred: false,

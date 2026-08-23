@@ -648,18 +648,41 @@ final class ReaderAppModel {
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
-		if let rawValue = restoredReaderModes[feedID], let mode = ReaderMode(rawValue: rawValue) {
-			return mode
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			if let rawValue = restoredReaderModes[alias], let mode = ReaderMode(rawValue: rawValue) {
+				return mode
+			}
 		}
-		guard let session else { return .feedContent }
-		return readerModeStore.mode(for: feedID, session: session)
+		if let session, let stored = readerModeStore.storedMode(for: aliases, session: session) {
+			return stored
+		}
+		return readerModeStore.storedMode(for: aliases) ?? .feedContent
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
 		guard let session else { return }
-		restoredReaderModes[feedID] = mode.rawValue
-		readerModeStore.setMode(mode, for: feedID, session: session)
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			restoredReaderModes[alias] = mode.rawValue
+		}
+		readerModeStore.setMode(mode, for: aliases, session: session)
 		scheduleRestorationSave()
+	}
+
+	func setReaderMode(_ mode: ReaderMode, for article: Recommendation) {
+		guard ReaderMode.shouldPersistSelection(hasOriginalURL: article.safeOriginalURL != nil) else {
+			return
+		}
+		setReaderMode(mode, for: article.feedKey)
+	}
+
+	private func readerModeAliases(for feedID: String) -> [String] {
+		ReaderModeIdentity.aliases(
+			for: feedID,
+			navigationItems: navigation.items,
+			subscriptions: subscriptions,
+		)
 	}
 
 	func articleScrollOffset(for articleID: String) -> Double {
