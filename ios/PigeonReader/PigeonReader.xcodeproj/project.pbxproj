@@ -19,6 +19,7 @@
 		1D54B12AA9F2BEF481C30033 /* ReaderKeyboardShortcutSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B8E6FAC0CA31C76DF1825CB /* ReaderKeyboardShortcutSettingsTests.swift */; };
 		1DF3FA1CA8B519ED9337EDA3 /* OfflineLibraryStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACEFB21C4DCD6BF99CCC01E9 /* OfflineLibraryStoreTests.swift */; };
 		1E37A2C8587C4C305156AAF0 /* FeedNotificationSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C92607B83A6A539E1AA11A5 /* FeedNotificationSettingsView.swift */; };
+		F33D1011F1CA710A1DE002 /* FeedNotificationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F33D1011F1CA710A1DE001 /* FeedNotificationIdentity.swift */; };
 		1E450C4CBE15BE7BB6083AF1 /* ArticleImageSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71B0901D92E983F119A40A9 /* ArticleImageSizingTests.swift */; };
 		1F091CD46B90972CB0F57573 /* OfflineLibraryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C99F9370B4660963E3A83C81 /* OfflineLibraryStore.swift */; };
 		20CD29EA2B2DE889FC0CB761 /* ArticleReaderHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83D17579F2A09B1B677AF8A7 /* ArticleReaderHeaderView.swift */; };
@@ -251,6 +252,7 @@
 		4BA0D8B5B9860DFDCA965A2D /* ReadwiseAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadwiseAPIClient.swift; sourceTree = "<group>"; };
 		4C7F070C38C5B9D34516AB78 /* StaleFeedModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleFeedModels.swift; sourceTree = "<group>"; };
 		4C92607B83A6A539E1AA11A5 /* FeedNotificationSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedNotificationSettingsView.swift; sourceTree = "<group>"; };
+		F33D1011F1CA710A1DE001 /* FeedNotificationIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedNotificationIdentity.swift; sourceTree = "<group>"; };
 		4C9F5D4D9D0CFCFBD490DD97 /* ReaderNavigationCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationCatalog.swift; sourceTree = "<group>"; };
 		4EE947B8C2DB35FE5F2975EF /* SyncHealthViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncHealthViewModelTests.swift; sourceTree = "<group>"; };
 		50776F9A0BF0E32F7C872EA4 /* ReaderFolderNavigationRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderFolderNavigationRowView.swift; sourceTree = "<group>"; };
@@ -540,6 +542,7 @@
 				18A38EB490D4ED8F7EB874C7 /* ArticleSortOrder.swift */,
 				C6E8701A33181654F7155130 /* EngagementAggregator.swift */,
 				F9A9E0E3EEAE679D0961DD0C /* EngagementEvent.swift */,
+				F33D1011F1CA710A1DE001 /* FeedNotificationIdentity.swift */,
 				A6AF83C61C126F9ADA0362D9 /* FeedSubscription.swift */,
 				439F1FE9FC96A2F8A8EE3FDA /* HTTPClient.swift */,
 				13657DEEA734C9BF9107150C /* KeychainReadwiseTokenStore.swift */,
@@ -906,6 +909,7 @@
 				3A6D0407F85F5D87E3993F34 /* EngagementAggregator.swift in Sources */,
 				DC4142B090655A77A3D36AF8 /* EngagementEvent.swift in Sources */,
 				1E37A2C8587C4C305156AAF0 /* FeedNotificationSettingsView.swift in Sources */,
+				F33D1011F1CA710A1DE002 /* FeedNotificationIdentity.swift in Sources */,
 				C277B98E3A1033AD02CC4276 /* FeedSubscription.swift in Sources */,
 				9BCDE9A7FA6F0DC7D5F965B7 /* HTTPClient.swift in Sources */,
 				67BDC3F35AEECD3F30F2B451 /* KeychainReadwiseTokenStore.swift in Sources */,

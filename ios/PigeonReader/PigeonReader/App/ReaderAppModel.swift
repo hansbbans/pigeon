@@ -532,8 +532,9 @@ final class ReaderAppModel {
 			knownIDs: knownIDs,
 			current: articleCache.values.flatMap { $0 },
 		)
+		ReaderNotificationManager.shared.expandEnabledAliases(using: subscriptions)
 		for article in newlyArrived.prefix(20) {
-			await ReaderNotificationManager.shared.postNewArticle(article)
+			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: subscriptions)
 		}
 		lastBackgroundRefreshAt = .now
 		writeWidgetSnapshot()

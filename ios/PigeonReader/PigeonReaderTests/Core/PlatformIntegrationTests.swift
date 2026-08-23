@@ -26,6 +26,65 @@ struct PlatformIntegrationTests {
 		#expect(delta.map(\.id) == ["new"])
 	}
 
+	@Test func feedNotificationsMatchStreamAndRecommendationFeedKeysFromLegacySlugPrefs() throws {
+		let subscription = try Self.subscription(id: "feed/7", path: "daily")
+		let enabledIDs: Set<String> = ["daily"]
+		#expect(FeedNotificationIdentity.isEnabled(subscription: subscription, enabledIDs: enabledIDs))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream-new", receivedAt: 3, feedKey: "feed/7"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "foryou-new", receivedAt: 4, feedKey: "daily"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "other", receivedAt: 5, feedKey: "feed/8"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		) == false)
+	}
+
+	@Test func feedNotificationsMatchWhenSettingsStoreStreamIDs() throws {
+		let subscription = try Self.subscription(id: "feed/7", path: "daily")
+		let enabledIDs = FeedNotificationIdentity.updatedIDs([], enabling: true, subscription: subscription)
+		#expect(enabledIDs == ["daily", "feed/7"])
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream-new", receivedAt: 3, feedKey: "feed/7"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "foryou-new", receivedAt: 4, feedKey: "daily"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.updatedIDs(enabledIDs, enabling: false, subscription: subscription).isEmpty)
+	}
+
+	@Test func feedNotificationsStillMatchAnExactStoredFeedKeyWithoutSubscriptions() {
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "exact", receivedAt: 1, feedKey: "daily"),
+			enabledIDs: ["daily"],
+			subscriptions: [],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream", receivedAt: 1, feedKey: "feed/7"),
+			enabledIDs: ["daily"],
+			subscriptions: [],
+		) == false)
+	}
+
+	@Test func feedNotificationsExpandLegacySlugPrefsToStreamAliases() throws {
+		let daily = try Self.subscription(id: "feed/7", path: "daily")
+		let other = try Self.subscription(id: "feed/8", path: "weekly")
+		let expanded = FeedNotificationIdentity.expandedIDs(["daily"], subscriptions: [daily, other])
+		#expect(expanded == ["daily", "feed/7"])
+		#expect(expanded.contains("feed/8") == false)
+	}
+
 	@Test func notificationActionsPersistAcrossATerminatedLaunch() throws {
 		let action = ReaderNotificationAction.markRead(articleID: "article-7")
 		let restored = try JSONDecoder().decode(
@@ -156,12 +215,23 @@ struct PlatformIntegrationTests {
 		#expect(body.feedKeys == ["quiet"])
 	}
 
-	private static func article(id: String, receivedAt: TimeInterval) -> Recommendation {
+	private static func article(id: String, receivedAt: TimeInterval, feedKey: String = "feed") -> Recommendation {
 		Recommendation(
-			id: id, readerId: "reader-\(id)", feedKey: "feed", source: "Feed", title: id,
+			id: id, readerId: "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
 			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
 			isRead: false, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
 			explanation: "Test", learningState: "Test",
+		)
+	}
+
+	private static func subscription(id: String, path: String) throws -> FeedSubscription {
+		FeedSubscription(
+			id: id,
+			title: path.capitalized,
+			categories: [],
+			url: try #require(URL(string: "https://pigeon.test/feed/\(path)")),
+			htmlUrl: URL(string: "https://example.com"),
+			iconUrl: nil,
 		)
 	}
 }

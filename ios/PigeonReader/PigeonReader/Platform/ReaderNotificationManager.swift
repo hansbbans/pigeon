@@ -39,16 +39,38 @@ final class ReaderNotificationManager: NSObject, UNUserNotificationCenterDelegat
 		enabledFeedIDs.contains(feedID)
 	}
 
+	func isEnabled(subscription: FeedSubscription) -> Bool {
+		FeedNotificationIdentity.isEnabled(subscription: subscription, enabledIDs: enabledFeedIDs)
+	}
+
 	func setEnabled(_ enabled: Bool, feedID: String) async -> Bool {
 		if enabled, await requestAuthorization() == false { return false }
 		var values = enabledFeedIDs
 		if enabled { values.insert(feedID) } else { values.remove(feedID) }
-		PigeonSharedData.defaults.set(Array(values).sorted(), forKey: Self.enabledFeedsKey)
+		persistEnabledFeedIDs(values)
 		return true
 	}
 
-	func postNewArticle(_ article: Recommendation) async {
-		guard isEnabled(feedID: article.feedKey) else { return }
+	func setEnabled(_ enabled: Bool, subscription: FeedSubscription) async -> Bool {
+		if enabled, await requestAuthorization() == false { return false }
+		persistEnabledFeedIDs(
+			FeedNotificationIdentity.updatedIDs(enabledFeedIDs, enabling: enabled, subscription: subscription)
+		)
+		return true
+	}
+
+	func expandEnabledAliases(using subscriptions: [FeedSubscription]) {
+		let expanded = FeedNotificationIdentity.expandedIDs(enabledFeedIDs, subscriptions: subscriptions)
+		guard expanded != enabledFeedIDs else { return }
+		persistEnabledFeedIDs(expanded)
+	}
+
+	func postNewArticle(_ article: Recommendation, subscriptions: [FeedSubscription]) async {
+		guard FeedNotificationIdentity.shouldNotify(
+			article: article,
+			enabledIDs: enabledFeedIDs,
+			subscriptions: subscriptions,
+		) else { return }
 		let content = UNMutableNotificationContent()
 		content.title = article.source
 		content.body = article.title
@@ -69,6 +91,10 @@ final class ReaderNotificationManager: NSObject, UNUserNotificationCenterDelegat
 
 	private var enabledFeedIDs: Set<String> {
 		Set(PigeonSharedData.defaults.stringArray(forKey: Self.enabledFeedsKey) ?? [])
+	}
+
+	private func persistEnabledFeedIDs(_ values: Set<String>) {
+		PigeonSharedData.defaults.set(Array(values).sorted(), forKey: Self.enabledFeedsKey)
 	}
 
 	nonisolated func userNotificationCenter(
