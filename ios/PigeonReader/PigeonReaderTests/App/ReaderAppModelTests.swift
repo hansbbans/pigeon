@@ -1892,6 +1892,146 @@ struct ReaderAppModelTests {
 		#expect(pending.isEmpty)
 	}
 
+	@Test func folderRenameRebuildsSidebarAndKeepsTheOpenFolder() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let article = makeArticle(id: "design-story")
+		model.select(item: folder)
+		model.setArticles([article], for: folder)
+		model.setArticleFilter(.all, for: folder)
+		model.toggleFolder(folder)
+
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let request = await controlled.nextRequest()
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations[0].kind == .moveFeed)
+		#expect(envelope.mutations[0].folders == ["Studio"])
+		#expect(model.subscriptions.first?.folderNames == ["Studio"])
+		#expect(model.folderNavigationItems.map(\.title) == ["Studio"])
+		#expect(model.folderNavigationItems.contains(where: { $0.title == "Design" }) == false)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(model.selectedNavigationID == renamed.id)
+		#expect(model.articles(for: renamed).map(\.id) == [article.id])
+		#expect(model.articleFilter(for: renamed) == .all)
+		#expect(model.isFolderExpanded(renamed))
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.folderNames == ["Studio"])
+		#expect(snapshot.navigation?.folderItems.map(\.title) == ["Studio"])
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await rename.value)
+		#expect(model.folderNavigationItems.map(\.title) == ["Studio"])
+		#expect(model.isOffline == false)
+	}
+
+	@Test func folderRenameRejectsADuplicateNameBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		installSubscriptions(
+			[
+				makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design"),
+				makeSubscription(id: "feed/2", key: "news", title: "News", folder: "Studio"),
+			],
+			on: model,
+		)
+
+		let succeeded = await model.renameFolder("Design", to: "studio")
+
+		#expect(succeeded == false)
+		#expect(model.errorMessage == "A folder with that name already exists.")
+		#expect(model.folderNavigationItems.map(\.title) == ["Design", "Studio"])
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
+	}
+
+	@Test func folderDeleteRemovesTheSidebarFolderAndKeepsFeedsSubscribed() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		model.select(section: .forYou)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations[0].kind == .moveFeed)
+		#expect(envelope.mutations[0].folders == [])
+		#expect(model.subscriptions.first?.folderNames == [])
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.uncategorizedFeedNavigationItems.map(\.title) == ["Daily"])
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.folderNames == [])
+		#expect(snapshot.navigation?.folderItems.isEmpty == true)
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.isOffline == false)
+	}
+
+	@Test func deletingTheOpenFolderOpensASmartViewInsteadOfAGhostFolder() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+		model.setArticles([makeArticle(id: "design-story")], for: folder)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.selectedCollection.title != "Design")
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+	}
+
+	@Test func deletingAFolderKeepsASelectedFeedVisibleAsUncategorized() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		let article = makeArticle(id: "daily-story")
+		model.select(item: feed)
+		model.setArticles([article], for: feed)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+
+		let uncategorized = try #require(model.uncategorizedFeedNavigationItems.first)
+		#expect(uncategorized.title == "Daily")
+		#expect(model.selectedNavigationID == uncategorized.id)
+		#expect(model.articles(for: uncategorized).map(\.id) == [article.id])
+		#expect(model.folderNavigationItems.isEmpty)
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+	}
+
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -2247,6 +2387,43 @@ struct ReaderAppModelTests {
 			feedKey: nil,
 			iconURL: nil,
 			smartSection: nil,
+		)
+	}
+
+	private func installSubscriptions(
+		_ subscriptions: [FeedSubscription],
+		on model: ReaderAppModel,
+		unreadCount: Int = 1,
+	) {
+		model.setSubscriptions(subscriptions)
+		var unreadCounts = subscriptions.map { ReaderUnreadCount(id: $0.id, count: unreadCount) }
+		var seenFolders = Set<String>()
+		for subscription in subscriptions {
+			for name in subscription.folderNames where seenFolders.insert(name).inserted {
+				unreadCounts.append(ReaderUnreadCount(id: "user/-/label/\(name)", count: unreadCount))
+			}
+		}
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: subscriptions.map { subscription in
+					ReaderSubscription(
+						id: subscription.id,
+						title: subscription.title,
+						categories: subscription.categories.map {
+							ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+						},
+						url: subscription.url.absoluteString,
+					)
+				},
+				unreadCounts: unreadCounts,
+				smartCounts: ReaderNavigationSmartCounts(
+					forYou: unreadCount,
+					today: unreadCount,
+					unread: unreadCount,
+					starred: 0,
+				),
+			),
+			markAsLoaded: true,
 		)
 	}
 

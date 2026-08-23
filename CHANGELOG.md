@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Sidebar folders can be renamed and deleted. The folder list updates immediately, and deleting the open folder no longer leaves a ghost collection.
+
 ## [0.1.2.0] - 2026-08-20
 
 ### Fixed
