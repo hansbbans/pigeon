@@ -1640,6 +1640,7 @@ struct ReaderAppModelTests {
 
 	@Test func loadingTodayDropsYesterdayRowsFromAStaleCache() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		await model.prepareOfflineLibrary()
 		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
 		model.setNavigation(ReaderNavigationState(items: [todayItem]))
 		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
