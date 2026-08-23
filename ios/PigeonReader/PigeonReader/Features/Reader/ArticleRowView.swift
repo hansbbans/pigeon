@@ -4,6 +4,7 @@ struct ArticleRowView: View {
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
+	@State private var didRequestBlockedThumbnail = false
 
 	init(
 		article: Recommendation,
@@ -27,6 +28,18 @@ struct ArticleRowView: View {
 		.opacity(article.isRead ? 0.55 : 1)
 		.accessibilityElement(children: .combine)
 		.accessibilityValue(article.isRead ? "Read" : "Unread")
+		.modifier(BlockedThumbnailLoadAction(isAvailable: thumbnailPresentation == .askToLoad) {
+			didRequestBlockedThumbnail = true
+		})
+	}
+
+	private var thumbnailPresentation: ArticleImagePolicy.ListThumbnail {
+		ArticleImagePolicy.listThumbnail(
+			policy: remoteImagePolicy,
+			html: article.html,
+			baseURL: article.safeOriginalURL,
+			didRequestBlockedLoad: didRequestBlockedThumbnail,
+		)
 	}
 
 	private var storyText: some View {
@@ -76,8 +89,8 @@ struct ArticleRowView: View {
 
 	@ViewBuilder
 	private var thumbnail: some View {
-		if remoteImagePolicy == .normal,
-			let url = StructuredHTMLSanitizer.imageURLs(in: article.html, baseURL: article.safeOriginalURL).first {
+		switch thumbnailPresentation {
+		case .remote(let url):
 			AsyncImage(url: url) { image in
 				image.resizable().scaledToFill()
 			} placeholder: {
@@ -86,7 +99,19 @@ struct ArticleRowView: View {
 			.frame(width: 72, height: 54)
 			.clipShape(.rect(cornerRadius: 8))
 			.accessibilityLabel("Article image")
-		} else {
+		case .askToLoad:
+			Button {
+				didRequestBlockedThumbnail = true
+			} label: {
+				imagePlaceholder
+					.frame(width: 72, height: 54)
+			}
+			.buttonStyle(.borderless)
+			.contentShape(Rectangle())
+			.accessibilityLabel("Load this remote image")
+			.accessibilityHint("Loads only this thumbnail. The publisher may see your network address.")
+			.accessibilityIdentifier("image-rich-ask-before-loading")
+		case .placeholder:
 			imagePlaceholder
 				.frame(width: 72, height: 54)
 		}
@@ -100,5 +125,18 @@ struct ArticleRowView: View {
 		}
 		.clipShape(.rect(cornerRadius: 8))
 		.accessibilityHidden(true)
+	}
+}
+
+private struct BlockedThumbnailLoadAction: ViewModifier {
+	let isAvailable: Bool
+	let load: () -> Void
+
+	func body(content: Content) -> some View {
+		if isAvailable {
+			content.accessibilityAction(named: "Load this remote image", load)
+		} else {
+			content
+		}
 	}
 }
