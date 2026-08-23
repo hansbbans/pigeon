@@ -81,15 +81,18 @@ struct ArticleReaderView: View {
 						}
 					}
 					.accessibilityIdentifier("article-reader-scroll-view")
+					.id(ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode))
 					.scrollPosition($scrollPosition)
 					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 					.onScrollGeometryChange(for: ArticleScrollGeometry.self) { geometry in
 						ArticleScrollGeometry(geometry)
 					} action: { _, geometry in
 						scrollBoundary = geometry.boundaryState
-						if let pendingRestoredDepth, geometry.maximumOffset > 1 {
-							scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
-							self.pendingRestoredDepth = nil
+						if let pendingRestoredDepth {
+							if geometry.maximumOffset > 1 {
+								scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+								self.pendingRestoredDepth = nil
+							}
 							return
 						}
 						let depth = min(max(geometry.offset / max(geometry.maximumOffset, 1), 0), 1)
@@ -127,8 +130,15 @@ struct ArticleReaderView: View {
 		}
 		.task(id: current.id) {
 			boundaryNavigationInProgress = false
-			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
+		}
+		.onChange(of: ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode), initial: true) { previous, currentIdentity in
+			scrollPosition = ScrollPosition()
+			pendingRestoredDepth = ArticleReaderContentIdentity.pendingRestoredDepth(
+				previous: previous,
+				current: currentIdentity,
+				savedDepth: model.articleScrollOffset(for: currentIdentity.articleID),
+			)
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
 			guard scenePhase == .active else {

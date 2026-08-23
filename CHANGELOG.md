@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.3.0] - 2026-08-23
+
+### Fixed
+
+- iPad Feed Content and Reader View now remount when the story or reading mode changes, so the next article no longer opens already scrolled.
+
 ## [0.1.2.0] - 2026-08-20
 
 ### Fixed
