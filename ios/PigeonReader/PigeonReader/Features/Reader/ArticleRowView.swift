@@ -132,6 +132,7 @@ private struct BlockedThumbnailLoadAction: ViewModifier {
 	let isAvailable: Bool
 	let load: () -> Void
 
+	@ViewBuilder
 	func body(content: Content) -> some View {
 		if isAvailable {
 			content.accessibilityAction(named: "Load this remote image", load)
