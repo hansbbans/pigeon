@@ -597,21 +597,28 @@ final class ReaderAppModel {
 	}
 
 	func writeWidgetSnapshot() {
+		makeWidgetSnapshot().save()
+		WidgetCenter.shared.reloadAllTimelines()
+	}
+
+	func makeWidgetSnapshot() -> PigeonWidgetSnapshot {
 		let allArticles = Dictionary(
 			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
 			uniquingKeysWith: { first, _ in first },
 		).values
 		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map(Self.widgetArticle)
-		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map(Self.widgetArticle)
-		let snapshot = PigeonWidgetSnapshot(
+		// For You's default list is Unread; keep the home-screen widget on the same stories.
+		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? [])
+			.filter { $0.isRead == false }
+			.prefix(5)
+			.map(Self.widgetArticle)
+		return PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
 			starredCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? allArticles.count(where: \.isStarred),
 			recent: Array(recent),
 			forYou: Array(forYou),
 		)
-		snapshot.save()
-		WidgetCenter.shared.reloadAllTimelines()
 	}
 
 	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {

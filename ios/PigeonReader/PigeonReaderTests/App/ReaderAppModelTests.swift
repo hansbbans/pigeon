@@ -1913,6 +1913,48 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
+	@Test func forYouWidgetSnapshotSkipsReadRecommendationsAndKeepsLaterUnreadRows() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readLeaders = (1...5).map { index in
+			makeArticle(id: "read-\(index)", isRead: true, receivedAt: 1_786_272_500 + TimeInterval(index), score: 90 - index)
+		}
+		let unreadTrail = [
+			makeArticle(id: "unread-a", isRead: false, receivedAt: 1_786_272_200, score: 40),
+			makeArticle(id: "unread-b", isRead: false, receivedAt: 1_786_272_100, score: 30),
+		]
+		model.setArticles(readLeaders + unreadTrail, for: .forYou)
+
+		let snapshot = model.makeWidgetSnapshot()
+
+		#expect(snapshot.forYou.map(\.id) == ["unread-a", "unread-b"])
+	}
+
+	@Test func recentWidgetSnapshotStillIncludesTheNewestReadStory() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let newestRead = makeArticle(id: "newest-read", isRead: true, receivedAt: 1_786_273_000, score: 10, feedKey: "alpha")
+		let olderUnread = makeArticle(id: "older-unread", isRead: false, receivedAt: 1_786_272_000, score: 80)
+		model.setArticles([newestRead], for: .today)
+		model.setArticles([olderUnread], for: .forYou)
+
+		let snapshot = model.makeWidgetSnapshot()
+
+		#expect(snapshot.recent.map(\.id).contains("newest-read"))
+		#expect(snapshot.forYou.map(\.id) == ["older-unread"])
+	}
+
+	@Test func forYouWidgetSnapshotDropsAStoryAfterItIsMarkedRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(statusCode: 500))
+		let keep = makeArticle(id: "keep-unread", isRead: false, receivedAt: 1_786_272_200, score: 60)
+		let finished = makeArticle(id: "just-read", isRead: false, receivedAt: 1_786_272_100, score: 50)
+		model.setArticles([keep, finished], for: .forYou)
+		#expect(model.makeWidgetSnapshot().forYou.map(\.id) == ["keep-unread", "just-read"])
+
+		await model.setRead(finished, read: true)
+
+		#expect(model.allArticles(for: .forYou).first(where: { $0.id == "just-read" })?.isRead == true)
+		#expect(model.makeWidgetSnapshot().forYou.map(\.id) == ["keep-unread"])
+	}
+
 	@Test func disconnectedLibraryLoadCannotRestoreThePreviousAccountsSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
