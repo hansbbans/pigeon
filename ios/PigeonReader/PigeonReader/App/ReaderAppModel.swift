@@ -2094,7 +2094,18 @@ final class ReaderAppModel {
 	}
 
 	func recordOutboundClick(itemId: String, destinationHost: String) async {
-		await send(EngagementEvent(itemId: itemId, type: .outboundLink, destinationHost: destinationHost))
+		guard let apiClient else {
+			return
+		}
+		do {
+			try await apiClient.sendEngagement([
+				EngagementEvent(itemId: itemId, type: .outboundLink, destinationHost: destinationHost),
+			])
+		} catch {
+			// Open Original and in-article links already left the reader.
+			// A failed analytics POST must not become the session error banner.
+			return
+		}
 	}
 
 	func setRead(_ article: Recommendation, read: Bool) async {

@@ -36,6 +36,44 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage != nil)
 	}
 
+	@Test func outboundClickDoesNotBannerWhenEngagementServerFails() async throws {
+		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+		#expect(model.errorMessage == nil)
+		let requests = await mock.requests()
+		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+	}
+
+	@Test func outboundClickDoesNotBannerWhenTheNetworkDrops() async throws {
+		let mock = MockHTTPClient(shouldFail: true)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+
+		await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func outboundClickDoesNotReplaceALibraryErrorBanner() async throws {
+		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "item-1", isRead: true)
+		model.articles = [article]
+		model.errorMessage = "Could not load stories"
+
+		await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+		#expect(model.errorMessage == "Could not load stories")
+		let requests = await mock.requests()
+		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+	}
+
 	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
