@@ -572,8 +572,8 @@ final class ReaderAppModel {
 		}
 	}
 
-	func consumePendingFeedRequest() {
-		if let url = PendingFeedStore.consume() {
+	func consumePendingFeedRequest(defaults: UserDefaults = PigeonSharedData.defaults) {
+		if let url = PendingFeedStore.consume(defaults: defaults) {
 			pendingFeedRequest = PendingFeedRequest(url: url)
 		}
 	}

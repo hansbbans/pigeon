@@ -3,6 +3,7 @@ import SwiftUI
 struct ReaderShellView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.scenePhase) private var scenePhase
 
 	var body: some View {
 		@Bindable var model = model
@@ -59,6 +60,13 @@ struct ReaderShellView: View {
 			if let action = ReaderNotificationManager.shared.consumePendingAction() {
 				await model.handleNotificationAction(action)
 			}
+		}
+		.onChange(of: scenePhase) { _, phase in
+			guard phase == .active else { return }
+			model.consumePendingFeedRequest()
+		}
+		.onReceive(NotificationCenter.default.publisher(for: PendingFeedStore.didSaveNotification)) { _ in
+			model.consumePendingFeedRequest()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: .pigeonReaderNotificationAction)) { notification in
 			guard let action = ReaderNotificationManager.shared.consumePendingAction()
