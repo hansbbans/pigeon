@@ -497,6 +497,121 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == other.id)
 	}
 
+	@Test func markingReadDuringSearchUpdatesTheVisibleSearchRow() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let hit = makeArticle(id: "search-hit", isRead: false)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit], for: collection)
+		try await store.saveArticles([hit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		#expect(model.searchResults.first?.isRead == false)
+
+		let mutation = Task { await model.setRead(hit, read: true) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.first?.isRead == true)
+		#expect(model.allArticles(for: collection).first?.isRead == true)
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
+	@Test func starringDuringSearchUpdatesTheVisibleSearchRow() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let hit = makeArticle(id: "star-hit")
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit], for: collection)
+		try await store.saveArticles([hit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.first?.isStarred == false)
+
+		let star = Task { await model.setStarred(hit, starred: true) }
+		let starRequest = await controlled.nextRequest()
+		#expect(model.searchResults.first?.isStarred == true)
+		await controlled.resolve(starRequest)
+		await star.value
+
+		let starredHit = try #require(model.searchResults.first)
+		let unstar = Task { await model.setStarred(starredHit, starred: false) }
+		let unstarRequest = await controlled.nextRequest()
+		#expect(model.searchResults.first?.isStarred == false)
+		await controlled.resolve(unstarRequest)
+		await unstar.value
+	}
+
+	@Test func markingReadDuringLibrarySearchUpdatesHitsMissingFromTheOpenList() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let openStory = makeArticle(id: "open-story", receivedAt: 1)
+		let otherStory = makeArticle(id: "other-story", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([openStory], for: collection)
+		model.setArticles([otherStory], for: otherCollection)
+		try await store.saveArticles([openStory], collectionID: collection.id, accountID: accountID)
+		try await store.saveArticles([otherStory], collectionID: otherCollection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .library, in: collection)
+		#expect(model.searchResults.map(\.id) == [openStory.id, otherStory.id])
+
+		let mutation = Task { await model.setRead(otherStory, read: true) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.first { $0.id == otherStory.id }?.isRead == true)
+		#expect(model.allArticles(for: otherCollection).first?.isRead == true)
+		#expect(model.searchResults.first { $0.id == openStory.id }?.isRead == false)
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
+	@Test func markAllAsReadDuringSearchUpdatesMatchingHits() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let first = makeArticle(id: "first-hit", receivedAt: 1)
+		let second = makeArticle(id: "second-hit", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([first, second], for: collection)
+		try await store.saveArticles([first, second], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.allSatisfy { $0.isRead == false })
+
+		let mutation = Task { await model.markAllStoriesAsRead(in: collection) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.map(\.isRead) == [true, true])
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let article = makeArticle(id: "shared")

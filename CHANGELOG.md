@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.3.0] - 2026-08-23
+
+### Fixed
+
+- Searching no longer leaves a stale unread or unstarred row after you mark the story read or starred. The same update applies to library-wide hits that are not in the open list.
+
 ## [0.1.2.0] - 2026-08-20
 
 ### Fixed

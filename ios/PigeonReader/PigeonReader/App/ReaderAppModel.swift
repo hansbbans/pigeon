@@ -2685,6 +2685,9 @@ final class ReaderAppModel {
 				articleCache[collectionID] = cachedArticles
 				changedCollections.insert(collectionID)
 			}
+			updateSearchResults(matching: target) { result in
+				result.isRead = read
+			}
 			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
 		reconcileCurrentArticleSelection()
@@ -2733,6 +2736,9 @@ final class ReaderAppModel {
 			articleCache[collectionID]?[index][keyPath: keyPath] = value
 			changedCollections.insert(collectionID)
 		}
+		updateSearchResults(matching: article) { result in
+			result[keyPath: keyPath] = value
+		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
@@ -2742,6 +2748,18 @@ final class ReaderAppModel {
 
 		await persistCollections(changedCollections)
 		await replayPendingMutations()
+	}
+
+	private func updateSearchResults(
+		matching article: Recommendation,
+		update: (inout Recommendation) -> Void,
+	) {
+		guard searchResults.isEmpty == false else {
+			return
+		}
+		for index in searchResults.indices where articlesMatch(searchResults[index], article) {
+			update(&searchResults[index])
+		}
 	}
 
 }
