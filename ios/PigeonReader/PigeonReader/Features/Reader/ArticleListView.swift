@@ -51,6 +51,7 @@ struct ArticleListView: View {
 								article: article,
 								density: model.readerTypography.timelineDensity,
 								remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+								imageProxySession: model.session,
 							)
 						}
 						.buttonStyle(.plain)

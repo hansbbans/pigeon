@@ -4,15 +4,18 @@ struct ArticleRowView: View {
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let imageProxySession: PigeonSession?
 
 	init(
 		article: Recommendation,
 		density: ReaderTimelineDensity = .comfortable,
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
+		imageProxySession: PigeonSession? = nil,
 	) {
 		self.article = article
 		self.density = density
 		self.remoteImagePolicy = remoteImagePolicy
+		self.imageProxySession = imageProxySession
 	}
 
 	var body: some View {
@@ -76,16 +79,15 @@ struct ArticleRowView: View {
 
 	@ViewBuilder
 	private var thumbnail: some View {
-		if remoteImagePolicy == .normal,
-			let url = StructuredHTMLSanitizer.imageURLs(in: article.html, baseURL: article.safeOriginalURL).first {
-			AsyncImage(url: url) { image in
-				image.resizable().scaledToFill()
-			} placeholder: {
-				imagePlaceholder
-			}
-			.frame(width: 72, height: 54)
-			.clipShape(.rect(cornerRadius: 8))
-			.accessibilityLabel("Article image")
+		if let url = ArticleListThumbnailRequest.thumbnailURL(
+			in: article.html,
+			baseURL: article.safeOriginalURL,
+		) {
+			ArticleListThumbnailView(
+				remoteURL: url,
+				policy: remoteImagePolicy,
+				session: imageProxySession,
+			)
 		} else {
 			imagePlaceholder
 				.frame(width: 72, height: 54)
