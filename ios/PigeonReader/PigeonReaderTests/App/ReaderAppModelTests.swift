@@ -1503,6 +1503,31 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 
+	@Test func afterSixtyPercentReadTreatsAFullyVisibleStoryAsRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "fits-on-screen")
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
+			offset: 0,
+			maximumOffset: 0,
+			contentHeight: 360,
+			isBodyLaidOut: false,
+		))
+		await Task.yield()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
+			offset: 0,
+			maximumOffset: 0,
+			contentHeight: 360,
+			isBodyLaidOut: true,
+		))
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
 	@Test func bulkReadUndoQueuesAReverseMutationAndRestoresEveryStory() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(statusCode: 500), offlineStore: store)

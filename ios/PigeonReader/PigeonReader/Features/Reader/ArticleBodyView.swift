@@ -26,7 +26,7 @@ struct ArticleBodyView: View {
 	@State private var isShowingLinkedImageDialog = false
 	@State private var deferredLinkDestination: OutboundDestination?
 	@State private var failedImageURLs: Set<String> = []
-	@State private var webViewHeight: CGFloat = 1
+	@State private var webViewHeight: CGFloat = 0
 	@State private var columnWidth: CGFloat = 0
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -67,6 +67,7 @@ struct ArticleBodyView: View {
 		)
 
 		renderedContent(textScale: renderedTextScale)
+		.preference(key: ArticleBodyLayoutKey.self, value: isBodyLaidOut)
 		.sheet(item: $imageSelection) { selection in
 			ZoomableImageView(url: selection.url)
 		}
@@ -122,6 +123,10 @@ struct ArticleBodyView: View {
 		} message: {
 			Text(saveMessage ?? "")
 		}
+	}
+
+	private var isBodyLaidOut: Bool {
+		sanitizedContent.isEmpty || webViewHeight > 0
 	}
 
 	private func renderedContent(textScale: Double) -> some View {
@@ -273,5 +278,13 @@ private struct ArticleColumnWidthKey: PreferenceKey {
 
 	static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
 		value = nextValue()
+	}
+}
+
+nonisolated struct ArticleBodyLayoutKey: PreferenceKey {
+	static let defaultValue = false
+
+	static func reduce(value: inout Bool, nextValue: () -> Bool) {
+		value = value || nextValue()
 	}
 }

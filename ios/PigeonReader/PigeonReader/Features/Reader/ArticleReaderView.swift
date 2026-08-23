@@ -14,6 +14,7 @@ struct ArticleReaderView: View {
 	@State private var pendingRestoredDepth: Double?
 	@State private var scrollBoundary = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
 	@State private var boundaryNavigationInProgress = false
+	@State private var isArticleBodyLaidOut = false
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -92,9 +93,17 @@ struct ArticleReaderView: View {
 							self.pendingRestoredDepth = nil
 							return
 						}
-						let depth = min(max(geometry.offset / max(geometry.maximumOffset, 1), 0), 1)
-						model.recordScrollDepth(itemId: current.id, depth: depth)
-						model.setArticleScrollOffset(depth, for: current.id)
+						let isBodyLaidOut = isArticleBodyLaidOut && isShowingArticleBody
+						let depth = ArticleReadingProgress.depth(
+							offset: Double(geometry.offset),
+							maximumOffset: Double(geometry.maximumOffset),
+							contentHeight: Double(geometry.contentHeight),
+							isBodyLaidOut: isBodyLaidOut,
+						)
+						if isBodyLaidOut {
+							model.recordScrollDepth(itemId: current.id, depth: depth)
+							model.setArticleScrollOffset(depth, for: current.id)
+						}
 					}
 				}
 				.background(readerBackground)
@@ -123,12 +132,17 @@ struct ArticleReaderView: View {
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
 		.task(id: readerRequestID(for: current)) {
+			isArticleBodyLaidOut = false
 			await loadReaderViewIfNeeded(for: current)
 		}
 		.task(id: current.id) {
 			boundaryNavigationInProgress = false
+			isArticleBodyLaidOut = false
 			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
+		}
+		.onPreferenceChange(ArticleBodyLayoutKey.self) { isLaidOut in
+			isArticleBodyLaidOut = isLaidOut
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
 			guard scenePhase == .active else {
@@ -277,6 +291,22 @@ struct ArticleReaderView: View {
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
+	private var isShowingArticleBody: Bool {
+		switch selectedMode {
+		case .feedContent:
+			true
+		case .website:
+			false
+		case .readerView:
+			switch readerViewState {
+			case .loaded, .fallback:
+				true
+			case .idle, .loading, .unavailable, .failed:
+				false
+			}
+		}
 	}
 
 	private var isCompactReader: Bool {
