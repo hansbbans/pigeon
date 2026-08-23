@@ -2759,7 +2759,7 @@ final class ReaderAppModel {
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
-		let displayedArticles = articleCache[collection.id] ?? []
+		let displayedArticles = articles(for: collection)
 		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
 			return

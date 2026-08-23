@@ -1551,6 +1551,62 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.id == boundary.id)
 	}
 
+	@Test func markAboveInReadFilterDoesNotMarkHiddenUnreadStories() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let hiddenUnreadAbove = makeArticle(id: "hidden-unread-above", receivedAt: 400)
+		let visibleReadAbove = makeArticle(id: "visible-read-above", isRead: true, receivedAt: 300)
+		let boundary = makeArticle(id: "boundary", isRead: true, receivedAt: 200)
+		let hiddenUnreadBelow = makeArticle(id: "hidden-unread-below", receivedAt: 100)
+		model.setArticles([hiddenUnreadAbove, visibleReadAbove, boundary, hiddenUnreadBelow], for: collection)
+		model.articleFilter = .read
+		model.select(article: boundary)
+
+		#expect(model.articles(for: collection).map(\.id) == [visibleReadAbove.id, boundary.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleReadAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func markBelowInReadFilterDoesNotMarkHiddenUnreadStories() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let hiddenUnreadAbove = makeArticle(id: "hidden-unread-above", receivedAt: 400)
+		let boundary = makeArticle(id: "boundary", isRead: true, receivedAt: 300)
+		let visibleReadBelow = makeArticle(id: "visible-read-below", isRead: true, receivedAt: 200)
+		let hiddenUnreadBelow = makeArticle(id: "hidden-unread-below", receivedAt: 100)
+		model.setArticles([hiddenUnreadAbove, boundary, visibleReadBelow, hiddenUnreadBelow], for: collection)
+		model.articleFilter = .read
+		model.select(article: boundary)
+
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id, visibleReadBelow.id])
+
+		await model.markStoriesBelowAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleReadBelow.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
 	@Test func markAllQueuesBoundedBatchAndUpdatesEveryLoadedUnreadStory() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
