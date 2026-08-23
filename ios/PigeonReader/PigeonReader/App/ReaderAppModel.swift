@@ -967,6 +967,7 @@ final class ReaderAppModel {
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
 			temporarilyUnavailableSelectedCollection = nil
+			errorMessage = nil
 		}
 		selectedNavigationID = collectionID
 		if isReselectingOpenCollection == false {
@@ -1977,6 +1978,9 @@ final class ReaderAppModel {
 		activeSearchScope = scope
 		activeSearchCollectionID = collection.id
 		isSearchingArticles = true
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
 		defer {
 			if activeSearchID == searchID { isSearchingArticles = false }
 		}
@@ -2000,11 +2004,15 @@ final class ReaderAppModel {
 	}
 
 	func clearArticleSearch() {
+		let hadActiveSearch = activeSearchID != nil
 		activeSearchID = nil
 		activeSearchScope = nil
 		activeSearchCollectionID = nil
 		searchResults = []
 		isSearchingArticles = false
+		if hadActiveSearch {
+			errorMessage = nil
+		}
 	}
 
 	func collectionStatusText(for collection: ReaderNavigationItem) -> String {

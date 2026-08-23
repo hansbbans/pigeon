@@ -918,6 +918,72 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
+	@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		model.select(section: .forYou)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.select(section: .today)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func reselectingFailedCollectionKeepsLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		model.select(section: .forYou)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.select(section: .forYou)
+		model.clearArticleSearch()
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func startingSearchClearsStaleLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.select(item: collection)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func clearingFailedSearchClearsErrorBanner() async throws {
+		let store = ScriptedSearchOfflineLibraryStore()
+		await store.failNextSearch(with: URLError(.notConnectedToInternet))
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.clearArticleSearch()
+
+		#expect(model.errorMessage == nil)
+	}
+
 	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
 		let httpClient = PaginationHTTPClient()
 		let store = OfflineLibraryStore.inMemory()
@@ -2525,6 +2591,89 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		limit: Int,
 	) async throws -> [Recommendation] {
 		try await base.searchArticles(
+			query: query,
+			collectionID: collectionID,
+			accountID: accountID,
+			limit: limit,
+		)
+	}
+}
+
+private actor ScriptedSearchOfflineLibraryStore: OfflineLibraryStoring {
+	private let base = OfflineLibraryStore.inMemory()
+	private var nextSearchError: Error?
+
+	func failNextSearch(with error: Error) {
+		nextSearchError = error
+	}
+
+	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot {
+		try await base.loadSnapshot(accountID: accountID)
+	}
+
+	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {
+		try await base.saveNavigation(navigation, accountID: accountID)
+	}
+
+	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws {
+		try await base.saveSubscriptions(subscriptions, accountID: accountID)
+	}
+
+	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws {
+		try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws {
+		try await base.saveCollectionContinuation(continuation, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws {
+		try await base.saveRestoration(restoration, accountID: accountID)
+	}
+
+	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws {
+		try await base.enqueue(mutation, accountID: accountID)
+	}
+
+	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation] {
+		try await base.pendingMutations(accountID: accountID, limit: limit)
+	}
+
+	func markMutationApplied(id: String, accountID: String) async throws {
+		try await base.markMutationApplied(id: id, accountID: accountID)
+	}
+
+	func recordMutationFailure(id: String, message: String, accountID: String) async throws {
+		try await base.recordMutationFailure(id: id, message: message, accountID: accountID)
+	}
+
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
+		try await base.apply(page, accountID: accountID)
+	}
+
+	func storageStats(accountID: String) async throws -> OfflineStorageStats {
+		try await base.storageStats(accountID: accountID)
+	}
+
+	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int {
+		try await base.cleanupReadBodies(accountID: accountID, keepingNewest: count)
+	}
+
+	func clearCachedArticles(accountID: String) async throws {
+		try await base.clearCachedArticles(accountID: accountID)
+	}
+
+	func searchArticles(
+		query: String,
+		collectionID: String?,
+		accountID: String,
+		limit: Int,
+	) async throws -> [Recommendation] {
+		if let nextSearchError {
+			self.nextSearchError = nil
+			throw nextSearchError
+		}
+		return try await base.searchArticles(
 			query: query,
 			collectionID: collectionID,
 			accountID: accountID,
