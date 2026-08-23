@@ -786,6 +786,24 @@ struct ReaderAppModelTests {
 		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
 	}
 
+	@Test func successfulFeedRefreshClearsAStaleLoadErrorBanner() async throws {
+		let client = FailThenSucceedSyncHTTPClient(failingSyncAttempt: 2)
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
+
+		await fixture.model.prepareOfflineLibrary()
+		#expect(fixture.model.errorMessage == nil)
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+
+		await fixture.model.refresh(collection: fixture.collection)
+		#expect(fixture.model.errorMessage == "Sync failed")
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+
+		await fixture.model.refresh(collection: fixture.collection)
+		#expect(fixture.model.errorMessage == nil)
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+		#expect(await client.syncAttempts() == 3)
+	}
+
 	@Test func cachedFeedRestoresContinuationAndLoadsMoreAfterSyncOnlyPreparation() async throws {
 		let client = PaginationHTTPClient(streamID: "feed/7")
 		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
@@ -2330,6 +2348,41 @@ private struct BenchmarkMetrics: Sendable {
 	let requestCount: Int
 	let byteCount: Int
 	let paths: [String]
+}
+
+private actor FailThenSucceedSyncHTTPClient: HTTPClient {
+	private let failingSyncAttempt: Int
+	private var syncCount = 0
+
+	init(failingSyncAttempt: Int) {
+		self.failingSyncAttempt = failingSyncAttempt
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+
+		if url.path == "/api/v1/sync" {
+			syncCount += 1
+			if syncCount == failingSyncAttempt {
+				guard let response = HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil) else {
+					throw PigeonError.invalidResponse
+				}
+				return (Data("Sync failed".utf8), response)
+			}
+		}
+
+		let data = Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func syncAttempts() -> Int {
+		syncCount
+	}
 }
 
 private actor WarmFeedRecoveryHTTPClient: HTTPClient {

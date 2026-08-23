@@ -1100,6 +1100,9 @@ final class ReaderAppModel {
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
 		if offlineSynchronizationEnabled,
 			session != nil,
 			collection.id == selectedCollection.id {
