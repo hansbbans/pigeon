@@ -7,6 +7,7 @@ All notable changes to Pigeon are documented in this file.
 ### Fixed
 
 - Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
+- Freeing space from older read articles, or an incremental sync that prunes those bodies, no longer blanks the newsletter you are currently reading.
 - Ordinary reading pans no longer count as back-to-feed; only the leading-edge swipe leaves the article.
 - Swiping from the leading edge of an iPhone article returns to the feed again. The gesture is recognized on the reader itself, not only the back button.
 

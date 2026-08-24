@@ -351,6 +351,81 @@ struct ReaderAppModelTests {
 		#expect(model.selectedCollection.id == forYou.id)
 	}
 
+	@Test func cleanupKeepsTheOpenArticleBodyWhenTheCachedCopyIsPruned() async throws {
+		let session = try makeSession(token: "keep-open-body")
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = session.storageIdentity
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 0,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let newer = makeArticle(
+			id: "newer-read",
+			isRead: true,
+			receivedAt: 400,
+			feedKey: "alpha",
+			html: "<p>Newer newsletter.</p>",
+		)
+		let older = makeArticle(
+			id: "older-read",
+			isRead: true,
+			receivedAt: 100,
+			feedKey: "alpha",
+			html: "<p>Keep reading this newsletter.</p>",
+		)
+		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
+		try await store.saveArticles([newer, older], collectionID: feed.id, accountID: accountID)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: feed.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: ReaderRestoredCompactColumn.content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+		model.select(item: feed)
+		model.select(article: older)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.selectedArticle?.html.contains("Keep reading this newsletter") == true)
+
+		// Settings → Free space / incremental sync prune older read bodies on disk,
+		// then reload the snapshot. The open story must keep the HTML already in memory.
+		_ = try await store.cleanupReadBodies(accountID: accountID, keepingNewest: 1)
+		let pruned = try #require(
+			try await store.loadSnapshot(accountID: accountID)
+				.articlesByCollection[feed.id]?
+				.first(where: { $0.id == older.id })
+		)
+		#expect(pruned.html.isEmpty)
+
+		_ = await model.cleanupOfflineBodies()
+
+		#expect(model.selectedArticleID == older.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.selectedArticle?.html.contains("Keep reading this newsletter") == true)
+		#expect(model.allArticles(for: feed).first(where: { $0.id == older.id })?.html.contains("Keep reading this newsletter") == true)
+	}
+
 	@Test func snapshotApplyKeepsTheSelectedCollectionWhenItsNavigationRowIsMissing() async throws {
 		let session = try makeSession(token: "keep-selected-collection")
 		let store = OfflineLibraryStore.inMemory()
