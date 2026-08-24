@@ -143,7 +143,7 @@ struct ArticleBodyView: View {
 
 			if sanitizedContent.isEmpty {
 				Text(fallbackText)
-					.font(ReaderTypography.articleBody)
+					.font(ReaderTypography.articleBody(textScale: self.textScale))
 					.textSelection(.enabled)
 			} else {
 				structuredContent(textScale: textScale)
