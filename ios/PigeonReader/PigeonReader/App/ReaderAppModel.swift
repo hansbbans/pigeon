@@ -2122,9 +2122,13 @@ final class ReaderAppModel {
 		)
 	}
 
+	func canMarkStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) -> Bool {
+		articles(for: collection).contains { $0.isRead == false && $0.receivedAt < date }
+	}
+
 	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false && $0.receivedAt < date } ?? [],
+			articles(for: collection).filter { $0.isRead == false && $0.receivedAt < date },
 			scope: .older,
 			undoTitle: "Mark Older Stories as Read",
 		)

@@ -1571,6 +1571,80 @@ struct ReaderAppModelTests {
 		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
+	@Test func markOlderThanWithReadFilterLeavesHiddenUnreadNeighborsUnread() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let hiddenNewerUnread = makeArticle(id: "hidden-newer-unread", receivedAt: 1_786_272_300)
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedAt: 1_786_272_200)
+		let hiddenOlderUnread = makeArticle(id: "hidden-older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([hiddenNewerUnread, visibleRead, hiddenOlderUnread], for: collection)
+		model.articleFilter = .read
+
+		#expect(model.articles(for: collection).map(\.id) == [visibleRead.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNewerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenOlderUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleRead.id })?.isRead == true)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markOlderThanWithUnreadFilterMarksOnlyVisibleOlderUnreadRows() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerUnread = makeArticle(id: "newer-unread", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_050)
+		let olderUnread = makeArticle(id: "older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerUnread, alreadyRead, olderUnread], for: collection)
+		model.articleFilter = .unread
+
+		#expect(model.articles(for: collection).map(\.id) == [newerUnread.id, olderUnread.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderUnread.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderUnread.readerId]))
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+	}
+
+	@Test func markOlderThanWithAllFilterStillMarksEveryLoadedOlderUnreadStory() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerUnread = makeArticle(id: "newer-unread", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_050)
+		let olderUnread = makeArticle(id: "older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerUnread, alreadyRead, olderUnread], for: collection)
+		model.articleFilter = .all
+
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderUnread.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderUnread.readerId]))
+	}
+
 	@Test func filteredBulkReadStaysQueuedAndOptimisticWhenOffline() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
