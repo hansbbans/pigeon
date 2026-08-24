@@ -151,7 +151,7 @@ struct ArticleListView: View {
 					olderThanButton(days: 1)
 					olderThanButton(days: 7)
 					olderThanButton(days: 30)
-					if model.canUndoBulkRead {
+					if model.canUndoBulkRead(in: collection) {
 						Divider()
 						Button("Undo \(model.bulkReadUndoTitle ?? "Last Read Action")", systemImage: "arrow.uturn.backward") {
 							Task { await model.undoLastBulkRead() }
