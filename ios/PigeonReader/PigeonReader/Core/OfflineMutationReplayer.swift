@@ -62,12 +62,15 @@ actor OfflineMutationReplayer {
 						message: result.error ?? "The server rejected this mutation.",
 						accountID: accountID,
 					)
-					pageHasFailure = true
+					// A permanent rejection will not succeed on retry. Drop it so it
+					// cannot sit at the FIFO head and block later queued actions.
+					try await store.markMutationApplied(id: action.mutation.id, accountID: accountID)
+					pageMadeProgress = true
 				}
 			}
 
-			// A permanent server rejection remains inspectable instead of becoming a
-			// hot loop. Later launches/refreshes may replay it after the cause changes.
+			// Omitted receipts stay queued. Stop this replay instead of immediately
+			// resending them in a hot loop. Later launches/refreshes retry them.
 			if pageHasFailure || pageMadeProgress == false { return appliedCount }
 		}
 	}
