@@ -918,6 +918,65 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
+	@Test func staleFeedLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadStaleFeeds()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func personalizationLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadPersonalization()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func invalidAddFeedURLStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+
+		let added = await model.addFeed(urlText: "not-a-url", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage == "Enter a complete HTTP or HTTPS feed URL.")
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func addFeedAPIFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500),
+		)
+
+		let added = await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage != nil)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func dismissingSettingsClearsTheSettingsErrorWithoutTouchingTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+		model.errorMessage = "Feed failed to load"
+
+		await model.loadStaleFeeds()
+		#expect(model.settingsErrorMessage != nil)
+
+		model.clearSettingsError()
+
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == "Feed failed to load")
+	}
+
 	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
 		let httpClient = PaginationHTTPClient()
 		let store = OfflineLibraryStore.inMemory()

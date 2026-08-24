@@ -48,6 +48,7 @@ struct AddFeedView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				SettingsErrorSection()
 				Section("Feed") {
 					TextField("https://example.com/feed.xml", text: $urlText)
 						.textContentType(.URL)
@@ -77,6 +78,9 @@ struct AddFeedView: View {
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
+			.onDisappear {
+				model.clearSettingsError()
+			}
 		}
 	}
 

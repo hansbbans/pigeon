@@ -55,6 +55,7 @@ final class ReaderAppModel {
 	}
 	var isConnecting = false
 	var errorMessage: String?
+	var settingsErrorMessage: String?
 	var isShowingSettings = false
 	private(set) var subscriptions: [FeedSubscription] = []
 	var isLoadingLibrary = false
@@ -448,6 +449,7 @@ final class ReaderAppModel {
 			lastBackgroundRefreshAt = nil
 			writeWidgetSnapshot()
 			errorMessage = nil
+			settingsErrorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
 		}
@@ -469,10 +471,11 @@ final class ReaderAppModel {
 		defer { isLoadingPersonalization = false }
 		do {
 			personalization = try await apiClient.personalization()
+			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -482,7 +485,7 @@ final class ReaderAppModel {
 			try await apiClient.deletePersonalizationHistory(id: id)
 			await loadPersonalization()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -493,7 +496,7 @@ final class ReaderAppModel {
 			await loadPersonalization()
 			await load(section: .forYou, force: true)
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -629,7 +632,7 @@ final class ReaderAppModel {
 		do {
 			return try await apiClient.exportPersonalization()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return nil
 		}
 	}
@@ -863,7 +866,7 @@ final class ReaderAppModel {
 			await refreshOfflineStorageStats()
 			return count
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return 0
 		}
 	}
@@ -879,7 +882,7 @@ final class ReaderAppModel {
 			await refreshOfflineStorageStats()
 			scheduleRestorationSave()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -1339,7 +1342,7 @@ final class ReaderAppModel {
 		}
 	}
 
-	func loadLibrary(force: Bool = false) async {
+	func loadLibrary(force: Bool = false, reportError: Bool = true) async {
 		guard let apiClient, let context = operationContext(for: apiClient) else {
 			return
 		}
@@ -1376,7 +1379,9 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLibraryLoadID == loadID else {
 				return
 			}
-			errorMessage = error.localizedDescription
+			if reportError {
+				errorMessage = error.localizedDescription
+			}
 		}
 	}
 
@@ -1426,7 +1431,7 @@ final class ReaderAppModel {
 		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard let url = URL(string: trimmedURL), let scheme = url.scheme?.lowercased(),
 			scheme == "http" || scheme == "https", url.host != nil else {
-			errorMessage = "Enter a complete HTTP or HTTPS feed URL."
+			presentSettingsError("Enter a complete HTTP or HTTPS feed URL.")
 			return false
 		}
 
@@ -1435,6 +1440,7 @@ final class ReaderAppModel {
 			if let folder = normalizedFolderName(folderName) {
 				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
 			}
+			settingsErrorMessage = nil
 			await loadLibrary(force: true)
 			if hasLoadedNavigation {
 				await loadNavigation(force: true)
@@ -1443,8 +1449,8 @@ final class ReaderAppModel {
 		} catch let error where isCancellation(error) {
 			return false
 		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
+			presentSettingsError(error)
+			await loadLibrary(force: true, reportError: false)
 			return false
 		}
 	}
@@ -1463,10 +1469,11 @@ final class ReaderAppModel {
 		defer { isLoadingStaleFeeds = false }
 		do {
 			staleFeedSnapshot = try await apiClient.staleFeeds(days: days)
+			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -1480,7 +1487,7 @@ final class ReaderAppModel {
 			await loadStaleFeeds()
 			return true
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return false
 		}
 	}
@@ -1495,7 +1502,7 @@ final class ReaderAppModel {
 			await loadStaleFeeds()
 			return true
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return false
 		}
 	}
@@ -1529,14 +1536,14 @@ final class ReaderAppModel {
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
 			} catch {
-				errorMessage = error.localizedDescription
+				presentSettingsError(error)
 				return
 			}
 		case .unarchive(let keys):
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
 			} catch {
-				errorMessage = error.localizedDescription
+				presentSettingsError(error)
 				return
 			}
 		case .unsubscribe(let removed):
@@ -2349,6 +2356,7 @@ final class ReaderAppModel {
 		bulkReadUndo = nil
 		bulkReadUndoTitle = nil
 		scrollReadTriggered = []
+		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
 		selectedNavigationID = firstEnabledSmartSection.rawValue
@@ -2672,6 +2680,18 @@ final class ReaderAppModel {
 
 	func clearError() {
 		errorMessage = nil
+	}
+
+	func clearSettingsError() {
+		settingsErrorMessage = nil
+	}
+
+	private func presentSettingsError(_ error: Error) {
+		presentSettingsError(error.localizedDescription)
+	}
+
+	private func presentSettingsError(_ message: String) {
+		settingsErrorMessage = message
 	}
 
 	func subscription(id: String) -> FeedSubscription? {
