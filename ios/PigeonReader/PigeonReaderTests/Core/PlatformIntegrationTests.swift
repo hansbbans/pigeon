@@ -132,6 +132,63 @@ struct PlatformIntegrationTests {
 		#expect(service.addedFolders.isEmpty)
 	}
 
+	@Test func opmlFilePickerReplacesThePreviewOnAValidSecondPick() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		#expect(screen.preview?.newEntries.map(\.title) == ["Studio Notes"])
+		#expect(screen.message == nil)
+
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Independent", url: "https://other.example/rss")))
+		#expect(screen.preview?.newEntries.map(\.title) == ["Independent"])
+		#expect(screen.message == nil)
+	}
+
+	@Test func opmlFilePickerClearsAStalePreviewWhenTheNextFileFails() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		#expect(screen.preview?.newEntries.isEmpty == false)
+
+		screen.apply(OPMLImportPlanner.outcome(of: .success(Data("<html></html>".utf8)), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == OPMLImportError.invalidDocument.localizedDescription)
+	}
+
+	@Test func opmlFilePickerKeepsTheCurrentPreviewWhenTheChooserIsCancelled() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		let preview = screen.preview
+
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CancellationError()), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CocoaError(.userCancelled)), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+
+		let cocoaCancelled = NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError)
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(cocoaCancelled), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+	}
+
+	@Test func opmlFilePickerClearsThePreviewWhenReadingTheNextFileFails() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+
+		let readError = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError)
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(readError), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == readError.localizedDescription)
+	}
+
+	@Test func opmlFilePickerDoesNotLeaveACancellationErrorOnAFreshScreen() {
+		var screen = OPMLImportScreenState()
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CocoaError(.userCancelled)), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == nil)
+	}
+
 	@Test func staleFeedClientDecodesEvidenceAndSendsBoundedArchiveRequest() async throws {
 		let response = Data(
 			#"{"cutoff":"2026-05-17T00:00:00.000Z","feeds":[{"feedKey":"quiet","streamId":"feed/7","title":"Quiet","sourceType":"rss","sourceURL":"https://example.com/feed","siteURL":null,"lastArticleAt":"2025-01-02T00:00:00.000Z","lastSuccessAt":"2025-01-01T00:00:00.000Z","httpStatus":304,"archived":false}]}"#.utf8,
@@ -154,6 +211,20 @@ struct PlatformIntegrationTests {
 		let body = try JSONDecoder().decode(StaleFeedArchiveRequest.self, from: try #require(post.body))
 		#expect(body.action == .archive)
 		#expect(body.feedKeys == ["quiet"])
+	}
+
+	private static func opmlDocument(title: String, url: String) -> Data {
+		Data(
+			"""
+			<?xml version="1.0"?><opml version="2.0"><body>
+			<outline title="\(title)" xmlUrl="\(url)" />
+			</body></opml>
+			""".utf8,
+		)
+	}
+
+	private static func opmlFileOutcome(_ data: Data) -> OPMLImportFileOutcome {
+		OPMLImportPlanner.outcome(of: .success(data), existing: [])
 	}
 
 	private static func article(id: String, receivedAt: TimeInterval) -> Recommendation {
