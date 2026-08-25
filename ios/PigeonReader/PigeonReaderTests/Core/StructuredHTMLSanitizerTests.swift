@@ -180,8 +180,61 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("body[data-theme=\"dark-gray\"] pre"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"blocked\""))
 		#expect(shell.contains("Load this remote image"))
+		#expect(shell.contains("target.closest(\".pigeon-image-blocked\")"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
 		#expect(shell.contains("pigeon-image://proxy?url="))
+	}
+
+	@MainActor
+	@Test
+	func askBeforeLoadingPlaceholderLoadsALinkedImageInsteadOfOpeningTheLink() async throws {
+		let webView = WKWebView()
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		let result = try await webView.evaluateJavaScript("""
+			JSON.stringify((() => {
+				window.__pigeonPosts = [];
+				window.webkit = {
+					messageHandlers: {
+						pigeonEvent: {
+							postMessage: (message) => window.__pigeonPosts.push(message),
+						},
+					},
+				};
+
+				window.__pigeonRender({
+					html: '<p><a href="https://example.com/gallery"><img src="https://cdn.example/hero.jpg" alt="Hero"></a></p>',
+					baseURL: "https://example.com/story",
+					textScale: 1,
+					lineHeight: 1.55,
+					theme: "system",
+					remoteImagePolicy: "blocked",
+				});
+
+				const placeholder = document.querySelector(".pigeon-image-blocked");
+				if (!placeholder) {
+					return { error: "missing-placeholder" };
+				}
+				placeholder.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+				return {
+					placeholderCount: String(document.querySelectorAll(".pigeon-image-blocked").length),
+					imageCount: String(document.querySelectorAll("img").length),
+					imageSrc: document.querySelector("img")?.getAttribute("src") || "",
+					linkPosts: String(window.__pigeonPosts.filter((post) => post.kind === "link").length),
+				};
+			})())
+			""")
+		let json = try #require(result as? String)
+		let data = try #require(json.data(using: .utf8))
+		let values = try #require(JSONSerialization.jsonObject(with: data) as? [String: String])
+
+		#expect(values["error"] == nil)
+		#expect(values["placeholderCount"] == "0")
+		#expect(values["imageCount"] == "1")
+		#expect(values["imageSrc"] == "https://cdn.example/hero.jpg")
+		#expect(values["linkPosts"] == "0")
 	}
 }
 
