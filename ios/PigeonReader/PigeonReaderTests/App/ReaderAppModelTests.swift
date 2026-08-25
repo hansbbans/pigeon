@@ -1598,6 +1598,41 @@ struct ReaderAppModelTests {
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
+	@Test func clearOfflineArticlesRefreshesStaleWidgetRows() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+
+		let session = try makeSession(token: "clear-offline-widgets")
+		let store = OfflineLibraryStore.inMemory()
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let recent = makeArticle(id: "widget-recent", receivedAt: 1_786_272_200)
+		let recommended = makeArticle(id: "widget-for-you", receivedAt: 1_786_272_100)
+		try await store.saveNavigation(ReaderNavigationState(items: [forYou]), accountID: session.storageIdentity)
+		try await store.saveArticles([recommended], collectionID: forYou.id, accountID: session.storageIdentity)
+
+		let model = try makeModel(httpClient: MockHTTPClient(), session: session, offlineStore: store)
+		model.setArticles([recent], for: .unread)
+		model.setArticles([recommended], for: .forYou)
+		model.select(article: recommended)
+		model.writeWidgetSnapshot()
+
+		let before = PigeonWidgetSnapshot.load()
+		#expect(before.recent.map(\.id).contains("widget-recent"))
+		#expect(before.forYou.map(\.id) == ["widget-for-you"])
+		#expect(model.selectedArticleID == recommended.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await model.clearOfflineArticles()
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.allArticles(for: .unread).isEmpty)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+		let after = PigeonWidgetSnapshot.load()
+		#expect(after.recent.isEmpty)
+		#expect(after.forYou.isEmpty)
+	}
+
 	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewInternalOnly() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let workFolderID = "user/-/label/Work"
