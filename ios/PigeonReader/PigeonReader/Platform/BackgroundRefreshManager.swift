@@ -15,7 +15,13 @@ nonisolated enum BackgroundRefreshArticlePlanner {
 
 	static func newArticles(knownIDs: Set<String>, current: [Recommendation]) -> [Recommendation] {
 		current.reduce(into: [String: Recommendation]()) { result, article in
-			if knownIDs.contains(article.id) == false { result[article.id] = article }
+			// A first sync, another device's read state, or a collection that
+			// was not in the local snapshot can introduce already-read IDs.
+			// Those are new to this cache, not new unread mail.
+			guard article.isRead == false, knownIDs.contains(article.id) == false else {
+				return
+			}
+			result[article.id] = article
 		}.values.sorted { $0.receivedAt > $1.receivedAt }
 	}
 }

@@ -26,6 +26,18 @@ struct PlatformIntegrationTests {
 		#expect(delta.map(\.id) == ["new"])
 	}
 
+	@Test func backgroundRefreshDoesNotNotifyForAlreadyReadArticles() {
+		let unreadNew = Self.article(id: "unread-new", receivedAt: 4)
+		let readNew = Self.article(id: "read-new", receivedAt: 5, isRead: true)
+		let readDuplicate = Self.article(id: "read-new", receivedAt: 6, isRead: true)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [])
+		let delta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: known,
+			current: [readNew, unreadNew, readDuplicate],
+		)
+		#expect(delta.map(\.id) == ["unread-new"])
+	}
+
 	@Test func notificationActionsPersistAcrossATerminatedLaunch() throws {
 		let action = ReaderNotificationAction.markRead(articleID: "article-7")
 		let restored = try JSONDecoder().decode(
@@ -156,11 +168,11 @@ struct PlatformIntegrationTests {
 		#expect(body.feedKeys == ["quiet"])
 	}
 
-	private static func article(id: String, receivedAt: TimeInterval) -> Recommendation {
+	private static func article(id: String, receivedAt: TimeInterval, isRead: Bool = false) -> Recommendation {
 		Recommendation(
 			id: id, readerId: "reader-\(id)", feedKey: "feed", source: "Feed", title: id,
 			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
-			isRead: false, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
+			isRead: isRead, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
 			explanation: "Test", learningState: "Test",
 		)
 	}
