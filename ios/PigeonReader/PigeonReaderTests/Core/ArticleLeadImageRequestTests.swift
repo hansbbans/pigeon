@@ -31,7 +31,8 @@ struct ArticleLeadImageRequestTests {
 				session: session,
 			),
 		)
-		let components = try #require(URLComponents(url: try #require(proxied.url), resolvingAgainstBaseURL: false))
+		let proxiedURL = try #require(proxied.url)
+		let components = try #require(URLComponents(url: proxiedURL, resolvingAgainstBaseURL: false))
 		#expect(components.host == "pigeon.test")
 		#expect(components.path == "/api/v1/image-proxy")
 		#expect(components.queryItems?.first(where: { $0.name == "url" })?.value == publisher.absoluteString)
