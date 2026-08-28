@@ -524,7 +524,7 @@ struct ReaderAppModelTests {
 
 		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
 		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
-		#expect(model.allArticles(for: .starred).allSatisfy(\.isStarred))
+		#expect(model.allArticles(for: .starred).allSatisfy { $0.isStarred })
 		#expect(model.articles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
 	}
 
