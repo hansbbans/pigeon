@@ -674,80 +674,165 @@ struct ReaderAppModelTests {
 		#expect(model.isOffline)
 	}
 
-	@Test func olderOfflinePreparationCannotOverwriteNewerSuccessfulPreparation() async throws {
+	@Test func overlappingPreparationsShareOneSuccessfulSync() async throws {
 		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled)
+		let model = try await makeWarmPreparationModel(httpClient: controlled)
 		let syncData = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
 
-		let older = Task { await model.prepareOfflineLibrary() }
-		let olderSync = await controlled.nextRequest()
-		#expect(olderSync.request.url?.path == "/api/v1/sync")
-
-		let newer = Task { await model.prepareOfflineLibrary() }
-		let newerSync = await controlled.nextRequest()
-		#expect(newerSync.request.url?.path == "/api/v1/sync")
-		await controlled.resolve(newerSync, data: syncData)
-
-		// A successful preparation refreshes navigation, the subscription library, and
-		// the selected collection before it completes. Resolve those live requests so
-		// the older failure below is observed only after the newer preparation is done.
-		for _ in 0..<6 {
-			let request = await controlled.nextRequest()
-			let path = request.request.url?.path
-			let data: Data
-			switch path {
-			case "/reader/api/0/subscription/list":
-				data = try subscriptionsData([])
-			case "/api/v1/recommendations":
-				data = try responseData(items: [])
-			default:
-				data = Data(#"{"itemRefs":[],"unreadcounts":[]}"#.utf8)
-			}
-			await controlled.resolve(request, data: data)
-		}
-		await newer.value
-		#expect(model.isOffline == false)
-
-		await controlled.fail(olderSync, with: URLError(.notConnectedToInternet))
-		await older.value
+		let first = Task { await model.prepareOfflineLibrary() }
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		let second = Task { await model.prepareOfflineLibrary() }
+		await controlled.resolve(sync, data: syncData)
+		await first.value
+		await second.value
 
 		#expect(model.isOffline == false)
+		#expect(await controlled.requestCount() == 1)
 	}
 
-	@Test func olderSuccessfulPreparationCannotClearNewerOfflineFailure() async throws {
+	@Test func overlappingPreparationsShareOneConnectivityFailure() async throws {
 		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled)
-		let syncData = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
+		let model = try await makeWarmPreparationModel(httpClient: controlled)
 
-		let older = Task { await model.prepareOfflineLibrary() }
-		let olderSync = await controlled.nextRequest()
-		await controlled.resolve(olderSync, data: syncData)
-
-		var olderNavigationRequests: [ControlledHTTPClient.PendingRequest] = []
-		for _ in 0..<4 {
-			olderNavigationRequests.append(await controlled.nextRequest())
-		}
-
-		let newer = Task { await model.prepareOfflineLibrary() }
-		let newerSync = await controlled.nextRequest()
-		await controlled.fail(newerSync, with: URLError(.notConnectedToInternet))
-		await newer.value
-		#expect(model.isOffline)
-
-		for request in olderNavigationRequests {
-			let path = request.request.url?.path
-			let data: Data
-			switch path {
-			case "/reader/api/0/subscription/list":
-				data = try subscriptionsData([])
-			default:
-				data = Data(#"{"itemRefs":[],"unreadcounts":[]}"#.utf8)
-			}
-			await controlled.resolve(request, data: data)
-		}
-		await older.value
+		let first = Task { await model.prepareOfflineLibrary() }
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		let second = Task { await model.prepareOfflineLibrary() }
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await first.value
+		await second.value
 
 		#expect(model.isOffline)
+		#expect(await controlled.requestCount() == 1)
+	}
+
+	@Test func warmLaunchStillRefreshesPersonalizedForYouContent() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try await makeWarmPreparationModel(httpClient: controlled)
+
+		let load = Task { await model.load(section: .forYou) }
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		await controlled.resolve(
+			sync,
+			data: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8),
+		)
+		let recommendations = await controlled.nextRequest()
+		#expect(recommendations.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			recommendations,
+			data: try responseData(items: [makeArticle(id: "fresh-for-you")]),
+		)
+		await load.value
+
+		#expect(model.articles(for: .forYou).map(\.id) == ["fresh-for-you"])
+		#expect(await controlled.requestCount() == 2)
+	}
+
+	@Test func postPreparationForYouLoadStillRefreshesPersonalizedContent() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try await makeWarmPreparationModel(httpClient: controlled)
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let sync = await controlled.nextRequest()
+		await controlled.resolve(
+			sync,
+			data: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8),
+		)
+		await preparation.value
+
+		let load = Task { await model.load(section: .forYou) }
+		let recommendations = await controlled.nextRequest()
+		#expect(recommendations.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			recommendations,
+			data: try responseData(items: [makeArticle(id: "post-prepare-for-you")]),
+		)
+		await load.value
+
+		#expect(model.articles(for: .forYou).map(\.id) == ["post-prepare-for-you"])
+		#expect(await controlled.requestCount() == 2)
+	}
+
+	@Test func postPreparationFeedLoadRecoversAnEmptyCachedBody() async throws {
+		let client = WarmFeedRecoveryHTTPClient()
+		let fixture = try await makeWarmFeedModel(httpClient: client, cachedHTML: "")
+
+		await fixture.model.prepareOfflineLibrary()
+		await fixture.model.load(collection: fixture.collection)
+
+		let article = try #require(fixture.model.articles(for: fixture.collection).first)
+		#expect(article.id == "cached-feed-article")
+		#expect(article.html == "<p>Recovered body</p>")
+		#expect(await client.paths() == [
+			"/api/v1/sync",
+			"/reader/api/0/stream/items/ids",
+			"/reader/api/0/stream/items/contents",
+		])
+	}
+
+	@Test func warmFeedLaunchAndRefreshUseAuthoritativeSyncWithoutRefetchingCachedBodies() async throws {
+		let client = MockHTTPClient(
+			responseData: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
+		)
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
+
+		await fixture.model.prepareOfflineLibrary()
+		await fixture.model.load(collection: fixture.collection)
+		await fixture.model.refresh(collection: fixture.collection)
+
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
+	}
+
+	@Test func cachedFeedRestoresContinuationAndLoadsMoreAfterSyncOnlyPreparation() async throws {
+		let client = PaginationHTTPClient(streamID: "feed/7")
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
+
+		await fixture.model.prepareOfflineLibrary()
+		await fixture.model.load(collection: fixture.collection)
+
+		#expect(fixture.model.canLoadMore(collection: fixture.collection))
+		#expect(await client.requests().map(\.path) == ["/api/v1/sync"])
+
+		await fixture.model.loadMore(collection: fixture.collection)
+
+		#expect(fixture.model.allArticles(for: fixture.collection).contains(where: { $0.id == "older" }))
+		#expect(fixture.model.canLoadMore(collection: fixture.collection) == false)
+		let pageRequests = await client.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(pageRequests.map { $0.query["c"] } == ["page-2"])
+	}
+
+	@Test func cachedFeedWithoutPersistedContinuationResolvesPaginationOnceAfterUpgrade() async throws {
+		let client = PaginationHTTPClient(streamID: "feed/7")
+		let fixture = try await makeWarmFeedModel(httpClient: client)
+
+		await fixture.model.load(collection: fixture.collection)
+
+		#expect(fixture.model.canLoadMore(collection: fixture.collection))
+		let requests = await client.requests()
+		#expect(requests.map(\.path) == [
+			"/api/v1/sync",
+			"/reader/api/0/stream/items/ids",
+			"/reader/api/0/stream/items/contents",
+		])
+		let pageRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(pageRequests.map { $0.query["c"] } == [nil])
+	}
+
+	@Test func deletingTheLastFeedDuringSyncClearsItsNavigationAndSelection() async throws {
+		let deletion = Data(
+			#"{"cursor":"warm-cursor-2","hasMore":false,"changes":[{"sequence":2,"entityType":"feed","entityId":"daily","operation":"delete","changedAt":"2026-08-21T12:00:00.000Z","payload":null}]}"#.utf8
+		)
+		let client = MockHTTPClient(responseData: deletion)
+		let fixture = try await makeWarmFeedModel(httpClient: client)
+
+		await fixture.model.prepareOfflineLibrary()
+
+		#expect(fixture.model.subscriptions.isEmpty)
+		#expect(fixture.model.navigation.items.contains(where: { $0.kind == .feed }) == false)
+		#expect(fixture.model.selectedNavigationID == ReaderSection.forYou.rawValue)
 	}
 
 	@Test func failedNavigationRefreshStillShowsConnectedFeedNavigationWhenForYouLoads() async throws {
@@ -863,7 +948,7 @@ struct ReaderAppModelTests {
 		let itemIDRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
 		#expect(itemIDRequests.count == 3)
 		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil])
-		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 3)
+		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 2)
 	}
 
 	@Test func repeatedFolderContinuationStopsWithoutAppendingDuplicateArticlesOrRequestingAgain() async throws {
@@ -1899,6 +1984,263 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.isEmpty)
 	}
 
+	@Test func warmReloadBenchmarkBeforeAndAfterOptimization() async throws {
+		var baselineLaunchSamples: [Double] = []
+		var baselineRefreshSamples: [Double] = []
+		var launchSamples: [Double] = []
+		var refreshSamples: [Double] = []
+		var launchRequests = 0
+		var launchBytes = 0
+		var refreshRequests = 0
+		var refreshBytes = 0
+
+		for run in 1...3 {
+			let baseline = try await makeWarmBenchmarkModel()
+			let baselineClient = PigeonAPIClient(
+				session: try #require(baseline.model.session),
+				httpClient: baseline.client,
+			)
+			let baselineLaunchStart = Date.now.timeIntervalSinceReferenceDate
+			_ = try await baselineClient.incrementalSync(cursor: "warm-cursor")
+			await baseline.model.loadNavigation(force: true)
+			await baseline.model.loadLibrary(force: true)
+			let baselineLaunchPage = try await baselineClient.recommendationsPage(from: baseline.collection.streamID)
+			try await baseline.store.saveArticles(
+				baselineLaunchPage.items,
+				collectionID: baseline.collection.id,
+				accountID: try #require(baseline.model.session?.storageIdentity),
+			)
+			try await baseline.store.saveNavigation(
+				baseline.model.navigation,
+				accountID: try #require(baseline.model.session?.storageIdentity),
+			)
+			baseline.model.setArticles(baselineLaunchPage.items, for: baseline.collection)
+			baseline.model.writeWidgetSnapshot()
+			let baselineLaunchElapsed = Date.now.timeIntervalSinceReferenceDate - baselineLaunchStart
+			baselineLaunchSamples.append(baselineLaunchElapsed)
+
+			await baseline.client.resetMetrics()
+			let baselineRefreshStart = Date.now.timeIntervalSinceReferenceDate
+			let baselineRefreshPage = try await baselineClient.recommendationsPage(from: baseline.collection.streamID)
+			try await baseline.store.saveArticles(
+				baselineRefreshPage.items,
+				collectionID: baseline.collection.id,
+				accountID: try #require(baseline.model.session?.storageIdentity),
+			)
+			try await baseline.store.saveNavigation(
+				baseline.model.navigation,
+				accountID: try #require(baseline.model.session?.storageIdentity),
+			)
+			baseline.model.setArticles(baselineRefreshPage.items, for: baseline.collection)
+			baseline.model.writeWidgetSnapshot()
+			await baseline.model.loadNavigation(force: true)
+			let baselineRefreshElapsed = Date.now.timeIntervalSinceReferenceDate - baselineRefreshStart
+			baselineRefreshSamples.append(baselineRefreshElapsed)
+			print("RELOAD_BENCH baseline run=\(run) launch=\(baselineLaunchElapsed) refresh=\(baselineRefreshElapsed)")
+
+			let launch = try await makeWarmBenchmarkModel()
+			let launchStart = Date.now.timeIntervalSinceReferenceDate
+			async let shellPreparation: Void = launch.model.prepareOfflineLibrary()
+			async let visibleCollectionLoad: Void = launch.model.load(collection: launch.collection)
+			_ = await (shellPreparation, visibleCollectionLoad)
+			let launchElapsed = Date.now.timeIntervalSinceReferenceDate - launchStart
+			let launchMetrics = await launch.client.metrics()
+			launchSamples.append(launchElapsed)
+			launchRequests += launchMetrics.requestCount
+			launchBytes += launchMetrics.byteCount
+			print("RELOAD_BENCH launch run=\(run) seconds=\(launchElapsed) requests=\(launchMetrics.requestCount) bytes=\(launchMetrics.byteCount)")
+
+			await launch.client.resetMetrics()
+			let refreshStart = Date.now.timeIntervalSinceReferenceDate
+			await launch.model.refresh(collection: launch.collection)
+			let refreshElapsed = Date.now.timeIntervalSinceReferenceDate - refreshStart
+			let refreshMetrics = await launch.client.metrics()
+			refreshSamples.append(refreshElapsed)
+			refreshRequests += refreshMetrics.requestCount
+			refreshBytes += refreshMetrics.byteCount
+			print("RELOAD_BENCH refresh run=\(run) seconds=\(refreshElapsed) requests=\(refreshMetrics.requestCount) bytes=\(refreshMetrics.byteCount)")
+			#expect(launchMetrics.paths == ["/api/v1/sync"])
+			#expect(refreshMetrics.paths == ["/api/v1/sync"])
+		}
+
+		let baselineLaunchMedian = median(baselineLaunchSamples)
+		let baselineRefreshMedian = median(baselineRefreshSamples)
+		let launchMedian = median(launchSamples)
+		let refreshMedian = median(refreshSamples)
+		print("RELOAD_BENCH summary baselineLaunchMedian=\(baselineLaunchMedian) launchMedian=\(launchMedian) baselineRefreshMedian=\(baselineRefreshMedian) refreshMedian=\(refreshMedian) launchAvgRequests=\(launchRequests / 3) launchAvgBytes=\(launchBytes / 3) refreshAvgRequests=\(refreshRequests / 3) refreshAvgBytes=\(refreshBytes / 3)")
+		#expect(launchMedian <= baselineLaunchMedian * 0.1)
+		#expect(refreshMedian <= baselineRefreshMedian * 0.1)
+	}
+
+	private func median(_ samples: [Double]) -> Double {
+		let sorted = samples.sorted()
+		return sorted[sorted.count / 2]
+	}
+
+	private func makeWarmPreparationModel(httpClient: any HTTPClient) async throws -> ReaderAppModel {
+		let session = try makeSession(token: "warm-preparation-token")
+		let store = OfflineLibraryStore.inMemory()
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let navigation = ReaderNavigationState(
+			items: ReaderSection.allCases.map { section in
+				ReaderNavigationItem.smart(section, unreadCount: section == .forYou ? 1 : 0)
+			},
+			expandedFolderIDs: [],
+		)
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.saveArticles(
+			[makeArticle(id: "cached-for-you")],
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: collection.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: session.storageIdentity,
+		)
+		return try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+	}
+
+	private func makeWarmFeedModel(
+		httpClient: any HTTPClient,
+		cachedHTML: String = "<p>Body</p>",
+		continuation: String? = nil,
+	) async throws -> (model: ReaderAppModel, collection: ReaderNavigationItem) {
+		let session = try makeSession(token: "warm-feed-token")
+		let store = OfflineLibraryStore.inMemory()
+		let collection = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Daily Brief",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "daily",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(
+			items: ReaderSection.allCases.map { ReaderNavigationItem.smart($0) } + [collection],
+			expandedFolderIDs: [],
+		)
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.saveSubscriptions(
+			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "cached-feed-article", feedKey: "daily", html: cachedHTML)],
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
+		try await store.saveCollectionContinuation(
+			continuation,
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: collection.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: httpClient, session: session, offlineStore: store)
+		return (model, collection)
+	}
+
+	private func makeWarmBenchmarkModel() async throws -> (
+		model: ReaderAppModel,
+		client: BenchmarkHTTPClient,
+		store: OfflineLibraryStore,
+		collection: ReaderNavigationItem,
+	) {
+		let session = try makeSession(token: "benchmark-token")
+		let store = OfflineLibraryStore.inMemory()
+		let client = BenchmarkHTTPClient()
+		let collection = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Benchmark Feed",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 50,
+			parentID: nil,
+			feedKey: "daily",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(
+			items: ReaderSection.allCases.map { section in
+				ReaderNavigationItem.smart(section, unreadCount: section == .unread ? 50 : 0)
+			} + [collection],
+			expandedFolderIDs: [],
+		)
+		let articles = (0..<50).map { index in
+			makeArticle(
+				id: "item-\(index)",
+				feedKey: "daily",
+				readerId: "item-\(index)",
+			)
+		}
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.saveSubscriptions(
+			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(articles, collectionID: collection.id, accountID: session.storageIdentity)
+		try await store.saveCollectionContinuation(
+			"page-2",
+			collectionID: collection.id,
+			accountID: session.storageIdentity,
+		)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: collection.id,
+			selectedArticleIDs: [:],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+		)
+		try await store.saveRestoration(restoration, accountID: session.storageIdentity)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		return (model, client, store, collection)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
@@ -1979,6 +2321,7 @@ struct ReaderAppModelTests {
 		feedKey: String = "daily",
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
+		html: String = "<p>Body</p>",
 	) -> Recommendation {
 		Recommendation(
 			id: id,
@@ -1986,7 +2329,7 @@ struct ReaderAppModelTests {
 			feedKey: feedKey,
 			source: "Daily",
 			title: "Story \(id)",
-			html: "<p>Body</p>",
+			html: html,
 			text: "Body",
 			originalURL: nil,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
@@ -2035,6 +2378,106 @@ struct ReaderAppModelTests {
 			"{\"id\":\"\($0)\",\"categories\":[],\"title\":\"\($0)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
 		}.joined(separator: ",")
 		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+	}
+}
+
+private struct BenchmarkMetrics: Sendable {
+	let requestCount: Int
+	let byteCount: Int
+	let paths: [String]
+}
+
+private actor WarmFeedRecoveryHTTPClient: HTTPClient {
+	private var capturedPaths: [String] = []
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else { throw PigeonError.invalidServerURL }
+		capturedPaths.append(url.path)
+		let data: Data
+		switch url.path {
+		case "/api/v1/sync":
+			data = Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/reader/api/0/stream/items/ids":
+			data = Data(#"{"itemRefs":[{"id":"cached-feed-article"}]}"#.utf8)
+		case "/reader/api/0/stream/items/contents":
+			data = Data(
+				#"{"id":"feed/7","updated":0,"items":[{"id":"cached-feed-article","categories":[],"title":"Recovered","published":1786272000,"summary":{"content":"<p>Recovered body</p>"},"content":{"content":"<p>Recovered body</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily Brief","htmlUrl":"https://example.com"}}]}"#.utf8
+			)
+		default:
+			data = Data(#"{"error":"not found"}"#.utf8)
+		}
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func paths() -> [String] {
+		capturedPaths
+	}
+}
+
+private actor BenchmarkHTTPClient: HTTPClient {
+	private var requestCount = 0
+	private var byteCount = 0
+	private var paths: [String] = []
+	private let body = String(repeating: "newsletter-body-", count: 750)
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else { throw PigeonError.invalidServerURL }
+		let delay: UInt64 = url.path == "/reader/api/0/stream/items/contents" ? 100_000_000 : 25_000_000
+		try await Task.sleep(nanoseconds: delay)
+		let data = try responseData(for: request, url: url)
+		requestCount += 1
+		byteCount += (request.httpBody?.count ?? 0) + data.count
+		paths.append(url.path)
+		return (data, try response(for: url))
+	}
+
+	func metrics() -> BenchmarkMetrics {
+		BenchmarkMetrics(requestCount: requestCount, byteCount: byteCount, paths: paths)
+	}
+
+	func resetMetrics() {
+		requestCount = 0
+		byteCount = 0
+		paths = []
+	}
+
+	private func responseData(for request: URLRequest, url: URL) throws -> Data {
+		switch url.path {
+		case "/api/v1/sync":
+			return Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/reader/api/0/subscription/list":
+			return Data(#"{"subscriptions":[{"id":"feed/7","title":"Benchmark Feed","categories":[],"url":"https://pigeon.test/feed/daily","iconUrl":null}]}"#.utf8)
+		case "/reader/api/0/unread-count":
+			return Data(#"{"unreadcounts":[{"id":"feed/7","count":50}]}"#.utf8)
+		case "/reader/api/0/stream/items/ids":
+			let streamID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "s" })?.value
+			guard streamID == "feed/7" else { return Data(#"{"itemRefs":[]}"#.utf8) }
+			let refs = (0..<50).map { "{\"id\":\"item-\($0)\"}" }.joined(separator: ",")
+			return Data("{\"itemRefs\":[\(refs)]}".utf8)
+		case "/reader/api/0/stream/items/contents":
+			let rawBody = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+			let ids = (URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? [])
+				.filter { $0.name == "i" }
+				.compactMap(\.value)
+			let items = ids.map { id in
+				"{\"id\":\"\(id)\",\"categories\":[],\"title\":\"Story \(id)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>\(body)</p>\"},\"content\":{\"content\":\"<p>\(body)</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"Benchmark Feed\",\"htmlUrl\":\"https://pigeon.test/feed/daily\"}}"
+			}.joined(separator: ",")
+			return Data("{\"id\":\"feed/7\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		case "/api/v1/recommendations":
+			return Data(#"{"generatedAt":"2026-08-21T00:00:00Z","view":"for-you","items":[]}"#.utf8)
+		default:
+			return Data(#"{"error":"not found"}"#.utf8)
+		}
+	}
+
+	private func response(for url: URL) throws -> HTTPURLResponse {
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return response
 	}
 }
 
@@ -2088,6 +2531,10 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 			articleSaveIsPaused = false
 		}
 		try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws {
+		try await base.saveCollectionContinuation(continuation, collectionID: collectionID, accountID: accountID)
 	}
 
 	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws {
@@ -2248,11 +2695,13 @@ private actor PaginationHTTPClient: HTTPClient {
 	}
 
 	private let repeatsContinuation: Bool
+	private let streamID: String
 	private var capturedRequests: [RequestSnapshot] = []
 	private var shouldFailNextItemIDRequest = false
 
-	init(repeatsContinuation: Bool = false) {
+	init(repeatsContinuation: Bool = false, streamID: String = "user/-/label/News") {
 		self.repeatsContinuation = repeatsContinuation
+		self.streamID = streamID
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -2272,7 +2721,7 @@ private actor PaginationHTTPClient: HTTPClient {
 		let data: Data
 		switch url.path {
 		case "/reader/api/0/stream/items/ids":
-			guard query["s"] == "user/-/label/News" else {
+			guard query["s"] == streamID else {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 				return (data, try Self.response(for: url, statusCode: 200))
 			}
@@ -2286,7 +2735,10 @@ private actor PaginationHTTPClient: HTTPClient {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 			}
 		case "/reader/api/0/stream/items/contents":
-			data = Self.contentsResponse(for: Self.formValues(from: request.httpBody, named: "i"))
+			data = Self.contentsResponse(
+				for: Self.formValues(from: request.httpBody, named: "i"),
+				streamID: streamID,
+			)
 		default:
 			data = Data(#"{"error":"not found"}"#.utf8)
 		}
@@ -2303,7 +2755,7 @@ private actor PaginationHTTPClient: HTTPClient {
 		shouldFailNextItemIDRequest = true
 	}
 
-	private static func contentsResponse(for ids: [String]) -> Data {
+	private static func contentsResponse(for ids: [String], streamID: String) -> Data {
 		let items = ids.map { id in
 			let published: Int
 			switch id {
@@ -2311,9 +2763,9 @@ private actor PaginationHTTPClient: HTTPClient {
 			case "middle": published = 1_786_272_002
 			default: published = 1_786_272_001
 			}
-			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
 		}.joined(separator: ",")
-		return Data("{\"id\":\"user/-/label/News\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		return Data("{\"id\":\"\(streamID)\",\"updated\":0,\"items\":[\(items)]}".utf8)
 	}
 
 	private static func formValues(from body: Data?, named name: String) -> [String] {
