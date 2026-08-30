@@ -1651,6 +1651,30 @@ struct ReaderAppModelTests {
 		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
+	@Test func markAllDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let hiddenUnread = makeArticle(id: "hidden-unread", title: "Newsletter unread")
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, title: "Newsletter read")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleRead], for: collection)
+		try await store.saveArticles([hiddenUnread, visibleRead], collectionID: collection.id, accountID: accountID)
+		model.articleFilter = .read
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.displayedSearchResults.map(\.id) == [visibleRead.id])
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
 	@Test func markAllDuringCollectionSearchMarksVisibleHitsNotHiddenNeighbors() async throws {
 		let mock = MockHTTPClient()
 		let store = OfflineLibraryStore.inMemory()
