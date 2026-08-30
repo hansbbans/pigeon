@@ -1634,6 +1634,45 @@ struct ReaderAppModelTests {
 		#expect(snapshot.starredCount == 3)
 	}
 
+	@Test func widgetSnapshotUsesTheStarredUnreadBadgeWhenTheCachedPageIsEmpty() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 6),
+				.smart(.starred, unreadCount: 3),
+			]),
+		)
+		model.setArticles([], for: .starred)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.starredCount == 3)
+	}
+
+	@Test func widgetStarredCountDoesNotTreatAPartialPageAsTheTotal() {
+		#expect(
+			WidgetStarredCountResolver.resolve(
+				cachedCount: 30,
+				knownStarredCount: 30,
+				unreadBadge: 40,
+				previousTotal: nil,
+				hasMore: true,
+			) == 40,
+		)
+	}
+
+	@Test func widgetStarredCountRetainsReadStoriesBeyondThePartialPage() {
+		#expect(
+			WidgetStarredCountResolver.resolve(
+				cachedCount: 2,
+				knownStarredCount: 2,
+				unreadBadge: 1,
+				previousTotal: 4,
+				hasMore: true,
+			) == 4,
+		)
+	}
+
 	@Test func widgetSnapshotCountsReadStarredStoriesFromOtherListsWhenStarredIsUnloaded() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		model.setNavigation(

@@ -8,6 +8,25 @@ struct PendingFeedRequest: Identifiable, Equatable {
 	let url: URL
 }
 
+struct WidgetStarredCountResolver {
+	static func resolve(
+		cachedCount: Int?,
+		knownStarredCount: Int,
+		unreadBadge: Int,
+		previousTotal: Int?,
+		hasMore: Bool,
+	) -> Int {
+		let knownCount = max(knownStarredCount, unreadBadge)
+		if hasMore {
+			return max(previousTotal ?? 0, knownCount)
+		}
+		guard let cachedCount, cachedCount > 0 else {
+			return knownCount
+		}
+		return max(cachedCount, knownStarredCount)
+	}
+}
+
 @MainActor
 @Observable
 final class ReaderAppModel {
@@ -598,6 +617,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
 		let allArticles = Dictionary(
 			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
 			uniquingKeysWith: { first, _ in first },
@@ -607,7 +627,7 @@ final class ReaderAppModel {
 		let snapshot = PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
-			starredCount: widgetStarredCount(from: allArticles),
+			starredCount: widgetStarredCount(from: allArticles, previousTotal: previousSnapshot.starredCount),
 			recent: Array(recent),
 			forYou: Array(forYou),
 		)
@@ -617,16 +637,23 @@ final class ReaderAppModel {
 	}
 
 	/// The counts widget labels this as a starred total, not an unread badge.
-	/// Prefer loaded starred rows (including read ones). Fall back to unique
-	/// starred stories in memory, then the Starred unread badge if nothing
-	/// starred has been cached yet.
-	private func widgetStarredCount(from articles: some Collection<Recommendation>) -> Int {
+	/// Prefer a complete Starred page (including read rows). A cached page with
+	/// a continuation is only a lower bound, so retain the prior widget total
+	/// until pagination finishes rather than treating that page as the total.
+	private func widgetStarredCount(
+		from articles: some Collection<Recommendation>,
+		previousTotal: Int?,
+	) -> Int {
 		let cachedStarred = articles.count(where: \.isStarred)
-		if let starredArticles = articleCache[ReaderSection.starred.rawValue] {
-			return max(starredArticles.count, cachedStarred)
-		}
 		let unreadStarredBadge = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
-		return max(cachedStarred, unreadStarredBadge)
+		let starredID = ReaderSection.starred.rawValue
+		return WidgetStarredCountResolver.resolve(
+			cachedCount: articleCache[starredID]?.count,
+			knownStarredCount: cachedStarred,
+			unreadBadge: unreadStarredBadge,
+			previousTotal: previousTotal,
+			hasMore: streamContinuations[starredID] != nil,
+		)
 	}
 
 	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {
