@@ -47,4 +47,18 @@ struct ArticleReaderContentIdentityTests {
 			) == 0
 		)
 	}
+
+	@Test func preservesSavedDepthDuringInitialPersistedModeTransition() {
+		let feedContent = ArticleReaderContentIdentity(articleID: "item-1", mode: .feedContent)
+		let persistedReaderView = ArticleReaderContentIdentity(articleID: "item-1", mode: .readerView)
+
+		#expect(
+			ArticleReaderContentIdentity.pendingRestoredDepth(
+				previous: feedContent,
+				current: persistedReaderView,
+				savedDepth: 0.72,
+				preserveSavedDepth: true,
+			) == 0.72
+		)
+	}
 }

@@ -15,8 +15,9 @@ struct ArticleReaderContentIdentity: Hashable, Sendable {
 		previous: ArticleReaderContentIdentity?,
 		current: ArticleReaderContentIdentity,
 		savedDepth: Double,
+		preserveSavedDepth: Bool = false,
 	) -> Double {
-		if previous?.articleID == current.articleID {
+		if previous?.articleID == current.articleID, preserveSavedDepth == false {
 			return 0
 		}
 		return min(max(savedDepth, 0), 1)

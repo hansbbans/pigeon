@@ -12,6 +12,8 @@ struct ArticleReaderView: View {
 	@State private var readerViewState = ReaderViewLoadState.idle
 	@State private var scrollPosition = ScrollPosition()
 	@State private var pendingRestoredDepth: Double?
+	@State private var modeResolutionArticleID: String?
+	@State private var restoredModeForArticle: ReaderMode?
 	@State private var scrollBoundary = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
 	@State private var boundaryNavigationInProgress = false
 
@@ -121,7 +123,10 @@ struct ArticleReaderView: View {
 			ReaderSettingsToolbarItem()
 		}
 		.task(id: current.feedKey) {
-			selectedMode = current.safeOriginalURL == nil ? .feedContent : model.readerMode(for: current.feedKey)
+			let restoredMode = current.safeOriginalURL == nil ? ReaderMode.feedContent : model.readerMode(for: current.feedKey)
+			modeResolutionArticleID = current.id
+			restoredModeForArticle = restoredMode
+			selectedMode = restoredMode
 			readerDocument = nil
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
@@ -138,6 +143,7 @@ struct ArticleReaderView: View {
 				previous: previous,
 				current: currentIdentity,
 				savedDepth: model.articleScrollOffset(for: currentIdentity.articleID),
+				preserveSavedDepth: modeResolutionArticleID != currentIdentity.articleID || restoredModeForArticle == currentIdentity.mode,
 			)
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
