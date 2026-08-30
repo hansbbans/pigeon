@@ -1498,8 +1498,8 @@ struct ReaderAppModelTests {
 		model.recordScrollDepth(itemId: article.id, depth: 0.59)
 		await Task.yield()
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
-		model.recordScrollDepth(itemId: article.id, depth: 0.6)
-		try await Task.sleep(for: .milliseconds(100))
+		let readTask = model.recordScrollDepth(itemId: article.id, depth: 0.6)
+		await readTask?.value
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 
@@ -1518,13 +1518,13 @@ struct ReaderAppModelTests {
 		await Task.yield()
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
 
-		model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
+		let readTask = model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
 			offset: 0,
 			maximumOffset: 0,
 			contentHeight: 360,
 			isBodyLaidOut: true,
 		))
-		try await Task.sleep(for: .milliseconds(100))
+		await readTask?.value
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 

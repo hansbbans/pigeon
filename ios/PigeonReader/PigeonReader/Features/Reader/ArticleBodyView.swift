@@ -1,5 +1,10 @@
 import SwiftUI
 
+nonisolated struct ArticleBodyLayoutIdentity: Hashable, Sendable {
+	let articleID: String
+	let content: String
+}
+
 struct ArticleBodyView: View {
 	let content: String
 	let fallbackText: String

@@ -175,6 +175,7 @@ struct ArticleReaderView: View {
 				openedDestination: openInlineDestination,
 				saveToReader: saveInlineDestination,
 			)
+			.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
 		case .readerView:
 			readerViewContent(for: article)
 		case .website:
@@ -219,6 +220,7 @@ struct ArticleReaderView: View {
 						openedDestination: openInlineDestination,
 						saveToReader: saveInlineDestination,
 					)
+					.id(ArticleBodyLayoutIdentity(articleID: article.id, content: readerDocument.contentHTML))
 				}
 				.accessibilityElement(children: .contain)
 				.accessibilityIdentifier("reader-view-loaded-content")
@@ -288,6 +290,7 @@ struct ArticleReaderView: View {
 					openedDestination: openInlineDestination,
 					saveToReader: saveInlineDestination,
 				)
+				.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)

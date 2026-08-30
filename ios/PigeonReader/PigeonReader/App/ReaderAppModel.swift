@@ -2071,26 +2071,29 @@ final class ReaderAppModel {
 		}
 	}
 
-	func recordScrollDepth(itemId: String, depth: Double) {
+	@discardableResult
+	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		var readTask: Task<Void, Never>?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
 			scrollReadTriggered.insert(itemId).inserted,
 			let article = article(withId: itemId),
 			article.isRead == false {
-			Task { @MainActor [weak self] in
+			readTask = Task { @MainActor [weak self] in
 				await self?.setRead(article, read: true)
 			}
 		}
 		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
-			return
+			return readTask
 		}
 		guard sentScrollThresholds[itemId, default: []].insert(threshold).inserted else {
-			return
+			return readTask
 		}
 		let event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
 		Task { @MainActor [weak self] in
 			await self?.send(event)
 		}
+		return readTask
 	}
 
 	func recordOutboundClick(itemId: String, destinationHost: String) async {
