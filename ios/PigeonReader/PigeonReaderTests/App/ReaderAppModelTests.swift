@@ -42,16 +42,12 @@ struct ReaderAppModelTests {
 		let article = makeArticle(id: "item-1", isRead: true)
 		model.articles = [article]
 
-		let monitor = Task {
-			await model.monitorActiveReading(
-				for: article.id,
-				interval: .milliseconds(5),
-				minimumActiveDuration: 0,
-			)
-		}
-		try await Task.sleep(for: .milliseconds(80))
-		monitor.cancel()
-		await monitor.value
+		await model.monitorActiveReading(
+			for: article.id,
+			interval: .zero,
+			minimumActiveDuration: 0,
+			maximumIntervals: 2,
+		)
 
 		#expect(model.errorMessage == nil)
 		let requests = await mock.requests()
@@ -65,16 +61,12 @@ struct ReaderAppModelTests {
 		let article = makeArticle(id: "item-1", isRead: true)
 		model.articles = [article]
 
-		let monitor = Task {
-			await model.monitorActiveReading(
-				for: article.id,
-				interval: .milliseconds(5),
-				minimumActiveDuration: 0,
-			)
-		}
-		try await Task.sleep(for: .milliseconds(40))
-		monitor.cancel()
-		await monitor.value
+		await model.monitorActiveReading(
+			for: article.id,
+			interval: .zero,
+			minimumActiveDuration: 0,
+			maximumIntervals: 1,
+		)
 
 		#expect(model.errorMessage == nil)
 	}
@@ -85,18 +77,14 @@ struct ReaderAppModelTests {
 		let article = makeArticle(id: "item-1", isRead: true)
 		model.articles = [article]
 
-		let monitor = Task {
-			await model.monitorActiveReading(
-				for: article.id,
-				interval: .seconds(3_600),
-				minimumActiveDuration: 0,
-			)
-		}
-		try await Task.sleep(for: .milliseconds(20))
-		model.recordScrollDepth(itemId: article.id, depth: 0.3)
-		try await Task.sleep(for: .milliseconds(80))
-		monitor.cancel()
-		await monitor.value
+		await model.monitorActiveReading(
+			for: article.id,
+			interval: .zero,
+			minimumActiveDuration: 0,
+			maximumIntervals: 0,
+		)
+		let send = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.3))
+		await send.value
 
 		#expect(model.errorMessage == nil)
 		let requests = await mock.requests()
@@ -1562,11 +1550,11 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
 
 		model.readerTypography.markReadBehavior = .onScroll
-		model.recordScrollDepth(itemId: article.id, depth: 0.59)
-		await Task.yield()
+		let belowThreshold = model.recordScrollDepth(itemId: article.id, depth: 0.59)
+		await belowThreshold?.value
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
-		model.recordScrollDepth(itemId: article.id, depth: 0.6)
-		try await Task.sleep(for: .milliseconds(100))
+		let threshold = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.6))
+		await threshold.value
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 

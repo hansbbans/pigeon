@@ -2052,13 +2052,16 @@ final class ReaderAppModel {
 		for articleId: String,
 		interval: Duration = .seconds(15),
 		minimumActiveDuration: TimeInterval = 10,
+		maximumIntervals: Int? = nil,
 	) async {
 		guard apiClient != nil, engagement.resume(itemId: articleId, at: .now) else {
 			return
 		}
 		defer { engagement.pause(itemId: articleId, at: .now) }
+		guard maximumIntervals != 0 else { return }
 
 		do {
+			var completedIntervals = 0
 			while !Task.isCancelled {
 				try await Task.sleep(for: interval)
 				try Task.checkCancellation()
@@ -2069,31 +2072,47 @@ final class ReaderAppModel {
 				) {
 					_ = await send(event, reportErrors: false)
 				}
+				completedIntervals += 1
+				if let maximumIntervals, completedIntervals >= maximumIntervals {
+					return
+				}
 			}
 		} catch {
 			return
 		}
 	}
 
-	func recordScrollDepth(itemId: String, depth: Double) {
+	@discardableResult
+	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		let articleToMarkRead: Recommendation?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
 			scrollReadTriggered.insert(itemId).inserted,
 			let article = article(withId: itemId),
 			article.isRead == false {
-			Task { @MainActor [weak self] in
-				await self?.setRead(article, read: true)
+			articleToMarkRead = article
+		} else {
+			articleToMarkRead = nil
+		}
+
+		let event: EngagementEvent?
+		if let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth),
+			threshold > 0,
+			sentScrollThresholds[itemId, default: []].insert(threshold).inserted {
+			event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
+		} else {
+			event = nil
+		}
+
+		guard articleToMarkRead != nil || event != nil else { return nil }
+		return Task { @MainActor [weak self] in
+			guard let self else { return }
+			if let articleToMarkRead {
+				await self.setRead(articleToMarkRead, read: true)
 			}
-		}
-		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
-			return
-		}
-		guard sentScrollThresholds[itemId, default: []].insert(threshold).inserted else {
-			return
-		}
-		let event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
-		Task { @MainActor [weak self] in
-			await self?.send(event, reportErrors: false)
+			if let event {
+				await self.send(event, reportErrors: false)
+			}
 		}
 	}
 
