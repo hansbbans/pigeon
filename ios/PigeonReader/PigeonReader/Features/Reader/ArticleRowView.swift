@@ -4,33 +4,42 @@ struct ArticleRowView: View {
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let select: () -> Void
 	@State private var didRequestBlockedThumbnail = false
 
 	init(
 		article: Recommendation,
 		density: ReaderTimelineDensity = .comfortable,
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
+		select: @escaping () -> Void,
 	) {
 		self.article = article
 		self.density = density
 		self.remoteImagePolicy = remoteImagePolicy
+		self.select = select
 	}
 
 	var body: some View {
 		HStack(alignment: .top, spacing: 10) {
-			storyText
-			if density == .imageRich {
+			Button(action: select) {
+				HStack(alignment: .top, spacing: 10) {
+					storyText
+					if density == .imageRich, thumbnailPresentation != .askToLoad {
+						thumbnail
+					}
+				}
+				.frame(maxWidth: .infinity, alignment: .leading)
+				.accessibilityElement(children: .combine)
+				.accessibilityValue(article.isRead ? "Read" : "Unread")
+			}
+			.buttonStyle(.plain)
+			if density == .imageRich, thumbnailPresentation == .askToLoad {
 				thumbnail
 			}
 		}
 		.padding(.vertical, density == .titleOnly ? 1 : 3)
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.opacity(article.isRead ? 0.55 : 1)
-		.accessibilityElement(children: .combine)
-		.accessibilityValue(article.isRead ? "Read" : "Unread")
-		.modifier(BlockedThumbnailLoadAction(isAvailable: thumbnailPresentation == .askToLoad) {
-			didRequestBlockedThumbnail = true
-		})
 	}
 
 	private var thumbnailPresentation: ArticleImagePolicy.ListThumbnail {
@@ -125,19 +134,5 @@ struct ArticleRowView: View {
 		}
 		.clipShape(.rect(cornerRadius: 8))
 		.accessibilityHidden(true)
-	}
-}
-
-private struct BlockedThumbnailLoadAction: ViewModifier {
-	let isAvailable: Bool
-	let load: () -> Void
-
-	@ViewBuilder
-	func body(content: Content) -> some View {
-		if isAvailable {
-			content.accessibilityAction(named: "Load this remote image", load)
-		} else {
-			content
-		}
 	}
 }
