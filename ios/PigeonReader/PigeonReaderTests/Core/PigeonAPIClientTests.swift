@@ -309,6 +309,52 @@ struct PigeonAPIClientTests {
 		#expect(Self.formValues(from: allContentRequests.last?.body, named: "i") == ["0"])
 	}
 
+	@Test func folderRecommendationsReuseCachedBodiesInServerOrder() async throws {
+		let mock = FolderLoadingHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+		let cached = (1...21).map { Self.cachedRecommendation(itemID: $0) }
+
+		let page = try await client.recommendationsPage(
+			from: "user/-/label/News",
+			cachedRecommendations: cached,
+		)
+
+		#expect(page.items.map(\.title) == (1...21).reversed().map { "Cached \($0)" })
+		#expect(page.continuation == "folder-page-2")
+		let requests = await mock.requests()
+		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }.count == 1)
+		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/items/contents" }) == false)
+	}
+
+	@Test func folderRecommendationsFetchOnlyMissingOrPrunedCachedBodies() async throws {
+		let mock = FolderLoadingHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+		let cached = (1...21).map { itemID in
+			Self.cachedRecommendation(itemID: itemID, html: itemID == 21 ? "" : "<p>Cached</p>")
+		}
+
+		let page = try await client.recommendationsPage(
+			from: "user/-/label/News",
+			cachedRecommendations: cached,
+		)
+
+		#expect(page.items.count == 21)
+		#expect(page.items.first?.title == "Newest")
+		#expect(page.items.dropFirst().map(\.title) == (1...20).reversed().map { "Cached \($0)" })
+		let requests = await mock.requests()
+		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 1)
+		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == ["21"])
+	}
+
 	@Test func legacyRecommendationsEntryPointDoesNotDrainFolderContinuations() async throws {
 		let mock = FolderLoadingHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -329,6 +375,29 @@ struct PigeonAPIClientTests {
 		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
 		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
 		return queryItems.filter { $0.name == name }.compactMap(\.value)
+	}
+
+	private static func cachedRecommendation(itemID: Int, html: String = "<p>Cached</p>") -> Recommendation {
+		let hex = String(itemID, radix: 16)
+		let paddedHex = String(repeating: "0", count: max(0, 16 - hex.count)) + hex
+		return Recommendation(
+			id: "cached-\(itemID)",
+			readerId: "tag:google.com,2005:reader/item/\(paddedHex)",
+			feedKey: "news",
+			source: "News",
+			title: "Cached \(itemID)",
+			html: html,
+			text: "Cached",
+			originalURL: URL(string: "https://example.com/\(itemID)"),
+			receivedAt: Date(timeIntervalSince1970: TimeInterval(1_786_272_000 + itemID)),
+			isRead: false,
+			isStarred: false,
+			score: 0,
+			confidence: 0,
+			sampleCount: 0,
+			explanation: "Cached",
+			learningState: "Cached",
+		)
 	}
 }
 
