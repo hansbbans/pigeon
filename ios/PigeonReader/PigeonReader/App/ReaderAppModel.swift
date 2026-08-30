@@ -1758,12 +1758,19 @@ final class ReaderAppModel {
 		setArticles(newArticles, for: collection.id)
 	}
 
-	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
+	private func setArticles(
+		_ newArticles: [Recommendation],
+		for collectionID: String,
+		preserveOpenSelection: Bool = true,
+	) {
 		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
 			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
 		}
+		let articlesToSort = preserveOpenSelection
+			? articlesPreservingOpenSelection(newArticles, for: collectionID)
+			: newArticles
 		let sortedArticles = sortOrder(for: collectionID).sorted(
-			articlesPreservingOpenSelection(newArticles, for: collectionID),
+			articlesToSort,
 		)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
@@ -1844,6 +1851,12 @@ final class ReaderAppModel {
 		if isReadingOpenArticle,
 			selectedNavigationID == collectionID,
 			let found = article(withId: rememberedID) {
+			if collectionID == ReaderSection.today.rawValue,
+				ReaderLocalDayBounds.localDay(containing: .now).contains(found.receivedAt) == false {
+				selectedArticleID = found.id
+				selectedArticleIDs[collectionID] = found.id
+				return
+			}
 			let kept = preserveOpenArticle(found, in: collectionID)
 			selectedArticleID = kept.id
 			selectedArticleIDs[collectionID] = kept.id
@@ -2445,7 +2458,7 @@ final class ReaderAppModel {
 		}
 		streamDayBounds[todayID] = bounds
 		if droppedStale, let kept {
-			setArticles(kept, for: todayID)
+			setArticles(kept, for: todayID, preserveOpenSelection: false)
 			updateNavigationCount(
 				for: todayID,
 				to: kept.count(where: { $0.isRead == false }),

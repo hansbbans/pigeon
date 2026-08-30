@@ -1617,6 +1617,34 @@ struct ReaderAppModelTests {
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 2)
 	}
 
+	@Test func todayPruneKeepsAnOpenYesterdayReaderWithoutPersistingItInToday() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+		model.select(item: todayItem)
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "open-yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(60))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+		model.select(article: yesterday)
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: unreadItem.id, accountID: accountID)
+
+		#expect(await model.handleLocalDayChange())
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.selectedArticle?.id == yesterday.id)
+		#expect(model.preferredCompactColumn == .detail)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[todayItem.id]?.map(\.id) == [today.id])
+	}
+
 	@Test func markAllOnTodayAfterMidnightLeavesYesterdayUnreadInOtherLists() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
