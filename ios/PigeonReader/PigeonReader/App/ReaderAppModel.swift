@@ -2071,32 +2071,41 @@ final class ReaderAppModel {
 		}
 	}
 
-	func recordScrollDepth(itemId: String, depth: Double) {
+	@discardableResult
+	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		let articleToMarkRead: Recommendation?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
 			let article = article(withId: itemId),
 			article.isRead == false,
 			scrollReadTriggered.insert(itemId).inserted
 		{
-			Task { @MainActor [weak self] in
-				await self?.setRead(article, read: true)
-				guard let self else {
-					return
-				}
+			articleToMarkRead = article
+		} else {
+			articleToMarkRead = nil
+		}
+
+		let event: EngagementEvent?
+		if let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth),
+			threshold > 0,
+			sentScrollThresholds[itemId, default: []].insert(threshold).inserted {
+			event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
+		} else {
+			event = nil
+		}
+
+		guard articleToMarkRead != nil || event != nil else { return nil }
+		return Task { @MainActor [weak self] in
+			guard let self else { return }
+			if let articleToMarkRead {
+				await self.setRead(articleToMarkRead, read: true)
 				if self.article(withId: itemId)?.isRead == false {
-					self.forgetScrollRead(for: article)
+					self.forgetScrollRead(for: articleToMarkRead)
 				}
 			}
-		}
-		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
-			return
-		}
-		guard sentScrollThresholds[itemId, default: []].insert(threshold).inserted else {
-			return
-		}
-		let event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
-		Task { @MainActor [weak self] in
-			await self?.send(event)
+			if let event {
+				await self.send(event)
+			}
 		}
 	}
 
