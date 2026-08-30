@@ -2802,7 +2802,7 @@ final class ReaderAppModel {
 
 	private func markReadOrderArticles(in collection: ReaderNavigationItem) -> [Recommendation] {
 		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
-			return searchResults
+			return displayedSearchResults
 		}
 		return articleCache[collection.id] ?? []
 	}
