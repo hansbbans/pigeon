@@ -2776,7 +2776,7 @@ final class ReaderAppModel {
 	) -> [Recommendation] {
 		let displayedArticles: [Recommendation]
 		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
-			displayedArticles = searchResults
+			displayedArticles = displayedSearchResults
 		} else {
 			displayedArticles = articleCache[collection.id] ?? []
 		}
