@@ -1193,9 +1193,10 @@ struct ReaderAppModelTests {
 	@Test(arguments: ReaderSection.allCases)
 	func everySectionSortsByNewestOrScoreWithoutLosingSelection(section: ReaderSection) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
-		let olderHighScore = makeArticle(id: "older-high", receivedAt: 1_786_100_000, score: 90)
-		let newerHighScore = makeArticle(id: "newer-high", receivedAt: 1_786_200_000, score: 90)
-		let newestLowScore = makeArticle(id: "newest-low", receivedAt: 1_786_300_000, score: 10)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let olderHighScore = makeArticle(id: "older-high", receivedDate: day.addingTimeInterval(1_000), score: 90)
+		let newerHighScore = makeArticle(id: "newer-high", receivedDate: day.addingTimeInterval(2_000), score: 90)
+		let newestLowScore = makeArticle(id: "newest-low", receivedDate: day.addingTimeInterval(3_000), score: 10)
 		model.setArticles([olderHighScore, newestLowScore, newerHighScore], for: section)
 		model.select(section: section)
 		model.select(article: newerHighScore)
@@ -1282,7 +1283,11 @@ struct ReaderAppModelTests {
 	func articleFilterDistinguishesFilteredAndGenuinelyEmptyCollections(filter: ReaderArticleFilter) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let filteredCollection = ReaderNavigationItem.smart(.today)
-		let article = makeArticle(id: "opposite-state", isRead: filter == .unread)
+		let article = makeArticle(
+			id: "opposite-state",
+			isRead: filter == .unread,
+			receivedDate: ReaderLocalDayBounds.localDay(containing: .now).start.addingTimeInterval(3_600),
+		)
 		model.setArticles([article], for: filteredCollection)
 		model.setArticleFilter(filter, for: filteredCollection)
 
