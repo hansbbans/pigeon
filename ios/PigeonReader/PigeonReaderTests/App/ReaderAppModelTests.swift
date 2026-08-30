@@ -1194,9 +1194,9 @@ struct ReaderAppModelTests {
 	func everySectionSortsByNewestOrScoreWithoutLosingSelection(section: ReaderSection) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let day = ReaderLocalDayBounds.localDay(containing: .now).start
-		let olderHighScore = makeArticle(id: "older-high", receivedDate: day.addingTimeInterval(1_000), score: 90)
-		let newerHighScore = makeArticle(id: "newer-high", receivedDate: day.addingTimeInterval(2_000), score: 90)
-		let newestLowScore = makeArticle(id: "newest-low", receivedDate: day.addingTimeInterval(3_000), score: 10)
+		let olderHighScore = makeArticle(id: "older-high", score: 90, receivedDate: day.addingTimeInterval(1_000))
+		let newerHighScore = makeArticle(id: "newer-high", score: 90, receivedDate: day.addingTimeInterval(2_000))
+		let newestLowScore = makeArticle(id: "newest-low", score: 10, receivedDate: day.addingTimeInterval(3_000))
 		model.setArticles([olderHighScore, newestLowScore, newerHighScore], for: section)
 		model.select(section: section)
 		model.select(article: newerHighScore)
