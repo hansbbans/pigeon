@@ -138,6 +138,13 @@ struct ArticleBodyView: View {
 						remoteImagePolicy: remoteImagePolicy,
 						imageProxySession: imageProxySession,
 					)
+					.id(
+						ArticleLeadImageRequest.loaderIdentity(
+							for: fallbackImageURL,
+							policy: remoteImagePolicy,
+							session: imageProxySession,
+						),
+					)
 					.clipShape(.rect(cornerRadius: 10))
 				}
 				.buttonStyle(.plain)

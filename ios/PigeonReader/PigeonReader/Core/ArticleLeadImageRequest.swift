@@ -7,6 +7,18 @@ import Foundation
 nonisolated enum ArticleLeadImageRequest {
 	static let maximumResponseBytes = 8 * 1_024 * 1_024
 
+	static func loaderIdentity(
+		for remoteURL: URL,
+		policy: ReaderRemoteImagePolicy,
+		session: PigeonSession?,
+	) -> String {
+		[
+			remoteURL.absoluteString,
+			policy.rawValue,
+			session?.storageIdentity ?? "no-session",
+		].joined(separator: "\u{0}")
+	}
+
 	static func shouldShowFallback(policy: ReaderRemoteImagePolicy, session: PigeonSession?) -> Bool {
 		switch policy {
 		case .normal:

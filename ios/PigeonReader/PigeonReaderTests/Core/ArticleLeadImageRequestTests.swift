@@ -4,6 +4,44 @@ import Testing
 
 struct ArticleLeadImageRequestTests {
 	@Test
+	func loaderIdentityChangesWithEveryRequestInput() throws {
+		let firstURL = try #require(URL(string: "https://example.com/first.jpg"))
+		let secondURL = try #require(URL(string: "https://example.com/second.jpg"))
+		let firstSession = PigeonSession(
+			baseURL: try #require(URL(string: "https://pigeon.test")),
+			token: "first-token",
+		)
+		let secondSession = PigeonSession(baseURL: firstSession.baseURL, token: "second-token")
+		let identity = ArticleLeadImageRequest.loaderIdentity(
+			for: firstURL,
+			policy: .privacyProxied,
+			session: firstSession,
+		)
+
+		#expect(
+			identity != ArticleLeadImageRequest.loaderIdentity(
+				for: secondURL,
+				policy: .privacyProxied,
+				session: firstSession,
+			),
+		)
+		#expect(
+			identity != ArticleLeadImageRequest.loaderIdentity(
+				for: firstURL,
+				policy: .normal,
+				session: firstSession,
+			),
+		)
+		#expect(
+			identity != ArticleLeadImageRequest.loaderIdentity(
+				for: firstURL,
+				policy: .privacyProxied,
+				session: secondSession,
+			),
+		)
+	}
+
+	@Test
 	func privacyProxyShowsAReaderViewLeadThatIsNotInTheBody() {
 		let session = PigeonSession(
 			baseURL: URL(string: "https://pigeon.test")!,

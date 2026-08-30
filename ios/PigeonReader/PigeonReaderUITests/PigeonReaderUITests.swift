@@ -209,16 +209,11 @@ final class PigeonReaderUITests: XCTestCase {
 
 		let start = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.45))
 		let end = reader.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.45))
-		// The back-swipe recognizer attaches on the next turn. One missed
-		// synthesis (common when the AX server blips) should not fail CI.
-		var returnedToFeed = false
-		for _ in 0..<2 where returnedToFeed == false {
-			start.press(forDuration: 0.1, thenDragTo: end)
-			returnedToFeed = app.descendants(matching: .any)["article-list"].waitForExistence(timeout: 3)
-				|| app.buttons["Filter"].waitForExistence(timeout: 2)
-		}
+		start.press(forDuration: 0.05, thenDragTo: end)
+
+		let feed = app.descendants(matching: .any)["article-list"]
 		XCTAssertTrue(
-			returnedToFeed,
+			feed.waitForExistence(timeout: 5) || app.buttons["Filter"].waitForExistence(timeout: 5),
 			"A leading-edge swipe must return to the feed, not only the back button",
 		)
 		attachScreenshot(named: "swipe-back-from-article-to-feed")
