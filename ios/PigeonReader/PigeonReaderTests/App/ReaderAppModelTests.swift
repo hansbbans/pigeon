@@ -962,6 +962,26 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == nil)
 	}
 
+	@Test func successfulAddFeedWithFailedLibraryRefreshStaysOffTheReaderBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let addTask = Task {
+			await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+		}
+
+		let quickAdd = await controlled.nextRequest()
+		#expect(quickAdd.request.url?.path == "/reader/api/0/subscription/quickadd")
+		await controlled.resolve(quickAdd, data: Data(#"{"streamId":"feed/1"}"#.utf8))
+
+		let refresh = await controlled.nextRequest()
+		#expect(refresh.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(refresh, data: Data("temporary failure".utf8), statusCode: 503)
+
+		#expect(await addTask.value)
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == nil)
+	}
+
 	@Test func dismissingSettingsClearsTheSettingsErrorWithoutTouchingTheReaderBanner() async throws {
 		let model = try makeModel(
 			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),

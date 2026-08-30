@@ -1441,7 +1441,7 @@ final class ReaderAppModel {
 				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
 			}
 			settingsErrorMessage = nil
-			await loadLibrary(force: true)
+			await loadLibrary(force: true, reportError: false)
 			if hasLoadedNavigation {
 				await loadNavigation(force: true)
 			}
