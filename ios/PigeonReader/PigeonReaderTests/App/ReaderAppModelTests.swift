@@ -1687,6 +1687,38 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == boundary.id)
 	}
 
+	@Test func markAboveDuringSearchDoesNotMarkStoriesOutsideSearchResults() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)
+		let matchingAbove = makeArticle(id: "match-above", receivedAt: 400)
+		let hiddenAbove = makeArticle(id: "other-above", receivedAt: 350)
+		let boundary = makeArticle(id: "match-boundary", receivedAt: 300)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.articleFilter = .all
+		model.setArticles([matchingAbove, hiddenAbove, boundary], for: collection)
+		try await store.saveArticles(
+			[matchingAbove, hiddenAbove, boundary],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+
+		await model.searchArticles(query: "match", scope: .collection, in: collection)
+		#expect(model.displayedSearchResults.map(\.id) == [matchingAbove.id, boundary.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == matchingAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [matchingAbove.readerId])
+	}
+
 	@Test func markAllQueuesBoundedBatchAndUpdatesEveryLoadedUnreadStory() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
