@@ -65,9 +65,6 @@ struct ReaderShellView: View {
 			guard phase == .active else { return }
 			model.consumePendingFeedRequest()
 		}
-		.onReceive(NotificationCenter.default.publisher(for: PendingFeedStore.didSaveNotification)) { _ in
-			model.consumePendingFeedRequest()
-		}
 		.onReceive(NotificationCenter.default.publisher(for: .pigeonReaderNotificationAction)) { notification in
 			guard let action = ReaderNotificationManager.shared.consumePendingAction()
 				?? notification.object as? ReaderNotificationAction else { return }

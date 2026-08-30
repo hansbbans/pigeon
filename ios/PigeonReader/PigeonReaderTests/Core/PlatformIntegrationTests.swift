@@ -85,8 +85,10 @@ struct PlatformIntegrationTests {
 		model.consumePendingFeedRequest(defaults: defaults)
 
 		#expect(model.pendingFeedRequest?.url == website)
+		let requestID = model.pendingFeedRequest?.id
 		model.consumePendingFeedRequest(defaults: defaults)
 		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
 	}
 
 	@Test @MainActor func addDeepLinkPresentsTheFeedSheetWithoutWaitingForAPendingStore() async throws {
@@ -94,6 +96,29 @@ struct PlatformIntegrationTests {
 		let website = try #require(URL(string: "https://daringfireball.net/feeds/main"))
 		await model.handleDeepLink(PigeonDeepLink.add(website).url)
 		#expect(model.pendingFeedRequest?.url == website)
+	}
+
+	@Test @MainActor func addDeepLinkAndPendingStorePresentOnlyOnce() async throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = PreviewData.makeModel()
+		let website = try #require(URL(string: "https://example.com/feed.xml"))
+		PendingFeedStore.save(website, defaults: defaults)
+
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		let requestID = model.pendingFeedRequest?.id
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		model.consumePendingFeedRequest(defaults: defaults)
+
+		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
 	}
 
 	@Test func opmlPreviewPreservesNestedFoldersAndDetectsNormalizedDuplicates() throws {

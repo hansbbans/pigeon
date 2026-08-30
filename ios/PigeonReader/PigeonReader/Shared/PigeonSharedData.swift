@@ -40,17 +40,26 @@ nonisolated struct PigeonWidgetSnapshot: Codable, Equatable, Sendable {
 }
 
 nonisolated enum PendingFeedStore {
-	static let didSaveNotification = Notification.Name("pigeon.pending-feed-url.did-save")
-
 	static func save(_ url: URL, defaults: UserDefaults = PigeonSharedData.defaults) {
 		guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else { return }
 		defaults.set(url.absoluteString, forKey: PigeonSharedData.pendingFeedURLKey)
-		NotificationCenter.default.post(name: didSaveNotification, object: url)
 	}
 
 	static func consume(defaults: UserDefaults = PigeonSharedData.defaults) -> URL? {
 		guard let raw = defaults.string(forKey: PigeonSharedData.pendingFeedURLKey) else { return nil }
 		defaults.removeObject(forKey: PigeonSharedData.pendingFeedURLKey)
 		return URL(string: raw)
+	}
+
+	@discardableResult
+	static func remove(
+		matching url: URL,
+		defaults: UserDefaults = PigeonSharedData.defaults,
+	) -> Bool {
+		guard defaults.string(forKey: PigeonSharedData.pendingFeedURLKey) == url.absoluteString else {
+			return false
+		}
+		defaults.removeObject(forKey: PigeonSharedData.pendingFeedURLKey)
+		return true
 	}
 }

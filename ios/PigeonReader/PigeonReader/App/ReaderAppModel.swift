@@ -540,11 +540,15 @@ final class ReaderAppModel {
 		return true
 	}
 
-	func handleDeepLink(_ url: URL) async {
+	func handleDeepLink(
+		_ url: URL,
+		pendingFeedDefaults: UserDefaults = PigeonSharedData.defaults,
+	) async {
 		guard let link = PigeonDeepLink(url: url) else { return }
 		switch link {
 		case .add(let url):
-			pendingFeedRequest = PendingFeedRequest(url: url)
+			PendingFeedStore.remove(matching: url, defaults: pendingFeedDefaults)
+			presentPendingFeedRequest(url)
 		case .feed(let id):
 			if navigation.items.contains(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) == false {
 				await prepareOfflineLibrary()
@@ -574,8 +578,13 @@ final class ReaderAppModel {
 
 	func consumePendingFeedRequest(defaults: UserDefaults = PigeonSharedData.defaults) {
 		if let url = PendingFeedStore.consume(defaults: defaults) {
-			pendingFeedRequest = PendingFeedRequest(url: url)
+			presentPendingFeedRequest(url)
 		}
+	}
+
+	private func presentPendingFeedRequest(_ url: URL) {
+		guard pendingFeedRequest?.url != url else { return }
+		pendingFeedRequest = PendingFeedRequest(url: url)
 	}
 
 	func handleNotificationAction(_ action: ReaderNotificationAction) async {
