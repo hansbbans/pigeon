@@ -1545,7 +1545,7 @@ struct ReaderAppModelTests {
 		#expect(model.canUndoBulkRead(in: forYou))
 		#expect(model.canUndoBulkRead(in: starred) == false)
 		#expect(model.bulkReadUndoTitle == "Mark All as Read")
-		#expect(model.allArticles(for: forYou).allSatisfy(\.isRead))
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead })
 		#expect(model.allArticles(for: starred).first?.isRead == false)
 
 		await model.undoLastBulkRead()
