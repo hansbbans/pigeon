@@ -1631,7 +1631,7 @@ struct ReaderAppModelTests {
 		#expect(model.canMarkAllStoriesAsRead(in: collection))
 		await model.markAllStoriesAsRead(in: collection)
 
-		#expect(model.allArticles(for: collection).allSatisfy(\.isRead))
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
 		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
