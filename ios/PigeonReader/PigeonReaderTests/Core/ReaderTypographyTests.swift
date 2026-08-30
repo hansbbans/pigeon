@@ -16,7 +16,7 @@ struct ReaderTypographyTests {
 	@Test func articleTitleAndFallbackBodyScaleWithReadingTextSize() {
 		#expect(ReaderTypography.scaledPointSize(ReaderTypography.articleTitlePointSize, textScale: 1) == 25)
 		#expect(ReaderTypography.scaledPointSize(ReaderTypography.articleTitlePointSize, textScale: 1.2) == 30)
-		#expect(ReaderTypography.scaledPointSize(ReaderTypography.articleBodyPointSize, textScale: 0.85) == 15.3)
+		#expect(abs(ReaderTypography.scaledPointSize(ReaderTypography.articleBodyPointSize, textScale: 0.85) - 15.3) < 0.000_001)
 		#expect(
 			ReaderTypography.scaledPointSize(ReaderTypography.articleTitlePointSize, textScale: 10)
 				== ReaderTypography.articleTitlePointSize * ReaderTypographySettings.textScaleRange.upperBound
