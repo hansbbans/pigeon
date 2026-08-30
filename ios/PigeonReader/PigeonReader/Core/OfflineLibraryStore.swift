@@ -73,6 +73,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		) { statement in
 			(string(at: 0, statement: statement), date(at: 1, statement: statement))
 		}
+		var continuationsByCollection: [String: String] = [:]
+		try query(
+			"SELECT collection_id, continuation FROM cached_collection_pagination WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				let continuation = string(at: 1, statement: statement),
+				continuation.isEmpty == false else {
+				return
+			}
+			continuationsByCollection[collectionID] = continuation
+		}
 
 		var articlesByCollection: [String: [Recommendation]] = [:]
 		// A cached article can belong to many collections; decode its payload once,
@@ -80,7 +93,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		var decodedArticlesByID: [String: Recommendation] = [:]
 		try query(
 			"""
-			SELECT ca.collection_id, ca.article_id, a.payload
+			SELECT ca.collection_id, ca.article_id, a.body_pruned, a.payload
 			FROM cached_collection_articles ca
 			JOIN cached_articles a
 			  ON a.account_id = ca.account_id AND a.id = ca.article_id
@@ -92,7 +105,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		) { statement in
 			guard let collectionID = string(at: 0, statement: statement),
 				let articleID = string(at: 1, statement: statement),
-				let payload = data(at: 2, statement: statement) else {
+				let payload = data(at: 3, statement: statement) else {
 				return
 			}
 			let article: Recommendation
@@ -102,8 +115,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				guard let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
 					return
 				}
-				decodedArticlesByID[articleID] = decodedArticle
-				article = decodedArticle
+				let resolvedArticle = sqlite3_column_int64(statement, 2) != 0
+					? replacingHTML(in: decodedArticle, with: "")
+					: decodedArticle
+				decodedArticlesByID[articleID] = resolvedArticle
+				article = resolvedArticle
 				#if DEBUG
 				snapshotArticleDecodeCount += 1
 				#endif
@@ -121,6 +137,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			navigation: derivedNavigation,
 			subscriptions: subscriptions,
 			articlesByCollection: articlesByCollection,
+			continuationsByCollection: continuationsByCollection,
 			restoration: restoration,
 			cursor: syncState?.0,
 			lastSyncAt: syncState?.1,
@@ -184,6 +201,29 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					collectionID: collectionID,
 					articleID: article.id,
 					position: position,
+					database: database,
+				)
+			}
+		}
+	}
+
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) throws {
+		let database = try openDatabase()
+		try transaction(database) {
+			if let continuation, continuation.isEmpty == false {
+				try execute(
+					"""
+					INSERT INTO cached_collection_pagination (account_id, collection_id, continuation)
+					VALUES (?, ?, ?)
+					ON CONFLICT(account_id, collection_id) DO UPDATE SET continuation = excluded.continuation
+					""",
+					bindings: [.text(accountID), .text(collectionID), .text(continuation)],
+					database: database,
+				)
+			} else {
+				try execute(
+					"DELETE FROM cached_collection_pagination WHERE account_id = ? AND collection_id = ?",
+					bindings: [.text(accountID), .text(collectionID)],
 					database: database,
 				)
 			}
@@ -360,6 +400,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		try transaction(database) {
 			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_collection_pagination WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 		}
 	}
 
@@ -423,9 +464,27 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	private func apply(_ change: IncrementalSyncChange, accountID: String, database: OpaquePointer) throws {
 		switch change.entityType {
 		case .feed:
+			let previousStreamID = try queryOne(
+				"SELECT stream_id FROM cached_feeds WHERE account_id = ? AND feed_key = ?",
+				bindings: [.text(accountID), .text(change.entityId)],
+				database: database,
+				map: { string(at: 0, statement: $0) },
+			) ?? nil
+			let previousSubscriptionIDs = try cachedSubscriptionIDs(
+				feedKey: change.entityId,
+				accountID: accountID,
+				database: database,
+			)
 			guard change.operation == .upsert, let payload = change.payload,
 				let feedKey = payload.feedKey, let streamID = payload.streamId, let title = payload.title else {
 				try execute("DELETE FROM cached_feeds WHERE account_id = ? AND feed_key = ?", bindings: [.text(accountID), .text(change.entityId)], database: database)
+				for subscriptionID in Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 }) {
+					try execute(
+						"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+						bindings: [.text(accountID), .text(subscriptionID)],
+						database: database,
+					)
+				}
 				return
 			}
 			try execute(
@@ -446,6 +505,42 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				],
 				database: database,
 			)
+			let staleSubscriptionIDs = Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 })
+				.filter { $0 != streamID }
+			for subscriptionID in staleSubscriptionIDs {
+				try execute(
+					"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+					bindings: [.text(accountID), .text(subscriptionID)],
+					database: database,
+				)
+			}
+			if payload.isActive == false {
+				try execute(
+					"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+					bindings: [.text(accountID), .text(streamID)],
+					database: database,
+				)
+			} else if let subscriptionURL = URL(string: "https://offline.invalid/feed/\(feedKey)") {
+				let subscription = FeedSubscription(
+					id: streamID,
+					title: title,
+					categories: (payload.folders ?? []).map {
+						FeedCategory(id: "user/-/label/\($0)", label: $0)
+					},
+					url: subscriptionURL,
+					sourceUrl: payload.feedURL,
+					htmlUrl: payload.siteURL,
+					iconUrl: payload.iconURL?.absoluteString,
+				)
+				try execute(
+					"""
+					INSERT INTO cached_subscriptions (account_id, id, title, payload) VALUES (?, ?, ?, ?)
+					ON CONFLICT(account_id, id) DO UPDATE SET title = excluded.title, payload = excluded.payload
+					""",
+					bindings: [.text(accountID), .text(streamID), .text(title), .blob(try encoder.encode(subscription))],
+					database: database,
+				)
+			}
 		case .article:
 			guard change.operation == .upsert, let payload = change.payload,
 				let id = payload.id, let readerID = payload.readerId, let feedKey = payload.feedKey,
@@ -457,18 +552,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			let existing = try loadArticle(id: id, accountID: accountID, database: database)
 			let serverPrunedBody = payload.isBodyPruned ?? false
 			let incomingHTML = payload.html ?? ""
-			let shouldPreserveBody = serverPrunedBody && incomingHTML.isEmpty && existing?.html.isEmpty == false
+			let shouldPreserveBody = serverPrunedBody
+				&& existing?.bodyPruned == false
+				&& existing?.article.html.isEmpty == false
+			let resolvedHTML = shouldPreserveBody
+				? (existing?.article.html ?? "")
+				: (serverPrunedBody ? "" : incomingHTML)
 			let article = sanitized(Recommendation(
 				id: id, readerId: readerID, feedKey: feedKey, source: source, author: payload.author, title: title,
-				html: shouldPreserveBody ? (existing?.html ?? "") : incomingHTML,
-				text: payload.text ?? existing?.text,
-				originalURL: payload.originalURL ?? existing?.originalURL,
+				html: resolvedHTML,
+				text: payload.text ?? existing?.article.text,
+				originalURL: payload.originalURL ?? existing?.article.originalURL,
 				receivedAt: receivedAt, isRead: payload.isRead ?? false, isStarred: payload.isStarred ?? false,
-				score: existing?.score ?? 0,
-				confidence: existing?.confidence ?? 0,
-				sampleCount: existing?.sampleCount ?? 0,
-				explanation: existing?.explanation ?? "From \(source)",
-				learningState: existing?.learningState ?? "Synced article",
+				score: existing?.article.score ?? 0,
+				confidence: existing?.article.confidence ?? 0,
+				sampleCount: existing?.article.sampleCount ?? 0,
+				explanation: existing?.article.explanation ?? "From \(source)",
+				learningState: existing?.article.learningState ?? "Synced article",
 			))
 			try upsertArticle(
 				article,
@@ -489,17 +589,47 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}
 	}
 
-	private func loadArticle(id: String, accountID: String, database: OpaquePointer) throws -> Recommendation? {
-		guard let payload = try queryOne(
-			"SELECT payload FROM cached_articles WHERE account_id = ? AND id = ?",
+	private func loadArticle(
+		id: String,
+		accountID: String,
+		database: OpaquePointer
+	) throws -> (article: Recommendation, bodyPruned: Bool)? {
+		try queryOne(
+			"SELECT payload, body_pruned FROM cached_articles WHERE account_id = ? AND id = ?",
 			bindings: [.text(accountID), .text(id)],
 			database: database,
-			map: { data(at: 0, statement: $0) },
-		) ?? nil else { return nil }
-		return try decoder.decode(Recommendation.self, from: payload)
+			map: { statement in
+				guard let payload = data(at: 0, statement: statement) else { return nil }
+				return (
+					article: try decoder.decode(Recommendation.self, from: payload),
+					bodyPruned: sqlite3_column_int64(statement, 1) != 0,
+				)
+			},
+		) ?? nil
 	}
 
-	private func sanitized(_ article: Recommendation) -> Recommendation {
+	private func cachedSubscriptionIDs(
+		feedKey: String,
+		accountID: String,
+		database: OpaquePointer
+	) throws -> [String] {
+		var ids: [String] = []
+		try query(
+			"SELECT payload FROM cached_subscriptions WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let payload = data(at: 0, statement: statement),
+				let subscription = try? decoder.decode(FeedSubscription.self, from: payload),
+				subscription.feedKey == feedKey else {
+				return
+			}
+			ids.append(subscription.id)
+		}
+		return ids
+	}
+
+	private func replacingHTML(in article: Recommendation, with html: String) -> Recommendation {
 		Recommendation(
 			id: article.id,
 			readerId: article.readerId,
@@ -507,7 +637,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			source: article.source,
 			author: article.author,
 			title: article.title,
-			html: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
+			html: html,
 			text: article.text,
 			originalURL: article.originalURL,
 			receivedAt: article.receivedAt,
@@ -518,6 +648,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			sampleCount: article.sampleCount,
 			explanation: article.explanation,
 			learningState: article.learningState,
+		)
+	}
+
+	private func sanitized(_ article: Recommendation) -> Recommendation {
+		replacingHTML(
+			in: article,
+			with: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
 		)
 	}
 
@@ -737,6 +874,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			"CREATE INDEX IF NOT EXISTS idx_cached_articles_feed ON cached_articles(account_id, feed_key, received_at DESC)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_articles (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, article_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (account_id, collection_id, article_id))",
 			"CREATE INDEX IF NOT EXISTS idx_cached_collection_order ON cached_collection_articles(account_id, collection_id, position)",
+			"CREATE TABLE IF NOT EXISTS cached_collection_pagination (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, continuation TEXT NOT NULL, PRIMARY KEY (account_id, collection_id))",
 			"CREATE TABLE IF NOT EXISTS sync_state (account_id TEXT PRIMARY KEY, cursor TEXT, last_sync_at REAL)",
 			"CREATE TABLE IF NOT EXISTS pending_actions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at REAL NOT NULL, UNIQUE (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_pending_actions_account ON pending_actions(account_id, sequence)",
