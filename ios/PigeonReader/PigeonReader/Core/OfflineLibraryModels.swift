@@ -172,6 +172,7 @@ nonisolated struct CachedLibrarySnapshot: Sendable {
 	let navigation: ReaderNavigationState?
 	let subscriptions: [FeedSubscription]
 	let articlesByCollection: [String: [Recommendation]]
+	let continuationsByCollection: [String: String]
 	let restoration: ReaderRestorationState?
 	let cursor: String?
 	let lastSyncAt: Date?
@@ -208,6 +209,7 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws
 	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws
 	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws
 	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws
 	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation]
