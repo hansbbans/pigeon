@@ -965,6 +965,10 @@ struct ReaderAppModelTests {
 	@Test func successfulAddFeedWithFailedLibraryRefreshStaysOffTheReaderBanner() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
+		model.setNavigation(
+			ReaderNavigationState(items: [.smart(.forYou)]),
+			markAsLoaded: true,
+		)
 		let addTask = Task {
 			await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
 		}
@@ -976,6 +980,14 @@ struct ReaderAppModelTests {
 		let refresh = await controlled.nextRequest()
 		#expect(refresh.request.url?.path == "/reader/api/0/subscription/list")
 		await controlled.resolve(refresh, data: Data("temporary failure".utf8), statusCode: 503)
+		for _ in 0..<4 {
+			let navigationRefresh = await controlled.nextRequest()
+			await controlled.resolve(
+				navigationRefresh,
+				data: Data("temporary failure".utf8),
+				statusCode: 503,
+			)
+		}
 
 		#expect(await addTask.value)
 		#expect(model.settingsErrorMessage == nil)

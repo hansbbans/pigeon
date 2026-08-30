@@ -1042,6 +1042,7 @@ final class ReaderAppModel {
 		force: Bool = false,
 		now: Date = .now,
 		dayBounds: ReaderLocalDayBounds? = nil,
+		reportError: Bool = true,
 	) async {
 		guard let apiClient, let context = operationContext(for: apiClient) else {
 			return
@@ -1096,7 +1097,7 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeNavigationLoadID == loadID else {
 				return
 			}
-			if session != nil {
+			if session != nil, reportError {
 				errorMessage = error.localizedDescription
 			}
 		}
@@ -1443,7 +1444,7 @@ final class ReaderAppModel {
 			settingsErrorMessage = nil
 			await loadLibrary(force: true, reportError: false)
 			if hasLoadedNavigation {
-				await loadNavigation(force: true)
+				await loadNavigation(force: true, reportError: false)
 			}
 			return true
 		} catch let error where isCancellation(error) {
