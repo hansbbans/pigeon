@@ -16,6 +16,22 @@ actor OfflineMutationReplayer {
 			try Task.checkCancellation()
 			let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
 			guard pending.isEmpty == false else { return appliedCount }
+			var droppedInvalidMutation = false
+			for action in pending {
+				guard let validationError = Self.permanentValidationError(for: action.mutation) else {
+					continue
+				}
+				try await store.recordMutationFailure(
+					id: action.mutation.id,
+					message: validationError,
+					accountID: accountID,
+				)
+				try await store.markMutationApplied(id: action.mutation.id, accountID: accountID)
+				droppedInvalidMutation = true
+			}
+			if droppedInvalidMutation {
+				continue
+			}
 			var page: [PendingOfflineMutation] = []
 			var itemIDCount = 0
 			for action in pending {
@@ -62,10 +78,10 @@ actor OfflineMutationReplayer {
 						message: result.error ?? "The server rejected this mutation.",
 						accountID: accountID,
 					)
-					// A permanent rejection will not succeed on retry. Drop it so it
-					// cannot sit at the FIFO head and block later queued actions.
-					try await store.markMutationApplied(id: action.mutation.id, accountID: accountID)
-					pageMadeProgress = true
+					// The server uses `failed` for retryable resolution and D1 errors.
+					// Keep the action queued, but still apply later successful receipts
+					// from this page before stopping the replay.
+					pageHasFailure = true
 				}
 			}
 
@@ -73,5 +89,47 @@ actor OfflineMutationReplayer {
 			// resending them in a hot loop. Later launches/refreshes retry them.
 			if pageHasFailure || pageMadeProgress == false { return appliedCount }
 		}
+	}
+
+	private static func permanentValidationError(for mutation: OfflineMutation) -> String? {
+		guard mutation.id.isEmpty == false, mutation.id.count <= 200 else {
+			return "The mutation id is invalid."
+		}
+		guard mutation.itemIds.count <= 200,
+			mutation.itemIds.allSatisfy({ $0.isEmpty == false && $0.count <= 200 }) else {
+			return "The mutation references too many or invalid items."
+		}
+
+		switch mutation.kind {
+		case .setRead, .setStarred:
+			guard mutation.itemIds.count == 1, mutation.value != nil else {
+				return "The item-state mutation is incomplete."
+			}
+		case .setReadBatch:
+			guard mutation.itemIds.isEmpty == false, mutation.value != nil else {
+				return "The bulk-read mutation is incomplete."
+			}
+		case .feedback:
+			guard mutation.itemIds.count == 1,
+				mutation.feedback == "more_like_this" || mutation.feedback == "not_interested" else {
+				return "The feedback mutation is invalid."
+			}
+		case .renameFeed:
+			guard let feedID = mutation.feedId, feedID.isEmpty == false, feedID.count <= 300,
+				let title = mutation.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+				title.isEmpty == false, title.count <= 200 else {
+				return "The feed rename is invalid."
+			}
+		case .moveFeed:
+			guard let feedID = mutation.feedId, feedID.isEmpty == false, feedID.count <= 300,
+				(mutation.folders ?? []).allSatisfy({ $0.count <= 80 }) else {
+				return "The feed move is invalid."
+			}
+		case .unsubscribeFeed, .restoreFeed:
+			guard let feedID = mutation.feedId, feedID.isEmpty == false, feedID.count <= 300 else {
+				return "The feed mutation is invalid."
+			}
+		}
+		return nil
 	}
 }
