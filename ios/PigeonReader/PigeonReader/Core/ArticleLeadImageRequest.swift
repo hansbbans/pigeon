@@ -7,6 +7,7 @@ import Foundation
 nonisolated enum ArticleLeadImageRequest {
 	static let maximumResponseBytes = 8 * 1_024 * 1_024
 
+	@MainActor
 	static func loaderIdentity(
 		for remoteURL: URL,
 		policy: ReaderRemoteImagePolicy,
