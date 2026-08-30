@@ -10,9 +10,11 @@ struct ArticleListView: View {
 		@Bindable var model = model
 		let allArticles = model.allArticles(for: collection)
 		let isSearchActive = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-		let articles = isSearchActive ? model.searchResults : model.articles(for: collection)
+		let articles = isSearchActive ? model.displayedSearchResults : model.articles(for: collection)
 		let isLoading = model.isLoading(collection: collection)
-		let isFilteredEmpty = model.isArticleFilterEmpty(for: collection)
+		let isFilteredEmpty = isSearchActive
+			? model.isSearchFilterEmpty
+			: model.isArticleFilterEmpty(for: collection)
 
 		Group {
 			if isLoading && allArticles.isEmpty {
@@ -23,7 +25,7 @@ struct ArticleListView: View {
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
 				VStack {
-					if isSearchActive {
+					if isSearchActive && isFilteredEmpty == false {
 						ContentUnavailableView.search(text: searchText)
 					} else if isFilteredEmpty {
 						ContentUnavailableView(
