@@ -1986,7 +1986,7 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
 		let article = makeArticle(id: "widget-foryou", feedKey: "alpha")
-		let todayArticle = makeArticle(id: "widget-today", feedKey: "alpha", receivedAt: Date.now.timeIntervalSince1970)
+		let todayArticle = makeArticle(id: "widget-today", receivedAt: Date.now.timeIntervalSince1970, feedKey: "alpha")
 		model.setArticles([article], for: .forYou)
 		model.setArticles([todayArticle], for: .today)
 		model.writeWidgetSnapshot()
