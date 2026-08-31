@@ -1292,6 +1292,7 @@ final class ReaderAppModel {
 			} else {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
+					excludeTag: collection.smartSection?.streamExcludeTag,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
 				dayBounds = nil
@@ -1382,15 +1383,16 @@ final class ReaderAppModel {
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
-			} else if collection.smartSection == nil {
+			} else if collection.smartSection?.usesRecommendationEndpoint == true {
+				streamContinuations[collection.id] = nil
+				return
+			} else {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
+					excludeTag: collection.smartSection?.streamExcludeTag,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
-			} else {
-				streamContinuations[collection.id] = nil
-				return
 			}
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
@@ -2757,7 +2759,7 @@ final class ReaderAppModel {
 	}
 
 	private func isPaginatedCollection(_ collection: ReaderNavigationItem) -> Bool {
-		collection.smartSection == .today || collection.smartSection == nil
+		collection.smartSection?.usesRecommendationEndpoint != true
 	}
 
 	private func shouldResolveCachedPagination(for collection: ReaderNavigationItem) -> Bool {

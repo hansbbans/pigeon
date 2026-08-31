@@ -1581,7 +1581,7 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
-	@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
+		@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		model.select(section: .forYou)
@@ -1645,6 +1645,48 @@ struct ReaderAppModelTests {
 		model.clearArticleSearch()
 
 		#expect(model.errorMessage == nil)
+	}
+
+		@Test func starredListPaginatesOnExplicitLoadMoreInsteadOfTheRecommendationCap() async throws {
+		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
+		let model = try makeModel(httpClient: httpClient)
+		let collection = ReaderNavigationItem.smart(.starred)
+
+		await model.load(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
+		#expect(model.canLoadMore(collection: collection))
+		let initialRequests = await httpClient.requests()
+		#expect(initialRequests.contains(where: { $0.path == "/api/v1/recommendations" }) == false)
+		let initialIDRequests = initialRequests.filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(initialIDRequests.map { $0.query["s"] } == ["user/-/state/com.google/starred"])
+		#expect(initialIDRequests.allSatisfy { $0.query["xt"] == nil })
+
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let laterIDRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(laterIDRequests.map { $0.query["c"] } == [nil, "page-2"])
+	}
+
+	@Test func unreadListPaginatesAndExcludesReadStories() async throws {
+		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/reading-list")
+		let model = try makeModel(httpClient: httpClient)
+		let collection = ReaderNavigationItem.smart(.unread)
+
+		await model.load(collection: collection)
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let idRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(idRequests.map { $0.query["s"] } == [
+			"user/-/state/com.google/reading-list",
+			"user/-/state/com.google/reading-list",
+		])
+		#expect(idRequests.allSatisfy { $0.query["xt"] == "user/-/state/com.google/read" })
+		#expect(await httpClient.requests().contains(where: { $0.path == "/api/v1/recommendations" }) == false)
 	}
 
 	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
