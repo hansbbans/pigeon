@@ -2701,6 +2701,60 @@ struct ReaderAppModelTests {
 		#expect(pending.last?.mutation.value == false)
 	}
 
+	@Test func bulkReadUndoStaysOnTheCollectionThatMarkedStoriesRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		let first = makeArticle(id: "first")
+		let second = makeArticle(id: "second")
+		var starredStory = makeArticle(id: "starred")
+		starredStory.isStarred = true
+		model.setNavigation(ReaderNavigationState(items: [forYou, starred]))
+		model.setArticles([first, second], for: forYou)
+		model.setArticles([starredStory], for: starred)
+
+		await model.markAllStoriesAsRead(in: forYou)
+
+		#expect(model.canUndoBulkRead)
+		#expect(model.canUndoBulkRead(in: forYou))
+		#expect(model.canUndoBulkRead(in: starred) == false)
+		#expect(model.bulkReadUndoTitle == "Mark All as Read")
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead })
+		#expect(model.allArticles(for: starred).first?.isRead == false)
+
+		await model.undoLastBulkRead()
+		#expect(model.canUndoBulkRead == false)
+		#expect(model.canUndoBulkRead(in: forYou) == false)
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead == false })
+	}
+
+	@Test func laterBulkReadMovesUndoToTheNewCollection() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let forYouStory = makeArticle(id: "for-you")
+		let unreadStory = makeArticle(id: "unread")
+		model.setNavigation(ReaderNavigationState(items: [forYou, unread]))
+		model.setArticles([forYouStory], for: forYou)
+		model.setArticles([unreadStory], for: unread)
+
+		await model.markAllStoriesAsRead(in: forYou)
+		#expect(model.canUndoBulkRead(in: forYou))
+		#expect(model.canUndoBulkRead(in: unread) == false)
+
+		await model.markAllStoriesAsRead(in: unread)
+		#expect(model.canUndoBulkRead(in: forYou) == false)
+		#expect(model.canUndoBulkRead(in: unread))
+		#expect(model.bulkReadUndoTitle == "Mark All as Read")
+		#expect(model.allArticles(for: forYou).first?.isRead == true)
+		#expect(model.allArticles(for: unread).first?.isRead == true)
+
+		await model.undoLastBulkRead()
+		#expect(model.canUndoBulkRead == false)
+		#expect(model.allArticles(for: forYou).first?.isRead == true)
+		#expect(model.allArticles(for: unread).first?.isRead == false)
+	}
+
 	@Test func filteredBulkReadMovesAboveAndBelowStoriesOutOfTheUnreadProjection() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)

@@ -43,6 +43,7 @@ final class ReaderAppModel {
 	private struct BulkReadUndo: Sendable {
 		let articles: [Recommendation]
 		let title: String
+		let collectionID: String
 	}
 
 	private struct CollectionFreshness: Sendable {
@@ -366,6 +367,10 @@ final class ReaderAppModel {
 	}
 
 	var canUndoBulkRead: Bool { bulkReadUndo != nil }
+
+	func canUndoBulkRead(in collection: ReaderNavigationItem) -> Bool {
+		bulkReadUndo?.collectionID == collection.id
+	}
 
 	var isLoading: Bool {
 		loadingCollections.contains(selectedNavigationID)
@@ -3459,6 +3464,7 @@ final class ReaderAppModel {
 		}
 		await markArticlesAsRead(
 			Array(targets),
+			in: collection,
 			scope: boundary == .above ? .above : .below,
 			undoTitle: boundary == .above ? "Mark Above as Read" : "Mark Below as Read",
 		)
@@ -3473,11 +3479,12 @@ final class ReaderAppModel {
 
 	private func markArticlesAsRead(
 		_ targets: [Recommendation],
+		in collection: ReaderNavigationItem,
 		scope: OfflineMutationScope,
 		undoTitle: String,
 	) async {
 		guard targets.isEmpty == false else { return }
-		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle)
+		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle, collectionID: collection.id)
 		bulkReadUndoTitle = undoTitle
 		await updateReadStateForArticles(targets, read: true, scope: scope)
 	}
