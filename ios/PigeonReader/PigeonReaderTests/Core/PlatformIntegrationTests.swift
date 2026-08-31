@@ -362,6 +362,14 @@ struct PlatformIntegrationTests {
 		feedKey: String = "feed",
 		isRead: Bool = false,
 	) -> Recommendation {
+		Recommendation(
+			id: id, readerId: "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
+			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
+			isRead: isRead, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
+			explanation: "Test", learningState: "Test",
+		)
+	}
+
 	private static func opmlDocument(title: String, url: String) -> Data {
 		Data(
 			"""
@@ -374,15 +382,6 @@ struct PlatformIntegrationTests {
 
 	private static func opmlFileOutcome(_ data: Data) -> OPMLImportFileOutcome {
 		OPMLImportPlanner.outcome(of: .success(data), existing: [])
-	}
-
-	private static func article(id: String, receivedAt: TimeInterval) -> Recommendation {
-		Recommendation(
-			id: id, readerId: "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
-			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
-			isRead: isRead, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
-			explanation: "Test", learningState: "Test",
-		)
 	}
 
 	private static func subscription(id: String, path: String) throws -> FeedSubscription {
