@@ -137,7 +137,7 @@ struct ArticleReaderView: View {
 			await model.monitorActiveReading(for: current.id)
 		}
 		.onChange(of: selectedMode) { _, newMode in
-			model.setReaderMode(newMode, for: current.feedKey)
+			model.setReaderMode(newMode, for: current)
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
