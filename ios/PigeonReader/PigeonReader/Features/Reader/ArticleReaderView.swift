@@ -106,7 +106,14 @@ struct ArticleReaderView: View {
 			}
 		}
 		.background(readerBackground)
-		.preferredColorScheme(preferredColorScheme)
+		// Window-level preferredColorScheme tints the iPad sidebar. Isolate
+		// the theme to this pane whenever the split view is showing.
+		.readerThemeColorScheme(
+			ReaderThemeColorSchemePlacement.resolve(
+				theme: model.readerTypography.theme,
+				isCompactReader: isCompactReader,
+			)
+		)
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
 		.navigationBarBackButtonHidden(true)
@@ -372,14 +379,6 @@ struct ArticleReaderView: View {
 
 	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
 		try await model.saveToReader(destination)
-	}
-
-	private var preferredColorScheme: ColorScheme? {
-		switch model.readerTypography.theme {
-		case .system: nil
-		case .light, .sepia: .light
-		case .darkGray, .dark: .dark
-		}
 	}
 
 	private var readerBackground: Color {
