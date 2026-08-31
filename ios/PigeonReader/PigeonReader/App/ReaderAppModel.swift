@@ -656,20 +656,30 @@ final class ReaderAppModel {
 
 	func makeWidgetSnapshot() -> PigeonWidgetSnapshot {
 		let previousSnapshot = PigeonWidgetSnapshot.load()
-		let allArticles = Dictionary(
-			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
-			uniquingKeysWith: { first, _ in first },
-		).values
+		let allArticles = deduplicatedArticles(
+			articleCache.values
+				.flatMap { $0 }
+				.sorted { left, right in
+					if left.receivedAt != right.receivedAt {
+						return left.receivedAt > right.receivedAt
+					}
+					if left.id != right.id {
+						return left.id < right.id
+					}
+					return left.readerId < right.readerId
+				}
+		)
 		let todayID = ReaderSection.today.rawValue
-		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map { article in
+		let recent = allArticles.prefix(5).map { article in
 			let collection = articleCache[todayID]?.contains(where: { articlesMatch($0, article) }) == true
 				? todayID
 				: nil
 			return Self.widgetArticle(article, collection: collection)
 		}
 		// For You's default list is Unread; keep the home-screen widget on the same stories.
-		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? [])
-			.filter { $0.isRead == false }
+		let forYou = deduplicatedArticles(
+			(articleCache[ReaderSection.forYou.rawValue] ?? []).filter { $0.isRead == false }
+		)
 			.prefix(5)
 			.map { Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue) }
 		return PigeonWidgetSnapshot(
@@ -692,8 +702,9 @@ final class ReaderAppModel {
 		let cachedStarred = articles.count(where: \.isStarred)
 		let unreadStarredBadge = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
 		let starredID = ReaderSection.starred.rawValue
+		let cachedStarredCount = articleCache[starredID].map { deduplicatedArticles($0).count }
 		return WidgetStarredCountResolver.resolve(
-			cachedCount: articleCache[starredID]?.count,
+			cachedCount: cachedStarredCount,
 			knownStarredCount: cachedStarred,
 			unreadBadge: unreadStarredBadge,
 			previousTotal: previousTotal,
@@ -2271,7 +2282,19 @@ final class ReaderAppModel {
 	}
 
 	private func articlesMatch(_ left: Recommendation, _ right: Recommendation) -> Bool {
-		left.id == right.id || left.readerId == right.readerId
+		left.id == right.id
+			|| left.readerId == right.readerId
+			|| left.id == right.readerId
+			|| left.readerId == right.id
+	}
+
+	private func deduplicatedArticles(_ articles: [Recommendation]) -> [Recommendation] {
+		articles.reduce(into: [Recommendation]()) { result, article in
+			guard result.contains(where: { articlesMatch($0, article) }) == false else {
+				return
+			}
+			result.append(article)
+		}
 	}
 
 	private func articleTarget(
@@ -3921,21 +3944,34 @@ final class ReaderAppModel {
 		}
 
 		if read {
-			if let index = unreadArticles.firstIndex(where: { articlesMatch($0, article) }) {
-				unreadArticles[index].isRead = true
-				articleCache[unreadID] = unreadArticles
+			let removedWasSelected = selectedArticleIDs[unreadID].map { remembered in
+				remembered == article.id
+					|| remembered == article.readerId
+					|| unreadArticles.contains {
+						($0.id == remembered || $0.readerId == remembered) && articlesMatch($0, article)
+					}
+			} ?? false
+			articleCache[unreadID] = unreadArticles.filter { articlesMatch($0, article) == false }
+			if removedWasSelected {
+				selectedArticleIDs[unreadID] = nil
+				if selectedNavigationID == unreadID {
+					selectedArticleID = nil
+					preferredCompactColumn = .content
+				}
 			}
 			return
 		}
 
-		if let index = unreadArticles.firstIndex(where: { articlesMatch($0, article) }) {
-			unreadArticles[index].isRead = false
+		if unreadArticles.contains(where: { articlesMatch($0, article) }) {
+			for index in unreadArticles.indices where articlesMatch(unreadArticles[index], article) {
+				unreadArticles[index].isRead = false
+			}
 		} else {
 			var copy = cachedArticle(matching: article) ?? article
 			copy.isRead = false
 			unreadArticles.append(copy)
 		}
-		articleCache[unreadID] = sortOrder(for: unreadID).sorted(unreadArticles)
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(deduplicatedArticles(unreadArticles))
 	}
 
 	private func cachedArticle(matching article: Recommendation) -> Recommendation? {

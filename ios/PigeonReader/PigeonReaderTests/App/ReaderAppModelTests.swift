@@ -1107,21 +1107,86 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .detail)
 	}
 
-	@Test func markingReadKeepsTheUnreadCacheRowForTheAllFilter() async throws {
+	@Test func markingReadRemovesUnreadAliasesPersistsSelectionAndRestoresOneRowOnUnread() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+		let store = OfflineLibraryStore.inMemory()
+		let session = try makeSession(token: "unread-identity")
+		let model = try makeModel(
+			httpClient: MockHTTPClient(statusCode: 500),
+			session: session,
+			offlineStore: store,
+		)
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let canonical = makeArticle(
+			id: "canonical",
+			readerId: "reader-canonical",
+			receivedDate: dayStart.addingTimeInterval(120),
+		)
+		let alias = makeArticle(
+			id: "greader-copy",
+			readerId: canonical.id,
+			receivedDate: dayStart.addingTimeInterval(60),
+		)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [unread, today]))
+		model.setArticles([canonical, alias], for: unread)
+		model.setArticles([canonical], for: today)
+		model.select(section: .unread)
+		model.select(article: canonical)
+		#expect(model.selectedArticleID == canonical.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await model.setRead(canonical, read: true)
+
+		#expect(model.allArticles(for: .unread).isEmpty)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+		let readSnapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect((readSnapshot.articlesByCollection[unread.id] ?? []).isEmpty)
+
+		await model.setRead(canonical, read: false)
+		await model.setRead(canonical, read: false)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == [canonical.id])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		let unreadSnapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect(unreadSnapshot.articlesByCollection[unread.id]?.map(\.id) == [canonical.id])
+		#expect(unreadSnapshot.articlesByCollection[unread.id]?.allSatisfy { $0.isRead == false } == true)
+	}
+
+	@Test func widgetSnapshotDeduplicatesRecommendationAliasesAcrossRecentForYouAndUnreadFallback() throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
-		let article = makeArticle(id: "shared", receivedDate: dayStart.addingTimeInterval(60))
-		model.setArticles([article], for: .unread)
-		model.setArticles([article], for: .today)
-		model.select(section: .today)
+		let canonical = makeArticle(
+			id: "canonical",
+			isStarred: true,
+			readerId: "reader-canonical",
+			receivedDate: dayStart.addingTimeInterval(120),
+		)
+		let alias = makeArticle(
+			id: "greader-copy",
+			isStarred: true,
+			readerId: canonical.id,
+			receivedDate: dayStart.addingTimeInterval(60),
+		)
+		model.setNavigation(ReaderNavigationState(items: [
+			ReaderNavigationItem.smart(.today),
+			ReaderNavigationItem.smart(.forYou),
+		]))
+		model.setArticles([canonical, alias], for: .today)
+		model.setArticles([canonical, alias], for: .forYou)
+		model.setArticles([canonical, alias], for: .starred)
 
-		await model.setRead(article, read: true)
+		let snapshot = model.makeWidgetSnapshot()
 
-		#expect(model.allArticles(for: .unread).map(\.id) == ["shared"])
-		#expect(model.allArticles(for: .unread).first?.isRead == true)
-		#expect(model.articles(for: .unread).isEmpty)
-		model.setArticleFilter(.all, for: .unread)
-		#expect(model.articles(for: .unread).map(\.id) == ["shared"])
+		#expect(snapshot.recent.map(\.id) == [canonical.id])
+		#expect(snapshot.forYou.map(\.id) == [canonical.id])
+		#expect(snapshot.unreadCount == 1)
+		#expect(snapshot.starredCount == 1)
 	}
 
 	@Test func undoingMarkAllOnTodayInsertsMissingStoriesIntoLoadedUnread() async throws {

@@ -26,6 +26,25 @@ struct PlatformIntegrationTests {
 		#expect(delta.map(\.id) == ["new"])
 	}
 
+	@Test func backgroundRefreshDeduplicatesCanonicalAndGReaderArticleAliases() {
+		let cachedCanonical = Self.article(id: "canonical", receivedAt: 1)
+		let gReaderCopy = Self.article(id: "greader-copy", receivedAt: 2, readerId: cachedCanonical.id)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [cachedCanonical])
+		let knownAliasDelta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: known,
+			current: [gReaderCopy],
+		)
+		#expect(knownAliasDelta.isEmpty)
+
+		let newCanonical = Self.article(id: "new-canonical", receivedAt: 4)
+		let newGReaderCopy = Self.article(id: "new-greader-copy", receivedAt: 3, readerId: newCanonical.id)
+		let delta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: [],
+			current: [newCanonical, newGReaderCopy],
+		)
+		#expect(delta.map(\.id) == [newCanonical.id])
+	}
+
 	@Test func feedNotificationsMatchStreamAndRecommendationFeedKeysFromLegacySlugPrefs() throws {
 		let subscription = try Self.subscription(id: "feed/7", path: "daily")
 		let enabledIDs: Set<String> = ["daily"]
@@ -361,9 +380,10 @@ struct PlatformIntegrationTests {
 		receivedAt: TimeInterval,
 		feedKey: String = "feed",
 		isRead: Bool = false,
+		readerId: String? = nil,
 	) -> Recommendation {
 		Recommendation(
-			id: id, readerId: "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
+			id: id, readerId: readerId ?? "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
 			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
 			explanation: "Test", learningState: "Test",
