@@ -7,7 +7,7 @@ enum ReaderTypography {
 }
 
 extension ReaderTheme {
-	var preferredColorScheme: ColorScheme? {
+	nonisolated var preferredColorScheme: ColorScheme? {
 		switch self {
 		case .system: nil
 		case .light, .sepia: .light
