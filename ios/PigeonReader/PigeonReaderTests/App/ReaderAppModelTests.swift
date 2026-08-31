@@ -497,6 +497,86 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == other.id)
 	}
 
+	@Test func searchResultsHonorTheCurrentReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let unreadHit = makeArticle(id: "unread-hit", isRead: false, receivedAt: 1)
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([unreadHit, readHit], for: collection)
+		try await store.saveArticles([unreadHit, readHit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		#expect(model.articleFilter == .unread)
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [unreadHit.id, readHit.id])
+		#expect(model.displayedSearchResults.map(\.id) == [unreadHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+
+		model.articleFilter = .read
+		#expect(model.displayedSearchResults.map(\.id) == [readHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+
+		model.articleFilter = .all
+		#expect(model.displayedSearchResults.map(\.id) == [unreadHit.id, readHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+	}
+
+	@Test func searchFilterEmptyWhenEveryHitIsHiddenByTheReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let readHit = makeArticle(id: "read-only-hit", isRead: true)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([readHit], for: collection)
+		try await store.saveArticles([readHit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+		model.articleFilter = .unread
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [readHit.id])
+		#expect(model.displayedSearchResults.isEmpty)
+		#expect(model.isSearchFilterEmpty)
+	}
+
+	@Test func articleShortcutsSkipSearchHitsHiddenByTheReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let firstUnread = makeArticle(id: "first-unread", isRead: false, receivedAt: 1)
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedAt: 2)
+		let nextUnread = makeArticle(id: "next-unread", isRead: false, receivedAt: 3)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([firstUnread, readHit, nextUnread], for: collection)
+		try await store.saveArticles(
+			[firstUnread, readHit, nextUnread],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.select(item: collection)
+		model.articleFilter = .unread
+		model.select(article: firstUnread)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.displayedSearchResults.map(\.id) == [firstUnread.id, nextUnread.id])
+		#expect(model.navigateArticle(.next)?.id == nextUnread.id)
+		#expect(model.selectedArticleID == nextUnread.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.selectedArticleID == nextUnread.id)
+	}
+
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let article = makeArticle(id: "shared")

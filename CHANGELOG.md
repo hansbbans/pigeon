@@ -14,6 +14,7 @@ All notable changes to Pigeon are documented in this file.
 
 - The top error banner now clears when you switch feeds or leave a failed search, so a stale load or search failure no longer covers the next list.
 - Not Interested from Today or a feed now drops the story from an already-loaded For You list.
+- Searching a list now respects Unread, Read, and All, so a read story no longer appears while Unread is selected.
 - Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
 - Ordinary reading pans no longer count as back-to-feed; only the leading-edge swipe leaves the article.
 - Swiping from the leading edge of an iPhone article returns to the feed again. The gesture is recognized on the reader itself, not only the back button.

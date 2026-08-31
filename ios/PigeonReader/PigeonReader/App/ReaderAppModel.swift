@@ -127,6 +127,14 @@ final class ReaderAppModel {
 	private var bulkReadUndo: BulkReadUndo?
 	private var scrollReadTriggered: Set<String> = []
 	private(set) var searchResults: [Recommendation] = []
+	var displayedSearchResults: [Recommendation] {
+		articleFilter.filtering(searchResults)
+	}
+	var isSearchFilterEmpty: Bool {
+		articleFilter != .all
+			&& searchResults.isEmpty == false
+			&& displayedSearchResults.isEmpty
+	}
 	private(set) var isSearchingArticles = false
 	private(set) var bulkReadUndoTitle: String?
 	private(set) var offlineStorageStats = OfflineStorageStats.empty
@@ -1967,7 +1975,7 @@ final class ReaderAppModel {
 	}
 
 	private var articleNavigationArticles: [Recommendation] {
-		activeSearchScope == nil ? articles : searchResults
+		activeSearchScope == nil ? articles : displayedSearchResults
 	}
 
 	func article(withId id: String) -> Recommendation? {
