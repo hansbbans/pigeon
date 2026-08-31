@@ -187,9 +187,9 @@ final class PigeonReaderUITests: XCTestCase {
 		let unsubscribe = app.buttons["Unsubscribe"]
 		XCTAssertTrue(unsubscribe.waitForExistence(timeout: 5))
 		unsubscribe.tap()
-		let confirm = app.buttons["confirm-unsubscribe-feed"].exists
-			? app.buttons["confirm-unsubscribe-feed"]
-			: app.buttons["Unsubscribe"]
+		let confirm = app.buttons["confirm-unsubscribe-feed"].firstMatch.exists
+			? app.buttons["confirm-unsubscribe-feed"].firstMatch
+			: app.buttons["Unsubscribe"].firstMatch
 		XCTAssertTrue(confirm.waitForExistence(timeout: 5))
 		confirm.tap()
 
