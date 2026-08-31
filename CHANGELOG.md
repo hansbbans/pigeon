@@ -7,6 +7,7 @@ All notable changes to Pigeon are documented in this file.
 ### Fixed
 
 - Sidebar folders can be renamed and deleted. The folder list updates immediately, and deleting the open folder no longer leaves a ghost collection.
+- Feed notifications now treat a subscription's stream ID (`feed/7`) and feed slug as the same feed, so enabling a feed in Settings actually alerts after background refresh.
 
 ## [0.1.3.0] - 2026-08-23
 
