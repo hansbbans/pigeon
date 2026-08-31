@@ -965,6 +965,14 @@ struct ReaderAppModelTests {
 	@Test func successfulAddFeedWithFailedLibraryRefreshStaysOffTheReaderBanner() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
+		let quickAddData = try JSONEncoder().encode(
+			QuickAddResponse(
+				query: "https://example.com/feed.xml",
+				numResults: 1,
+				streamId: "feed/1",
+				streamName: "Example",
+			),
+		)
 		model.setNavigation(
 			ReaderNavigationState(items: [.smart(.forYou)]),
 			markAsLoaded: true,
@@ -975,13 +983,18 @@ struct ReaderAppModelTests {
 
 		let quickAdd = await controlled.nextRequest()
 		#expect(quickAdd.request.url?.path == "/reader/api/0/subscription/quickadd")
-		await controlled.resolve(quickAdd, data: Data(#"{"streamId":"feed/1"}"#.utf8))
+		await controlled.resolve(quickAdd, data: quickAddData)
 
 		let refresh = await controlled.nextRequest()
 		#expect(refresh.request.url?.path == "/reader/api/0/subscription/list")
 		await controlled.resolve(refresh, data: Data("temporary failure".utf8), statusCode: 503)
+		// Let every concurrent request start before failing one. Otherwise the
+		// failed request can cancel a sibling before it reaches the HTTP client.
+		var navigationRefreshes: [ControlledHTTPClient.PendingRequest] = []
 		for _ in 0..<4 {
-			let navigationRefresh = await controlled.nextRequest()
+			navigationRefreshes.append(await controlled.nextRequest())
+		}
+		for navigationRefresh in navigationRefreshes {
 			await controlled.resolve(
 				navigationRefresh,
 				data: Data("temporary failure".utf8),
