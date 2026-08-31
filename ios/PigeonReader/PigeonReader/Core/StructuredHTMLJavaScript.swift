@@ -303,6 +303,12 @@ enum StructuredHTMLJavaScript {
 			document.addEventListener("click", function(event) {
 				const target = event.target;
 				if (!(target instanceof Element) || !content.contains(target)) return;
+				// Ask Before Loading placeholders replace the <img>, including
+				// inside newsletter <a> wrappers. That tap must load the image,
+				// not open the surrounding link.
+				if (target.closest(".pigeon-image-blocked")) {
+					return;
+				}
 				const image = target.closest("img");
 				if (image) {
 					event.preventDefault();
