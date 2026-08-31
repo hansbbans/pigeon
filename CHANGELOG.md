@@ -7,6 +7,7 @@ All notable changes to Pigeon are documented in this file.
 ### Fixed
 
 - Reader mode now follows a feed across For You `feed_key` and stream `feed/{rowid}` identities, so choosing Reader View or Website in one list applies in the other.
+- iPad Feed Content and Reader View now remount when the story or reading mode changes, so the next article no longer opens already scrolled.
 
 ## [0.1.2.0] - 2026-08-20
 
