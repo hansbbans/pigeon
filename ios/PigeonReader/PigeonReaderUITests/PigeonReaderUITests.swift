@@ -187,9 +187,9 @@ final class PigeonReaderUITests: XCTestCase {
 		let deleteFolder = app.buttons["Delete Folder"]
 		XCTAssertTrue(deleteFolder.waitForExistence(timeout: 5))
 		deleteFolder.tap()
-		let confirmDelete = app.buttons["confirm-delete-folder"].exists
-			? app.buttons["confirm-delete-folder"]
-			: app.buttons["Delete Folder"]
+		let confirmDelete = app.buttons["confirm-delete-folder"].firstMatch.exists
+			? app.buttons["confirm-delete-folder"].firstMatch
+			: app.buttons["Delete Folder"].firstMatch
 		XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5))
 		confirmDelete.tap()
 
