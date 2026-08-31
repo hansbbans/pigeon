@@ -5,6 +5,10 @@ struct ReaderArticleFilterStore {
 	static let legacyKeyPrefix = "pigeon.reader.article-filter."
 	static let defaultFilter = ReaderArticleFilter.unread
 
+	static func defaultFilter(for collectionID: String) -> ReaderArticleFilter {
+		ReaderSection(rawValue: collectionID) == .starred ? .all : .unread
+	}
+
 	private let defaults: UserDefaults
 
 	init(defaults: UserDefaults = .standard) {
@@ -17,7 +21,7 @@ struct ReaderArticleFilterStore {
 	func filter(for collectionID: String, session: PigeonSession) -> ReaderArticleFilter {
 		guard let rawValue = defaults.string(forKey: key(for: collectionID, session: session)),
 			let filter = ReaderArticleFilter(rawValue: rawValue) else {
-			return Self.defaultFilter
+			return Self.defaultFilter(for: collectionID)
 		}
 		return filter
 	}

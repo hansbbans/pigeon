@@ -1778,7 +1778,7 @@ final class ReaderAppModel {
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
 		guard let session else {
-			return ReaderArticleFilterStore.defaultFilter
+			return ReaderArticleFilterStore.defaultFilter(for: collectionID)
 		}
 		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
 		return articleFilters[key] ?? articleFilterStore.filter(for: collectionID, session: session)
