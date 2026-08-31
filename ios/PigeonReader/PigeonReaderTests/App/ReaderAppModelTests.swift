@@ -1767,7 +1767,7 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
-		@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
+	@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 		model.select(section: .forYou)
@@ -1833,7 +1833,7 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == nil)
 	}
 
-		@Test func starredListPaginatesOnExplicitLoadMoreInsteadOfTheRecommendationCap() async throws {
+	@Test func starredListPaginatesOnExplicitLoadMoreInsteadOfTheRecommendationCap() async throws {
 		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
 		let model = try makeModel(httpClient: httpClient)
 		let collection = ReaderNavigationItem.smart(.starred)
@@ -1873,6 +1873,110 @@ struct ReaderAppModelTests {
 		])
 		#expect(idRequests.allSatisfy { $0.query["xt"] == "user/-/state/com.google/read" })
 		#expect(await httpClient.requests().contains(where: { $0.path == "/api/v1/recommendations" }) == false)
+	}
+
+	@Test func staleFeedLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadStaleFeeds()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func personalizationLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadPersonalization()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func invalidAddFeedURLStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+
+		let added = await model.addFeed(urlText: "not-a-url", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage == "Enter a complete HTTP or HTTPS feed URL.")
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func addFeedAPIFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500),
+		)
+
+		let added = await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage != nil)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func successfulAddFeedWithFailedLibraryRefreshStaysOffTheReaderBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let quickAddData = try JSONEncoder().encode(
+			QuickAddResponse(
+				query: "https://example.com/feed.xml",
+				numResults: 1,
+				streamId: "feed/1",
+				streamName: "Example",
+			),
+		)
+		model.setNavigation(
+			ReaderNavigationState(items: [.smart(.forYou)]),
+			markAsLoaded: true,
+		)
+		let addTask = Task {
+			await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+		}
+
+		let quickAdd = await controlled.nextRequest()
+		#expect(quickAdd.request.url?.path == "/reader/api/0/subscription/quickadd")
+		await controlled.resolve(quickAdd, data: quickAddData)
+
+		let refresh = await controlled.nextRequest()
+		#expect(refresh.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(refresh, data: Data("temporary failure".utf8), statusCode: 503)
+		// Let every concurrent request start before failing one. Otherwise the
+		// failed request can cancel a sibling before it reaches the HTTP client.
+		var navigationRefreshes: [ControlledHTTPClient.PendingRequest] = []
+		for _ in 0..<4 {
+			navigationRefreshes.append(await controlled.nextRequest())
+		}
+		for navigationRefresh in navigationRefreshes {
+			await controlled.resolve(
+				navigationRefresh,
+				data: Data("temporary failure".utf8),
+				statusCode: 503,
+			)
+		}
+
+		#expect(await addTask.value)
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func dismissingSettingsClearsTheSettingsErrorWithoutTouchingTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+		model.errorMessage = "Feed failed to load"
+
+		await model.loadStaleFeeds()
+		#expect(model.settingsErrorMessage != nil)
+
+		model.clearSettingsError()
+
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == "Feed failed to load")
 	}
 
 	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {

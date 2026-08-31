@@ -7,6 +7,7 @@ struct PersonalizationSettingsView: View {
 
 	var body: some View {
 		Form {
+			SettingsErrorSection()
 			if let snapshot = model.personalization {
 				Section("How Ranking Works") {
 					Text(snapshot.policy.plainLanguageSummary)

@@ -16,6 +16,8 @@ struct SettingsView: View {
 
 		NavigationStack {
 			Form {
+				SettingsErrorSection()
+
 				Section("Connection") {
 					LabeledContent("Server", value: model.session?.baseURL.absoluteString ?? "Not connected")
 					Text("Your password is never stored here. Pigeon keeps only the ClientLogin token in Keychain.")
@@ -273,6 +275,9 @@ struct SettingsView: View {
 			} message: {
 				Text("Pending read, star, folder, and feedback changes will not be deleted.")
 			}
+		}
+		.onDisappear {
+			model.clearSettingsError()
 		}
 	}
 
