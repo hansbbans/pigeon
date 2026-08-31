@@ -2218,9 +2218,13 @@ final class ReaderAppModel {
 		)
 	}
 
+	func canMarkStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) -> Bool {
+		markOlderThanCandidates(in: collection, olderThan: date).isEmpty == false
+	}
+
 	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			allArticles(for: collection).filter { $0.isRead == false && $0.receivedAt < date },
+			markOlderThanCandidates(in: collection, olderThan: date),
 			scope: .older,
 			undoTitle: "Mark Older Stories as Read",
 		)
@@ -3000,6 +3004,19 @@ final class ReaderAppModel {
 		} catch {
 			errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
+	}
+
+	private func markOlderThanCandidates(
+		in collection: ReaderNavigationItem,
+		olderThan date: Date,
+	) -> [Recommendation] {
+		let displayedArticles: [Recommendation]
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			displayedArticles = displayedSearchResults
+		} else {
+			displayedArticles = allArticles(for: collection)
+		}
+		return displayedArticles.filter { $0.isRead == false && $0.receivedAt < date }
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
