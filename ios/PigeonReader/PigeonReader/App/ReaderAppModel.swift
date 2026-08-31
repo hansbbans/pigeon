@@ -1672,12 +1672,25 @@ final class ReaderAppModel {
 			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
+		let previousFeedItems = feedItems(forStreamID: subscription.id)
+		let previousSelectedID = selectedNavigationID
+		let previousSelectedItem = navigation.item(withID: previousSelectedID)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
 		updateSubscription(id: subscription.id) { item in
 			item.categories = normalizedFolders.map {
 				FeedCategory(id: "user/-/label/\($0)", label: $0)
 			}
 		}
 		rebuildNavigationFromSubscriptions()
+		let remappedCollectionIDs = remapMovedFeedState(
+			streamID: subscription.id,
+			feedKey: subscription.feedKey,
+			previousFeedItems: previousFeedItems,
+			previousSelectedID: previousSelectedID,
+			previousSelectedItem: previousSelectedItem,
+		)
 		if let accountID = session?.storageIdentity {
 			do {
 				try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
@@ -1685,6 +1698,9 @@ final class ReaderAppModel {
 			} catch {
 				errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 			}
+		}
+		if remappedCollectionIDs.isEmpty == false {
+			await persistCollections(remappedCollectionIDs)
 		}
 		await replayPendingMutations()
 		return true
@@ -2976,6 +2992,158 @@ final class ReaderAppModel {
 		} catch {
 			errorMessage = "Your library change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
+	}
+
+	private func feedItems(forStreamID streamID: String) -> [ReaderNavigationItem] {
+		navigation.items.filter { $0.kind == .feed && $0.streamID == streamID }
+	}
+
+	@discardableResult
+	private func remapMovedFeedState(
+		streamID: String,
+		feedKey: String,
+		previousFeedItems: [ReaderNavigationItem],
+		previousSelectedID: String,
+		previousSelectedItem: ReaderNavigationItem?,
+	) -> Set<String> {
+		let nextFeedItems = feedItems(forStreamID: streamID)
+		var changedCollectionIDs = Set<String>()
+		var reservedDestinationIDs = Set<String>()
+		var mappings: [(from: String, to: String)] = []
+
+		for previousItem in previousFeedItems {
+			if let matching = nextFeedItems.first(where: {
+				$0.parentID == previousItem.parentID && reservedDestinationIDs.contains($0.id) == false
+			}) {
+				mappings.append((previousItem.id, matching.id))
+				reservedDestinationIDs.insert(matching.id)
+			} else if let fallback = nextFeedItems.first(where: { reservedDestinationIDs.contains($0.id) == false }) {
+				mappings.append((previousItem.id, fallback.id))
+				reservedDestinationIDs.insert(fallback.id)
+			}
+		}
+
+		if let sourceID = mappings.first?.from ?? previousFeedItems.first?.id {
+			for nextItem in nextFeedItems where reservedDestinationIDs.contains(nextItem.id) == false {
+				mappings.append((sourceID, nextItem.id))
+			}
+		}
+
+		for mapping in mappings {
+			moveCollectionState(from: mapping.from, to: mapping.to)
+			changedCollectionIDs.insert(mapping.from)
+			changedCollectionIDs.insert(mapping.to)
+		}
+
+		let nextFeedIDs = Set(nextFeedItems.map(\.id))
+		for previousItem in previousFeedItems where nextFeedIDs.contains(previousItem.id) == false {
+			clearCollectionState(previousItem.id)
+			changedCollectionIDs.insert(previousItem.id)
+		}
+
+		let feedStories = nextFeedItems
+			.flatMap { articleCache[$0.id] ?? [] }
+			.reduce(into: [Recommendation]()) { result, article in
+				if result.contains(where: { articlesMatch($0, article) }) == false {
+					result.append(article)
+				}
+			}
+		let previousFolderIDs = Set(previousFeedItems.compactMap(\.parentID))
+		let nextFolderIDs = Set(nextFeedItems.compactMap(\.parentID))
+		for folderID in previousFolderIDs.subtracting(nextFolderIDs) {
+			guard articleCache[folderID] != nil else { continue }
+			articleCache[folderID]?.removeAll { articleBelongsToFeed($0, streamID: streamID, feedKey: feedKey) }
+			changedCollectionIDs.insert(folderID)
+		}
+		for folderID in nextFolderIDs.subtracting(previousFolderIDs) {
+			guard articleCache[folderID] != nil, feedStories.isEmpty == false else { continue }
+			mergeArticles(feedStories, into: folderID)
+			changedCollectionIDs.insert(folderID)
+		}
+
+		if previousFeedItems.contains(where: { $0.id == previousSelectedID }) {
+			let destinationID = mappings.first(where: { $0.from == previousSelectedID })?.to
+				?? nextFeedItems.first?.id
+			if let destinationID, let destination = navigation.item(withID: destinationID) {
+				select(item: destination)
+			} else {
+				select(section: firstEnabledSmartSection)
+			}
+		} else if previousSelectedItem?.kind == .folder, navigation.item(withID: previousSelectedID) == nil {
+			select(section: firstEnabledSmartSection)
+		}
+
+		return changedCollectionIDs
+	}
+
+	private func articleBelongsToFeed(_ article: Recommendation, streamID: String, feedKey: String) -> Bool {
+		article.feedKey == streamID || article.feedKey == feedKey
+	}
+
+	private func moveCollectionState(from sourceID: String, to destinationID: String) {
+		guard sourceID != destinationID else { return }
+		if let incoming = articleCache[sourceID] {
+			if articleCache[destinationID] == nil {
+				articleCache[destinationID] = incoming
+			} else {
+				mergeArticles(incoming, into: destinationID)
+			}
+		}
+		if sortOrders[destinationID] == nil, let sortOrder = sortOrders[sourceID] {
+			sortOrders[destinationID] = sortOrder
+		}
+		if selectedArticleIDs[destinationID] == nil {
+			selectedArticleIDs[destinationID] = selectedArticleIDs[sourceID]
+		}
+		if streamContinuations[destinationID] == nil {
+			streamContinuations[destinationID] = streamContinuations[sourceID]
+		}
+		if seenStreamContinuations[destinationID] == nil {
+			seenStreamContinuations[destinationID] = seenStreamContinuations[sourceID]
+		}
+		if collectionFreshness[destinationID] == nil {
+			collectionFreshness[destinationID] = collectionFreshness[sourceID]
+		}
+		if resolvedPaginationCollections.contains(sourceID) {
+			resolvedPaginationCollections.insert(destinationID)
+		}
+		if deferredInitialFeedPaginationCollectionID == sourceID {
+			deferredInitialFeedPaginationCollectionID = destinationID
+		}
+		if let session {
+			let sourceKey = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: sourceID)
+			let destinationKey = ArticleFilterKey(
+				sessionIdentity: session.articleFilterStorageIdentity,
+				collectionID: destinationID,
+			)
+			if articleFilters[destinationKey] == nil, let filter = articleFilters[sourceKey] {
+				articleFilters[destinationKey] = filter
+				articleFilterStore.setFilter(filter, for: destinationID, session: session)
+			}
+		}
+	}
+
+	private func clearCollectionState(_ collectionID: String) {
+		articleCache[collectionID] = nil
+		sortOrders[collectionID] = nil
+		selectedArticleIDs[collectionID] = nil
+		resetStreamPagination(for: collectionID)
+		resolvedPaginationCollections.remove(collectionID)
+		collectionFreshness[collectionID] = nil
+		if deferredInitialFeedPaginationCollectionID == collectionID {
+			deferredInitialFeedPaginationCollectionID = nil
+		}
+		if let session {
+			articleFilters[ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)] = nil
+		}
+	}
+
+	private func mergeArticles(_ articles: [Recommendation], into collectionID: String) {
+		var combined = articleCache[collectionID] ?? []
+		for article in articles where combined.contains(where: { articlesMatch($0, article) }) == false {
+			combined.append(article)
+		}
+		articleCache[collectionID] = sortOrder(for: collectionID).sorted(combined)
 	}
 
 	private func rebuildNavigationFromSubscriptions() {
