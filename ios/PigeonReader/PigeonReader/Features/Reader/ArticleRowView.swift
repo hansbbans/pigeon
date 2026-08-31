@@ -5,31 +5,53 @@ struct ArticleRowView: View {
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let imageProxySession: PigeonSession?
+	let select: () -> Void
+	@State private var didRequestBlockedThumbnail = false
 
 	init(
 		article: Recommendation,
 		density: ReaderTimelineDensity = .comfortable,
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
 		imageProxySession: PigeonSession? = nil,
+		select: @escaping () -> Void,
 	) {
 		self.article = article
 		self.density = density
 		self.remoteImagePolicy = remoteImagePolicy
 		self.imageProxySession = imageProxySession
+		self.select = select
 	}
 
 	var body: some View {
 		HStack(alignment: .top, spacing: 10) {
-			storyText
-			if density == .imageRich {
+			Button(action: select) {
+				HStack(alignment: .top, spacing: 10) {
+					storyText
+					if density == .imageRich, thumbnailPresentation != .askToLoad {
+						thumbnail
+					}
+				}
+				.frame(maxWidth: .infinity, alignment: .leading)
+				.accessibilityElement(children: .combine)
+				.accessibilityValue(article.isRead ? "Read" : "Unread")
+			}
+			.buttonStyle(.plain)
+			if density == .imageRich, thumbnailPresentation == .askToLoad {
 				thumbnail
 			}
 		}
 		.padding(.vertical, density == .titleOnly ? 1 : 3)
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.opacity(article.isRead ? 0.55 : 1)
-		.accessibilityElement(children: .combine)
-		.accessibilityValue(article.isRead ? "Read" : "Unread")
+	}
+
+	private var thumbnailPresentation: ArticleImagePolicy.ListThumbnail {
+		ArticleImagePolicy.listThumbnail(
+			policy: remoteImagePolicy,
+			html: article.html,
+			baseURL: article.safeOriginalURL,
+			didRequestBlockedLoad: didRequestBlockedThumbnail,
+		)
 	}
 
 	private var storyText: some View {
@@ -79,18 +101,43 @@ struct ArticleRowView: View {
 
 	@ViewBuilder
 	private var thumbnail: some View {
-		if let url = ArticleListThumbnailRequest.thumbnailURL(
-			in: article.html,
-			baseURL: article.safeOriginalURL,
-		) {
+		if remoteImagePolicy == .privacyProxied,
+			let url = ArticleListThumbnailRequest.thumbnailURL(
+				in: article.html,
+				baseURL: article.safeOriginalURL,
+			) {
 			ArticleListThumbnailView(
 				remoteURL: url,
 				policy: remoteImagePolicy,
 				session: imageProxySession,
 			)
 		} else {
-			imagePlaceholder
+			switch thumbnailPresentation {
+			case .remote(let url):
+				AsyncImage(url: url) { image in
+					image.resizable().scaledToFill()
+				} placeholder: {
+					imagePlaceholder
+				}
 				.frame(width: 72, height: 54)
+				.clipShape(.rect(cornerRadius: 8))
+				.accessibilityLabel("Article image")
+			case .askToLoad:
+				Button {
+					didRequestBlockedThumbnail = true
+				} label: {
+					imagePlaceholder
+						.frame(width: 72, height: 54)
+				}
+				.buttonStyle(.borderless)
+				.contentShape(Rectangle())
+				.accessibilityLabel("Load this remote image")
+				.accessibilityHint("Loads only this thumbnail. The publisher may see your network address.")
+				.accessibilityIdentifier("image-rich-ask-before-loading")
+			case .placeholder:
+				imagePlaceholder
+					.frame(width: 72, height: 54)
+			}
 		}
 	}
 

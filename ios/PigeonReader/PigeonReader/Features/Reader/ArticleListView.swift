@@ -46,17 +46,13 @@ struct ArticleListView: View {
 			} else {
 				List {
 					ForEach(articles) { article in
-						Button {
-							model.select(article: article)
-						} label: {
-							ArticleRowView(
-								article: article,
-								density: model.readerTypography.timelineDensity,
-								remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-								imageProxySession: model.session,
-							)
-						}
-						.buttonStyle(.plain)
+						ArticleRowView(
+							article: article,
+							density: model.readerTypography.timelineDensity,
+							remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+							imageProxySession: model.session,
+							select: { model.select(article: article) },
+						)
 						.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
 						.swipeActions(edge: .leading, allowsFullSwipe: true) {
 							readButton(for: article)
