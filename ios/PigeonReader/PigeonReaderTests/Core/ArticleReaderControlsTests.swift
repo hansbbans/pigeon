@@ -18,6 +18,53 @@ struct ArticleReaderControlsTests {
 		#expect(ArticleReaderControl.shareToReadwise.systemImage == "bookmark")
 	}
 
+	@Test func readingControlsMenuLeadsWithTextSizeThenLineHeight() {
+		#expect(ArticleReaderReadingAdjustment.allCases == [
+			.largerText,
+			.smallerText,
+			.looserLines,
+			.tighterLines,
+		])
+		#expect(ArticleReaderControl.readingControls.systemImage == "textformat.size")
+		#expect(ArticleReaderReadingAdjustment.largerText.title == "Larger text")
+		#expect(ArticleReaderReadingAdjustment.smallerText.title == "Smaller text")
+		#expect(ArticleReaderReadingAdjustment.largerText.systemImage == "textformat.size.larger")
+		#expect(ArticleReaderReadingAdjustment.smallerText.systemImage == "textformat.size.smaller")
+	}
+
+	@Test func readingAdjustmentsDisableAtTypographyBounds() {
+		#expect(
+			ArticleReaderReadingAdjustment.largerText.isEnabled(
+				textScale: ReaderTypographySettings.textScaleRange.upperBound,
+				lineHeight: ReaderTypographySettings.defaultLineHeight,
+			) == false
+		)
+		#expect(
+			ArticleReaderReadingAdjustment.smallerText.isEnabled(
+				textScale: ReaderTypographySettings.textScaleRange.lowerBound,
+				lineHeight: ReaderTypographySettings.defaultLineHeight,
+			) == false
+		)
+		#expect(
+			ArticleReaderReadingAdjustment.largerText.isEnabled(
+				textScale: ReaderTypographySettings.defaultTextScale,
+				lineHeight: ReaderTypographySettings.defaultLineHeight,
+			)
+		)
+		#expect(
+			ArticleReaderReadingAdjustment.looserLines.isEnabled(
+				textScale: ReaderTypographySettings.defaultTextScale,
+				lineHeight: ReaderTypographySettings.lineHeightRange.upperBound,
+			) == false
+		)
+		#expect(
+			ArticleReaderReadingAdjustment.tighterLines.isEnabled(
+				textScale: ReaderTypographySettings.defaultTextScale,
+				lineHeight: ReaderTypographySettings.lineHeightRange.lowerBound,
+			) == false
+		)
+	}
+
 	@Test func markReadTitleAndIconFollowReadState() {
 		#expect(ArticleReaderControl.markRead.title(isRead: false) == "Mark read")
 		#expect(ArticleReaderControl.markRead.systemImage(isRead: false) == "largecircle.fill.circle")
