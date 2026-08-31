@@ -141,7 +141,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					return
 				}
 				let resolvedArticle = sqlite3_column_int64(statement, 2) != 0
-					? replacingHTML(in: decodedArticle, with: "")
+					? decodedArticle.replacingHTML("")
 					: decodedArticle
 				decodedArticlesByID[articleID] = resolvedArticle
 				article = resolvedArticle
@@ -654,32 +654,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		return ids
 	}
 
-	private func replacingHTML(in article: Recommendation, with html: String) -> Recommendation {
-		Recommendation(
-			id: article.id,
-			readerId: article.readerId,
-			feedKey: article.feedKey,
-			source: article.source,
-			author: article.author,
-			title: article.title,
-			html: html,
-			text: article.text,
-			originalURL: article.originalURL,
-			receivedAt: article.receivedAt,
-			isRead: article.isRead,
-			isStarred: article.isStarred,
-			score: article.score,
-			confidence: article.confidence,
-			sampleCount: article.sampleCount,
-			explanation: article.explanation,
-			learningState: article.learningState,
-		)
-	}
-
 	private func sanitized(_ article: Recommendation) -> Recommendation {
-		replacingHTML(
-			in: article,
-			with: StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
+		article.replacingHTML(
+			StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
 		)
 	}
 

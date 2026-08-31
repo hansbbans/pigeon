@@ -2539,14 +2539,33 @@ final class ReaderAppModel {
 
 	@discardableResult
 	private func preserveOpenArticle(_ article: Recommendation, in collectionID: String) -> Recommendation {
-		if let existing = articleCache[collectionID]?.first(where: { articlesMatch($0, article) }) {
-			return existing
+		let kept = articleWithPreservedBody(article)
+		replaceCachedMatches(with: kept)
+		if articleCache[collectionID]?.contains(where: { articlesMatch($0, kept) }) != true {
+			var cached = articleCache[collectionID] ?? []
+			cached.append(kept)
+			articleCache[collectionID] = sortOrder(for: collectionID).sorted(cached)
 		}
-		var cached = articleCache[collectionID] ?? []
-		cached.append(article)
-		let sorted = sortOrder(for: collectionID).sorted(cached)
-		articleCache[collectionID] = sorted
-		return sorted.first(where: { articlesMatch($0, article) }) ?? article
+		return articleCache[collectionID]?.first(where: { articlesMatch($0, kept) }) ?? kept
+	}
+
+	/// Snapshot reloads can replace the open row with a body-pruned cache copy.
+	/// Keep the HTML the user is currently reading, and take snapshot flags from cache.
+	private func articleWithPreservedBody(_ article: Recommendation) -> Recommendation {
+		guard let existing = articleCache.values.lazy.flatMap({ $0 }).first(where: { articlesMatch($0, article) }) else {
+			return article
+		}
+		if existing.hasReadableHTML == false, article.hasReadableHTML {
+			return existing.replacingHTML(article.html)
+		}
+		return existing
+	}
+
+	private func replaceCachedMatches(with article: Recommendation) {
+		for (collectionID, articles) in articleCache {
+			guard articles.contains(where: { articlesMatch($0, article) }) else { continue }
+			articleCache[collectionID] = articles.map { articlesMatch($0, article) ? article : $0 }
+		}
 	}
 
 	@discardableResult
