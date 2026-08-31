@@ -990,6 +990,7 @@ final class ReaderAppModel {
 			selectedArticleIDs = [:]
 			selectedArticleID = nil
 			preferredCompactColumn = .content
+			writeWidgetSnapshot()
 			await refreshOfflineStorageStats()
 			scheduleRestorationSave()
 		} catch {
