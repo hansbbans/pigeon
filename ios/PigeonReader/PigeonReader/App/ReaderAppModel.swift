@@ -590,11 +590,16 @@ final class ReaderAppModel {
 				select(item: item)
 				await load(collection: item)
 			}
-		case .article(let id):
+		case .article(let id, let requestedCollection):
 			if article(withId: id) == nil { await prepareOfflineLibrary() }
 			guard let article = article(withId: id) else { return }
-			if let collectionID = articleCache.first(where: { $0.value.contains(where: { $0.id == article.id || $0.readerId == article.readerId }) })?.key {
-				select(collectionID: collectionID)
+			if let item = collectionItem(for: article, preferredID: requestedCollection) {
+				select(item: item)
+				if articleCache[item.id] != nil {
+					_ = preserveOpenArticle(article, in: item.id)
+				} else {
+					await load(collection: item)
+				}
 			}
 			select(article: article)
 		}
@@ -615,7 +620,7 @@ final class ReaderAppModel {
 		guard let article = article(withId: articleID) else { return }
 		switch action {
 		case .open:
-			await handleDeepLink(PigeonDeepLink.article(articleID).url)
+			await handleDeepLink(PigeonDeepLink.article(articleID, collection: nil).url)
 		case .markRead:
 			await setRead(article, read: true)
 		case .star:
@@ -631,8 +636,16 @@ final class ReaderAppModel {
 			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
 			uniquingKeysWith: { first, _ in first },
 		).values
-		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map(Self.widgetArticle)
-		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map(Self.widgetArticle)
+		let todayID = ReaderSection.today.rawValue
+		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map { article in
+			let collection = articleCache[todayID]?.contains(where: { articlesMatch($0, article) }) == true
+				? todayID
+				: nil
+			return Self.widgetArticle(article, collection: collection)
+		}
+		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map {
+			Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue)
+		}
 		let snapshot = PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
@@ -665,13 +678,13 @@ final class ReaderAppModel {
 		)
 	}
 
-	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {
+	private static func widgetArticle(_ article: Recommendation, collection: String? = nil) -> PigeonWidgetArticle {
 		PigeonWidgetArticle(
 			id: article.id,
 			title: article.title,
 			source: article.source,
 			receivedAt: article.receivedAt,
-			deepLink: PigeonDeepLink.article(article.id).url,
+			deepLink: PigeonDeepLink.article(article.id, collection: collection).url,
 		)
 	}
 
@@ -2070,6 +2083,46 @@ final class ReaderAppModel {
 			return
 		}
 		navigation = navigation.replacingCount(for: starredItem.id, with: starredItem.unreadCount + delta)
+	}
+
+	private func collectionItem(for article: Recommendation, preferredID: String?) -> ReaderNavigationItem? {
+		if let preferredID, let item = navigationItem(matching: preferredID) {
+			return item
+		}
+
+		if let feed = navigation.items.first(where: { $0.kind == .feed && feedItemContains($0, article: article) }) {
+			return feed
+		}
+
+		let smartOrder: [ReaderSection] = [.today, .forYou, .unread, .starred]
+		for section in smartOrder {
+			if articleCache[section.rawValue]?.contains(where: { articlesMatch($0, article) }) == true,
+				let item = navigation.item(withID: section.rawValue) {
+				return item
+			}
+		}
+
+		if let folder = navigation.folderItems.first(where: { folder in
+			navigation.children(of: folder.id).contains { feedItemContains($0, article: article) }
+		}) {
+			return folder
+		}
+
+		return articleCache.keys.sorted().compactMap { key -> ReaderNavigationItem? in
+			guard articleCache[key]?.contains(where: { articlesMatch($0, article) }) == true else {
+				return nil
+			}
+			return navigation.item(withID: key)
+		}.first
+	}
+
+	private func navigationItem(matching identifier: String) -> ReaderNavigationItem? {
+		if let item = navigation.item(withID: identifier) {
+			return item
+		}
+		return navigation.items.first { item in
+			item.streamID == identifier || item.feedKey == identifier || item.title == identifier
+		}
 	}
 
 	private func feedItemContains(_ item: ReaderNavigationItem, article: Recommendation) -> Bool {
