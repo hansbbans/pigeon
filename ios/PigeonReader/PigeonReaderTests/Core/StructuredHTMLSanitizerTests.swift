@@ -185,6 +185,70 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("pigeon-image://proxy?url="))
 		#expect(shell.contains("image.dataset.pigeonOriginalSrc"))
 		#expect(shell.contains("image.dataset.pigeonOriginalSrc || image.currentSrc || image.src"))
+		#expect(shell.contains("add(image.dataset.pigeonOriginalSrc)"))
+		#expect(shell.contains("__pigeonSafeURL(image.dataset.pigeonOriginalSrc, document.baseURI)"))
+	}
+
+	@MainActor
+	@Test
+	func privacyProxyImageFailureReportsOriginalHTTPSIdentityAndRejectsUnsafeSchemes() async throws {
+		let body = try #require(URL(string: "https://cdn.example/body.jpg"))
+		let lead = try #require(URL(string: "https://cdn.example/lead.jpg"))
+		let coordinator = StructuredHTMLView.Coordinator(
+			onLink: { _ in },
+			onImage: { _, _ in },
+			onImageFailure: { _ in },
+			onHeight: { _ in },
+		)
+		let configuration = WKWebViewConfiguration()
+		configuration.websiteDataStore = .nonPersistent()
+		configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+		configuration.userContentController.add(coordinator, name: "pigeonEvent")
+		let webView = WKWebView(frame: .zero, configuration: configuration)
+		coordinator.webView = webView
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		let proxiedFailureURLs = await withCheckedContinuation { (continuation: CheckedContinuation<[URL], Never>) in
+			coordinator.onImageFailure = { urls in
+				continuation.resume(returning: urls)
+			}
+			webView.evaluateJavaScript("""
+				window.__pigeonRender({
+					html: '<img src="\(body.absoluteString)" alt="Body">',
+					baseURL: "https://example.com/story",
+					textScale: 1,
+					lineHeight: 1.55,
+					theme: "system",
+					remoteImagePolicy: "privacy-proxied",
+				});
+				document.querySelector("img")?.dispatchEvent(new Event("error"));
+			""", completionHandler: nil)
+		}
+
+		#expect(proxiedFailureURLs == [body])
+		#expect(StructuredHTMLSanitizer.safeWebURL("pigeon-image://proxy?url=https%3A%2F%2Fcdn.example%2Fbody.jpg", relativeTo: nil) == nil)
+		#expect(StructuredHTMLSanitizer.safeWebURL("javascript:alert(1)", relativeTo: nil) == nil)
+		#expect(ArticleImagePolicy.fallbackLeadImageURL(
+			bodyImageURLs: [body],
+			leadImageURL: lead,
+			failedImageURLs: Set(proxiedFailureURLs.map(\.absoluteString)),
+		) == lead)
+
+		let unsafeFailureURLs = await withCheckedContinuation { (continuation: CheckedContinuation<[URL], Never>) in
+			coordinator.onImageFailure = { urls in
+				continuation.resume(returning: urls)
+			}
+			webView.evaluateJavaScript("""
+				const image = document.createElement("img");
+				image.dataset.pigeonOriginalSrc = "javascript:alert(1)";
+				image.src = "pigeon-image://proxy?url=javascript%3Aalert(1)";
+				document.getElementById("pigeon-content").replaceChildren(image);
+				image.dispatchEvent(new Event("error"));
+			""", completionHandler: nil)
+		}
+		#expect(unsafeFailureURLs.isEmpty)
 	}
 
 	@MainActor

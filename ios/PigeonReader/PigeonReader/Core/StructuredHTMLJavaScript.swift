@@ -144,6 +144,7 @@ enum StructuredHTMLJavaScript {
 			const safeURL = __pigeonSafeURL(value, document.baseURI);
 			if (safeURL && !urls.includes(safeURL)) urls.push(safeURL);
 		};
+		add(image.dataset.pigeonOriginalSrc);
 		add(image.getAttribute("src"));
 		for (const candidate of String(image.getAttribute("srcset") || "").split(",")) {
 			add(candidate.trim().split(/\\s+/)[0]);
@@ -330,7 +331,10 @@ enum StructuredHTMLJavaScript {
 			document.addEventListener("error", function(event) {
 				const image = event.target;
 				if (!(image instanceof HTMLImageElement) || !content.contains(image)) return;
-				const imageURL = image.currentSrc || image.src || null;
+				const imageURL = __pigeonSafeURL(image.dataset.pigeonOriginalSrc, document.baseURI)
+					|| __pigeonSafeURL(image.currentSrc, document.baseURI)
+					|| __pigeonSafeURL(image.src, document.baseURI)
+					|| null;
 				const placeholder = document.createElement("span");
 				placeholder.className = "pigeon-image-failure";
 				placeholder.setAttribute("role", "img");
