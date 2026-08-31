@@ -2200,12 +2200,20 @@ final class ReaderAppModel {
 			return visible
 		}
 
-		let cached = articleCache[selectedNavigationID] ?? []
-		guard let cacheIndex = cached.firstIndex(where: { articlesMatch($0, current) }) else {
+		let ordering: [Recommendation]
+		if activeSearchScope != nil {
+			// Search results span the library, while the open collection cache may
+			// contain only the current story. Keep the unfiltered search ordering as
+			// the source of truth before applying the active read/unread filter.
+			ordering = searchResults
+		} else {
+			ordering = articleCache[selectedNavigationID] ?? []
+		}
+		guard let orderingIndex = ordering.firstIndex(where: { articlesMatch($0, current) }) else {
 			return visible + [current]
 		}
 
-		let insertionIndex = cached.prefix(cacheIndex).reduce(0) { count, candidate in
+		let insertionIndex = ordering.prefix(orderingIndex).reduce(0) { count, candidate in
 			count + (visible.contains(where: { articlesMatch($0, candidate) }) ? 1 : 0)
 		}
 		var ordered = visible
@@ -3376,17 +3384,17 @@ final class ReaderAppModel {
 		moveDictionaryValue(&streamContinuations, from: oldID, to: newID)
 		moveDictionaryValue(&seenStreamContinuations, from: oldID, to: newID)
 		moveDictionaryValue(&streamDayBounds, from: oldID, to: newID)
-		moveDictionaryValue(&activeLoadIDs, from: oldID, to: newID)
-		moveDictionaryValue(&activeLoadMoreIDs, from: oldID, to: newID)
+		// Requests capture the collection ID they started with. Do not transplant
+		// their tokens to the renamed ID: their completion guards and defers still
+		// use the old key, so doing so would leave the new collection permanently
+		// marked as loading after the stale request is discarded.
+		activeLoadIDs[oldID] = nil
+		loadingCollections.remove(oldID)
+		activeLoadMoreIDs[oldID] = nil
+		loadingMoreCollections.remove(oldID)
 		moveDictionaryValue(&loadMoreErrors, from: oldID, to: newID)
 		moveDictionaryValue(&collectionFreshness, from: oldID, to: newID)
 		moveDictionaryValue(&articleScrollOffsets, from: oldID, to: newID)
-		if loadingCollections.remove(oldID) != nil {
-			loadingCollections.insert(newID)
-		}
-		if loadingMoreCollections.remove(oldID) != nil {
-			loadingMoreCollections.insert(newID)
-		}
 		if resolvedPaginationCollections.remove(oldID) != nil {
 			resolvedPaginationCollections.insert(newID)
 		}

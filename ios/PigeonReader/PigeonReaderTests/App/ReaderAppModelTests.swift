@@ -797,6 +797,36 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == nextUnread.id)
 	}
 
+	@Test func articleShortcutsKeepCrossLibrarySearchOrderAfterTheMiddleStoryIsMarkedRead() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let openCollection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let previous = makeArticle(id: "search-previous", receivedAt: 1)
+		let middle = makeArticle(id: "search-middle", receivedAt: 2)
+		let next = makeArticle(id: "search-next", receivedAt: 3)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [openCollection, otherCollection]))
+		model.setSortOrder(.oldest, for: openCollection)
+		model.setArticles([middle], for: openCollection)
+		model.setArticles([previous, next], for: otherCollection)
+		try await store.saveArticles([middle], collectionID: openCollection.id, accountID: accountID)
+		try await store.saveArticles([previous, next], collectionID: otherCollection.id, accountID: accountID)
+		model.select(item: openCollection)
+		model.setArticleFilter(.unread, for: openCollection)
+		model.select(article: middle)
+
+		await model.searchArticles(query: "Story", scope: .library, in: openCollection)
+		#expect(model.searchResults.map(\.id) == [previous.id, middle.id, next.id])
+
+		await model.setRead(middle, read: true)
+
+		#expect(model.displayedSearchResults.map(\.id) == [previous.id, next.id])
+		#expect(model.navigateArticle(.previous, from: middle)?.id == previous.id)
+		#expect(model.navigateArticle(.next, from: middle)?.id == next.id)
+	}
+
 	@Test func changingSortReordersActiveSearchResultsAndArticleShortcuts() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
@@ -4174,6 +4204,77 @@ struct ReaderAppModelTests {
 		#expect(await rename.value)
 		#expect(model.folderNavigationItems.map(\.title) == ["Studio"])
 		#expect(model.isOffline == false)
+	}
+
+	@Test func folderRenameDiscardsAnInFlightLoadWithoutLeavingTheRenamedFolderLoading() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+
+		let load = Task { await model.load(collection: folder, force: true) }
+		let loadRequest = await controlled.nextRequest()
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let mutationRequest = await controlled.nextRequest()
+		let renamedID = "user/-/label/Studio"
+		#expect(model.selectedNavigationID == renamedID)
+
+		await controlled.resolve(loadRequest, data: streamIDsData(ids: [], continuation: "stale-next"))
+		await controlled.resolve(mutationRequest)
+		await load.value
+		#expect(await rename.value)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(renamed.id == renamedID)
+		#expect(model.isLoading(collection: renamed) == false)
+		#expect(model.isLoadingMore(collection: renamed) == false)
+
+		let freshLoad = Task { await model.load(collection: renamed, force: true) }
+		let freshRequest = await controlled.nextRequest()
+		await controlled.resolve(freshRequest, data: streamIDsData(ids: [], continuation: nil))
+		await freshLoad.value
+		#expect(model.isLoading(collection: renamed) == false)
+	}
+
+	@Test func folderRenameDiscardsAnInFlightLoadMoreWithoutLeavingPaginationBlocked() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+
+		let initialLoad = Task { await model.load(collection: folder, force: true) }
+		let initialRequest = await controlled.nextRequest()
+		await controlled.resolve(initialRequest, data: streamIDsData(ids: [], continuation: "first-next"))
+		await initialLoad.value
+		#expect(model.canLoadMore(collection: folder))
+
+		let staleLoadMore = Task { await model.loadMore(collection: folder) }
+		let staleRequest = await controlled.nextRequest()
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let mutationRequest = await controlled.nextRequest()
+		let renamedID = "user/-/label/Studio"
+		#expect(model.selectedNavigationID == renamedID)
+
+		await controlled.resolve(staleRequest, data: streamIDsData(ids: [], continuation: "stale-next"))
+		await controlled.resolve(mutationRequest)
+		await staleLoadMore.value
+		#expect(await rename.value)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(renamed.id == renamedID)
+		#expect(model.isLoadingMore(collection: renamed) == false)
+		#expect(model.canLoadMore(collection: renamed))
+
+		let freshLoadMore = Task { await model.loadMore(collection: renamed) }
+		let freshRequest = await controlled.nextRequest()
+		await controlled.resolve(freshRequest, data: streamIDsData(ids: [], continuation: nil))
+		await freshLoadMore.value
+		#expect(model.isLoadingMore(collection: renamed) == false)
+		#expect(model.canLoadMore(collection: renamed) == false)
 	}
 
 	@Test func folderRenameRejectsADuplicateNameBeforeQueueing() async throws {
