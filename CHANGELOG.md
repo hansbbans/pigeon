@@ -21,11 +21,12 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
-- The top error banner now clears when you switch feeds or leave a failed search, so a stale load or search failure no longer covers the next list.
-- Not Interested from Today or a feed now drops the story from an already-loaded For You list.
-- Mark Above / Below as Read during search follows the visible hit list instead of the unfiltered collection cache.
-- Mark All as Read during search now marks the visible hits, not every story in the open collection.
-- Mark Older Than during search now marks the visible hits, not every older story in the open collection.
+ - The top error banner now clears when you switch feeds or leave a failed search, so a stale load or search failure no longer covers the next list.
+ - Not Interested from Today or a feed now drops the story from an already-loaded For You list.
+ - Mark Above / Below as Read during search follows the visible hit list instead of the unfiltered collection cache.
+ - Mark All as Read during search now marks the visible hits, not every story in the open collection.
+ - Mark Older Than during search now marks the visible hits, not every older story in the open collection.
+ - Mark Above and Mark Below as Read now follow the visible Unread/Read/All list, so hidden unread stories stay unread when the Read filter is on.
 - Searching a list now respects Unread, Read, and All, so a read story no longer appears while Unread is selected.
 - After 60% Read marks a story again after you mark it unread. Scrolling a story that is already read no longer consumes that trigger.
 - Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
