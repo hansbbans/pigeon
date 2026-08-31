@@ -2876,6 +2876,9 @@ final class ReaderAppModel {
 				articleCache[collectionID] = cachedArticles
 				changedCollections.insert(collectionID)
 			}
+			updateSearchResults(matching: target) { result in
+				result.isRead = read
+			}
 			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
 		reconcileCurrentArticleSelection()
@@ -2923,6 +2926,9 @@ final class ReaderAppModel {
 			}
 			articleCache[collectionID]?[index][keyPath: keyPath] = value
 			changedCollections.insert(collectionID)
+		}
+		updateSearchResults(matching: article) { result in
+			result[keyPath: keyPath] = value
 		}
 		if mutationName == "read" {
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
@@ -2981,4 +2987,22 @@ final class ReaderAppModel {
 		return nil
 	}
 
-}
+	private func updateSearchResults(
+		matching article: Recommendation,
+		update: (inout Recommendation) -> Void,
+	) {
+		guard searchResults.isEmpty == false else {
+			return
+		}
+		var updated = searchResults
+		var changed = false
+		for index in updated.indices where articlesMatch(updated[index], article) {
+			update(&updated[index])
+			changed = true
+		}
+		if changed {
+			searchResults = updated
+		}
+	}
+
+	}
