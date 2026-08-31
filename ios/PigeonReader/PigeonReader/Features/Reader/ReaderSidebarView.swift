@@ -110,10 +110,10 @@ struct ReaderSidebarView: View {
 				Task { await model.deleteFolder(name) }
 			}
 			.accessibilityIdentifier("confirm-delete-folder")
-			} message: {
-				Text("Feeds in this folder stay subscribed. They move to Feeds if they have no other folder.")
-			}
-			.confirmationDialog(
+		} message: {
+			Text("Feeds in this folder stay subscribed. They move to Feeds if they have no other folder.")
+		}
+		.confirmationDialog(
 			feedPendingUnsubscribe.map { "Unsubscribe from \"\($0.title)\"?" } ?? "Unsubscribe?",
 			isPresented: Binding(
 				get: { feedPendingUnsubscribe != nil },
@@ -132,9 +132,9 @@ struct ReaderSidebarView: View {
 			Button("Cancel", role: .cancel) {
 				feedPendingUnsubscribe = nil
 			}
-			} message: {
-				Text("Pigeon will stop fetching this feed. Existing stories stay in your library until they age out.")
-			}
+		} message: {
+			Text("Pigeon will stop fetching this feed. Existing stories stay in your library until they age out.")
+		}
 	}
 
 	private func feedRow(_ feed: ReaderNavigationItem, indentation: CGFloat = 0) -> some View {

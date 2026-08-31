@@ -3155,6 +3155,10 @@ final class ReaderAppModel {
 			updateSearchResults(matching: target) { result in
 				result.isRead = read
 			}
+			syncUnreadMembership(for: target, read: read)
+			if articleCache[ReaderSection.unread.rawValue] != nil {
+				changedCollections.insert(ReaderSection.unread.rawValue)
+			}
 			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
 		reconcileCurrentArticleSelection()
@@ -3215,6 +3219,10 @@ final class ReaderAppModel {
 			if value == false {
 				forgetScrollRead(for: article)
 			}
+			syncUnreadMembership(for: article, read: value)
+			if articleCache[ReaderSection.unread.rawValue] != nil {
+				changedCollections.insert(ReaderSection.unread.rawValue)
+			}
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
@@ -3260,6 +3268,29 @@ final class ReaderAppModel {
 				preferredCompactColumn = .content
 			}
 		}
+	}
+	private func syncUnreadMembership(for article: Recommendation, read: Bool) {
+		let unreadID = ReaderSection.unread.rawValue
+		guard var unreadArticles = articleCache[unreadID] else {
+			return
+		}
+
+		if read {
+			if let index = unreadArticles.firstIndex(where: { articlesMatch($0, article) }) {
+				unreadArticles[index].isRead = true
+				articleCache[unreadID] = unreadArticles
+			}
+			return
+		}
+
+		if let index = unreadArticles.firstIndex(where: { articlesMatch($0, article) }) {
+			unreadArticles[index].isRead = false
+		} else {
+			var copy = cachedArticle(matching: article) ?? article
+			copy.isRead = false
+			unreadArticles.append(copy)
+		}
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(unreadArticles)
 	}
 
 	private func cachedArticle(matching article: Recommendation) -> Recommendation? {
