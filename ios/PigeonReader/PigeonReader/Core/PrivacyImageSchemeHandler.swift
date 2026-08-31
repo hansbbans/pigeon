@@ -18,27 +18,11 @@ nonisolated final class PrivacyImageSchemeHandler: NSObject, WKURLSchemeHandler,
 			let components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false),
 			let rawURL = components.queryItems?.first(where: { $0.name == "url" })?.value,
 			let remoteURL = URL(string: rawURL),
-			let scheme = remoteURL.scheme?.lowercased(),
-			(scheme == "https" || scheme == "http"),
-			remoteURL.host != nil else {
+			let request = PrivacyProxiedImageRequest.authorizedRequest(for: remoteURL, session: session) else {
 			fail(urlSchemeTask, code: .badURL)
 			return
 		}
 
-		var endpoint = URLComponents(
-			url: session.baseURL.appending(path: "api/v1/image-proxy"),
-			resolvingAgainstBaseURL: false,
-		)
-		endpoint?.queryItems = [URLQueryItem(name: "url", value: remoteURL.absoluteString)]
-		guard let endpointURL = endpoint?.url else {
-			fail(urlSchemeTask, code: .badURL)
-			return
-		}
-
-		var request = URLRequest(url: endpointURL)
-		request.timeoutInterval = 20
-		request.cachePolicy = .returnCacheDataElseLoad
-		request.setValue("GoogleLogin auth=pigeon/\(session.token)", forHTTPHeaderField: "Authorization")
 		let schemeTask = SchemeTaskBox(urlSchemeTask)
 		let identifier = ObjectIdentifier(urlSchemeTask as AnyObject)
 		let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -48,7 +32,7 @@ nonisolated final class PrivacyImageSchemeHandler: NSObject, WKURLSchemeHandler,
 				return
 			}
 			guard let data,
-				data.count <= 8 * 1_024 * 1_024,
+				data.count <= PrivacyProxiedImageRequest.maximumResponseBytes,
 				let response = response as? HTTPURLResponse,
 				(200..<300).contains(response.statusCode),
 				let mimeType = response.mimeType,
