@@ -19,6 +19,13 @@ struct ArticleReaderHeaderView: View {
 					.foregroundStyle(.secondary)
 			}
 
+			if let author = article.displayAuthor {
+				Text(author)
+					.font(.subheadline)
+					.foregroundStyle(.secondary)
+					.textSelection(.enabled)
+			}
+
 			Text(article.title)
 				.font(ReaderTypography.articleTitle)
 				.bold()
