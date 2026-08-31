@@ -25,4 +25,18 @@ nonisolated enum ArticleReadingProgress {
 		}
 		return min(max(offset / maximumOffset, 0), 1)
 	}
+
+	/// Returns whether a pending restoration can be released for the current
+	/// geometry. A laid-out body that fits on screen has no scroll offset to
+	/// restore, so it must fall through to depth calculation.
+	static func shouldConsumePendingRestoredDepth(
+		pendingDepth: Double?,
+		maximumOffset: Double,
+		isBodyLaidOut: Bool,
+	) -> Bool {
+		guard pendingDepth != nil else {
+			return false
+		}
+		return maximumOffset > 1 || isBodyLaidOut
+	}
 }

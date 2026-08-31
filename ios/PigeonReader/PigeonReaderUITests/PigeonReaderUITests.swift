@@ -224,6 +224,39 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "folder-sidebar-actions")
 	}
 
+	func testRenameFolderValidationErrorStaysVisibleInTheSheet() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let folder = app.staticTexts["Design"]
+		if folder.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(folder.waitForExistence(timeout: 10))
+		folder.press(forDuration: 1.2)
+		let renameFolder = app.buttons["Rename Folder"]
+		XCTAssertTrue(renameFolder.waitForExistence(timeout: 5))
+		renameFolder.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-folder-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		nameField.doubleTap()
+		nameField.typeText("Technology")
+		app.buttons["Save"].tap()
+
+		XCTAssertTrue(app.staticTexts["A folder with that name already exists."].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.otherElements["library-editor-error"].exists)
+		XCTAssertTrue(app.navigationBars["Rename Folder"].exists)
+	}
+
 	func testLongPressFeedOffersRenameAndUnsubscribe() throws {
 		app.terminate()
 		app.launchArguments = [
@@ -408,6 +441,24 @@ final class PigeonReaderUITests: XCTestCase {
 
 		XCTAssertTrue(currentTitle.waitForExistence(timeout: 5))
 		XCTAssertFalse(nextTitle.exists)
+	}
+
+	func testShortArticleMarksReadAfterBodyLayoutWithAfterSixtyPercentSetting() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-short-article",
+			"-reader-reset-reader-state",
+			"-reader-mark-read-on-scroll",
+		]
+		app.launch()
+
+		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 15))
+		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
+		XCTAssertTrue(
+			app.buttons["Mark unread"].waitForExistence(timeout: 15),
+			"A laid-out article that fits onscreen should count as fully read for After 60% Read.",
+		)
 	}
 
 	private func tapLinkedImage() throws {

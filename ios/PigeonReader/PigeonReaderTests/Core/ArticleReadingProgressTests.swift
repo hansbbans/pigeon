@@ -93,4 +93,35 @@ struct ArticleReadingProgressTests {
 			) == 1
 		)
 	}
+
+	@Test func pendingRestorationReleasesForLaidOutShortStoriesButNotPlaceholders() {
+		#expect(
+			ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+				pendingDepth: 0,
+				maximumOffset: 0,
+				isBodyLaidOut: true,
+			)
+		)
+		#expect(
+			ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+				pendingDepth: 0,
+				maximumOffset: 0,
+				isBodyLaidOut: false,
+			) == false
+		)
+		#expect(
+			ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+				pendingDepth: 0.6,
+				maximumOffset: 500,
+				isBodyLaidOut: false,
+			)
+		)
+		#expect(
+			ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+				pendingDepth: nil,
+				maximumOffset: 0,
+				isBodyLaidOut: true,
+			) == false
+		)
+	}
 }

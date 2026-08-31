@@ -103,4 +103,31 @@ struct ReaderModeTests {
 		#expect(ReaderMode.shouldPersistSelection(hasOriginalURL: false) == false)
 		#expect(ReaderMode.shouldPersistSelection(hasOriginalURL: true) == true)
 	}
+
+	@Test
+	func modeResolutionIdentityChangesForEachArticleAndURLAvailability() {
+		let firstURLArticle = ArticleReaderModeResolutionIdentity(
+			articleID: "story-a",
+			feedKey: "daily",
+			hasOriginalURL: true,
+		)
+		let secondURLLessArticle = ArticleReaderModeResolutionIdentity(
+			articleID: "story-b",
+			feedKey: "daily",
+			hasOriginalURL: false,
+		)
+		let firstURLLessArticle = ArticleReaderModeResolutionIdentity(
+			articleID: "story-a",
+			feedKey: "daily",
+			hasOriginalURL: false,
+		)
+
+		#expect(firstURLArticle != secondURLLessArticle)
+		#expect(firstURLArticle != firstURLLessArticle)
+		#expect(firstURLArticle == ArticleReaderModeResolutionIdentity(
+			articleID: "story-a",
+			feedKey: "daily",
+			hasOriginalURL: true,
+		))
+	}
 }

@@ -125,6 +125,7 @@ private struct RenameFeedView: View {
 	) -> some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				TextField(fieldTitle, text: text)
 					.accessibilityIdentifier("rename-feed-name")
 			}
@@ -163,6 +164,7 @@ private struct EditFeedFoldersView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				Section {
 					if model.folders.isEmpty {
 						Text("No folders yet")
@@ -260,6 +262,7 @@ private struct RenameFolderView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				TextField("Folder name", text: $name)
 					.accessibilityIdentifier("rename-folder-name")
 			}
@@ -278,6 +281,28 @@ private struct RenameFolderView: View {
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
+		}
+	}
+}
+
+private struct LibraryEditorErrorSection: View {
+	@Environment(ReaderAppModel.self) private var model
+
+	var body: some View {
+		if let message = model.errorMessage {
+			Section {
+				HStack(alignment: .top) {
+					Label(message, systemImage: "exclamationmark.triangle.fill")
+						.frame(maxWidth: .infinity, alignment: .leading)
+					Button("Dismiss", systemImage: "xmark") {
+						model.clearError()
+					}
+					.labelStyle(.iconOnly)
+					.accessibilityLabel("Dismiss")
+				}
+				.accessibilityElement(children: .contain)
+				.accessibilityIdentifier("library-editor-error")
+			}
 		}
 	}
 }

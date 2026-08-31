@@ -94,14 +94,22 @@ struct ArticleReaderView: View {
 						ArticleScrollGeometry(geometry)
 					} action: { _, geometry in
 						scrollBoundary = geometry.boundaryState
+						let isBodyLaidOut = isArticleBodyLaidOut && isShowingArticleBody
 						if let pendingRestoredDepth {
 							if geometry.maximumOffset > 1 {
 								scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
 								self.pendingRestoredDepth = nil
+								return
 							}
-							return
+							guard ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+								pendingDepth: pendingRestoredDepth,
+								maximumOffset: Double(geometry.maximumOffset),
+								isBodyLaidOut: isBodyLaidOut,
+							) else {
+								return
+							}
+							self.pendingRestoredDepth = nil
 						}
-						let isBodyLaidOut = isArticleBodyLaidOut && isShowingArticleBody
 						let depth = ArticleReadingProgress.depth(
 							offset: Double(geometry.offset),
 							maximumOffset: Double(geometry.maximumOffset),
@@ -141,8 +149,15 @@ struct ArticleReaderView: View {
 		.toolbar {
 			ReaderSettingsToolbarItem()
 		}
-		.task(id: current.feedKey) {
-			let restoredMode = current.safeOriginalURL == nil ? ReaderMode.feedContent : model.readerMode(for: current.feedKey)
+		.task(id: ArticleReaderModeResolutionIdentity(
+			articleID: current.id,
+			feedKey: current.feedKey,
+			hasOriginalURL: current.safeOriginalURL != nil,
+		)) {
+			let restoredMode = ReaderMode.displayMode(
+				stored: model.readerMode(for: current.feedKey),
+				hasOriginalURL: current.safeOriginalURL != nil,
+			)
 			modeResolutionArticleID = current.id
 			restoredModeForArticle = restoredMode
 			selectedMode = restoredMode

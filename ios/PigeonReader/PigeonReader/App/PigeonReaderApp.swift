@@ -25,8 +25,17 @@ struct PigeonReaderApp: App {
 		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
 			let previewModel = PreviewData.makeModel()
+			if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-on-scroll") {
+				previewModel.readerTypography.markReadBehavior = .onScroll
+			}
 			if ProcessInfo.processInfo.arguments.contains("-reader-show-sidebar") {
 				previewModel.preferredCompactColumn = .sidebar
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-short-article") {
+				previewModel.setArticleFilter(.all, for: .forYou)
+				if let shortArticle = previewModel.articles.first(where: { $0.id == "preview-2" }) {
+					previewModel.select(article: shortArticle)
+					previewModel.setReaderMode(.feedContent, for: shortArticle.feedKey)
+				}
 			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-article") {
 				// Keep the launch fixture stable while the opened article is marked read.
 				previewModel.setArticleFilter(.all, for: .forYou)
