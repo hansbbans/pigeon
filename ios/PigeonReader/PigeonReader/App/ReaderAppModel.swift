@@ -2801,7 +2801,7 @@ final class ReaderAppModel {
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
-		let displayedArticles = articleCache[collection.id] ?? []
+		let displayedArticles = markReadOrderArticles(in: collection)
 		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
 			return
@@ -2832,6 +2832,13 @@ final class ReaderAppModel {
 			scope: boundary == .above ? .above : .below,
 			undoTitle: boundary == .above ? "Mark Above as Read" : "Mark Below as Read",
 		)
+	}
+
+	private func markReadOrderArticles(in collection: ReaderNavigationItem) -> [Recommendation] {
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			return displayedSearchResults
+		}
+		return articleCache[collection.id] ?? []
 	}
 
 	private func markArticlesAsRead(

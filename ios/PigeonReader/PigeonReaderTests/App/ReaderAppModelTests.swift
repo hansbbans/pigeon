@@ -2213,6 +2213,136 @@ struct ReaderAppModelTests {
 		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Read uncategorized feed", "Unread uncategorized feed"])
 	}
 
+	@Test func markAboveDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedAt: 300, title: "Newsletter unread")
+		let visibleReadBoundary = makeArticle(id: "read-boundary", isRead: true, receivedAt: 200, title: "Newsletter read")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleReadBoundary], for: collection)
+		try await store.saveArticles([hiddenUnread, visibleReadBoundary], collectionID: collection.id, accountID: accountID)
+		model.articleFilter = .read
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [hiddenUnread.id, visibleReadBoundary.id])
+		#expect(model.displayedSearchResults.map(\.id) == [visibleReadBoundary.id])
+		await model.markStoriesAboveAsRead(visibleReadBoundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markAboveDuringSearchUsesVisibleHitsNotCollectionNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let visibleAbove = makeArticle(id: "visible-above", receivedAt: 400, title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 300, title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedAt: 200, title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedAt: 100, title: "Newsletter evening")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([visibleAbove, hiddenNeighbor, boundary, visibleBelow], for: collection)
+		try await store.saveArticles(
+			[visibleAbove, hiddenNeighbor, boundary, visibleBelow],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+		model.select(article: boundary)
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [visibleAbove.id, boundary.id, visibleBelow.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNeighbor.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [visibleAbove.readerId])
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func markBelowDuringSearchUsesVisibleHitsNotCollectionNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let visibleAbove = makeArticle(id: "visible-above", receivedAt: 400, title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 300, title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedAt: 200, title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedAt: 100, title: "Newsletter evening")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([visibleAbove, hiddenNeighbor, boundary, visibleBelow], for: collection)
+		try await store.saveArticles(
+			[visibleAbove, hiddenNeighbor, boundary, visibleBelow],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [visibleAbove.id, boundary.id, visibleBelow.id])
+
+		await model.markStoriesBelowAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNeighbor.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleBelow.id })?.isRead == true)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [visibleBelow.readerId])
+	}
+
+	@Test func markAboveDuringLibrarySearchIncludesHitsMissingFromTheOpenList() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let todayUnrelated = makeArticle(id: "today-unrelated", receivedAt: 400, title: "Weather brief")
+		let libraryAbove = makeArticle(id: "library-above", receivedAt: 300, title: "Newsletter extra")
+		let todayBoundary = makeArticle(id: "today-boundary", receivedAt: 200, title: "Newsletter noon")
+
+		model.setNavigation(ReaderNavigationState(items: [today, unread]))
+		model.select(item: today)
+		model.setSortOrder(.newest, for: today)
+		model.setArticles([todayUnrelated, todayBoundary], for: today)
+		model.setArticles([libraryAbove], for: unread)
+		try await store.saveArticles([todayUnrelated, todayBoundary], collectionID: today.id, accountID: accountID)
+		try await store.saveArticles([libraryAbove], collectionID: unread.id, accountID: accountID)
+		model.articleFilter = .all
+		model.select(article: todayBoundary)
+
+		await model.searchArticles(query: "Newsletter", scope: .library, in: today)
+
+		#expect(model.searchResults.map(\.id) == [libraryAbove.id, todayBoundary.id])
+
+		await model.markStoriesAboveAsRead(todayBoundary, in: today)
+
+		#expect(model.allArticles(for: unread).first(where: { $0.id == libraryAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelated.id })?.isRead == false)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayBoundary.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [libraryAbove.readerId])
+		#expect(model.selectedArticleID == todayBoundary.id)
+	}
+
 	@Test func markAboveUsesStrictBoundaryAndNewestDisplayedOrder() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -2903,13 +3033,14 @@ struct ReaderAppModelTests {
 		receivedDate: Date? = nil,
 		html: String = "<p>Body</p>",
 		originalURL: URL? = nil,
+		title: String? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId ?? "tag:google.com,2005:reader/item/\(id)",
 			feedKey: feedKey,
 			source: "Daily",
-			title: "Story \(id)",
+			title: title ?? "Story \(id)",
 			html: html,
 			text: "Body",
 			originalURL: originalURL,
