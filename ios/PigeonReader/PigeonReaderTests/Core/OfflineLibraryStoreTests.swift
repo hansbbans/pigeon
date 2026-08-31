@@ -357,6 +357,115 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
 	}
 
+	@Test func permanentlyInvalidMutationDropsSoLaterMutationsCanSync() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let rejected = OfflineMutation(
+			id: "mutation-rejected",
+			kind: .setRead,
+			itemIds: (0..<201).map { "reader-rejected-\($0)" },
+			value: true,
+			scope: .all,
+		)
+		let later = OfflineMutation(
+			id: "mutation-later",
+			kind: .setStarred,
+			itemIds: ["reader-later"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(rejected, accountID: "account-a")
+		try await store.enqueue(later, accountID: "account-a")
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(
+			session: session,
+			httpClient: MutationResultHTTPClient(
+				resultsByID: [
+					later.id: "applied",
+				]
+			),
+		)
+		let replayer = OfflineMutationReplayer(store: store)
+
+		let applied = try await replayer.replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 1)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+		#expect(try await store.storageStats(accountID: "account-a").pendingMutationCount == 0)
+	}
+
+	@Test func retryableServerFailureStaysQueuedWhileLaterActionsCanSync() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let retryable = OfflineMutation(
+			id: "mutation-retryable",
+			kind: .setRead,
+			itemIds: ["reader-retryable"],
+			value: true,
+			scope: .single,
+		)
+		let later = OfflineMutation(
+			id: "mutation-later",
+			kind: .setStarred,
+			itemIds: ["reader-later"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(retryable, accountID: "account-a")
+		try await store.enqueue(later, accountID: "account-a")
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(
+			session: session,
+			httpClient: MutationResultHTTPClient(
+				resultsByID: [
+					retryable.id: "failed",
+					later.id: "applied",
+				]
+			),
+		)
+		let replayer = OfflineMutationReplayer(store: store)
+
+		let applied = try await replayer.replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 1)
+		let pending = try await store.pendingMutations(accountID: "account-a", limit: 100)
+		#expect(pending.map(\.mutation.id) == [retryable.id])
+		#expect(pending.first?.attempts == 1)
+	}
+
+	@Test func omittedMutationReceiptStaysQueuedWithoutHotLoopingLaterActions() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let omitted = OfflineMutation(
+			id: "mutation-omitted",
+			kind: .setReadBatch,
+			itemIds: (0..<200).map { "reader-omitted-\($0)" },
+			value: true,
+			scope: .all,
+		)
+		let later = OfflineMutation(
+			id: "mutation-later",
+			kind: .setStarred,
+			itemIds: ["reader-later"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(omitted, accountID: "account-a")
+		try await store.enqueue(later, accountID: "account-a")
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(
+			session: session,
+			httpClient: MutationResultHTTPClient(resultsByID: [later.id: "applied"]),
+		)
+		let replayer = OfflineMutationReplayer(store: store)
+
+		let applied = try await replayer.replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 0)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [
+			omitted.id,
+			later.id,
+		])
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).first?.attempts == 1)
+	}
+
 	@Test func clearingCachedArticlesNeverDeletesPendingActions() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		try await store.saveArticles([makeArticle()], collectionID: "feed/7", accountID: "account-a")
@@ -525,4 +634,38 @@ private enum TestSQLiteError: Error {
 	case openFailed
 	case prepareFailed
 	case updateFailed
+}
+
+actor MutationResultHTTPClient: HTTPClient {
+	private let resultsByID: [String: String]
+
+	init(resultsByID: [String: String]) {
+		self.resultsByID = resultsByID
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let requestBody = request.httpBody else {
+			throw PigeonError.invalidResponse
+		}
+		let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: requestBody)
+		let results = envelope.mutations.compactMap { mutation -> String? in
+			guard let status = resultsByID[mutation.id] else { return nil }
+			return """
+			{"mutationId":"\(mutation.id)","status":"\(status)","appliedAt":"2026-08-15T12:00:00.000Z","error":null}
+			"""
+		}
+		let body = Data("{\"results\":[\(results.joined(separator: ","))]}".utf8)
+		let url = request.url ?? Self.fallbackURL
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (body, response)
+	}
+
+	private static var fallbackURL: URL {
+		guard let url = URL(string: "https://pigeon.test") else {
+			preconditionFailure("The test URL must be valid")
+		}
+		return url
+	}
 }
