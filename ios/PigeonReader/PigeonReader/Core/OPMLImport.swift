@@ -27,6 +27,30 @@ nonisolated struct OPMLImportResult: Equatable, Sendable {
 	let duplicateCount: Int
 }
 
+nonisolated enum OPMLImportFileOutcome: Equatable, Sendable {
+	case keepExisting
+	case ready(OPMLImportPreview)
+	case failed(String)
+}
+
+nonisolated struct OPMLImportScreenState: Equatable, Sendable {
+	var preview: OPMLImportPreview?
+	var message: String?
+
+	mutating func apply(_ outcome: OPMLImportFileOutcome) {
+		switch outcome {
+		case .keepExisting:
+			break
+		case .ready(let preview):
+			self.preview = preview
+			self.message = nil
+		case .failed(let message):
+			self.preview = nil
+			self.message = message
+		}
+	}
+}
+
 nonisolated enum OPMLImportError: LocalizedError, Equatable, Sendable {
 	case invalidDocument
 	case noFeeds
@@ -72,6 +96,32 @@ nonisolated enum OPMLImportPlanner {
 		let entries = deduplicated.values.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 		guard entries.isEmpty == false else { throw OPMLImportError.noFeeds }
 		return entries
+	}
+
+	static func outcome(of result: Result<Data, Error>, existing: [FeedSubscription]) -> OPMLImportFileOutcome {
+		switch result {
+		case .success(let data):
+			do {
+				return .ready(preview(entries: try parse(data: data), existing: existing))
+			} catch {
+				return .failed(error.localizedDescription)
+			}
+		case .failure(let error) where isUserCancellation(error):
+			return .keepExisting
+		case .failure(let error):
+			return .failed(error.localizedDescription)
+		}
+	}
+
+	static func isUserCancellation(_ error: Error) -> Bool {
+		if error is CancellationError {
+			return true
+		}
+		if let cocoaError = error as? CocoaError {
+			return cocoaError.code == .userCancelled
+		}
+		let nsError = error as NSError
+		return nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError
 	}
 
 	static func preview(entries: [OPMLFeedEntry], existing: [FeedSubscription]) -> OPMLImportPreview {
