@@ -470,6 +470,58 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == "first")
 	}
 
+	@Test func articleShortcutsContinueAfterTheOpenStoryIsMarkedReadInTheUnreadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.unread)
+		let first = makeArticle(id: "first", receivedAt: 1)
+		let middle = makeArticle(id: "middle", receivedAt: 2)
+		let last = makeArticle(id: "last", receivedAt: 3)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([first, middle, last], for: collection)
+		model.select(item: collection)
+		model.setArticleFilter(.unread, for: collection)
+		model.select(article: first)
+
+		await model.recordExplicitOpen(for: first)
+
+		#expect(model.articles(for: collection).map(\.id) == [middle.id, last.id])
+		#expect(model.selectedArticleID == first.id)
+		#expect(model.canNavigateArticle(.next))
+		#expect(model.navigateArticle(.next)?.id == middle.id)
+		#expect(model.selectedArticleID == middle.id)
+
+		await model.setRead(middle, read: true)
+
+		#expect(model.articles(for: collection).map(\.id) == [last.id])
+		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.selectedArticleID == last.id)
+		#expect(model.navigateArticle(.previous) == nil)
+	}
+
+	@Test func articleShortcutsSkipAStoryHiddenByTheReadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.today)
+		let first = makeArticle(id: "first", isRead: true, receivedAt: 1)
+		let middle = makeArticle(id: "middle", isRead: true, receivedAt: 2)
+		let last = makeArticle(id: "last", isRead: true, receivedAt: 3)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([first, middle, last], for: collection)
+		model.select(item: collection)
+		model.setArticleFilter(.read, for: collection)
+		model.select(article: middle)
+
+		await model.setRead(middle, read: false)
+
+		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
+		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.previous)?.id == first.id)
+	}
+
 	@Test func articleShortcutsFollowVisibleLibrarySearchResultsAcrossCollections() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)

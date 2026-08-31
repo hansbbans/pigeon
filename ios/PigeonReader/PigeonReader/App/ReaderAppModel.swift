@@ -2029,7 +2029,7 @@ final class ReaderAppModel {
 		guard let current else {
 			return nil
 		}
-		let displayedArticles = articleNavigationArticles
+		let displayedArticles = navigationArticles(including: current)
 		guard let currentIndex = displayedArticles.firstIndex(where: { articlesMatch($0, current) }),
 			let targetIndex = ReaderBoundaryNavigation.targetIndex(
 				currentIndex: currentIndex,
@@ -2044,6 +2044,28 @@ final class ReaderAppModel {
 
 	private var articleNavigationArticles: [Recommendation] {
 		activeSearchScope == nil ? articles : displayedSearchResults
+	}
+
+	/// Unread/Read filters drop the open story from the visible list as soon as
+	/// it is marked read (the default When Opened behavior). Keep that story as
+	/// the navigation origin so next/previous still reach the adjacent visible row.
+	private func navigationArticles(including current: Recommendation) -> [Recommendation] {
+		let visible = articleNavigationArticles
+		if visible.contains(where: { articlesMatch($0, current) }) {
+			return visible
+		}
+
+		let cached = articleCache[selectedNavigationID] ?? []
+		guard let cacheIndex = cached.firstIndex(where: { articlesMatch($0, current) }) else {
+			return visible + [current]
+		}
+
+		let insertionIndex = cached.prefix(cacheIndex).reduce(0) { count, candidate in
+			count + (visible.contains(where: { articlesMatch($0, candidate) }) ? 1 : 0)
+		}
+		var ordered = visible
+		ordered.insert(current, at: min(insertionIndex, ordered.count))
+		return ordered
 	}
 
 	func article(withId id: String) -> Recommendation? {
