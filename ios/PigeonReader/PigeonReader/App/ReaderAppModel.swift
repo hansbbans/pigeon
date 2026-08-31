@@ -2432,6 +2432,7 @@ final class ReaderAppModel {
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
 			markReadOrderArticles(in: collection).filter { $0.isRead == false },
+			in: collection,
 			scope: .all,
 			undoTitle: "Mark All as Read",
 		)
@@ -2444,6 +2445,7 @@ final class ReaderAppModel {
 	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
 			markOlderThanCandidates(in: collection, olderThan: date),
+			in: collection,
 			scope: .older,
 			undoTitle: "Mark Older Stories as Read",
 		)
@@ -3474,7 +3476,7 @@ final class ReaderAppModel {
 		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
 			return displayedSearchResults
 		}
-		return allArticles(for: collection)
+		return articles(for: collection)
 	}
 
 	private func markArticlesAsRead(

@@ -29,6 +29,7 @@ All notable changes to Pigeon are documented in this file.
  - Mark Above and Mark Below as Read now follow the visible Unread/Read/All list, so hidden unread stories stay unread when the Read filter is on.
 - Searching a list now respects Unread, Read, and All, so a read story no longer appears while Unread is selected.
 - After 60% Read marks a story again after you mark it unread. Scrolling a story that is already read no longer consumes that trigger.
+- Mark All as Read now marks the visible Unread/Read/All list, not hidden unread neighbors behind the Read filter.
 - Opening an article no longer jumps back to the feed list when a library refresh, unread membership update, or stale snapshot apply runs in the background.
 - Freeing space from older read articles, or an incremental sync that prunes those bodies, no longer blanks the newsletter you are currently reading.
 - Ordinary reading pans no longer count as back-to-feed; only the leading-edge swipe leaves the article.
