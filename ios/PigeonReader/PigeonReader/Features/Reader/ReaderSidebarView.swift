@@ -3,6 +3,7 @@ import SwiftUI
 struct ReaderSidebarView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@State private var editorRoute: LibraryEditorRoute?
+	@State private var folderPendingDeletion: String?
 
 	var body: some View {
 		@Bindable var model = model
@@ -40,6 +41,16 @@ struct ReaderSidebarView: View {
 							onSelect: { model.select(item: folder) },
 						)
 						.tag(folder.id)
+						.contextMenu {
+							Button("Rename Folder", systemImage: "pencil") {
+								editorRoute = .renameFolder(folder.title)
+							}
+							.accessibilityIdentifier("rename-folder")
+							Button("Delete Folder", systemImage: "trash", role: .destructive) {
+								folderPendingDeletion = folder.title
+							}
+							.accessibilityIdentifier("delete-folder")
+						}
 
 						if model.isFolderExpanded(folder) {
 							ForEach(model.visibleFeedNavigationItems(in: folder)) { feed in
@@ -81,6 +92,25 @@ struct ReaderSidebarView: View {
 		}
 		.sheet(item: $editorRoute) { route in
 			LibraryManagementView(route: route)
+		}
+		.confirmationDialog(
+			folderPendingDeletion.map { "Delete \"\($0)\"?" } ?? "Delete Folder?",
+			isPresented: Binding(
+				get: { folderPendingDeletion != nil },
+				set: { if $0 == false { folderPendingDeletion = nil } },
+			),
+			titleVisibility: .visible,
+		) {
+			Button("Delete Folder", role: .destructive) {
+				guard let name = folderPendingDeletion else {
+					return
+				}
+				folderPendingDeletion = nil
+				Task { await model.deleteFolder(name) }
+			}
+			.accessibilityIdentifier("confirm-delete-folder")
+		} message: {
+			Text("Feeds in this folder stay subscribed. They move to Feeds if they have no other folder.")
 		}
 	}
 

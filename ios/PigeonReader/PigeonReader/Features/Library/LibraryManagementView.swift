@@ -255,6 +255,7 @@ private struct RenameFolderView: View {
 		NavigationStack {
 			Form {
 				TextField("Folder name", text: $name)
+					.accessibilityIdentifier("rename-folder-name")
 			}
 			.navigationTitle("Rename Folder")
 			.navigationBarTitleDisplayMode(.inline)

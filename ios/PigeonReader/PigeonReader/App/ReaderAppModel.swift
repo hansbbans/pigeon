@@ -1667,15 +1667,19 @@ final class ReaderAppModel {
 			) else { return false }
 		}
 		applyFolderRename(from: oldName, to: name)
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-		}
+		remapFolderCollectionState(from: oldName, to: name)
+		rebuildNavigationFromSubscriptions()
+		await persistLibraryAfterFolderChange()
 		await replayPendingMutations()
 		return true
 	}
 
 	@discardableResult
 	func deleteFolder(_ name: String) async -> Bool {
+		let folderID = folderStreamID(forName: name)
+		let wasSelectedFolder = selectedNavigationID == folderID
+		let selectedFeed = navigation.item(withID: selectedNavigationID)
+		let selectedFeedStreamID = selectedFeed?.kind == .feed ? selectedFeed?.streamID : nil
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
 		for subscription in affected {
 			guard await enqueueOfflineMutation(
@@ -1692,9 +1696,23 @@ final class ReaderAppModel {
 			}
 		}
 
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		if let selectedFeedStreamID, selectedNavigationID.hasSuffix("::\(folderID)") {
+			let remainingFolders = subscriptions.first(where: { $0.id == selectedFeedStreamID })?.folderNames ?? []
+			let nextID = remainingFolders.first.map { "\(selectedFeedStreamID)::\(folderStreamID(forName: $0))" }
+				?? selectedFeedStreamID
+			remapCollectionState(from: selectedNavigationID, to: nextID)
 		}
+
+		rebuildNavigationFromSubscriptions()
+		if wasSelectedFolder
+			|| temporarilyUnavailableSelectedCollection?.id == folderID
+			|| navigation.item(withID: selectedNavigationID) == nil {
+			temporarilyUnavailableSelectedCollection = nil
+			if navigation.item(withID: selectedNavigationID) == nil {
+				select(section: firstEnabledSmartSection)
+			}
+		}
+		await persistLibraryAfterFolderChange()
 		await replayPendingMutations()
 		return true
 	}
@@ -2792,12 +2810,96 @@ final class ReaderAppModel {
 		for index in subscriptions.indices {
 			for categoryIndex in subscriptions[index].categories.indices where subscriptions[index].categories[categoryIndex].label == oldName {
 				subscriptions[index].categories[categoryIndex] = FeedCategory(
-					id: "user/-/label/\(newName)",
+					id: folderStreamID(forName: newName),
 					label: newName,
 				)
 			}
 		}
 		subscriptions = sortedSubscriptions(subscriptions)
+	}
+
+	private func folderStreamID(forName name: String) -> String {
+		"user/-/label/\(name)"
+	}
+
+	private func remapFolderCollectionState(from oldName: String, to newName: String) {
+		let oldFolderID = folderStreamID(forName: oldName)
+		let newFolderID = folderStreamID(forName: newName)
+		remapCollectionState(from: oldFolderID, to: newFolderID)
+		for subscription in subscriptions where subscription.folderNames.contains(newName) {
+			remapCollectionState(
+				from: "\(subscription.id)::\(oldFolderID)",
+				to: "\(subscription.id)::\(newFolderID)",
+			)
+		}
+	}
+
+	private func remapCollectionState(from oldID: String, to newID: String) {
+		guard oldID != newID else {
+			return
+		}
+		if selectedNavigationID == oldID {
+			selectedNavigationID = newID
+		}
+		if activeSearchCollectionID == oldID {
+			activeSearchCollectionID = newID
+		}
+		if deferredInitialFeedPaginationCollectionID == oldID {
+			deferredInitialFeedPaginationCollectionID = newID
+		}
+		moveDictionaryValue(&articleCache, from: oldID, to: newID)
+		moveDictionaryValue(&sortOrders, from: oldID, to: newID)
+		moveDictionaryValue(&selectedArticleIDs, from: oldID, to: newID)
+		moveDictionaryValue(&streamContinuations, from: oldID, to: newID)
+		moveDictionaryValue(&seenStreamContinuations, from: oldID, to: newID)
+		moveDictionaryValue(&streamDayBounds, from: oldID, to: newID)
+		moveDictionaryValue(&activeLoadIDs, from: oldID, to: newID)
+		moveDictionaryValue(&activeLoadMoreIDs, from: oldID, to: newID)
+		moveDictionaryValue(&loadMoreErrors, from: oldID, to: newID)
+		moveDictionaryValue(&collectionFreshness, from: oldID, to: newID)
+		moveDictionaryValue(&articleScrollOffsets, from: oldID, to: newID)
+		if loadingCollections.remove(oldID) != nil {
+			loadingCollections.insert(newID)
+		}
+		if loadingMoreCollections.remove(oldID) != nil {
+			loadingMoreCollections.insert(newID)
+		}
+		if resolvedPaginationCollections.remove(oldID) != nil {
+			resolvedPaginationCollections.insert(newID)
+		}
+		if navigation.expandedFolderIDs.remove(oldID) != nil {
+			navigation.expandedFolderIDs.insert(newID)
+		}
+
+		let matchingFilterKeys = articleFilters.keys.filter { $0.collectionID == oldID }
+		for key in matchingFilterKeys {
+			guard let value = articleFilters.removeValue(forKey: key) else {
+				continue
+			}
+			articleFilters[ArticleFilterKey(sessionIdentity: key.sessionIdentity, collectionID: newID)] = value
+			if let session, key.sessionIdentity == session.articleFilterStorageIdentity {
+				articleFilterStore.setFilter(value, for: newID, session: session)
+			}
+		}
+	}
+
+	private func moveDictionaryValue<Value>(_ dictionary: inout [String: Value], from oldID: String, to newID: String) {
+		guard let value = dictionary.removeValue(forKey: oldID) else {
+			return
+		}
+		dictionary[newID] = value
+	}
+
+	private func persistLibraryAfterFolderChange() async {
+		guard let accountID = session?.storageIdentity else {
+			return
+		}
+		do {
+			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+		} catch {
+			errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+		}
 	}
 
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {

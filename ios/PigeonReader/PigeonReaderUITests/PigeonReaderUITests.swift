@@ -152,6 +152,52 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "feed-folder-edit")
 	}
 
+	func testLongPressFolderRenamesAndDeletesFromTheSidebar() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let folder = app.staticTexts["Design"]
+		if folder.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(folder.waitForExistence(timeout: 10))
+		folder.press(forDuration: 1.2)
+
+		let renameFolder = app.buttons["Rename Folder"]
+		XCTAssertTrue(renameFolder.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Delete Folder"].exists)
+		renameFolder.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-folder-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		XCTAssertEqual(nameField.value as? String, "Design")
+		app.buttons["Cancel"].tap()
+		XCTAssertFalse(app.navigationBars["Rename Folder"].waitForExistence(timeout: 2))
+
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.press(forDuration: 1.2)
+		let deleteFolder = app.buttons["Delete Folder"]
+		XCTAssertTrue(deleteFolder.waitForExistence(timeout: 5))
+		deleteFolder.tap()
+		let confirmDelete = app.buttons["confirm-delete-folder"].firstMatch.exists
+			? app.buttons["confirm-delete-folder"].firstMatch
+			: app.buttons["Delete Folder"].firstMatch
+		XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5))
+		confirmDelete.tap()
+
+		XCTAssertFalse(app.staticTexts["Design"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["Dense Discovery"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "folder-sidebar-actions")
+	}
+
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
 		app.terminate()
 		app.launchArguments = [
