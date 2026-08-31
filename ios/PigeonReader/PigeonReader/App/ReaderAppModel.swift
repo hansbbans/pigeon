@@ -3432,7 +3432,7 @@ final class ReaderAppModel {
 		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
 			displayedArticles = displayedSearchResults
 		} else {
-			displayedArticles = allArticles(for: collection)
+			displayedArticles = articles(for: collection)
 		}
 		return displayedArticles.filter { $0.isRead == false && $0.receivedAt < date }
 	}
