@@ -3,6 +3,7 @@ import SwiftUI
 struct ReaderShellView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.scenePhase) private var scenePhase
 
 	var body: some View {
 		@Bindable var model = model
@@ -55,10 +56,18 @@ struct ReaderShellView: View {
 		.task(id: model.session?.storageIdentity) {
 			model.configurePlatformServices()
 			await model.prepareOfflineLibrary()
+			await model.handleLocalDayChange()
 			model.writeWidgetSnapshot()
 			if let action = ReaderNotificationManager.shared.consumePendingAction() {
 				await model.handleNotificationAction(action)
 			}
+		}
+		.onChange(of: scenePhase) { _, phase in
+			guard phase == .active else { return }
+			Task { await model.handleLocalDayChange() }
+		}
+		.onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+			Task { await model.handleLocalDayChange() }
 		}
 		.onReceive(NotificationCenter.default.publisher(for: .pigeonReaderNotificationAction)) { notification in
 			guard let action = ReaderNotificationManager.shared.consumePendingAction()
