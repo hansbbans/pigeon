@@ -640,6 +640,13 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
+		let snapshot = makeWidgetSnapshot()
+		snapshot.save()
+		WidgetCenter.shared.reloadAllTimelines()
+		return snapshot
+	}
+
+	func makeWidgetSnapshot() -> PigeonWidgetSnapshot {
 		let previousSnapshot = PigeonWidgetSnapshot.load()
 		let allArticles = Dictionary(
 			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
@@ -652,19 +659,18 @@ final class ReaderAppModel {
 				: nil
 			return Self.widgetArticle(article, collection: collection)
 		}
-		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map {
-			Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue)
-		}
-		let snapshot = PigeonWidgetSnapshot(
+		// For You's default list is Unread; keep the home-screen widget on the same stories.
+		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? [])
+			.filter { $0.isRead == false }
+			.prefix(5)
+			.map { Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue) }
+		return PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
 			starredCount: widgetStarredCount(from: allArticles, previousTotal: previousSnapshot.starredCount),
 			recent: Array(recent),
 			forYou: Array(forYou),
 		)
-		snapshot.save()
-		WidgetCenter.shared.reloadAllTimelines()
-		return snapshot
 	}
 
 	/// The counts widget labels this as a starred total, not an unread badge.
