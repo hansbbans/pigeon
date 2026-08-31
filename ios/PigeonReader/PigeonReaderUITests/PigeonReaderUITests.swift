@@ -257,20 +257,8 @@ final class PigeonReaderUITests: XCTestCase {
 
 	private func tapLinkedImage() throws {
 		let image = app.images["A notebook beside a cup of coffee"]
-		for attempt in 0..<6 {
-			if image.exists {
-				image.tap()
-			} else {
-				app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.62)).tap()
-			}
-			if app.buttons["View image"].waitForExistence(timeout: 1) {
-				return
-			}
-			if attempt < 5 {
-				app.swipeUp()
-			}
-		}
-		XCTFail("The linked fixture image did not open its image dialog.")
+		guard waitForHittableReaderTarget(image, description: "the linked fixture image") else { return }
+		image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 	}
 
 	private func openSettings() {
@@ -291,24 +279,76 @@ final class PigeonReaderUITests: XCTestCase {
 
 	private func tapNormalLink() throws {
 		let normalLink = app.links["Read the design notes"]
-		for attempt in 0..<8 {
-			if normalLink.exists {
-				normalLink.tap()
-			} else {
-				app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72)).tap()
-			}
-			if app.buttons["Open in Browser"].waitForExistence(timeout: 1) {
-				return
-			}
-			XCTAssertFalse(
-				app.buttons["View image"].exists || app.buttons["Open link"].exists,
-				"The normal-link helper hit the linked-image dialog; the fixture target should be accessible directly.",
-			)
-			if attempt < 7 {
-				app.swipeUp()
-			}
+		guard waitForHittableReaderTarget(normalLink, description: "the normal fixture link") else { return }
+		normalLink.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+		XCTAssertFalse(
+			app.buttons["View image"].exists || app.buttons["Open link"].exists,
+			"The normal-link helper hit the linked-image dialog; the fixture target should be accessible directly.",
+		)
+	}
+
+	private func waitForHittableReaderTarget(_ target: XCUIElement, description: String) -> Bool {
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		guard reader.waitForExistence(timeout: 5) else {
+			XCTFail("The article reader did not appear while waiting for \(description).")
+			return false
 		}
-		XCTFail("The normal fixture link did not open the existing link-choice dialog.")
+		let webView = app.webViews.firstMatch
+		guard webView.waitForExistence(timeout: 5) else {
+			XCTFail("The article WebView did not appear while waiting for \(description).")
+			return false
+		}
+		let deadline = Date().addingTimeInterval(20)
+		var lastScrolledTargetFrame: CGRect?
+
+		while Date() < deadline {
+			if target.exists {
+				// Do not scroll the outer reader until the WebView has reported a
+				// full article-sized frame. While it is still collapsed during
+				// HTML measurement, a swipe can be interpreted as article-boundary
+				// navigation and replace the rich fixture with another article.
+				let readerFrame = reader.frame
+				let webViewFrame = webView.frame
+				let targetFrame = target.frame
+				let usableReaderFrame = visibleReaderFrame(reader)
+				// Validate the same point we will tap. Requiring the entire image
+				// to fit can oscillate between scroll positions even with its center visible.
+				let tapPoint = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
+				let targetIsUsable = targetFrame.isEmpty == false
+					&& target.isHittable && usableReaderFrame.contains(tapPoint)
+				if targetIsUsable, webViewFrame.contains(tapPoint) {
+					return true
+				}
+				if webViewFrame.height > readerFrame.height, targetFrame.isEmpty == false {
+					if targetFrame.maxY > usableReaderFrame.maxY {
+						if lastScrolledTargetFrame != targetFrame {
+							reader.swipeUp()
+							lastScrolledTargetFrame = targetFrame
+						}
+					} else if targetFrame.minY < usableReaderFrame.minY {
+						if lastScrolledTargetFrame != targetFrame {
+							reader.swipeDown()
+							lastScrolledTargetFrame = targetFrame
+						}
+					}
+				}
+			}
+
+			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+		}
+
+		XCTFail("Timed out waiting for \(description) to finish rendering and become hittable.")
+		return false
+	}
+
+	private func visibleReaderFrame(_ reader: XCUIElement) -> CGRect {
+		var frame = reader.frame
+		let controls = app.otherElements["article-reader-controls"]
+		guard controls.exists else { return frame }
+		let controlsFrame = controls.frame
+		guard controlsFrame.minY > frame.minY, controlsFrame.minY < frame.maxY else { return frame }
+		frame.size.height = controlsFrame.minY - frame.minY
+		return frame
 	}
 
 	private func attachScreenshot(named name: String) {
