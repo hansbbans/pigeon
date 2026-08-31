@@ -115,6 +115,32 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testSidebarAddFeedOpensTheSubscribeSheet() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let addFeed = app.descendants(matching: .any)["add-feed"]
+		if addFeed.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(addFeed.waitForExistence(timeout: 10))
+		addFeed.tap()
+
+		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.textFields["add-feed-url"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Add"].exists)
+		app.buttons["Cancel"].tap()
+		XCTAssertTrue(app.navigationBars["Add Feed"].waitForNonExistence(timeout: 3))
+		attachScreenshot(named: "sidebar-add-feed")
+	}
+
 	func testLongPressFeedAssignsExistingAndCreatesNewFolder() throws {
 		app.terminate()
 		app.launchArguments = [

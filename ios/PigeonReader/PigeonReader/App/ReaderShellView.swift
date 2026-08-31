@@ -65,6 +65,7 @@ struct ReaderShellView: View {
 		.onChange(of: scenePhase) { _, phase in
 			guard phase == .active else { return }
 			Task { await model.handleLocalDayChange() }
+			model.consumePendingFeedRequest()
 		}
 		.onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
 			Task { await model.handleLocalDayChange() }

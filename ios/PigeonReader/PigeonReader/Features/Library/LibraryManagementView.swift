@@ -54,6 +54,7 @@ struct AddFeedView: View {
 						.keyboardType(.URL)
 						.textInputAutocapitalization(.never)
 						.autocorrectionDisabled()
+						.accessibilityIdentifier("add-feed-url")
 				}
 				Section("Folder") {
 					Picker("Existing folder", selection: $selectedFolder) {

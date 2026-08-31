@@ -121,6 +121,68 @@ struct PlatformIntegrationTests {
 		#expect(model.selectedCollection.feedKey == "marginal-revolution")
 	}
 
+	@Test func pendingFeedStoreSavesValidURLsAndIgnoresInvalidOnes() throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let website = try #require(URL(string: "https://example.com/feed.xml"))
+		let fileURL = try #require(URL(string: "file:///tmp/feed.xml"))
+		let ftpURL = try #require(URL(string: "ftp://example.com/feed.xml"))
+
+		PendingFeedStore.save(fileURL, defaults: defaults)
+		PendingFeedStore.save(ftpURL, defaults: defaults)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+
+		PendingFeedStore.save(website, defaults: defaults)
+		#expect(PendingFeedStore.consume(defaults: defaults) == website)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+	}
+
+	@Test @MainActor func consumePendingFeedRequestPresentsASavedURLWhileTheSessionIsAlreadyOpen() throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let website = try #require(URL(string: "https://stratechery.com/feed/"))
+		let model = PreviewData.makeModel()
+
+		PendingFeedStore.save(website, defaults: defaults)
+		model.consumePendingFeedRequest(defaults: defaults)
+
+		#expect(model.pendingFeedRequest?.url == website)
+		let requestID = model.pendingFeedRequest?.id
+		model.consumePendingFeedRequest(defaults: defaults)
+		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
+	}
+
+	@Test @MainActor func addDeepLinkPresentsTheFeedSheetWithoutWaitingForAPendingStore() async throws {
+		let model = PreviewData.makeModel()
+		let website = try #require(URL(string: "https://daringfireball.net/feeds/main"))
+		await model.handleDeepLink(PigeonDeepLink.add(website).url)
+		#expect(model.pendingFeedRequest?.url == website)
+	}
+
+	@Test @MainActor func addDeepLinkAndPendingStorePresentOnlyOnce() async throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = PreviewData.makeModel()
+		let website = try #require(URL(string: "https://example.com/feed.xml"))
+		PendingFeedStore.save(website, defaults: defaults)
+
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		let requestID = model.pendingFeedRequest?.id
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		model.consumePendingFeedRequest(defaults: defaults)
+
+		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+	}
+
 	@Test func opmlPreviewPreservesNestedFoldersAndDetectsNormalizedDuplicates() throws {
 		let data = Data(
 			"""
@@ -216,6 +278,13 @@ struct PlatformIntegrationTests {
 		let body = try JSONDecoder().decode(StaleFeedArchiveRequest.self, from: try #require(post.body))
 		#expect(body.action == .archive)
 		#expect(body.feedKeys == ["quiet"])
+	}
+
+	private func makePendingFeedDefaults() throws -> (UserDefaults, String) {
+		let suiteName = "pigeon-pending-feed-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defaults.removePersistentDomain(forName: suiteName)
+		return (defaults, suiteName)
 	}
 
 	private static func article(id: String, receivedAt: TimeInterval, feedKey: String = "feed") -> Recommendation {
