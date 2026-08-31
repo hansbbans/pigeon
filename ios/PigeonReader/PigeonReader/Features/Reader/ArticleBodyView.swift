@@ -147,8 +147,19 @@ struct ArticleBodyView: View {
 				Button {
 					imageSelection = ArticleImageSelection(url: fallbackImageURL)
 				} label: {
-					RemoteArticleImageView(url: fallbackImageURL)
-						.clipShape(.rect(cornerRadius: 10))
+					RemoteArticleImageView(
+						url: fallbackImageURL,
+						remoteImagePolicy: remoteImagePolicy,
+						imageProxySession: imageProxySession,
+					)
+					.id(
+						ArticleLeadImageRequest.loaderIdentity(
+							for: fallbackImageURL,
+							policy: remoteImagePolicy,
+							session: imageProxySession,
+						),
+					)
+					.clipShape(.rect(cornerRadius: 10))
 				}
 				.buttonStyle(.plain)
 				.accessibilityLabel("View lead image")
@@ -203,7 +214,12 @@ struct ArticleBodyView: View {
 	}
 
 	private var fallbackImageURL: URL? {
-		guard remoteImagePolicy == .normal else { return nil }
+		guard ArticleLeadImageRequest.shouldShowFallback(
+			policy: remoteImagePolicy,
+			session: imageProxySession,
+		) else {
+			return nil
+		}
 		return ArticleImagePolicy.fallbackLeadImageURL(
 			bodyImageURLs: bodyImageURLs,
 			leadImageURL: leadImageURL,
