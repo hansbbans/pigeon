@@ -4,6 +4,7 @@ struct ArticleReaderHeaderView: View {
 	let article: Recommendation
 	let selectedMode: ReaderMode
 	let hasOriginalURL: Bool
+	let textScale: Double
 	let onSelectMode: (ReaderMode) -> Void
 	let onOpenOriginal: () -> Void
 
@@ -27,7 +28,7 @@ struct ArticleReaderHeaderView: View {
 			}
 
 			Text(article.title)
-				.font(ReaderTypography.articleTitle)
+				.font(ReaderTypography.articleTitle(textScale: textScale))
 				.bold()
 				.fixedSize(horizontal: false, vertical: true)
 				.frame(maxWidth: .infinity, alignment: .leading)

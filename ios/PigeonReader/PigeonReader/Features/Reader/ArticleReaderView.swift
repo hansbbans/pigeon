@@ -32,6 +32,7 @@ struct ArticleReaderView: View {
 						article: current,
 						selectedMode: selectedMode,
 						hasOriginalURL: true,
+						textScale: model.readerTypography.textScale,
 						onSelectMode: selectMode,
 						onOpenOriginal: openOriginal,
 					)
@@ -55,6 +56,7 @@ struct ArticleReaderView: View {
 								article: current,
 								selectedMode: selectedMode,
 								hasOriginalURL: current.safeOriginalURL != nil,
+								textScale: model.readerTypography.textScale,
 								onSelectMode: selectMode,
 								onOpenOriginal: openOriginal,
 							)
