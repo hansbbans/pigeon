@@ -3195,6 +3195,86 @@ struct ReaderAppModelTests {
 		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
 		}
 
+	@Test func restoringAnEmptyTodayCacheDropsAnUntrustedContinuation() async throws {
+		let session = try makeSession(token: "today-empty-continuation")
+		let store = OfflineLibraryStore.inMemory()
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 0)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveCollectionContinuation(
+			"old-day-next",
+			collectionID: todayItem.id,
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: todayItem).isEmpty)
+		#expect(model.canLoadMore(collection: todayItem) == false)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.continuationsByCollection[todayItem.id] == nil)
+	}
+
+	@Test func incrementalSnapshotCannotResurrectAnOldTodayContinuationAfterInitialPrune() async throws {
+		let session = try makeSession(token: "today-two-stage-continuation")
+		let store = OfflineLibraryStore.inMemory()
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "two-stage-yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "two-stage-today", receivedDate: bounds.start.addingTimeInterval(60))
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-day-next", collectionID: todayItem.id, accountID: accountID)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
+		let syncPage = Data(
+			"""
+			{
+			  "cursor": "after-status",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 1,
+			    "entityType": "status",
+			    "entityId": "\(today.id)",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "itemId": "\(today.id)",
+			      "isRead": true,
+			      "isStarred": false
+			    }
+			  }]
+			}
+			""".utf8,
+		)
+		let client = TodayReconciliationHTTPClient(changedPage: syncPage)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.syncAttempts() == 1)
+		#expect(model.allArticles(for: todayItem).map(\.id) == [today.id])
+		#expect(model.canLoadMore(collection: todayItem) == false)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[todayItem.id]?.map(\.id) == [today.id])
+		#expect(snapshot.continuationsByCollection[todayItem.id] == nil)
+
+		// The first live page must establish a fresh token before load-more uses it;
+		// the old persisted token must never be sent for today's request.
+		await model.load(collection: todayItem)
+		await model.loadMore(collection: todayItem)
+		#expect(model.allArticles(for: todayItem).contains(where: { $0.id == "today-page-2" }))
+		#expect(await client.todayPageContinuations() == [nil, "today-page-2"])
+	}
+
 	@Test func markAllWithReadFilterLeavesHiddenUnreadNeighborsUnread() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -4062,6 +4142,98 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: feed).isEmpty)
 	}
 
+	@Test func unsubscribingAFeedClearsStoredChildrenAndContinuationsWithoutTouchingAnotherFeed() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let removed = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let retained = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		installSubscriptions([removed, retained], on: model)
+		let removedChildID = "feed/1::user/-/label/Design"
+		let removedFolderID = "user/-/label/Design"
+		let retainedID = retained.id
+		let removedArticle = makeArticle(id: "removed-story", feedKey: "daily")
+		let retainedArticle = makeArticle(id: "retained-story", feedKey: "weekly")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedChildID, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedFolderID, accountID: accountID)
+		try await store.saveArticles([retainedArticle], collectionID: retainedID, accountID: accountID)
+		try await store.saveCollectionContinuation("removed-next", collectionID: removedChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("removed-folder-next", collectionID: removedFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("retained-next", collectionID: retainedID, accountID: accountID)
+
+		#expect(await model.unsubscribe(removed))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[removedFolderID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+		#expect(snapshot.continuationsByCollection[removedFolderID] == nil)
+		#expect(snapshot.articlesByCollection[retainedID]?.map(\.id) == [retainedArticle.id])
+		#expect(snapshot.continuationsByCollection[retainedID] == "retained-next")
+
+		// Re-adding the same subscription must not resurrect its old collection rows.
+		try await store.saveSubscriptions([removed, retained], accountID: accountID)
+		installSubscriptions([removed, retained], on: model)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		let restoredSnapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((restoredSnapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect(restoredSnapshot.continuationsByCollection[removedChildID] == nil)
+	}
+
+	@Test func staleFeedUnsubscribeUsesTheSameOfflineCleanupAndUndoRestoresNavigationLocally() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let removed = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let retained = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		installSubscriptions([removed, retained], on: model)
+		let removedChildID = "feed/1::user/-/label/Design"
+		let removedFolderID = "user/-/label/Design"
+		let removedArticle = makeArticle(id: "stale-removed", feedKey: "daily")
+		let retainedArticle = makeArticle(id: "stale-retained", feedKey: "weekly")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedChildID, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedFolderID, accountID: accountID)
+		try await store.saveArticles([retainedArticle], collectionID: retained.id, accountID: accountID)
+		try await store.saveCollectionContinuation("stale-next", collectionID: removedChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("stale-folder-next", collectionID: removedFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("retained-next", collectionID: retained.id, accountID: accountID)
+
+		let stale = StaleFeed(
+			feedKey: removed.feedKey,
+			streamId: removed.id,
+			title: removed.title,
+			sourceType: "rss",
+			sourceURL: nil,
+			siteURL: nil,
+			lastArticleAt: nil,
+			lastSuccessAt: nil,
+			httpStatus: nil,
+			archived: false,
+		)
+		#expect(await model.unsubscribeStaleFeeds([stale]))
+
+		var snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[removedFolderID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+		#expect(snapshot.continuationsByCollection[removedFolderID] == nil)
+		#expect(snapshot.articlesByCollection[retained.id]?.map(\.id) == [retainedArticle.id])
+		#expect(snapshot.continuationsByCollection[retained.id] == "retained-next")
+
+		await model.undoStaleFeedAction()
+
+		#expect(model.navigation.item(withID: removedChildID) != nil)
+		snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: removedChildID) != nil)
+		#expect(snapshot.subscriptions.contains(where: { $0.id == removed.id }))
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+	}
+
 	@Test func emptyFeedRenameIsRejectedBeforeQueueing() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
@@ -4312,6 +4484,68 @@ struct ReaderAppModelTests {
 		#expect(pending.isEmpty)
 	}
 
+	@Test func validFolderRenameRetryClearsThePreviousDuplicateError() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		installSubscriptions(
+			[
+				makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design"),
+				makeSubscription(id: "feed/2", key: "news", title: "News", folder: "Studio"),
+			],
+			on: model,
+		)
+
+		#expect(await model.renameFolder("Design", to: "studio") == false)
+		#expect(model.errorMessage == "A folder with that name already exists.")
+		#expect(await model.renameFolder("Design", to: "Draft"))
+		#expect(model.errorMessage == nil)
+		#expect(model.folderNavigationItems.map(\.title) == ["Draft", "Studio"])
+	}
+
+	@Test func validFeedManagementRetriesClearAStaleValidationError() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+
+		model.errorMessage = "The previous operation failed."
+		#expect(await model.renameFeed(subscription, to: "Morning"))
+		#expect(model.errorMessage == nil)
+
+		model.errorMessage = "The previous operation failed."
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func renamingFolderRemapsUnloadedCachedArticlesAndContinuationsAcrossRestart() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let accountID = try #require(model.session).storageIdentity
+		let oldFolderID = "user/-/label/Design"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let article = makeArticle(id: "rename-offline", feedKey: "daily")
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-folder-next", collectionID: oldFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-child-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.renameFolder("Design", to: "Studio"))
+
+		let newFolderID = "user/-/label/Studio"
+		let newChildID = "feed/1::\(newFolderID)"
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newFolderID]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldFolderID] == nil)
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newFolderID] == "old-folder-next")
+		#expect(snapshot.continuationsByCollection[newChildID] == "old-child-next")
+	}
+
 	@Test func folderDeleteRemovesTheSidebarFolderAndKeepsFeedsSubscribed() async throws {
 		let controlled = ControlledHTTPClient()
 		let store = OfflineLibraryStore.inMemory()
@@ -4388,6 +4622,124 @@ struct ReaderAppModelTests {
 		#expect(await deletion.value)
 	}
 
+	@Test func deletingAFolderRemapsEveryAffectedFeedCacheAndCleansOldRowsOffline() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-delete-folder-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let first = FeedSubscription(
+			id: "feed/1",
+			title: "Daily",
+			categories: [
+				FeedCategory(id: "user/-/label/Old", label: "Old"),
+				FeedCategory(id: "user/-/label/New", label: "New"),
+			],
+			url: try #require(URL(string: "https://pigeon.test/feed/daily")),
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+		let second = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: "Old")
+		installSubscriptions([first, second], on: model)
+		model.select(section: .forYou)
+
+		let oldFolder = try #require(model.navigation.item(withID: "user/-/label/Old"))
+		let newFolder = try #require(model.navigation.item(withID: "user/-/label/New"))
+		let firstOld = try #require(model.navigation.item(withID: "feed/1::user/-/label/Old"))
+		let firstNew = try #require(model.navigation.item(withID: "feed/1::user/-/label/New"))
+		let secondOld = try #require(model.navigation.item(withID: "feed/2::user/-/label/Old"))
+		let secondStory = makeArticle(id: "weekly-old", receivedAt: 1_786_272_100, feedKey: "weekly")
+		let firstOldStory = makeArticle(id: "daily-old", receivedAt: 1_786_272_300, feedKey: "daily")
+		let firstNewStory = makeArticle(id: "daily-new", receivedAt: 1_786_272_200, feedKey: "daily")
+		model.setArticles([firstOldStory], for: firstOld)
+		model.setArticles([firstNewStory], for: firstNew)
+		model.setArticles([firstOldStory, firstNewStory], for: newFolder)
+		model.setArticles([secondStory], for: secondOld)
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([firstOldStory], collectionID: firstOld.id, accountID: accountID)
+		try await store.saveArticles([firstNewStory], collectionID: firstNew.id, accountID: accountID)
+		try await store.saveArticles([firstOldStory, firstNewStory], collectionID: newFolder.id, accountID: accountID)
+		try await store.saveArticles([secondStory], collectionID: secondOld.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-daily-next", collectionID: firstOld.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-weekly-next", collectionID: secondOld.id, accountID: accountID)
+
+		#expect(await model.deleteFolder("Old"))
+
+		let uncategorized = try #require(model.navigation.item(withID: "feed/2"))
+		#expect(model.allArticles(for: firstNew).map(\.id).contains(firstOldStory.id))
+		#expect(Set(model.allArticles(for: newFolder).map(\.id)) == Set([firstOldStory.id, firstNewStory.id]))
+		#expect(model.allArticles(for: uncategorized).map(\.id) == [secondStory.id])
+		#expect(model.allArticles(for: firstOld).isEmpty)
+		#expect(model.allArticles(for: secondOld).isEmpty)
+
+		let restartedStore = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await restartedStore.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolder.id] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[firstOld.id] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[secondOld.id] ?? []).isEmpty)
+		#expect(Set(snapshot.articlesByCollection[newFolder.id, default: []].map(\.id)) == Set([firstOldStory.id, firstNewStory.id]))
+		#expect(snapshot.articlesByCollection[firstNew.id]?.map(\.id).contains(firstOldStory.id) == true)
+		#expect(snapshot.articlesByCollection[uncategorized.id]?.map(\.id) == [secondStory.id])
+		#expect(snapshot.continuationsByCollection[firstOld.id] == nil)
+		#expect(snapshot.continuationsByCollection[secondOld.id] == nil)
+		#expect(snapshot.navigation?.item(withID: oldFolder.id) == nil)
+		#expect(snapshot.navigation?.item(withID: firstOld.id) == nil)
+		#expect(snapshot.navigation?.item(withID: secondOld.id) == nil)
+	}
+
+	@Test func deletingAFolderUsesSubscriptionCategoriesWhenNavigationOmitsTheDeletedChild() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-partial-delete-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = FeedSubscription(
+			id: "feed/1",
+			title: "Daily",
+			categories: [
+				FeedCategory(id: "user/-/label/Old", label: "Old"),
+				FeedCategory(id: "user/-/label/New", label: "New"),
+			],
+			url: try #require(URL(string: "https://pigeon.test/feed/daily")),
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+		installSubscriptions([subscription], on: model)
+		let oldFolderID = "user/-/label/Old"
+		let newFolderID = "user/-/label/New"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let newChildID = "feed/1::\(newFolderID)"
+		let partialNavigation = ReaderNavigationState(
+			items: model.navigation.items.filter { $0.id != oldChildID },
+			expandedFolderIDs: model.navigation.expandedFolderIDs,
+		)
+		model.setNavigation(partialNavigation, markAsLoaded: true)
+		let article = makeArticle(id: "partial-delete", feedKey: "daily")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(partialNavigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveArticles([], collectionID: newFolderID, accountID: accountID)
+		try await store.saveArticles([], collectionID: newChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-child-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.deleteFolder("Old"))
+
+		let snapshot = try await OfflineLibraryStore(databaseURL: databaseURL).loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newFolderID]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newChildID] == "old-child-next")
+	}
+
 	@Test func movingTheOpenFeedKeepsStoriesAndAvoidsAGhostCollection() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
@@ -4438,6 +4790,60 @@ struct ReaderAppModelTests {
 		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
 		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
 		#expect((snapshot.articlesByCollection[feed.id] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedDoesNotOverwriteAStoredDestinationCollectionBeforeItIsLoaded() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		let destinationID = "feed/1::user/-/label/Reading"
+		let destinationArticle = makeArticle(id: "stored-destination", feedKey: "daily")
+		try await store.saveArticles([destinationArticle], collectionID: destinationID, accountID: accountID)
+
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[destinationID]?.map(\.id) == [destinationArticle.id])
+		#expect((snapshot.articlesByCollection["feed/1::user/-/label/Design"] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedUsesSubscriptionCategoriesWhenNavigationOmitsTheOldChild() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-partial-move-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let oldFolderID = "user/-/label/Design"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let partialNavigation = ReaderNavigationState(
+			items: model.navigation.items.filter { $0.id != oldChildID },
+			expandedFolderIDs: model.navigation.expandedFolderIDs,
+		)
+		model.setNavigation(partialNavigation, markAsLoaded: true)
+		let article = makeArticle(id: "partial-move", feedKey: "daily")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(partialNavigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("design-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+
+		let newChildID = "feed/1::user/-/label/Reading"
+		let snapshot = try await OfflineLibraryStore(databaseURL: databaseURL).loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newChildID] == "design-next")
 	}
 
 	@Test func movingTheLastFeedOutOfTheOpenFolderLeavesASmartView() async throws {
@@ -5242,6 +5648,73 @@ private actor FailThenSucceedSyncHTTPClient: HTTPClient {
 
 	func syncAttempts() -> Int {
 		syncCount
+	}
+}
+
+private actor TodayReconciliationHTTPClient: HTTPClient {
+	struct RequestSnapshot: Sendable {
+		let path: String
+		let query: [String: String]
+	}
+
+	private let changedPage: Data
+	private var syncCount = 0
+	private var capturedRequests: [RequestSnapshot] = []
+
+	init(changedPage: Data) {
+		self.changedPage = changedPage
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		let query = queryItems.reduce(into: [String: String]()) { result, item in
+			if let value = item.value { result[item.name] = value }
+		}
+		capturedRequests.append(RequestSnapshot(path: url.path, query: query))
+		let data: Data
+		if url.path == "/api/v1/sync" {
+			syncCount += 1
+			data = syncCount == 1
+				? changedPage
+				: Data(#"{"cursor":"after-status","hasMore":false,"changes":[]}"#.utf8)
+		} else if url.path == "/reader/api/0/stream/items/ids" {
+			switch query["c"] {
+			case nil: data = Data(#"{"itemRefs":[{"id":"today-page-1"}],"continuation":"today-page-2"}"#.utf8)
+			case "today-page-2": data = Data(#"{"itemRefs":[{"id":"today-page-2"}]}"#.utf8)
+			default: data = Data(#"{"itemRefs":[]}"#.utf8)
+			}
+		} else if url.path == "/reader/api/0/stream/items/contents" {
+			let ids = Self.formValues(from: request.httpBody, named: "i")
+			let items = ids.map { id in
+				"{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id)\",\"published\":\(Int(Date.now.timeIntervalSince1970)),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"user/-/state/com.google/reading-list\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
+			}.joined(separator: ",")
+			data = Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		} else {
+			data = Data()
+		}
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func syncAttempts() -> Int {
+		syncCount
+	}
+
+	func todayPageContinuations() -> [String?] {
+		capturedRequests
+			.filter { $0.path == "/reader/api/0/stream/items/ids" }
+			.map { $0.query["c"] }
+	}
+
+	private static func formValues(from body: Data?, named name: String) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems.filter { $0.name == name }.compactMap(\.value)
 	}
 }
 

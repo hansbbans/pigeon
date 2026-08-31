@@ -1644,14 +1644,14 @@ final class ReaderAppModel {
 		for subscription in removed {
 			guard await enqueueOfflineMutation(OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)) else { return false }
 		}
-		subscriptions.removeAll { subscription in
-			removed.contains(where: { $0.id == subscription.id })
-		}
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		var changedCollectionIDs = Set<String>()
+		for subscription in removed {
+			changedCollectionIDs.formUnion(await removeSubscriptionLocally(subscription))
 		}
 		staleFeedUndo = .unsubscribe(removed)
 		staleFeedUndoTitle = removed.count == 1 ? "Undo Unsubscribe" : "Undo Unsubscribe \(removed.count) Feeds"
+		await persistLibraryAfterSubscriptionChange()
+		await persistCollections(changedCollectionIDs)
 		await replayPendingMutations()
 		await loadNavigation(force: true)
 		await loadStaleFeeds()
@@ -1659,9 +1659,10 @@ final class ReaderAppModel {
 	}
 
 	func undoStaleFeedAction() async {
-		guard let apiClient, let undo = staleFeedUndo else { return }
+		guard let undo = staleFeedUndo else { return }
 		switch undo {
 		case .archive(let keys):
+			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
 			} catch {
@@ -1669,6 +1670,7 @@ final class ReaderAppModel {
 				return
 			}
 		case .unarchive(let keys):
+			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
 			} catch {
@@ -1680,11 +1682,19 @@ final class ReaderAppModel {
 				guard await enqueueOfflineMutation(OfflineMutation(kind: .restoreFeed, feedId: subscription.id)) else { return }
 			}
 			setSubscriptions(subscriptions + removed)
+			rebuildNavigationFromSubscriptions()
 			if let accountID = session?.storageIdentity {
-				try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+				do {
+					try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+					try await offlineStore.saveNavigation(navigation, accountID: accountID)
+				} catch {
+					errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+				}
 			}
 			await replayPendingMutations()
-			await loadNavigation(force: true)
+			if apiClient != nil {
+				await loadNavigation(force: true)
+			}
 		}
 		staleFeedUndo = nil
 		staleFeedUndoTitle = nil
@@ -1698,6 +1708,7 @@ final class ReaderAppModel {
 			errorMessage = "Feed names must be between 1 and 200 characters."
 			return false
 		}
+		errorMessage = nil
 		let mutation = OfflineMutation(kind: .renameFeed, feedId: subscription.id, title: title)
 		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { $0.title = title }
@@ -1713,18 +1724,34 @@ final class ReaderAppModel {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
+		errorMessage = nil
+		let previousFeedItems = feedItems(for: subscription)
+		let previousSelectedID = selectedNavigationID
+		let previousSelectedItem = navigation.item(withID: previousSelectedID)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
+		let nextFeedCollectionIDs = normalizedFolders.isEmpty
+			? [subscription.id]
+			: normalizedFolders.map { "\(subscription.id)::\(folderStreamID(forName: $0))" }
+		var cacheIDsToHydrate = Set<String>()
+		cacheIDsToHydrate.formUnion(previousFeedItems.map(\.id))
+		cacheIDsToHydrate.formUnion(nextFeedCollectionIDs)
+		cacheIDsToHydrate.formUnion(previousFeedItems.compactMap(\.parentID))
+		let previousFolderIDs = Set(
+			subscription.categories.map(\.id).filter { $0.isEmpty == false }
+			+ subscription.folderNames.map { folderStreamID(forName: $0) },
+		)
+		cacheIDsToHydrate.formUnion(previousFolderIDs)
+		cacheIDsToHydrate.formUnion(previousFolderIDs.map { "\(subscription.id)::\($0)" })
+		cacheIDsToHydrate.formUnion(normalizedFolders.map { folderStreamID(forName: $0) })
 		let mutation = OfflineMutation(
 			kind: .moveFeed,
 			feedId: subscription.id,
 			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		let previousFeedItems = feedItems(forStreamID: subscription.id)
-		let previousSelectedID = selectedNavigationID
-		let previousSelectedItem = navigation.item(withID: previousSelectedID)
-			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
-				? temporarilyUnavailableSelectedCollection
-				: nil)
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		updateSubscription(id: subscription.id) { item in
 			item.categories = normalizedFolders.map {
 				FeedCategory(id: "user/-/label/\($0)", label: $0)
@@ -1757,17 +1784,48 @@ final class ReaderAppModel {
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
 		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		let removedFeedIDs = navigation.items
+		let changedCollectionIDs = await removeSubscriptionLocally(subscription)
+		await persistLibraryAfterSubscriptionChange()
+		await persistCollections(changedCollectionIDs)
+		await replayPendingMutations()
+		return true
+	}
+
+	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String> {
+		let removedFeedItems = navigation.items
 			.filter { $0.kind == .feed && $0.streamID == subscription.id }
-			.map(\.id)
+		let subscriptionFolderIDs = Set(subscription.categories.map(\.id).filter { $0.isEmpty == false })
+		let removedFeedIDs = Set(
+			[subscription.id]
+			+ removedFeedItems.map(\.id)
+			+ subscriptionFolderIDs.map { "\(subscription.id)::\($0)" }
+		)
+		let affectedFolderIDs = subscriptionFolderIDs.union(removedFeedItems.compactMap(\.parentID))
+		await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs))
 		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
+		var changedCollectionIDs = Set(removedFeedIDs)
+		for folderID in affectedFolderIDs {
+			guard let cachedArticles = articleCache[folderID] else { continue }
+			let remainingArticles = cachedArticles.filter {
+				articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) == false
+			}
+			if remainingArticles.count != cachedArticles.count {
+				articleCache[folderID] = remainingArticles
+				changedCollectionIDs.insert(folderID)
+			}
+		}
 		for collectionID in removedFeedIDs {
-			articleCache[collectionID] = nil
-			selectedArticleIDs[collectionID] = nil
-			resetStreamPagination(for: collectionID)
+			clearCollectionState(collectionID)
 		}
 		rebuildNavigationFromSubscriptions()
+		for folderID in affectedFolderIDs where navigation.item(withID: folderID) == nil {
+			// If the removed feed was the last child, its aggregate folder is
+			// removed too. Clear that orphan even when the aggregate had no loaded
+			// article rows but still had a persisted continuation.
+			clearCollectionState(folderID)
+			changedCollectionIDs.insert(folderID)
+		}
 		if wasSelectedFeed
 			|| removedFeedIDs.contains(temporarilyUnavailableSelectedCollection?.id ?? "")
 			|| navigation.item(withID: selectedNavigationID) == nil {
@@ -1776,9 +1834,7 @@ final class ReaderAppModel {
 				select(section: firstEnabledSmartSection)
 			}
 		}
-		await persistLibraryAfterSubscriptionChange()
-		await replayPendingMutations()
-		return true
+		return changedCollectionIDs
 	}
 
 	@discardableResult
@@ -1787,6 +1843,7 @@ final class ReaderAppModel {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
+		errorMessage = nil
 		guard name != oldName else {
 			return true
 		}
@@ -1795,6 +1852,18 @@ final class ReaderAppModel {
 			return false
 		}
 		let affected = subscriptions.filter { $0.folderNames.contains(oldName) }
+		let oldFolderID = folderStreamID(forName: oldName)
+		let newFolderID = folderStreamID(forName: name)
+		let cacheIDsToHydrate = Set(
+			[oldFolderID, newFolderID]
+				+ affected.flatMap { subscription in
+					[
+						"\(subscription.id)::\(oldFolderID)",
+						"\(subscription.id)::\(newFolderID)",
+					]
+				}
+		)
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		for subscription in affected {
 			let folders = subscription.folderNames.map { $0 == oldName ? name : $0 }
 			guard await enqueueOfflineMutation(
@@ -1802,9 +1871,10 @@ final class ReaderAppModel {
 			) else { return false }
 		}
 		applyFolderRename(from: oldName, to: name)
-		remapFolderCollectionState(from: oldName, to: name)
+		let remappedCollectionIDs = remapFolderCollectionState(from: oldName, to: name)
 		rebuildNavigationFromSubscriptions()
 		await persistLibraryAfterFolderChange()
+		await persistCollections(remappedCollectionIDs)
 		await replayPendingMutations()
 		return true
 	}
@@ -1813,9 +1883,32 @@ final class ReaderAppModel {
 	func deleteFolder(_ name: String) async -> Bool {
 		let folderID = folderStreamID(forName: name)
 		let wasSelectedFolder = selectedNavigationID == folderID
-		let selectedFeed = navigation.item(withID: selectedNavigationID)
-		let selectedFeedStreamID = selectedFeed?.kind == .feed ? selectedFeed?.streamID : nil
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
+		let previousSelectedID = selectedNavigationID
+		let previousSelectedItem = navigation.item(withID: previousSelectedID)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
+		var previousFeedItemsBySubscription: [String: [ReaderNavigationItem]] = [:]
+		var cacheIDsToHydrate = Set<String>([folderID])
+		for subscription in affected {
+			let previousItems = feedItems(for: subscription)
+			previousFeedItemsBySubscription[subscription.id] = previousItems
+			cacheIDsToHydrate.formUnion(previousItems.map(\.id))
+			cacheIDsToHydrate.insert(subscription.id)
+			let previousFolderIDs = Set(
+				subscription.categories.map(\.id).filter { $0.isEmpty == false }
+					+ subscription.folderNames.map { folderStreamID(forName: $0) },
+			)
+			cacheIDsToHydrate.formUnion(previousFolderIDs)
+			cacheIDsToHydrate.formUnion(previousFolderIDs.map { "\(subscription.id)::\($0)" })
+			let remainingFolders = subscription.folderNames.filter { $0 != name }
+			cacheIDsToHydrate.formUnion(remainingFolders.map { folderStreamID(forName: $0) })
+			cacheIDsToHydrate.formUnion(
+				remainingFolders.map { "\(subscription.id)::\(folderStreamID(forName: $0))" }
+			)
+			cacheIDsToHydrate.formUnion(previousItems.compactMap(\.parentID))
+		}
 		for subscription in affected {
 			guard await enqueueOfflineMutation(
 				OfflineMutation(
@@ -1825,20 +1918,31 @@ final class ReaderAppModel {
 				)
 			) else { return false }
 		}
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		for subscription in affected {
 			updateSubscription(id: subscription.id) { item in
 				item.categories.removeAll { $0.label == name }
 			}
 		}
 
-		if let selectedFeedStreamID, selectedNavigationID.hasSuffix("::\(folderID)") {
-			let remainingFolders = subscriptions.first(where: { $0.id == selectedFeedStreamID })?.folderNames ?? []
-			let nextID = remainingFolders.first.map { "\(selectedFeedStreamID)::\(folderStreamID(forName: $0))" }
-				?? selectedFeedStreamID
-			remapCollectionState(from: selectedNavigationID, to: nextID)
-		}
-
 		rebuildNavigationFromSubscriptions()
+		var remappedCollectionIDs = Set<String>([folderID])
+		for subscription in affected {
+			remappedCollectionIDs.formUnion(
+				remapMovedFeedState(
+					streamID: subscription.id,
+					feedKey: subscription.feedKey,
+					previousFeedItems: previousFeedItemsBySubscription[subscription.id] ?? [],
+					previousSelectedID: previousSelectedID,
+					previousSelectedItem: previousSelectedItem,
+					preserveRemovedState: true,
+				)
+			)
+		}
+		// A deleted folder has no valid aggregate collection after the navigation
+		// rebuild. Clear it even when it was not loaded in memory so a stale
+		// offline membership row is removed as well.
+		clearCollectionState(folderID)
 		if wasSelectedFolder
 			|| temporarilyUnavailableSelectedCollection?.id == folderID
 			|| navigation.item(withID: selectedNavigationID) == nil {
@@ -1848,6 +1952,9 @@ final class ReaderAppModel {
 			}
 		}
 		await persistLibraryAfterFolderChange()
+		if remappedCollectionIDs.isEmpty == false {
+			await persistCollections(remappedCollectionIDs)
+		}
 		await replayPendingMutations()
 		return true
 	}
@@ -2608,12 +2715,25 @@ final class ReaderAppModel {
 			?? (temporarilyUnavailableSelectedCollection?.id == preservedNavigationID
 				? temporarilyUnavailableSelectedCollection
 				: nil)
+		let todayID = ReaderSection.today.rawValue
+		let currentTodayBounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let hadTrustedTodayBounds = streamDayBounds[todayID] == currentTodayBounds
 
 		libraryGeneration = UUID()
 		if preservingPagination == false {
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 		}
+		// A persisted Today continuation has no day-bound metadata. Only reuse it
+		// while this live model has already established that the token belongs to
+		// the current local day; otherwise a cold restore could send an old-day
+		// token with today's request.
+		let canRestoreTodayPagination = preservingPagination && hadTrustedTodayBounds
+		if canRestoreTodayPagination == false {
+			resetStreamPagination(for: todayID)
+			resolvedPaginationCollections.remove(todayID)
+		}
+		var discardedUntrustedTodayPagination = false
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
@@ -2656,10 +2776,19 @@ final class ReaderAppModel {
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
 		for (collectionID, continuation) in snapshot.continuationsByCollection {
+			if collectionID == todayID, canRestoreTodayPagination == false {
+				discardedUntrustedTodayPagination = true
+				continue
+			}
 			guard preservingPagination == false || streamContinuations[collectionID] == nil else { continue }
 			streamContinuations[collectionID] = continuation
 			seenStreamContinuations[collectionID] = [continuation]
 			resolvedPaginationCollections.insert(collectionID)
+		}
+		if discardedUntrustedTodayPagination {
+			// Mark Today as intentionally reconciled so the caller persists the
+			// cleared token even when the snapshot had no Today article rows.
+			articleCache[todayID] = snapshot.articlesByCollection[todayID] ?? []
 		}
 		if let updatedAt = snapshot.lastSyncAt {
 			collectionFreshness = snapshot.articlesByCollection.keys.reduce(into: [:]) { result, collectionID in
@@ -2677,7 +2806,12 @@ final class ReaderAppModel {
 			selectedArticleIDs[preservedNavigationID] = kept.id
 			selectedArticleID = kept.id
 			preferredCompactColumn = .detail
-			return pruneStaleTodayStories()
+			let didPruneToday = pruneStaleTodayStories()
+			if didPruneToday {
+				resetStreamPagination(for: ReaderSection.today.rawValue)
+				resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
+			}
+			return didPruneToday || discardedUntrustedTodayPagination
 		}
 
 		if navigation.item(withID: selectedNavigationID) == nil {
@@ -2689,7 +2823,12 @@ final class ReaderAppModel {
 		reconcileSelectedSmartViewIfNeeded()
 		selectedArticleID = selectedArticleIDs[selectedNavigationID]
 		reconcileCurrentArticleSelection()
-		return pruneStaleTodayStories()
+		let didPruneToday = pruneStaleTodayStories()
+		if didPruneToday {
+			resetStreamPagination(for: ReaderSection.today.rawValue)
+			resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
+		}
+		return didPruneToday || discardedUntrustedTodayPagination
 	}
 
 	private func resetInMemoryLibraryForAccountChange() {
@@ -3066,15 +3205,67 @@ final class ReaderAppModel {
 		await refreshOfflineStorageStats()
 	}
 
+	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async {
+		guard collectionIDs.isEmpty == false,
+			let accountID = session?.storageIdentity else {
+			return
+		}
+		let unloadedIDs = collectionIDs.filter { articleCache[$0] == nil }
+		let unloadedPaginationIDs = collectionIDs.filter {
+			streamContinuations[$0] == nil && seenStreamContinuations[$0] == nil
+		}
+		guard unloadedIDs.isEmpty == false || unloadedPaginationIDs.isEmpty == false else {
+			return
+		}
+		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID) else {
+			return
+		}
+		for collectionID in unloadedIDs {
+			if let articles = snapshot.articlesByCollection[collectionID] {
+				articleCache[collectionID] = articles
+			}
+		}
+		for collectionID in unloadedPaginationIDs {
+			if let continuation = snapshot.continuationsByCollection[collectionID] {
+				streamContinuations[collectionID] = continuation
+				seenStreamContinuations[collectionID] = [continuation]
+				resolvedPaginationCollections.insert(collectionID)
+			}
+		}
+		if let restoration = snapshot.restoration {
+			for collectionID in collectionIDs where selectedArticleIDs[collectionID] == nil {
+				selectedArticleIDs[collectionID] = restoration.selectedArticleIDs[collectionID]
+			}
+		}
+	}
+
 	private func persistCollections(_ collectionIDs: Set<String>) async {
 		guard let accountID = session?.storageIdentity else { return }
 		do {
 			for collectionID in collectionIDs {
-				try await offlineStore.saveArticles(
-					articleCache[collectionID] ?? [],
-					collectionID: collectionID,
-					accountID: accountID,
-				)
+				// A collection that still exists in navigation may have state only in
+				// SQLite. Do not turn that cache into an empty snapshot merely because
+				// this operation did not load it into memory. Removed IDs are explicit
+				// clears and must still be persisted as empty collections.
+				let isRemovedCollection = navigation.item(withID: collectionID) == nil
+				let hasLoadedArticles = articleCache[collectionID] != nil
+				if hasLoadedArticles || isRemovedCollection {
+					try await offlineStore.saveArticles(
+						articleCache[collectionID] ?? [],
+						collectionID: collectionID,
+						accountID: accountID,
+					)
+				}
+				// A continuation can be hydrated independently of article bodies.
+				// Persist that moved token without overwriting an unloaded SQLite
+				// article collection with an empty array.
+				if hasLoadedArticles || isRemovedCollection || streamContinuations[collectionID] != nil {
+					try await offlineStore.saveCollectionContinuation(
+						streamContinuations[collectionID],
+						collectionID: collectionID,
+						accountID: accountID,
+					)
+				}
 			}
 			try await offlineStore.saveNavigation(navigation, accountID: accountID)
 			scheduleRestorationSave()
@@ -3149,6 +3340,36 @@ final class ReaderAppModel {
 		navigation.items.filter { $0.kind == .feed && $0.streamID == streamID }
 	}
 
+	private func feedItems(for subscription: FeedSubscription) -> [ReaderNavigationItem] {
+		var items = feedItems(forStreamID: subscription.id)
+		var knownIDs = Set(items.map(\.id))
+		var folderIDs = subscription.categories.map(\.id).filter { $0.isEmpty == false }
+		for folderName in subscription.folderNames {
+			let folderID = folderStreamID(forName: folderName)
+			if folderIDs.contains(folderID) == false {
+				folderIDs.append(folderID)
+			}
+		}
+		for folderID in folderIDs {
+			let childID = "\(subscription.id)::\(folderID)"
+			guard knownIDs.insert(childID).inserted else { continue }
+			items.append(
+				ReaderNavigationItem(
+					id: childID,
+					title: subscription.title,
+					streamID: subscription.id,
+					kind: .feed,
+					unreadCount: 0,
+					parentID: folderID,
+					feedKey: subscription.feedKey,
+					iconURL: subscription.iconUrl.flatMap(URL.init(string:)),
+					smartSection: nil,
+				),
+			)
+		}
+		return items
+	}
+
 	@discardableResult
 	private func remapMovedFeedState(
 		streamID: String,
@@ -3156,13 +3377,26 @@ final class ReaderAppModel {
 		previousFeedItems: [ReaderNavigationItem],
 		previousSelectedID: String,
 		previousSelectedItem: ReaderNavigationItem?,
+		preserveRemovedState: Bool = false,
 	) -> Set<String> {
 		let nextFeedItems = feedItems(forStreamID: streamID)
 		var changedCollectionIDs = Set<String>()
 		var reservedDestinationIDs = Set<String>()
 		var mappings: [(from: String, to: String)] = []
 
+		var unmatchedPreviousItems: [ReaderNavigationItem] = []
 		for previousItem in previousFeedItems {
+			if let matching = nextFeedItems.first(where: {
+				$0.id == previousItem.id && reservedDestinationIDs.contains($0.id) == false
+			}) {
+				mappings.append((previousItem.id, matching.id))
+				reservedDestinationIDs.insert(matching.id)
+			} else {
+				unmatchedPreviousItems.append(previousItem)
+			}
+		}
+
+		for previousItem in unmatchedPreviousItems {
 			if let matching = nextFeedItems.first(where: {
 				$0.parentID == previousItem.parentID && reservedDestinationIDs.contains($0.id) == false
 			}) {
@@ -3171,6 +3405,11 @@ final class ReaderAppModel {
 			} else if let fallback = nextFeedItems.first(where: { reservedDestinationIDs.contains($0.id) == false }) {
 				mappings.append((previousItem.id, fallback.id))
 				reservedDestinationIDs.insert(fallback.id)
+			} else if preserveRemovedState, let fallback = nextFeedItems.first {
+				// When deleting one folder from a multi-folder feed, every remaining
+				// child already matched its previous row. Merge the removed row into a
+				// surviving child instead of dropping its cached stories.
+				mappings.append((previousItem.id, fallback.id))
 			}
 		}
 
@@ -3206,8 +3445,15 @@ final class ReaderAppModel {
 			articleCache[folderID]?.removeAll { articleBelongsToFeed($0, streamID: streamID, feedKey: feedKey) }
 			changedCollectionIDs.insert(folderID)
 		}
-		for folderID in nextFolderIDs.subtracting(previousFolderIDs) {
-			guard articleCache[folderID] != nil, feedStories.isEmpty == false else { continue }
+		for folderID in nextFolderIDs {
+			guard feedStories.isEmpty == false else { continue }
+			// A surviving folder can have no row in SQLite because it was empty or
+			// had never been loaded. Hydration above has already restored any stored
+			// stories, so an absent entry is safe to initialize before merging the
+			// affected feed's stories into the aggregate.
+			if articleCache[folderID] == nil {
+				articleCache[folderID] = []
+			}
 			mergeArticles(feedStories, into: folderID)
 			changedCollectionIDs.insert(folderID)
 		}
@@ -3353,16 +3599,22 @@ final class ReaderAppModel {
 		"user/-/label/\(name)"
 	}
 
-	private func remapFolderCollectionState(from oldName: String, to newName: String) {
+	@discardableResult
+	private func remapFolderCollectionState(from oldName: String, to newName: String) -> Set<String> {
 		let oldFolderID = folderStreamID(forName: oldName)
 		let newFolderID = folderStreamID(forName: newName)
 		remapCollectionState(from: oldFolderID, to: newFolderID)
+		var changedCollectionIDs: Set<String> = [oldFolderID, newFolderID]
 		for subscription in subscriptions where subscription.folderNames.contains(newName) {
+			let oldChildID = "\(subscription.id)::\(oldFolderID)"
+			let newChildID = "\(subscription.id)::\(newFolderID)"
 			remapCollectionState(
-				from: "\(subscription.id)::\(oldFolderID)",
-				to: "\(subscription.id)::\(newFolderID)",
+				from: oldChildID,
+				to: newChildID,
 			)
+			changedCollectionIDs.formUnion([oldChildID, newChildID])
 		}
+		return changedCollectionIDs
 	}
 
 	private func remapCollectionState(from oldID: String, to newID: String) {
@@ -3378,7 +3630,13 @@ final class ReaderAppModel {
 		if deferredInitialFeedPaginationCollectionID == oldID {
 			deferredInitialFeedPaginationCollectionID = newID
 		}
-		moveDictionaryValue(&articleCache, from: oldID, to: newID)
+		if let incomingArticles = articleCache.removeValue(forKey: oldID) {
+			if articleCache[newID] == nil {
+				articleCache[newID] = incomingArticles
+			} else {
+				mergeArticles(incomingArticles, into: newID)
+			}
+		}
 		moveDictionaryValue(&sortOrders, from: oldID, to: newID)
 		moveDictionaryValue(&selectedArticleIDs, from: oldID, to: newID)
 		moveDictionaryValue(&streamContinuations, from: oldID, to: newID)

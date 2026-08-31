@@ -175,6 +175,202 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.loadSnapshot(accountID: "account-a").subscriptions.isEmpty)
 	}
 
+	@Test func feedFolderMoveClearsOldFolderMembershipsAndRebuildsTheNewFolderOffline() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(
+			id: "feed/7",
+			key: "daily",
+			title: "Daily Brief",
+			folders: ["Old"],
+		)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		let article = makeArticle(id: "folder-story", feedKey: "daily", isRead: false)
+		let oldFolderID = "user/-/label/Old"
+		let oldChildID = "feed/7::\(oldFolderID)"
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-folder-next", collectionID: oldFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-child-next", collectionID: oldChildID, accountID: accountID)
+
+		let move = try decodePage(
+			"""
+			{
+			  "cursor": "v1:move",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 1,
+			    "entityType": "feed",
+			    "entityId": "daily",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "feedKey": "daily",
+			      "streamId": "feed/7",
+			      "title": "Daily Brief",
+			      "isActive": true,
+			      "folders": ["New"]
+			    }
+			  }]
+			}
+			"""
+		)
+		try await store.apply(move, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let newFolderID = "user/-/label/New"
+		let newChildID = "feed/7::\(newFolderID)"
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[oldFolderID] == nil)
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.articlesByCollection[newFolderID]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.navigation?.item(withID: oldChildID) == nil)
+		#expect(snapshot.navigation?.item(withID: newChildID) != nil)
+	}
+
+	@Test func incrementalArticleUpsertAddsFolderAndChildMembershipsFromCachedSubscriptions() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(
+			id: "feed/7",
+			key: "daily",
+			title: "Daily Brief",
+			folders: ["News"],
+		)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.apply(
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:feed",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": 1,
+				    "entityType": "feed",
+				    "entityId": "daily",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-15T12:00:00.000Z",
+				    "payload": {
+				      "feedKey": "daily",
+				      "streamId": "feed/7",
+				      "title": "Daily Brief",
+				      "isActive": true,
+				      "folders": ["News"]
+				    }
+				  }]
+				}
+				"""
+			),
+			accountID: accountID,
+		)
+
+		let articlePage = try decodePage(
+			"""
+			{
+			  "cursor": "v1:article",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 2,
+			    "entityType": "article",
+			    "entityId": "article-2",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:01:00.000Z",
+			    "payload": {
+			      "id": "article-2",
+			      "readerId": "reader-2",
+			      "feedKey": "daily",
+			      "source": "Daily",
+			      "title": "New folder story",
+			      "html": "<p>Body</p>",
+			      "receivedAt": "2026-08-15T11:00:00.000Z",
+			      "isRead": false,
+			      "isStarred": false
+			    }
+			  }]
+			}
+			"""
+		)
+		try await store.apply(articlePage, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let folderID = "user/-/label/News"
+		let childID = "feed/7::\(folderID)"
+		#expect(snapshot.articlesByCollection[folderID]?.map(\.id) == ["article-2"])
+		#expect(snapshot.articlesByCollection[childID]?.map(\.id) == ["article-2"])
+	}
+
+	@Test func recommendationAndFeedCopiesWithOneReaderIDShareStateMembershipsAndSearchResults() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(
+			id: "feed/7",
+			key: "daily",
+			title: "Daily Brief",
+			folders: ["News"],
+		)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		let readerID = "tag:google.com,2005:reader/item/shared"
+		let canonical = makeArticle(
+			id: "canonical-uuid",
+			feedKey: "daily",
+			readerID: readerID,
+			isRead: false,
+		)
+		let gReaderCopy = makeArticle(
+			id: readerID,
+			feedKey: "daily",
+			readerID: readerID,
+			isRead: false,
+		)
+		try await store.saveArticles([canonical], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store.saveArticles([gReaderCopy], collectionID: "feed/7::user/-/label/News", accountID: accountID)
+
+		let status = try decodePage(
+			"""
+			{
+			  "cursor": "v1:status",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 1,
+			    "entityType": "status",
+			    "entityId": "\(canonical.id)",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "itemId": "\(canonical.id)",
+			      "isRead": true,
+			      "isStarred": true
+			    }
+			  }]
+			}
+			"""
+		)
+		try await store.apply(status, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let folderArticles = snapshot.articlesByCollection["feed/7::user/-/label/News"] ?? []
+		let forYouArticles = snapshot.articlesByCollection[ReaderSection.forYou.rawValue] ?? []
+		let search = try await store.searchArticles(
+			query: "Story",
+			collectionID: nil,
+			accountID: accountID,
+			limit: 20,
+		)
+		#expect(forYouArticles.map(\.id) == [canonical.id])
+		#expect(folderArticles.map(\.id) == [canonical.id])
+		#expect(forYouArticles.first?.isRead == true)
+		#expect(forYouArticles.first?.isStarred == true)
+		#expect(folderArticles.first?.isRead == true)
+		#expect(folderArticles.first?.isStarred == true)
+		#expect(search.map(\.id) == [canonical.id])
+		#expect(try await store.storageStats(accountID: accountID).articleCount == 1)
+	}
+
 	@Test func prunedServerPlaceholderIsStoredAsMissingBodyForRecovery() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let page = try decodePage(
@@ -557,6 +753,7 @@ struct OfflineLibraryStoreTests {
 	private func makeArticle(
 		id: String = "article-1",
 		feedKey: String = "daily",
+		readerID: String? = nil,
 		score: Int = 80,
 		html: String = "<p>Cached body</p>",
 		receivedAt: TimeInterval = 300,
@@ -565,7 +762,7 @@ struct OfflineLibraryStoreTests {
 	) -> Recommendation {
 		Recommendation(
 			id: id,
-			readerId: id == "article-1" ? "reader-1" : "reader-\(id)",
+			readerId: readerID ?? (id == "article-1" ? "reader-1" : "reader-\(id)"),
 			feedKey: feedKey,
 			source: "Daily",
 			title: "Story \(id)",
@@ -580,6 +777,47 @@ struct OfflineLibraryStoreTests {
 			sampleCount: 8,
 			explanation: "A learned recommendation",
 			learningState: "Personalized",
+		)
+	}
+
+	private func makeSubscription(
+		id: String,
+		key: String,
+		title: String,
+		folders: [String],
+	) -> FeedSubscription {
+		guard let url = URL(string: "https://pigeon.test/feed/\(key)") else {
+			preconditionFailure("Invalid test URL")
+		}
+		return FeedSubscription(
+			id: id,
+			title: title,
+			categories: folders.map { FeedCategory(id: "user/-/label/\($0)", label: $0) },
+			url: url,
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+	}
+
+	private func makeNavigation(_ subscriptions: [FeedSubscription]) -> ReaderNavigationState {
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map {
+					ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+				},
+				url: subscription.url.absoluteString,
+			)
+		}
+		let feedCounts = subscriptions.map { ReaderUnreadCount(id: $0.id, count: 1) }
+		let folderCounts = subscriptions.flatMap { subscription in
+			subscription.categories.map { ReaderUnreadCount(id: $0.id, count: 1) }
+		}
+		return ReaderNavigationCatalog.make(
+			subscriptions: readerSubscriptions,
+			unreadCounts: feedCounts + folderCounts,
+			smartCounts: ReaderNavigationSmartCounts(forYou: 1, today: 1, unread: 1, starred: 0),
 		)
 	}
 
