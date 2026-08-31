@@ -549,7 +549,7 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == other.id)
 	}
 
-	@Test func searchResultsHonorTheCurrentReadFilter() async throws {
+		@Test func searchResultsHonorTheCurrentReadFilter() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.unread)
@@ -804,6 +804,29 @@ struct ReaderAppModelTests {
 
 		await controlled.resolve(request)
 		await mutation.value
+	}
+
+		@Test func returningFromACompactArticleKeepsTheActiveLibrarySearch() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let hit = makeArticle(id: "search-hit")
+		let other = makeArticle(id: "other-story")
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit, other], for: collection)
+		try await store.saveArticles([hit, other], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+		await model.searchArticles(query: "search-hit", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		model.select(article: hit)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		model.showFeedColumn()
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.searchResults.map(\.id) == [hit.id])
 	}
 
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {

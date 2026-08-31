@@ -7,28 +7,39 @@ struct ReaderShellView: View {
 
 	var body: some View {
 		@Bindable var model = model
+		let showsCompactArticle = ReaderCompactArticlePresentation.isActive(
+			horizontalSizeClass: horizontalSizeClass,
+			preferredColumn: model.preferredCompactColumn,
+			hasSelectedArticle: model.selectedArticle != nil,
+		)
 
-		Group {
-			if horizontalSizeClass != .regular, model.preferredCompactColumn == .detail, let article = model.selectedArticle {
+		ZStack {
+			NavigationSplitView(preferredCompactColumn: splitViewColumn) {
+				ReaderSidebarView()
+			} content: {
+				ArticleListView(collection: model.selectedCollection)
+			} detail: {
+				if showsCompactArticle {
+					ReaderPlaceholderView(collection: model.selectedCollection)
+				} else if let article = model.selectedArticle {
+					ArticleReaderView(article: article)
+				} else {
+					ReaderPlaceholderView(collection: model.selectedCollection)
+				}
+			}
+			.navigationSplitViewStyle(.balanced)
+			.allowsHitTesting(showsCompactArticle == false)
+			.accessibilityHidden(showsCompactArticle)
+
+			if showsCompactArticle, let article = model.selectedArticle {
 				// NavigationSplitView that launches on `.detail` has no stack to pop, so
 				// the system back item and interactive pop do nothing. Own the article
-				// on compact and return to the split view when the reader asks.
+				// on compact without replacing the library list underneath.
 				NavigationStack {
 					ArticleReaderView(article: article)
 				}
-			} else {
-				NavigationSplitView(preferredCompactColumn: $model.preferredCompactColumn) {
-					ReaderSidebarView()
-				} content: {
-					ArticleListView(collection: model.selectedCollection)
-				} detail: {
-					if let article = model.selectedArticle {
-						ArticleReaderView(article: article)
-					} else {
-						ReaderPlaceholderView(collection: model.selectedCollection)
-					}
-				}
-				.navigationSplitViewStyle(.balanced)
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.background(.background)
 			}
 		}
 		.sheet(isPresented: $model.isShowingSettings) {
@@ -75,6 +86,18 @@ struct ReaderShellView: View {
 				?? notification.object as? ReaderNotificationAction else { return }
 			Task { await model.handleNotificationAction(action) }
 		}
+	}
+
+	private var splitViewColumn: Binding<NavigationSplitViewColumn> {
+		Binding(
+			get: {
+				ReaderCompactArticlePresentation.splitViewColumn(
+					horizontalSizeClass: horizontalSizeClass,
+					preferredColumn: model.preferredCompactColumn,
+				)
+			},
+			set: { model.preferredCompactColumn = $0 },
+		)
 	}
 }
 

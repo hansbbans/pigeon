@@ -310,6 +310,42 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "article-bottom-controls")
 	}
 
+	func testSearchSurvivesOpeningAnArticleOnCompact() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let forYou = app.staticTexts["For You"]
+		if forYou.waitForExistence(timeout: 3) {
+			forYou.tap()
+		}
+		let list = app.descendants(matching: .any)["article-list"]
+		XCTAssertTrue(list.waitForExistence(timeout: 10) || app.searchFields.firstMatch.waitForExistence(timeout: 10))
+
+		let search = app.searchFields.firstMatch
+		XCTAssertTrue(search.waitForExistence(timeout: 10))
+		search.tap()
+		search.typeText("calmer")
+		let result = app.staticTexts["Designing calmer tools for people who read every day"]
+		XCTAssertTrue(result.waitForExistence(timeout: 10))
+		result.tap()
+
+		let back = app.descendants(matching: .any)["article-back-to-feed"]
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+
+		XCTAssertTrue(search.waitForExistence(timeout: 5))
+		let query = (search.value as? String) ?? search.placeholderValue
+		XCTAssertTrue(
+			search.value as? String == "calmer" || app.staticTexts["calmer"].exists,
+			"Opening a compact article must not remount the list and clear search. Observed: \(String(describing: query))",
+		)
+		attachScreenshot(named: "search-survives-compact-article")
+	}
+
 	func testBackFromOpenedArticleReturnsToTheFeed() throws {
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		let back = app.descendants(matching: .any)["article-back-to-feed"]

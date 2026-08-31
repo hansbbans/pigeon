@@ -402,6 +402,49 @@ struct OfflineLibraryStoreTests {
 		#expect(wrongAccount.isEmpty)
 	}
 
+	@Test func seededPreviewStoreSearchesOnlyItsAccountAndCollectionAndDoesNotReseed() async throws {
+		let collectionID = ReaderSection.forYou.rawValue
+		let accountID = "preview-account"
+		let article = makeArticle(id: "preview-seed", html: "<p>Calmer preview body</p>", isRead: false)
+		let store = OfflineLibraryStore.inMemory(
+			seeding: [article],
+			collectionID: collectionID,
+			accountID: accountID,
+		)
+
+		let firstSearch = try await store.searchArticles(
+			query: "calmer",
+			collectionID: collectionID,
+			accountID: accountID,
+			limit: 20,
+		)
+		let wrongCollection = try await store.searchArticles(
+			query: "calmer",
+			collectionID: "other-collection",
+			accountID: accountID,
+			limit: 20,
+		)
+		let wrongAccount = try await store.searchArticles(
+			query: "calmer",
+			collectionID: collectionID,
+			accountID: "other-account",
+			limit: 20,
+		)
+
+		try await store.saveArticles([], collectionID: collectionID, accountID: accountID)
+		let afterRemoval = try await store.searchArticles(
+			query: "calmer",
+			collectionID: collectionID,
+			accountID: accountID,
+			limit: 20,
+		)
+
+		#expect(firstSearch.map(\.id) == [article.id])
+		#expect(wrongCollection.isEmpty)
+		#expect(wrongAccount.isEmpty)
+		#expect(afterRemoval.isEmpty)
+	}
+
 	private func makeArticle(
 		id: String = "article-1",
 		feedKey: String = "daily",
