@@ -2175,9 +2175,13 @@ final class ReaderAppModel {
 		await markStoriesAsRead(.below, around: article, in: collection)
 	}
 
+	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
+		markReadOrderArticles(in: collection).contains { $0.isRead == false }
+	}
+
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false } ?? [],
+			markReadOrderArticles(in: collection).filter { $0.isRead == false },
 			scope: .all,
 			undoTitle: "Mark All as Read",
 		)

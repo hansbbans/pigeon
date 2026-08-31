@@ -148,7 +148,7 @@ struct ArticleListView: View {
 					Button("Mark All as Read", systemImage: "checkmark.circle") {
 						Task { await model.markAllStoriesAsRead(in: collection) }
 					}
-					.disabled(allArticles.contains(where: { $0.isRead == false }) == false)
+					.disabled(model.canMarkAllStoriesAsRead(in: collection) == false)
 					Divider()
 					olderThanButton(days: 1)
 					olderThanButton(days: 7)
