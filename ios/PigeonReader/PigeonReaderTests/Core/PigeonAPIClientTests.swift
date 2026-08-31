@@ -46,6 +46,21 @@ struct PigeonAPIClientTests {
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
 	}
 
+#if DEBUG
+	@Test func previewRecommendationsRefreshRetainsSeededArticles() async throws {
+		let seededArticles = Array(PreviewData.articles.prefix(2))
+		let baseURL = try #require(URL(string: "https://pigeon.preview"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "preview-token"),
+			httpClient: PreviewHTTPClient(recommendations: seededArticles),
+		)
+
+		let refreshedArticles = try await client.recommendations(for: .forYou)
+
+		#expect(refreshedArticles == seededArticles)
+	}
+#endif
+
 	@Test func incrementalSyncSendsOpaqueCursorAndDecodesCanonicalDates() async throws {
 		let response = Data(
 			#"{"cursor":"v1:42","hasMore":false,"changes":[{"sequence":42,"entityType":"status","entityId":"item-1","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"itemId":"item-1","isRead":true,"isStarred":false,"updatedAt":"2026-08-15T12:00:00.000Z","version":2,"mutationId":"mutation-1"}}]}"#.utf8,
