@@ -9,6 +9,7 @@ struct ArticleReaderView: View {
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var selectedMode = ReaderMode.feedContent
 	@State private var readerDocument: ReaderViewDocument?
+	@State private var readerDocumentArticleID: String?
 	@State private var readerViewState = ReaderViewLoadState.idle
 	@State private var scrollPosition = ScrollPosition()
 	@State private var pendingRestoredDepth: Double?
@@ -146,6 +147,7 @@ struct ArticleReaderView: View {
 			restoredModeForArticle = restoredMode
 			selectedMode = restoredMode
 			readerDocument = nil
+			readerDocumentArticleID = nil
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
 		.task(id: readerRequestID(for: current)) {
@@ -211,7 +213,12 @@ struct ArticleReaderView: View {
 
 	@ViewBuilder
 	private func readerViewContent(for article: Recommendation) -> some View {
-		switch readerViewState {
+		let presentedState = ReaderViewDocumentOwnership.presentedState(
+			stored: readerViewState,
+			documentArticleID: readerDocumentArticleID,
+			visibleArticleID: article.id,
+		)
+		switch presentedState {
 		case .idle, .loading:
 			ProgressView("Preparing Reader View")
 				.frame(maxWidth: .infinity, minHeight: 160)
@@ -226,7 +233,11 @@ struct ArticleReaderView: View {
 		case .fallback(let message):
 			readerViewFailure(message: message, article: article, showingFeedContent: true)
 		case .loaded:
-			if let readerDocument {
+			if let readerDocument,
+				ReaderViewDocumentOwnership.shouldApply(
+					extractedArticleID: readerDocumentArticleID ?? "",
+					visibleArticleID: article.id,
+				) {
 				VStack(alignment: .leading, spacing: 12) {
 					if let byline = readerDocument.byline {
 						Text(byline)
@@ -273,7 +284,14 @@ struct ArticleReaderView: View {
 			return
 		}
 		guard article.safeOriginalURL != nil else {
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			readerViewState = .unavailable
+			readerDocumentArticleID = article.id
 			return
 		}
 
@@ -281,13 +299,27 @@ struct ArticleReaderView: View {
 		do {
 			let document = try await model.loadReaderView(for: article)
 			try Task.checkCancellation()
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			readerDocument = document
+			readerDocumentArticleID = article.id
 			readerViewState = .loaded
 		} catch is CancellationError {
 			return
 		} catch {
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			let hasFeedContent = article.html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 			readerViewState = hasFeedContent ? .fallback(error.localizedDescription) : .failed(error.localizedDescription)
+			readerDocumentArticleID = article.id
 		}
 	}
 
