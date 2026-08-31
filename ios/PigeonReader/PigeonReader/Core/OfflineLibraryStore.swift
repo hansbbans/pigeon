@@ -4,18 +4,30 @@ import SQLite3
 actor OfflineLibraryStore: OfflineLibraryStoring {
 	static let shared = OfflineLibraryStore()
 
+	private struct PreviewSeed: Sendable {
+		let articles: [Recommendation]
+		let collectionID: String
+		let accountID: String
+	}
+
 	private let databaseURL: URL?
 	// Access stays actor-confined; unsafe isolation is needed only so deinit can close
 	// SQLite's C pointer under Swift 6's nonisolated deinitializer rule.
 	nonisolated(unsafe) private var database: OpaquePointer?
 	private let encoder: JSONEncoder
 	private let decoder: JSONDecoder
+	private var previewSeed: PreviewSeed?
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
 	#endif
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
+		self.init(databaseURL: databaseURL, previewSeed: nil)
+	}
+
+	private init(databaseURL: URL?, previewSeed: PreviewSeed?) {
 		self.databaseURL = databaseURL
+		self.previewSeed = previewSeed
 		let encoder = JSONEncoder()
 		encoder.dateEncodingStrategy = .iso8601
 		self.encoder = encoder
@@ -39,6 +51,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	static func inMemory() -> OfflineLibraryStore {
 		OfflineLibraryStore(databaseURL: nil)
 	}
+
+	#if DEBUG
+	static func inMemory(
+		seeding articles: [Recommendation],
+		collectionID: String,
+		accountID: String,
+	) -> OfflineLibraryStore {
+		OfflineLibraryStore(
+			databaseURL: nil,
+			previewSeed: PreviewSeed(articles: articles, collectionID: collectionID, accountID: accountID),
+		)
+	}
+	#endif
 
 	deinit {
 		if let database {
@@ -859,6 +884,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		try execute("PRAGMA foreign_keys = ON", database: opened)
 		try execute("PRAGMA busy_timeout = 5000", database: opened)
 		try createSchema(database: opened)
+		if let previewSeed {
+			try saveArticles(previewSeed.articles, collectionID: previewSeed.collectionID, accountID: previewSeed.accountID)
+			self.previewSeed = nil
+		}
 		return opened
 	}
 

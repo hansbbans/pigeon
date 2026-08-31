@@ -12,7 +12,11 @@ enum PreviewData {
 			sessionStore: PreviewSessionStore(session: session),
 			httpClient: PreviewHTTPClient(),
 			readwiseTokenStore: PreviewReadwiseTokenStore(),
-			offlineStore: OfflineLibraryStore.inMemory(),
+			offlineStore: OfflineLibraryStore.inMemory(
+				seeding: articles,
+				collectionID: ReaderSection.forYou.rawValue,
+				accountID: session.storageIdentity,
+			),
 			offlineSynchronizationEnabled: false,
 		)
 		model.setArticles(articles, for: .forYou)
