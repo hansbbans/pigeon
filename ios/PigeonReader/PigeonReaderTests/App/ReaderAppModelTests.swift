@@ -672,9 +672,10 @@ struct ReaderAppModelTests {
 	@Test func articleShortcutsSkipAStoryHiddenByTheReadFilter() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.today)
-		let first = makeArticle(id: "first", isRead: true, receivedAt: 1)
-		let middle = makeArticle(id: "middle", isRead: true, receivedAt: 2)
-		let last = makeArticle(id: "last", isRead: true, receivedAt: 3)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let first = makeArticle(id: "first", isRead: true, receivedDate: day.addingTimeInterval(1))
+		let middle = makeArticle(id: "middle", isRead: true, receivedDate: day.addingTimeInterval(2))
+		let last = makeArticle(id: "last", isRead: true, receivedDate: day.addingTimeInterval(3))
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.setSortOrder(.oldest, for: collection)
@@ -831,8 +832,9 @@ struct ReaderAppModelTests {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today)
-		let olderHigh = makeArticle(id: "older-high", receivedAt: 1, score: 90)
-		let newerLow = makeArticle(id: "newer-low", receivedAt: 2, score: 10)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let olderHigh = makeArticle(id: "older-high", score: 90, receivedDate: day.addingTimeInterval(1))
+		let newerLow = makeArticle(id: "newer-low", score: 10, receivedDate: day.addingTimeInterval(2))
 		let accountID = try #require(model.session?.storageIdentity)
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
@@ -1075,8 +1077,7 @@ struct ReaderAppModelTests {
 	}
 
 	@Test func markingUnreadDoesNotCreateUnreadCacheBeforeThatCollectionLoads() async throws {
-		let serverUnread = makeArticle(id: "from-server")
-		let mock = MockHTTPClient(responseData: try responseData(items: [serverUnread]))
+		let mock = PaginationHTTPClient(streamID: "user/-/state/com.google/reading-list")
 		let model = try makeModel(httpClient: mock)
 		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
 		let article = makeArticle(id: "from-feed", isRead: true, receivedDate: dayStart.addingTimeInterval(60))
@@ -1086,7 +1087,7 @@ struct ReaderAppModelTests {
 		await model.load(section: .unread)
 
 		#expect(model.allArticles(for: .today).first?.isRead == false)
-		#expect(model.allArticles(for: .unread).map(\.id) == ["from-server"])
+		#expect(model.allArticles(for: .unread).map(\.id) == ["newest", "middle"])
 	}
 
 	@Test func markingUnreadFromAnotherListKeepsThatListSelected() async throws {
@@ -1201,8 +1202,7 @@ struct ReaderAppModelTests {
 	}
 
 	@Test func starringDoesNotCreateStarredCacheBeforeThatCollectionLoads() async throws {
-		let serverStarred = makeArticle(id: "from-server", isStarred: true)
-		let mock = MockHTTPClient(responseData: try responseData(items: [serverStarred]))
+		let mock = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
 		let model = try makeModel(httpClient: mock)
 		let article = makeArticle(id: "from-feed")
 		model.setArticles([article], for: .forYou)
@@ -1211,7 +1211,7 @@ struct ReaderAppModelTests {
 		await model.load(section: .starred)
 
 		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
-		#expect(model.allArticles(for: .starred).map(\.id) == ["from-server"])
+		#expect(model.allArticles(for: .starred).map(\.id) == ["newest", "middle"])
 	}
 
 	@Test func unstarringRemovesTheStoryFromStarredAndClosesItIfOpen() async throws {
@@ -1233,7 +1233,8 @@ struct ReaderAppModelTests {
 
 	@Test func unstarringFromAnotherListDropsTheLoadedStarredRow() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
-		let article = makeArticle(id: "shared", isStarred: true)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", isStarred: true, receivedDate: day.addingTimeInterval(60))
 		model.setArticles([article], for: .starred)
 		model.setArticles([article], for: .today)
 		model.select(section: .today)
@@ -1250,7 +1251,8 @@ struct ReaderAppModelTests {
 	@Test func notInterestedFromTodayDropsTheStoryFromALoadedForYouCache() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
-		let article = makeArticle(id: "shared")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", receivedDate: day.addingTimeInterval(60))
 		model.setNavigation(
 			ReaderNavigationState(items: [
 				.smart(.forYou, unreadCount: 1),
@@ -1354,7 +1356,8 @@ struct ReaderAppModelTests {
 	@Test func failedNotInterestedFromTodayKeepsForYouRemovalQueued() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
-		let article = makeArticle(id: "shared")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", receivedDate: day.addingTimeInterval(60))
 		model.setArticles([article], for: .forYou)
 		model.setArticles([article], for: .today)
 		model.select(section: .today)
@@ -2923,8 +2926,9 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
 		let accountID = try #require(model.session?.storageIdentity)
-		let hiddenUnread = makeArticle(id: "hidden-unread", title: "Newsletter unread")
-		let visibleRead = makeArticle(id: "visible-read", isRead: true, title: "Newsletter read")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(1), title: "Newsletter unread")
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedDate: day.addingTimeInterval(2), title: "Newsletter read")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -2947,10 +2951,11 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 3)
 		let accountID = try #require(model.session?.storageIdentity)
-		let visibleOne = makeArticle(id: "visible-one", receivedAt: 400, title: "Newsletter morning")
-		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 300, title: "Weather brief")
-		let visibleTwo = makeArticle(id: "visible-two", receivedAt: 200, title: "Newsletter evening")
-		let alreadyReadHit = makeArticle(id: "already-read-hit", isRead: true, receivedAt: 100, title: "Newsletter recap")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleOne = makeArticle(id: "visible-one", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let visibleTwo = makeArticle(id: "visible-two", receivedDate: day.addingTimeInterval(200), title: "Newsletter evening")
+		let alreadyReadHit = makeArticle(id: "already-read-hit", isRead: true, receivedDate: day.addingTimeInterval(100), title: "Newsletter recap")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -2981,8 +2986,9 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
 		let accountID = try #require(model.session?.storageIdentity)
-		let readHit = makeArticle(id: "read-hit", isRead: true, receivedAt: 200, title: "Newsletter morning")
-		let hiddenUnread = makeArticle(id: "hidden-unread", receivedAt: 100, title: "Weather brief")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedDate: day.addingTimeInterval(200), title: "Newsletter morning")
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(100), title: "Weather brief")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -3002,9 +3008,10 @@ struct ReaderAppModelTests {
 		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
 		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
 		let accountID = try #require(model.session?.storageIdentity)
-		let todayUnrelated = makeArticle(id: "today-unrelated", receivedAt: 400, title: "Weather brief")
-		let libraryHit = makeArticle(id: "library-hit", receivedAt: 300, title: "Newsletter extra")
-		let todayHit = makeArticle(id: "today-hit", receivedAt: 200, title: "Newsletter noon")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let todayUnrelated = makeArticle(id: "today-unrelated", receivedDate: day.addingTimeInterval(400), title: "Weather brief")
+		let libraryHit = makeArticle(id: "library-hit", receivedDate: day.addingTimeInterval(300), title: "Newsletter extra")
+		let todayHit = makeArticle(id: "today-hit", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
 
 		model.setNavigation(ReaderNavigationState(items: [today, unread]))
 		model.select(item: today)
@@ -3033,8 +3040,9 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
 		let accountID = try #require(model.session?.storageIdentity)
-		let visibleHit = makeArticle(id: "visible-hit", receivedAt: 200, title: "Newsletter morning")
-		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 100, title: "Weather brief")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleHit = makeArticle(id: "visible-hit", receivedDate: day.addingTimeInterval(200), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(100), title: "Weather brief")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -3716,8 +3724,9 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
 		let accountID = try #require(model.session?.storageIdentity)
-		let hiddenUnread = makeArticle(id: "hidden-unread", receivedAt: 300, title: "Newsletter unread")
-		let visibleReadBoundary = makeArticle(id: "read-boundary", isRead: true, receivedAt: 200, title: "Newsletter read")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(300), title: "Newsletter unread")
+		let visibleReadBoundary = makeArticle(id: "read-boundary", isRead: true, receivedDate: day.addingTimeInterval(200), title: "Newsletter read")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -3740,10 +3749,11 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
 		let accountID = try #require(model.session?.storageIdentity)
-		let visibleAbove = makeArticle(id: "visible-above", receivedAt: 400, title: "Newsletter morning")
-		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 300, title: "Weather brief")
-		let boundary = makeArticle(id: "boundary", receivedAt: 200, title: "Newsletter noon")
-		let visibleBelow = makeArticle(id: "visible-below", receivedAt: 100, title: "Newsletter evening")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleAbove = makeArticle(id: "visible-above", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedDate: day.addingTimeInterval(100), title: "Newsletter evening")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -3777,10 +3787,11 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: mock, offlineStore: store)
 		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
 		let accountID = try #require(model.session?.storageIdentity)
-		let visibleAbove = makeArticle(id: "visible-above", receivedAt: 400, title: "Newsletter morning")
-		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedAt: 300, title: "Weather brief")
-		let boundary = makeArticle(id: "boundary", receivedAt: 200, title: "Newsletter noon")
-		let visibleBelow = makeArticle(id: "visible-below", receivedAt: 100, title: "Newsletter evening")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleAbove = makeArticle(id: "visible-above", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedDate: day.addingTimeInterval(100), title: "Newsletter evening")
 
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
@@ -3813,9 +3824,10 @@ struct ReaderAppModelTests {
 		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
 		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
 		let accountID = try #require(model.session?.storageIdentity)
-		let todayUnrelated = makeArticle(id: "today-unrelated", receivedAt: 400, title: "Weather brief")
-		let libraryAbove = makeArticle(id: "library-above", receivedAt: 300, title: "Newsletter extra")
-		let todayBoundary = makeArticle(id: "today-boundary", receivedAt: 200, title: "Newsletter noon")
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let todayUnrelated = makeArticle(id: "today-unrelated", receivedDate: day.addingTimeInterval(400), title: "Weather brief")
+		let libraryAbove = makeArticle(id: "library-above", receivedDate: day.addingTimeInterval(300), title: "Newsletter extra")
+		let todayBoundary = makeArticle(id: "today-boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
 
 		model.setNavigation(ReaderNavigationState(items: [today, unread]))
 		model.select(item: today)
