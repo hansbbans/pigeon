@@ -435,8 +435,8 @@ struct OfflineLibraryStoreTests {
 		let store = OfflineLibraryStore.inMemory()
 		let omitted = OfflineMutation(
 			id: "mutation-omitted",
-			kind: .setRead,
-			itemIds: (0..<201).map { "reader-omitted-\($0)" },
+			kind: .setReadBatch,
+			itemIds: (0..<200).map { "reader-omitted-\($0)" },
 			value: true,
 			scope: .all,
 		)
