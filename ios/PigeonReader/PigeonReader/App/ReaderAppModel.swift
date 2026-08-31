@@ -1765,6 +1765,9 @@ final class ReaderAppModel {
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(cachedArticles)
 		}
+		if activeSearchCollectionID == collectionID {
+			searchResults = newSortOrder.sorted(searchResults)
+		}
 		scheduleRestorationSave()
 	}
 

@@ -577,6 +577,68 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == nextUnread.id)
 	}
 
+	@Test func changingSortReordersActiveSearchResultsAndArticleShortcuts() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let olderHigh = makeArticle(id: "older-high", receivedAt: 1, score: 90)
+		let newerLow = makeArticle(id: "newer-low", receivedAt: 2, score: 10)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([newerLow, olderHigh], for: collection)
+		try await store.saveArticles([olderHigh, newerLow], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [olderHigh.id, newerLow.id])
+		#expect(model.articles(for: collection).map(\.id) == [olderHigh.id, newerLow.id])
+
+		model.setSortOrder(.newest, for: collection)
+
+		#expect(model.searchResults.map(\.id) == [newerLow.id, olderHigh.id])
+		#expect(model.articles(for: collection).map(\.id) == [newerLow.id, olderHigh.id])
+
+		model.select(article: newerLow)
+		#expect(model.navigateArticle(.next)?.id == olderHigh.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.navigateArticle(.previous)?.id == newerLow.id)
+
+		model.setSortOrder(.score, for: collection)
+		#expect(model.searchResults.map(\.id) == [olderHigh.id, newerLow.id])
+		model.select(article: olderHigh)
+		#expect(model.navigateArticle(.next)?.id == newerLow.id)
+	}
+
+	@Test func changingSortOnAnotherCollectionLeavesSearchOrderAlone() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let older = makeArticle(id: "older", receivedAt: 1)
+		let newer = makeArticle(id: "newer", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setSortOrder(.oldest, for: otherCollection)
+		model.setArticles([older, newer], for: collection)
+		model.setArticles([newer], for: otherCollection)
+		try await store.saveArticles([older, newer], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [older.id, newer.id])
+
+		model.setSortOrder(.newest, for: otherCollection)
+
+		#expect(model.searchResults.map(\.id) == [older.id, newer.id])
+		#expect(model.sortOrder(for: collection) == .oldest)
+	}
+
 	@Test func markingReadDuringSearchUpdatesTheVisibleSearchRow() async throws {
 		let controlled = ControlledHTTPClient()
 		let store = OfflineLibraryStore.inMemory()
