@@ -123,6 +123,7 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild test \
+            -jobs 2 \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination "${{ steps.simulator.outputs.destination }}" \
@@ -355,6 +356,7 @@ jobs:
 
           archive_arguments=(
             archive
+            -jobs 2
             -project "$PROJECT"
             -scheme "$SCHEME"
             -configuration Release
