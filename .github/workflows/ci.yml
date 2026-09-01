@@ -66,6 +66,7 @@ jobs:
           set -o pipefail
           test_log="$RUNNER_TEMP/pigeon-xcode-test.log"
           xcodebuild test \
+            -jobs 2 \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination "${{ steps.simulator.outputs.destination }}" \
@@ -90,6 +91,7 @@ jobs:
           set -o pipefail
           build_log="$RUNNER_TEMP/pigeon-xcode-release.log"
           xcodebuild clean build \
+            -jobs 2 \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -configuration Release \
