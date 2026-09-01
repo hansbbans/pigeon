@@ -125,12 +125,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let addFeed = app.descendants(matching: .any)["add-feed"]
-		if addFeed.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(addFeed.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: addFeed))
 		addFeed.tap()
 
 		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 5))
@@ -151,12 +146,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let feed = app.staticTexts["Stratechery"]
-		if feed.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: feed))
 		feed.press(forDuration: 1.2)
 		let editFeed = app.buttons["Edit Feed"]
 		XCTAssertTrue(editFeed.waitForExistence(timeout: 5))
@@ -188,12 +178,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let folder = app.staticTexts["Design"]
-		if folder.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(folder.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: folder))
 		folder.press(forDuration: 1.2)
 
 		let renameFolder = app.buttons["Rename Folder"]
@@ -234,12 +219,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let folder = app.staticTexts["Design"]
-		if folder.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(folder.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: folder))
 		folder.press(forDuration: 1.2)
 		let renameFolder = app.buttons["Rename Folder"]
 		XCTAssertTrue(renameFolder.waitForExistence(timeout: 5))
@@ -267,12 +247,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let feed = app.staticTexts["Stratechery"]
-		if feed.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: feed))
 		feed.press(forDuration: 1.2)
 
 		let renameFeed = app.buttons["Rename Feed"]
@@ -475,12 +450,26 @@ final class PigeonReaderUITests: XCTestCase {
 			"-reader-reset-reader-state",
 		]
 		app.launch()
-		let back = app.buttons.firstMatch
-		XCTAssertTrue(back.waitForExistence(timeout: 5))
-		back.tap()
 		let settings = app.descendants(matching: .any)["Settings"]
-		XCTAssertTrue(settings.waitForExistence(timeout: 5))
+		XCTAssertTrue(revealSidebar(containing: settings))
 		settings.tap()
+	}
+
+	private func revealSidebar(containing target: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+		let deadline = Date().addingTimeInterval(timeout)
+		let backButton = app.buttons["BackButton"]
+
+		while Date() < deadline {
+			if target.exists {
+				return true
+			}
+			if backButton.waitForExistence(timeout: 1), backButton.isHittable {
+				backButton.tap()
+			}
+			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+		}
+
+		return target.exists
 	}
 
 	private func tapNormalLink() throws {
