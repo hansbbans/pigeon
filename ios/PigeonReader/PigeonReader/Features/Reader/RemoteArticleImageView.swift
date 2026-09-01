@@ -4,13 +4,27 @@ import UIKit
 
 struct RemoteArticleImageView: View {
 	let url: URL
+	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let imageProxySession: PigeonSession?
 
 	@StateObject private var loader: RemoteArticleImageLoader
 	@State private var availableWidth: CGFloat = 1
 
-	init(url: URL) {
+	init(
+		url: URL,
+		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
+		imageProxySession: PigeonSession? = nil,
+	) {
 		self.url = url
-		_loader = StateObject(wrappedValue: RemoteArticleImageLoader(url: url))
+		self.remoteImagePolicy = remoteImagePolicy
+		self.imageProxySession = imageProxySession
+		_loader = StateObject(
+			wrappedValue: RemoteArticleImageLoader(
+				url: url,
+				policy: remoteImagePolicy,
+				session: imageProxySession,
+			),
+		)
 	}
 
 	var body: some View {
@@ -79,11 +93,15 @@ private final class RemoteArticleImageLoader: ObservableObject {
 	}
 
 	let url: URL
+	private let policy: ReaderRemoteImagePolicy
+	private let session: PigeonSession?
 	@Published private(set) var state = State.loading
 	private var loadTask: Task<Void, Never>?
 
-	init(url: URL) {
+	init(url: URL, policy: ReaderRemoteImagePolicy, session: PigeonSession?) {
 		self.url = url
+		self.policy = policy
+		self.session = session
 	}
 
 	func loadIfNeeded() {
@@ -96,9 +114,17 @@ private final class RemoteArticleImageLoader: ObservableObject {
 			defer { loadTask = nil }
 
 			do {
-				let (data, response) = try await URLSession.shared.data(from: url)
+				guard let request = ArticleLeadImageRequest.loadRequest(
+					for: url,
+					policy: policy,
+					session: session,
+				) else {
+					throw URLError(.badURL)
+				}
+				let (data, response) = try await URLSession.shared.data(for: request)
 				try Task.checkCancellation()
-				guard let response = response as? HTTPURLResponse,
+				guard data.count <= ArticleLeadImageRequest.maximumResponseBytes,
+					let response = response as? HTTPURLResponse,
 					(200..<300).contains(response.statusCode),
 					let image = UIImage(data: data) else {
 					throw URLError(.cannotDecodeContentData)

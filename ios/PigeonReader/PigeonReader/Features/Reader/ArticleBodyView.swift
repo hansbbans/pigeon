@@ -1,5 +1,10 @@
 import SwiftUI
 
+nonisolated struct ArticleBodyLayoutIdentity: Hashable, Sendable {
+	let articleID: String
+	let content: String
+}
+
 struct ArticleBodyView: View {
 	let content: String
 	let fallbackText: String
@@ -26,7 +31,7 @@ struct ArticleBodyView: View {
 	@State private var isShowingLinkedImageDialog = false
 	@State private var deferredLinkDestination: OutboundDestination?
 	@State private var failedImageURLs: Set<String> = []
-	@State private var webViewHeight: CGFloat = 1
+	@State private var webViewHeight: CGFloat = 0
 	@State private var columnWidth: CGFloat = 0
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -67,8 +72,13 @@ struct ArticleBodyView: View {
 		)
 
 		renderedContent(textScale: renderedTextScale)
+		.preference(key: ArticleBodyLayoutKey.self, value: isBodyLaidOut)
 		.sheet(item: $imageSelection) { selection in
-			ZoomableImageView(url: selection.url)
+			ZoomableImageView(
+				url: selection.url,
+				remoteImagePolicy: remoteImagePolicy,
+				imageProxySession: imageProxySession,
+			)
 		}
 		.confirmationDialog(
 			"Open article link",
@@ -124,6 +134,10 @@ struct ArticleBodyView: View {
 		}
 	}
 
+	private var isBodyLaidOut: Bool {
+		sanitizedContent.isEmpty || webViewHeight > 0
+	}
+
 	private func renderedContent(textScale: Double) -> some View {
 		VStack(alignment: .leading, spacing: 16) {
 			if remoteImagePolicy == .blocked, bodyImageURLs.isEmpty == false {
@@ -133,8 +147,19 @@ struct ArticleBodyView: View {
 				Button {
 					imageSelection = ArticleImageSelection(url: fallbackImageURL)
 				} label: {
-					RemoteArticleImageView(url: fallbackImageURL)
-						.clipShape(.rect(cornerRadius: 10))
+					RemoteArticleImageView(
+						url: fallbackImageURL,
+						remoteImagePolicy: remoteImagePolicy,
+						imageProxySession: imageProxySession,
+					)
+					.id(
+						ArticleLeadImageRequest.loaderIdentity(
+							for: fallbackImageURL,
+							policy: remoteImagePolicy,
+							session: imageProxySession,
+						),
+					)
+					.clipShape(.rect(cornerRadius: 10))
 				}
 				.buttonStyle(.plain)
 				.accessibilityLabel("View lead image")
@@ -143,7 +168,7 @@ struct ArticleBodyView: View {
 
 			if sanitizedContent.isEmpty {
 				Text(fallbackText)
-					.font(ReaderTypography.articleBody)
+					.font(ReaderTypography.articleBody(textScale: self.textScale))
 					.textSelection(.enabled)
 			} else {
 				structuredContent(textScale: textScale)
@@ -189,7 +214,12 @@ struct ArticleBodyView: View {
 	}
 
 	private var fallbackImageURL: URL? {
-		guard remoteImagePolicy == .normal else { return nil }
+		guard ArticleLeadImageRequest.shouldShowFallback(
+			policy: remoteImagePolicy,
+			session: imageProxySession,
+		) else {
+			return nil
+		}
 		return ArticleImagePolicy.fallbackLeadImageURL(
 			bodyImageURLs: bodyImageURLs,
 			leadImageURL: leadImageURL,
@@ -273,5 +303,13 @@ private struct ArticleColumnWidthKey: PreferenceKey {
 
 	static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
 		value = nextValue()
+	}
+}
+
+nonisolated struct ArticleBodyLayoutKey: PreferenceKey {
+	static let defaultValue = false
+
+	static func reduce(value: inout Bool, nextValue: () -> Bool) {
+		value = value || nextValue()
 	}
 }

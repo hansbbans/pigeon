@@ -10,9 +10,11 @@ struct ArticleListView: View {
 		@Bindable var model = model
 		let allArticles = model.allArticles(for: collection)
 		let isSearchActive = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-		let articles = isSearchActive ? model.searchResults : model.articles(for: collection)
+		let articles = isSearchActive ? model.displayedSearchResults : model.articles(for: collection)
 		let isLoading = model.isLoading(collection: collection)
-		let isFilteredEmpty = model.isArticleFilterEmpty(for: collection)
+		let isFilteredEmpty = isSearchActive
+			? model.isSearchFilterEmpty
+			: model.isArticleFilterEmpty(for: collection)
 
 		Group {
 			if isLoading && allArticles.isEmpty {
@@ -23,7 +25,7 @@ struct ArticleListView: View {
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
 				VStack {
-					if isSearchActive {
+					if isSearchActive && isFilteredEmpty == false {
 						ContentUnavailableView.search(text: searchText)
 					} else if isFilteredEmpty {
 						ContentUnavailableView(
@@ -44,16 +46,13 @@ struct ArticleListView: View {
 			} else {
 				List {
 					ForEach(articles) { article in
-						Button {
-							model.select(article: article)
-						} label: {
-							ArticleRowView(
-								article: article,
-								density: model.readerTypography.timelineDensity,
-								remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-							)
-						}
-						.buttonStyle(.plain)
+						ArticleRowView(
+							article: article,
+							density: model.readerTypography.timelineDensity,
+							remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+							imageProxySession: model.session,
+							select: { model.select(article: article) },
+						)
 						.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
 						.swipeActions(edge: .leading, allowsFullSwipe: true) {
 							readButton(for: article)
@@ -146,12 +145,12 @@ struct ArticleListView: View {
 					Button("Mark All as Read", systemImage: "checkmark.circle") {
 						Task { await model.markAllStoriesAsRead(in: collection) }
 					}
-					.disabled(allArticles.contains(where: { $0.isRead == false }) == false)
+					.disabled(model.canMarkAllStoriesAsRead(in: collection) == false)
 					Divider()
 					olderThanButton(days: 1)
 					olderThanButton(days: 7)
 					olderThanButton(days: 30)
-					if model.canUndoBulkRead {
+					if model.canUndoBulkRead(in: collection) {
 						Divider()
 						Button("Undo \(model.bulkReadUndoTitle ?? "Last Read Action")", systemImage: "arrow.uturn.backward") {
 							Task { await model.undoLastBulkRead() }
@@ -284,10 +283,11 @@ struct ArticleListView: View {
 	}
 
 	private func olderThanButton(days: Int) -> some View {
-		Button("Older than \(days) \(days == 1 ? "day" : "days")", systemImage: "calendar.badge.checkmark") {
-			let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
+		let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: .now) ?? .now
+		return Button("Older than \(days) \(days == 1 ? "day" : "days")", systemImage: "calendar.badge.checkmark") {
 			Task { await model.markStoriesOlderThan(cutoff, in: collection) }
 		}
+		.disabled(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
 	}
 }
 

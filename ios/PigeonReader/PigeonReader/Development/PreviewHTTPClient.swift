@@ -1,7 +1,19 @@
 #if DEBUG
 import Foundation
 
+private nonisolated struct PreviewRecommendationsResponse: Encodable, Sendable {
+	let generatedAt: Date
+	let view: String
+	let items: [Recommendation]
+}
+
 struct PreviewHTTPClient: HTTPClient {
+	private let recommendations: [Recommendation]
+
+	init(recommendations: [Recommendation] = []) {
+		self.recommendations = recommendations
+	}
+
 	nonisolated func data(for request: URLRequest) async throws -> (Data, URLResponse) {
 		guard let fallbackURL = URL(string: "https://pigeon.preview") else {
 			throw PigeonError.invalidServerURL
@@ -10,7 +22,14 @@ struct PreviewHTTPClient: HTTPClient {
 		let data: Data
 		switch url.path {
 		case "/api/v1/recommendations":
-			data = Data("{\"generatedAt\":\"2026-08-09T12:00:00Z\",\"view\":\"preview\",\"items\":[]}".utf8)
+			let response = PreviewRecommendationsResponse(
+				generatedAt: Date(timeIntervalSince1970: 1_786_276_800),
+				view: "preview",
+				items: recommendations,
+			)
+			let encoder = JSONEncoder()
+			encoder.dateEncodingStrategy = .iso8601
+			data = try encoder.encode(response)
 		case "/app/status":
 			data = Data(Self.syncHealthFixture.utf8)
 		case "/app/status/retry":

@@ -26,21 +26,22 @@ struct FeedNotificationSettingsView: View {
 		}
 		.navigationTitle("Feed Notifications")
 		.task {
+			ReaderNotificationManager.shared.expandEnabledAliases(using: model.subscriptions)
 			enabledFeedIDs = Set(model.subscriptions.filter {
-				ReaderNotificationManager.shared.isEnabled(feedID: $0.feedKey)
-			}.map(\.feedKey))
+				ReaderNotificationManager.shared.isEnabled(subscription: $0)
+			}.map(\.id))
 		}
 	}
 
 	private func binding(for subscription: FeedSubscription) -> Binding<Bool> {
 		Binding(
-			get: { enabledFeedIDs.contains(subscription.feedKey) },
+			get: { enabledFeedIDs.contains(subscription.id) },
 			set: { enabled in
-				if enabled { enabledFeedIDs.insert(subscription.feedKey) } else { enabledFeedIDs.remove(subscription.feedKey) }
+				if enabled { enabledFeedIDs.insert(subscription.id) } else { enabledFeedIDs.remove(subscription.id) }
 				Task {
-					let saved = await ReaderNotificationManager.shared.setEnabled(enabled, feedID: subscription.feedKey)
+					let saved = await ReaderNotificationManager.shared.setEnabled(enabled, subscription: subscription)
 					if saved == false {
-						enabledFeedIDs.remove(subscription.feedKey)
+						enabledFeedIDs.remove(subscription.id)
 						deniedMessage = "Notifications are disabled in Settings. Pigeon will continue refreshing quietly."
 					}
 				}

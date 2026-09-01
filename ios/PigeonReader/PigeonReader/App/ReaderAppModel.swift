@@ -8,6 +8,25 @@ struct PendingFeedRequest: Identifiable, Equatable {
 	let url: URL
 }
 
+struct WidgetStarredCountResolver {
+	static func resolve(
+		cachedCount: Int?,
+		knownStarredCount: Int,
+		unreadBadge: Int,
+		previousTotal: Int?,
+		hasMore: Bool,
+	) -> Int {
+		let knownCount = max(knownStarredCount, unreadBadge)
+		if hasMore {
+			return max(previousTotal ?? 0, knownCount)
+		}
+		guard let cachedCount, cachedCount > 0 else {
+			return knownCount
+		}
+		return max(cachedCount, knownStarredCount)
+	}
+}
+
 @MainActor
 @Observable
 final class ReaderAppModel {
@@ -24,6 +43,7 @@ final class ReaderAppModel {
 	private struct BulkReadUndo: Sendable {
 		let articles: [Recommendation]
 		let title: String
+		let collectionID: String
 	}
 
 	private struct CollectionFreshness: Sendable {
@@ -55,6 +75,7 @@ final class ReaderAppModel {
 	}
 	var isConnecting = false
 	var errorMessage: String?
+	var settingsErrorMessage: String?
 	var isShowingSettings = false
 	private(set) var subscriptions: [FeedSubscription] = []
 	var isLoadingLibrary = false
@@ -90,6 +111,8 @@ final class ReaderAppModel {
 	private var sortOrders: [String: ArticleSortOrder] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
+	private var detachedSelectedArticle: Recommendation?
+	private var detachedSelectedArticleOrdering: [Recommendation] = []
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
 	private var streamContinuations: [String: String] = [:]
@@ -127,6 +150,14 @@ final class ReaderAppModel {
 	private var bulkReadUndo: BulkReadUndo?
 	private var scrollReadTriggered: Set<String> = []
 	private(set) var searchResults: [Recommendation] = []
+	var displayedSearchResults: [Recommendation] {
+		articleFilter.filtering(searchResults)
+	}
+	var isSearchFilterEmpty: Bool {
+		articleFilter != .all
+			&& searchResults.isEmpty == false
+			&& displayedSearchResults.isEmpty
+	}
 	private(set) var isSearchingArticles = false
 	private(set) var bulkReadUndoTitle: String?
 	private(set) var offlineStorageStats = OfflineStorageStats.empty
@@ -318,6 +349,10 @@ final class ReaderAppModel {
 		guard let selectedArticleID else {
 			return nil
 		}
+		if let detachedSelectedArticle,
+			detachedSelectedArticle.id == selectedArticleID || detachedSelectedArticle.readerId == selectedArticleID {
+			return detachedSelectedArticle
+		}
 		return article(withId: selectedArticleID)
 	}
 
@@ -338,6 +373,10 @@ final class ReaderAppModel {
 	}
 
 	var canUndoBulkRead: Bool { bulkReadUndo != nil }
+
+	func canUndoBulkRead(in collection: ReaderNavigationItem) -> Bool {
+		bulkReadUndo?.collectionID == collection.id
+	}
 
 	var isLoading: Bool {
 		loadingCollections.contains(selectedNavigationID)
@@ -406,6 +445,7 @@ final class ReaderAppModel {
 			sortOrders = [:]
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
+			clearDetachedSelectedArticle()
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 			subscriptions = []
@@ -448,6 +488,7 @@ final class ReaderAppModel {
 			lastBackgroundRefreshAt = nil
 			writeWidgetSnapshot()
 			errorMessage = nil
+			settingsErrorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
 		}
@@ -469,10 +510,11 @@ final class ReaderAppModel {
 		defer { isLoadingPersonalization = false }
 		do {
 			personalization = try await apiClient.personalization()
+			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -482,7 +524,7 @@ final class ReaderAppModel {
 			try await apiClient.deletePersonalizationHistory(id: id)
 			await loadPersonalization()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -493,7 +535,7 @@ final class ReaderAppModel {
 			await loadPersonalization()
 			await load(section: .forYou, force: true)
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -532,19 +574,24 @@ final class ReaderAppModel {
 			knownIDs: knownIDs,
 			current: articleCache.values.flatMap { $0 },
 		)
+		ReaderNotificationManager.shared.expandEnabledAliases(using: subscriptions)
 		for article in newlyArrived.prefix(20) {
-			await ReaderNotificationManager.shared.postNewArticle(article)
+			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: subscriptions)
 		}
 		lastBackgroundRefreshAt = .now
 		writeWidgetSnapshot()
 		return true
 	}
 
-	func handleDeepLink(_ url: URL) async {
+	func handleDeepLink(
+		_ url: URL,
+		pendingFeedDefaults: UserDefaults = PigeonSharedData.defaults,
+	) async {
 		guard let link = PigeonDeepLink(url: url) else { return }
 		switch link {
 		case .add(let url):
-			pendingFeedRequest = PendingFeedRequest(url: url)
+			PendingFeedStore.remove(matching: url, defaults: pendingFeedDefaults)
+			presentPendingFeedRequest(url)
 		case .feed(let id):
 			if navigation.items.contains(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) == false {
 				await prepareOfflineLibrary()
@@ -562,20 +609,30 @@ final class ReaderAppModel {
 				select(item: item)
 				await load(collection: item)
 			}
-		case .article(let id):
+		case .article(let id, let requestedCollection):
 			if article(withId: id) == nil { await prepareOfflineLibrary() }
 			guard let article = article(withId: id) else { return }
-			if let collectionID = articleCache.first(where: { $0.value.contains(where: { $0.id == article.id || $0.readerId == article.readerId }) })?.key {
-				select(collectionID: collectionID)
+			if let item = collectionItem(for: article, preferredID: requestedCollection) {
+				select(item: item)
+				if articleCache[item.id] != nil {
+					_ = preserveOpenArticle(article, in: item.id)
+				} else {
+					await load(collection: item)
+				}
 			}
 			select(article: article)
 		}
 	}
 
-	func consumePendingFeedRequest() {
-		if let url = PendingFeedStore.consume() {
-			pendingFeedRequest = PendingFeedRequest(url: url)
+	func consumePendingFeedRequest(defaults: UserDefaults = PigeonSharedData.defaults) {
+		if let url = PendingFeedStore.consume(defaults: defaults) {
+			presentPendingFeedRequest(url)
 		}
+	}
+
+	private func presentPendingFeedRequest(_ url: URL) {
+		guard pendingFeedRequest?.url != url else { return }
+		pendingFeedRequest = PendingFeedRequest(url: url)
 	}
 
 	func handleNotificationAction(_ action: ReaderNotificationAction) async {
@@ -587,7 +644,7 @@ final class ReaderAppModel {
 		guard let article = article(withId: articleID) else { return }
 		switch action {
 		case .open:
-			await handleDeepLink(PigeonDeepLink.article(articleID).url)
+			await handleDeepLink(PigeonDeepLink.article(articleID, collection: nil).url)
 		case .markRead:
 			await setRead(article, read: true)
 		case .star:
@@ -596,31 +653,79 @@ final class ReaderAppModel {
 		writeWidgetSnapshot()
 	}
 
-	func writeWidgetSnapshot() {
-		let allArticles = Dictionary(
-			articleCache.values.flatMap { $0 }.map { ($0.id, $0) },
-			uniquingKeysWith: { first, _ in first },
-		).values
-		let recent = allArticles.sorted { $0.receivedAt > $1.receivedAt }.prefix(5).map(Self.widgetArticle)
-		let forYou = (articleCache[ReaderSection.forYou.rawValue] ?? []).prefix(5).map(Self.widgetArticle)
-		let snapshot = PigeonWidgetSnapshot(
+	@discardableResult
+	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
+		let snapshot = makeWidgetSnapshot()
+		snapshot.save()
+		WidgetCenter.shared.reloadAllTimelines()
+		return snapshot
+	}
+
+	func makeWidgetSnapshot() -> PigeonWidgetSnapshot {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		let allArticles = deduplicatedArticles(
+			articleCache.values
+				.flatMap { $0 }
+				.sorted { left, right in
+					if left.receivedAt != right.receivedAt {
+						return left.receivedAt > right.receivedAt
+					}
+					if left.id != right.id {
+						return left.id < right.id
+					}
+					return left.readerId < right.readerId
+				}
+		)
+		let todayID = ReaderSection.today.rawValue
+		let recent = allArticles.prefix(5).map { article in
+			let collection = articleCache[todayID]?.contains(where: { articlesMatch($0, article) }) == true
+				? todayID
+				: nil
+			return Self.widgetArticle(article, collection: collection)
+		}
+		// For You's default list is Unread; keep the home-screen widget on the same stories.
+		let forYou = deduplicatedArticles(
+			(articleCache[ReaderSection.forYou.rawValue] ?? []).filter { $0.isRead == false }
+		)
+			.prefix(5)
+			.map { Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue) }
+		return PigeonWidgetSnapshot(
 			generatedAt: .now,
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
-			starredCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? allArticles.count(where: \.isStarred),
+			starredCount: widgetStarredCount(from: allArticles, previousTotal: previousSnapshot.starredCount),
 			recent: Array(recent),
 			forYou: Array(forYou),
 		)
-		snapshot.save()
-		WidgetCenter.shared.reloadAllTimelines()
 	}
 
-	private static func widgetArticle(_ article: Recommendation) -> PigeonWidgetArticle {
+	/// The counts widget labels this as a starred total, not an unread badge.
+	/// Prefer a complete Starred page (including read rows). A cached page with
+	/// a continuation is only a lower bound, so retain the prior widget total
+	/// until pagination finishes rather than treating that page as the total.
+	private func widgetStarredCount(
+		from articles: some Collection<Recommendation>,
+		previousTotal: Int?,
+	) -> Int {
+		let cachedStarred = articles.count(where: \.isStarred)
+		let unreadStarredBadge = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
+		let starredID = ReaderSection.starred.rawValue
+		let cachedStarredCount = articleCache[starredID].map { deduplicatedArticles($0).count }
+		return WidgetStarredCountResolver.resolve(
+			cachedCount: cachedStarredCount,
+			knownStarredCount: cachedStarred,
+			unreadBadge: unreadStarredBadge,
+			previousTotal: previousTotal,
+			hasMore: streamContinuations[starredID] != nil,
+		)
+	}
+
+	private static func widgetArticle(_ article: Recommendation, collection: String? = nil) -> PigeonWidgetArticle {
 		PigeonWidgetArticle(
 			id: article.id,
 			title: article.title,
 			source: article.source,
 			receivedAt: article.receivedAt,
-			deepLink: PigeonDeepLink.article(article.id).url,
+			deepLink: PigeonDeepLink.article(article.id, collection: collection).url,
 		)
 	}
 
@@ -629,7 +734,7 @@ final class ReaderAppModel {
 		do {
 			return try await apiClient.exportPersonalization()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return nil
 		}
 	}
@@ -648,18 +753,41 @@ final class ReaderAppModel {
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
-		if let rawValue = restoredReaderModes[feedID], let mode = ReaderMode(rawValue: rawValue) {
-			return mode
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			if let rawValue = restoredReaderModes[alias], let mode = ReaderMode(rawValue: rawValue) {
+				return mode
+			}
 		}
-		guard let session else { return .feedContent }
-		return readerModeStore.mode(for: feedID, session: session)
+		if let session, let stored = readerModeStore.storedMode(for: aliases, session: session) {
+			return stored
+		}
+		return readerModeStore.storedMode(for: aliases) ?? .feedContent
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {
 		guard let session else { return }
-		restoredReaderModes[feedID] = mode.rawValue
-		readerModeStore.setMode(mode, for: feedID, session: session)
+		let aliases = readerModeAliases(for: feedID)
+		for alias in aliases {
+			restoredReaderModes[alias] = mode.rawValue
+		}
+		readerModeStore.setMode(mode, for: aliases, session: session)
 		scheduleRestorationSave()
+	}
+
+	func setReaderMode(_ mode: ReaderMode, for article: Recommendation) {
+		guard ReaderMode.shouldPersistSelection(hasOriginalURL: article.safeOriginalURL != nil) else {
+			return
+		}
+		setReaderMode(mode, for: article.feedKey)
+	}
+
+	private func readerModeAliases(for feedID: String) -> [String] {
+		ReaderModeIdentity.aliases(
+			for: feedID,
+			navigationItems: navigation.items,
+			subscriptions: subscriptions,
+		)
 	}
 
 	func articleScrollOffset(for articleID: String) -> Double {
@@ -714,7 +842,9 @@ final class ReaderAppModel {
 					preparationID: preparationID,
 					generation: preparationGeneration,
 				) else { return }
-				applyCachedSnapshot(snapshot)
+				if applyCachedSnapshot(snapshot) {
+					await persistCollections([ReaderSection.today.rawValue])
+				}
 				preparationGeneration = libraryGeneration
 				preparedOfflineAccountID = accountID
 			} catch {
@@ -859,11 +989,13 @@ final class ReaderAppModel {
 		guard let accountID = session?.storageIdentity else { return 0 }
 		do {
 			let count = try await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 200)
-			applyCachedSnapshot(try await offlineStore.loadSnapshot(accountID: accountID))
+			if applyCachedSnapshot(try await offlineStore.loadSnapshot(accountID: accountID)) {
+				await persistCollections([ReaderSection.today.rawValue])
+			}
 			await refreshOfflineStorageStats()
 			return count
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return 0
 		}
 	}
@@ -874,12 +1006,14 @@ final class ReaderAppModel {
 			try await offlineStore.clearCachedArticles(accountID: accountID)
 			articleCache = [:]
 			selectedArticleIDs = [:]
+			clearDetachedSelectedArticle()
 			selectedArticleID = nil
 			preferredCompactColumn = .content
+			writeWidgetSnapshot()
 			await refreshOfflineStorageStats()
 			scheduleRestorationSave()
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -966,7 +1100,9 @@ final class ReaderAppModel {
 	private func select(collectionID: String) {
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
+			clearDetachedSelectedArticle()
 			temporarilyUnavailableSelectedCollection = nil
+			errorMessage = nil
 		}
 		selectedNavigationID = collectionID
 		if isReselectingOpenCollection == false {
@@ -1020,6 +1156,7 @@ final class ReaderAppModel {
 		guard self.article(withId: article.id) != nil || searchResults.contains(where: { articlesMatch($0, article) }) else {
 			return
 		}
+		clearDetachedSelectedArticle()
 		selectedArticleID = article.id
 		selectedArticleIDs[selectedNavigationID] = article.id
 		preferredCompactColumn = .detail
@@ -1039,6 +1176,7 @@ final class ReaderAppModel {
 		force: Bool = false,
 		now: Date = .now,
 		dayBounds: ReaderLocalDayBounds? = nil,
+		reportError: Bool = true,
 	) async {
 		guard let apiClient, let context = operationContext(for: apiClient) else {
 			return
@@ -1093,13 +1231,16 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeNavigationLoadID == loadID else {
 				return
 			}
-			if session != nil {
+			if session != nil, reportError {
 				errorMessage = error.localizedDescription
 			}
 		}
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
 		if offlineSynchronizationEnabled,
 			session != nil,
 			collection.id == selectedCollection.id {
@@ -1112,23 +1253,28 @@ final class ReaderAppModel {
 		}
 	}
 
-	func load(section: ReaderSection, force: Bool = false) async {
-		await load(collection: .smart(section), force: force)
+	func load(section: ReaderSection, force: Bool = false, now: Date = .now) async {
+		await load(collection: .smart(section), force: force, now: now)
 	}
 
-	func load(collection: ReaderNavigationItem, force: Bool = false) async {
+	func load(collection: ReaderNavigationItem, force: Bool = false, now: Date = .now) async {
 		if force == false,
 			offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID != session.storageIdentity {
 			await prepareOfflineLibrary()
+			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
+			if didPruneToday {
+				await persistCollections([collection.id])
+			}
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				articleCache[collection.id] == nil
 					|| collection.smartSection?.usesRecommendationEndpoint == true
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
-					|| shouldResolveCachedPagination(for: collection) {
-				await load(collection: collection, force: true)
+					|| shouldResolveCachedPagination(for: collection)
+					|| didPruneToday {
+				await load(collection: collection, force: true, now: now)
 			}
 			return
 		}
@@ -1136,12 +1282,17 @@ final class ReaderAppModel {
 			return
 		}
 		if force == false, articleCache[collection.id] != nil {
+			if pruneTodayIfNeeded(collection, now: now) {
+				await persistCollections([collection.id])
+				await load(collection: collection, force: true, now: now)
+				return
+			}
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				collection.smartSection?.usesRecommendationEndpoint == true
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
 					|| shouldResolveCachedPagination(for: collection) {
-				await load(collection: collection, force: true)
+				await load(collection: collection, force: true, now: now)
 			}
 			return
 		}
@@ -1171,7 +1322,7 @@ final class ReaderAppModel {
 				)
 				dayBounds = nil
 			} else if collection.smartSection == .today {
-				let todayBounds = ReaderLocalDayBounds.localDay(containing: .now)
+				let todayBounds = ReaderLocalDayBounds.localDay(containing: now)
 				page = try await apiClient.recommendationsPage(
 					from: "user/-/state/com.google/reading-list",
 					dayBounds: todayBounds,
@@ -1181,6 +1332,7 @@ final class ReaderAppModel {
 			} else {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
+					excludeTag: collection.smartSection?.streamExcludeTag,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
 				dayBounds = nil
@@ -1271,15 +1423,16 @@ final class ReaderAppModel {
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
-			} else if collection.smartSection == nil {
+			} else if collection.smartSection?.usesRecommendationEndpoint == true {
+				streamContinuations[collection.id] = nil
+				return
+			} else {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
+					excludeTag: collection.smartSection?.streamExcludeTag,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
 				)
-			} else {
-				streamContinuations[collection.id] = nil
-				return
 			}
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
@@ -1339,7 +1492,7 @@ final class ReaderAppModel {
 		}
 	}
 
-	func loadLibrary(force: Bool = false) async {
+	func loadLibrary(force: Bool = false, reportError: Bool = true) async {
 		guard let apiClient, let context = operationContext(for: apiClient) else {
 			return
 		}
@@ -1376,7 +1529,9 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLibraryLoadID == loadID else {
 				return
 			}
-			errorMessage = error.localizedDescription
+			if reportError {
+				errorMessage = error.localizedDescription
+			}
 		}
 	}
 
@@ -1426,7 +1581,7 @@ final class ReaderAppModel {
 		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard let url = URL(string: trimmedURL), let scheme = url.scheme?.lowercased(),
 			scheme == "http" || scheme == "https", url.host != nil else {
-			errorMessage = "Enter a complete HTTP or HTTPS feed URL."
+			presentSettingsError("Enter a complete HTTP or HTTPS feed URL.")
 			return false
 		}
 
@@ -1435,16 +1590,17 @@ final class ReaderAppModel {
 			if let folder = normalizedFolderName(folderName) {
 				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
 			}
-			await loadLibrary(force: true)
+			settingsErrorMessage = nil
+			await loadLibrary(force: true, reportError: false)
 			if hasLoadedNavigation {
-				await loadNavigation(force: true)
+				await loadNavigation(force: true, reportError: false)
 			}
 			return true
 		} catch let error where isCancellation(error) {
 			return false
 		} catch {
-			errorMessage = error.localizedDescription
-			await loadLibrary(force: true)
+			presentSettingsError(error)
+			await loadLibrary(force: true, reportError: false)
 			return false
 		}
 	}
@@ -1463,10 +1619,11 @@ final class ReaderAppModel {
 		defer { isLoadingStaleFeeds = false }
 		do {
 			staleFeedSnapshot = try await apiClient.staleFeeds(days: days)
+			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 		}
 	}
 
@@ -1480,7 +1637,7 @@ final class ReaderAppModel {
 			await loadStaleFeeds()
 			return true
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return false
 		}
 	}
@@ -1495,7 +1652,7 @@ final class ReaderAppModel {
 			await loadStaleFeeds()
 			return true
 		} catch {
-			errorMessage = error.localizedDescription
+			presentSettingsError(error)
 			return false
 		}
 	}
@@ -1508,14 +1665,14 @@ final class ReaderAppModel {
 		for subscription in removed {
 			guard await enqueueOfflineMutation(OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)) else { return false }
 		}
-		subscriptions.removeAll { subscription in
-			removed.contains(where: { $0.id == subscription.id })
-		}
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		var changedCollectionIDs = Set<String>()
+		for subscription in removed {
+			changedCollectionIDs.formUnion(await removeSubscriptionLocally(subscription))
 		}
 		staleFeedUndo = .unsubscribe(removed)
 		staleFeedUndoTitle = removed.count == 1 ? "Undo Unsubscribe" : "Undo Unsubscribe \(removed.count) Feeds"
+		await persistLibraryAfterSubscriptionChange()
+		await persistCollections(changedCollectionIDs)
 		await replayPendingMutations()
 		await loadNavigation(force: true)
 		await loadStaleFeeds()
@@ -1523,20 +1680,22 @@ final class ReaderAppModel {
 	}
 
 	func undoStaleFeedAction() async {
-		guard let apiClient, let undo = staleFeedUndo else { return }
+		guard let undo = staleFeedUndo else { return }
 		switch undo {
 		case .archive(let keys):
+			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
 			} catch {
-				errorMessage = error.localizedDescription
+				presentSettingsError(error)
 				return
 			}
 		case .unarchive(let keys):
+			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
 			} catch {
-				errorMessage = error.localizedDescription
+				presentSettingsError(error)
 				return
 			}
 		case .unsubscribe(let removed):
@@ -1544,11 +1703,19 @@ final class ReaderAppModel {
 				guard await enqueueOfflineMutation(OfflineMutation(kind: .restoreFeed, feedId: subscription.id)) else { return }
 			}
 			setSubscriptions(subscriptions + removed)
+			rebuildNavigationFromSubscriptions()
 			if let accountID = session?.storageIdentity {
-				try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+				do {
+					try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+					try await offlineStore.saveNavigation(navigation, accountID: accountID)
+				} catch {
+					errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+				}
 			}
 			await replayPendingMutations()
-			await loadNavigation(force: true)
+			if apiClient != nil {
+				await loadNavigation(force: true)
+			}
 		}
 		staleFeedUndo = nil
 		staleFeedUndoTitle = nil
@@ -1562,12 +1729,12 @@ final class ReaderAppModel {
 			errorMessage = "Feed names must be between 1 and 200 characters."
 			return false
 		}
+		errorMessage = nil
 		let mutation = OfflineMutation(kind: .renameFeed, feedId: subscription.id, title: title)
 		guard await enqueueOfflineMutation(mutation) else { return false }
 		updateSubscription(id: subscription.id) { $0.title = title }
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-		}
+		rebuildNavigationFromSubscriptions()
+		await persistLibraryAfterSubscriptionChange()
 		await replayPendingMutations()
 		return true
 	}
@@ -1578,18 +1745,47 @@ final class ReaderAppModel {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
+		errorMessage = nil
+		let previousFeedItems = feedItems(for: subscription)
+		let previousSelectedID = selectedNavigationID
+		let previousSelectedItem = navigation.item(withID: previousSelectedID)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
+		let nextFeedCollectionIDs = normalizedFolders.isEmpty
+			? [subscription.id]
+			: normalizedFolders.map { "\(subscription.id)::\(folderStreamID(forName: $0))" }
+		var cacheIDsToHydrate = Set<String>()
+		cacheIDsToHydrate.formUnion(previousFeedItems.map(\.id))
+		cacheIDsToHydrate.formUnion(nextFeedCollectionIDs)
+		cacheIDsToHydrate.formUnion(previousFeedItems.compactMap(\.parentID))
+		let previousFolderIDs = Set(
+			subscription.categories.map(\.id).filter { $0.isEmpty == false }
+			+ subscription.folderNames.map { folderStreamID(forName: $0) },
+		)
+		cacheIDsToHydrate.formUnion(previousFolderIDs)
+		cacheIDsToHydrate.formUnion(previousFolderIDs.map { "\(subscription.id)::\($0)" })
+		cacheIDsToHydrate.formUnion(normalizedFolders.map { folderStreamID(forName: $0) })
 		let mutation = OfflineMutation(
 			kind: .moveFeed,
 			feedId: subscription.id,
 			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		updateSubscription(id: subscription.id) { item in
 			item.categories = normalizedFolders.map {
 				FeedCategory(id: "user/-/label/\($0)", label: $0)
 			}
 		}
 		rebuildNavigationFromSubscriptions()
+		let remappedCollectionIDs = remapMovedFeedState(
+			streamID: subscription.id,
+			feedKey: subscription.feedKey,
+			previousFeedItems: previousFeedItems,
+			previousSelectedID: previousSelectedID,
+			previousSelectedItem: previousSelectedItem,
+		)
 		if let accountID = session?.storageIdentity {
 			do {
 				try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
@@ -1597,6 +1793,9 @@ final class ReaderAppModel {
 			} catch {
 				errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 			}
+		}
+		if remappedCollectionIDs.isEmpty == false {
+			await persistCollections(remappedCollectionIDs)
 		}
 		await replayPendingMutations()
 		return true
@@ -1606,12 +1805,57 @@ final class ReaderAppModel {
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
 		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		subscriptions.removeAll { $0.id == subscription.id }
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-		}
+		let changedCollectionIDs = await removeSubscriptionLocally(subscription)
+		await persistLibraryAfterSubscriptionChange()
+		await persistCollections(changedCollectionIDs)
 		await replayPendingMutations()
 		return true
+	}
+
+	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String> {
+		let removedFeedItems = navigation.items
+			.filter { $0.kind == .feed && $0.streamID == subscription.id }
+		let subscriptionFolderIDs = Set(subscription.categories.map(\.id).filter { $0.isEmpty == false })
+		let removedFeedIDs = Set(
+			[subscription.id]
+			+ removedFeedItems.map(\.id)
+			+ subscriptionFolderIDs.map { "\(subscription.id)::\($0)" }
+		)
+		let affectedFolderIDs = subscriptionFolderIDs.union(removedFeedItems.compactMap(\.parentID))
+		await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs))
+		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
+		subscriptions.removeAll { $0.id == subscription.id }
+		var changedCollectionIDs = Set(removedFeedIDs)
+		for folderID in affectedFolderIDs {
+			guard let cachedArticles = articleCache[folderID] else { continue }
+			let remainingArticles = cachedArticles.filter {
+				articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) == false
+			}
+			if remainingArticles.count != cachedArticles.count {
+				articleCache[folderID] = remainingArticles
+				changedCollectionIDs.insert(folderID)
+			}
+		}
+		for collectionID in removedFeedIDs {
+			clearCollectionState(collectionID)
+		}
+		rebuildNavigationFromSubscriptions()
+		for folderID in affectedFolderIDs where navigation.item(withID: folderID) == nil {
+			// If the removed feed was the last child, its aggregate folder is
+			// removed too. Clear that orphan even when the aggregate had no loaded
+			// article rows but still had a persisted continuation.
+			clearCollectionState(folderID)
+			changedCollectionIDs.insert(folderID)
+		}
+		if wasSelectedFeed
+			|| removedFeedIDs.contains(temporarilyUnavailableSelectedCollection?.id ?? "")
+			|| navigation.item(withID: selectedNavigationID) == nil {
+			temporarilyUnavailableSelectedCollection = nil
+			if navigation.item(withID: selectedNavigationID) == nil {
+				select(section: firstEnabledSmartSection)
+			}
+		}
+		return changedCollectionIDs
 	}
 
 	@discardableResult
@@ -1620,6 +1864,7 @@ final class ReaderAppModel {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
 		}
+		errorMessage = nil
 		guard name != oldName else {
 			return true
 		}
@@ -1628,6 +1873,18 @@ final class ReaderAppModel {
 			return false
 		}
 		let affected = subscriptions.filter { $0.folderNames.contains(oldName) }
+		let oldFolderID = folderStreamID(forName: oldName)
+		let newFolderID = folderStreamID(forName: name)
+		let cacheIDsToHydrate = Set(
+			[oldFolderID, newFolderID]
+				+ affected.flatMap { subscription in
+					[
+						"\(subscription.id)::\(oldFolderID)",
+						"\(subscription.id)::\(newFolderID)",
+					]
+				}
+		)
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		for subscription in affected {
 			let folders = subscription.folderNames.map { $0 == oldName ? name : $0 }
 			guard await enqueueOfflineMutation(
@@ -1635,16 +1892,44 @@ final class ReaderAppModel {
 			) else { return false }
 		}
 		applyFolderRename(from: oldName, to: name)
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-		}
+		let remappedCollectionIDs = remapFolderCollectionState(from: oldName, to: name)
+		rebuildNavigationFromSubscriptions()
+		await persistLibraryAfterFolderChange()
+		await persistCollections(remappedCollectionIDs)
 		await replayPendingMutations()
 		return true
 	}
 
 	@discardableResult
 	func deleteFolder(_ name: String) async -> Bool {
+		let folderID = folderStreamID(forName: name)
+		let wasSelectedFolder = selectedNavigationID == folderID
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
+		let previousSelectedID = selectedNavigationID
+		let previousSelectedItem = navigation.item(withID: previousSelectedID)
+			?? (temporarilyUnavailableSelectedCollection?.id == previousSelectedID
+				? temporarilyUnavailableSelectedCollection
+				: nil)
+		var previousFeedItemsBySubscription: [String: [ReaderNavigationItem]] = [:]
+		var cacheIDsToHydrate = Set<String>([folderID])
+		for subscription in affected {
+			let previousItems = feedItems(for: subscription)
+			previousFeedItemsBySubscription[subscription.id] = previousItems
+			cacheIDsToHydrate.formUnion(previousItems.map(\.id))
+			cacheIDsToHydrate.insert(subscription.id)
+			let previousFolderIDs = Set(
+				subscription.categories.map(\.id).filter { $0.isEmpty == false }
+					+ subscription.folderNames.map { folderStreamID(forName: $0) },
+			)
+			cacheIDsToHydrate.formUnion(previousFolderIDs)
+			cacheIDsToHydrate.formUnion(previousFolderIDs.map { "\(subscription.id)::\($0)" })
+			let remainingFolders = subscription.folderNames.filter { $0 != name }
+			cacheIDsToHydrate.formUnion(remainingFolders.map { folderStreamID(forName: $0) })
+			cacheIDsToHydrate.formUnion(
+				remainingFolders.map { "\(subscription.id)::\(folderStreamID(forName: $0))" }
+			)
+			cacheIDsToHydrate.formUnion(previousItems.compactMap(\.parentID))
+		}
 		for subscription in affected {
 			guard await enqueueOfflineMutation(
 				OfflineMutation(
@@ -1654,14 +1939,42 @@ final class ReaderAppModel {
 				)
 			) else { return false }
 		}
+		await hydrateCachedCollections(cacheIDsToHydrate)
 		for subscription in affected {
 			updateSubscription(id: subscription.id) { item in
 				item.categories.removeAll { $0.label == name }
 			}
 		}
 
-		if let accountID = session?.storageIdentity {
-			try? await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+		rebuildNavigationFromSubscriptions()
+		var remappedCollectionIDs = Set<String>([folderID])
+		for subscription in affected {
+			remappedCollectionIDs.formUnion(
+				remapMovedFeedState(
+					streamID: subscription.id,
+					feedKey: subscription.feedKey,
+					previousFeedItems: previousFeedItemsBySubscription[subscription.id] ?? [],
+					previousSelectedID: previousSelectedID,
+					previousSelectedItem: previousSelectedItem,
+					preserveRemovedState: true,
+				)
+			)
+		}
+		// A deleted folder has no valid aggregate collection after the navigation
+		// rebuild. Clear it even when it was not loaded in memory so a stale
+		// offline membership row is removed as well.
+		clearCollectionState(folderID)
+		if wasSelectedFolder
+			|| temporarilyUnavailableSelectedCollection?.id == folderID
+			|| navigation.item(withID: selectedNavigationID) == nil {
+			temporarilyUnavailableSelectedCollection = nil
+			if navigation.item(withID: selectedNavigationID) == nil {
+				select(section: firstEnabledSmartSection)
+			}
+		}
+		await persistLibraryAfterFolderChange()
+		if remappedCollectionIDs.isEmpty == false {
+			await persistCollections(remappedCollectionIDs)
 		}
 		await replayPendingMutations()
 		return true
@@ -1676,11 +1989,11 @@ final class ReaderAppModel {
 	}
 
 	func allArticles(for section: ReaderSection) -> [Recommendation] {
-		articleCache[section.rawValue] ?? []
+		allArticles(for: section.rawValue)
 	}
 
 	func allArticles(for collection: ReaderNavigationItem) -> [Recommendation] {
-		articleCache[collection.id] ?? []
+		allArticles(for: collection.id)
 	}
 
 	func isArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
@@ -1733,6 +2046,9 @@ final class ReaderAppModel {
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(cachedArticles)
 		}
+		if activeSearchCollectionID == collectionID {
+			searchResults = newSortOrder.sorted(searchResults)
+		}
 		scheduleRestorationSave()
 	}
 
@@ -1744,12 +2060,19 @@ final class ReaderAppModel {
 		setArticles(newArticles, for: collection.id)
 	}
 
-	private func setArticles(_ newArticles: [Recommendation], for collectionID: String) {
+	private func setArticles(
+		_ newArticles: [Recommendation],
+		for collectionID: String,
+		preserveOpenSelection: Bool = true,
+	) {
 		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
 			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
 		}
+		let articlesToSort = preserveOpenSelection
+			? articlesPreservingOpenSelection(newArticles, for: collectionID)
+			: newArticles
 		let sortedArticles = sortOrder(for: collectionID).sorted(
-			articlesPreservingOpenSelection(newArticles, for: collectionID),
+			articlesToSort,
 		)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
@@ -1777,7 +2100,7 @@ final class ReaderAppModel {
 
 	private func articleFilter(for collectionID: String) -> ReaderArticleFilter {
 		guard let session else {
-			return ReaderArticleFilterStore.defaultFilter
+			return ReaderArticleFilterStore.defaultFilter(for: collectionID)
 		}
 		let key = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)
 		return articleFilters[key] ?? articleFilterStore.filter(for: collectionID, session: session)
@@ -1798,7 +2121,11 @@ final class ReaderAppModel {
 	}
 
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
-		articleFilter(for: collectionID).filtering(articleCache[collectionID] ?? [])
+		articleFilter(for: collectionID).filtering(allArticles(for: collectionID))
+	}
+
+	private func allArticles(for collectionID: String) -> [Recommendation] {
+		articlesInCurrentLocalDay(articleCache[collectionID] ?? [], for: collectionID)
 	}
 
 	private func reconcileSelection(for collectionID: String) {
@@ -1816,8 +2143,17 @@ final class ReaderAppModel {
 			guard selectedNavigationID == collectionID else {
 				return
 			}
+			clearDetachedSelectedArticle()
 			selectedArticleID = cached.id
 			selectedArticleIDs[collectionID] = cached.id
+			return
+		}
+
+		if selectedNavigationID == collectionID,
+			let detachedSelectedArticle,
+			detachedSelectedArticle.id == rememberedID || detachedSelectedArticle.readerId == rememberedID {
+			selectedArticleID = detachedSelectedArticle.id
+			selectedArticleIDs[collectionID] = detachedSelectedArticle.id
 			return
 		}
 
@@ -1826,6 +2162,12 @@ final class ReaderAppModel {
 		if isReadingOpenArticle,
 			selectedNavigationID == collectionID,
 			let found = article(withId: rememberedID) {
+			if collectionID == ReaderSection.today.rawValue,
+				ReaderLocalDayBounds.localDay(containing: .now).contains(found.receivedAt) == false {
+				selectedArticleID = found.id
+				selectedArticleIDs[collectionID] = found.id
+				return
+			}
 			let kept = preserveOpenArticle(found, in: collectionID)
 			selectedArticleID = kept.id
 			selectedArticleIDs[collectionID] = kept.id
@@ -1841,6 +2183,11 @@ final class ReaderAppModel {
 
 	private func reconcileCurrentArticleSelection() {
 		reconcileSelection(for: selectedNavigationID)
+	}
+
+	private func clearDetachedSelectedArticle() {
+		detachedSelectedArticle = nil
+		detachedSelectedArticleOrdering = []
 	}
 
 	private func updateNavigationCount(for itemID: String, to count: Int) {
@@ -1914,12 +2261,64 @@ final class ReaderAppModel {
 		navigation = navigation.replacingCount(for: starredItem.id, with: starredItem.unreadCount + delta)
 	}
 
+	private func collectionItem(for article: Recommendation, preferredID: String?) -> ReaderNavigationItem? {
+		if let preferredID, let item = navigationItem(matching: preferredID) {
+			return item
+		}
+
+		if let feed = navigation.items.first(where: { $0.kind == .feed && feedItemContains($0, article: article) }) {
+			return feed
+		}
+
+		let smartOrder: [ReaderSection] = [.today, .forYou, .unread, .starred]
+		for section in smartOrder {
+			if articleCache[section.rawValue]?.contains(where: { articlesMatch($0, article) }) == true,
+				let item = navigation.item(withID: section.rawValue) {
+				return item
+			}
+		}
+
+		if let folder = navigation.folderItems.first(where: { folder in
+			navigation.children(of: folder.id).contains { feedItemContains($0, article: article) }
+		}) {
+			return folder
+		}
+
+		return articleCache.keys.sorted().compactMap { key -> ReaderNavigationItem? in
+			guard articleCache[key]?.contains(where: { articlesMatch($0, article) }) == true else {
+				return nil
+			}
+			return navigation.item(withID: key)
+		}.first
+	}
+
+	private func navigationItem(matching identifier: String) -> ReaderNavigationItem? {
+		if let item = navigation.item(withID: identifier) {
+			return item
+		}
+		return navigation.items.first { item in
+			item.streamID == identifier || item.feedKey == identifier || item.title == identifier
+		}
+	}
+
 	private func feedItemContains(_ item: ReaderNavigationItem, article: Recommendation) -> Bool {
 		item.feedKey == article.feedKey || item.streamID == article.feedKey || articleCache[item.id]?.contains(where: { articlesMatch($0, article) }) == true
 	}
 
 	private func articlesMatch(_ left: Recommendation, _ right: Recommendation) -> Bool {
-		left.id == right.id || left.readerId == right.readerId
+		left.id == right.id
+			|| left.readerId == right.readerId
+			|| left.id == right.readerId
+			|| left.readerId == right.id
+	}
+
+	private func deduplicatedArticles(_ articles: [Recommendation]) -> [Recommendation] {
+		articles.reduce(into: [Recommendation]()) { result, article in
+			guard result.contains(where: { articlesMatch($0, article) }) == false else {
+				return
+			}
+			result.append(article)
+		}
 	}
 
 	private func articleTarget(
@@ -1929,7 +2328,7 @@ final class ReaderAppModel {
 		guard let current else {
 			return nil
 		}
-		let displayedArticles = articleNavigationArticles
+		let displayedArticles = navigationArticles(including: current)
 		guard let currentIndex = displayedArticles.firstIndex(where: { articlesMatch($0, current) }),
 			let targetIndex = ReaderBoundaryNavigation.targetIndex(
 				currentIndex: currentIndex,
@@ -1943,7 +2342,41 @@ final class ReaderAppModel {
 	}
 
 	private var articleNavigationArticles: [Recommendation] {
-		activeSearchScope == nil ? articles : searchResults
+		activeSearchScope == nil ? articles : displayedSearchResults
+	}
+
+	/// Unread/Read filters drop the open story from the visible list as soon as
+	/// it is marked read (the default When Opened behavior). Keep that story as
+	/// the navigation origin so next/previous still reach the adjacent visible row.
+	private func navigationArticles(including current: Recommendation) -> [Recommendation] {
+		let visible = articleNavigationArticles
+		if visible.contains(where: { articlesMatch($0, current) }) {
+			return visible
+		}
+
+		let ordering: [Recommendation]
+		if let detachedSelectedArticle,
+			articlesMatch(detachedSelectedArticle, current),
+			detachedSelectedArticleOrdering.isEmpty == false {
+			ordering = detachedSelectedArticleOrdering
+		} else if activeSearchScope != nil {
+			// Search results span the library, while the open collection cache may
+			// contain only the current story. Keep the unfiltered search ordering as
+			// the source of truth before applying the active read/unread filter.
+			ordering = searchResults
+		} else {
+			ordering = articleCache[selectedNavigationID] ?? []
+		}
+		guard let orderingIndex = ordering.firstIndex(where: { articlesMatch($0, current) }) else {
+			return visible + [current]
+		}
+
+		let insertionIndex = ordering.prefix(orderingIndex).reduce(0) { count, candidate in
+			count + (visible.contains(where: { articlesMatch($0, candidate) }) ? 1 : 0)
+		}
+		var ordered = visible
+		ordered.insert(current, at: min(insertionIndex, ordered.count))
+		return ordered
 	}
 
 	func article(withId id: String) -> Recommendation? {
@@ -1977,6 +2410,9 @@ final class ReaderAppModel {
 		activeSearchScope = scope
 		activeSearchCollectionID = collection.id
 		isSearchingArticles = true
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
 		defer {
 			if activeSearchID == searchID { isSearchingArticles = false }
 		}
@@ -2000,11 +2436,15 @@ final class ReaderAppModel {
 	}
 
 	func clearArticleSearch() {
+		let hadActiveSearch = activeSearchID != nil
 		activeSearchID = nil
 		activeSearchScope = nil
 		activeSearchCollectionID = nil
 		searchResults = []
 		isSearchingArticles = false
+		if hadActiveSearch {
+			errorMessage = nil
+		}
 	}
 
 	func collectionStatusText(for collection: ReaderNavigationItem) -> String {
@@ -2048,53 +2488,91 @@ final class ReaderAppModel {
 		}
 	}
 
-	func monitorActiveReading(for articleId: String) async {
-		guard let apiClient, engagement.resume(itemId: articleId, at: .now) else {
+	func monitorActiveReading(
+		for articleId: String,
+		interval: Duration = .seconds(15),
+		minimumActiveDuration: TimeInterval = 10,
+		maximumIntervals: Int? = nil,
+	) async {
+		guard apiClient != nil, engagement.resume(itemId: articleId, at: .now) else {
 			return
 		}
 		defer { engagement.pause(itemId: articleId, at: .now) }
+		guard maximumIntervals != 0 else { return }
 
 		do {
+			var completedIntervals = 0
 			while !Task.isCancelled {
-				try await Task.sleep(for: .seconds(15))
+				try await Task.sleep(for: interval)
 				try Task.checkCancellation()
-				if let event = engagement.activeReadingDeltaEvent(itemId: articleId, at: .now) {
-					try await apiClient.sendEngagement([event])
+				if let event = engagement.activeReadingDeltaEvent(
+					itemId: articleId,
+					at: .now,
+					minimumDuration: minimumActiveDuration,
+				) {
+					_ = await send(event, reportErrors: false)
+				}
+				completedIntervals += 1
+				if let maximumIntervals, completedIntervals >= maximumIntervals {
+					return
 				}
 			}
-		} catch let error where isCancellation(error) {
-			return
-		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
-			return
 		} catch {
-			errorMessage = error.localizedDescription
+			return
 		}
 	}
 
-	func recordScrollDepth(itemId: String, depth: Double) {
+	@discardableResult
+	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		let articleToMarkRead: Recommendation?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
-			scrollReadTriggered.insert(itemId).inserted,
 			let article = article(withId: itemId),
-			article.isRead == false {
-			Task { @MainActor [weak self] in
-				await self?.setRead(article, read: true)
+			article.isRead == false,
+			scrollReadTriggered.insert(itemId).inserted
+		{
+			articleToMarkRead = article
+		} else {
+			articleToMarkRead = nil
+		}
+
+		let event: EngagementEvent?
+		if let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth),
+			threshold > 0,
+			sentScrollThresholds[itemId, default: []].insert(threshold).inserted {
+			event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
+		} else {
+			event = nil
+		}
+
+		guard articleToMarkRead != nil || event != nil else { return nil }
+		return Task { @MainActor [weak self] in
+			guard let self else { return }
+			if let articleToMarkRead {
+				await self.setRead(articleToMarkRead, read: true)
+				if self.article(withId: itemId)?.isRead == false {
+					self.forgetScrollRead(for: articleToMarkRead)
+				}
 			}
-		}
-		guard let threshold = engagement.updateScrollDepth(itemId: itemId, depth: depth), threshold > 0 else {
-			return
-		}
-		guard sentScrollThresholds[itemId, default: []].insert(threshold).inserted else {
-			return
-		}
-		let event = EngagementEvent(itemId: itemId, type: .scrollDepth, value: depth, scrollDepth: depth)
-		Task { @MainActor [weak self] in
-			await self?.send(event)
+			if let event {
+				await self.send(event, reportErrors: false)
+			}
 		}
 	}
 
 	func recordOutboundClick(itemId: String, destinationHost: String) async {
-		await send(EngagementEvent(itemId: itemId, type: .outboundLink, destinationHost: destinationHost))
+		guard let apiClient else {
+			return
+		}
+		do {
+			try await apiClient.sendEngagement([
+				EngagementEvent(itemId: itemId, type: .outboundLink, destinationHost: destinationHost),
+			])
+		} catch {
+			// Open Original and in-article links already left the reader.
+			// A failed analytics POST must not become the session error banner.
+			return
+		}
 	}
 
 	func setRead(_ article: Recommendation, read: Bool) async {
@@ -2114,20 +2592,43 @@ final class ReaderAppModel {
 		await markStoriesAsRead(.below, around: article, in: collection)
 	}
 
+	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
+		markReadOrderArticles(in: collection).contains { $0.isRead == false }
+	}
+
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false } ?? [],
+			markReadOrderArticles(in: collection).filter { $0.isRead == false },
+			in: collection,
 			scope: .all,
 			undoTitle: "Mark All as Read",
 		)
 	}
 
+	func canMarkStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) -> Bool {
+		markOlderThanCandidates(in: collection, olderThan: date).isEmpty == false
+	}
+
 	func markStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) async {
 		await markArticlesAsRead(
-			articleCache[collection.id]?.filter { $0.isRead == false && $0.receivedAt < date } ?? [],
+			markOlderThanCandidates(in: collection, olderThan: date),
+			in: collection,
 			scope: .older,
 			undoTitle: "Mark Older Stories as Read",
 		)
+	}
+
+	/// Drops yesterday's Today rows after local midnight and refreshes if Today is open.
+	@discardableResult
+	func handleLocalDayChange(now: Date = .now) async -> Bool {
+		guard pruneStaleTodayStories(now: now) else {
+			return false
+		}
+		await persistCollections([ReaderSection.today.rawValue])
+		if selectedCollection.smartSection == .today {
+			await load(collection: selectedCollection, force: true, now: now)
+		}
+		return true
 	}
 
 	func undoLastBulkRead() async {
@@ -2154,7 +2655,7 @@ final class ReaderAppModel {
 			feedback: type.rawValue,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return }
-		guard type == .notInterested, selectedNavigationID == ReaderSection.forYou.rawValue else {
+		guard type == .notInterested, articleCache[ReaderSection.forYou.rawValue] != nil else {
 			await replayPendingMutations()
 			return
 		}
@@ -2208,7 +2709,9 @@ final class ReaderAppModel {
 		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
 		let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return false }
-		applyCachedSnapshot(snapshot, preservingPagination: true)
+		if applyCachedSnapshot(snapshot, preservingPagination: true) {
+			await persistCollections([ReaderSection.today.rawValue])
+		}
 		return canUseIncrementalReload
 	}
 
@@ -2218,21 +2721,41 @@ final class ReaderAppModel {
 
 	@discardableResult
 	private func preserveOpenArticle(_ article: Recommendation, in collectionID: String) -> Recommendation {
-		if let existing = articleCache[collectionID]?.first(where: { articlesMatch($0, article) }) {
-			return existing
+		let kept = articleWithPreservedBody(article)
+		replaceCachedMatches(with: kept)
+		if articleCache[collectionID]?.contains(where: { articlesMatch($0, kept) }) != true {
+			var cached = articleCache[collectionID] ?? []
+			cached.append(kept)
+			articleCache[collectionID] = sortOrder(for: collectionID).sorted(cached)
 		}
-		var cached = articleCache[collectionID] ?? []
-		cached.append(article)
-		let sorted = sortOrder(for: collectionID).sorted(cached)
-		articleCache[collectionID] = sorted
-		return sorted.first(where: { articlesMatch($0, article) }) ?? article
+		return articleCache[collectionID]?.first(where: { articlesMatch($0, kept) }) ?? kept
 	}
 
+	/// Snapshot reloads can replace the open row with a body-pruned cache copy.
+	/// Keep the HTML the user is currently reading, and take snapshot flags from cache.
+	private func articleWithPreservedBody(_ article: Recommendation) -> Recommendation {
+		guard let existing = articleCache.values.lazy.flatMap({ $0 }).first(where: { articlesMatch($0, article) }) else {
+			return article
+		}
+		if existing.hasReadableHTML == false, article.hasReadableHTML {
+			return existing.replacingHTML(article.html)
+		}
+		return existing
+	}
+
+	private func replaceCachedMatches(with article: Recommendation) {
+		for (collectionID, articles) in articleCache {
+			guard articles.contains(where: { articlesMatch($0, article) }) else { continue }
+			articleCache[collectionID] = articles.map { articlesMatch($0, article) ? article : $0 }
+		}
+	}
+
+	@discardableResult
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
-	) {
-		guard let session else { return }
+	) -> Bool {
+		guard let session else { return false }
 		offlineSyncCursor = snapshot.cursor
 		let openArticle = selectedArticle
 		let preserveOpenReader = preferredCompactColumn == .detail
@@ -2243,12 +2766,25 @@ final class ReaderAppModel {
 			?? (temporarilyUnavailableSelectedCollection?.id == preservedNavigationID
 				? temporarilyUnavailableSelectedCollection
 				: nil)
+		let todayID = ReaderSection.today.rawValue
+		let currentTodayBounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let hadTrustedTodayBounds = streamDayBounds[todayID] == currentTodayBounds
 
 		libraryGeneration = UUID()
 		if preservingPagination == false {
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 		}
+		// A persisted Today continuation has no day-bound metadata. Only reuse it
+		// while this live model has already established that the token belongs to
+		// the current local day; otherwise a cold restore could send an old-day
+		// token with today's request.
+		let canRestoreTodayPagination = preservingPagination && hadTrustedTodayBounds
+		if canRestoreTodayPagination == false {
+			resetStreamPagination(for: todayID)
+			resolvedPaginationCollections.remove(todayID)
+		}
+		var discardedUntrustedTodayPagination = false
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
@@ -2291,10 +2827,19 @@ final class ReaderAppModel {
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
 		for (collectionID, continuation) in snapshot.continuationsByCollection {
+			if collectionID == todayID, canRestoreTodayPagination == false {
+				discardedUntrustedTodayPagination = true
+				continue
+			}
 			guard preservingPagination == false || streamContinuations[collectionID] == nil else { continue }
 			streamContinuations[collectionID] = continuation
 			seenStreamContinuations[collectionID] = [continuation]
 			resolvedPaginationCollections.insert(collectionID)
+		}
+		if discardedUntrustedTodayPagination {
+			// Mark Today as intentionally reconciled so the caller persists the
+			// cleared token even when the snapshot had no Today article rows.
+			articleCache[todayID] = snapshot.articlesByCollection[todayID] ?? []
 		}
 		if let updatedAt = snapshot.lastSyncAt {
 			collectionFreshness = snapshot.articlesByCollection.keys.reduce(into: [:]) { result, collectionID in
@@ -2312,7 +2857,12 @@ final class ReaderAppModel {
 			selectedArticleIDs[preservedNavigationID] = kept.id
 			selectedArticleID = kept.id
 			preferredCompactColumn = .detail
-			return
+			let didPruneToday = pruneStaleTodayStories()
+			if didPruneToday {
+				resetStreamPagination(for: ReaderSection.today.rawValue)
+				resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
+			}
+			return didPruneToday || discardedUntrustedTodayPagination
 		}
 
 		if navigation.item(withID: selectedNavigationID) == nil {
@@ -2324,6 +2874,12 @@ final class ReaderAppModel {
 		reconcileSelectedSmartViewIfNeeded()
 		selectedArticleID = selectedArticleIDs[selectedNavigationID]
 		reconcileCurrentArticleSelection()
+		let didPruneToday = pruneStaleTodayStories()
+		if didPruneToday {
+			resetStreamPagination(for: ReaderSection.today.rawValue)
+			resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
+		}
+		return didPruneToday || discardedUntrustedTodayPagination
 	}
 
 	private func resetInMemoryLibraryForAccountChange() {
@@ -2349,6 +2905,7 @@ final class ReaderAppModel {
 		bulkReadUndo = nil
 		bulkReadUndoTitle = nil
 		scrollReadTriggered = []
+		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
 		selectedNavigationID = firstEnabledSmartSection.rawValue
@@ -2370,6 +2927,53 @@ final class ReaderAppModel {
 		seenStreamContinuations[collectionID] = nil
 		streamDayBounds[collectionID] = nil
 		invalidateLoadMore(for: collectionID)
+	}
+
+	private func articlesInCurrentLocalDay(
+		_ articles: [Recommendation],
+		for collectionID: String,
+		now: Date = .now,
+	) -> [Recommendation] {
+		guard collectionID == ReaderSection.today.rawValue else {
+			return articles
+		}
+		let bounds = ReaderLocalDayBounds.localDay(containing: now)
+		return articles.filter { bounds.contains($0.receivedAt) }
+	}
+
+	@discardableResult
+	private func pruneTodayIfNeeded(_ collection: ReaderNavigationItem, now: Date) -> Bool {
+		guard collection.smartSection == .today else {
+			return false
+		}
+		return pruneStaleTodayStories(now: now)
+	}
+
+	@discardableResult
+	private func pruneStaleTodayStories(now: Date = .now) -> Bool {
+		let todayID = ReaderSection.today.rawValue
+		let bounds = ReaderLocalDayBounds.localDay(containing: now)
+		let previousBounds = streamDayBounds[todayID]
+		let boundsChanged = previousBounds.map { $0 != bounds } ?? false
+		let cached = articleCache[todayID]
+		let kept = cached?.filter { bounds.contains($0.receivedAt) }
+		let droppedStale = cached.map { $0.count != (kept?.count ?? 0) } ?? false
+		guard droppedStale || boundsChanged else {
+			return false
+		}
+
+		if boundsChanged {
+			resetStreamPagination(for: todayID)
+		}
+		streamDayBounds[todayID] = bounds
+		if droppedStale, let kept {
+			setArticles(kept, for: todayID, preserveOpenSelection: false)
+			updateNavigationCount(
+				for: todayID,
+				to: kept.count(where: { $0.isRead == false }),
+			)
+		}
+		return true
 	}
 
 	private func invalidateLoadMore(for collectionID: String) {
@@ -2420,7 +3024,7 @@ final class ReaderAppModel {
 	}
 
 	private func isPaginatedCollection(_ collection: ReaderNavigationItem) -> Bool {
-		collection.smartSection == .today || collection.smartSection == nil
+		collection.smartSection?.usesRecommendationEndpoint != true
 	}
 
 	private func shouldResolveCachedPagination(for collection: ReaderNavigationItem) -> Bool {
@@ -2652,15 +3256,67 @@ final class ReaderAppModel {
 		await refreshOfflineStorageStats()
 	}
 
+	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async {
+		guard collectionIDs.isEmpty == false,
+			let accountID = session?.storageIdentity else {
+			return
+		}
+		let unloadedIDs = collectionIDs.filter { articleCache[$0] == nil }
+		let unloadedPaginationIDs = collectionIDs.filter {
+			streamContinuations[$0] == nil && seenStreamContinuations[$0] == nil
+		}
+		guard unloadedIDs.isEmpty == false || unloadedPaginationIDs.isEmpty == false else {
+			return
+		}
+		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID) else {
+			return
+		}
+		for collectionID in unloadedIDs {
+			if let articles = snapshot.articlesByCollection[collectionID] {
+				articleCache[collectionID] = articles
+			}
+		}
+		for collectionID in unloadedPaginationIDs {
+			if let continuation = snapshot.continuationsByCollection[collectionID] {
+				streamContinuations[collectionID] = continuation
+				seenStreamContinuations[collectionID] = [continuation]
+				resolvedPaginationCollections.insert(collectionID)
+			}
+		}
+		if let restoration = snapshot.restoration {
+			for collectionID in collectionIDs where selectedArticleIDs[collectionID] == nil {
+				selectedArticleIDs[collectionID] = restoration.selectedArticleIDs[collectionID]
+			}
+		}
+	}
+
 	private func persistCollections(_ collectionIDs: Set<String>) async {
 		guard let accountID = session?.storageIdentity else { return }
 		do {
 			for collectionID in collectionIDs {
-				try await offlineStore.saveArticles(
-					articleCache[collectionID] ?? [],
-					collectionID: collectionID,
-					accountID: accountID,
-				)
+				// A collection that still exists in navigation may have state only in
+				// SQLite. Do not turn that cache into an empty snapshot merely because
+				// this operation did not load it into memory. Removed IDs are explicit
+				// clears and must still be persisted as empty collections.
+				let isRemovedCollection = navigation.item(withID: collectionID) == nil
+				let hasLoadedArticles = articleCache[collectionID] != nil
+				if hasLoadedArticles || isRemovedCollection {
+					try await offlineStore.saveArticles(
+						articleCache[collectionID] ?? [],
+						collectionID: collectionID,
+						accountID: accountID,
+					)
+				}
+				// A continuation can be hydrated independently of article bodies.
+				// Persist that moved token without overwriting an unloaded SQLite
+				// article collection with an empty array.
+				if hasLoadedArticles || isRemovedCollection || streamContinuations[collectionID] != nil {
+					try await offlineStore.saveCollectionContinuation(
+						streamContinuations[collectionID],
+						collectionID: collectionID,
+						accountID: accountID,
+					)
+				}
 			}
 			try await offlineStore.saveNavigation(navigation, accountID: accountID)
 			scheduleRestorationSave()
@@ -2672,6 +3328,18 @@ final class ReaderAppModel {
 
 	func clearError() {
 		errorMessage = nil
+	}
+
+	func clearSettingsError() {
+		settingsErrorMessage = nil
+	}
+
+	private func presentSettingsError(_ error: Error) {
+		presentSettingsError(error.localizedDescription)
+	}
+
+	private func presentSettingsError(_ message: String) {
+		settingsErrorMessage = message
 	}
 
 	func subscription(id: String) -> FeedSubscription? {
@@ -2704,6 +3372,226 @@ final class ReaderAppModel {
 			}
 		}
 		return normalized.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+	}
+
+	private func persistLibraryAfterSubscriptionChange() async {
+		guard let accountID = session?.storageIdentity else {
+			return
+		}
+		do {
+			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			scheduleRestorationSave()
+		} catch {
+			errorMessage = "Your library change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+		}
+	}
+
+	private func feedItems(forStreamID streamID: String) -> [ReaderNavigationItem] {
+		navigation.items.filter { $0.kind == .feed && $0.streamID == streamID }
+	}
+
+	private func feedItems(for subscription: FeedSubscription) -> [ReaderNavigationItem] {
+		var items = feedItems(forStreamID: subscription.id)
+		var knownIDs = Set(items.map(\.id))
+		var folderIDs = subscription.categories.map(\.id).filter { $0.isEmpty == false }
+		for folderName in subscription.folderNames {
+			let folderID = folderStreamID(forName: folderName)
+			if folderIDs.contains(folderID) == false {
+				folderIDs.append(folderID)
+			}
+		}
+		for folderID in folderIDs {
+			let childID = "\(subscription.id)::\(folderID)"
+			guard knownIDs.insert(childID).inserted else { continue }
+			items.append(
+				ReaderNavigationItem(
+					id: childID,
+					title: subscription.title,
+					streamID: subscription.id,
+					kind: .feed,
+					unreadCount: 0,
+					parentID: folderID,
+					feedKey: subscription.feedKey,
+					iconURL: subscription.iconUrl.flatMap(URL.init(string:)),
+					smartSection: nil,
+				),
+			)
+		}
+		return items
+	}
+
+	@discardableResult
+	private func remapMovedFeedState(
+		streamID: String,
+		feedKey: String,
+		previousFeedItems: [ReaderNavigationItem],
+		previousSelectedID: String,
+		previousSelectedItem: ReaderNavigationItem?,
+		preserveRemovedState: Bool = false,
+	) -> Set<String> {
+		let nextFeedItems = feedItems(forStreamID: streamID)
+		var changedCollectionIDs = Set<String>()
+		var reservedDestinationIDs = Set<String>()
+		var mappings: [(from: String, to: String)] = []
+
+		var unmatchedPreviousItems: [ReaderNavigationItem] = []
+		for previousItem in previousFeedItems {
+			if let matching = nextFeedItems.first(where: {
+				$0.id == previousItem.id && reservedDestinationIDs.contains($0.id) == false
+			}) {
+				mappings.append((previousItem.id, matching.id))
+				reservedDestinationIDs.insert(matching.id)
+			} else {
+				unmatchedPreviousItems.append(previousItem)
+			}
+		}
+
+		for previousItem in unmatchedPreviousItems {
+			if let matching = nextFeedItems.first(where: {
+				$0.parentID == previousItem.parentID && reservedDestinationIDs.contains($0.id) == false
+			}) {
+				mappings.append((previousItem.id, matching.id))
+				reservedDestinationIDs.insert(matching.id)
+			} else if let fallback = nextFeedItems.first(where: { reservedDestinationIDs.contains($0.id) == false }) {
+				mappings.append((previousItem.id, fallback.id))
+				reservedDestinationIDs.insert(fallback.id)
+			} else if preserveRemovedState, let fallback = nextFeedItems.first {
+				// When deleting one folder from a multi-folder feed, every remaining
+				// child already matched its previous row. Merge the removed row into a
+				// surviving child instead of dropping its cached stories.
+				mappings.append((previousItem.id, fallback.id))
+			}
+		}
+
+		if let sourceID = mappings.first?.from ?? previousFeedItems.first?.id {
+			for nextItem in nextFeedItems where reservedDestinationIDs.contains(nextItem.id) == false {
+				mappings.append((sourceID, nextItem.id))
+			}
+		}
+
+		for mapping in mappings {
+			moveCollectionState(from: mapping.from, to: mapping.to)
+			changedCollectionIDs.insert(mapping.from)
+			changedCollectionIDs.insert(mapping.to)
+		}
+
+		let nextFeedIDs = Set(nextFeedItems.map(\.id))
+		for previousItem in previousFeedItems where nextFeedIDs.contains(previousItem.id) == false {
+			clearCollectionState(previousItem.id)
+			changedCollectionIDs.insert(previousItem.id)
+		}
+
+		let feedStories = nextFeedItems
+			.flatMap { articleCache[$0.id] ?? [] }
+			.reduce(into: [Recommendation]()) { result, article in
+				if result.contains(where: { articlesMatch($0, article) }) == false {
+					result.append(article)
+				}
+			}
+		let previousFolderIDs = Set(previousFeedItems.compactMap(\.parentID))
+		let nextFolderIDs = Set(nextFeedItems.compactMap(\.parentID))
+		for folderID in previousFolderIDs.subtracting(nextFolderIDs) {
+			guard articleCache[folderID] != nil else { continue }
+			articleCache[folderID]?.removeAll { articleBelongsToFeed($0, streamID: streamID, feedKey: feedKey) }
+			changedCollectionIDs.insert(folderID)
+		}
+		for folderID in nextFolderIDs {
+			guard feedStories.isEmpty == false else { continue }
+			// A surviving folder can have no row in SQLite because it was empty or
+			// had never been loaded. Hydration above has already restored any stored
+			// stories, so an absent entry is safe to initialize before merging the
+			// affected feed's stories into the aggregate.
+			if articleCache[folderID] == nil {
+				articleCache[folderID] = []
+			}
+			mergeArticles(feedStories, into: folderID)
+			changedCollectionIDs.insert(folderID)
+		}
+
+		if previousFeedItems.contains(where: { $0.id == previousSelectedID }) {
+			let destinationID = mappings.first(where: { $0.from == previousSelectedID })?.to
+				?? nextFeedItems.first?.id
+			if let destinationID, let destination = navigation.item(withID: destinationID) {
+				select(item: destination)
+			} else {
+				select(section: firstEnabledSmartSection)
+			}
+		} else if previousSelectedItem?.kind == .folder, navigation.item(withID: previousSelectedID) == nil {
+			select(section: firstEnabledSmartSection)
+		}
+
+		return changedCollectionIDs
+	}
+
+	private func articleBelongsToFeed(_ article: Recommendation, streamID: String, feedKey: String) -> Bool {
+		article.feedKey == streamID || article.feedKey == feedKey
+	}
+
+	private func moveCollectionState(from sourceID: String, to destinationID: String) {
+		guard sourceID != destinationID else { return }
+		if let incoming = articleCache[sourceID] {
+			if articleCache[destinationID] == nil {
+				articleCache[destinationID] = incoming
+			} else {
+				mergeArticles(incoming, into: destinationID)
+			}
+		}
+		if sortOrders[destinationID] == nil, let sortOrder = sortOrders[sourceID] {
+			sortOrders[destinationID] = sortOrder
+		}
+		if selectedArticleIDs[destinationID] == nil {
+			selectedArticleIDs[destinationID] = selectedArticleIDs[sourceID]
+		}
+		if streamContinuations[destinationID] == nil {
+			streamContinuations[destinationID] = streamContinuations[sourceID]
+		}
+		if seenStreamContinuations[destinationID] == nil {
+			seenStreamContinuations[destinationID] = seenStreamContinuations[sourceID]
+		}
+		if collectionFreshness[destinationID] == nil {
+			collectionFreshness[destinationID] = collectionFreshness[sourceID]
+		}
+		if resolvedPaginationCollections.contains(sourceID) {
+			resolvedPaginationCollections.insert(destinationID)
+		}
+		if deferredInitialFeedPaginationCollectionID == sourceID {
+			deferredInitialFeedPaginationCollectionID = destinationID
+		}
+		if let session {
+			let sourceKey = ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: sourceID)
+			let destinationKey = ArticleFilterKey(
+				sessionIdentity: session.articleFilterStorageIdentity,
+				collectionID: destinationID,
+			)
+			if articleFilters[destinationKey] == nil, let filter = articleFilters[sourceKey] {
+				articleFilters[destinationKey] = filter
+				articleFilterStore.setFilter(filter, for: destinationID, session: session)
+			}
+		}
+	}
+
+	private func clearCollectionState(_ collectionID: String) {
+		articleCache[collectionID] = nil
+		sortOrders[collectionID] = nil
+		selectedArticleIDs[collectionID] = nil
+		resetStreamPagination(for: collectionID)
+		resolvedPaginationCollections.remove(collectionID)
+		collectionFreshness[collectionID] = nil
+		if deferredInitialFeedPaginationCollectionID == collectionID {
+			deferredInitialFeedPaginationCollectionID = nil
+		}
+		if let session {
+			articleFilters[ArticleFilterKey(sessionIdentity: session.articleFilterStorageIdentity, collectionID: collectionID)] = nil
+		}
+	}
+
+	private func mergeArticles(_ articles: [Recommendation], into collectionID: String) {
+		var combined = articleCache[collectionID] ?? []
+		for article in articles where combined.contains(where: { articlesMatch($0, article) }) == false {
+			combined.append(article)
+		}
+		articleCache[collectionID] = sortOrder(for: collectionID).sorted(combined)
 	}
 
 	private func rebuildNavigationFromSubscriptions() {
@@ -2750,7 +3638,7 @@ final class ReaderAppModel {
 		for index in subscriptions.indices {
 			for categoryIndex in subscriptions[index].categories.indices where subscriptions[index].categories[categoryIndex].label == oldName {
 				subscriptions[index].categories[categoryIndex] = FeedCategory(
-					id: "user/-/label/\(newName)",
+					id: folderStreamID(forName: newName),
 					label: newName,
 				)
 			}
@@ -2758,8 +3646,117 @@ final class ReaderAppModel {
 		subscriptions = sortedSubscriptions(subscriptions)
 	}
 
+	private func folderStreamID(forName name: String) -> String {
+		"user/-/label/\(name)"
+	}
+
+	@discardableResult
+	private func remapFolderCollectionState(from oldName: String, to newName: String) -> Set<String> {
+		let oldFolderID = folderStreamID(forName: oldName)
+		let newFolderID = folderStreamID(forName: newName)
+		remapCollectionState(from: oldFolderID, to: newFolderID)
+		var changedCollectionIDs: Set<String> = [oldFolderID, newFolderID]
+		for subscription in subscriptions where subscription.folderNames.contains(newName) {
+			let oldChildID = "\(subscription.id)::\(oldFolderID)"
+			let newChildID = "\(subscription.id)::\(newFolderID)"
+			remapCollectionState(
+				from: oldChildID,
+				to: newChildID,
+			)
+			changedCollectionIDs.formUnion([oldChildID, newChildID])
+		}
+		return changedCollectionIDs
+	}
+
+	private func remapCollectionState(from oldID: String, to newID: String) {
+		guard oldID != newID else {
+			return
+		}
+		if selectedNavigationID == oldID {
+			selectedNavigationID = newID
+		}
+		if activeSearchCollectionID == oldID {
+			activeSearchCollectionID = newID
+		}
+		if deferredInitialFeedPaginationCollectionID == oldID {
+			deferredInitialFeedPaginationCollectionID = newID
+		}
+		if let incomingArticles = articleCache.removeValue(forKey: oldID) {
+			if articleCache[newID] == nil {
+				articleCache[newID] = incomingArticles
+			} else {
+				mergeArticles(incomingArticles, into: newID)
+			}
+		}
+		moveDictionaryValue(&sortOrders, from: oldID, to: newID)
+		moveDictionaryValue(&selectedArticleIDs, from: oldID, to: newID)
+		moveDictionaryValue(&streamContinuations, from: oldID, to: newID)
+		moveDictionaryValue(&seenStreamContinuations, from: oldID, to: newID)
+		moveDictionaryValue(&streamDayBounds, from: oldID, to: newID)
+		// Requests capture the collection ID they started with. Do not transplant
+		// their tokens to the renamed ID: their completion guards and defers still
+		// use the old key, so doing so would leave the new collection permanently
+		// marked as loading after the stale request is discarded.
+		activeLoadIDs[oldID] = nil
+		loadingCollections.remove(oldID)
+		activeLoadMoreIDs[oldID] = nil
+		loadingMoreCollections.remove(oldID)
+		moveDictionaryValue(&loadMoreErrors, from: oldID, to: newID)
+		moveDictionaryValue(&collectionFreshness, from: oldID, to: newID)
+		moveDictionaryValue(&articleScrollOffsets, from: oldID, to: newID)
+		if resolvedPaginationCollections.remove(oldID) != nil {
+			resolvedPaginationCollections.insert(newID)
+		}
+		if navigation.expandedFolderIDs.remove(oldID) != nil {
+			navigation.expandedFolderIDs.insert(newID)
+		}
+
+		let matchingFilterKeys = articleFilters.keys.filter { $0.collectionID == oldID }
+		for key in matchingFilterKeys {
+			guard let value = articleFilters.removeValue(forKey: key) else {
+				continue
+			}
+			articleFilters[ArticleFilterKey(sessionIdentity: key.sessionIdentity, collectionID: newID)] = value
+			if let session, key.sessionIdentity == session.articleFilterStorageIdentity {
+				articleFilterStore.setFilter(value, for: newID, session: session)
+			}
+		}
+	}
+
+	private func moveDictionaryValue<Value>(_ dictionary: inout [String: Value], from oldID: String, to newID: String) {
+		guard let value = dictionary.removeValue(forKey: oldID) else {
+			return
+		}
+		dictionary[newID] = value
+	}
+
+	private func persistLibraryAfterFolderChange() async {
+		guard let accountID = session?.storageIdentity else {
+			return
+		}
+		do {
+			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
+			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+		} catch {
+			errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
+		}
+	}
+
+	private func markOlderThanCandidates(
+		in collection: ReaderNavigationItem,
+		olderThan date: Date,
+	) -> [Recommendation] {
+		let displayedArticles: [Recommendation]
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			displayedArticles = displayedSearchResults
+		} else {
+			displayedArticles = articles(for: collection)
+		}
+		return displayedArticles.filter { $0.isRead == false && $0.receivedAt < date }
+	}
+
 	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
-		let displayedArticles = articleCache[collection.id] ?? []
+		let displayedArticles = markReadOrderArticles(in: collection)
 		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
 			return
@@ -2787,18 +3784,27 @@ final class ReaderAppModel {
 		}
 		await markArticlesAsRead(
 			Array(targets),
+			in: collection,
 			scope: boundary == .above ? .above : .below,
 			undoTitle: boundary == .above ? "Mark Above as Read" : "Mark Below as Read",
 		)
 	}
 
+	private func markReadOrderArticles(in collection: ReaderNavigationItem) -> [Recommendation] {
+		if activeSearchScope != nil, activeSearchCollectionID == collection.id {
+			return displayedSearchResults
+		}
+		return articles(for: collection)
+	}
+
 	private func markArticlesAsRead(
 		_ targets: [Recommendation],
+		in collection: ReaderNavigationItem,
 		scope: OfflineMutationScope,
 		undoTitle: String,
 	) async {
 		guard targets.isEmpty == false else { return }
-		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle)
+		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle, collectionID: collection.id)
 		bulkReadUndoTitle = undoTitle
 		await updateReadStateForArticles(targets, read: true, scope: scope)
 	}
@@ -2823,6 +3829,9 @@ final class ReaderAppModel {
 
 		var changedCollections = Set<String>()
 		for target in targets {
+			if read == false {
+				forgetScrollRead(for: target)
+			}
 			for collectionID in Array(articleCache.keys) {
 				guard var cachedArticles = articleCache[collectionID] else {
 					continue
@@ -2837,6 +3846,13 @@ final class ReaderAppModel {
 				articleCache[collectionID] = cachedArticles
 				changedCollections.insert(collectionID)
 			}
+			updateSearchResults(matching: target) { result in
+				result.isRead = read
+			}
+			syncUnreadMembership(for: target, read: read)
+			if articleCache[ReaderSection.unread.rawValue] != nil {
+				changedCollections.insert(ReaderSection.unread.rawValue)
+			}
 			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
 		reconcileCurrentArticleSelection()
@@ -2845,7 +3861,7 @@ final class ReaderAppModel {
 	}
 
 	@discardableResult
-	private func send(_ event: EngagementEvent) async -> Bool {
+	private func send(_ event: EngagementEvent, reportErrors: Bool = true) async -> Bool {
 		guard let apiClient else {
 			return false
 		}
@@ -2857,9 +3873,16 @@ final class ReaderAppModel {
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
 		} catch {
-			errorMessage = error.localizedDescription
+			if reportErrors {
+				errorMessage = error.localizedDescription
+			}
 			return false
 		}
+	}
+
+	private func forgetScrollRead(for article: Recommendation) {
+		scrollReadTriggered.remove(article.id)
+		scrollReadTriggered.remove(article.readerId)
 	}
 
 	private func optimisticallyUpdateState(
@@ -2885,10 +3908,24 @@ final class ReaderAppModel {
 			articleCache[collectionID]?[index][keyPath: keyPath] = value
 			changedCollections.insert(collectionID)
 		}
+		updateSearchResults(matching: article) { result in
+			result[keyPath: keyPath] = value
+		}
 		if mutationName == "read" {
+			if value == false {
+				forgetScrollRead(for: article)
+			}
+			syncUnreadMembership(for: article, read: value)
+			if articleCache[ReaderSection.unread.rawValue] != nil {
+				changedCollections.insert(ReaderSection.unread.rawValue)
+			}
 			adjustNavigationCounts(for: article, fromRead: article.isRead, toRead: value)
 			reconcileCurrentArticleSelection()
 		} else if mutationName == "starred" {
+			syncStarredMembership(for: article, starred: value)
+			if articleCache[ReaderSection.starred.rawValue] != nil {
+				changedCollections.insert(ReaderSection.starred.rawValue)
+			}
 			adjustStarredNavigationCount(for: article, fromStarred: article.isStarred, toStarred: value)
 		}
 
@@ -2896,4 +3933,110 @@ final class ReaderAppModel {
 		await replayPendingMutations()
 	}
 
-}
+	private func syncStarredMembership(for article: Recommendation, starred: Bool) {
+		let starredID = ReaderSection.starred.rawValue
+		guard var starredArticles = articleCache[starredID] else {
+			return
+		}
+
+		if starred {
+			if let index = starredArticles.firstIndex(where: { articlesMatch($0, article) }) {
+				starredArticles[index].isStarred = true
+			} else {
+				var copy = cachedArticle(matching: article) ?? article
+				copy.isStarred = true
+				starredArticles.append(copy)
+			}
+			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles)
+			return
+		}
+
+		let removedWasSelected = selectedArticleIDs[starredID].map { remembered in
+			remembered == article.id
+				|| remembered == article.readerId
+				|| starredArticles.contains(where: { $0.id == remembered && articlesMatch($0, article) })
+		} ?? false
+		articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		if removedWasSelected {
+			selectedArticleIDs[starredID] = nil
+			if selectedNavigationID == starredID {
+				selectedArticleID = nil
+				preferredCompactColumn = .content
+			}
+		}
+	}
+	private func syncUnreadMembership(for article: Recommendation, read: Bool) {
+		let unreadID = ReaderSection.unread.rawValue
+		guard var unreadArticles = articleCache[unreadID] else {
+			return
+		}
+
+		if read {
+			let removedWasSelected = selectedArticleIDs[unreadID].map { remembered in
+				remembered == article.id
+					|| remembered == article.readerId
+					|| unreadArticles.contains {
+						($0.id == remembered || $0.readerId == remembered) && articlesMatch($0, article)
+					}
+			} ?? false
+			let keepsOpenSelection = removedWasSelected
+				&& selectedNavigationID == unreadID
+				&& preferredCompactColumn == .detail
+			if keepsOpenSelection {
+				var detached = unreadArticles.first(where: { articlesMatch($0, article) }) ?? article
+				detached.isRead = true
+				detachedSelectedArticle = detached
+				detachedSelectedArticleOrdering = unreadArticles
+				selectedArticleID = detached.id
+				selectedArticleIDs[unreadID] = detached.id
+			}
+			articleCache[unreadID] = unreadArticles.filter { articlesMatch($0, article) == false }
+			if removedWasSelected && keepsOpenSelection == false {
+				selectedArticleIDs[unreadID] = nil
+			}
+			return
+		}
+
+		if unreadArticles.contains(where: { articlesMatch($0, article) }) {
+			for index in unreadArticles.indices where articlesMatch(unreadArticles[index], article) {
+				unreadArticles[index].isRead = false
+			}
+		} else {
+			var copy = cachedArticle(matching: article) ?? article
+			copy.isRead = false
+			unreadArticles.append(copy)
+		}
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(deduplicatedArticles(unreadArticles))
+		if let detachedSelectedArticle, articlesMatch(detachedSelectedArticle, article) {
+			clearDetachedSelectedArticle()
+		}
+	}
+
+	private func cachedArticle(matching article: Recommendation) -> Recommendation? {
+		for cachedArticles in articleCache.values {
+			if let match = cachedArticles.first(where: { articlesMatch($0, article) }) {
+				return match
+			}
+		}
+		return nil
+	}
+
+	private func updateSearchResults(
+		matching article: Recommendation,
+		update: (inout Recommendation) -> Void,
+	) {
+		guard searchResults.isEmpty == false else {
+			return
+		}
+		var updated = searchResults
+		var changed = false
+		for index in updated.indices where articlesMatch(updated[index], article) {
+			update(&updated[index])
+			changed = true
+		}
+		if changed {
+			searchResults = updated
+		}
+	}
+
+	}

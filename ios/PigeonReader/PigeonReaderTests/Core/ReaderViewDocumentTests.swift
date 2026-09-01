@@ -32,4 +32,49 @@ struct ReaderViewDocumentTests {
 			try ReaderViewDocument(contentHTML: "   ")
 		}
 	}
+
+	@Test
+	func readerViewDocumentBelongsOnlyToTheStoryThatRequestedIt() {
+		#expect(ReaderViewDocumentOwnership.shouldApply(extractedArticleID: "story-a", visibleArticleID: "story-a"))
+		#expect(ReaderViewDocumentOwnership.shouldApply(extractedArticleID: "story-a", visibleArticleID: "story-b") == false)
+	}
+
+	@Test
+	func leftoverReaderViewStateDoesNotPresentThePreviousStory() {
+		#expect(
+			ReaderViewDocumentOwnership.presentedState(
+				stored: .loaded,
+				documentArticleID: "story-a",
+				visibleArticleID: "story-b",
+			) == .loading
+		)
+		#expect(
+			ReaderViewDocumentOwnership.presentedState(
+				stored: .failed("timed out"),
+				documentArticleID: "story-a",
+				visibleArticleID: "story-b",
+			) == .loading
+		)
+		#expect(
+			ReaderViewDocumentOwnership.presentedState(
+				stored: .loaded,
+				documentArticleID: "story-b",
+				visibleArticleID: "story-b",
+			) == .loaded
+		)
+		#expect(
+			ReaderViewDocumentOwnership.presentedState(
+				stored: .loading,
+				documentArticleID: "story-a",
+				visibleArticleID: "story-b",
+			) == .loading
+		)
+		#expect(
+			ReaderViewDocumentOwnership.presentedState(
+				stored: .unavailable,
+				documentArticleID: nil,
+				visibleArticleID: "story-b",
+			) == .unavailable
+		)
+	}
 }

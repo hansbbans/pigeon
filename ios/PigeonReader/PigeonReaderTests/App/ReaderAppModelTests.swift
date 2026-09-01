@@ -36,6 +36,99 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage != nil)
 	}
 
+		@Test func activeReadingMonitorDoesNotBannerWhenEngagementServerFails() async throws {
+			let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .zero,
+				minimumActiveDuration: 0,
+				maximumIntervals: 2,
+			)
+
+			#expect(model.errorMessage == nil)
+			let requests = await mock.requests()
+			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+			#expect(requests.filter { $0.url.path == "/api/v1/engagement" }.count >= 2)
+		}
+
+		@Test func outboundClickDoesNotBannerWhenEngagementServerFails() async throws {
+			let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+
+			await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+			#expect(model.errorMessage == nil)
+			let requests = await mock.requests()
+			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+		}
+
+		@Test func activeReadingMonitorDoesNotBannerWhenTheNetworkDrops() async throws {
+			let mock = MockHTTPClient(shouldFail: true)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .zero,
+				minimumActiveDuration: 0,
+				maximumIntervals: 1,
+			)
+
+			#expect(model.errorMessage == nil)
+		}
+
+		@Test func outboundClickDoesNotBannerWhenTheNetworkDrops() async throws {
+			let mock = MockHTTPClient(shouldFail: true)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+
+			await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+			#expect(model.errorMessage == nil)
+		}
+
+		@Test func scrollDepthAnalyticsDoNotBannerWhenEngagementServerFails() async throws {
+			let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+
+			await model.monitorActiveReading(
+				for: article.id,
+				interval: .zero,
+				minimumActiveDuration: 0,
+				maximumIntervals: 0,
+			)
+			let send = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.3))
+			await send.value
+
+			#expect(model.errorMessage == nil)
+			let requests = await mock.requests()
+			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+		}
+
+		@Test func outboundClickDoesNotReplaceALibraryErrorBanner() async throws {
+			let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
+			let model = try makeModel(httpClient: mock)
+			let article = makeArticle(id: "item-1", isRead: true)
+			model.articles = [article]
+			model.errorMessage = "Could not load stories"
+
+			await model.recordOutboundClick(itemId: article.id, destinationHost: "example.com")
+
+			#expect(model.errorMessage == "Could not load stories")
+			let requests = await mock.requests()
+			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
+		}
+
 	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
@@ -351,6 +444,81 @@ struct ReaderAppModelTests {
 		#expect(model.selectedCollection.id == forYou.id)
 	}
 
+	@Test func cleanupKeepsTheOpenArticleBodyWhenTheCachedCopyIsPruned() async throws {
+		let session = try makeSession(token: "keep-open-body")
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = session.storageIdentity
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 0,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let newer = makeArticle(
+			id: "newer-read",
+			isRead: true,
+			receivedAt: 400,
+			feedKey: "alpha",
+			html: "<p>Newer newsletter.</p>",
+		)
+		let older = makeArticle(
+			id: "older-read",
+			isRead: true,
+			receivedAt: 100,
+			feedKey: "alpha",
+			html: "<p>Keep reading this newsletter.</p>",
+		)
+		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
+		try await store.saveArticles([newer, older], collectionID: feed.id, accountID: accountID)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: feed.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: ReaderRestoredCompactColumn.content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+		model.select(item: feed)
+		model.select(article: older)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.selectedArticle?.html.contains("Keep reading this newsletter") == true)
+
+		// Settings → Free space / incremental sync prune older read bodies on disk,
+		// then reload the snapshot. The open story must keep the HTML already in memory.
+		_ = try await store.cleanupReadBodies(accountID: accountID, keepingNewest: 1)
+		let pruned = try #require(
+			try await store.loadSnapshot(accountID: accountID)
+				.articlesByCollection[feed.id]?
+				.first(where: { $0.id == older.id })
+		)
+		#expect(pruned.html.isEmpty)
+
+		_ = await model.cleanupOfflineBodies()
+
+		#expect(model.selectedArticleID == older.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.selectedArticle?.html.contains("Keep reading this newsletter") == true)
+		#expect(model.allArticles(for: feed).first(where: { $0.id == older.id })?.html.contains("Keep reading this newsletter") == true)
+	}
+
 	@Test func snapshotApplyKeepsTheSelectedCollectionWhenItsNavigationRowIsMissing() async throws {
 		let session = try makeSession(token: "keep-selected-collection")
 		let store = OfflineLibraryStore.inMemory()
@@ -470,6 +638,59 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == "first")
 	}
 
+	@Test func articleShortcutsContinueAfterTheOpenStoryIsMarkedReadInTheUnreadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.unread)
+		let first = makeArticle(id: "first", receivedAt: 1)
+		let middle = makeArticle(id: "middle", receivedAt: 2)
+		let last = makeArticle(id: "last", receivedAt: 3)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([first, middle, last], for: collection)
+		model.select(item: collection)
+		model.setArticleFilter(.unread, for: collection)
+		model.select(article: first)
+
+		await model.recordExplicitOpen(for: first)
+
+		#expect(model.articles(for: collection).map(\.id) == [middle.id, last.id])
+		#expect(model.selectedArticleID == first.id)
+		#expect(model.canNavigateArticle(.next))
+		#expect(model.navigateArticle(.next)?.id == middle.id)
+		#expect(model.selectedArticleID == middle.id)
+
+		await model.setRead(middle, read: true)
+
+		#expect(model.articles(for: collection).map(\.id) == [last.id])
+		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.selectedArticleID == last.id)
+		#expect(model.navigateArticle(.previous) == nil)
+	}
+
+	@Test func articleShortcutsSkipAStoryHiddenByTheReadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.today)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let first = makeArticle(id: "first", isRead: true, receivedDate: day.addingTimeInterval(1))
+		let middle = makeArticle(id: "middle", isRead: true, receivedDate: day.addingTimeInterval(2))
+		let last = makeArticle(id: "last", isRead: true, receivedDate: day.addingTimeInterval(3))
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([first, middle, last], for: collection)
+		model.select(item: collection)
+		model.setArticleFilter(.read, for: collection)
+		model.select(article: middle)
+
+		await model.setRead(middle, read: false)
+
+		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
+		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.previous)?.id == first.id)
+	}
+
 	@Test func articleShortcutsFollowVisibleLibrarySearchResultsAcrossCollections() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
@@ -497,6 +718,317 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == other.id)
 	}
 
+		@Test func searchResultsHonorTheCurrentReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let unreadHit = makeArticle(id: "unread-hit", isRead: false, receivedAt: 1)
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([unreadHit, readHit], for: collection)
+		try await store.saveArticles([unreadHit, readHit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		#expect(model.articleFilter == .unread)
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [unreadHit.id, readHit.id])
+		#expect(model.displayedSearchResults.map(\.id) == [unreadHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+
+		model.articleFilter = .read
+		#expect(model.displayedSearchResults.map(\.id) == [readHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+
+		model.articleFilter = .all
+		#expect(model.displayedSearchResults.map(\.id) == [unreadHit.id, readHit.id])
+		#expect(model.isSearchFilterEmpty == false)
+	}
+
+	@Test func searchFilterEmptyWhenEveryHitIsHiddenByTheReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let readHit = makeArticle(id: "read-only-hit", isRead: true)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([readHit], for: collection)
+		try await store.saveArticles([readHit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+		model.articleFilter = .unread
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [readHit.id])
+		#expect(model.displayedSearchResults.isEmpty)
+		#expect(model.isSearchFilterEmpty)
+	}
+
+	@Test func articleShortcutsSkipSearchHitsHiddenByTheReadFilter() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let firstUnread = makeArticle(id: "first-unread", isRead: false, receivedAt: 1)
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedAt: 2)
+		let nextUnread = makeArticle(id: "next-unread", isRead: false, receivedAt: 3)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([firstUnread, readHit, nextUnread], for: collection)
+		try await store.saveArticles(
+			[firstUnread, readHit, nextUnread],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.select(item: collection)
+		model.articleFilter = .unread
+		model.select(article: firstUnread)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.displayedSearchResults.map(\.id) == [firstUnread.id, nextUnread.id])
+		#expect(model.navigateArticle(.next)?.id == nextUnread.id)
+		#expect(model.selectedArticleID == nextUnread.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.selectedArticleID == nextUnread.id)
+	}
+
+	@Test func articleShortcutsKeepCrossLibrarySearchOrderAfterTheMiddleStoryIsMarkedRead() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let openCollection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let previous = makeArticle(id: "search-previous", receivedAt: 1)
+		let middle = makeArticle(id: "search-middle", receivedAt: 2)
+		let next = makeArticle(id: "search-next", receivedAt: 3)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [openCollection, otherCollection]))
+		model.setSortOrder(.oldest, for: openCollection)
+		model.setArticles([middle], for: openCollection)
+		model.setArticles([previous, next], for: otherCollection)
+		try await store.saveArticles([middle], collectionID: openCollection.id, accountID: accountID)
+		try await store.saveArticles([previous, next], collectionID: otherCollection.id, accountID: accountID)
+		model.select(item: openCollection)
+		model.setArticleFilter(.unread, for: openCollection)
+		model.select(article: middle)
+
+		await model.searchArticles(query: "Story", scope: .library, in: openCollection)
+		#expect(model.searchResults.map(\.id) == [previous.id, middle.id, next.id])
+
+		await model.setRead(middle, read: true)
+
+		#expect(model.displayedSearchResults.map(\.id) == [previous.id, next.id])
+		#expect(model.navigateArticle(.previous, from: middle)?.id == previous.id)
+		#expect(model.navigateArticle(.next, from: middle)?.id == next.id)
+	}
+
+	@Test func changingSortReordersActiveSearchResultsAndArticleShortcuts() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let olderHigh = makeArticle(id: "older-high", score: 90, receivedDate: day.addingTimeInterval(1))
+		let newerLow = makeArticle(id: "newer-low", score: 10, receivedDate: day.addingTimeInterval(2))
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([newerLow, olderHigh], for: collection)
+		try await store.saveArticles([olderHigh, newerLow], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [olderHigh.id, newerLow.id])
+		#expect(model.articles(for: collection).map(\.id) == [olderHigh.id, newerLow.id])
+
+		model.setSortOrder(.newest, for: collection)
+
+		#expect(model.searchResults.map(\.id) == [newerLow.id, olderHigh.id])
+		#expect(model.articles(for: collection).map(\.id) == [newerLow.id, olderHigh.id])
+
+		model.select(article: newerLow)
+		#expect(model.navigateArticle(.next)?.id == olderHigh.id)
+		#expect(model.navigateArticle(.next) == nil)
+		#expect(model.navigateArticle(.previous)?.id == newerLow.id)
+
+		model.setSortOrder(.score, for: collection)
+		#expect(model.searchResults.map(\.id) == [olderHigh.id, newerLow.id])
+		model.select(article: olderHigh)
+		#expect(model.navigateArticle(.next)?.id == newerLow.id)
+	}
+
+	@Test func changingSortOnAnotherCollectionLeavesSearchOrderAlone() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let older = makeArticle(id: "older", receivedAt: 1)
+		let newer = makeArticle(id: "newer", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setSortOrder(.oldest, for: otherCollection)
+		model.setArticles([older, newer], for: collection)
+		model.setArticles([newer], for: otherCollection)
+		try await store.saveArticles([older, newer], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [older.id, newer.id])
+
+		model.setSortOrder(.newest, for: otherCollection)
+
+		#expect(model.searchResults.map(\.id) == [older.id, newer.id])
+		#expect(model.sortOrder(for: collection) == .oldest)
+	}
+
+	@Test func markingReadDuringSearchUpdatesTheVisibleSearchRow() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let hit = makeArticle(id: "search-hit", isRead: false)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit], for: collection)
+		try await store.saveArticles([hit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		#expect(model.searchResults.first?.isRead == false)
+
+		let mutation = Task { await model.setRead(hit, read: true) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.first?.isRead == true)
+		#expect(model.allArticles(for: collection).isEmpty)
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
+	@Test func starringDuringSearchUpdatesTheVisibleSearchRow() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today)
+		let hit = makeArticle(id: "star-hit")
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit], for: collection)
+		try await store.saveArticles([hit], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.first?.isStarred == false)
+
+		let star = Task { await model.setStarred(hit, starred: true) }
+		let starRequest = await controlled.nextRequest()
+		#expect(model.searchResults.first?.isStarred == true)
+		await controlled.resolve(starRequest)
+		await star.value
+
+		let starredHit = try #require(model.searchResults.first)
+		let unstar = Task { await model.setStarred(starredHit, starred: false) }
+		let unstarRequest = await controlled.nextRequest()
+		#expect(model.searchResults.first?.isStarred == false)
+		await controlled.resolve(unstarRequest)
+		await unstar.value
+	}
+
+	@Test func markingReadDuringLibrarySearchUpdatesHitsMissingFromTheOpenList() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let otherCollection = ReaderNavigationItem.smart(.unread)
+		let openStory = makeArticle(id: "open-story", receivedAt: 1)
+		let otherStory = makeArticle(id: "other-story", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection, otherCollection]))
+		model.setSortOrder(.oldest, for: collection)
+		model.setArticles([openStory], for: collection)
+		model.setArticles([otherStory], for: otherCollection)
+		try await store.saveArticles([openStory], collectionID: collection.id, accountID: accountID)
+		try await store.saveArticles([otherStory], collectionID: otherCollection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .library, in: collection)
+		#expect(model.searchResults.map(\.id) == [openStory.id, otherStory.id])
+
+		let mutation = Task { await model.setRead(otherStory, read: true) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.first { $0.id == otherStory.id }?.isRead == true)
+		#expect(model.allArticles(for: otherCollection).isEmpty)
+		#expect(model.searchResults.first { $0.id == openStory.id }?.isRead == false)
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
+	@Test func markAllAsReadDuringSearchUpdatesMatchingHits() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.unread)
+		let first = makeArticle(id: "first-hit", receivedAt: 1)
+		let second = makeArticle(id: "second-hit", receivedAt: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([first, second], for: collection)
+		try await store.saveArticles([first, second], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(model.searchResults.allSatisfy { $0.isRead == false })
+
+		let mutation = Task { await model.markAllStoriesAsRead(in: collection) }
+		let request = await controlled.nextRequest()
+
+		#expect(model.searchResults.map(\.isRead) == [true, true])
+
+		await controlled.resolve(request)
+		await mutation.value
+	}
+
+		@Test func returningFromACompactArticleKeepsTheActiveLibrarySearch() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let hit = makeArticle(id: "search-hit")
+		let other = makeArticle(id: "other-story")
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([hit, other], for: collection)
+		try await store.saveArticles([hit, other], collectionID: collection.id, accountID: accountID)
+		model.select(item: collection)
+		await model.searchArticles(query: "search-hit", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		model.select(article: hit)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.searchResults.map(\.id) == [hit.id])
+		model.showFeedColumn()
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.searchResults.map(\.id) == [hit.id])
+	}
+
 	@Test func notInterestedRemovesAndClearsForYouSelectionButKeepsUnread() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let article = makeArticle(id: "shared")
@@ -511,6 +1043,404 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: .unread).map(\.id) == [article.id])
 		#expect(model.selectedArticleID == nil)
 		#expect(model.preferredCompactColumn == .content)
+	}
+
+	@Test func markingUnreadInsertsIntoLoadedUnreadCacheInNewestOrder() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let older = makeArticle(id: "already-unread", receivedDate: dayStart.addingTimeInterval(60))
+		let article = makeArticle(id: "from-feed", isRead: true, receivedDate: dayStart.addingTimeInterval(120))
+		model.setArticles([older], for: .unread)
+		model.setArticles([article], for: .today)
+
+		await model.setRead(article, read: false)
+
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		#expect(model.articles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+	}
+
+	@Test func markingUnreadOnEmptyLoadedUnreadShowsTheStory() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "from-feed", isRead: true, receivedDate: dayStart.addingTimeInterval(60))
+		model.setArticles([], for: .unread)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+
+		await model.setRead(article, read: false)
+		model.select(section: .unread)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed"])
+		#expect(model.articles(for: .unread).map(\.id) == ["from-feed"])
+	}
+
+	@Test func markingUnreadDoesNotCreateUnreadCacheBeforeThatCollectionLoads() async throws {
+		let mock = PaginationHTTPClient(streamID: "user/-/state/com.google/reading-list")
+		let model = try makeModel(httpClient: mock)
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "from-feed", isRead: true, receivedDate: dayStart.addingTimeInterval(60))
+		model.setArticles([article], for: .today)
+
+		await model.setRead(article, read: false)
+		await model.load(section: .unread)
+
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["newest", "middle"])
+	}
+
+	@Test func markingUnreadFromAnotherListKeepsThatListSelected() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", isRead: true, receivedDate: dayStart.addingTimeInterval(60))
+		model.setArticles([], for: .unread)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.setRead(article, read: false)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["shared"])
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func markingReadRemovesUnreadAliasesPersistsSelectionAndRestoresOneRowOnUnread() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+		let store = OfflineLibraryStore.inMemory()
+		let session = try makeSession(token: "unread-identity")
+		let model = try makeModel(
+			httpClient: MockHTTPClient(statusCode: 500),
+			session: session,
+			offlineStore: store,
+		)
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let canonical = makeArticle(
+			id: "canonical",
+			readerId: "reader-canonical",
+			receivedDate: dayStart.addingTimeInterval(120),
+		)
+		let alias = makeArticle(
+			id: "greader-copy",
+			readerId: canonical.id,
+			receivedDate: dayStart.addingTimeInterval(60),
+		)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [unread, today]))
+		model.setArticles([canonical, alias], for: unread)
+		model.setArticles([canonical], for: today)
+		model.select(section: .unread)
+		model.select(article: canonical)
+		#expect(model.selectedArticleID == canonical.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await model.setRead(canonical, read: true)
+
+		#expect(model.allArticles(for: .unread).isEmpty)
+		#expect(model.selectedArticleID == canonical.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.preferredCompactColumn == .detail)
+		let readSnapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect((readSnapshot.articlesByCollection[unread.id] ?? []).isEmpty)
+
+		await model.setRead(canonical, read: false)
+		await model.setRead(canonical, read: false)
+
+		#expect(model.allArticles(for: .unread).map(\.id) == [canonical.id])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		let unreadSnapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect(unreadSnapshot.articlesByCollection[unread.id]?.map(\.id) == [canonical.id])
+		#expect(unreadSnapshot.articlesByCollection[unread.id]?.allSatisfy { $0.isRead == false } == true)
+	}
+
+	@Test func widgetSnapshotDeduplicatesRecommendationAliasesAcrossRecentForYouAndUnreadFallback() throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let canonical = makeArticle(
+			id: "canonical",
+			isStarred: true,
+			readerId: "reader-canonical",
+			receivedDate: dayStart.addingTimeInterval(120),
+		)
+		let alias = makeArticle(
+			id: "greader-copy",
+			isStarred: true,
+			readerId: canonical.id,
+			receivedDate: dayStart.addingTimeInterval(60),
+		)
+		model.setNavigation(ReaderNavigationState(items: [
+			ReaderNavigationItem.smart(.today),
+			ReaderNavigationItem.smart(.forYou),
+		]))
+		model.setArticles([canonical, alias], for: .today)
+		model.setArticles([canonical, alias], for: .forYou)
+		model.setArticles([canonical, alias], for: .starred)
+
+		let snapshot = model.makeWidgetSnapshot()
+
+		#expect(snapshot.recent.map(\.id) == [canonical.id])
+		#expect(snapshot.forYou.map(\.id) == [canonical.id])
+		#expect(snapshot.unreadCount == 1)
+		#expect(snapshot.starredCount == 1)
+	}
+
+	@Test func undoingMarkAllOnTodayInsertsMissingStoriesIntoLoadedUnread() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let alreadyUnread = makeArticle(id: "already-unread", receivedDate: dayStart.addingTimeInterval(60))
+		let fromToday = makeArticle(id: "from-today", receivedDate: dayStart.addingTimeInterval(120))
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [
+			ReaderNavigationItem.smart(.unread, unreadCount: 1),
+			today,
+		]))
+		model.setArticles([alreadyUnread], for: .unread)
+		model.setArticles([fromToday], for: today)
+		model.select(item: today)
+
+		await model.markAllStoriesAsRead(in: today)
+		#expect(model.allArticles(for: .unread).map(\.id) == ["already-unread"])
+		#expect(model.allArticles(for: .unread).first?.isRead == false)
+		#expect(model.allArticles(for: today).first?.isRead == true)
+
+		await model.undoLastBulkRead()
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-today", "already-unread"])
+		#expect(model.allArticles(for: .unread).allSatisfy { $0.isRead == false })
+		#expect(model.allArticles(for: today).first?.isRead == false)
+	}
+
+	@Test func failedMarkUnreadKeepsUnreadMembershipQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let dayStart = ReaderLocalDayBounds.localDay(containing: .now).start
+		let existing = makeArticle(id: "already-unread", receivedDate: dayStart.addingTimeInterval(60))
+		let article = makeArticle(id: "from-feed", isRead: true, receivedDate: dayStart.addingTimeInterval(120))
+		model.setArticles([existing], for: .unread)
+		model.setArticles([article], for: .today)
+
+		let mutation = Task { await model.setRead(article, read: false) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .unread).map(\.id) == ["from-feed", "already-unread"])
+		#expect(model.allArticles(for: .today).first?.isRead == false)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline == false)
+	}
+
+	@Test func starringInsertsIntoLoadedStarredCacheInNewestOrder() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let older = makeArticle(id: "already-starred", isStarred: true, receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", receivedAt: 1_786_272_100)
+		model.setArticles([older], for: .starred)
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+		#expect(model.allArticles(for: .starred).allSatisfy { $0.isStarred })
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+	}
+
+	@Test func starringAnEmptyLoadedStarredCollectionShowsTheNewStory() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([], for: .starred)
+		model.setArticles([article], for: .forYou)
+		model.select(section: .forYou)
+
+		await model.setStarred(article, starred: true)
+		model.select(section: .starred)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed"])
+		#expect(model.articles(for: .starred).map(\.id) == ["from-feed"])
+	}
+
+	@Test func starringDoesNotCreateStarredCacheBeforeThatCollectionLoads() async throws {
+		let mock = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
+		let model = try makeModel(httpClient: mock)
+		let article = makeArticle(id: "from-feed")
+		model.setArticles([article], for: .forYou)
+
+		await model.setStarred(article, starred: true)
+		await model.load(section: .starred)
+
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.allArticles(for: .starred).map(\.id) == ["newest", "middle"])
+	}
+
+	@Test func unstarringRemovesTheStoryFromStarredAndClosesItIfOpen() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let kept = makeArticle(id: "kept", isStarred: true)
+		let removed = makeArticle(id: "removed", isStarred: true)
+		model.setArticles([kept, removed], for: .starred)
+		model.setArticles([removed], for: .forYou)
+		model.select(section: .starred)
+		model.select(article: removed)
+
+		await model.setStarred(removed, starred: false)
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["kept"])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+	}
+
+	@Test func unstarringFromAnotherListDropsTheLoadedStarredRow() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", isStarred: true, receivedDate: day.addingTimeInterval(60))
+		model.setArticles([article], for: .starred)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.setStarred(article, starred: false)
+
+		#expect(model.allArticles(for: .starred).isEmpty)
+		#expect(model.allArticles(for: .today).first?.isStarred == false)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedFromTodayDropsTheStoryFromALoadedForYouCache() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", receivedDate: day.addingTimeInterval(60))
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.forYou, unreadCount: 1),
+				.smart(.today, unreadCount: 1),
+			])
+		)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		await model.recordPreference(.notInterested, for: article)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 0)
+		let accountID = try #require(model.session?.storageIdentity)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[ReaderSection.forYou.rawValue] ?? []).isEmpty)
+	}
+
+	@Test func failedStarKeepsStarredMembershipQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let existing = makeArticle(id: "already-starred", isStarred: true, receivedAt: 1_786_272_000)
+		let article = makeArticle(id: "from-feed", receivedAt: 1_786_272_100)
+		model.setArticles([existing], for: .starred)
+		model.setArticles([article], for: .forYou)
+
+		let mutation = Task { await model.setStarred(article, starred: true) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .starred).map(\.id) == ["from-feed", "already-starred"])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.isOffline == false)
+	}
+
+	@Test func notInterestedFromAFeedDropsForYouStoryWithADifferentItemID() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readerId = "tag:google.com,2005:reader/item/0000000000000001"
+		let forYouArticle = makeArticle(id: "item-uuid", readerId: readerId)
+		let feedArticle = makeArticle(id: readerId, feedKey: "feed/7", readerId: readerId)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.forYou, unreadCount: 1),
+				feed,
+			])
+		)
+		model.setArticles([forYouArticle], for: .forYou)
+		model.setArticles([feedArticle], for: feed)
+		model.select(item: feed)
+		model.select(article: feedArticle)
+
+		await model.recordPreference(.notInterested, for: feedArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: feed).map(\.id) == [feedArticle.id])
+		#expect(model.selectedArticleID == feedArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func notInterestedDoesNotCreateForYouCacheBeforeThatCollectionLoads() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let session = try makeSession(token: "not-interested-no-foryou-cache")
+		let persistedForYou = makeArticle(id: "cached-for-you")
+		let todayArticle = makeArticle(id: "from-today")
+		try await store.saveArticles(
+			[persistedForYou],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(), session: session, offlineStore: store)
+		model.setArticles([todayArticle], for: .today)
+		model.select(section: .today)
+
+		await model.recordPreference(.notInterested, for: todayArticle)
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let snapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == [persistedForYou.id])
+	}
+
+	@Test func failedNotInterestedFromTodayKeepsForYouRemovalQueued() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let article = makeArticle(id: "shared", receivedDate: day.addingTimeInterval(60))
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .today)
+		model.select(article: article)
+
+		let mutation = Task { await model.recordPreference(.notInterested, for: article) }
+		let request = await controlled.nextRequest()
+		#expect(model.allArticles(for: .forYou).isEmpty)
+
+		await controlled.resolve(request, statusCode: 500)
+		await mutation.value
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.articles(for: .today).map(\.id) == [article.id])
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.preferredCompactColumn == .detail)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
 	@Test func offlineReadStaysOptimisticAndQueuedWhenRequestFails() async throws {
@@ -786,6 +1716,24 @@ struct ReaderAppModelTests {
 		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
 	}
 
+	@Test func successfulFeedRefreshClearsAStaleLoadErrorBanner() async throws {
+		let client = FailThenSucceedSyncHTTPClient(failingSyncAttempt: 2)
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
+
+		await fixture.model.prepareOfflineLibrary()
+		#expect(fixture.model.errorMessage == nil)
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+
+		await fixture.model.refresh(collection: fixture.collection)
+		#expect(fixture.model.errorMessage == "Sync failed")
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+
+		await fixture.model.refresh(collection: fixture.collection)
+		#expect(fixture.model.errorMessage == nil)
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+		#expect(await client.syncAttempts() == 3)
+	}
+
 	@Test func cachedFeedRestoresContinuationAndLoadsMoreAfterSyncOnlyPreparation() async throws {
 		let client = PaginationHTTPClient(streamID: "feed/7")
 		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
@@ -916,6 +1864,218 @@ struct ReaderAppModelTests {
 		await load.value
 
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		model.select(section: .forYou)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.select(section: .today)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func reselectingFailedCollectionKeepsLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		model.select(section: .forYou)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.select(section: .forYou)
+		model.clearArticleSearch()
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+	}
+
+	@Test func startingSearchClearsStaleLoadErrorBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.select(item: collection)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		await load.value
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func clearingFailedSearchClearsErrorBanner() async throws {
+		let store = ScriptedSearchOfflineLibraryStore()
+		await store.failNextSearch(with: URLError(.notConnectedToInternet))
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.select(item: collection)
+
+		await model.searchArticles(query: "Story", scope: .collection, in: collection)
+
+		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+
+		model.clearArticleSearch()
+
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func starredListPaginatesOnExplicitLoadMoreInsteadOfTheRecommendationCap() async throws {
+		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
+		let model = try makeModel(httpClient: httpClient)
+		let collection = ReaderNavigationItem.smart(.starred)
+
+		await model.load(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
+		#expect(model.canLoadMore(collection: collection))
+		let initialRequests = await httpClient.requests()
+		#expect(initialRequests.contains(where: { $0.path == "/api/v1/recommendations" }) == false)
+		let initialIDRequests = initialRequests.filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(initialIDRequests.map { $0.query["s"] } == ["user/-/state/com.google/starred"])
+		#expect(initialIDRequests.allSatisfy { $0.query["xt"] == nil })
+
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let laterIDRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(laterIDRequests.map { $0.query["c"] } == [nil, "page-2"])
+	}
+
+	@Test func unreadListPaginatesAndExcludesReadStories() async throws {
+		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/reading-list")
+		let model = try makeModel(httpClient: httpClient)
+		let collection = ReaderNavigationItem.smart(.unread)
+
+		await model.load(collection: collection)
+		await model.loadMore(collection: collection)
+
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
+		let idRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(idRequests.map { $0.query["s"] } == [
+			"user/-/state/com.google/reading-list",
+			"user/-/state/com.google/reading-list",
+		])
+		#expect(idRequests.allSatisfy { $0.query["xt"] == "user/-/state/com.google/read" })
+		#expect(await httpClient.requests().contains(where: { $0.path == "/api/v1/recommendations" }) == false)
+	}
+
+	@Test func staleFeedLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadStaleFeeds()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func personalizationLoadFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+
+		await model.loadPersonalization()
+
+		#expect(model.settingsErrorMessage == URLError(.notConnectedToInternet).localizedDescription)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func invalidAddFeedURLStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+
+		let added = await model.addFeed(urlText: "not-a-url", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage == "Enter a complete HTTP or HTTPS feed URL.")
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func addFeedAPIFailureStaysOffTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500),
+		)
+
+		let added = await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+
+		#expect(added == false)
+		#expect(model.settingsErrorMessage != nil)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func successfulAddFeedWithFailedLibraryRefreshStaysOffTheReaderBanner() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let quickAddData = try JSONEncoder().encode(
+			QuickAddResponse(
+				query: "https://example.com/feed.xml",
+				numResults: 1,
+				streamId: "feed/1",
+				streamName: "Example",
+			),
+		)
+		model.setNavigation(
+			ReaderNavigationState(items: [.smart(.forYou)]),
+			markAsLoaded: true,
+		)
+		let addTask = Task {
+			await model.addFeed(urlText: "https://example.com/feed.xml", folderName: nil)
+		}
+
+		let quickAdd = await controlled.nextRequest()
+		#expect(quickAdd.request.url?.path == "/reader/api/0/subscription/quickadd")
+		await controlled.resolve(quickAdd, data: quickAddData)
+
+		let refresh = await controlled.nextRequest()
+		#expect(refresh.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(refresh, data: Data("temporary failure".utf8), statusCode: 503)
+		// Let every concurrent request start before failing one. Otherwise the
+		// failed request can cancel a sibling before it reaches the HTTP client.
+		var navigationRefreshes: [ControlledHTTPClient.PendingRequest] = []
+		for _ in 0..<4 {
+			navigationRefreshes.append(await controlled.nextRequest())
+		}
+		for navigationRefresh in navigationRefreshes {
+			await controlled.resolve(
+				navigationRefresh,
+				data: Data("temporary failure".utf8),
+				statusCode: 503,
+			)
+		}
+
+		#expect(await addTask.value)
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func dismissingSettingsClearsTheSettingsErrorWithoutTouchingTheReaderBanner() async throws {
+		let model = try makeModel(
+			httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)),
+		)
+		model.errorMessage = "Feed failed to load"
+
+		await model.loadStaleFeeds()
+		#expect(model.settingsErrorMessage != nil)
+
+		model.clearSettingsError()
+
+		#expect(model.settingsErrorMessage == nil)
+		#expect(model.errorMessage == "Feed failed to load")
 	}
 
 	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
@@ -1193,9 +2353,10 @@ struct ReaderAppModelTests {
 	@Test(arguments: ReaderSection.allCases)
 	func everySectionSortsByNewestOrScoreWithoutLosingSelection(section: ReaderSection) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
-		let olderHighScore = makeArticle(id: "older-high", receivedAt: 1_786_100_000, score: 90)
-		let newerHighScore = makeArticle(id: "newer-high", receivedAt: 1_786_200_000, score: 90)
-		let newestLowScore = makeArticle(id: "newest-low", receivedAt: 1_786_300_000, score: 10)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let olderHighScore = makeArticle(id: "older-high", score: 90, receivedDate: day.addingTimeInterval(1_000))
+		let newerHighScore = makeArticle(id: "newer-high", score: 90, receivedDate: day.addingTimeInterval(2_000))
+		let newestLowScore = makeArticle(id: "newest-low", score: 10, receivedDate: day.addingTimeInterval(3_000))
 		model.setArticles([olderHighScore, newestLowScore, newerHighScore], for: section)
 		model.select(section: section)
 		model.select(article: newerHighScore)
@@ -1282,7 +2443,11 @@ struct ReaderAppModelTests {
 	func articleFilterDistinguishesFilteredAndGenuinelyEmptyCollections(filter: ReaderArticleFilter) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let filteredCollection = ReaderNavigationItem.smart(.today)
-		let article = makeArticle(id: "opposite-state", isRead: filter == .unread)
+		let article = makeArticle(
+			id: "opposite-state",
+			isRead: filter == .unread,
+			receivedDate: ReaderLocalDayBounds.localDay(containing: .now).start.addingTimeInterval(3_600),
+		)
 		model.setArticles([article], for: filteredCollection)
 		model.setArticleFilter(filter, for: filteredCollection)
 
@@ -1322,6 +2487,44 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).map(\.id) == [unread.id, read.id])
 	}
 
+	@Test func articleFilterDefaultsToUnreadExceptStarredWhichDefaultsToAll() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let state = try makeNavigationState(unreadCount: 1)
+		model.setNavigation(state)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		let forYou = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(model.smartNavigationItems.first(where: { $0.smartSection == .starred }))
+
+		#expect(model.articleFilter == .unread)
+		#expect(model.articleFilter(for: forYou) == .unread)
+		#expect(model.articleFilter(for: folder) == .unread)
+		#expect(model.articleFilter(for: feed) == .unread)
+		#expect(model.articleFilter(for: starred) == .all)
+		#expect(model.articleFilter(for: .starred) == .all)
+
+		model.select(section: .starred)
+		#expect(model.articleFilter == .all)
+	}
+
+	@Test func openingAStarredStoryKeepsItVisibleAfterItIsMarkedRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let unreadStarred = makeArticle(id: "keep-me", isRead: false, receivedAt: 1_786_272_200)
+		let alreadyReadStarred = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_100)
+		model.setArticles([unreadStarred, alreadyReadStarred], for: .starred)
+		model.select(section: .starred)
+		model.select(article: unreadStarred)
+
+		#expect(model.articleFilter == .all)
+		#expect(model.articles(for: .starred).map(\.id) == [unreadStarred.id, alreadyReadStarred.id])
+
+		await model.recordExplicitOpen(for: unreadStarred)
+
+		#expect(model.allArticles(for: .starred).first(where: { $0.id == unreadStarred.id })?.isRead == true)
+		#expect(model.articles(for: .starred).map(\.id) == [unreadStarred.id, alreadyReadStarred.id])
+		#expect(model.selectedArticleID == unreadStarred.id)
+	}
+
 	@Test func articleFilterDefaultsToUnreadAndStaysPerCollection() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let state = try makeNavigationState(unreadCount: 1)
@@ -1358,6 +2561,7 @@ struct ReaderAppModelTests {
 		let folder = try #require(firstModel.folderNavigationItems.first)
 		let feed = try #require(firstModel.feedNavigationItems(in: folder).first)
 		let forYou = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let starred = try #require(firstModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		firstModel.select(item: feed)
 		firstModel.articleFilter = .all
@@ -1370,12 +2574,15 @@ struct ReaderAppModelTests {
 		#expect(defaults.string(forKey: sessionKeyPrefix + feed.id) == "unread")
 		#expect(defaults.string(forKey: sessionKeyPrefix + folder.id) == "read")
 		#expect(defaults.string(forKey: sessionKeyPrefix + forYou.id) == nil)
+		#expect(defaults.string(forKey: sessionKeyPrefix + starred.id) == nil)
+		#expect(firstModel.articleFilter(for: starred) == .all)
 
 		let restoredModel = try makeModel(httpClient: MockHTTPClient(), articleFilterStore: ReaderArticleFilterStore(defaults: defaults))
 		restoredModel.setNavigation(state)
 		let restoredFolder = try #require(restoredModel.folderNavigationItems.first)
 		let restoredFeed = try #require(restoredModel.feedNavigationItems(in: restoredFolder).first)
 		let restoredForYou = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .forYou }))
+		let restoredStarred = try #require(restoredModel.smartNavigationItems.first(where: { $0.smartSection == .starred }))
 
 		restoredModel.select(item: restoredFeed)
 		#expect(restoredModel.articleFilter == .unread)
@@ -1383,9 +2590,12 @@ struct ReaderAppModelTests {
 		#expect(restoredModel.articleFilter == .read)
 		restoredModel.select(item: restoredForYou)
 		#expect(restoredModel.articleFilter == .unread)
+		restoredModel.select(item: restoredStarred)
+		#expect(restoredModel.articleFilter == .all)
 		#expect(restoredModel.articleFilter(for: restoredFeed) == .unread)
 		#expect(restoredModel.articleFilter(for: restoredFolder) == .read)
 		#expect(restoredModel.articleFilter(for: restoredForYou) == .unread)
+		#expect(restoredModel.articleFilter(for: restoredStarred) == .all)
 	}
 
 	@Test func articleFilterRestoresAfterDisconnectAndReconnectToSameIdentity() async throws {
@@ -1495,11 +2705,74 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
 
 		model.readerTypography.markReadBehavior = .onScroll
-		model.recordScrollDepth(itemId: article.id, depth: 0.59)
+		let belowThreshold = model.recordScrollDepth(itemId: article.id, depth: 0.59)
+		await belowThreshold?.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		let threshold = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.6))
+		await threshold.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test func scrollThresholdReadWorksAgainAfterMarkUnread() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "scroll-unread")
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		let firstThreshold = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.6))
+		await firstThreshold.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		let readArticle = try #require(model.allArticles(for: .forYou).first)
+		await model.setRead(readArticle, read: false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		let secondThreshold = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.61))
+		await secondThreshold.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test func scrollingAnAlreadyReadStoryDoesNotBlockLaterScrollRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "already-read", isRead: true)
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		let alreadyRead = model.recordScrollDepth(itemId: article.id, depth: 0.8)
+		await alreadyRead?.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		let readArticle = try #require(model.allArticles(for: .forYou).first)
+		await model.setRead(readArticle, read: false)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		let threshold = try #require(model.recordScrollDepth(itemId: article.id, depth: 0.8))
+		await threshold.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test func afterSixtyPercentReadTreatsAFullyVisibleStoryAsRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "fits-on-screen")
+		model.setArticles([article], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+
+		model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
+			offset: 0,
+			maximumOffset: 0,
+			contentHeight: 360,
+			isBodyLaidOut: false,
+		))
 		await Task.yield()
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
-		model.recordScrollDepth(itemId: article.id, depth: 0.6)
-		try await Task.sleep(for: .milliseconds(100))
+
+		let readTask = model.recordScrollDepth(itemId: article.id, depth: ArticleReadingProgress.depth(
+			offset: 0,
+			maximumOffset: 0,
+			contentHeight: 360,
+			isBodyLaidOut: true,
+		))
+		await readTask?.value
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
 
@@ -1527,6 +2800,60 @@ struct ReaderAppModelTests {
 		#expect(pending.last?.mutation.value == false)
 	}
 
+	@Test func bulkReadUndoStaysOnTheCollectionThatMarkedStoriesRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		let first = makeArticle(id: "first")
+		let second = makeArticle(id: "second")
+		var starredStory = makeArticle(id: "starred")
+		starredStory.isStarred = true
+		model.setNavigation(ReaderNavigationState(items: [forYou, starred]))
+		model.setArticles([first, second], for: forYou)
+		model.setArticles([starredStory], for: starred)
+
+		await model.markAllStoriesAsRead(in: forYou)
+
+		#expect(model.canUndoBulkRead)
+		#expect(model.canUndoBulkRead(in: forYou))
+		#expect(model.canUndoBulkRead(in: starred) == false)
+		#expect(model.bulkReadUndoTitle == "Mark All as Read")
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead })
+		#expect(model.allArticles(for: starred).first?.isRead == false)
+
+		await model.undoLastBulkRead()
+		#expect(model.canUndoBulkRead == false)
+		#expect(model.canUndoBulkRead(in: forYou) == false)
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead == false })
+	}
+
+	@Test func laterBulkReadMovesUndoToTheNewCollection() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let forYouStory = makeArticle(id: "for-you")
+		let unreadStory = makeArticle(id: "unread")
+		model.setNavigation(ReaderNavigationState(items: [forYou, unread]))
+		model.setArticles([forYouStory], for: forYou)
+		model.setArticles([unreadStory], for: unread)
+
+		await model.markAllStoriesAsRead(in: forYou)
+		#expect(model.canUndoBulkRead(in: forYou))
+		#expect(model.canUndoBulkRead(in: unread) == false)
+
+		await model.markAllStoriesAsRead(in: unread)
+		#expect(model.canUndoBulkRead(in: forYou) == false)
+		#expect(model.canUndoBulkRead(in: unread))
+		#expect(model.bulkReadUndoTitle == "Mark All as Read")
+		#expect(model.allArticles(for: forYou).first?.isRead == true)
+		#expect(model.allArticles(for: unread).isEmpty)
+
+		await model.undoLastBulkRead()
+		#expect(model.canUndoBulkRead == false)
+		#expect(model.allArticles(for: forYou).first?.isRead == true)
+		#expect(model.allArticles(for: unread).first?.isRead == false)
+	}
+
 	@Test func filteredBulkReadMovesAboveAndBelowStoriesOutOfTheUnreadProjection() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)
@@ -1551,6 +2878,94 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.id == boundary.id)
 	}
 
+	@Test func markAboveInReadFilterDoesNotMarkHiddenUnreadStories() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let hiddenUnreadAbove = makeArticle(id: "hidden-unread-above", receivedAt: 400)
+		let visibleReadAbove = makeArticle(id: "visible-read-above", isRead: true, receivedAt: 300)
+		let boundary = makeArticle(id: "boundary", isRead: true, receivedAt: 200)
+		let hiddenUnreadBelow = makeArticle(id: "hidden-unread-below", receivedAt: 100)
+		model.setArticles([hiddenUnreadAbove, visibleReadAbove, boundary, hiddenUnreadBelow], for: collection)
+		model.articleFilter = .read
+		model.select(article: boundary)
+
+		#expect(model.articles(for: collection).map(\.id) == [visibleReadAbove.id, boundary.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleReadAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func markBelowInReadFilterDoesNotMarkHiddenUnreadStories() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+
+		let hiddenUnreadAbove = makeArticle(id: "hidden-unread-above", receivedAt: 400)
+		let boundary = makeArticle(id: "boundary", isRead: true, receivedAt: 300)
+		let visibleReadBelow = makeArticle(id: "visible-read-below", isRead: true, receivedAt: 200)
+		let hiddenUnreadBelow = makeArticle(id: "hidden-unread-below", receivedAt: 100)
+		model.setArticles([hiddenUnreadAbove, boundary, visibleReadBelow, hiddenUnreadBelow], for: collection)
+		model.articleFilter = .read
+		model.select(article: boundary)
+
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id, visibleReadBelow.id])
+
+		await model.markStoriesBelowAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleReadBelow.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnreadBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func markAboveDuringSearchDoesNotMarkStoriesOutsideSearchResults() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 3)
+		let matchingAbove = makeArticle(id: "match-above", receivedAt: 400)
+		let hiddenAbove = makeArticle(id: "other-above", receivedAt: 350)
+		let boundary = makeArticle(id: "match-boundary", receivedAt: 300)
+		let accountID = try #require(model.session?.storageIdentity)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.articleFilter = .all
+		model.setArticles([matchingAbove, hiddenAbove, boundary], for: collection)
+		try await store.saveArticles(
+			[matchingAbove, hiddenAbove, boundary],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+
+		await model.searchArticles(query: "match", scope: .collection, in: collection)
+		#expect(model.displayedSearchResults.map(\.id) == [matchingAbove.id, boundary.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == matchingAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [matchingAbove.readerId])
+	}
+
 	@Test func markAllQueuesBoundedBatchAndUpdatesEveryLoadedUnreadStory() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -1569,6 +2984,499 @@ struct ReaderAppModelTests {
 		#expect(envelope.mutations.count == 1)
 		#expect(envelope.mutations.first?.scope == .all)
 		#expect(Set(envelope.mutations.first?.itemIds ?? []) == Set([unreadOne.readerId, unreadTwo.readerId]))
+	}
+
+		@Test func markAllDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(1), title: "Newsletter unread")
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedDate: day.addingTimeInterval(2), title: "Newsletter read")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleRead], for: collection)
+		try await store.saveArticles([hiddenUnread, visibleRead], collectionID: collection.id, accountID: accountID)
+		model.articleFilter = .read
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.displayedSearchResults.map(\.id) == [visibleRead.id])
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+		@Test func markAllDuringCollectionSearchMarksVisibleHitsNotHiddenNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 3)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleOne = makeArticle(id: "visible-one", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let visibleTwo = makeArticle(id: "visible-two", receivedDate: day.addingTimeInterval(200), title: "Newsletter evening")
+		let alreadyReadHit = makeArticle(id: "already-read-hit", isRead: true, receivedDate: day.addingTimeInterval(100), title: "Newsletter recap")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([visibleOne, hiddenNeighbor, visibleTwo, alreadyReadHit], for: collection)
+		try await store.saveArticles(
+			[visibleOne, hiddenNeighbor, visibleTwo, alreadyReadHit],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [visibleOne.id, visibleTwo.id, alreadyReadHit.id])
+		#expect(model.canMarkAllStoriesAsRead(in: collection))
+
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleOne.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNeighbor.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleTwo.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyReadHit.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([visibleOne.readerId, visibleTwo.readerId]))
+	}
+
+		@Test func canMarkAllDuringSearchIgnoresHiddenUnreadNeighbors() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let readHit = makeArticle(id: "read-hit", isRead: true, receivedDate: day.addingTimeInterval(200), title: "Newsletter morning")
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(100), title: "Weather brief")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([readHit, hiddenUnread], for: collection)
+		try await store.saveArticles([readHit, hiddenUnread], collectionID: collection.id, accountID: accountID)
+
+		#expect(model.canMarkAllStoriesAsRead(in: collection))
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [readHit.id])
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+		}
+
+		@Test func markAllDuringLibrarySearchMarksHitsMissingFromTheOpenList() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let todayUnrelated = makeArticle(id: "today-unrelated", receivedDate: day.addingTimeInterval(400), title: "Weather brief")
+		let libraryHit = makeArticle(id: "library-hit", receivedDate: day.addingTimeInterval(300), title: "Newsletter extra")
+		let todayHit = makeArticle(id: "today-hit", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+
+		model.setNavigation(ReaderNavigationState(items: [today, unread]))
+		model.select(item: today)
+		model.setSortOrder(.newest, for: today)
+		model.setArticles([todayUnrelated, todayHit], for: today)
+		model.setArticles([libraryHit], for: unread)
+		try await store.saveArticles([todayUnrelated, todayHit], collectionID: today.id, accountID: accountID)
+		try await store.saveArticles([libraryHit], collectionID: unread.id, accountID: accountID)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .library, in: today)
+		#expect(model.searchResults.map(\.id) == [libraryHit.id, todayHit.id])
+		#expect(model.canMarkAllStoriesAsRead(in: today))
+
+		await model.markAllStoriesAsRead(in: today)
+
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryHit.id }) == false)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayHit.id })?.isRead == true)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelated.id })?.isRead == false)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([libraryHit.readerId, todayHit.readerId]))
+		}
+
+		@Test func markAllAfterClearingSearchUsesTheCollectionCacheAgain() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleHit = makeArticle(id: "visible-hit", receivedDate: day.addingTimeInterval(200), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(100), title: "Weather brief")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([visibleHit, hiddenNeighbor], for: collection)
+		try await store.saveArticles([visibleHit, hiddenNeighbor], collectionID: collection.id, accountID: accountID)
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [visibleHit.id])
+		model.clearArticleSearch()
+		#expect(model.canMarkAllStoriesAsRead(in: collection))
+
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([visibleHit.readerId, hiddenNeighbor.readerId]))
+		}
+
+		@Test func todayHidesYesterdayStoriesAfterLocalMidnight() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(3_600))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+
+		#expect(model.articles(for: .today).map(\.id) == [today.id])
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.allArticles(for: .unread).map(\.id) == [today.id, yesterday.id])
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveArticles([yesterday, today], collectionID: ReaderSection.today.rawValue, accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: ReaderSection.unread.rawValue, accountID: accountID)
+
+		await model.handleLocalDayChange()
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+		#expect(model.allArticles(for: .unread).map(\.id) == [today.id, yesterday.id])
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id).contains(yesterday.id) == true)
+	}
+
+	@Test func todayKeepsSameDayStoriesWhenTheLocalDayHasNotChanged() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem]))
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let morning = makeArticle(id: "morning", receivedDate: bounds.start.addingTimeInterval(60))
+		let evening = makeArticle(id: "evening", receivedDate: bounds.end.addingTimeInterval(-60))
+		model.setArticles([morning, evening], for: .today)
+
+		#expect(await model.handleLocalDayChange() == false)
+		#expect(model.allArticles(for: .today).map(\.id) == [evening.id, morning.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 2)
+	}
+
+	@Test func todayPruneKeepsAnOpenYesterdayReaderWithoutPersistingItInToday() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+		model.select(item: todayItem)
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "open-yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(60))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+		model.select(article: yesterday)
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: unreadItem.id, accountID: accountID)
+
+		#expect(await model.handleLocalDayChange())
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.selectedArticle?.id == yesterday.id)
+		#expect(model.preferredCompactColumn == .detail)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[todayItem.id]?.map(\.id) == [today.id])
+	}
+
+	@Test func markAllOnTodayAfterMidnightLeavesYesterdayUnreadInOtherLists() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem, unreadItem]))
+		model.select(item: todayItem)
+
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-120))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(1_200))
+		model.setArticles([yesterday, today], for: .today)
+		model.setArticles([yesterday, today], for: .unread)
+
+		await model.markAllStoriesAsRead(in: todayItem)
+
+		#expect(model.allArticles(for: .today).first(where: { $0.id == today.id })?.isRead == true)
+		#expect(model.allArticles(for: .unread).first(where: { $0.id == yesterday.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [today.readerId])
+	}
+
+	@Test func loadingTodayDropsYesterdayRowsFromAStaleCache() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		await model.prepareOfflineLibrary()
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [todayItem]))
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-30))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(90))
+		model.setArticles([yesterday, today], for: .today)
+
+		await model.load(section: .today)
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+	}
+
+	@Test func restoringACachedLibraryDropsYesterdayFromToday() async throws {
+		let session = try makeSession(token: "today-midnight-snapshot")
+		let store = OfflineLibraryStore.inMemory()
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-90))
+		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(180))
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .today).map(\.id) == [today.id])
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
+		}
+
+	@Test func restoringAnEmptyTodayCacheDropsAnUntrustedContinuation() async throws {
+		let session = try makeSession(token: "today-empty-continuation")
+		let store = OfflineLibraryStore.inMemory()
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 0)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveCollectionContinuation(
+			"old-day-next",
+			collectionID: todayItem.id,
+			accountID: accountID,
+		)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: todayItem).isEmpty)
+		#expect(model.canLoadMore(collection: todayItem) == false)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.continuationsByCollection[todayItem.id] == nil)
+	}
+
+	@Test func incrementalSnapshotCannotResurrectAnOldTodayContinuationAfterInitialPrune() async throws {
+		let session = try makeSession(token: "today-two-stage-continuation")
+		let store = OfflineLibraryStore.inMemory()
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let yesterday = makeArticle(id: "two-stage-yesterday", receivedDate: bounds.start.addingTimeInterval(-60))
+		let today = makeArticle(id: "two-stage-today", receivedDate: bounds.start.addingTimeInterval(60))
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-day-next", collectionID: todayItem.id, accountID: accountID)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
+		let syncPage = Data(
+			"""
+			{
+			  "cursor": "after-status",
+			  "hasMore": false,
+			  "changes": [{
+			    "sequence": 1,
+			    "entityType": "status",
+			    "entityId": "\(today.id)",
+			    "operation": "upsert",
+			    "changedAt": "2026-08-15T12:00:00.000Z",
+			    "payload": {
+			      "itemId": "\(today.id)",
+			      "isRead": true,
+			      "isStarred": false
+			    }
+			  }]
+			}
+			""".utf8,
+		)
+		let client = TodayReconciliationHTTPClient(changedPage: syncPage)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.syncAttempts() == 1)
+		#expect(model.allArticles(for: todayItem).map(\.id) == [today.id])
+		#expect(model.canLoadMore(collection: todayItem) == false)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[todayItem.id]?.map(\.id) == [today.id])
+		#expect(snapshot.continuationsByCollection[todayItem.id] == nil)
+
+		// The first live page must establish a fresh token before load-more uses it;
+		// the old persisted token must never be sent for today's request.
+		await model.load(collection: todayItem)
+		await model.loadMore(collection: todayItem)
+		#expect(model.allArticles(for: todayItem).contains(where: { $0.id == "today-page-2" }))
+		#expect(await client.todayPageContinuations() == [nil, "today-page-2"])
+	}
+
+	@Test func markAllWithReadFilterLeavesHiddenUnreadNeighborsUnread() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedAt: 1_786_272_300)
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedAt: 1_786_272_200)
+		let hiddenOlderUnread = makeArticle(id: "hidden-older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleRead, hiddenOlderUnread], for: collection)
+		model.articleFilter = .read
+
+		#expect(model.articles(for: collection).map(\.id) == [visibleRead.id])
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenOlderUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleRead.id })?.isRead == true)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markOlderThanWithReadFilterLeavesHiddenUnreadNeighborsUnread() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let hiddenNewerUnread = makeArticle(id: "hidden-newer-unread", receivedAt: 1_786_272_300)
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedAt: 1_786_272_200)
+		let hiddenOlderUnread = makeArticle(id: "hidden-older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([hiddenNewerUnread, visibleRead, hiddenOlderUnread], for: collection)
+		model.articleFilter = .read
+
+		#expect(model.articles(for: collection).map(\.id) == [visibleRead.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNewerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenOlderUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleRead.id })?.isRead == true)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markAllWithUnreadFilterMarksOnlyTheVisibleUnreadRows() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let unreadOne = makeArticle(id: "unread-one", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_200)
+		let unreadTwo = makeArticle(id: "unread-two", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([unreadOne, alreadyRead, unreadTwo], for: collection)
+		model.articleFilter = .unread
+
+		#expect(model.canMarkAllStoriesAsRead(in: collection))
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == unreadOne.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == unreadTwo.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([unreadOne.readerId, unreadTwo.readerId]))
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+	}
+
+	@Test func markAllWithAllFilterStillMarksEveryLoadedUnreadStory() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let unreadOne = makeArticle(id: "unread-one", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_200)
+		let unreadTwo = makeArticle(id: "unread-two", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([unreadOne, alreadyRead, unreadTwo], for: collection)
+		model.articleFilter = .all
+
+		#expect(model.canMarkAllStoriesAsRead(in: collection))
+		await model.markAllStoriesAsRead(in: collection)
+
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([unreadOne.readerId, unreadTwo.readerId]))
+	}
+
+	@Test func markOlderThanWithUnreadFilterMarksOnlyVisibleOlderUnreadRows() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerUnread = makeArticle(id: "newer-unread", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_050)
+		let olderUnread = makeArticle(id: "older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerUnread, alreadyRead, olderUnread], for: collection)
+		model.articleFilter = .unread
+
+		#expect(model.articles(for: collection).map(\.id) == [newerUnread.id, olderUnread.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderUnread.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderUnread.readerId]))
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+	}
+
+	@Test func markOlderThanWithAllFilterStillMarksEveryLoadedOlderUnreadStory() async throws {
+		let mock = MockHTTPClient()
+		let model = try makeModel(httpClient: mock)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerUnread = makeArticle(id: "newer-unread", receivedAt: 1_786_272_300)
+		let alreadyRead = makeArticle(id: "already-read", isRead: true, receivedAt: 1_786_272_050)
+		let olderUnread = makeArticle(id: "older-unread", receivedAt: 1_786_272_100)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerUnread, alreadyRead, olderUnread], for: collection)
+		model.articleFilter = .all
+
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerUnread.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderUnread.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderUnread.readerId]))
 	}
 
 	@Test func filteredBulkReadStaysQueuedAndOptimisticWhenOffline() async throws {
@@ -1597,6 +3505,320 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticle?.id == boundary.id)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
+
+	@Test func markOlderThanDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedAt: 1_786_272_100, title: "Newsletter unread")
+		let visibleRead = makeArticle(id: "visible-read", isRead: true, receivedAt: 1_786_272_050, title: "Newsletter read")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleRead], for: collection)
+		try await store.saveArticles([hiddenUnread, visibleRead], collectionID: collection.id, accountID: accountID)
+		model.articleFilter = .read
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.displayedSearchResults.map(\.id) == [visibleRead.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markOlderThanDuringCollectionSearchMarksVisibleHitsNotHiddenNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let olderVisible = makeArticle(
+			id: "older-visible",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+		let newerVisible = makeArticle(
+			id: "newer-visible",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter evening",
+		)
+		let olderReadHit = makeArticle(
+			id: "older-read-hit",
+			isRead: true,
+			receivedAt: 1_786_272_000,
+			title: "Newsletter recap",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([newerVisible, olderVisible, olderHidden, olderReadHit], for: collection)
+		try await store.saveArticles(
+			[newerVisible, olderVisible, olderHidden, olderReadHit],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [newerVisible.id, olderVisible.id, olderReadHit.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderVisible.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderHidden.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == newerVisible.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == olderReadHit.id })?.isRead == true)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderVisible.readerId]))
+	}
+
+	@Test func canMarkOlderThanDuringSearchIgnoresHiddenOlderNeighbors() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let newerHit = makeArticle(
+			id: "newer-hit",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_100,
+			title: "Weather brief",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([newerHit, olderHidden], for: collection)
+		try await store.saveArticles([newerHit, olderHidden], collectionID: collection.id, accountID: accountID)
+
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [newerHit.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection) == false)
+	}
+
+	@Test func markOlderThanDuringLibrarySearchMarksHitsMissingFromTheOpenList() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let forYouUnrelatedOlder = makeArticle(
+			id: "for-you-unrelated-older",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+		let libraryHitOlder = makeArticle(
+			id: "library-hit-older",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter extra",
+		)
+		let forYouHitNewer = makeArticle(
+			id: "for-you-hit-newer",
+			receivedAt: 1_786_272_200,
+			title: "Newsletter noon",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [forYou, unread]))
+		model.select(item: forYou)
+		model.setSortOrder(.newest, for: forYou)
+		model.setArticles([forYouUnrelatedOlder, forYouHitNewer], for: forYou)
+		model.setArticles([libraryHitOlder], for: unread)
+		try await store.saveArticles([forYouUnrelatedOlder, forYouHitNewer], collectionID: forYou.id, accountID: accountID)
+		try await store.saveArticles([libraryHitOlder], collectionID: unread.id, accountID: accountID)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .library, in: forYou)
+		#expect(model.searchResults.map(\.id) == [forYouHitNewer.id, libraryHitOlder.id])
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: forYou))
+
+		await model.markStoriesOlderThan(cutoff, in: forYou)
+
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryHitOlder.id }) == false)
+		#expect(model.allArticles(for: forYou).first(where: { $0.id == forYouHitNewer.id })?.isRead == false)
+		#expect(model.allArticles(for: forYou).first(where: { $0.id == forYouUnrelatedOlder.id })?.isRead == false)
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([libraryHitOlder.readerId]))
+	}
+
+	@Test func markOlderThanAfterClearingSearchUsesTheCollectionCacheAgain() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let accountID = try #require(model.session?.storageIdentity)
+		let cutoff = Date(timeIntervalSince1970: 1_786_272_150)
+		let olderVisible = makeArticle(
+			id: "older-visible",
+			receivedAt: 1_786_272_100,
+			title: "Newsletter morning",
+		)
+		let olderHidden = makeArticle(
+			id: "older-hidden",
+			receivedAt: 1_786_272_050,
+			title: "Weather brief",
+		)
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([olderVisible, olderHidden], for: collection)
+		try await store.saveArticles([olderVisible, olderHidden], collectionID: collection.id, accountID: accountID)
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+		#expect(model.searchResults.map(\.id) == [olderVisible.id])
+		model.clearArticleSearch()
+		#expect(model.canMarkStoriesOlderThan(cutoff, in: collection))
+
+		await model.markStoriesOlderThan(cutoff, in: collection)
+
+		#expect(model.allArticles(for: collection).allSatisfy { $0.isRead })
+		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([olderVisible.readerId, olderHidden.readerId]))
+	}
+
+		@Test func widgetSnapshotCountsAllStarredStoriesNotOnlyTheUnreadBadge() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 4)
+		let starred = ReaderNavigationItem.smart(.starred, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [unread, starred]))
+
+		var unreadStarred = makeArticle(id: "unread-starred")
+		unreadStarred.isStarred = true
+		var readStarred = makeArticle(id: "read-starred", isRead: true)
+		readStarred.isStarred = true
+		let unreadPlain = makeArticle(id: "unread-plain")
+		model.setArticles([unreadStarred, readStarred], for: .starred)
+		model.setArticles([unreadStarred, unreadPlain], for: .unread)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.unreadCount == 4)
+		#expect(snapshot.starredCount == 2)
+		#expect(model.navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount == 1)
+	}
+
+	@Test func widgetSnapshotUsesTheStarredUnreadBadgeBeforeAnyStarredRowsAreCached() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 6),
+				.smart(.starred, unreadCount: 3),
+			]),
+		)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.unreadCount == 6)
+		#expect(snapshot.starredCount == 3)
+	}
+
+	@Test func widgetSnapshotUsesTheStarredUnreadBadgeWhenTheCachedPageIsEmpty() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 6),
+				.smart(.starred, unreadCount: 3),
+			]),
+		)
+		model.setArticles([], for: .starred)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.starredCount == 3)
+	}
+
+	@Test func widgetStarredCountDoesNotTreatAPartialPageAsTheTotal() {
+		#expect(
+			WidgetStarredCountResolver.resolve(
+				cachedCount: 30,
+				knownStarredCount: 30,
+				unreadBadge: 40,
+				previousTotal: nil,
+				hasMore: true,
+			) == 40,
+		)
+	}
+
+	@Test func widgetStarredCountRetainsReadStoriesBeyondThePartialPage() {
+		#expect(
+			WidgetStarredCountResolver.resolve(
+				cachedCount: 2,
+				knownStarredCount: 2,
+				unreadBadge: 1,
+				previousTotal: 4,
+				hasMore: true,
+			) == 4,
+		)
+	}
+
+	@Test func widgetSnapshotCountsReadStarredStoriesFromOtherListsWhenStarredIsUnloaded() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(
+			ReaderNavigationState(items: [
+				.smart(.unread, unreadCount: 1),
+				.smart(.starred, unreadCount: 0),
+				.smart(.today, unreadCount: 0),
+			]),
+		)
+
+		var readStarred = makeArticle(id: "saved-and-read", isRead: true)
+		readStarred.isStarred = true
+		model.setArticles([readStarred], for: .today)
+
+		let snapshot = model.writeWidgetSnapshot()
+
+		#expect(snapshot.starredCount == 1)
+	}
+
+		@Test func clearOfflineArticlesRefreshesStaleWidgetRows() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+
+		let session = try makeSession(token: "clear-offline-widgets")
+		let store = OfflineLibraryStore.inMemory()
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let recent = makeArticle(id: "widget-recent", receivedAt: 1_786_272_200)
+		let recommended = makeArticle(id: "widget-for-you", receivedAt: 1_786_272_100)
+		try await store.saveNavigation(ReaderNavigationState(items: [forYou]), accountID: session.storageIdentity)
+		try await store.saveArticles([recommended], collectionID: forYou.id, accountID: session.storageIdentity)
+
+		let model = try makeModel(httpClient: MockHTTPClient(), session: session, offlineStore: store)
+		model.setArticles([recent], for: .unread)
+		model.setArticles([recommended], for: .forYou)
+		model.select(article: recommended)
+		model.writeWidgetSnapshot()
+
+		let before = PigeonWidgetSnapshot.load()
+		#expect(before.recent.map(\.id).contains("widget-recent"))
+		#expect(before.forYou.map(\.id) == ["widget-for-you"])
+		#expect(model.selectedArticleID == recommended.id)
+		#expect(model.preferredCompactColumn == .detail)
+
+		await model.clearOfflineArticles()
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.allArticles(for: .unread).isEmpty)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.preferredCompactColumn == .content)
+		let after = PigeonWidgetSnapshot.load()
+		#expect(after.recent.isEmpty)
+		#expect(after.forYou.isEmpty)
+		}
 
 	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewInternalOnly() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
@@ -1642,6 +3864,140 @@ struct ReaderAppModelTests {
 		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Read uncategorized feed", "Unread uncategorized feed"])
 	}
 
+	@Test func markAboveDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let hiddenUnread = makeArticle(id: "hidden-unread", receivedDate: day.addingTimeInterval(300), title: "Newsletter unread")
+		let visibleReadBoundary = makeArticle(id: "read-boundary", isRead: true, receivedDate: day.addingTimeInterval(200), title: "Newsletter read")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setArticles([hiddenUnread, visibleReadBoundary], for: collection)
+		try await store.saveArticles([hiddenUnread, visibleReadBoundary], collectionID: collection.id, accountID: accountID)
+		model.articleFilter = .read
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [hiddenUnread.id, visibleReadBoundary.id])
+		#expect(model.displayedSearchResults.map(\.id) == [visibleReadBoundary.id])
+		await model.markStoriesAboveAsRead(visibleReadBoundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenUnread.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()).isEmpty)
+	}
+
+	@Test func markAboveDuringSearchUsesVisibleHitsNotCollectionNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleAbove = makeArticle(id: "visible-above", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedDate: day.addingTimeInterval(100), title: "Newsletter evening")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([visibleAbove, hiddenNeighbor, boundary, visibleBelow], for: collection)
+		try await store.saveArticles(
+			[visibleAbove, hiddenNeighbor, boundary, visibleBelow],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+		model.select(article: boundary)
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [visibleAbove.id, boundary.id, visibleBelow.id])
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNeighbor.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleBelow.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [visibleAbove.readerId])
+		#expect(model.selectedArticleID == boundary.id)
+	}
+
+	@Test func markBelowDuringSearchUsesVisibleHitsNotCollectionNeighbors() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.today, unreadCount: 4)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let visibleAbove = makeArticle(id: "visible-above", receivedDate: day.addingTimeInterval(400), title: "Newsletter morning")
+		let hiddenNeighbor = makeArticle(id: "hidden-neighbor", receivedDate: day.addingTimeInterval(300), title: "Weather brief")
+		let boundary = makeArticle(id: "boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+		let visibleBelow = makeArticle(id: "visible-below", receivedDate: day.addingTimeInterval(100), title: "Newsletter evening")
+
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
+		model.setArticles([visibleAbove, hiddenNeighbor, boundary, visibleBelow], for: collection)
+		try await store.saveArticles(
+			[visibleAbove, hiddenNeighbor, boundary, visibleBelow],
+			collectionID: collection.id,
+			accountID: accountID,
+		)
+		model.articleFilter = .all
+
+		await model.searchArticles(query: "Newsletter", scope: .collection, in: collection)
+
+		#expect(model.searchResults.map(\.id) == [visibleAbove.id, boundary.id, visibleBelow.id])
+
+		await model.markStoriesBelowAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleAbove.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == hiddenNeighbor.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == visibleBelow.id })?.isRead == true)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [visibleBelow.readerId])
+	}
+
+	@Test func markAboveDuringLibrarySearchIncludesHitsMissingFromTheOpenList() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 1)
+		let accountID = try #require(model.session?.storageIdentity)
+		let day = ReaderLocalDayBounds.localDay(containing: .now).start
+		let todayUnrelated = makeArticle(id: "today-unrelated", receivedDate: day.addingTimeInterval(400), title: "Weather brief")
+		let libraryAbove = makeArticle(id: "library-above", receivedDate: day.addingTimeInterval(300), title: "Newsletter extra")
+		let todayBoundary = makeArticle(id: "today-boundary", receivedDate: day.addingTimeInterval(200), title: "Newsletter noon")
+
+		model.setNavigation(ReaderNavigationState(items: [today, unread]))
+		model.select(item: today)
+		model.setSortOrder(.newest, for: today)
+		model.setArticles([todayUnrelated, todayBoundary], for: today)
+		model.setArticles([libraryAbove], for: unread)
+		try await store.saveArticles([todayUnrelated, todayBoundary], collectionID: today.id, accountID: accountID)
+		try await store.saveArticles([libraryAbove], collectionID: unread.id, accountID: accountID)
+		model.articleFilter = .all
+		model.select(article: todayBoundary)
+
+		await model.searchArticles(query: "Newsletter", scope: .library, in: today)
+
+		#expect(model.searchResults.map(\.id) == [libraryAbove.id, todayBoundary.id])
+
+		await model.markStoriesAboveAsRead(todayBoundary, in: today)
+
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryAbove.id }) == false)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelated.id })?.isRead == false)
+		#expect(model.allArticles(for: today).first(where: { $0.id == todayBoundary.id })?.isRead == false)
+		#expect(editTagReaderIDs(from: await mock.requests()) == [libraryAbove.readerId])
+		#expect(model.selectedArticleID == todayBoundary.id)
+	}
+
 	@Test func markAboveUsesStrictBoundaryAndNewestDisplayedOrder() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -1661,9 +4017,9 @@ struct ReaderAppModelTests {
 
 		await model.markStoriesAboveAsRead(boundary, in: collection)
 
-		#expect(model.articles(for: collection).map(\.id) == [alreadyRead.id, unreadAbove.id, boundary.id, below.id])
+		#expect(model.articles(for: collection).map(\.id) == [alreadyRead.id, boundary.id, below.id])
 		#expect(model.articles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
-		#expect(model.articles(for: collection).first(where: { $0.id == unreadAbove.id })?.isRead == true)
+		#expect(model.articles(for: collection).contains(where: { $0.id == unreadAbove.id }) == false)
 		#expect(model.articles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
 		#expect(model.articles(for: collection).first(where: { $0.id == below.id })?.isRead == false)
 		#expect(editTagReaderIDs(from: await mock.requests()) == [unreadAbove.readerId])
@@ -1731,7 +4087,11 @@ struct ReaderAppModelTests {
 
 		#expect(editTagReaderIDs(from: await mock.requests()) == [target.readerId])
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == target.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == target.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == target.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 			#expect(model.allArticles(for: item).first(where: { $0.id == alreadyRead.id })?.isRead == true)
 		}
@@ -1767,8 +4127,12 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
-			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == first.id || $0.id == second.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+				#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 
@@ -1782,8 +4146,12 @@ struct ReaderAppModelTests {
 		await mutation.value
 
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
-			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == first.id || $0.id == second.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+				#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
@@ -1791,6 +4159,173 @@ struct ReaderAppModelTests {
 		#expect(model.preferredCompactColumn == .detail)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 		#expect(model.isOffline == false)
+	}
+
+	@Test func renamingAFeedUpdatesTheSidebarImmediatelyAndPersists() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		model.setSubscriptions([subscription])
+		model.setNavigation(try makeUncategorizedFeedNavigation(subscription: subscription, unreadCount: 2))
+		model.select(item: try #require(model.navigation.item(withID: subscription.id)))
+
+		#expect(await model.renameFeed(subscription, to: "Morning Brief"))
+		#expect(model.navigation.item(withID: subscription.id)?.title == "Morning Brief")
+		#expect(model.selectedCollection.title == "Morning Brief")
+		#expect(model.selectedCollection.id == subscription.id)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.title == "Morning Brief")
+		#expect(snapshot.navigation?.item(withID: subscription.id)?.title == "Morning Brief")
+	}
+
+	@Test func unsubscribingAFeedRemovesItFromTheSidebarAndPersists() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let daily = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		let weekly = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		model.setSubscriptions([daily, weekly])
+		model.setNavigation(try makeUncategorizedFeedNavigation(subscriptions: [daily, weekly], unreadCount: 1))
+		model.select(section: .forYou)
+
+		#expect(await model.unsubscribe(daily))
+		#expect(model.subscriptions.map(\.id) == ["feed/2"])
+		#expect(model.navigation.item(withID: daily.id) == nil)
+		#expect(model.navigation.item(withID: weekly.id)?.title == "Weekly")
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.map(\.id) == ["feed/2"])
+		#expect(snapshot.navigation?.item(withID: daily.id) == nil)
+		#expect(snapshot.navigation?.item(withID: weekly.id)?.title == "Weekly")
+	}
+
+	@Test func unsubscribingTheOpenFeedLeavesASmartViewInsteadOfAGhost() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let feedID = "feed/1::user/-/label/Design"
+		model.setSubscriptions([subscription])
+		model.setNavigation(try makeFolderFeedNavigation(subscription: subscription, unreadCount: 3))
+		let feed = try #require(model.navigation.item(withID: feedID))
+		model.setArticles([makeArticle(id: "open-feed-article", feedKey: "daily")], for: feed)
+		model.select(item: feed)
+		model.select(article: try #require(model.allArticles(for: feed).first))
+
+		#expect(await model.unsubscribe(subscription))
+		#expect(model.navigation.item(withID: feedID) == nil)
+		#expect(model.navigation.item(withID: "user/-/label/Design") == nil)
+		#expect(model.navigation.item(withID: subscription.id) == nil)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.selectedArticleID == nil)
+		#expect(model.allArticles(for: feed).isEmpty)
+	}
+
+	@Test func unsubscribingAFeedClearsStoredChildrenAndContinuationsWithoutTouchingAnotherFeed() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let removed = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let retained = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		installSubscriptions([removed, retained], on: model)
+		let removedChildID = "feed/1::user/-/label/Design"
+		let removedFolderID = "user/-/label/Design"
+		let retainedID = retained.id
+		let removedArticle = makeArticle(id: "removed-story", feedKey: "daily")
+		let retainedArticle = makeArticle(id: "retained-story", feedKey: "weekly")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedChildID, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedFolderID, accountID: accountID)
+		try await store.saveArticles([retainedArticle], collectionID: retainedID, accountID: accountID)
+		try await store.saveCollectionContinuation("removed-next", collectionID: removedChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("removed-folder-next", collectionID: removedFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("retained-next", collectionID: retainedID, accountID: accountID)
+
+		#expect(await model.unsubscribe(removed))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[removedFolderID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+		#expect(snapshot.continuationsByCollection[removedFolderID] == nil)
+		#expect(snapshot.articlesByCollection[retainedID]?.map(\.id) == [retainedArticle.id])
+		#expect(snapshot.continuationsByCollection[retainedID] == "retained-next")
+
+		// Re-adding the same subscription must not resurrect its old collection rows.
+		try await store.saveSubscriptions([removed, retained], accountID: accountID)
+		installSubscriptions([removed, retained], on: model)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		let restoredSnapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((restoredSnapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect(restoredSnapshot.continuationsByCollection[removedChildID] == nil)
+	}
+
+	@Test func staleFeedUnsubscribeUsesTheSameOfflineCleanupAndUndoRestoresNavigationLocally() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let removed = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let retained = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: nil)
+		installSubscriptions([removed, retained], on: model)
+		let removedChildID = "feed/1::user/-/label/Design"
+		let removedFolderID = "user/-/label/Design"
+		let removedArticle = makeArticle(id: "stale-removed", feedKey: "daily")
+		let retainedArticle = makeArticle(id: "stale-retained", feedKey: "weekly")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedChildID, accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: removedFolderID, accountID: accountID)
+		try await store.saveArticles([retainedArticle], collectionID: retained.id, accountID: accountID)
+		try await store.saveCollectionContinuation("stale-next", collectionID: removedChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("stale-folder-next", collectionID: removedFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("retained-next", collectionID: retained.id, accountID: accountID)
+
+		let stale = StaleFeed(
+			feedKey: removed.feedKey,
+			streamId: removed.id,
+			title: removed.title,
+			sourceType: "rss",
+			sourceURL: nil,
+			siteURL: nil,
+			lastArticleAt: nil,
+			lastSuccessAt: nil,
+			httpStatus: nil,
+			archived: false,
+		)
+		#expect(await model.unsubscribeStaleFeeds([stale]))
+
+		var snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[removedFolderID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+		#expect(snapshot.continuationsByCollection[removedFolderID] == nil)
+		#expect(snapshot.articlesByCollection[retained.id]?.map(\.id) == [retainedArticle.id])
+		#expect(snapshot.continuationsByCollection[retained.id] == "retained-next")
+
+		await model.undoStaleFeedAction()
+
+		#expect(model.navigation.item(withID: removedChildID) != nil)
+		snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: removedChildID) != nil)
+		#expect(snapshot.subscriptions.contains(where: { $0.id == removed.id }))
+		#expect((snapshot.articlesByCollection[removedChildID] ?? []).isEmpty)
+		#expect(snapshot.continuationsByCollection[removedChildID] == nil)
+	}
+
+	@Test func emptyFeedRenameIsRejectedBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		model.setSubscriptions([subscription])
+
+		#expect(await model.renameFeed(subscription, to: "   ") == false)
+		#expect(model.errorMessage == "Feed names must be between 1 and 200 characters.")
+		#expect(model.subscriptions.first?.title == "Daily")
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
 	}
 
 	@Test func offlineFeedRenameStaysVisibleAndQueuedWhenRequestFails() async throws {
@@ -1892,6 +4427,555 @@ struct ReaderAppModelTests {
 		#expect(pending.isEmpty)
 	}
 
+	@Test func folderRenameRebuildsSidebarAndKeepsTheOpenFolder() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let article = makeArticle(id: "design-story")
+		model.select(item: folder)
+		model.setArticles([article], for: folder)
+		model.setArticleFilter(.all, for: folder)
+		model.toggleFolder(folder)
+
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let request = await controlled.nextRequest()
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations[0].kind == .moveFeed)
+		#expect(envelope.mutations[0].folders == ["Studio"])
+		#expect(model.subscriptions.first?.folderNames == ["Studio"])
+		#expect(model.folderNavigationItems.map(\.title) == ["Studio"])
+		#expect(model.folderNavigationItems.contains(where: { $0.title == "Design" }) == false)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(model.selectedNavigationID == renamed.id)
+		#expect(model.articles(for: renamed).map(\.id) == [article.id])
+		#expect(model.articleFilter(for: renamed) == .all)
+		#expect(model.isFolderExpanded(renamed))
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.folderNames == ["Studio"])
+		#expect(snapshot.navigation?.folderItems.map(\.title) == ["Studio"])
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await rename.value)
+		#expect(model.folderNavigationItems.map(\.title) == ["Studio"])
+		#expect(model.isOffline == false)
+	}
+
+	@Test func folderRenameDiscardsAnInFlightLoadWithoutLeavingTheRenamedFolderLoading() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+
+		let load = Task { await model.load(collection: folder, force: true) }
+		let loadRequest = await controlled.nextRequest()
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let mutationRequest = await controlled.nextRequest()
+		let renamedID = "user/-/label/Studio"
+		#expect(model.selectedNavigationID == renamedID)
+
+		await controlled.resolve(loadRequest, data: streamIDsData(ids: [], continuation: "stale-next"))
+		await controlled.resolve(mutationRequest)
+		await load.value
+		#expect(await rename.value)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(renamed.id == renamedID)
+		#expect(model.isLoading(collection: renamed) == false)
+		#expect(model.isLoadingMore(collection: renamed) == false)
+
+		let freshLoad = Task { await model.load(collection: renamed, force: true) }
+		let freshRequest = await controlled.nextRequest()
+		await controlled.resolve(freshRequest, data: streamIDsData(ids: [], continuation: nil))
+		await freshLoad.value
+		#expect(model.isLoading(collection: renamed) == false)
+	}
+
+	@Test func folderRenameDiscardsAnInFlightLoadMoreWithoutLeavingPaginationBlocked() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+
+		let initialLoad = Task { await model.load(collection: folder, force: true) }
+		let initialRequest = await controlled.nextRequest()
+		await controlled.resolve(initialRequest, data: streamIDsData(ids: [], continuation: "first-next"))
+		await initialLoad.value
+		#expect(model.canLoadMore(collection: folder))
+
+		let staleLoadMore = Task { await model.loadMore(collection: folder) }
+		let staleRequest = await controlled.nextRequest()
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let mutationRequest = await controlled.nextRequest()
+		let renamedID = "user/-/label/Studio"
+		#expect(model.selectedNavigationID == renamedID)
+
+		await controlled.resolve(staleRequest, data: streamIDsData(ids: [], continuation: "stale-next"))
+		await controlled.resolve(mutationRequest)
+		await staleLoadMore.value
+		#expect(await rename.value)
+
+		let renamed = try #require(model.folderNavigationItems.first)
+		#expect(renamed.id == renamedID)
+		#expect(model.isLoadingMore(collection: renamed) == false)
+		#expect(model.canLoadMore(collection: renamed))
+
+		let freshLoadMore = Task { await model.loadMore(collection: renamed) }
+		let freshRequest = await controlled.nextRequest()
+		await controlled.resolve(freshRequest, data: streamIDsData(ids: [], continuation: nil))
+		await freshLoadMore.value
+		#expect(model.isLoadingMore(collection: renamed) == false)
+		#expect(model.canLoadMore(collection: renamed) == false)
+	}
+
+	@Test func folderRenameRejectsADuplicateNameBeforeQueueing() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		installSubscriptions(
+			[
+				makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design"),
+				makeSubscription(id: "feed/2", key: "news", title: "News", folder: "Studio"),
+			],
+			on: model,
+		)
+
+		let succeeded = await model.renameFolder("Design", to: "studio")
+
+		#expect(succeeded == false)
+		#expect(model.errorMessage == "A folder with that name already exists.")
+		#expect(model.folderNavigationItems.map(\.title) == ["Design", "Studio"])
+		let pending = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 100,
+		)
+		#expect(pending.isEmpty)
+	}
+
+	@Test func validFolderRenameRetryClearsThePreviousDuplicateError() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		installSubscriptions(
+			[
+				makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design"),
+				makeSubscription(id: "feed/2", key: "news", title: "News", folder: "Studio"),
+			],
+			on: model,
+		)
+
+		#expect(await model.renameFolder("Design", to: "studio") == false)
+		#expect(model.errorMessage == "A folder with that name already exists.")
+		#expect(await model.renameFolder("Design", to: "Draft"))
+		#expect(model.errorMessage == nil)
+		#expect(model.folderNavigationItems.map(\.title) == ["Draft", "Studio"])
+	}
+
+	@Test func validFeedManagementRetriesClearAStaleValidationError() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true))
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+
+		model.errorMessage = "The previous operation failed."
+		#expect(await model.renameFeed(subscription, to: "Morning"))
+		#expect(model.errorMessage == nil)
+
+		model.errorMessage = "The previous operation failed."
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+		#expect(model.errorMessage == nil)
+	}
+
+	@Test func renamingFolderRemapsUnloadedCachedArticlesAndContinuationsAcrossRestart() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let accountID = try #require(model.session).storageIdentity
+		let oldFolderID = "user/-/label/Design"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let article = makeArticle(id: "rename-offline", feedKey: "daily")
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-folder-next", collectionID: oldFolderID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-child-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.renameFolder("Design", to: "Studio"))
+
+		let newFolderID = "user/-/label/Studio"
+		let newChildID = "feed/1::\(newFolderID)"
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newFolderID]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldFolderID] == nil)
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newFolderID] == "old-folder-next")
+		#expect(snapshot.continuationsByCollection[newChildID] == "old-child-next")
+	}
+
+	@Test func folderDeleteRemovesTheSidebarFolderAndKeepsFeedsSubscribed() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		model.select(section: .forYou)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		#expect(envelope.mutations[0].kind == .moveFeed)
+		#expect(envelope.mutations[0].folders == [])
+		#expect(model.subscriptions.first?.folderNames == [])
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.uncategorizedFeedNavigationItems.map(\.title) == ["Daily"])
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.subscriptions.first?.folderNames == [])
+		#expect(snapshot.navigation?.folderItems.isEmpty == true)
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.isOffline == false)
+	}
+
+	@Test func deletingTheOpenFolderOpensASmartViewInsteadOfAGhostFolder() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		model.select(item: folder)
+		model.setArticles([makeArticle(id: "design-story")], for: folder)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+
+		#expect(model.folderNavigationItems.isEmpty)
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.selectedCollection.title != "Design")
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+	}
+
+	@Test func deletingAFolderKeepsASelectedFeedVisibleAsUncategorized() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		let article = makeArticle(id: "daily-story")
+		model.select(item: feed)
+		model.setArticles([article], for: feed)
+
+		let deletion = Task { await model.deleteFolder("Design") }
+		let request = await controlled.nextRequest()
+
+		let uncategorized = try #require(model.uncategorizedFeedNavigationItems.first)
+		#expect(uncategorized.title == "Daily")
+		#expect(model.selectedNavigationID == uncategorized.id)
+		#expect(model.articles(for: uncategorized).map(\.id) == [article.id])
+		#expect(model.folderNavigationItems.isEmpty)
+
+		await controlled.resolve(request, statusCode: 500)
+		#expect(await deletion.value)
+	}
+
+	@Test func deletingAFolderRemapsEveryAffectedFeedCacheAndCleansOldRowsOffline() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-delete-folder-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let first = FeedSubscription(
+			id: "feed/1",
+			title: "Daily",
+			categories: [
+				FeedCategory(id: "user/-/label/Old", label: "Old"),
+				FeedCategory(id: "user/-/label/New", label: "New"),
+			],
+			url: try #require(URL(string: "https://pigeon.test/feed/daily")),
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+		let second = makeSubscription(id: "feed/2", key: "weekly", title: "Weekly", folder: "Old")
+		installSubscriptions([first, second], on: model)
+		model.select(section: .forYou)
+
+		let oldFolder = try #require(model.navigation.item(withID: "user/-/label/Old"))
+		let newFolder = try #require(model.navigation.item(withID: "user/-/label/New"))
+		let firstOld = try #require(model.navigation.item(withID: "feed/1::user/-/label/Old"))
+		let firstNew = try #require(model.navigation.item(withID: "feed/1::user/-/label/New"))
+		let secondOld = try #require(model.navigation.item(withID: "feed/2::user/-/label/Old"))
+		let secondStory = makeArticle(id: "weekly-old", receivedAt: 1_786_272_100, feedKey: "weekly")
+		let firstOldStory = makeArticle(id: "daily-old", receivedAt: 1_786_272_300, feedKey: "daily")
+		let firstNewStory = makeArticle(id: "daily-new", receivedAt: 1_786_272_200, feedKey: "daily")
+		model.setArticles([firstOldStory], for: firstOld)
+		model.setArticles([firstNewStory], for: firstNew)
+		model.setArticles([firstOldStory, firstNewStory], for: newFolder)
+		model.setArticles([secondStory], for: secondOld)
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		try await store.saveArticles([firstOldStory], collectionID: firstOld.id, accountID: accountID)
+		try await store.saveArticles([firstNewStory], collectionID: firstNew.id, accountID: accountID)
+		try await store.saveArticles([firstOldStory, firstNewStory], collectionID: newFolder.id, accountID: accountID)
+		try await store.saveArticles([secondStory], collectionID: secondOld.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-daily-next", collectionID: firstOld.id, accountID: accountID)
+		try await store.saveCollectionContinuation("old-weekly-next", collectionID: secondOld.id, accountID: accountID)
+
+		#expect(await model.deleteFolder("Old"))
+
+		let uncategorized = try #require(model.navigation.item(withID: "feed/2"))
+		#expect(model.allArticles(for: firstNew).map(\.id).contains(firstOldStory.id))
+		#expect(Set(model.allArticles(for: newFolder).map(\.id)) == Set([firstOldStory.id, firstNewStory.id]))
+		#expect(model.allArticles(for: uncategorized).map(\.id) == [secondStory.id])
+		#expect(model.allArticles(for: firstOld).isEmpty)
+		#expect(model.allArticles(for: secondOld).isEmpty)
+
+		let restartedStore = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await restartedStore.loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolder.id] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[firstOld.id] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[secondOld.id] ?? []).isEmpty)
+		#expect(Set(snapshot.articlesByCollection[newFolder.id, default: []].map(\.id)) == Set([firstOldStory.id, firstNewStory.id]))
+		#expect(snapshot.articlesByCollection[firstNew.id]?.map(\.id).contains(firstOldStory.id) == true)
+		#expect(snapshot.articlesByCollection[uncategorized.id]?.map(\.id) == [secondStory.id])
+		#expect(snapshot.continuationsByCollection[firstOld.id] == nil)
+		#expect(snapshot.continuationsByCollection[secondOld.id] == nil)
+		#expect(snapshot.navigation?.item(withID: oldFolder.id) == nil)
+		#expect(snapshot.navigation?.item(withID: firstOld.id) == nil)
+		#expect(snapshot.navigation?.item(withID: secondOld.id) == nil)
+	}
+
+	@Test func deletingAFolderUsesSubscriptionCategoriesWhenNavigationOmitsTheDeletedChild() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-partial-delete-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = FeedSubscription(
+			id: "feed/1",
+			title: "Daily",
+			categories: [
+				FeedCategory(id: "user/-/label/Old", label: "Old"),
+				FeedCategory(id: "user/-/label/New", label: "New"),
+			],
+			url: try #require(URL(string: "https://pigeon.test/feed/daily")),
+			htmlUrl: nil,
+			iconUrl: nil,
+		)
+		installSubscriptions([subscription], on: model)
+		let oldFolderID = "user/-/label/Old"
+		let newFolderID = "user/-/label/New"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let newChildID = "feed/1::\(newFolderID)"
+		let partialNavigation = ReaderNavigationState(
+			items: model.navigation.items.filter { $0.id != oldChildID },
+			expandedFolderIDs: model.navigation.expandedFolderIDs,
+		)
+		model.setNavigation(partialNavigation, markAsLoaded: true)
+		let article = makeArticle(id: "partial-delete", feedKey: "daily")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(partialNavigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveArticles([], collectionID: newFolderID, accountID: accountID)
+		try await store.saveArticles([], collectionID: newChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("old-child-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.deleteFolder("Old"))
+
+		let snapshot = try await OfflineLibraryStore(databaseURL: databaseURL).loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newFolderID]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newChildID] == "old-child-next")
+	}
+
+	@Test func movingTheOpenFeedKeepsStoriesAndAvoidsAGhostCollection() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: nil)
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let feed = try #require(model.uncategorizedFeedNavigationItems.first)
+		model.select(item: feed)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.selectedCollection.id == moved.id)
+		#expect(model.navigation.item(withID: model.selectedCollection.id) != nil)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect(model.uncategorizedFeedNavigationItems.isEmpty)
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[feed.id] ?? []).isEmpty)
+		#expect(snapshot.navigation?.item(withID: moved.id) != nil)
+	}
+
+	@Test func movingAFeedFromAnotherListRemapsItsCacheToTheNewSidebarRow() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		let feed = try #require(model.feedNavigationItems(in: design).first)
+		model.select(section: .forYou)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[feed.id] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedDoesNotOverwriteAStoredDestinationCollectionBeforeItIsLoaded() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(model.navigation, accountID: accountID)
+		let destinationID = "feed/1::user/-/label/Reading"
+		let destinationArticle = makeArticle(id: "stored-destination", feedKey: "daily")
+		try await store.saveArticles([destinationArticle], collectionID: destinationID, accountID: accountID)
+
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[destinationID]?.map(\.id) == [destinationArticle.id])
+		#expect((snapshot.articlesByCollection["feed/1::user/-/label/Design"] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedUsesSubscriptionCategoriesWhenNavigationOmitsTheOldChild() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-partial-move-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let oldFolderID = "user/-/label/Design"
+		let oldChildID = "feed/1::\(oldFolderID)"
+		let partialNavigation = ReaderNavigationState(
+			items: model.navigation.items.filter { $0.id != oldChildID },
+			expandedFolderIDs: model.navigation.expandedFolderIDs,
+		)
+		model.setNavigation(partialNavigation, markAsLoaded: true)
+		let article = makeArticle(id: "partial-move", feedKey: "daily")
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveSubscriptions(model.subscriptions, accountID: accountID)
+		try await store.saveNavigation(partialNavigation, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldFolderID, accountID: accountID)
+		try await store.saveArticles([article], collectionID: oldChildID, accountID: accountID)
+		try await store.saveCollectionContinuation("design-next", collectionID: oldChildID, accountID: accountID)
+
+		#expect(await model.moveFeed(subscription, toFolderNames: ["Reading"]))
+
+		let newChildID = "feed/1::user/-/label/Reading"
+		let snapshot = try await OfflineLibraryStore(databaseURL: databaseURL).loadSnapshot(accountID: accountID)
+		#expect((snapshot.articlesByCollection[oldFolderID] ?? []).isEmpty)
+		#expect((snapshot.articlesByCollection[oldChildID] ?? []).isEmpty)
+		#expect(snapshot.articlesByCollection[newChildID]?.map(\.id) == [article.id])
+		#expect(snapshot.continuationsByCollection[oldChildID] == nil)
+		#expect(snapshot.continuationsByCollection[newChildID] == "design-next")
+	}
+
+	@Test func movingTheLastFeedOutOfTheOpenFolderLeavesASmartView() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let article = makeArticle(id: "daily-1", feedKey: "feed/1")
+		installFeedLibrary(model, subscriptions: [subscription])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		let feed = try #require(model.feedNavigationItems(in: design).first)
+		model.select(item: design)
+		model.setArticles([article], for: design)
+		model.setArticles([article], for: feed)
+
+		let succeeded = await model.moveFeed(subscription, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.folderNavigationItems.contains(where: { $0.title == "Design" }) == false)
+		#expect(model.selectedCollection.smartSection == .forYou)
+		#expect(model.navigation.item(withID: model.selectedCollection.id) != nil)
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		let moved = try #require(model.feedNavigationItems(in: reading).first)
+		#expect(model.allArticles(for: moved).map(\.id) == ["daily-1"])
+		#expect((model.allArticles(for: design)).isEmpty)
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[moved.id]?.map(\.id) == ["daily-1"])
+		#expect((snapshot.articlesByCollection[design.id] ?? []).isEmpty)
+	}
+
+	@Test func movingAFeedOutOfALoadedFolderDropsThoseStories() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let daily = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		let stay = makeSubscription(id: "feed/2", key: "stay", title: "Stay", folder: "Design")
+		let dailyArticle = makeArticle(id: "daily-1", feedKey: "feed/1")
+		let stayArticle = makeArticle(id: "stay-1", feedKey: "feed/2")
+		installFeedLibrary(model, subscriptions: [daily, stay])
+		let design = try #require(model.folderNavigationItems.first(where: { $0.title == "Design" }))
+		model.select(item: design)
+		model.setArticles([dailyArticle, stayArticle], for: design)
+
+		let succeeded = await model.moveFeed(daily, toFolderNames: ["Reading"])
+
+		#expect(succeeded)
+		#expect(model.selectedCollection.id == design.id)
+		#expect(model.allArticles(for: design).map(\.id) == ["stay-1"])
+		let reading = try #require(model.folderNavigationItems.first(where: { $0.title == "Reading" }))
+		#expect(model.feedNavigationItems(in: reading).map(\.title) == ["Daily"])
+
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session).storageIdentity)
+		#expect(snapshot.articlesByCollection[design.id]?.map(\.id) == ["stay-1"])
+	}
+
 	@Test func olderLibraryLoadCannotReplaceNewerSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -1913,6 +4997,48 @@ struct ReaderAppModelTests {
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
 
+	@Test func forYouWidgetSnapshotSkipsReadRecommendationsAndKeepsLaterUnreadRows() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let readLeaders = (1...5).map { index in
+			makeArticle(id: "read-\(index)", isRead: true, receivedAt: 1_786_272_500 + TimeInterval(index), score: 90 - index)
+		}
+		let unreadTrail = [
+			makeArticle(id: "unread-a", isRead: false, receivedAt: 1_786_272_200, score: 40),
+			makeArticle(id: "unread-b", isRead: false, receivedAt: 1_786_272_100, score: 30),
+		]
+		model.setArticles(readLeaders + unreadTrail, for: .forYou)
+
+		let snapshot = model.makeWidgetSnapshot()
+
+		#expect(snapshot.forYou.map(\.id) == ["unread-a", "unread-b"])
+	}
+
+	@Test func recentWidgetSnapshotStillIncludesTheNewestReadStory() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let newestRead = makeArticle(id: "newest-read", isRead: true, receivedAt: 1_786_273_000, score: 10, feedKey: "alpha")
+		let olderUnread = makeArticle(id: "older-unread", isRead: false, receivedAt: 1_786_272_000, score: 80)
+		model.setArticles([newestRead], for: .today)
+		model.setArticles([olderUnread], for: .forYou)
+
+		let snapshot = model.makeWidgetSnapshot()
+
+		#expect(snapshot.recent.map(\.id).contains("newest-read"))
+		#expect(snapshot.forYou.map(\.id) == ["older-unread"])
+	}
+
+	@Test func forYouWidgetSnapshotDropsAStoryAfterItIsMarkedRead() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(statusCode: 500))
+		let keep = makeArticle(id: "keep-unread", isRead: false, receivedAt: 1_786_272_200, score: 60)
+		let finished = makeArticle(id: "just-read", isRead: false, receivedAt: 1_786_272_100, score: 50)
+		model.setArticles([keep, finished], for: .forYou)
+		#expect(model.makeWidgetSnapshot().forYou.map(\.id) == ["keep-unread", "just-read"])
+
+		await model.setRead(finished, read: true)
+
+		#expect(model.allArticles(for: .forYou).first(where: { $0.id == "just-read" })?.isRead == true)
+		#expect(model.makeWidgetSnapshot().forYou.map(\.id) == ["keep-unread"])
+	}
+
 	@Test func disconnectedLibraryLoadCannotRestoreThePreviousAccountsSubscriptions() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -1927,6 +5053,75 @@ struct ReaderAppModelTests {
 
 		#expect(model.session == nil)
 		#expect(model.subscriptions.isEmpty)
+	}
+
+	@Test func articleDeepLinkOpensTheFeedInsteadOfAnArbitraryCachedList() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "widget-story", feedKey: "alpha")
+		let feed = try #require(model.navigation.items.first(where: { $0.kind == .feed }))
+		let folder = try #require(model.folderNavigationItems.first)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: .today)
+		model.setArticles([article], for: feed)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(PigeonDeepLink.article("widget-story", collection: nil).url)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.id == feed.id)
+		#expect(model.isFolderExpanded(folder))
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test func articleDeepLinkHonorsAnExplicitForYouCollection() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "foryou-story", feedKey: "alpha")
+		let feed = try #require(model.navigation.items.first(where: { $0.kind == .feed }))
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: feed)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(
+			PigeonDeepLink.article("foryou-story", collection: ReaderSection.forYou.rawValue).url
+		)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.smartSection == .forYou)
+	}
+
+	@Test func articleDeepLinkPrefersTodayWhenTheFeedRowIsMissing() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "today-story", feedKey: "unknown-feed")
+		model.setArticles([article], for: .unread)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		model.select(section: .unread)
+
+		await model.handleDeepLink(PigeonDeepLink.article("today-story", collection: nil).url)
+
+		#expect(model.selectedArticle?.id == article.id)
+		#expect(model.selectedCollection.smartSection == .today)
+	}
+
+	@Test func forYouWidgetSnapshotDeepLinksStayOnForYou() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(try makeNavigationState(unreadCount: 1), markAsLoaded: true)
+		let article = makeArticle(id: "widget-foryou", feedKey: "alpha")
+		let todayArticle = makeArticle(id: "widget-today", receivedAt: Date.now.timeIntervalSince1970, feedKey: "alpha")
+		model.setArticles([article], for: .forYou)
+		model.setArticles([todayArticle], for: .today)
+		model.writeWidgetSnapshot()
+
+		let snapshot = PigeonWidgetSnapshot.load()
+		let forYouLink = try #require(snapshot.forYou.first?.deepLink)
+		#expect(PigeonDeepLink(url: forYouLink) == .article(article.id, collection: ReaderSection.forYou.rawValue))
+		let recentLink = try #require(snapshot.recent.first(where: { $0.id == todayArticle.id })?.deepLink)
+		#expect(PigeonDeepLink(url: recentLink) == .article(todayArticle.id, collection: ReaderSection.today.rawValue))
 	}
 
 	@Test func warmReloadBenchmarkBeforeAndAfterOptimization() async throws {
@@ -2186,9 +5381,71 @@ struct ReaderAppModelTests {
 		return (model, client, store, collection)
 	}
 
+	@Test func readerModeFollowsAFeedAcrossForYouAndStreamKeys() throws {
+		let suiteName = "pigeon-reader-mode-model-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "alpha") == .feedContent)
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setReaderMode(.readerView, for: "alpha")
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+		#expect(store.mode(for: "feed/7", session: try #require(model.session)) == .readerView)
+
+		model.setReaderMode(.website, for: "feed/7")
+		#expect(model.readerMode(for: "alpha") == .website)
+		#expect(store.mode(for: "alpha", session: try #require(model.session)) == .website)
+	}
+
+	@Test func readerModeFindsALegacyKeyAfterNavigationLoads() throws {
+		let suiteName = "pigeon-reader-mode-legacy-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let store = ReaderModeStore(defaults: defaults)
+		store.setMode(.website, for: "alpha")
+		let model = try makeModel(httpClient: MockHTTPClient(), readerModeStore: store)
+
+		#expect(model.readerMode(for: "feed/7") == .feedContent)
+
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+
+		#expect(model.readerMode(for: "feed/7") == .website)
+		#expect(model.readerMode(for: "alpha") == .website)
+	}
+
+	@Test func urlLessArticleDoesNotRewriteStoredFeedReaderMode() throws {
+		let suiteName = "pigeon-reader-mode-urlless-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: ReaderModeStore(defaults: defaults),
+		)
+		model.setNavigation(try makeNavigationState(unreadCount: 0))
+		let withURL = makeArticle(
+			id: "with-url",
+			feedKey: "alpha",
+			originalURL: URL(string: "https://example.com/story"),
+		)
+		let withoutURL = makeArticle(id: "no-url", feedKey: "feed/7")
+
+		model.setReaderMode(.readerView, for: withURL)
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+
+		model.setReaderMode(.feedContent, for: withoutURL)
+
+		#expect(model.readerMode(for: "alpha") == .readerView)
+		#expect(model.readerMode(for: "feed/7") == .readerView)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
+		readerModeStore: ReaderModeStore? = nil,
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
@@ -2200,6 +5457,7 @@ struct ReaderAppModelTests {
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
 			readwiseTokenStore: TestReadwiseTokenStore(),
+			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
@@ -2236,6 +5494,62 @@ struct ReaderAppModelTests {
 		)
 	}
 
+	private func makeUncategorizedFeedNavigation(
+		subscription: FeedSubscription,
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		try makeUncategorizedFeedNavigation(subscriptions: [subscription], unreadCount: unreadCount)
+	}
+
+	private func makeUncategorizedFeedNavigation(
+		subscriptions: [FeedSubscription],
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		ReaderNavigationCatalog.make(
+			subscriptions: subscriptions.map {
+				ReaderSubscription(
+					id: $0.id,
+					title: $0.title,
+					categories: $0.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+					url: $0.url.absoluteString,
+				)
+			},
+			unreadCounts: subscriptions.map { ReaderUnreadCount(id: $0.id, count: unreadCount) },
+			smartCounts: ReaderNavigationSmartCounts(
+				forYou: unreadCount,
+				today: unreadCount,
+				unread: unreadCount,
+				starred: 0,
+			),
+		)
+	}
+
+	private func makeFolderFeedNavigation(
+		subscription: FeedSubscription,
+		unreadCount: Int,
+	) throws -> ReaderNavigationState {
+		ReaderNavigationCatalog.make(
+			subscriptions: [
+				ReaderSubscription(
+					id: subscription.id,
+					title: subscription.title,
+					categories: subscription.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+					url: subscription.url.absoluteString,
+				),
+			],
+			unreadCounts: [
+				ReaderUnreadCount(id: subscription.id, count: unreadCount),
+				ReaderUnreadCount(id: "user/-/label/Design", count: unreadCount),
+			],
+			smartCounts: ReaderNavigationSmartCounts(
+				forYou: unreadCount,
+				today: unreadCount,
+				unread: unreadCount,
+				starred: 0,
+			),
+		)
+	}
+
 	private func makePaginationCollection() -> ReaderNavigationItem {
 		ReaderNavigationItem(
 			id: "user/-/label/News",
@@ -2250,6 +5564,51 @@ struct ReaderAppModelTests {
 		)
 	}
 
+	private func installSubscriptions(
+		_ subscriptions: [FeedSubscription],
+		on model: ReaderAppModel,
+		unreadCount: Int = 1,
+	) {
+		model.setSubscriptions(subscriptions)
+		var unreadCounts = subscriptions.map { ReaderUnreadCount(id: $0.id, count: unreadCount) }
+		var seenFolders = Set<String>()
+		for subscription in subscriptions {
+			for name in subscription.folderNames where seenFolders.insert(name).inserted {
+				unreadCounts.append(ReaderUnreadCount(id: "user/-/label/\(name)", count: unreadCount))
+			}
+		}
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: subscriptions.map { subscription in
+					ReaderSubscription(
+						id: subscription.id,
+						title: subscription.title,
+						categories: subscription.categories.map {
+							ReaderSubscriptionCategory(id: $0.id, label: $0.label)
+						},
+						url: subscription.url.absoluteString,
+					)
+				},
+				unreadCounts: unreadCounts,
+				smartCounts: ReaderNavigationSmartCounts(
+					forYou: unreadCount,
+					today: unreadCount,
+					unread: unreadCount,
+					starred: 0,
+				),
+			),
+			markAsLoaded: true,
+		)
+	}
+
+	private func installFeedLibrary(
+		_ model: ReaderAppModel,
+		subscriptions: [FeedSubscription],
+		unreadCount: Int = 1,
+	) {
+		installSubscriptions(subscriptions, on: model, unreadCount: unreadCount)
+	}
+
 	private func makeSubscription(id: String, key: String, title: String, folder: String?) -> FeedSubscription {
 		guard let url = URL(string: "https://pigeon.test/feed/\(key)") else {
 			preconditionFailure("Invalid test URL")
@@ -2261,25 +5620,28 @@ struct ReaderAppModelTests {
 	private func makeArticle(
 		id: String,
 		isRead: Bool = false,
+		isStarred: Bool = false,
 		receivedAt: TimeInterval = 1_786_272_000,
 		score: Int = 50,
 		feedKey: String = "daily",
 		readerId: String? = nil,
 		receivedDate: Date? = nil,
 		html: String = "<p>Body</p>",
+		originalURL: URL? = nil,
+		title: String? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId ?? "tag:google.com,2005:reader/item/\(id)",
 			feedKey: feedKey,
 			source: "Daily",
-			title: "Story \(id)",
+			title: title ?? "Story \(id)",
 			html: html,
 			text: "Body",
-			originalURL: nil,
+			originalURL: originalURL,
 			receivedAt: receivedDate ?? Date(timeIntervalSince1970: receivedAt),
 			isRead: isRead,
-			isStarred: false,
+			isStarred: isStarred,
 			score: score,
 			confidence: 0,
 			sampleCount: 0,
@@ -2330,6 +5692,108 @@ private struct BenchmarkMetrics: Sendable {
 	let requestCount: Int
 	let byteCount: Int
 	let paths: [String]
+}
+
+private actor FailThenSucceedSyncHTTPClient: HTTPClient {
+	private let failingSyncAttempt: Int
+	private var syncCount = 0
+
+	init(failingSyncAttempt: Int) {
+		self.failingSyncAttempt = failingSyncAttempt
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+
+		if url.path == "/api/v1/sync" {
+			syncCount += 1
+			if syncCount == failingSyncAttempt {
+				guard let response = HTTPURLResponse(url: url, statusCode: 500, httpVersion: nil, headerFields: nil) else {
+					throw PigeonError.invalidResponse
+				}
+				return (Data("Sync failed".utf8), response)
+			}
+		}
+
+		let data = Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func syncAttempts() -> Int {
+		syncCount
+	}
+}
+
+private actor TodayReconciliationHTTPClient: HTTPClient {
+	struct RequestSnapshot: Sendable {
+		let path: String
+		let query: [String: String]
+	}
+
+	private let changedPage: Data
+	private var syncCount = 0
+	private var capturedRequests: [RequestSnapshot] = []
+
+	init(changedPage: Data) {
+		self.changedPage = changedPage
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		let query = queryItems.reduce(into: [String: String]()) { result, item in
+			if let value = item.value { result[item.name] = value }
+		}
+		capturedRequests.append(RequestSnapshot(path: url.path, query: query))
+		let data: Data
+		if url.path == "/api/v1/sync" {
+			syncCount += 1
+			data = syncCount == 1
+				? changedPage
+				: Data(#"{"cursor":"after-status","hasMore":false,"changes":[]}"#.utf8)
+		} else if url.path == "/reader/api/0/stream/items/ids" {
+			switch query["c"] {
+			case nil: data = Data(#"{"itemRefs":[{"id":"today-page-1"}],"continuation":"today-page-2"}"#.utf8)
+			case "today-page-2": data = Data(#"{"itemRefs":[{"id":"today-page-2"}]}"#.utf8)
+			default: data = Data(#"{"itemRefs":[]}"#.utf8)
+			}
+		} else if url.path == "/reader/api/0/stream/items/contents" {
+			let ids = Self.formValues(from: request.httpBody, named: "i")
+			let items = ids.map { id in
+				"{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id)\",\"published\":\(Int(Date.now.timeIntervalSince1970)),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"user/-/state/com.google/reading-list\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
+			}.joined(separator: ",")
+			data = Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		} else {
+			data = Data()
+		}
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func syncAttempts() -> Int {
+		syncCount
+	}
+
+	func todayPageContinuations() -> [String?] {
+		capturedRequests
+			.filter { $0.path == "/reader/api/0/stream/items/ids" }
+			.map { $0.query["c"] }
+	}
+
+	private static func formValues(from body: Data?, named name: String) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems.filter { $0.name == name }.compactMap(\.value)
+	}
 }
 
 private actor WarmFeedRecoveryHTTPClient: HTTPClient {
@@ -2525,6 +5989,89 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		limit: Int,
 	) async throws -> [Recommendation] {
 		try await base.searchArticles(
+			query: query,
+			collectionID: collectionID,
+			accountID: accountID,
+			limit: limit,
+		)
+	}
+}
+
+private actor ScriptedSearchOfflineLibraryStore: OfflineLibraryStoring {
+	private let base = OfflineLibraryStore.inMemory()
+	private var nextSearchError: Error?
+
+	func failNextSearch(with error: Error) {
+		nextSearchError = error
+	}
+
+	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot {
+		try await base.loadSnapshot(accountID: accountID)
+	}
+
+	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {
+		try await base.saveNavigation(navigation, accountID: accountID)
+	}
+
+	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws {
+		try await base.saveSubscriptions(subscriptions, accountID: accountID)
+	}
+
+	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws {
+		try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws {
+		try await base.saveCollectionContinuation(continuation, collectionID: collectionID, accountID: accountID)
+	}
+
+	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws {
+		try await base.saveRestoration(restoration, accountID: accountID)
+	}
+
+	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws {
+		try await base.enqueue(mutation, accountID: accountID)
+	}
+
+	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation] {
+		try await base.pendingMutations(accountID: accountID, limit: limit)
+	}
+
+	func markMutationApplied(id: String, accountID: String) async throws {
+		try await base.markMutationApplied(id: id, accountID: accountID)
+	}
+
+	func recordMutationFailure(id: String, message: String, accountID: String) async throws {
+		try await base.recordMutationFailure(id: id, message: message, accountID: accountID)
+	}
+
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
+		try await base.apply(page, accountID: accountID)
+	}
+
+	func storageStats(accountID: String) async throws -> OfflineStorageStats {
+		try await base.storageStats(accountID: accountID)
+	}
+
+	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int {
+		try await base.cleanupReadBodies(accountID: accountID, keepingNewest: count)
+	}
+
+	func clearCachedArticles(accountID: String) async throws {
+		try await base.clearCachedArticles(accountID: accountID)
+	}
+
+	func searchArticles(
+		query: String,
+		collectionID: String?,
+		accountID: String,
+		limit: Int,
+	) async throws -> [Recommendation] {
+		if let nextSearchError {
+			self.nextSearchError = nil
+			throw nextSearchError
+		}
+		return try await base.searchArticles(
 			query: query,
 			collectionID: collectionID,
 			accountID: accountID,

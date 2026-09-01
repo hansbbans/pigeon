@@ -70,8 +70,8 @@ nonisolated enum ReaderMarkReadBehavior: String, CaseIterable, Identifiable, Sen
 @MainActor
 @Observable
 final class ReaderTypographySettings {
-	static let textScaleRange = 0.85...1.35
-	static let lineHeightRange = 1.25...1.85
+	nonisolated static let textScaleRange = 0.85...1.35
+	nonisolated static let lineHeightRange = 1.25...1.85
 	static let horizontalMarginRange = 8.0...56.0
 	static let columnWidthRange = 480.0...920.0
 	static let defaultTextScale = 1.0

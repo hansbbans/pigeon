@@ -5,8 +5,7 @@ struct OPMLImportView: View {
 	private static let opmlType = UTType(filenameExtension: "opml") ?? .xml
 	@Environment(ReaderAppModel.self) private var model
 	@State private var isChoosingFile = false
-	@State private var preview: OPMLImportPreview?
-	@State private var message: String?
+	@State private var screen = OPMLImportScreenState()
 	@State private var isImporting = false
 
 	var body: some View {
@@ -17,7 +16,7 @@ struct OPMLImportView: View {
 					.font(.footnote)
 					.foregroundStyle(.secondary)
 			}
-			if let preview {
+			if let preview = screen.preview {
 				Section("Preview") {
 					LabeledContent("New feeds", value: preview.newEntries.count.formatted())
 					LabeledContent("Already subscribed", value: preview.duplicateCount.formatted())
@@ -43,7 +42,7 @@ struct OPMLImportView: View {
 					.disabled((preview.newEntries.isEmpty && preview.folderMerges.isEmpty) || isImporting)
 				}
 			}
-			if let message { Section { Text(message).foregroundStyle(.secondary) } }
+			if let message = screen.message { Section { Text(message).foregroundStyle(.secondary) } }
 		}
 		.navigationTitle("Import OPML")
 		.fileImporter(isPresented: $isChoosingFile, allowedContentTypes: [.xml, Self.opmlType]) { result in
@@ -52,16 +51,14 @@ struct OPMLImportView: View {
 	}
 
 	private func handleFile(_ result: Result<URL, Error>) {
-		do {
-			let url = try result.get()
-			let accessed = url.startAccessingSecurityScopedResource()
-			defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-			let entries = try OPMLImportPlanner.parse(data: Data(contentsOf: url))
-			preview = OPMLImportPlanner.preview(entries: entries, existing: model.subscriptions)
-			message = nil
-		} catch {
-			message = error.localizedDescription
+		let dataResult = result.flatMap { url in
+			Result {
+				let accessed = url.startAccessingSecurityScopedResource()
+				defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+				return try Data(contentsOf: url)
+			}
 		}
+		screen.apply(OPMLImportPlanner.outcome(of: dataResult, existing: model.subscriptions))
 	}
 
 	private func importFeeds(_ preview: OPMLImportPreview) {
@@ -70,10 +67,10 @@ struct OPMLImportView: View {
 			defer { isImporting = false }
 			do {
 				let result = try await model.importOPML(preview)
-				message = "Imported \(result.importedCount) feed\(result.importedCount == 1 ? "" : "s"), updated folders on \(result.updatedCount), and found \(result.duplicateCount) existing subscription\(result.duplicateCount == 1 ? "" : "s")."
-				self.preview = nil
+				screen.message = "Imported \(result.importedCount) feed\(result.importedCount == 1 ? "" : "s"), updated folders on \(result.updatedCount), and found \(result.duplicateCount) existing subscription\(result.duplicateCount == 1 ? "" : "s")."
+				screen.preview = nil
 			} catch {
-				message = error.localizedDescription
+				screen.message = error.localizedDescription
 			}
 		}
 	}

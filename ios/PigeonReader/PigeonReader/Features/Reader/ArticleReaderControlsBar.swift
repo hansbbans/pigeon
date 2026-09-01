@@ -45,6 +45,109 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 	}
 }
 
+nonisolated enum ArticleShareItem: Equatable, Sendable {
+	case url(URL)
+	case text(String)
+
+	static func make(from article: Recommendation) -> Self? {
+		if let url = article.safeOriginalURL {
+			return .url(url)
+		}
+
+		let text = shareText(for: article)
+		return text.isEmpty ? nil : .text(text)
+	}
+
+	private static func shareText(for article: Recommendation) -> String {
+		var lines: [String] = []
+		let title = article.title.trimmingCharacters(in: .whitespacesAndNewlines)
+		if title.isEmpty == false {
+			lines.append(title)
+		}
+
+		let source = article.source.trimmingCharacters(in: .whitespacesAndNewlines)
+		if source.isEmpty == false, source != title {
+			lines.append(source)
+		}
+
+		let body: String
+		if let text = article.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false {
+			body = text
+		} else {
+			body = Self.plainText(fromHTML: article.html)
+		}
+		if body.isEmpty == false, body != title {
+			if lines.isEmpty == false {
+				lines.append("")
+			}
+			lines.append(body)
+		}
+
+		return lines.joined(separator: "\n")
+	}
+
+	private static func plainText(fromHTML html: String) -> String {
+		var text = html.replacingOccurrences(
+			of: #"</?(?:p|div|br|h[1-6]|li|tr|blockquote)[^>]*>"#,
+			with: "\n",
+			options: [.regularExpression, .caseInsensitive],
+		)
+		text = text.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+		let decoded = [
+			"&nbsp;": " ",
+			"&amp;": "&",
+			"&lt;": "<",
+			"&gt;": ">",
+			"&quot;": "\"",
+			"&#39;": "'",
+			"&apos;": "'",
+		].reduce(text) { result, pair in
+			result.replacingOccurrences(of: pair.key, with: pair.value)
+		}
+		return decoded
+			.components(separatedBy: .newlines)
+			.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+			.filter { $0.isEmpty == false }
+			.joined(separator: "\n\n")
+		}
+	}
+
+nonisolated enum ArticleReaderReadingAdjustment: Int, CaseIterable, Identifiable, Sendable {
+	case largerText
+	case smallerText
+	case looserLines
+	case tighterLines
+
+	var id: Int { rawValue }
+
+	var title: String {
+		switch self {
+		case .largerText: "Larger text"
+		case .smallerText: "Smaller text"
+		case .looserLines: "Looser lines"
+		case .tighterLines: "Tighter lines"
+		}
+	}
+
+	var systemImage: String {
+		switch self {
+		case .largerText: "textformat.size.larger"
+		case .smallerText: "textformat.size.smaller"
+		case .looserLines: "arrow.down.to.line"
+		case .tighterLines: "arrow.up.to.line"
+		}
+	}
+
+	func isEnabled(textScale: Double, lineHeight: Double) -> Bool {
+		switch self {
+		case .largerText: textScale < ReaderTypographySettings.textScaleRange.upperBound
+		case .smallerText: textScale > ReaderTypographySettings.textScaleRange.lowerBound
+		case .looserLines: lineHeight < ReaderTypographySettings.lineHeightRange.upperBound
+		case .tighterLines: lineHeight > ReaderTypographySettings.lineHeightRange.lowerBound
+		}
+	}
+}
+
 nonisolated struct ArticleReaderControlsSaveTaskID: Equatable, Sendable {
 	let articleID: String
 	let requestID: UUID?
@@ -159,17 +262,28 @@ struct ArticleReaderControlsBar: View {
 
 	private var shareButton: some View {
 		controlSlot {
-			if let shareURL = article.safeOriginalURL {
-				ShareLink(item: shareURL, subject: Text(article.title)) {
-					Label(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage)
+			switch ArticleShareItem.make(from: article) {
+			case .url(let url):
+				ShareLink(item: url, subject: Text(article.title)) {
+					shareLabel
 				}
 				.keyboardShortcut("s", modifiers: [.command, .shift])
 				.accessibilityHint("Opens the system share sheet")
-			} else {
+			case .text(let text):
+				ShareLink(item: text, subject: Text(article.title)) {
+					shareLabel
+				}
+				.keyboardShortcut("s", modifiers: [.command, .shift])
+				.accessibilityHint("Opens the system share sheet")
+			case nil:
 				Button(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage) {}
 					.disabled(true)
 			}
 		}
+	}
+
+	private var shareLabel: some View {
+		Label(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage)
 	}
 
 	private var markReadButton: some View {
@@ -204,14 +318,17 @@ struct ArticleReaderControlsBar: View {
 	private var readingControlsButton: some View {
 		controlSlot {
 			Menu(ArticleReaderControl.readingControls.title, systemImage: ArticleReaderControl.readingControls.systemImage) {
-				Button("Looser lines", systemImage: "arrow.down.to.line") {
-					model.readerTypography.increaseLineHeight()
+				ForEach(ArticleReaderReadingAdjustment.allCases) { adjustment in
+					Button(adjustment.title, systemImage: adjustment.systemImage) {
+						applyReadingAdjustment(adjustment)
+					}
+					.disabled(
+						adjustment.isEnabled(
+							textScale: model.readerTypography.textScale,
+							lineHeight: model.readerTypography.lineHeight,
+						) == false
+					)
 				}
-				.disabled(model.readerTypography.lineHeight >= ReaderTypographySettings.lineHeightRange.upperBound)
-				Button("Tighter lines", systemImage: "arrow.up.to.line") {
-					model.readerTypography.decreaseLineHeight()
-				}
-				.disabled(model.readerTypography.lineHeight <= ReaderTypographySettings.lineHeightRange.lowerBound)
 				Picker("Theme", selection: Binding(
 					get: { model.readerTypography.theme },
 					set: { model.readerTypography.theme = $0 },
@@ -242,6 +359,15 @@ struct ArticleReaderControlsBar: View {
 	private func controlSlot<Content: View>(@ViewBuilder content: () -> Content) -> some View {
 		content()
 			.frame(maxWidth: .infinity, minHeight: 44)
+	}
+
+	private func applyReadingAdjustment(_ adjustment: ArticleReaderReadingAdjustment) {
+		switch adjustment {
+		case .largerText: model.readerTypography.increaseTextScale()
+		case .smallerText: model.readerTypography.decreaseTextScale()
+		case .looserLines: model.readerTypography.increaseLineHeight()
+		case .tighterLines: model.readerTypography.decreaseLineHeight()
+		}
 	}
 
 	private func shareToReadwise() {

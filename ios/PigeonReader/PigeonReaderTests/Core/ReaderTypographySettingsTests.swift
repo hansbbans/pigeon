@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Testing
 @testable import PigeonReader
 
@@ -35,6 +36,11 @@ struct ReaderTypographySettingsTests {
 		settings.reset()
 		#expect(settings.textScale == ReaderTypographySettings.defaultTextScale)
 		#expect(settings.lineHeight == ReaderTypographySettings.defaultLineHeight)
+		settings.increaseTextScale()
+		#expect(settings.textScale == ReaderTypographySettings.defaultTextScale + 0.05)
+		settings.decreaseTextScale()
+		settings.decreaseTextScale()
+		#expect(settings.textScale == ReaderTypographySettings.defaultTextScale - 0.05)
 		#expect(settings.horizontalMargin == ReaderTypographySettings.defaultHorizontalMargin)
 		#expect(settings.columnWidth == ReaderTypographySettings.defaultColumnWidth)
 		#expect(settings.theme == .system)
@@ -65,5 +71,31 @@ struct ReaderTypographySettingsTests {
 		restoredDarkGray.reset()
 		#expect(restoredDarkGray.theme == .system)
 		#expect(defaults.string(forKey: "pigeon.reader.theme") == "system")
+	}
+
+	@Test
+	func splitViewReaderDoesNotPreferAWindowColorScheme() {
+		#expect(ReaderTheme.system.preferredColorScheme == nil)
+		#expect(ReaderTheme.light.preferredColorScheme == .light)
+		#expect(ReaderTheme.sepia.preferredColorScheme == .light)
+		#expect(ReaderTheme.darkGray.preferredColorScheme == .dark)
+		#expect(ReaderTheme.dark.preferredColorScheme == .dark)
+
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .sepia, isCompactReader: false) == .environmentOnly(.light))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .light, isCompactReader: false) == .environmentOnly(.light))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .dark, isCompactReader: false) == .environmentOnly(.dark))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .darkGray, isCompactReader: false) == .environmentOnly(.dark))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .system, isCompactReader: false) == .inheritSystem)
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .sepia, isCompactReader: false).usesPreferredColorScheme == false)
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .dark, isCompactReader: false).usesPreferredColorScheme == false)
+	}
+
+	@Test
+	func compactReaderMayPreferAWindowColorScheme() {
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .sepia, isCompactReader: true) == .preferredColorScheme(.light))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .dark, isCompactReader: true) == .preferredColorScheme(.dark))
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .system, isCompactReader: true) == .inheritSystem)
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .sepia, isCompactReader: true).usesPreferredColorScheme)
+		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .system, isCompactReader: true).usesPreferredColorScheme == false)
 	}
 }

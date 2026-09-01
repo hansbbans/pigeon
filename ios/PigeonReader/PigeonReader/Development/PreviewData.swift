@@ -10,9 +10,13 @@ enum PreviewData {
 		let session = PigeonSession(baseURL: baseURL, token: "preview-token")
 		let model = ReaderAppModel(
 			sessionStore: PreviewSessionStore(session: session),
-			httpClient: PreviewHTTPClient(),
+			httpClient: PreviewHTTPClient(recommendations: articles),
 			readwiseTokenStore: PreviewReadwiseTokenStore(),
-			offlineStore: OfflineLibraryStore.inMemory(),
+			offlineStore: OfflineLibraryStore.inMemory(
+				seeding: articles,
+				collectionID: ReaderSection.forYou.rawValue,
+				accountID: session.storageIdentity,
+			),
 			offlineSynchronizationEnabled: false,
 		)
 		model.setArticles(articles, for: .forYou)

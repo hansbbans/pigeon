@@ -180,8 +180,127 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("body[data-theme=\"dark-gray\"] pre"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"blocked\""))
 		#expect(shell.contains("Load this remote image"))
+		#expect(shell.contains("target.closest(\".pigeon-image-blocked\")"))
 		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
 		#expect(shell.contains("pigeon-image://proxy?url="))
+		#expect(shell.contains("image.dataset.pigeonOriginalSrc"))
+		#expect(shell.contains("image.dataset.pigeonOriginalSrc || image.currentSrc || image.src"))
+		#expect(shell.contains("add(image.dataset.pigeonOriginalSrc)"))
+		#expect(shell.contains("__pigeonSafeURL(image.dataset.pigeonOriginalSrc, document.baseURI)"))
+	}
+
+	@MainActor
+	@Test
+	func privacyProxyImageFailureReportsOriginalHTTPSIdentityAndRejectsUnsafeSchemes() async throws {
+		let body = try #require(URL(string: "https://cdn.example/body.jpg"))
+		let lead = try #require(URL(string: "https://cdn.example/lead.jpg"))
+		let coordinator = StructuredHTMLView.Coordinator(
+			onLink: { _ in },
+			onImage: { _, _ in },
+			onImageFailure: { _ in },
+			onHeight: { _ in },
+		)
+		let configuration = WKWebViewConfiguration()
+		configuration.websiteDataStore = .nonPersistent()
+		configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+		configuration.userContentController.add(coordinator, name: "pigeonEvent")
+		let webView = WKWebView(frame: .zero, configuration: configuration)
+		coordinator.webView = webView
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		let proxiedFailureURLs = await withCheckedContinuation { (continuation: CheckedContinuation<[URL], Never>) in
+			coordinator.onImageFailure = { urls in
+				continuation.resume(returning: urls)
+			}
+			webView.evaluateJavaScript("""
+				window.__pigeonRender({
+					html: '<img src="\(body.absoluteString)" alt="Body">',
+					baseURL: "https://example.com/story",
+					textScale: 1,
+					lineHeight: 1.55,
+					theme: "system",
+					remoteImagePolicy: "privacy-proxied",
+				});
+				document.querySelector("img")?.dispatchEvent(new Event("error"));
+			""", completionHandler: nil)
+		}
+
+		#expect(proxiedFailureURLs == [body])
+		#expect(StructuredHTMLSanitizer.safeWebURL("pigeon-image://proxy?url=https%3A%2F%2Fcdn.example%2Fbody.jpg", relativeTo: nil) == nil)
+		#expect(StructuredHTMLSanitizer.safeWebURL("javascript:alert(1)", relativeTo: nil) == nil)
+		#expect(ArticleImagePolicy.fallbackLeadImageURL(
+			bodyImageURLs: [body],
+			leadImageURL: lead,
+			failedImageURLs: Set(proxiedFailureURLs.map(\.absoluteString)),
+		) == lead)
+
+		let unsafeFailureURLs = await withCheckedContinuation { (continuation: CheckedContinuation<[URL], Never>) in
+			coordinator.onImageFailure = { urls in
+				continuation.resume(returning: urls)
+			}
+			webView.evaluateJavaScript("""
+				const image = document.createElement("img");
+				image.dataset.pigeonOriginalSrc = "javascript:alert(1)";
+				image.src = "pigeon-image://proxy?url=javascript%3Aalert(1)";
+				document.getElementById("pigeon-content").replaceChildren(image);
+				image.dispatchEvent(new Event("error"));
+			""", completionHandler: nil)
+		}
+		#expect(unsafeFailureURLs.isEmpty)
+	}
+
+	@MainActor
+	@Test
+	func askBeforeLoadingPlaceholderLoadsALinkedImageInsteadOfOpeningTheLink() async throws {
+		let webView = WKWebView()
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		let result = try await webView.evaluateJavaScript("""
+			JSON.stringify((() => {
+				window.__pigeonPosts = [];
+				window.webkit = {
+					messageHandlers: {
+						pigeonEvent: {
+							postMessage: (message) => window.__pigeonPosts.push(message),
+						},
+					},
+				};
+
+				window.__pigeonRender({
+					html: '<p><a href="https://example.com/gallery"><img src="https://cdn.example/hero.jpg" alt="Hero"></a></p>',
+					baseURL: "https://example.com/story",
+					textScale: 1,
+					lineHeight: 1.55,
+					theme: "system",
+					remoteImagePolicy: "blocked",
+				});
+
+				const placeholder = document.querySelector(".pigeon-image-blocked");
+				if (!placeholder) {
+					return { error: "missing-placeholder" };
+				}
+				placeholder.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+				return {
+					placeholderCount: String(document.querySelectorAll(".pigeon-image-blocked").length),
+					imageCount: String(document.querySelectorAll("img").length),
+					imageSrc: document.querySelector("img")?.getAttribute("src") || "",
+					linkPosts: String(window.__pigeonPosts.filter((post) => post.kind === "link").length),
+				};
+			})())
+			""")
+		let json = try #require(result as? String)
+		let data = try #require(json.data(using: .utf8))
+		let values = try #require(JSONSerialization.jsonObject(with: data) as? [String: String])
+
+		#expect(values["error"] == nil)
+		#expect(values["placeholderCount"] == "0")
+		#expect(values["imageCount"] == "1")
+		#expect(values["imageSrc"] == "https://cdn.example/hero.jpg")
+		#expect(values["linkPosts"] == "0")
 	}
 }
 

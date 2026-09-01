@@ -48,12 +48,14 @@ struct AddFeedView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				SettingsErrorSection()
 				Section("Feed") {
 					TextField("https://example.com/feed.xml", text: $urlText)
 						.textContentType(.URL)
 						.keyboardType(.URL)
 						.textInputAutocapitalization(.never)
 						.autocorrectionDisabled()
+						.accessibilityIdentifier("add-feed-url")
 				}
 				Section("Folder") {
 					Picker("Existing folder", selection: $selectedFolder) {
@@ -77,6 +79,9 @@ struct AddFeedView: View {
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
+			.onDisappear {
+				model.clearSettingsError()
+			}
 		}
 	}
 
@@ -120,7 +125,9 @@ private struct RenameFeedView: View {
 	) -> some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				TextField(fieldTitle, text: text)
+					.accessibilityIdentifier("rename-feed-name")
 			}
 			.navigationTitle(navigationTitle)
 			.navigationBarTitleDisplayMode(.inline)
@@ -157,6 +164,7 @@ private struct EditFeedFoldersView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				Section {
 					if model.folders.isEmpty {
 						Text("No folders yet")
@@ -254,7 +262,9 @@ private struct RenameFolderView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				LibraryEditorErrorSection()
 				TextField("Folder name", text: $name)
+					.accessibilityIdentifier("rename-folder-name")
 			}
 			.navigationTitle("Rename Folder")
 			.navigationBarTitleDisplayMode(.inline)
@@ -271,6 +281,28 @@ private struct RenameFolderView: View {
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
+		}
+	}
+}
+
+private struct LibraryEditorErrorSection: View {
+	@Environment(ReaderAppModel.self) private var model
+
+	var body: some View {
+		if let message = model.errorMessage {
+			Section {
+				HStack(alignment: .top) {
+					Label(message, systemImage: "exclamationmark.triangle.fill")
+						.frame(maxWidth: .infinity, alignment: .leading)
+					Button("Dismiss", systemImage: "xmark") {
+						model.clearError()
+					}
+					.labelStyle(.iconOnly)
+					.accessibilityLabel("Dismiss")
+				}
+				.accessibilityElement(children: .contain)
+				.accessibilityIdentifier("library-editor-error")
+			}
 		}
 	}
 }

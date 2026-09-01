@@ -46,6 +46,21 @@ struct PigeonAPIClientTests {
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
 	}
 
+#if DEBUG
+	@Test func previewRecommendationsRefreshRetainsSeededArticles() async throws {
+		let seededArticles = Array(PreviewData.articles.prefix(2))
+		let baseURL = try #require(URL(string: "https://pigeon.preview"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "preview-token"),
+			httpClient: PreviewHTTPClient(recommendations: seededArticles),
+		)
+
+		let refreshedArticles = try await client.recommendations(for: .forYou)
+
+		#expect(refreshedArticles == seededArticles)
+	}
+#endif
+
 	@Test func incrementalSyncSendsOpaqueCursorAndDecodesCanonicalDates() async throws {
 		let response = Data(
 			#"{"cursor":"v1:42","hasMore":false,"changes":[{"sequence":42,"entityType":"status","entityId":"item-1","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"itemId":"item-1","isRead":true,"isStarred":false,"updatedAt":"2026-08-15T12:00:00.000Z","version":2,"mutationId":"mutation-1"}}]}"#.utf8,
@@ -100,6 +115,19 @@ struct PigeonAPIClientTests {
 
 		#expect(items.first?.explanation == "From Daily")
 		#expect(items.first?.author == "Alice Appleseed")
+		#expect(items.first?.displayAuthor == "Alice Appleseed")
+	}
+
+	@Test func streamRecommendationsTreatABlankAuthorAsMissing() async throws {
+		let mock = BlankAuthorStreamHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let items = try await client.recommendations(from: "feed/7")
+
+		#expect(items.first?.author == nil)
+		#expect(items.first?.displayAuthor == nil)
+		#expect(items.first?.source == "Daily")
 	}
 
 	@Test func clientLoginPreservesAnOptionalServerPath() async throws {
@@ -253,6 +281,26 @@ struct PigeonAPIClientTests {
 		} catch {
 			Issue.record("Unexpected error: \(error)")
 		}
+	}
+
+	@Test func unreadStreamRecommendationsExcludeReadItems() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"itemRefs":[]}"#.utf8))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		_ = try await client.recommendationsPage(
+			from: "user/-/state/com.google/reading-list",
+			excludeTag: "user/-/state/com.google/read",
+		)
+
+		let request = try #require(await mock.lastRequest())
+		let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(request.url.path == "/reader/api/0/stream/items/ids")
+		#expect(query.first(where: { $0.name == "s" })?.value == "user/-/state/com.google/reading-list")
+		#expect(query.first(where: { $0.name == "xt" })?.value == "user/-/state/com.google/read")
 	}
 
 	@Test func folderRecommendationsReturnOneBoundedPageAndExposeContinuation() async throws {
@@ -417,6 +465,38 @@ private actor SingleStreamHTTPClient: HTTPClient {
 			let payload = Data(
 				"""
 				{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","author":"Alice Appleseed","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
+				""".utf8,
+			)
+			return (payload, try Self.response(for: url, statusCode: 200))
+		default:
+			return (Data("not found".utf8), try Self.response(for: url, statusCode: 404))
+		}
+	}
+
+	private static func response(for url: URL, statusCode: Int) throws -> HTTPURLResponse {
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return response
+	}
+}
+
+private actor BlankAuthorStreamHTTPClient: HTTPClient {
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+
+		switch url.path {
+		case "/reader/api/0/stream/items/ids":
+			return (
+				Data("{\"itemRefs\":[{\"id\":\"1\"}]}".utf8),
+				try Self.response(for: url, statusCode: 200),
+			)
+		case "/reader/api/0/stream/items/contents":
+			let payload = Data(
+				"""
+				{"id":"feed/7","updated":0,"items":[{"id":"tag:google.com,2005:reader/item/0000000000000001","categories":[],"title":"A useful story","author":"","published":1786272000,"summary":{"content":"<p>Hello</p>"},"content":{"content":"<p>Hello</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Daily","htmlUrl":"https://example.com"}}]}
 				""".utf8,
 			)
 			return (payload, try Self.response(for: url, statusCode: 200))

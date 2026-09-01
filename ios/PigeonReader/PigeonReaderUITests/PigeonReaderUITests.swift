@@ -115,6 +115,27 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testSidebarAddFeedOpensTheSubscribeSheet() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let addFeed = app.descendants(matching: .any)["add-feed"]
+		XCTAssertTrue(revealSidebar(containing: addFeed))
+		addFeed.tap()
+
+		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.textFields["add-feed-url"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Add"].exists)
+		app.buttons["Cancel"].tap()
+		XCTAssertTrue(app.navigationBars["Add Feed"].waitForNonExistence(timeout: 3))
+		attachScreenshot(named: "sidebar-add-feed")
+	}
+
 	func testLongPressFeedAssignsExistingAndCreatesNewFolder() throws {
 		app.terminate()
 		app.launchArguments = [
@@ -125,12 +146,7 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launch()
 
 		let feed = app.staticTexts["Stratechery"]
-		if feed.waitForExistence(timeout: 2) == false {
-			let showSidebar = app.navigationBars.buttons.firstMatch
-			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
-			showSidebar.tap()
-		}
-		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		XCTAssertTrue(revealSidebar(containing: feed))
 		feed.press(forDuration: 1.2)
 		let editFeed = app.buttons["Edit Feed"]
 		XCTAssertTrue(editFeed.waitForExistence(timeout: 5))
@@ -150,6 +166,117 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.staticTexts["Design"].exists)
 		XCTAssertFalse(app.navigationBars["Edit Feed"].exists)
 		attachScreenshot(named: "feed-folder-edit")
+	}
+
+	func testLongPressFolderRenamesAndDeletesFromTheSidebar() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let folder = app.staticTexts["Design"]
+		XCTAssertTrue(revealSidebar(containing: folder))
+		folder.press(forDuration: 1.2)
+
+		let renameFolder = app.buttons["Rename Folder"]
+		XCTAssertTrue(renameFolder.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Delete Folder"].exists)
+		renameFolder.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-folder-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		XCTAssertEqual(nameField.value as? String, "Design")
+		app.buttons["Cancel"].tap()
+		XCTAssertFalse(app.navigationBars["Rename Folder"].waitForExistence(timeout: 2))
+
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.press(forDuration: 1.2)
+		let deleteFolder = app.buttons["Delete Folder"]
+		XCTAssertTrue(deleteFolder.waitForExistence(timeout: 5))
+		deleteFolder.tap()
+		let confirmDelete = app.buttons["confirm-delete-folder"].firstMatch.exists
+			? app.buttons["confirm-delete-folder"].firstMatch
+			: app.buttons["Delete Folder"].firstMatch
+		XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5))
+		confirmDelete.tap()
+
+		XCTAssertFalse(app.staticTexts["Design"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["Dense Discovery"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "folder-sidebar-actions")
+	}
+
+	func testRenameFolderValidationErrorStaysVisibleInTheSheet() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let folder = app.staticTexts["Design"]
+		XCTAssertTrue(revealSidebar(containing: folder))
+		folder.press(forDuration: 1.2)
+		let renameFolder = app.buttons["Rename Folder"]
+		XCTAssertTrue(renameFolder.waitForExistence(timeout: 5))
+		renameFolder.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-folder-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		nameField.doubleTap()
+		nameField.typeText("Technology")
+		app.buttons["Save"].tap()
+
+		XCTAssertTrue(app.staticTexts["A folder with that name already exists."].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.otherElements["library-editor-error"].exists)
+		XCTAssertTrue(app.navigationBars["Rename Folder"].exists)
+	}
+
+	func testLongPressFeedOffersRenameAndUnsubscribe() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let feed = app.staticTexts["Stratechery"]
+		XCTAssertTrue(revealSidebar(containing: feed))
+		feed.press(forDuration: 1.2)
+
+		let renameFeed = app.buttons["Rename Feed"]
+		XCTAssertTrue(renameFeed.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Unsubscribe"].exists)
+		renameFeed.tap()
+
+		XCTAssertTrue(app.navigationBars["Rename Feed"].waitForExistence(timeout: 5))
+		let nameField = app.textFields["rename-feed-name"]
+		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+		XCTAssertEqual(nameField.value as? String, "Stratechery")
+		app.buttons["Cancel"].tap()
+		XCTAssertFalse(app.navigationBars["Rename Feed"].waitForExistence(timeout: 2))
+
+		XCTAssertTrue(feed.waitForExistence(timeout: 5))
+		feed.press(forDuration: 1.2)
+		let unsubscribe = app.buttons["Unsubscribe"]
+		XCTAssertTrue(unsubscribe.waitForExistence(timeout: 5))
+		unsubscribe.tap()
+		let confirm = app.buttons["confirm-unsubscribe-feed"].firstMatch.exists
+			? app.buttons["confirm-unsubscribe-feed"].firstMatch
+			: app.buttons["Unsubscribe"].firstMatch
+		XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+		confirm.tap()
+
+		XCTAssertFalse(app.staticTexts["Stratechery"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["For You"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Design"].waitForExistence(timeout: 5))
+		attachScreenshot(named: "feed-sidebar-actions")
 	}
 
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
@@ -189,6 +316,42 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(app.buttons["Star"].exists)
 		XCTAssertFalse(app.buttons["Unstar"].exists)
 		attachScreenshot(named: "article-bottom-controls")
+	}
+
+	func testSearchSurvivesOpeningAnArticleOnCompact() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let forYou = app.staticTexts["For You"]
+		if forYou.waitForExistence(timeout: 3) {
+			forYou.tap()
+		}
+		let list = app.descendants(matching: .any)["article-list"]
+		XCTAssertTrue(list.waitForExistence(timeout: 10) || app.searchFields.firstMatch.waitForExistence(timeout: 10))
+
+		let search = app.searchFields.firstMatch
+		XCTAssertTrue(search.waitForExistence(timeout: 10))
+		search.tap()
+		search.typeText("calmer")
+		let result = app.staticTexts["Designing calmer tools for people who read every day"]
+		XCTAssertTrue(result.waitForExistence(timeout: 10))
+		result.tap()
+
+		let back = app.descendants(matching: .any)["article-back-to-feed"]
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+
+		XCTAssertTrue(search.waitForExistence(timeout: 5))
+		let query = (search.value as? String) ?? search.placeholderValue
+		XCTAssertTrue(
+			search.value as? String == "calmer" || app.staticTexts["calmer"].exists,
+			"Opening a compact article must not remount the list and clear search. Observed: \(String(describing: query))",
+		)
+		attachScreenshot(named: "search-survives-compact-article")
 	}
 
 	func testBackFromOpenedArticleReturnsToTheFeed() throws {
@@ -255,22 +418,28 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(nextTitle.exists)
 	}
 
+	func testShortArticleMarksReadAfterBodyLayoutWithAfterSixtyPercentSetting() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-short-article",
+			"-reader-reset-reader-state",
+			"-reader-mark-read-on-scroll",
+		]
+		app.launch()
+
+		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 15))
+		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
+		XCTAssertTrue(
+			app.buttons["Mark unread"].waitForExistence(timeout: 15),
+			"A laid-out article that fits onscreen should count as fully read for After 60% Read.",
+		)
+	}
+
 	private func tapLinkedImage() throws {
 		let image = app.images["A notebook beside a cup of coffee"]
-		for attempt in 0..<6 {
-			if image.exists {
-				image.tap()
-			} else {
-				app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.62)).tap()
-			}
-			if app.buttons["View image"].waitForExistence(timeout: 1) {
-				return
-			}
-			if attempt < 5 {
-				app.swipeUp()
-			}
-		}
-		XCTFail("The linked fixture image did not open its image dialog.")
+		guard waitForHittableReaderTarget(image, description: "the linked fixture image") else { return }
+		image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 	}
 
 	private func openSettings() {
@@ -281,34 +450,100 @@ final class PigeonReaderUITests: XCTestCase {
 			"-reader-reset-reader-state",
 		]
 		app.launch()
-		let back = app.buttons.firstMatch
-		XCTAssertTrue(back.waitForExistence(timeout: 5))
-		back.tap()
 		let settings = app.descendants(matching: .any)["Settings"]
-		XCTAssertTrue(settings.waitForExistence(timeout: 5))
+		XCTAssertTrue(revealSidebar(containing: settings))
 		settings.tap()
+	}
+
+	private func revealSidebar(containing target: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+		let deadline = Date().addingTimeInterval(timeout)
+		let backButton = app.buttons["BackButton"]
+
+		while Date() < deadline {
+			if target.exists {
+				return true
+			}
+			if backButton.waitForExistence(timeout: 1), backButton.isHittable {
+				backButton.tap()
+			}
+			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+		}
+
+		return target.exists
 	}
 
 	private func tapNormalLink() throws {
 		let normalLink = app.links["Read the design notes"]
-		for attempt in 0..<8 {
-			if normalLink.exists {
-				normalLink.tap()
-			} else {
-				app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72)).tap()
-			}
-			if app.buttons["Open in Browser"].waitForExistence(timeout: 1) {
-				return
-			}
-			XCTAssertFalse(
-				app.buttons["View image"].exists || app.buttons["Open link"].exists,
-				"The normal-link helper hit the linked-image dialog; the fixture target should be accessible directly.",
-			)
-			if attempt < 7 {
-				app.swipeUp()
-			}
+		guard waitForHittableReaderTarget(normalLink, description: "the normal fixture link") else { return }
+		normalLink.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+		XCTAssertFalse(
+			app.buttons["View image"].exists || app.buttons["Open link"].exists,
+			"The normal-link helper hit the linked-image dialog; the fixture target should be accessible directly.",
+		)
+	}
+
+	private func waitForHittableReaderTarget(_ target: XCUIElement, description: String) -> Bool {
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		guard reader.waitForExistence(timeout: 5) else {
+			XCTFail("The article reader did not appear while waiting for \(description).")
+			return false
 		}
-		XCTFail("The normal fixture link did not open the existing link-choice dialog.")
+		let webView = app.webViews.firstMatch
+		guard webView.waitForExistence(timeout: 5) else {
+			XCTFail("The article WebView did not appear while waiting for \(description).")
+			return false
+		}
+		let deadline = Date().addingTimeInterval(20)
+		var lastScrolledTargetFrame: CGRect?
+
+		while Date() < deadline {
+			if target.exists {
+				// Do not scroll the outer reader until the WebView has reported a
+				// full article-sized frame. While it is still collapsed during
+				// HTML measurement, a swipe can be interpreted as article-boundary
+				// navigation and replace the rich fixture with another article.
+				let readerFrame = reader.frame
+				let webViewFrame = webView.frame
+				let targetFrame = target.frame
+				let usableReaderFrame = visibleReaderFrame(reader)
+				// Validate the same point we will tap. Requiring the entire image
+				// to fit can oscillate between scroll positions even with its center visible.
+				let tapPoint = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
+				let targetIsUsable = targetFrame.isEmpty == false
+					&& target.isHittable && usableReaderFrame.contains(tapPoint)
+				if targetIsUsable, webViewFrame.contains(tapPoint) {
+					return true
+				}
+				if webViewFrame.height > readerFrame.height, targetFrame.isEmpty == false {
+					if targetFrame.maxY > usableReaderFrame.maxY {
+						if lastScrolledTargetFrame != targetFrame {
+							reader.swipeUp()
+							lastScrolledTargetFrame = targetFrame
+						}
+					} else if targetFrame.minY < usableReaderFrame.minY {
+						if lastScrolledTargetFrame != targetFrame {
+							reader.swipeDown()
+							lastScrolledTargetFrame = targetFrame
+						}
+					}
+				}
+			}
+
+			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+		}
+
+		XCTFail("Timed out waiting for \(description) to finish rendering and become hittable.")
+		return false
+	}
+
+	private func visibleReaderFrame(_ reader: XCUIElement) -> CGRect {
+		var frame = reader.frame
+		let controls = app.otherElements["article-reader-controls"]
+		guard controls.exists else { return frame }
+		let controlsFrame = controls.frame
+		guard controlsFrame.minY > frame.minY, controlsFrame.minY < frame.maxY else { return frame }
+		frame.size.height = controlsFrame.minY - frame.minY
+		return frame
 	}
 
 	private func attachScreenshot(named name: String) {

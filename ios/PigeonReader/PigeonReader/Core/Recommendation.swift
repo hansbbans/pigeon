@@ -25,4 +25,50 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 		}
 		return originalURL
 	}
+
+	/// Visible byline, ignoring blank GReader authors and names that only repeat the feed.
+	var displayAuthor: String? {
+		Self.displayAuthor(author, source: source)
+	}
+
+	static func displayAuthor(_ author: String?, source: String) -> String? {
+		guard let author else {
+			return nil
+		}
+		let trimmed = author.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard trimmed.isEmpty == false else {
+			return nil
+		}
+		let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+		if trimmed.caseInsensitiveCompare(trimmedSource) == .orderedSame {
+			return nil
+		}
+		return trimmed
+	}
+
+	var hasReadableHTML: Bool {
+		html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+	}
+
+	func replacingHTML(_ html: String) -> Recommendation {
+		Recommendation(
+			id: id,
+			readerId: readerId,
+			feedKey: feedKey,
+			source: source,
+			author: author,
+			title: title,
+			html: html,
+			text: text,
+			originalURL: originalURL,
+			receivedAt: receivedAt,
+			isRead: isRead,
+			isStarred: isStarred,
+			score: score,
+			confidence: confidence,
+			sampleCount: sampleCount,
+			explanation: explanation,
+			learningState: learningState,
+		)
+	}
 }

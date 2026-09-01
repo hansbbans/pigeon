@@ -26,6 +26,96 @@ struct PlatformIntegrationTests {
 		#expect(delta.map(\.id) == ["new"])
 	}
 
+	@Test func backgroundRefreshDeduplicatesCanonicalAndGReaderArticleAliases() {
+		let cachedCanonical = Self.article(id: "canonical", receivedAt: 1)
+		let gReaderCopy = Self.article(id: "greader-copy", receivedAt: 2, readerId: cachedCanonical.id)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [cachedCanonical])
+		let knownAliasDelta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: known,
+			current: [gReaderCopy],
+		)
+		#expect(knownAliasDelta.isEmpty)
+
+		let newCanonical = Self.article(id: "new-canonical", receivedAt: 4)
+		let newGReaderCopy = Self.article(id: "new-greader-copy", receivedAt: 3, readerId: newCanonical.id)
+		let delta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: [],
+			current: [newCanonical, newGReaderCopy],
+		)
+		#expect(delta.map(\.id) == [newCanonical.id])
+	}
+
+	@Test func feedNotificationsMatchStreamAndRecommendationFeedKeysFromLegacySlugPrefs() throws {
+		let subscription = try Self.subscription(id: "feed/7", path: "daily")
+		let enabledIDs: Set<String> = ["daily"]
+		#expect(FeedNotificationIdentity.isEnabled(subscription: subscription, enabledIDs: enabledIDs))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream-new", receivedAt: 3, feedKey: "feed/7"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "foryou-new", receivedAt: 4, feedKey: "daily"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "other", receivedAt: 5, feedKey: "feed/8"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		) == false)
+	}
+
+	@Test func feedNotificationsMatchWhenSettingsStoreStreamIDs() throws {
+		let subscription = try Self.subscription(id: "feed/7", path: "daily")
+		let enabledIDs = FeedNotificationIdentity.updatedIDs([], enabling: true, subscription: subscription)
+		#expect(enabledIDs == ["daily", "feed/7"])
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream-new", receivedAt: 3, feedKey: "feed/7"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "foryou-new", receivedAt: 4, feedKey: "daily"),
+			enabledIDs: enabledIDs,
+			subscriptions: [subscription],
+		))
+		#expect(FeedNotificationIdentity.updatedIDs(enabledIDs, enabling: false, subscription: subscription).isEmpty)
+	}
+
+	@Test func feedNotificationsStillMatchAnExactStoredFeedKeyWithoutSubscriptions() {
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "exact", receivedAt: 1, feedKey: "daily"),
+			enabledIDs: ["daily"],
+			subscriptions: [],
+		))
+		#expect(FeedNotificationIdentity.shouldNotify(
+			article: Self.article(id: "stream", receivedAt: 1, feedKey: "feed/7"),
+			enabledIDs: ["daily"],
+			subscriptions: [],
+		) == false)
+	}
+
+	@Test func feedNotificationsExpandLegacySlugPrefsToStreamAliases() throws {
+		let daily = try Self.subscription(id: "feed/7", path: "daily")
+		let other = try Self.subscription(id: "feed/8", path: "weekly")
+		let expanded = FeedNotificationIdentity.expandedIDs(["daily"], subscriptions: [daily, other])
+		#expect(expanded == ["daily", "feed/7"])
+		#expect(expanded.contains("feed/8") == false)
+	}
+
+	@Test func backgroundRefreshDoesNotNotifyForAlreadyReadArticles() {
+		let unreadNew = Self.article(id: "unread-new", receivedAt: 4)
+		let readNew = Self.article(id: "read-new", receivedAt: 5, isRead: true)
+		let readDuplicate = Self.article(id: "read-new", receivedAt: 6, isRead: true)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [])
+		let delta = BackgroundRefreshArticlePlanner.newArticles(
+			knownIDs: known,
+			current: [readNew, unreadNew, readDuplicate],
+		)
+		#expect(delta.map(\.id) == ["unread-new"])
+	}
+
 	@Test func notificationActionsPersistAcrossATerminatedLaunch() throws {
 		let action = ReaderNotificationAction.markRead(articleID: "article-7")
 		let restored = try JSONDecoder().decode(
@@ -40,13 +130,15 @@ struct PlatformIntegrationTests {
 		let links: [PigeonDeepLink] = [
 			.feed("feed/7"),
 			.folder("user/-/label/Design Notes"),
-			.article("article/with/slashes"),
+			.article("article/with/slashes", collection: nil),
+			.article("preview-2", collection: ReaderSection.forYou.rawValue),
 			.add(website),
 		]
 		for link in links {
 			#expect(PigeonDeepLink(url: link.url) == link)
 		}
 		#expect(PigeonDeepLink(url: try #require(URL(string: "https://example.com"))) == nil)
+		#expect(PigeonDeepLink(url: try #require(URL(string: "pigeon://article/preview-2"))) == .article("preview-2", collection: nil))
 	}
 
 	@Test @MainActor func deepLinksSelectExistingFeedFolderAndArticleDestinations() async {
@@ -55,8 +147,71 @@ struct PlatformIntegrationTests {
 		#expect(model.selectedCollection.feedKey == "dense-discovery")
 		await model.handleDeepLink(PigeonDeepLink.folder("Design").url)
 		#expect(model.selectedCollection.title == "Design")
-		await model.handleDeepLink(PigeonDeepLink.article("preview-2").url)
+		await model.handleDeepLink(PigeonDeepLink.article("preview-2", collection: nil).url)
 		#expect(model.selectedArticle?.id == "preview-2")
+		#expect(model.selectedCollection.feedKey == "marginal-revolution")
+	}
+
+	@Test func pendingFeedStoreSavesValidURLsAndIgnoresInvalidOnes() throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let website = try #require(URL(string: "https://example.com/feed.xml"))
+		let fileURL = try #require(URL(string: "file:///tmp/feed.xml"))
+		let ftpURL = try #require(URL(string: "ftp://example.com/feed.xml"))
+
+		PendingFeedStore.save(fileURL, defaults: defaults)
+		PendingFeedStore.save(ftpURL, defaults: defaults)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+
+		PendingFeedStore.save(website, defaults: defaults)
+		#expect(PendingFeedStore.consume(defaults: defaults) == website)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+	}
+
+	@Test @MainActor func consumePendingFeedRequestPresentsASavedURLWhileTheSessionIsAlreadyOpen() throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let website = try #require(URL(string: "https://stratechery.com/feed/"))
+		let model = PreviewData.makeModel()
+
+		PendingFeedStore.save(website, defaults: defaults)
+		model.consumePendingFeedRequest(defaults: defaults)
+
+		#expect(model.pendingFeedRequest?.url == website)
+		let requestID = model.pendingFeedRequest?.id
+		model.consumePendingFeedRequest(defaults: defaults)
+		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
+	}
+
+	@Test @MainActor func addDeepLinkPresentsTheFeedSheetWithoutWaitingForAPendingStore() async throws {
+		let model = PreviewData.makeModel()
+		let website = try #require(URL(string: "https://daringfireball.net/feeds/main"))
+		await model.handleDeepLink(PigeonDeepLink.add(website).url)
+		#expect(model.pendingFeedRequest?.url == website)
+	}
+
+	@Test @MainActor func addDeepLinkAndPendingStorePresentOnlyOnce() async throws {
+		let (defaults, suiteName) = try makePendingFeedDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let model = PreviewData.makeModel()
+		let website = try #require(URL(string: "https://example.com/feed.xml"))
+		PendingFeedStore.save(website, defaults: defaults)
+
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		let requestID = model.pendingFeedRequest?.id
+		await model.handleDeepLink(
+			PigeonDeepLink.add(website).url,
+			pendingFeedDefaults: defaults,
+		)
+		model.consumePendingFeedRequest(defaults: defaults)
+
+		#expect(model.pendingFeedRequest?.url == website)
+		#expect(model.pendingFeedRequest?.id == requestID)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
 	}
 
 	@Test func opmlPreviewPreservesNestedFoldersAndDetectsNormalizedDuplicates() throws {
@@ -132,6 +287,63 @@ struct PlatformIntegrationTests {
 		#expect(service.addedFolders.isEmpty)
 	}
 
+	@Test func opmlFilePickerReplacesThePreviewOnAValidSecondPick() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		#expect(screen.preview?.newEntries.map(\.title) == ["Studio Notes"])
+		#expect(screen.message == nil)
+
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Independent", url: "https://other.example/rss")))
+		#expect(screen.preview?.newEntries.map(\.title) == ["Independent"])
+		#expect(screen.message == nil)
+	}
+
+	@Test func opmlFilePickerClearsAStalePreviewWhenTheNextFileFails() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		#expect(screen.preview?.newEntries.isEmpty == false)
+
+		screen.apply(OPMLImportPlanner.outcome(of: .success(Data("<html></html>".utf8)), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == OPMLImportError.invalidDocument.localizedDescription)
+	}
+
+	@Test func opmlFilePickerKeepsTheCurrentPreviewWhenTheChooserIsCancelled() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+		let preview = screen.preview
+
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CancellationError()), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CocoaError(.userCancelled)), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+
+		let cocoaCancelled = NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError)
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(cocoaCancelled), existing: []))
+		#expect(screen.preview == preview)
+		#expect(screen.message == nil)
+	}
+
+	@Test func opmlFilePickerClearsThePreviewWhenReadingTheNextFileFails() {
+		var screen = OPMLImportScreenState()
+		screen.apply(Self.opmlFileOutcome(Self.opmlDocument(title: "Studio Notes", url: "https://one.example/feed")))
+
+		let readError = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError)
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(readError), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == readError.localizedDescription)
+	}
+
+	@Test func opmlFilePickerDoesNotLeaveACancellationErrorOnAFreshScreen() {
+		var screen = OPMLImportScreenState()
+		screen.apply(OPMLImportPlanner.outcome(of: .failure(CocoaError(.userCancelled)), existing: []))
+		#expect(screen.preview == nil)
+		#expect(screen.message == nil)
+	}
+
 	@Test func staleFeedClientDecodesEvidenceAndSendsBoundedArchiveRequest() async throws {
 		let response = Data(
 			#"{"cutoff":"2026-05-17T00:00:00.000Z","feeds":[{"feedKey":"quiet","streamId":"feed/7","title":"Quiet","sourceType":"rss","sourceURL":"https://example.com/feed","siteURL":null,"lastArticleAt":"2025-01-02T00:00:00.000Z","lastSuccessAt":"2025-01-01T00:00:00.000Z","httpStatus":304,"archived":false}]}"#.utf8,
@@ -156,12 +368,50 @@ struct PlatformIntegrationTests {
 		#expect(body.feedKeys == ["quiet"])
 	}
 
-	private static func article(id: String, receivedAt: TimeInterval) -> Recommendation {
+	private func makePendingFeedDefaults() throws -> (UserDefaults, String) {
+		let suiteName = "pigeon-pending-feed-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defaults.removePersistentDomain(forName: suiteName)
+		return (defaults, suiteName)
+	}
+
+	private static func article(
+		id: String,
+		receivedAt: TimeInterval,
+		feedKey: String = "feed",
+		isRead: Bool = false,
+		readerId: String? = nil,
+	) -> Recommendation {
 		Recommendation(
-			id: id, readerId: "reader-\(id)", feedKey: "feed", source: "Feed", title: id,
+			id: id, readerId: readerId ?? "reader-\(id)", feedKey: feedKey, source: "Feed", title: id,
 			html: "<p>\(id)</p>", text: nil, originalURL: nil, receivedAt: Date(timeIntervalSince1970: receivedAt),
-			isRead: false, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
+			isRead: isRead, isStarred: false, score: 0, confidence: 0, sampleCount: 0,
 			explanation: "Test", learningState: "Test",
+		)
+	}
+
+	private static func opmlDocument(title: String, url: String) -> Data {
+		Data(
+			"""
+			<?xml version="1.0"?><opml version="2.0"><body>
+			<outline title="\(title)" xmlUrl="\(url)" />
+			</body></opml>
+			""".utf8,
+		)
+	}
+
+	private static func opmlFileOutcome(_ data: Data) -> OPMLImportFileOutcome {
+		OPMLImportPlanner.outcome(of: .success(data), existing: [])
+	}
+
+	private static func subscription(id: String, path: String) throws -> FeedSubscription {
+		FeedSubscription(
+			id: id,
+			title: path.capitalized,
+			categories: [],
+			url: try #require(URL(string: "https://pigeon.test/feed/\(path)")),
+			htmlUrl: URL(string: "https://example.com"),
+			iconUrl: nil,
 		)
 	}
 }

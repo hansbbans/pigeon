@@ -28,4 +28,25 @@ enum ReaderMode: String, CaseIterable, Identifiable, Sendable {
 			"safari"
 		}
 	}
+
+	/// Articles without an original URL can only show Feed Content.
+	/// That fallback is per-article and must not be stored as the feed preference.
+	static func displayMode(stored: ReaderMode, hasOriginalURL: Bool) -> ReaderMode {
+		hasOriginalURL ? stored : .feedContent
+	}
+
+	static func shouldPersistSelection(hasOriginalURL: Bool) -> Bool {
+		hasOriginalURL
+	}
+}
+
+/// Inputs that determine which mode an article reader should restore.
+///
+/// The feed preference is shared by a feed, but URL-less articles fall back to
+/// Feed Content only for the current article. Keep that per-article decision
+/// separate from the stored feed preference when reusing the reader view.
+struct ArticleReaderModeResolutionIdentity: Hashable, Sendable {
+	let articleID: String
+	let feedKey: String
+	let hasOriginalURL: Bool
 }

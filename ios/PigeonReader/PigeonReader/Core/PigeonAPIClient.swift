@@ -283,12 +283,14 @@ struct PigeonAPIClient: Sendable {
 	func recommendationsPage(
 		from streamID: String,
 		dayBounds: ReaderLocalDayBounds? = nil,
+		excludeTag: String? = nil,
 		continuation: String? = nil,
 		cachedRecommendations: [Recommendation] = [],
 	) async throws -> ReaderRecommendationsPage {
 		try Task.checkCancellation()
 		let page = try await streamItemIDs(
 			streamID: streamID,
+			excludeTag: excludeTag,
 			olderThanUnix: dayBounds.map { max($0.startSeconds - 1, 0) },
 			limit: Self.streamItemIDPageLimit,
 			continuation: continuation,

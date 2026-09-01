@@ -8,6 +8,7 @@ struct StaleFeedsView: View {
 
 	var body: some View {
 		List {
+			SettingsErrorSection()
 			if let undoTitle = model.staleFeedUndoTitle {
 				Section {
 					Button(undoTitle, systemImage: "arrow.uturn.backward") {

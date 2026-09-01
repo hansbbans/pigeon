@@ -9,14 +9,44 @@ nonisolated enum BackgroundRefreshPolicy {
 }
 
 nonisolated enum BackgroundRefreshArticlePlanner {
+	private static func aliases(of article: Recommendation) -> [String] {
+		[article.id, article.readerId].filter { $0.isEmpty == false }
+	}
+
 	static func knownIDs(inMemory: [Recommendation], cached: [Recommendation]) -> Set<String> {
-		Set((inMemory + cached).map(\.id))
+		(inMemory + cached).reduce(into: Set<String>()) { result, article in
+			result.formUnion(aliases(of: article))
+		}
 	}
 
 	static func newArticles(knownIDs: Set<String>, current: [Recommendation]) -> [Recommendation] {
-		current.reduce(into: [String: Recommendation]()) { result, article in
-			if knownIDs.contains(article.id) == false { result[article.id] = article }
-		}.values.sorted { $0.receivedAt > $1.receivedAt }
+		var seenIDs = Set<String>()
+		return current
+			.sorted { left, right in
+				if left.receivedAt != right.receivedAt {
+					return left.receivedAt > right.receivedAt
+				}
+				if left.id != right.id {
+					return left.id < right.id
+				}
+				return left.readerId < right.readerId
+			}
+			.reduce(into: [Recommendation]()) { result, article in
+				// A first sync, another device's read state, or a collection that
+				// was not in the local snapshot can introduce already-read IDs.
+				// Those are new to this cache, not new unread mail.
+				guard article.isRead == false else {
+					return
+				}
+				let articleAliases = aliases(of: article)
+				guard articleAliases.isEmpty == false,
+					articleAliases.allSatisfy({ knownIDs.contains($0) == false }),
+					articleAliases.allSatisfy({ seenIDs.contains($0) == false }) else {
+					return
+				}
+				seenIDs.formUnion(articleAliases)
+				result.append(article)
+			}
 	}
 }
 

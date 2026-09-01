@@ -266,7 +266,7 @@ struct ReaderNavigationTests {
 
 		let mutation = Task { await model.setRead(article, read: true) }
 		let request = await controlled.nextRequest()
-		#expect(model.allArticles(for: .unread).first?.isRead == true)
+		#expect(model.allArticles(for: .unread).isEmpty)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 0)
@@ -277,7 +277,7 @@ struct ReaderNavigationTests {
 		await controlled.resolve(request, statusCode: 500)
 		await mutation.value
 
-		#expect(model.allArticles(for: .unread).first?.isRead == true)
+		#expect(model.allArticles(for: .unread).isEmpty)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 0)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 0)

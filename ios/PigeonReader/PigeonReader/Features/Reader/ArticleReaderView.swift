@@ -9,11 +9,15 @@ struct ArticleReaderView: View {
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var selectedMode = ReaderMode.feedContent
 	@State private var readerDocument: ReaderViewDocument?
+	@State private var readerDocumentArticleID: String?
 	@State private var readerViewState = ReaderViewLoadState.idle
 	@State private var scrollPosition = ScrollPosition()
 	@State private var pendingRestoredDepth: Double?
+	@State private var modeResolutionArticleID: String?
+	@State private var restoredModeForArticle: ReaderMode?
 	@State private var scrollBoundary = ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true)
 	@State private var boundaryNavigationInProgress = false
+	@State private var isArticleBodyLaidOut = false
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -29,6 +33,7 @@ struct ArticleReaderView: View {
 						article: current,
 						selectedMode: selectedMode,
 						hasOriginalURL: true,
+						textScale: model.readerTypography.textScale,
 						onSelectMode: selectMode,
 						onOpenOriginal: openOriginal,
 					)
@@ -36,7 +41,7 @@ struct ArticleReaderView: View {
 					.padding(.vertical, 16)
 					Divider()
 
-					ArticleWebsiteView(url: originalURL)
+					ArticleWebsiteView(articleID: current.id, url: originalURL)
 						.frame(maxWidth: .infinity, maxHeight: .infinity)
 				}
 			} else {
@@ -52,6 +57,7 @@ struct ArticleReaderView: View {
 								article: current,
 								selectedMode: selectedMode,
 								hasOriginalURL: current.safeOriginalURL != nil,
+								textScale: model.readerTypography.textScale,
 								onSelectMode: selectMode,
 								onOpenOriginal: openOriginal,
 							)
@@ -81,27 +87,53 @@ struct ArticleReaderView: View {
 						}
 					}
 					.accessibilityIdentifier("article-reader-scroll-view")
+					.id(ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode))
 					.scrollPosition($scrollPosition)
 					.scrollBounceBehavior(.basedOnSize, axes: .horizontal)
 					.onScrollGeometryChange(for: ArticleScrollGeometry.self) { geometry in
 						ArticleScrollGeometry(geometry)
 					} action: { _, geometry in
 						scrollBoundary = geometry.boundaryState
-						if let pendingRestoredDepth, geometry.maximumOffset > 1 {
-							scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+						let isBodyLaidOut = isArticleBodyLaidOut && isShowingArticleBody
+						if let pendingRestoredDepth {
+							if geometry.maximumOffset > 1 {
+								scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+								self.pendingRestoredDepth = nil
+								return
+							}
+							guard ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+								pendingDepth: pendingRestoredDepth,
+								maximumOffset: Double(geometry.maximumOffset),
+								isBodyLaidOut: isBodyLaidOut,
+							) else {
+								return
+							}
 							self.pendingRestoredDepth = nil
-							return
 						}
-						let depth = min(max(geometry.offset / max(geometry.maximumOffset, 1), 0), 1)
-						model.recordScrollDepth(itemId: current.id, depth: depth)
-						model.setArticleScrollOffset(depth, for: current.id)
+						let depth = ArticleReadingProgress.depth(
+							offset: Double(geometry.offset),
+							maximumOffset: Double(geometry.maximumOffset),
+							contentHeight: Double(geometry.contentHeight),
+							isBodyLaidOut: isBodyLaidOut,
+						)
+						if isBodyLaidOut {
+							model.recordScrollDepth(itemId: current.id, depth: depth)
+							model.setArticleScrollOffset(depth, for: current.id)
+						}
 					}
 				}
 				.background(readerBackground)
 			}
 		}
 		.background(readerBackground)
-		.preferredColorScheme(preferredColorScheme)
+		// Window-level preferredColorScheme tints the iPad sidebar. Isolate
+		// the theme to this pane whenever the split view is showing.
+		.readerThemeColorScheme(
+			ReaderThemeColorSchemePlacement.resolve(
+				theme: model.readerTypography.theme,
+				isCompactReader: isCompactReader,
+			)
+		)
 		.navigationTitle(current.source)
 		.navigationBarTitleDisplayMode(.inline)
 		.navigationBarBackButtonHidden(true)
@@ -117,18 +149,43 @@ struct ArticleReaderView: View {
 		.toolbar {
 			ReaderSettingsToolbarItem()
 		}
-		.task(id: current.feedKey) {
-			selectedMode = current.safeOriginalURL == nil ? .feedContent : model.readerMode(for: current.feedKey)
+		.task(id: ArticleReaderModeResolutionIdentity(
+			articleID: current.id,
+			feedKey: current.feedKey,
+			hasOriginalURL: current.safeOriginalURL != nil,
+		)) {
+			let restoredMode = ReaderMode.displayMode(
+				stored: model.readerMode(for: current.feedKey),
+				hasOriginalURL: current.safeOriginalURL != nil,
+			)
+			modeResolutionArticleID = current.id
+			restoredModeForArticle = restoredMode
+			selectedMode = restoredMode
 			readerDocument = nil
+			readerDocumentArticleID = nil
 			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
 		}
 		.task(id: readerRequestID(for: current)) {
+			isArticleBodyLaidOut = false
 			await loadReaderViewIfNeeded(for: current)
 		}
 		.task(id: current.id) {
 			boundaryNavigationInProgress = false
+			isArticleBodyLaidOut = false
 			pendingRestoredDepth = model.articleScrollOffset(for: current.id)
 			await model.recordExplicitOpen(for: current)
+		}
+		.onChange(of: ArticleReaderContentIdentity(articleID: current.id, mode: selectedMode), initial: true) { previous, currentIdentity in
+			scrollPosition = ScrollPosition()
+			pendingRestoredDepth = ArticleReaderContentIdentity.pendingRestoredDepth(
+				previous: previous,
+				current: currentIdentity,
+				savedDepth: model.articleScrollOffset(for: currentIdentity.articleID),
+				preserveSavedDepth: modeResolutionArticleID != currentIdentity.articleID || restoredModeForArticle == currentIdentity.mode,
+			)
+		}
+		.onPreferenceChange(ArticleBodyLayoutKey.self) { isLaidOut in
+			isArticleBodyLaidOut = isLaidOut
 		}
 		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
 			guard scenePhase == .active else {
@@ -137,7 +194,7 @@ struct ArticleReaderView: View {
 			await model.monitorActiveReading(for: current.id)
 		}
 		.onChange(of: selectedMode) { _, newMode in
-			model.setReaderMode(newMode, for: current.feedKey)
+			model.setReaderMode(newMode, for: current)
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
 			}
@@ -161,6 +218,7 @@ struct ArticleReaderView: View {
 				openedDestination: openInlineDestination,
 				saveToReader: saveInlineDestination,
 			)
+			.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
 		case .readerView:
 			readerViewContent(for: article)
 		case .website:
@@ -170,7 +228,12 @@ struct ArticleReaderView: View {
 
 	@ViewBuilder
 	private func readerViewContent(for article: Recommendation) -> some View {
-		switch readerViewState {
+		let presentedState = ReaderViewDocumentOwnership.presentedState(
+			stored: readerViewState,
+			documentArticleID: readerDocumentArticleID,
+			visibleArticleID: article.id,
+		)
+		switch presentedState {
 		case .idle, .loading:
 			ProgressView("Preparing Reader View")
 				.frame(maxWidth: .infinity, minHeight: 160)
@@ -185,7 +248,11 @@ struct ArticleReaderView: View {
 		case .fallback(let message):
 			readerViewFailure(message: message, article: article, showingFeedContent: true)
 		case .loaded:
-			if let readerDocument {
+			if let readerDocument,
+				ReaderViewDocumentOwnership.shouldApply(
+					extractedArticleID: readerDocumentArticleID ?? "",
+					visibleArticleID: article.id,
+				) {
 				VStack(alignment: .leading, spacing: 12) {
 					if let byline = readerDocument.byline {
 						Text(byline)
@@ -205,6 +272,7 @@ struct ArticleReaderView: View {
 						openedDestination: openInlineDestination,
 						saveToReader: saveInlineDestination,
 					)
+					.id(ArticleBodyLayoutIdentity(articleID: article.id, content: readerDocument.contentHTML))
 				}
 				.accessibilityElement(children: .contain)
 				.accessibilityIdentifier("reader-view-loaded-content")
@@ -231,7 +299,14 @@ struct ArticleReaderView: View {
 			return
 		}
 		guard article.safeOriginalURL != nil else {
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			readerViewState = .unavailable
+			readerDocumentArticleID = article.id
 			return
 		}
 
@@ -239,13 +314,27 @@ struct ArticleReaderView: View {
 		do {
 			let document = try await model.loadReaderView(for: article)
 			try Task.checkCancellation()
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			readerDocument = document
+			readerDocumentArticleID = article.id
 			readerViewState = .loaded
 		} catch is CancellationError {
 			return
 		} catch {
+			guard ReaderViewDocumentOwnership.shouldApply(
+				extractedArticleID: article.id,
+				visibleArticleID: currentArticle.id,
+			) else {
+				return
+			}
 			let hasFeedContent = article.html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 			readerViewState = hasFeedContent ? .fallback(error.localizedDescription) : .failed(error.localizedDescription)
+			readerDocumentArticleID = article.id
 		}
 	}
 
@@ -274,9 +363,26 @@ struct ArticleReaderView: View {
 					openedDestination: openInlineDestination,
 					saveToReader: saveInlineDestination,
 				)
+				.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
 			}
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
+	private var isShowingArticleBody: Bool {
+		switch selectedMode {
+		case .feedContent:
+			true
+		case .website:
+			false
+		case .readerView:
+			switch readerViewState {
+			case .loaded, .fallback:
+				true
+			case .idle, .loading, .unavailable, .failed:
+				false
+			}
+		}
 	}
 
 	private var isCompactReader: Bool {
@@ -356,14 +462,6 @@ struct ArticleReaderView: View {
 
 	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
 		try await model.saveToReader(destination)
-	}
-
-	private var preferredColorScheme: ColorScheme? {
-		switch model.readerTypography.theme {
-		case .system: nil
-		case .light, .sepia: .light
-		case .darkGray, .dark: .dark
-		}
 	}
 
 	private var readerBackground: Color {
