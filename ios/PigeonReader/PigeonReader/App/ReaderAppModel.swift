@@ -111,6 +111,8 @@ final class ReaderAppModel {
 	private var sortOrders: [String: ArticleSortOrder] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
+	private var detachedSelectedArticle: Recommendation?
+	private var detachedSelectedArticleOrdering: [Recommendation] = []
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
 	private var streamContinuations: [String: String] = [:]
@@ -347,6 +349,10 @@ final class ReaderAppModel {
 		guard let selectedArticleID else {
 			return nil
 		}
+		if let detachedSelectedArticle,
+			detachedSelectedArticle.id == selectedArticleID || detachedSelectedArticle.readerId == selectedArticleID {
+			return detachedSelectedArticle
+		}
 		return article(withId: selectedArticleID)
 	}
 
@@ -439,6 +445,7 @@ final class ReaderAppModel {
 			sortOrders = [:]
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
+			clearDetachedSelectedArticle()
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 			subscriptions = []
@@ -999,6 +1006,7 @@ final class ReaderAppModel {
 			try await offlineStore.clearCachedArticles(accountID: accountID)
 			articleCache = [:]
 			selectedArticleIDs = [:]
+			clearDetachedSelectedArticle()
 			selectedArticleID = nil
 			preferredCompactColumn = .content
 			writeWidgetSnapshot()
@@ -1092,6 +1100,7 @@ final class ReaderAppModel {
 	private func select(collectionID: String) {
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
+			clearDetachedSelectedArticle()
 			temporarilyUnavailableSelectedCollection = nil
 			errorMessage = nil
 		}
@@ -1147,6 +1156,7 @@ final class ReaderAppModel {
 		guard self.article(withId: article.id) != nil || searchResults.contains(where: { articlesMatch($0, article) }) else {
 			return
 		}
+		clearDetachedSelectedArticle()
 		selectedArticleID = article.id
 		selectedArticleIDs[selectedNavigationID] = article.id
 		preferredCompactColumn = .detail
@@ -2133,8 +2143,17 @@ final class ReaderAppModel {
 			guard selectedNavigationID == collectionID else {
 				return
 			}
+			clearDetachedSelectedArticle()
 			selectedArticleID = cached.id
 			selectedArticleIDs[collectionID] = cached.id
+			return
+		}
+
+		if selectedNavigationID == collectionID,
+			let detachedSelectedArticle,
+			detachedSelectedArticle.id == rememberedID || detachedSelectedArticle.readerId == rememberedID {
+			selectedArticleID = detachedSelectedArticle.id
+			selectedArticleIDs[collectionID] = detachedSelectedArticle.id
 			return
 		}
 
@@ -2164,6 +2183,11 @@ final class ReaderAppModel {
 
 	private func reconcileCurrentArticleSelection() {
 		reconcileSelection(for: selectedNavigationID)
+	}
+
+	private func clearDetachedSelectedArticle() {
+		detachedSelectedArticle = nil
+		detachedSelectedArticleOrdering = []
 	}
 
 	private func updateNavigationCount(for itemID: String, to count: Int) {
@@ -2331,7 +2355,11 @@ final class ReaderAppModel {
 		}
 
 		let ordering: [Recommendation]
-		if activeSearchScope != nil {
+		if let detachedSelectedArticle,
+			articlesMatch(detachedSelectedArticle, current),
+			detachedSelectedArticleOrdering.isEmpty == false {
+			ordering = detachedSelectedArticleOrdering
+		} else if activeSearchScope != nil {
 			// Search results span the library, while the open collection cache may
 			// contain only the current story. Keep the unfiltered search ordering as
 			// the source of truth before applying the active read/unread filter.
@@ -3951,13 +3979,20 @@ final class ReaderAppModel {
 						($0.id == remembered || $0.readerId == remembered) && articlesMatch($0, article)
 					}
 			} ?? false
+			let keepsOpenSelection = removedWasSelected
+				&& selectedNavigationID == unreadID
+				&& preferredCompactColumn == .detail
+			if keepsOpenSelection {
+				var detached = unreadArticles.first(where: { articlesMatch($0, article) }) ?? article
+				detached.isRead = true
+				detachedSelectedArticle = detached
+				detachedSelectedArticleOrdering = unreadArticles
+				selectedArticleID = detached.id
+				selectedArticleIDs[unreadID] = detached.id
+			}
 			articleCache[unreadID] = unreadArticles.filter { articlesMatch($0, article) == false }
-			if removedWasSelected {
+			if removedWasSelected && keepsOpenSelection == false {
 				selectedArticleIDs[unreadID] = nil
-				if selectedNavigationID == unreadID {
-					selectedArticleID = nil
-					preferredCompactColumn = .content
-				}
 			}
 			return
 		}
@@ -3972,6 +4007,9 @@ final class ReaderAppModel {
 			unreadArticles.append(copy)
 		}
 		articleCache[unreadID] = sortOrder(for: unreadID).sorted(deduplicatedArticles(unreadArticles))
+		if let detachedSelectedArticle, articlesMatch(detachedSelectedArticle, article) {
+			clearDetachedSelectedArticle()
+		}
 	}
 
 	private func cachedArticle(matching article: Recommendation) -> Recommendation? {

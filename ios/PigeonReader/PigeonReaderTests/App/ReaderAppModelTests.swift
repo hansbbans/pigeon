@@ -912,7 +912,7 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 
 		#expect(model.searchResults.first?.isRead == true)
-		#expect(model.allArticles(for: collection).first?.isRead == true)
+		#expect(model.allArticles(for: collection).isEmpty)
 
 		await controlled.resolve(request)
 		await mutation.value
@@ -973,7 +973,7 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 
 		#expect(model.searchResults.first { $0.id == otherStory.id }?.isRead == true)
-		#expect(model.allArticles(for: otherCollection).first?.isRead == true)
+		#expect(model.allArticles(for: otherCollection).isEmpty)
 		#expect(model.searchResults.first { $0.id == openStory.id }?.isRead == false)
 
 		await controlled.resolve(request)
@@ -1141,8 +1141,9 @@ struct ReaderAppModelTests {
 		await model.setRead(canonical, read: true)
 
 		#expect(model.allArticles(for: .unread).isEmpty)
-		#expect(model.selectedArticleID == nil)
-		#expect(model.preferredCompactColumn == .content)
+		#expect(model.selectedArticleID == canonical.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.preferredCompactColumn == .detail)
 		let readSnapshot = try await store.loadSnapshot(accountID: session.storageIdentity)
 		#expect((readSnapshot.articlesByCollection[unread.id] ?? []).isEmpty)
 
@@ -2845,7 +2846,7 @@ struct ReaderAppModelTests {
 		#expect(model.canUndoBulkRead(in: unread))
 		#expect(model.bulkReadUndoTitle == "Mark All as Read")
 		#expect(model.allArticles(for: forYou).first?.isRead == true)
-		#expect(model.allArticles(for: unread).first?.isRead == true)
+		#expect(model.allArticles(for: unread).isEmpty)
 
 		await model.undoLastBulkRead()
 		#expect(model.canUndoBulkRead == false)
@@ -3093,7 +3094,7 @@ struct ReaderAppModelTests {
 
 		await model.markAllStoriesAsRead(in: today)
 
-		#expect(model.allArticles(for: unread).first(where: { $0.id == libraryHit.id })?.isRead == true)
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryHit.id }) == false)
 		#expect(model.allArticles(for: today).first(where: { $0.id == todayHit.id })?.isRead == true)
 		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelated.id })?.isRead == false)
 		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([libraryHit.readerId, todayHit.readerId]))
@@ -3650,7 +3651,7 @@ struct ReaderAppModelTests {
 
 		await model.markStoriesOlderThan(cutoff, in: forYou)
 
-		#expect(model.allArticles(for: unread).first(where: { $0.id == libraryHitOlder.id })?.isRead == true)
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryHitOlder.id }) == false)
 		#expect(model.allArticles(for: forYou).first(where: { $0.id == forYouHitNewer.id })?.isRead == false)
 		#expect(model.allArticles(for: forYou).first(where: { $0.id == forYouUnrelatedOlder.id })?.isRead == false)
 		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([libraryHitOlder.readerId]))
@@ -3990,7 +3991,7 @@ struct ReaderAppModelTests {
 
 		await model.markStoriesAboveAsRead(todayBoundary, in: today)
 
-		#expect(model.allArticles(for: unread).first(where: { $0.id == libraryAbove.id })?.isRead == true)
+		#expect(model.allArticles(for: unread).contains(where: { $0.id == libraryAbove.id }) == false)
 		#expect(model.allArticles(for: today).first(where: { $0.id == todayUnrelated.id })?.isRead == false)
 		#expect(model.allArticles(for: today).first(where: { $0.id == todayBoundary.id })?.isRead == false)
 		#expect(editTagReaderIDs(from: await mock.requests()) == [libraryAbove.readerId])
@@ -4016,9 +4017,9 @@ struct ReaderAppModelTests {
 
 		await model.markStoriesAboveAsRead(boundary, in: collection)
 
-		#expect(model.articles(for: collection).map(\.id) == [alreadyRead.id, unreadAbove.id, boundary.id, below.id])
+		#expect(model.articles(for: collection).map(\.id) == [alreadyRead.id, boundary.id, below.id])
 		#expect(model.articles(for: collection).first(where: { $0.id == alreadyRead.id })?.isRead == true)
-		#expect(model.articles(for: collection).first(where: { $0.id == unreadAbove.id })?.isRead == true)
+		#expect(model.articles(for: collection).contains(where: { $0.id == unreadAbove.id }) == false)
 		#expect(model.articles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
 		#expect(model.articles(for: collection).first(where: { $0.id == below.id })?.isRead == false)
 		#expect(editTagReaderIDs(from: await mock.requests()) == [unreadAbove.readerId])
@@ -4086,7 +4087,11 @@ struct ReaderAppModelTests {
 
 		#expect(editTagReaderIDs(from: await mock.requests()) == [target.readerId])
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == target.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == target.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == target.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 			#expect(model.allArticles(for: item).first(where: { $0.id == alreadyRead.id })?.isRead == true)
 		}
@@ -4122,8 +4127,12 @@ struct ReaderAppModelTests {
 		let request = await controlled.nextRequest()
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
-			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == first.id || $0.id == second.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+				#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 
@@ -4137,8 +4146,12 @@ struct ReaderAppModelTests {
 		await mutation.value
 
 		for item in state.items {
-			#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
-			#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			if item.smartSection == .unread {
+				#expect(model.allArticles(for: item).contains(where: { $0.id == first.id || $0.id == second.id }) == false)
+			} else {
+				#expect(model.allArticles(for: item).first(where: { $0.id == first.id })?.isRead == true)
+				#expect(model.allArticles(for: item).first(where: { $0.id == second.id })?.isRead == true)
+			}
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 		}
 		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 0 })
