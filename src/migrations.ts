@@ -285,10 +285,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		.prepare('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_applied ON mutation_receipts(account_id, applied_at DESC)')
 		.run();
 
-	for (const trigger of syncTriggers()) {
-		await db.prepare(trigger).run();
-	}
-
 	// D1 executes batch statements sequentially and atomically. The private
 	// claim is visible only inside this transaction, so a concurrent wrapper
 	// that observed the same old version cannot run any source backfill after
@@ -366,6 +362,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 				   )`,
 			)
 			.bind(schemaVersionClaim),
+		...syncTriggers().map((trigger) => db.prepare(trigger)),
 		db
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",

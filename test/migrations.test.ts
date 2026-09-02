@@ -634,6 +634,9 @@ function createSqliteV11Fixture(): DatabaseSync {
 			('article-b', 'feed-a', 'Article B', '<p>B</p>', 'B', 'message-b', '2026-08-02T00:00:00.000Z'),
 			('article-c', 'feed-b', 'Article C', '<p>C</p>', 'C', 'message-c', '2026-08-03T00:00:00.000Z'),
 			('article-d', 'feed-c', 'Article D', '<p>D</p>', 'D', 'message-d', '2026-08-04T00:00:00.000Z');
+		UPDATE feeds SET category = 'legacy-' || feed_key;
+		DELETE FROM item_statuses;
+		DELETE FROM feed_tags;
 		DELETE FROM sync_changes;
 		INSERT INTO sync_changes (entity_type, entity_id) VALUES
 			('feed', 'feed-a'),
@@ -642,6 +645,12 @@ function createSqliteV11Fixture(): DatabaseSync {
 		UPDATE _meta SET value = '11' WHERE key = 'schema_version';
 		DROP INDEX idx_sync_changes_entity;
 	`);
+	const syncTriggers = database.prepare(
+		"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_sync_%'",
+	).all() as Array<{ name: string }>;
+	for (const { name } of syncTriggers) {
+		database.exec(`DROP TRIGGER ${name}`);
+	}
 	return database;
 }
 
@@ -668,7 +677,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(winner.metrics.inserted, { feed: 2, article: 3, status: 3 });
 	assert.deepEqual(winner.metrics.sourceRowsRead, { feed: 3, article: 4, status: 4 });
 	assert.deepEqual(winner.legacyBackfillMetrics.statements, { itemStatus: 1, feedTag: 1 });
-	assert.deepEqual(winner.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
+	assert.deepEqual(winner.legacyBackfillMetrics.inserted, { itemStatus: 4, feedTag: 3 });
 	assert.deepEqual(winner.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 4, feedTag: 3 });
 
 	const loser = wrappers.find((wrapper) => wrapper !== winner);
@@ -694,6 +703,17 @@ test('SQLite v11 migration claims every source backfill once across independent 
 		const seedPosition = migrationBatch.findIndex((statement) => seedKindForSql(statement.sql) === kind);
 		assert.ok(entityIndexPosition < seedPosition);
 	}
+	const lastSeedPosition = Math.max(
+		...(['feed', 'article', 'status'] as const).map((kind) =>
+			migrationBatch.findIndex((statement) => seedKindForSql(statement.sql) === kind),
+		),
+	);
+	const firstSyncTriggerPosition = migrationBatch.findIndex((statement) =>
+		statement.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_sync_'),
+	);
+	const finalVersionPosition = migrationBatch.findIndex((statement) => statement.values[0] === '12');
+	assert.ok(lastSeedPosition < firstSyncTriggerPosition);
+	assert.ok(firstSyncTriggerPosition < finalVersionPosition);
 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
@@ -725,6 +745,11 @@ test('SQLite v11 migration claims every source backfill once across independent 
 		Object.fromEntries(counts.map(({ entity_type, count }) => [entity_type, Number(count)])),
 		{ article: 4, feed: 3, status: 4 },
 	);
+	const legacyCounts = {
+		itemStatus: Number((database.prepare('SELECT COUNT(*) AS count FROM item_statuses').get() as { count: number }).count),
+		feedTag: Number((database.prepare('SELECT COUNT(*) AS count FROM feed_tags').get() as { count: number }).count),
+	};
+	assert.deepEqual(legacyCounts, { itemStatus: 4, feedTag: 3 });
 
 	for (const kind of ['itemStatus', 'feedTag'] as const) {
 		const backfill = winner.executedSql.find((statement) => legacyBackfillKindForSql(statement.sql) === kind);
