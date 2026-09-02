@@ -4,6 +4,7 @@ import { afterEach, test } from 'node:test';
 import app from '../src/index';
 import {
 	createLegacySchemaState,
+	createCurrentSchemaState,
 	maybeHandleSchemaAll,
 	maybeHandleSchemaFirst,
 	maybeHandleSchemaRun,
@@ -188,12 +189,13 @@ class LegacySchemaStatement {
 }
 
 class LegacySchemaDb {
-	readonly state = createLegacySchemaState();
+	readonly state: SchemaState;
 	readonly batches: Array<Array<{ sql: string; values: unknown[] }>> = [];
 	private readonly mode: 'feed' | 'email' | 'scheduled';
 
-	constructor(mode: LegacySchemaDb['mode']) {
+	constructor(mode: LegacySchemaDb['mode'], state: SchemaState = createLegacySchemaState()) {
 		this.mode = mode;
+		this.state = state;
 	}
 
 	prepare(sql: string): LegacySchemaStatement {
@@ -229,6 +231,10 @@ function operationIndex(state: SchemaState, name: string): number {
 	return state.operations.indexOf(name);
 }
 
+function postMetaMigrationOperations(state: SchemaState): string[] {
+	return state.operations.filter((operation) => operation !== 'create-meta' && operation !== 'seed-meta');
+}
+
 test('fetch upgrades a legacy schema before reading feed rows that require site_url and original_url', async () => {
 	const db = new LegacySchemaDb('feed');
 
@@ -238,7 +244,7 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '11');
+	assert.equal(db.state.schemaVersion, '12');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
@@ -250,6 +256,12 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	assert.ok(operationIndex(db.state, 'add-original_url') !== -1);
 	assert.ok(operationIndex(db.state, 'create-feed_tags') !== -1);
 	assert.ok(operationIndex(db.state, 'create-engagement_events') !== -1);
+	assert.ok(operationIndex(db.state, 'create-sync-entity-index') !== -1);
+	for (const seedIndex of db.state.operations
+		.map((operation, index) => (operation === 'seed-sync_changes' ? index : -1))
+		.filter((index) => index !== -1)) {
+		assert.ok(operationIndex(db.state, 'create-sync-entity-index') < seedIndex);
+	}
 	assert.ok(operationIndex(db.state, 'add-site_url') < operationIndex(db.state, 'feed-select'));
 	assert.ok(operationIndex(db.state, 'add-original_url') < operationIndex(db.state, 'item-select'));
 });
@@ -267,7 +279,7 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '11');
+	assert.equal(db.state.schemaVersion, '12');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -298,7 +310,7 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '11');
+	assert.equal(db.state.schemaVersion, '12');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -312,4 +324,62 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 	assert.ok(operationIndex(db.state, 'create-engagement_events') !== -1);
 	assert.ok(operationIndex(db.state, 'add-site_url') < operationIndex(db.state, 'cron-select'));
 	assert.ok(operationIndex(db.state, 'add-original_url') < operationIndex(db.state, 'rss-batch'));
+});
+
+test('a fresh DB wrapper skips completed migrations using the persisted schema version', async () => {
+	const persistedState = createLegacySchemaState();
+	const firstDb = new LegacySchemaDb('feed', persistedState);
+
+	const firstResponse = await app.fetch(
+		new Request('https://pigeon.example/feed/example-feed'),
+		createEnv(firstDb) as never,
+	);
+
+	assert.equal(firstResponse.status, 200);
+	assert.equal(persistedState.schemaVersion, '12');
+	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
+
+	persistedState.operations.length = 0;
+	const secondDb = new LegacySchemaDb('feed', persistedState);
+	const secondResponse = await app.fetch(
+		new Request('https://pigeon.example/feed/example-feed'),
+		createEnv(secondDb) as never,
+	);
+
+	assert.equal(secondResponse.status, 200);
+	assert.deepEqual(
+		persistedState.operations.filter((operation) => operation === 'seed-sync_changes'),
+		[],
+	);
+	assert.deepEqual(postMetaMigrationOperations(persistedState), ['feed-select', 'item-select']);
+});
+
+test('a future schema version is left untouched without rerunning migrations', async () => {
+	const state = createCurrentSchemaState();
+	state.schemaVersion = '99';
+	const db = new LegacySchemaDb('feed', state);
+
+	const response = await app.fetch(
+		new Request('https://pigeon.example/feed/example-feed'),
+		createEnv(db) as never,
+	);
+
+	assert.equal(response.status, 200);
+	assert.equal(state.schemaVersion, '99');
+	assert.deepEqual(postMetaMigrationOperations(state), ['feed-select', 'item-select']);
+});
+
+test('a malformed schema version fails safely before migration work', async () => {
+	const state = createCurrentSchemaState();
+	state.schemaVersion = 'not-a-version';
+	const db = new LegacySchemaDb('feed', state);
+
+	const response = await app.fetch(
+		new Request('https://pigeon.example/feed/example-feed'),
+		createEnv(db) as never,
+	);
+
+	assert.equal(response.status, 503);
+	assert.equal(state.schemaVersion, 'not-a-version');
+	assert.deepEqual(postMetaMigrationOperations(state), []);
 });

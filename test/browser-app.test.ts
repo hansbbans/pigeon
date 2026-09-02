@@ -48,6 +48,7 @@ function normalizeSql(sql: string): string {
 interface FakeDbScenario {
 	schemaVersion?: string | null;
 	throwOnSchemaVersion?: boolean;
+	schemaVersionReadCount?: number;
 	feedCounts?: {
 		active_feed_count: number | null;
 		email_feed_count: number | null;
@@ -87,7 +88,9 @@ class FakePreparedStatement {
 	async first<T>(): Promise<T | null> {
 		switch (this.sql) {
 			case SCHEMA_VERSION_SQL:
-				if (this.scenario.throwOnSchemaVersion) {
+				const schemaVersionReadCount = this.scenario.schemaVersionReadCount ?? 0;
+				this.scenario.schemaVersionReadCount = schemaVersionReadCount + 1;
+				if (this.scenario.throwOnSchemaVersion && schemaVersionReadCount > 0) {
 					throw new Error('no such table: _meta');
 				}
 				return this.scenario.schemaVersion === undefined

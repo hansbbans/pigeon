@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v11
+-- D1 Schema v12
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '11');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '12');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -176,6 +176,8 @@ CREATE TABLE IF NOT EXISTS sync_changes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_changes_sequence ON sync_changes(sequence);
+CREATE INDEX IF NOT EXISTS idx_sync_changes_entity
+  ON sync_changes(entity_type, entity_id);
 
 CREATE TABLE IF NOT EXISTS mutation_receipts (
   account_id TEXT NOT NULL DEFAULT 'default',

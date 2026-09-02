@@ -131,6 +131,13 @@ class RecordingDb {
 
 				throw new Error(`Unexpected SQL in all(): ${sql}`);
 			},
+			async first<T>() {
+				if (sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
+					return { value: '11' } as T;
+				}
+
+				throw new Error(`Unexpected SQL in first(): ${sql}`);
+			},
 			async run() {
 				if (isMigrationSql(sql) || sql.startsWith('UPDATE feeds SET last_fetched_at')) {
 					return;
@@ -216,6 +223,10 @@ class FeedStoreStatement {
 	}
 
 	async first<T>(): Promise<T | null> {
+		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
+			return { value: '11' } as T;
+		}
+
 		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {
 			const [feedKey, canonicalUrl, sourceUrl] = this.boundValues as string[];
 			const feed =

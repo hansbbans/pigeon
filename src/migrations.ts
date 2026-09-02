@@ -1,6 +1,7 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '11';
+const REQUIRED_SCHEMA_VERSION = '12';
+const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 
 const migrationPromises = new WeakMap<D1Database, Promise<void>>();
 
@@ -30,6 +31,14 @@ export async function ensureDatabaseSchema(env: Env): Promise<void> {
 async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	await db.prepare('CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)').run();
 	await db.prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '0')").run();
+
+	const schemaVersionRow = await db
+		.prepare("SELECT value FROM _meta WHERE key = 'schema_version'")
+		.first<{ value: string | null }>();
+	const persistedVersion = parsePersistedSchemaVersion(schemaVersionRow?.value);
+	if (persistedVersion >= REQUIRED_SCHEMA_VERSION_NUMBER) {
+		return;
+	}
 
 	const feedColumns = await getTableColumns(db, 'feeds');
 	if (feedColumns.size === 0) {
@@ -272,6 +281,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			)`,
 		)
 		.run();
+	await db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)').run();
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_sequence ON sync_changes(sequence)').run();
 	await db
 		.prepare(
@@ -324,6 +334,18 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		.run();
 
 	await db.prepare("UPDATE _meta SET value = ? WHERE key = 'schema_version'").bind(REQUIRED_SCHEMA_VERSION).run();
+}
+
+function parsePersistedSchemaVersion(value: unknown): number {
+	if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) {
+		throw new Error(`Cannot migrate Pigeon database: malformed schema version ${String(value)}`);
+	}
+
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed)) {
+		throw new Error(`Cannot migrate Pigeon database: schema version is out of range (${value})`);
+	}
+	return parsed;
 }
 
 function syncTriggers(): string[] {
