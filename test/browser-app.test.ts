@@ -255,6 +255,7 @@ function createStatusDb(scenario: FakeDbScenario = {}) {
 		prepare(sql: string) {
 			return new FakePreparedStatement(sql, scenario);
 		},
+		async batch() {},
 	};
 }
 

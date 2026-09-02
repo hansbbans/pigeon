@@ -61,7 +61,7 @@ The native reader adds an append-only `engagement_events` table in schema v7, wi
 
 ### Sync change log
 
-Schema v12 adds the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`. It supports bounded entity-existence checks during the one-time feed, article, and status sync seed.
+Schema v12 adds the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`. The ordered atomic v12 batch creates it before the one-time feed, article, and status sync seed, so the seed's entity-existence checks stay bounded before schema version `12` is recorded.
 
 ## Key Queries
 

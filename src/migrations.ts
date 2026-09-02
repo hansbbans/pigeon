@@ -35,8 +35,14 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	const schemaVersionRow = await db
 		.prepare("SELECT value FROM _meta WHERE key = 'schema_version'")
 		.first<{ value: string | null }>();
-	const persistedVersion = parsePersistedSchemaVersion(schemaVersionRow?.value);
-	if (persistedVersion >= REQUIRED_SCHEMA_VERSION_NUMBER) {
+	const persistedVersionValue = schemaVersionRow?.value;
+	const persistedVersion = parsePersistedSchemaVersion(persistedVersionValue);
+	if (persistedVersion > REQUIRED_SCHEMA_VERSION_NUMBER) {
+		throw new Error(
+			`Cannot migrate Pigeon database: unsupported newer schema version ${persistedVersionValue}; this Worker supports schema version ${REQUIRED_SCHEMA_VERSION}.`,
+		);
+	}
+	if (persistedVersion === REQUIRED_SCHEMA_VERSION_NUMBER) {
 		return;
 	}
 
@@ -281,7 +287,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			)`,
 		)
 		.run();
-	await db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)').run();
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_sequence ON sync_changes(sequence)').run();
 	await db
 		.prepare(
@@ -303,37 +308,65 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		await db.prepare(trigger).run();
 	}
 
-	// Seed current rows once so a client starting at cursor zero receives the
-	// complete existing library before it switches to trigger-generated deltas.
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'feed', feed_key FROM feeds f
-			 WHERE NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'feed' AND c.entity_id = f.feed_key
-			 )`,
-		)
-		.run();
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'article', id FROM items i
-			 WHERE id IS NOT NULL AND NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'article' AND c.entity_id = i.id
-			 )`,
-		)
-		.run();
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'status', item_id FROM item_statuses s
-			 WHERE account_id = 'default' AND NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'status' AND c.entity_id = s.item_id
-			 )`,
-		)
-		.run();
-
-	await db.prepare("UPDATE _meta SET value = ? WHERE key = 'schema_version'").bind(REQUIRED_SCHEMA_VERSION).run();
+	// D1 executes batch statements sequentially and atomically. The private
+	// claim is visible only inside this transaction, so a concurrent wrapper
+	// that observed the same old version cannot run the seed after this batch
+	// commits.
+	const schemaVersionClaim = `__pigeon_schema_v${REQUIRED_SCHEMA_VERSION}_claim_${crypto.randomUUID()}`;
+	await db.batch([
+		db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)'),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(schemaVersionClaim, persistedVersionValue),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'feed', f.feed_key
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN feeds f
+				 WHERE NOT EXISTS (
+				   SELECT 1 FROM sync_changes c
+				    WHERE c.entity_type = 'feed' AND c.entity_id = f.feed_key
+				 )`,
+			)
+			.bind(schemaVersionClaim),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'article', i.id
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN items i
+				 WHERE i.id IS NOT NULL
+				   AND NOT EXISTS (
+				     SELECT 1 FROM sync_changes c
+				      WHERE c.entity_type = 'article' AND c.entity_id = i.id
+				   )`,
+			)
+			.bind(schemaVersionClaim),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'status', s.item_id
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN item_statuses s
+				 WHERE s.account_id = 'default'
+				   AND NOT EXISTS (
+				     SELECT 1 FROM sync_changes c
+				      WHERE c.entity_type = 'status' AND c.entity_id = s.item_id
+				   )`,
+			)
+			.bind(schemaVersionClaim),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, schemaVersionClaim),
+	]);
 }
 
 function parsePersistedSchemaVersion(value: unknown): number {

@@ -9,8 +9,8 @@ D1 has no built-in migration tooling. Pigeon uses a version-based migration runn
 The production implementation is in `src/migrations.ts`:
 
 - `ensureDatabaseSchema(env)` coalesces concurrent migration calls for the same D1 binding with a `WeakMap<D1Database, Promise<void>>`.
-- It minimally creates `_meta` and the `schema_version` row, then reads the persisted version before doing table, column, index, trigger, or backfill work. A stored version of `12` or newer returns immediately, so completed migrations are not rerun and future versions are not downgraded.
-- The v12 path creates the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)` before the one-time feed, article, and status sync seed queries. Those queries can therefore use bounded entity-existence checks.
+- It minimally creates `_meta` and the `schema_version` row, then reads the persisted version before doing table, column, index, trigger, or backfill work. A stored version of `12` returns immediately; a newer version fails with an unsupported-version error instead of being downgraded or modified.
+- The v12 path uses one ordered, atomic D1 batch: it creates the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`, claims the old version with a private in-batch sentinel, gates the feed, article, and status seed queries on that sentinel, and records schema version `12` last. A concurrent wrapper that loses the claim performs no seed work, and the index keeps the winner's existence checks bounded.
 - Malformed or out-of-range persisted schema versions are rejected instead of being guessed or silently reset.
 
 ## Migration Runner
@@ -81,7 +81,7 @@ async function runMigrations(db: D1Database): Promise<void> {
 
 ## Running Migrations
 
-Call `ensureDatabaseSchema(env)` from the database-backed `fetch()` and `email()` paths. On the first database-backed request after a deployment, pending work is applied; a current database performs only the minimal `_meta` bootstrap and persisted-version read before returning. The `WeakMap` also coalesces concurrent calls for the same D1 binding, while the persisted version prevents completed migration SQL from rerunning on later requests.
+Call `ensureDatabaseSchema(env)` from the database-backed `fetch()` and `email()` paths. On the first database-backed request after a deployment, pending work is applied; a current database performs only the minimal `_meta` bootstrap and persisted-version read before returning. The `WeakMap` coalesces concurrent calls for the same D1 binding, while the ordered v12 batch claims and seeds atomically so a second wrapper cannot repeat the seed after the first commits.
 
 Alternatively, run migrations manually via wrangler:
 ```bash

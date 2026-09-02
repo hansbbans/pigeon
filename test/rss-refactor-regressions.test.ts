@@ -133,7 +133,7 @@ class RecordingDb {
 			},
 			async first<T>() {
 				if (sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-					return { value: '11' } as T;
+					return { value: '12' } as T;
 				}
 
 				throw new Error(`Unexpected SQL in first(): ${sql}`);
@@ -224,7 +224,7 @@ class FeedStoreStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '11' } as T;
+			return { value: '12' } as T;
 		}
 
 		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {

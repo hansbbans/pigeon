@@ -1,7 +1,10 @@
 import * as assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { afterEach, test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import app from '../src/index';
+import { ensureDatabaseSchema } from '../src/migrations';
 import {
 	createLegacySchemaState,
 	createCurrentSchemaState,
@@ -52,6 +55,167 @@ afterEach(() => {
 
 function missingColumnError(columnName: string): Error {
 	return new Error(`no such column: ${columnName}`);
+}
+
+type SeedKind = 'feed' | 'article' | 'status';
+
+interface SeedMetrics {
+	statements: Record<SeedKind, number>;
+	inserted: Record<SeedKind, number>;
+	sourceRowsRead: Record<SeedKind, number>;
+}
+
+function createSeedMetrics(): SeedMetrics {
+	return {
+		statements: { feed: 0, article: 0, status: 0 },
+		inserted: { feed: 0, article: 0, status: 0 },
+		sourceRowsRead: { feed: 0, article: 0, status: 0 },
+	};
+}
+
+interface VersionReadBarrier {
+	wait(): Promise<void>;
+}
+
+function createVersionReadBarrier(expectedReads: number): VersionReadBarrier {
+	let readCount = 0;
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+
+	return {
+		wait(): Promise<void> {
+			readCount += 1;
+			if (readCount >= expectedReads) {
+				release();
+			}
+			return released;
+		},
+	};
+}
+
+interface SqliteD1SharedState {
+	batchTail: Promise<void>;
+	versionReadBarrier: VersionReadBarrier;
+}
+
+interface SqliteStatementSnapshot {
+	sql: string;
+	values: unknown[];
+}
+
+function seedKindForSql(sql: string): SeedKind | null {
+	if (!sql.startsWith('INSERT INTO sync_changes')) {
+		return null;
+	}
+	if (sql.includes("SELECT 'feed'")) return 'feed';
+	if (sql.includes("SELECT 'article'")) return 'article';
+	if (sql.includes("SELECT 'status'")) return 'status';
+	return null;
+}
+
+function sourceTableForSeed(kind: SeedKind): string {
+	return kind === 'feed' ? 'feeds' : kind === 'article' ? 'items' : 'item_statuses';
+}
+
+class SqliteMigrationStatement {
+	private values: unknown[] = [];
+
+	constructor(
+		private readonly database: DatabaseSync,
+		private readonly sql: string,
+		private readonly versionReadBarrier: VersionReadBarrier,
+		private readonly executedSql: SqliteStatementSnapshot[],
+	) {}
+
+	bind(...values: unknown[]): this {
+		this.values = values;
+		return this;
+	}
+
+	snapshot(): SqliteStatementSnapshot {
+		return { sql: this.sql, values: [...this.values] };
+	}
+
+	async first<T>(): Promise<T | null> {
+		const row = (this.database.prepare(this.sql).get(...this.values) as T | undefined) ?? null;
+		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
+			await this.versionReadBarrier.wait();
+		}
+		return row;
+	}
+
+	async all<T>(): Promise<{ results: T[] }> {
+		return { results: this.database.prepare(this.sql).all(...this.values) as T[] };
+	}
+
+	async run(): Promise<{ meta: { changes: number } }> {
+		this.executedSql.push(this.snapshot());
+		const result = this.database.prepare(this.sql).run(...this.values);
+		return { meta: { changes: Number(result.changes) } };
+	}
+}
+
+class SqliteMigrationDatabase {
+	readonly metrics = createSeedMetrics();
+	readonly executedSql: SqliteStatementSnapshot[] = [];
+	readonly batches: SqliteStatementSnapshot[][] = [];
+
+	constructor(
+		private readonly database: DatabaseSync,
+		private readonly shared: SqliteD1SharedState,
+	) {}
+
+	prepare(sql: string): SqliteMigrationStatement {
+		return new SqliteMigrationStatement(this.database, sql, this.shared.versionReadBarrier, this.executedSql);
+	}
+
+	async batch(statements: SqliteMigrationStatement[]): Promise<Array<{ meta: { changes: number } }>> {
+		const previousBatch = this.shared.batchTail;
+		let release!: () => void;
+		this.shared.batchTail = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previousBatch;
+
+		this.batches.push(statements.map((statement) => statement.snapshot()));
+		this.database.exec('BEGIN IMMEDIATE');
+		try {
+			const results: Array<{ meta: { changes: number } }> = [];
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				const kind = seedKindForSql(snapshot.sql);
+				if (kind) {
+					const currentVersion = this.database.prepare(
+						"SELECT value FROM _meta WHERE key = 'schema_version'",
+					).get() as { value: string } | undefined;
+					const claim = String(snapshot.values[0] ?? '');
+					if (currentVersion?.value === claim) {
+						const sourceTable = sourceTableForSeed(kind);
+						const sourceCount = this.database.prepare(`SELECT COUNT(*) AS count FROM ${sourceTable}`).get() as {
+							count: number;
+						};
+						this.metrics.sourceRowsRead[kind] += Number(sourceCount.count);
+					}
+				}
+
+				const result = await statement.run();
+				if (kind) {
+					this.metrics.statements[kind] += 1;
+					this.metrics.inserted[kind] += result.meta.changes;
+				}
+				results.push(result);
+			}
+			this.database.exec('COMMIT');
+			return results;
+		} catch (error) {
+			this.database.exec('ROLLBACK');
+			throw error;
+		} finally {
+			release();
+		}
+	}
 }
 
 class LegacySchemaStatement {
@@ -203,6 +367,36 @@ class LegacySchemaDb {
 	}
 
 	async batch(statements: LegacySchemaStatement[]): Promise<void> {
+		if (statements[0]?.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity')) {
+			let claimed = false;
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity')) {
+					this.state.operations.push('create-sync-entity-index');
+					continue;
+				}
+
+				if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					const expectedValue = String(snapshot.values[1] ?? '');
+					if (nextValue.startsWith('__pigeon_schema_v') && this.state.schemaVersion === expectedValue) {
+						this.state.schemaVersion = nextValue;
+						claimed = true;
+					}
+					if (claimed && nextValue === '12' && this.state.schemaVersion === expectedValue) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:12');
+					}
+					continue;
+				}
+
+				if (snapshot.sql.startsWith('INSERT INTO sync_changes') && claimed) {
+					this.state.operations.push('seed-sync_changes');
+				}
+			}
+			return;
+		}
+
 		if (!this.state.feedColumns.has('site_url')) {
 			throw missingColumnError('site_url');
 		}
@@ -354,8 +548,8 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	assert.deepEqual(postMetaMigrationOperations(persistedState), ['feed-select', 'item-select']);
 });
 
-test('a future schema version is left untouched without rerunning migrations', async () => {
-	const state = createCurrentSchemaState();
+test('a future schema version fails closed before touching an incomplete schema', async () => {
+	const state = createLegacySchemaState();
 	state.schemaVersion = '99';
 	const db = new LegacySchemaDb('feed', state);
 
@@ -364,9 +558,11 @@ test('a future schema version is left untouched without rerunning migrations', a
 		createEnv(db) as never,
 	);
 
-	assert.equal(response.status, 200);
+	assert.equal(response.status, 503);
 	assert.equal(state.schemaVersion, '99');
-	assert.deepEqual(postMetaMigrationOperations(state), ['feed-select', 'item-select']);
+	assert.equal(state.hasSyncChangesTable, false);
+	assert.equal(state.feedColumns.has('site_url'), false);
+	assert.deepEqual(postMetaMigrationOperations(state), []);
 });
 
 test('a malformed schema version fails safely before migration work', async () => {
@@ -382,4 +578,108 @@ test('a malformed schema version fails safely before migration work', async () =
 	assert.equal(response.status, 503);
 	assert.equal(state.schemaVersion, 'not-a-version');
 	assert.deepEqual(postMetaMigrationOperations(state), []);
+});
+
+function createSqliteV11Fixture(): DatabaseSync {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec(`
+		INSERT INTO feeds (feed_key, display_name, source_type, is_active) VALUES
+			('feed-a', 'Feed A', 'email', 1),
+			('feed-b', 'Feed B', 'rss', 1),
+			('feed-c', 'Feed C', 'email', 1);
+		INSERT INTO items (id, feed_key, subject, html_content, text_content, message_id, received_at) VALUES
+			('article-a', 'feed-a', 'Article A', '<p>A</p>', 'A', 'message-a', '2026-08-01T00:00:00.000Z'),
+			('article-b', 'feed-a', 'Article B', '<p>B</p>', 'B', 'message-b', '2026-08-02T00:00:00.000Z'),
+			('article-c', 'feed-b', 'Article C', '<p>C</p>', 'C', 'message-c', '2026-08-03T00:00:00.000Z'),
+			('article-d', 'feed-c', 'Article D', '<p>D</p>', 'D', 'message-d', '2026-08-04T00:00:00.000Z');
+		DELETE FROM sync_changes;
+		INSERT INTO sync_changes (entity_type, entity_id) VALUES
+			('feed', 'feed-a'),
+			('article', 'article-a'),
+			('status', 'article-a');
+		UPDATE _meta SET value = '11' WHERE key = 'schema_version';
+		DROP INDEX idx_sync_changes_entity;
+	`);
+	return database;
+}
+
+test('SQLite v11 migration claims the sync seed once across independent wrappers', async () => {
+	const database = createSqliteV11Fixture();
+	const shared: SqliteD1SharedState = {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(2),
+	};
+	const firstDb = new SqliteMigrationDatabase(database, shared);
+	const secondDb = new SqliteMigrationDatabase(database, shared);
+
+	await Promise.all([
+		ensureDatabaseSchema({ DB: firstDb } as never),
+		ensureDatabaseSchema({ DB: secondDb } as never),
+	]);
+
+	const wrappers = [firstDb, secondDb];
+	const winners = wrappers.filter(
+		(wrapper) => Object.values(wrapper.metrics.inserted).some((count) => count > 0),
+	);
+	assert.equal(winners.length, 1);
+	const winner = winners[0];
+	assert.deepEqual(winner.metrics.inserted, { feed: 2, article: 3, status: 3 });
+	assert.deepEqual(winner.metrics.sourceRowsRead, { feed: 3, article: 4, status: 4 });
+
+	const loser = wrappers.find((wrapper) => wrapper !== winner);
+	assert.ok(loser);
+	assert.deepEqual(loser.metrics.inserted, { feed: 0, article: 0, status: 0 });
+	assert.deepEqual(loser.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
+
+	assert.equal(winner.batches.length, 1);
+	const migrationBatch = winner.batches[0];
+	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
+	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
+	for (const kind of ['feed', 'article', 'status'] as const) {
+		const seedPosition = migrationBatch.findIndex((statement) => seedKindForSql(statement.sql) === kind);
+		assert.ok(entityIndexPosition < seedPosition);
+	}
+
+	const schemaVersion = database.prepare(
+		"SELECT value FROM _meta WHERE key = 'schema_version'",
+	).get() as { value: string };
+	assert.equal(schemaVersion.value, '12');
+
+	const indexes = database.prepare("PRAGMA index_list('sync_changes')").all() as Array<{
+		name: string;
+		unique: number;
+	}>;
+	const entityIndex = indexes.find((index) => index.name === 'idx_sync_changes_entity');
+	assert.ok(entityIndex);
+	assert.equal(entityIndex.unique, 0);
+	const entityIndexColumns = database.prepare(
+		"PRAGMA index_info('idx_sync_changes_entity')",
+	).all() as Array<{ seqno: number; name: string }>;
+	assert.deepEqual(
+		entityIndexColumns.map(({ seqno, name }) => ({ seqno, name })),
+		[
+			{ seqno: 0, name: 'entity_type' },
+			{ seqno: 1, name: 'entity_id' },
+		],
+	);
+
+	const counts = database.prepare(
+		'SELECT entity_type, COUNT(*) AS count FROM sync_changes GROUP BY entity_type',
+	).all() as Array<{ entity_type: string; count: number }>;
+	assert.deepEqual(
+		Object.fromEntries(counts.map(({ entity_type, count }) => [entity_type, Number(count)])),
+		{ article: 4, feed: 3, status: 4 },
+	);
+
+	const feedSeed = winner.executedSql.find((statement) => seedKindForSql(statement.sql) === 'feed');
+	assert.ok(feedSeed);
+	const plan = database.prepare(`EXPLAIN QUERY PLAN ${feedSeed.sql}`).all(...feedSeed.values) as Array<{
+		detail: string;
+	}>;
+	assert.ok(
+		plan.some(({ detail }) => detail.includes('idx_sync_changes_entity')),
+		plan.map(({ detail }) => detail).join('\n'),
+	);
+	database.close();
 });
