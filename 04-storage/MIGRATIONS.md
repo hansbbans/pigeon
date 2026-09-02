@@ -2,7 +2,16 @@
 
 ## Approach
 
-D1 has no built-in migration tooling. We use a simple version-based migration runner that executes on Worker startup.
+D1 has no built-in migration tooling. Pigeon uses a version-based migration runner through `ensureDatabaseSchema` on database-backed Worker paths.
+
+## Current Implementation
+
+The production implementation is in `src/migrations.ts`:
+
+- `ensureDatabaseSchema(env)` coalesces concurrent migration calls for the same D1 binding with a `WeakMap<D1Database, Promise<void>>`.
+- It minimally creates `_meta` and the `schema_version` row, then reads the persisted version before doing table, column, index, trigger, or backfill work. A stored version of `12` or newer returns immediately, so completed migrations are not rerun and future versions are not downgraded.
+- The v12 path creates the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)` before the one-time feed, article, and status sync seed queries. Those queries can therefore use bounded entity-existence checks.
+- Malformed or out-of-range persisted schema versions are rejected instead of being guessed or silently reset.
 
 ## Migration Runner
 
@@ -72,7 +81,7 @@ async function runMigrations(db: D1Database): Promise<void> {
 
 ## Running Migrations
 
-Call `runMigrations(env.DB)` at the start of both `fetch()` and `email()` handlers. D1 queries are fast enough that checking the version on every request is negligible. The actual migration SQL only runs once.
+Call `ensureDatabaseSchema(env)` from the database-backed `fetch()` and `email()` paths. On the first database-backed request after a deployment, pending work is applied; a current database performs only the minimal `_meta` bootstrap and persisted-version read before returning. The `WeakMap` also coalesces concurrent calls for the same D1 binding, while the persisted version prevents completed migration SQL from rerunning on later requests.
 
 Alternatively, run migrations manually via wrangler:
 ```bash

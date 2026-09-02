@@ -59,6 +59,10 @@ CREATE INDEX IF NOT EXISTS idx_rules_feed_key ON parsing_rules(feed_key, priorit
 
 The native reader adds an append-only `engagement_events` table in schema v7, with schema v8 adding an optional normalized destination host for outbound-link events. It stores coarse client family, item/feed identity, event type, optional reading duration/scroll depth, and an idempotency key. Outbound telemetry stores only the destination host, never a path or query. It deliberately has no raw user-agent or IP columns. Repeated native submissions use `INSERT OR IGNORE`; GReader state changes are recorded only when the requested state actually changes, while mark-all requests use the neutral `bulk_mark_all_read` event type.
 
+### Sync change log
+
+Schema v12 adds the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`. It supports bounded entity-existence checks during the one-time feed, article, and status sync seed.
+
 ## Key Queries
 
 ### Insert new item (with feed upsert)
@@ -151,7 +155,7 @@ CREATE TABLE IF NOT EXISTS _meta (
   value TEXT
 );
 
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '8');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '12');
 ```
 
 See MIGRATIONS.md for the migration runner pattern.
