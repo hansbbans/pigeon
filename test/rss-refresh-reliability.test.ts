@@ -38,6 +38,12 @@ class Statement {
 		}
 		throw new Error(`Unexpected all(): ${this.sql}`);
 	}
+	async first<T>(): Promise<T | null> {
+		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
+			return { value: '12' } as T;
+		}
+		throw new Error(`Unexpected first(): ${this.sql}`);
+	}
 	async run(): Promise<{ meta: { changes: number } }> {
 		return { meta: { changes: this.runChanges } };
 	}

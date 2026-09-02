@@ -113,7 +113,7 @@ xcodebuild build -project PigeonReader.xcodeproj -scheme PigeonReader -configura
 
 The app stores feed metadata in `feeds` and content items in `items`.
 
-Current schema version: `5`
+Current schema version: `12`
 
 Schema files:
 
@@ -122,8 +122,11 @@ Schema files:
 - `04-storage/SCHEMA-V3.sql`
 - `04-storage/SCHEMA-V4.sql`
 - `04-storage/SCHEMA-V5.sql`
+- `src/migrations.ts` (the existing-database upgrade path)
 
 Version `2` added RSS subscription support. Version `3` added feed icons. Version `4` added per-item original URLs so reader apps can open source posts. Version `5` added `feeds.site_url` so feed homepages stay separate from feed URLs.
+
+Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `12` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
 
 ## Runtime Settings
 
@@ -177,7 +180,7 @@ npx wrangler d1 execute pigeon-db --remote --command "SELECT value FROM _meta WH
 npx wrangler d1 execute pigeon-db --remote --command "SELECT name FROM pragma_table_info('feeds') ORDER BY cid;"
 ```
 
-For existing deployments:
+For an existing database that missed a prior automatic upgrade:
 
 - if `source_type` is missing, run `04-storage/SCHEMA-V2.sql`
 - if `icon_url` is missing, run `04-storage/SCHEMA-V3.sql`

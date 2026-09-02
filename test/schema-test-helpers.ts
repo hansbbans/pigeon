@@ -22,7 +22,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '10',
+		schemaVersion: '12',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
@@ -292,6 +292,11 @@ export function maybeHandleSchemaRun(
 	if (sql.startsWith('CREATE TABLE IF NOT EXISTS mutation_receipts')) {
 		state.hasMutationReceiptsTable = true;
 		state.operations.push('create-mutation_receipts');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity')) {
+		state.operations.push('create-sync-entity-index');
 		return true;
 	}
 

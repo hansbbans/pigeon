@@ -255,7 +255,7 @@ test('native engagement is authenticated, validated, migrated, and idempotent', 
 	);
 	assert.equal(
 		(db.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'11',
+		'12',
 	);
 	const eventColumns = db
 		.prepare('PRAGMA table_info(engagement_events)')

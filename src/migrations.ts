@@ -1,6 +1,7 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '11';
+const REQUIRED_SCHEMA_VERSION = '12';
+const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 
 const migrationPromises = new WeakMap<D1Database, Promise<void>>();
 
@@ -30,6 +31,20 @@ export async function ensureDatabaseSchema(env: Env): Promise<void> {
 async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	await db.prepare('CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)').run();
 	await db.prepare("INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '0')").run();
+
+	const schemaVersionRow = await db
+		.prepare("SELECT value FROM _meta WHERE key = 'schema_version'")
+		.first<{ value: string | null }>();
+	const persistedVersionValue = schemaVersionRow?.value;
+	const persistedVersion = parsePersistedSchemaVersion(persistedVersionValue);
+	if (persistedVersion > REQUIRED_SCHEMA_VERSION_NUMBER) {
+		throw new Error(
+			`Cannot migrate Pigeon database: unsupported newer schema version ${persistedVersionValue}; this Worker supports schema version ${REQUIRED_SCHEMA_VERSION}.`,
+		);
+	}
+	if (persistedVersion === REQUIRED_SCHEMA_VERSION_NUMBER) {
+		return;
+	}
 
 	const feedColumns = await getTableColumns(db, 'feeds');
 	if (feedColumns.size === 0) {
@@ -158,14 +173,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		.run();
 	await db
 		.prepare(
-			`INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
-			 SELECT 'default', id, COALESCE(is_read, 0), COALESCE(is_starred, 0), COALESCE(created_at, datetime('now'))
-			 FROM items
-			 WHERE id IS NOT NULL`,
-		)
-		.run();
-	await db
-		.prepare(
 			`CREATE TRIGGER IF NOT EXISTS trg_items_insert_status
 			 AFTER INSERT ON items
 			 WHEN NEW.id IS NOT NULL
@@ -205,17 +212,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		)
 		.run();
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_feed_tags_label ON feed_tags(label, feed_key)').run();
-
-	if (feedColumns.has('category')) {
-		await db
-			.prepare(
-				`INSERT OR IGNORE INTO feed_tags (feed_key, label)
-				 SELECT feed_key, category
-				   FROM feeds
-				  WHERE category IS NOT NULL AND category <> ''`,
-			)
-			.run();
-	}
 
 	await db
 		.prepare(
@@ -289,41 +285,107 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		.prepare('CREATE INDEX IF NOT EXISTS idx_mutation_receipts_applied ON mutation_receipts(account_id, applied_at DESC)')
 		.run();
 
-	for (const trigger of syncTriggers()) {
-		await db.prepare(trigger).run();
+	// D1 executes batch statements sequentially and atomically. The private
+	// claim is visible only inside this transaction, so a concurrent wrapper
+	// that observed the same old version cannot run any source backfill after
+	// this batch commits.
+	const schemaVersionClaim = `__pigeon_schema_v${REQUIRED_SCHEMA_VERSION}_claim_${crypto.randomUUID()}`;
+	const syncTriggerStatements = syncTriggers();
+	const migrationBatch = [
+		db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)'),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(schemaVersionClaim, persistedVersionValue),
+		...syncTriggerStatements.map((trigger) =>
+			db.prepare(`DROP TRIGGER IF EXISTS ${syncTriggerName(trigger)}`),
+		),
+		db
+			.prepare(
+				`INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
+				 SELECT 'default', i.id, COALESCE(i.is_read, 0), COALESCE(i.is_starred, 0), COALESCE(i.created_at, datetime('now'))
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN items i
+				 WHERE i.id IS NOT NULL`,
+			)
+			.bind(schemaVersionClaim),
+		...(feedColumns.has('category')
+			? [
+					db
+						.prepare(
+							`INSERT OR IGNORE INTO feed_tags (feed_key, label)
+							 SELECT f.feed_key, f.category
+							 FROM (SELECT 1 FROM _meta m
+							        WHERE m.key = 'schema_version' AND m.value = ?) claim
+							 CROSS JOIN feeds f
+							 WHERE f.category IS NOT NULL AND f.category <> ''`,
+						)
+						.bind(schemaVersionClaim),
+			  ]
+			: []),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'feed', f.feed_key
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN feeds f
+				 WHERE NOT EXISTS (
+				   SELECT 1 FROM sync_changes c
+				    WHERE c.entity_type = 'feed' AND c.entity_id = f.feed_key
+				 )`,
+			)
+			.bind(schemaVersionClaim),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'article', i.id
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN items i
+				 WHERE i.id IS NOT NULL
+				   AND NOT EXISTS (
+				     SELECT 1 FROM sync_changes c
+				      WHERE c.entity_type = 'article' AND c.entity_id = i.id
+				   )`,
+			)
+			.bind(schemaVersionClaim),
+		db
+			.prepare(
+				`INSERT INTO sync_changes (entity_type, entity_id)
+				 SELECT 'status', s.item_id
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN item_statuses s
+				 WHERE s.account_id = 'default'
+				   AND NOT EXISTS (
+				     SELECT 1 FROM sync_changes c
+				      WHERE c.entity_type = 'status' AND c.entity_id = s.item_id
+				   )`,
+			)
+			.bind(schemaVersionClaim),
+		...syncTriggerStatements.map((trigger) => db.prepare(trigger)),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, schemaVersionClaim),
+	];
+	await db.batch(migrationBatch);
+}
+
+function parsePersistedSchemaVersion(value: unknown): number {
+	if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) {
+		throw new Error(`Cannot migrate Pigeon database: malformed schema version ${String(value)}`);
 	}
 
-	// Seed current rows once so a client starting at cursor zero receives the
-	// complete existing library before it switches to trigger-generated deltas.
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'feed', feed_key FROM feeds f
-			 WHERE NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'feed' AND c.entity_id = f.feed_key
-			 )`,
-		)
-		.run();
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'article', id FROM items i
-			 WHERE id IS NOT NULL AND NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'article' AND c.entity_id = i.id
-			 )`,
-		)
-		.run();
-	await db
-		.prepare(
-			`INSERT INTO sync_changes (entity_type, entity_id)
-			 SELECT 'status', item_id FROM item_statuses s
-			 WHERE account_id = 'default' AND NOT EXISTS (
-			   SELECT 1 FROM sync_changes c WHERE c.entity_type = 'status' AND c.entity_id = s.item_id
-			 )`,
-		)
-		.run();
-
-	await db.prepare("UPDATE _meta SET value = ? WHERE key = 'schema_version'").bind(REQUIRED_SCHEMA_VERSION).run();
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed)) {
+		throw new Error(`Cannot migrate Pigeon database: schema version is out of range (${value})`);
+	}
+	return parsed;
 }
 
 function syncTriggers(): string[] {
@@ -362,6 +424,14 @@ function syncTriggers(): string[] {
 		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
 		 END`,
 	];
+}
+
+function syncTriggerName(trigger: string): string {
+	const match = /^CREATE TRIGGER IF NOT EXISTS ([a-z0-9_]+)/.exec(trigger);
+	if (!match) {
+		throw new Error('Cannot migrate Pigeon database: invalid sync trigger definition');
+	}
+	return match[1];
 }
 
 async function getTableColumns(db: D1Database, tableName: 'feeds' | 'items'): Promise<Set<string>> {
