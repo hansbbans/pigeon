@@ -126,7 +126,7 @@ Schema files:
 
 Version `2` added RSS subscription support. Version `3` added feed icons. Version `4` added per-item original URLs so reader apps can open source posts. Version `5` added `feeds.site_url` so feed homepages stay separate from feed URLs.
 
-Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `12` is rejected instead of being downgraded. The v12 sync index, one-time seed, and final version update run as one ordered transaction. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
+Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `12` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
 
 ## Runtime Settings
 

@@ -58,6 +58,7 @@ function missingColumnError(columnName: string): Error {
 }
 
 type SeedKind = 'feed' | 'article' | 'status';
+type LegacyBackfillKind = 'itemStatus' | 'feedTag';
 
 interface SeedMetrics {
 	statements: Record<SeedKind, number>;
@@ -70,6 +71,20 @@ function createSeedMetrics(): SeedMetrics {
 		statements: { feed: 0, article: 0, status: 0 },
 		inserted: { feed: 0, article: 0, status: 0 },
 		sourceRowsRead: { feed: 0, article: 0, status: 0 },
+	};
+}
+
+interface LegacyBackfillMetrics {
+	statements: Record<LegacyBackfillKind, number>;
+	inserted: Record<LegacyBackfillKind, number>;
+	sourceRowsRead: Record<LegacyBackfillKind, number>;
+}
+
+function createLegacyBackfillMetrics(): LegacyBackfillMetrics {
+	return {
+		statements: { itemStatus: 0, feedTag: 0 },
+		inserted: { itemStatus: 0, feedTag: 0 },
+		sourceRowsRead: { itemStatus: 0, feedTag: 0 },
 	};
 }
 
@@ -119,6 +134,20 @@ function sourceTableForSeed(kind: SeedKind): string {
 	return kind === 'feed' ? 'feeds' : kind === 'article' ? 'items' : 'item_statuses';
 }
 
+function legacyBackfillKindForSql(sql: string): LegacyBackfillKind | null {
+	if (sql.startsWith('INSERT OR IGNORE INTO item_statuses') && sql.includes('CROSS JOIN items')) {
+		return 'itemStatus';
+	}
+	if (sql.startsWith('INSERT OR IGNORE INTO feed_tags') && sql.includes('CROSS JOIN feeds')) {
+		return 'feedTag';
+	}
+	return null;
+}
+
+function sourceTableForLegacyBackfill(kind: LegacyBackfillKind): string {
+	return kind === 'itemStatus' ? 'items' : 'feeds';
+}
+
 class SqliteMigrationStatement {
 	private values: unknown[] = [];
 
@@ -159,6 +188,7 @@ class SqliteMigrationStatement {
 
 class SqliteMigrationDatabase {
 	readonly metrics = createSeedMetrics();
+	readonly legacyBackfillMetrics = createLegacyBackfillMetrics();
 	readonly executedSql: SqliteStatementSnapshot[] = [];
 	readonly batches: SqliteStatementSnapshot[][] = [];
 
@@ -186,17 +216,24 @@ class SqliteMigrationDatabase {
 			for (const statement of statements) {
 				const snapshot = statement.snapshot();
 				const kind = seedKindForSql(snapshot.sql);
-				if (kind) {
+				const legacyBackfillKind = legacyBackfillKindForSql(snapshot.sql);
+				if (kind || legacyBackfillKind) {
 					const currentVersion = this.database.prepare(
 						"SELECT value FROM _meta WHERE key = 'schema_version'",
 					).get() as { value: string } | undefined;
 					const claim = String(snapshot.values[0] ?? '');
 					if (currentVersion?.value === claim) {
-						const sourceTable = sourceTableForSeed(kind);
+						const sourceTable = kind
+							? sourceTableForSeed(kind)
+							: sourceTableForLegacyBackfill(legacyBackfillKind!);
 						const sourceCount = this.database.prepare(`SELECT COUNT(*) AS count FROM ${sourceTable}`).get() as {
 							count: number;
 						};
-						this.metrics.sourceRowsRead[kind] += Number(sourceCount.count);
+						if (kind) {
+							this.metrics.sourceRowsRead[kind] += Number(sourceCount.count);
+						} else {
+							this.legacyBackfillMetrics.sourceRowsRead[legacyBackfillKind!] += Number(sourceCount.count);
+						}
 					}
 				}
 
@@ -204,6 +241,10 @@ class SqliteMigrationDatabase {
 				if (kind) {
 					this.metrics.statements[kind] += 1;
 					this.metrics.inserted[kind] += result.meta.changes;
+				}
+				if (legacyBackfillKind) {
+					this.legacyBackfillMetrics.statements[legacyBackfillKind] += 1;
+					this.legacyBackfillMetrics.inserted[legacyBackfillKind] += result.meta.changes;
 				}
 				results.push(result);
 			}
@@ -604,7 +645,7 @@ function createSqliteV11Fixture(): DatabaseSync {
 	return database;
 }
 
-test('SQLite v11 migration claims the sync seed once across independent wrappers', async () => {
+test('SQLite v11 migration claims every source backfill once across independent wrappers', async () => {
 	const database = createSqliteV11Fixture();
 	const shared: SqliteD1SharedState = {
 		batchTail: Promise.resolve(),
@@ -626,16 +667,29 @@ test('SQLite v11 migration claims the sync seed once across independent wrappers
 	const winner = winners[0];
 	assert.deepEqual(winner.metrics.inserted, { feed: 2, article: 3, status: 3 });
 	assert.deepEqual(winner.metrics.sourceRowsRead, { feed: 3, article: 4, status: 4 });
+	assert.deepEqual(winner.legacyBackfillMetrics.statements, { itemStatus: 1, feedTag: 1 });
+	assert.deepEqual(winner.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
+	assert.deepEqual(winner.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 4, feedTag: 3 });
 
 	const loser = wrappers.find((wrapper) => wrapper !== winner);
 	assert.ok(loser);
 	assert.deepEqual(loser.metrics.inserted, { feed: 0, article: 0, status: 0 });
 	assert.deepEqual(loser.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
+	assert.deepEqual(loser.legacyBackfillMetrics.statements, { itemStatus: 1, feedTag: 1 });
+	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
+	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
 	assert.equal(winner.batches.length, 1);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
+	const claimPosition = migrationBatch.findIndex((statement) =>
+		statement.sql.startsWith("UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?"),
+	);
+	for (const kind of ['itemStatus', 'feedTag'] as const) {
+		const backfillPosition = migrationBatch.findIndex((statement) => legacyBackfillKindForSql(statement.sql) === kind);
+		assert.ok(claimPosition < backfillPosition);
+	}
 	for (const kind of ['feed', 'article', 'status'] as const) {
 		const seedPosition = migrationBatch.findIndex((statement) => seedKindForSql(statement.sql) === kind);
 		assert.ok(entityIndexPosition < seedPosition);
@@ -671,6 +725,21 @@ test('SQLite v11 migration claims the sync seed once across independent wrappers
 		Object.fromEntries(counts.map(({ entity_type, count }) => [entity_type, Number(count)])),
 		{ article: 4, feed: 3, status: 4 },
 	);
+
+	for (const kind of ['itemStatus', 'feedTag'] as const) {
+		const backfill = winner.executedSql.find((statement) => legacyBackfillKindForSql(statement.sql) === kind);
+		assert.ok(backfill);
+		const plan = database.prepare(`EXPLAIN QUERY PLAN ${backfill.sql}`).all(...backfill.values) as Array<{
+			detail: string;
+		}>;
+		const claimLookupPosition = plan.findIndex(({ detail }) => detail.includes('SEARCH m'));
+		const sourceScanAlias = kind === 'itemStatus' ? 'SCAN i' : 'SCAN f';
+		const sourceScanPosition = plan.findIndex(({ detail }) => detail.includes(sourceScanAlias));
+		assert.ok(
+			claimLookupPosition >= 0 && claimLookupPosition < sourceScanPosition,
+			plan.map(({ detail }) => detail).join('\n'),
+		);
+	}
 
 	const feedSeed = winner.executedSql.find((statement) => seedKindForSql(statement.sql) === 'feed');
 	assert.ok(feedSeed);

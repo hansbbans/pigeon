@@ -173,14 +173,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		.run();
 	await db
 		.prepare(
-			`INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
-			 SELECT 'default', id, COALESCE(is_read, 0), COALESCE(is_starred, 0), COALESCE(created_at, datetime('now'))
-			 FROM items
-			 WHERE id IS NOT NULL`,
-		)
-		.run();
-	await db
-		.prepare(
 			`CREATE TRIGGER IF NOT EXISTS trg_items_insert_status
 			 AFTER INSERT ON items
 			 WHEN NEW.id IS NOT NULL
@@ -220,17 +212,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		)
 		.run();
 	await db.prepare('CREATE INDEX IF NOT EXISTS idx_feed_tags_label ON feed_tags(label, feed_key)').run();
-
-	if (feedColumns.has('category')) {
-		await db
-			.prepare(
-				`INSERT OR IGNORE INTO feed_tags (feed_key, label)
-				 SELECT feed_key, category
-				   FROM feeds
-				  WHERE category IS NOT NULL AND category <> ''`,
-			)
-			.run();
-	}
 
 	await db
 		.prepare(
@@ -310,16 +291,40 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 
 	// D1 executes batch statements sequentially and atomically. The private
 	// claim is visible only inside this transaction, so a concurrent wrapper
-	// that observed the same old version cannot run the seed after this batch
-	// commits.
+	// that observed the same old version cannot run any source backfill after
+	// this batch commits.
 	const schemaVersionClaim = `__pigeon_schema_v${REQUIRED_SCHEMA_VERSION}_claim_${crypto.randomUUID()}`;
-	await db.batch([
+	const migrationBatch = [
 		db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)'),
 		db
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
 			.bind(schemaVersionClaim, persistedVersionValue),
+		db
+			.prepare(
+				`INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
+				 SELECT 'default', i.id, COALESCE(i.is_read, 0), COALESCE(i.is_starred, 0), COALESCE(i.created_at, datetime('now'))
+				 FROM (SELECT 1 FROM _meta m
+				        WHERE m.key = 'schema_version' AND m.value = ?) claim
+				 CROSS JOIN items i
+				 WHERE i.id IS NOT NULL`,
+			)
+			.bind(schemaVersionClaim),
+		...(feedColumns.has('category')
+			? [
+					db
+						.prepare(
+							`INSERT OR IGNORE INTO feed_tags (feed_key, label)
+							 SELECT f.feed_key, f.category
+							 FROM (SELECT 1 FROM _meta m
+							        WHERE m.key = 'schema_version' AND m.value = ?) claim
+							 CROSS JOIN feeds f
+							 WHERE f.category IS NOT NULL AND f.category <> ''`,
+						)
+						.bind(schemaVersionClaim),
+			  ]
+			: []),
 		db
 			.prepare(
 				`INSERT INTO sync_changes (entity_type, entity_id)
@@ -366,7 +371,8 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
 			.bind(REQUIRED_SCHEMA_VERSION, schemaVersionClaim),
-	]);
+	];
+	await db.batch(migrationBatch);
 }
 
 function parsePersistedSchemaVersion(value: unknown): number {
