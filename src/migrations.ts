@@ -290,6 +290,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	// that observed the same old version cannot run any source backfill after
 	// this batch commits.
 	const schemaVersionClaim = `__pigeon_schema_v${REQUIRED_SCHEMA_VERSION}_claim_${crypto.randomUUID()}`;
+	const syncTriggerStatements = syncTriggers();
 	const migrationBatch = [
 		db.prepare('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)'),
 		db
@@ -297,6 +298,9 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
 			.bind(schemaVersionClaim, persistedVersionValue),
+		...syncTriggerStatements.map((trigger) =>
+			db.prepare(`DROP TRIGGER IF EXISTS ${syncTriggerName(trigger)}`),
+		),
 		db
 			.prepare(
 				`INSERT OR IGNORE INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at)
@@ -362,7 +366,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 				   )`,
 			)
 			.bind(schemaVersionClaim),
-		...syncTriggers().map((trigger) => db.prepare(trigger)),
+		...syncTriggerStatements.map((trigger) => db.prepare(trigger)),
 		db
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
@@ -420,6 +424,14 @@ function syncTriggers(): string[] {
 		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('status', NEW.item_id);
 		 END`,
 	];
+}
+
+function syncTriggerName(trigger: string): string {
+	const match = /^CREATE TRIGGER IF NOT EXISTS ([a-z0-9_]+)/.exec(trigger);
+	if (!match) {
+		throw new Error('Cannot migrate Pigeon database: invalid sync trigger definition');
+	}
+	return match[1];
 }
 
 async function getTableColumns(db: D1Database, tableName: 'feeds' | 'items'): Promise<Set<string>> {

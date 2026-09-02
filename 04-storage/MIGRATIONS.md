@@ -10,7 +10,7 @@ The production implementation is in `src/migrations.ts`:
 
 - `ensureDatabaseSchema(env)` coalesces concurrent migration calls for the same D1 binding with a `WeakMap<D1Database, Promise<void>>`.
 - It minimally creates `_meta` and the `schema_version` row, then reads the persisted version before doing table, column, index, trigger, or backfill work. A stored version of `12` returns immediately; a newer version fails with an unsupported-version error instead of being downgraded or modified.
-- The v12 path uses one ordered, atomic D1 batch: it creates the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`, claims the old version with a private in-batch sentinel, gates the legacy item-status and feed-tag backfills plus the feed, article, and status sync seeds on that sentinel, installs the sync triggers after the ordered seeds, and records schema version `12` last. A concurrent wrapper that loses the claim performs no source-table backfill scans, and the index keeps the winner's sync existence checks bounded.
+- The v12 path uses one ordered, atomic D1 batch: it creates the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`, claims the old version with a private in-batch sentinel, temporarily drops existing sync triggers, gates the legacy item-status and feed-tag backfills plus the feed, article, and status sync seeds on that sentinel, restores the triggers after the ordered seeds, and records schema version `12` last. A concurrent wrapper that loses the claim performs no source-table backfill scans, and the index keeps the winner's sync existence checks bounded.
 - Malformed or out-of-range persisted schema versions are rejected instead of being guessed or silently reset.
 
 ## Migration Runner

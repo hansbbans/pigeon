@@ -645,12 +645,6 @@ function createSqliteV11Fixture(): DatabaseSync {
 		UPDATE _meta SET value = '11' WHERE key = 'schema_version';
 		DROP INDEX idx_sync_changes_entity;
 	`);
-	const syncTriggers = database.prepare(
-		"SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_sync_%'",
-	).all() as Array<{ name: string }>;
-	for (const { name } of syncTriggers) {
-		database.exec(`DROP TRIGGER ${name}`);
-	}
 	return database;
 }
 
@@ -699,6 +693,14 @@ test('SQLite v11 migration claims every source backfill once across independent 
 		const backfillPosition = migrationBatch.findIndex((statement) => legacyBackfillKindForSql(statement.sql) === kind);
 		assert.ok(claimPosition < backfillPosition);
 	}
+	const firstSyncTriggerDropPosition = migrationBatch.findIndex((statement) =>
+		statement.sql.startsWith('DROP TRIGGER IF EXISTS trg_sync_'),
+	);
+	const firstLegacyBackfillPosition = migrationBatch.findIndex((statement) =>
+		Boolean(legacyBackfillKindForSql(statement.sql)),
+	);
+	assert.ok(claimPosition < firstSyncTriggerDropPosition);
+	assert.ok(firstSyncTriggerDropPosition < firstLegacyBackfillPosition);
 	for (const kind of ['feed', 'article', 'status'] as const) {
 		const seedPosition = migrationBatch.findIndex((statement) => seedKindForSql(statement.sql) === kind);
 		assert.ok(entityIndexPosition < seedPosition);
@@ -745,6 +747,22 @@ test('SQLite v11 migration claims every source backfill once across independent 
 		Object.fromEntries(counts.map(({ entity_type, count }) => [entity_type, Number(count)])),
 		{ article: 4, feed: 3, status: 4 },
 	);
+	const orderedChanges = database.prepare(
+		'SELECT entity_type, entity_id FROM sync_changes ORDER BY sequence',
+	).all() as Array<{ entity_type: string; entity_id: string }>;
+	assert.deepEqual(orderedChanges.map(({ entity_type, entity_id }) => ({ entity_type, entity_id })), [
+		{ entity_type: 'feed', entity_id: 'feed-a' },
+		{ entity_type: 'article', entity_id: 'article-a' },
+		{ entity_type: 'status', entity_id: 'article-a' },
+		{ entity_type: 'feed', entity_id: 'feed-b' },
+		{ entity_type: 'feed', entity_id: 'feed-c' },
+		{ entity_type: 'article', entity_id: 'article-b' },
+		{ entity_type: 'article', entity_id: 'article-c' },
+		{ entity_type: 'article', entity_id: 'article-d' },
+		{ entity_type: 'status', entity_id: 'article-b' },
+		{ entity_type: 'status', entity_id: 'article-c' },
+		{ entity_type: 'status', entity_id: 'article-d' },
+	]);
 	const legacyCounts = {
 		itemStatus: Number((database.prepare('SELECT COUNT(*) AS count FROM item_statuses').get() as { count: number }).count),
 		feedTag: Number((database.prepare('SELECT COUNT(*) AS count FROM feed_tags').get() as { count: number }).count),
