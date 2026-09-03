@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
+- Daily database maintenance now advances through small indexed batches instead of rescanning the full article library every hour. Starred and unread views also use targeted indexes, preventing routine Pigeon traffic from exhausting the D1 daily read allowance.
 - Sidebar folders can be renamed and deleted. The folder list updates immediately, and deleting the open folder no longer leaves a ghost collection.
 - Feed notifications now treat a subscription's stream ID (`feed/7`) and feed slug as the same feed, so enabling a feed in Settings actually alerts after background refresh.
 - Fresh Worker instances now honor the stored database schema version, reject unsupported newer versions safely, and use an atomic indexed one-time sync backfill, preventing repeated full-library scans from exhausting D1 reads.

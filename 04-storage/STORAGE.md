@@ -63,6 +63,10 @@ The native reader adds an append-only `engagement_events` table in schema v7, wi
 
 Schema v12 adds the non-unique `idx_sync_changes_entity` index on `(entity_type, entity_id)`. One ordered atomic v12 batch claims the legacy item-status and feed-tag backfills, creates the index before the one-time feed, article, and status sync seed, and then records schema version `12`. Losing concurrent Workers perform none of those source scans, while the winner's sync existence checks stay bounded.
 
+### Bounded maintenance
+
+Schema v13 adds `maintenance_state` plus indexes for article retention, refresh-activity retention, and starred, unread, and read streams. One Worker claims each UTC maintenance day, processes at most five feeds with at most 500 article-body updates and 500 activity deletions per feed, and advances a feed cursor for the next day. Cleanup and claim completion share one atomic batch, so a failure rolls the whole attempt back for a safe retry. The v13 migration contains no legacy data backfill.
+
 ## Key Queries
 
 ### Insert new item (with feed upsert)
@@ -155,7 +159,7 @@ CREATE TABLE IF NOT EXISTS _meta (
   value TEXT
 );
 
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '12');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '13');
 ```
 
 See MIGRATIONS.md for the migration runner pattern.
