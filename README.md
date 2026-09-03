@@ -62,6 +62,8 @@ Every hour, the Worker's `scheduled()` handler:
 - deduplicates items
 - updates feed metadata like counts, fetch timestamps, and last item time
 
+On the first successful scheduled run of each UTC day, the same handler also advances bounded retention work for up to five feeds. It removes at most 500 old read article bodies and 500 old refresh records per feed while preserving unread, starred, and the newest 200 article bodies.
+
 Main files:
 
 - `src/subscribe.ts`
@@ -113,7 +115,7 @@ xcodebuild build -project PigeonReader.xcodeproj -scheme PigeonReader -configura
 
 The app stores feed metadata in `feeds` and content items in `items`.
 
-Current schema version: `12`
+Current schema version: `13`
 
 Schema files:
 
@@ -126,7 +128,7 @@ Schema files:
 
 Version `2` added RSS subscription support. Version `3` added feed icons. Version `4` added per-item original URLs so reader apps can open source posts. Version `5` added `feeds.site_url` so feed homepages stay separate from feed URLs.
 
-Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `12` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
+Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `13` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. Version 13 adds indexed, once-daily retention batches and targeted starred, unread, and read indexes without repeating any legacy backfill. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
 
 ## Runtime Settings
 

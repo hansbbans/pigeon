@@ -65,7 +65,7 @@ class RecordingStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '12' } as T;
+			return { value: '13' } as T;
 		}
 
 		throw new Error(`Unexpected SQL in first(): ${this.sql}`);

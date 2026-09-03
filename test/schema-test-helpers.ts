@@ -7,6 +7,12 @@ export interface SchemaState {
 	hasEngagementEventsTable: boolean;
 	hasFeedUrlAliasesTable: boolean;
 	hasRefreshActivityTable: boolean;
+	hasMaintenanceStateTable: boolean;
+	maintenanceCompletedDay: string | null;
+	maintenanceClaimedDay: string | null;
+	maintenanceClaimToken: string | null;
+	maintenanceLeaseUntil: string | null;
+	maintenanceCursorFeedKey: string | null;
 	hasItemStatusesTable: boolean;
 	hasSyncChangesTable: boolean;
 	hasMutationReceiptsTable: boolean;
@@ -22,7 +28,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '12',
+		schemaVersion: '13',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
@@ -30,6 +36,12 @@ export function createCurrentSchemaState(): SchemaState {
 		hasEngagementEventsTable: true,
 		hasFeedUrlAliasesTable: true,
 		hasRefreshActivityTable: true,
+		hasMaintenanceStateTable: true,
+		maintenanceCompletedDay: null,
+		maintenanceClaimedDay: null,
+		maintenanceClaimToken: null,
+		maintenanceLeaseUntil: null,
+		maintenanceCursorFeedKey: null,
 		hasItemStatusesTable: true,
 		hasSyncChangesTable: true,
 		hasMutationReceiptsTable: true,
@@ -96,6 +108,7 @@ export function createLegacySchemaState(): SchemaState {
 	state.hasEngagementEventsTable = false;
 	state.hasFeedUrlAliasesTable = false;
 	state.hasRefreshActivityTable = false;
+	state.hasMaintenanceStateTable = false;
 	state.hasItemStatusesTable = false;
 	state.hasSyncChangesTable = false;
 	state.hasMutationReceiptsTable = false;
@@ -145,6 +158,7 @@ export function maybeHandleSchemaFirst<T>(
 			(tableName === 'engagement_events' && state.hasEngagementEventsTable) ||
 			(tableName === 'feed_url_aliases' && state.hasFeedUrlAliasesTable) ||
 			(tableName === 'refresh_activity' && state.hasRefreshActivityTable) ||
+			(tableName === 'maintenance_state' && state.hasMaintenanceStateTable) ||
 			(tableName === 'item_statuses' && state.hasItemStatusesTable) ||
 			(tableName === 'sync_changes' && state.hasSyncChangesTable) ||
 			(tableName === 'mutation_receipts' && state.hasMutationReceiptsTable) ||
@@ -255,6 +269,18 @@ export function maybeHandleSchemaRun(
 	if (sql.startsWith('CREATE TABLE IF NOT EXISTS refresh_activity')) {
 		state.hasRefreshActivityTable = true;
 		state.operations.push('create-refresh_activity');
+		return true;
+	}
+
+	if (sql.startsWith('CREATE TABLE IF NOT EXISTS maintenance_state')) {
+		state.hasMaintenanceStateTable = true;
+		state.operations.push('create-maintenance_state');
+		return true;
+	}
+
+	if (sql.startsWith("INSERT OR IGNORE INTO maintenance_state")) {
+		state.hasMaintenanceStateTable = true;
+		state.operations.push('seed-maintenance_state');
 		return true;
 	}
 
