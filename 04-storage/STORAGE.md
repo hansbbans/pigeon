@@ -135,15 +135,11 @@ Always batch the feed upsert + item insert together.
 
 ## Data Retention
 
-No immediate need for cleanup, but the schema supports it:
+The hourly scheduler attempts retention once per UTC day. A claimed run advances through at most five feeds and processes at most 500 eligible rows of each kind per feed:
 
-```sql
--- Delete items older than 1 year (if ever needed)
-DELETE FROM items WHERE received_at < datetime('now', '-1 year');
-
--- Update feed item counts after cleanup
-UPDATE feeds SET item_count = (SELECT COUNT(*) FROM items WHERE items.feed_key = feeds.feed_key);
-```
+- Article bodies older than 180 days are replaced only when they are read, unstarred, already outside the newest 200 for that feed, and not already pruned.
+- Refresh activity older than 30 days is deleted while the newest activity row for each feed is preserved.
+- A durable feed cursor spreads work across days, and cleanup plus claim completion run atomically so failed work can retry safely.
 
 ## Migration Strategy
 

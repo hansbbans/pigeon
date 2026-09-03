@@ -62,6 +62,8 @@ Every hour, the Worker's `scheduled()` handler:
 - deduplicates items
 - updates feed metadata like counts, fetch timestamps, and last item time
 
+On the first successful scheduled run of each UTC day, the same handler also advances bounded retention work for up to five feeds. It removes at most 500 old read article bodies and 500 old refresh records per feed while preserving unread, starred, and the newest 200 article bodies.
+
 Main files:
 
 - `src/subscribe.ts`
