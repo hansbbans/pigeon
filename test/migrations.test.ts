@@ -259,6 +259,15 @@ class SqliteMigrationDatabase {
 	}
 }
 
+class FailingV13MigrationDatabase extends SqliteMigrationDatabase {
+	async batch(statements: SqliteMigrationStatement[]): Promise<Array<{ meta: { changes: number } }>> {
+		if (statements.some((statement) => statement.sql.startsWith('CREATE TABLE IF NOT EXISTS maintenance_state'))) {
+			throw new Error('simulated v13 migration failure');
+		}
+		return super.batch(statements);
+	}
+}
+
 class LegacySchemaStatement {
 	readonly sql: string;
 	private readonly state: SchemaState;
@@ -287,6 +296,17 @@ class LegacySchemaStatement {
 		const schema = maybeHandleSchemaFirst<T>(this.sql, this.boundValues, this.state);
 		if (schema.handled) {
 			return schema.value;
+		}
+
+		if (this.mode === 'scheduled' && this.sql.includes('SELECT cursor_feed_key')) {
+			if (
+				this.state.hasMaintenanceStateTable &&
+				this.state.maintenanceClaimedDay === String(this.boundValues[1] ?? '') &&
+				this.state.maintenanceClaimToken === String(this.boundValues[2] ?? '')
+			) {
+				return { cursor_feed_key: this.state.maintenanceCursorFeedKey } as T;
+			}
+			return null;
 		}
 
 		if (this.mode === 'feed' && this.sql === FEED_SQL) {
@@ -357,6 +377,10 @@ class LegacySchemaStatement {
 			};
 		}
 
+		if (this.mode === 'scheduled' && this.sql.startsWith('SELECT feed_key FROM feeds')) {
+			return { results: [{ feed_key: 'example-feed' }] as T[] };
+		}
+
 		if (this.mode === 'email' && this.sql.includes('FROM routing_rules')) {
 			return { results: [] as T[] };
 		}
@@ -374,6 +398,65 @@ class LegacySchemaStatement {
 			return;
 		}
 
+		if (this.mode === 'scheduled' && this.sql.startsWith('UPDATE maintenance_state')) {
+			if (this.sql.includes('SET claimed_day = ?, claim_token = ?, lease_until = ?')) {
+				const [day, token, leaseUntil, jobName, expectedDay, now] = this.boundValues.map(String);
+				const leaseAvailable =
+					this.state.maintenanceClaimedDay === null ||
+					this.state.maintenanceClaimToken === null ||
+					this.state.maintenanceLeaseUntil === null ||
+					this.state.maintenanceLeaseUntil <= now;
+				const dayAvailable =
+					this.state.maintenanceCompletedDay === null ||
+					this.state.maintenanceCompletedDay < expectedDay;
+				if (this.state.hasMaintenanceStateTable && jobName === 'daily_retention' && dayAvailable && leaseAvailable) {
+					this.state.maintenanceClaimedDay = day;
+					this.state.maintenanceClaimToken = token;
+					this.state.maintenanceLeaseUntil = leaseUntil;
+					this.state.operations.push('cron-retention-claim');
+					return { meta: { changes: 1 } };
+				}
+				this.state.operations.push('cron-retention-loser');
+				return { meta: { changes: 0 } };
+			}
+
+			if (this.sql.includes('SET completed_day = ?')) {
+				const [day, cursorFeedKey, jobName, claimedDay, token] = this.boundValues;
+				if (
+					this.state.hasMaintenanceStateTable &&
+					String(jobName) === 'daily_retention' &&
+					this.state.maintenanceClaimedDay === String(claimedDay) &&
+					this.state.maintenanceClaimToken === String(token)
+				) {
+					this.state.maintenanceCompletedDay = String(day);
+					this.state.maintenanceCursorFeedKey = cursorFeedKey === null ? null : String(cursorFeedKey);
+					this.state.maintenanceClaimedDay = null;
+					this.state.maintenanceClaimToken = null;
+					this.state.maintenanceLeaseUntil = null;
+					this.state.operations.push('cron-retention-complete');
+					return { meta: { changes: 1 } };
+				}
+				return { meta: { changes: 0 } };
+			}
+
+			if (this.sql.includes('SET claimed_day = NULL')) {
+				const [jobName, claimedDay, token] = this.boundValues.map(String);
+				if (
+					this.state.hasMaintenanceStateTable &&
+					jobName === 'daily_retention' &&
+					this.state.maintenanceClaimedDay === claimedDay &&
+					this.state.maintenanceClaimToken === token
+				) {
+					this.state.maintenanceClaimedDay = null;
+					this.state.maintenanceClaimToken = null;
+					this.state.maintenanceLeaseUntil = null;
+					this.state.operations.push('cron-retention-release');
+					return { meta: { changes: 1 } };
+				}
+				return { meta: { changes: 0 } };
+			}
+		}
+
 		if (this.mode === 'scheduled' && this.sql.includes('SET refresh_lease_until = ?')) {
 			this.state.operations.push('cron-lease');
 			return { meta: { changes: 1 } };
@@ -384,9 +467,9 @@ class LegacySchemaStatement {
 			return;
 		}
 
-		if (this.mode === 'scheduled' && this.sql.startsWith('WITH ranked_items AS')) {
+		if (this.mode === 'scheduled' && this.sql.startsWith('WITH retention_boundary AS')) {
 			this.state.operations.push('cron-prune-content');
-			return;
+			return { meta: { changes: 0 } };
 		}
 
 		throw new Error(`Unexpected SQL in run(): ${this.sql}`);
@@ -407,7 +490,34 @@ class LegacySchemaDb {
 		return new LegacySchemaStatement(sql, this.state, this.mode);
 	}
 
-	async batch(statements: LegacySchemaStatement[]): Promise<void> {
+	async batch(statements: LegacySchemaStatement[]): Promise<void | Array<void | { meta: { changes: number } }>> {
+		if (statements.some((statement) => statement.sql.startsWith('CREATE TABLE IF NOT EXISTS maintenance_state'))) {
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity')) {
+					this.state.operations.push('create-sync-entity-index');
+				} else if (snapshot.sql.startsWith('CREATE TABLE IF NOT EXISTS maintenance_state')) {
+					this.state.hasMaintenanceStateTable = true;
+					this.state.operations.push('create-maintenance_state');
+				} else if (snapshot.sql.startsWith('INSERT OR IGNORE INTO maintenance_state')) {
+					this.state.hasMaintenanceStateTable = true;
+					this.state.operations.push('seed-maintenance_state');
+				} else if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_items_retention_rank')) {
+					this.state.operations.push('create-retention-index');
+				} else if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_items_starred_date')) {
+					this.state.operations.push('create-starred-index');
+				} else if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					const expectedValue = String(snapshot.values[1] ?? '');
+					if (nextValue === '13' && this.state.schemaVersion === expectedValue) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:13');
+					}
+				}
+			}
+			return;
+		}
+
 		if (statements[0]?.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity')) {
 			let claimed = false;
 			for (const statement of statements) {
@@ -436,6 +546,14 @@ class LegacySchemaDb {
 				}
 			}
 			return;
+		}
+
+		if (statements.some((statement) => statement.sql.includes('SET completed_day = ?'))) {
+			const results: Array<void | { meta: { changes: number } }> = [];
+			for (const statement of statements) {
+				results.push(await statement.run());
+			}
+			return results;
 		}
 
 		if (!this.state.feedColumns.has('site_url')) {
@@ -479,11 +597,12 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '12');
+	assert.equal(db.state.schemaVersion, '13');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasMaintenanceStateTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.equal(db.state.hasSyncChangesTable, true);
 	assert.equal(db.state.hasMutationReceiptsTable, true);
@@ -514,10 +633,11 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '12');
+	assert.equal(db.state.schemaVersion, '13');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasMaintenanceStateTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.equal(db.state.hasSyncChangesTable, true);
 	assert.equal(db.state.hasMutationReceiptsTable, true);
@@ -545,10 +665,11 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '12');
+	assert.equal(db.state.schemaVersion, '13');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
+	assert.equal(db.state.hasMaintenanceStateTable, true);
 	assert.equal(db.state.hasItemStatusesTable, true);
 	assert.equal(db.state.hasSyncChangesTable, true);
 	assert.equal(db.state.hasMutationReceiptsTable, true);
@@ -571,7 +692,7 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	);
 
 	assert.equal(firstResponse.status, 200);
-	assert.equal(persistedState.schemaVersion, '12');
+	assert.equal(persistedState.schemaVersion, '13');
 	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
 
 	persistedState.operations.length = 0;
@@ -682,7 +803,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
 	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
-	assert.equal(winner.batches.length, 1);
+	assert.equal(winner.batches.length, 2);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
@@ -720,7 +841,52 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
 	).get() as { value: string };
-	assert.equal(schemaVersion.value, '12');
+	assert.equal(schemaVersion.value, '13');
+
+	const indexMigrationBatch = winner.batches[1];
+	assert.equal(
+		indexMigrationBatch[0]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
+	);
+	assert.equal(indexMigrationBatch[1]?.sql, 'DROP INDEX IF EXISTS idx_items_unread');
+	assert.equal(indexMigrationBatch[2]?.sql, 'DROP INDEX IF EXISTS idx_refresh_activity_feed');
+	assert.match(indexMigrationBatch[3]?.sql ?? '', /^CREATE TABLE IF NOT EXISTS maintenance_state/);
+	assert.equal(
+		indexMigrationBatch[4]?.sql,
+		"INSERT OR IGNORE INTO maintenance_state (job_name) VALUES ('daily_retention')",
+	);
+	assert.equal(
+		indexMigrationBatch[5]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_retention_rank ON items(feed_key, datetime(received_at) DESC, id DESC)',
+	);
+	assert.equal(
+		indexMigrationBatch[6]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_retention_candidates ON items(feed_key, datetime(received_at), id) WHERE content_pruned_at IS NULL AND is_read = 1 AND is_starred = 0',
+	);
+	assert.equal(
+		indexMigrationBatch[7]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_starred_date ON items(received_at DESC) WHERE is_starred = 1',
+	);
+	assert.equal(indexMigrationBatch[8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_feed ON items(feed_key) WHERE is_read = 0');
+	assert.equal(indexMigrationBatch[9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
+	assert.equal(indexMigrationBatch[10]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
+	assert.equal(
+		indexMigrationBatch[11]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed ON refresh_activity(feed_key, attempted_at DESC, id DESC)',
+	);
+	assert.equal(indexMigrationBatch[12]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
+	assert.deepEqual(indexMigrationBatch.at(-1)?.values, ['13', '12']);
+	const maintenanceRow = database.prepare(
+		'SELECT job_name, completed_day, claimed_day, claim_token, lease_until, cursor_feed_key FROM maintenance_state',
+	).get() as Record<string, string | null>;
+	assert.deepEqual({ ...maintenanceRow }, {
+		job_name: 'daily_retention',
+		completed_day: null,
+		claimed_day: null,
+		claim_token: null,
+		lease_until: null,
+		cursor_feed_key: null,
+	});
 
 	const indexes = database.prepare("PRAGMA index_list('sync_changes')").all() as Array<{
 		name: string;
@@ -792,6 +958,198 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.ok(
 		plan.some(({ detail }) => detail.includes('idx_sync_changes_entity')),
 		plan.map(({ detail }) => detail).join('\n'),
+	);
+	database.close();
+});
+
+function createSqliteV12Fixture(): DatabaseSync {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec(`
+		DROP INDEX idx_items_retention_rank;
+		DROP INDEX idx_items_retention_candidates;
+		DROP INDEX idx_items_starred_date;
+		DROP INDEX idx_items_unread_feed;
+		DROP INDEX idx_items_unread_date;
+		DROP INDEX idx_items_read_date;
+		DROP INDEX idx_refresh_activity_feed;
+		CREATE INDEX idx_items_unread ON items(is_read, feed_key);
+		CREATE INDEX idx_refresh_activity_feed ON refresh_activity(feed_key, attempted_at DESC);
+		DROP INDEX idx_sync_changes_entity;
+		DROP TABLE maintenance_state;
+		UPDATE _meta SET value = '12' WHERE key = 'schema_version';
+	`);
+	return database;
+}
+
+test('SQLite v12 migration creates only v13 indexes without legacy source scans', async () => {
+	const database = createSqliteV12Fixture();
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'13',
+	);
+	assert.deepEqual(db.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
+	assert.deepEqual(db.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
+	assert.equal(
+		db.executedSql.some((statement) =>
+			Boolean(seedKindForSql(statement.sql)) || Boolean(legacyBackfillKindForSql(statement.sql)),
+		),
+		false,
+	);
+	assert.equal(db.batches.length, 1);
+	assert.equal(
+		db.batches[0][0]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
+	);
+	assert.equal(db.batches[0][1]?.sql, 'DROP INDEX IF EXISTS idx_items_unread');
+	assert.equal(db.batches[0][2]?.sql, 'DROP INDEX IF EXISTS idx_refresh_activity_feed');
+	assert.match(db.batches[0][3]?.sql ?? '', /^CREATE TABLE IF NOT EXISTS maintenance_state/);
+	assert.equal(
+		db.batches[0][4]?.sql,
+		"INSERT OR IGNORE INTO maintenance_state (job_name) VALUES ('daily_retention')",
+	);
+	assert.equal(
+		db.batches[0][5]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_retention_rank ON items(feed_key, datetime(received_at) DESC, id DESC)',
+	);
+	assert.equal(
+		db.batches[0][6]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_retention_candidates ON items(feed_key, datetime(received_at), id) WHERE content_pruned_at IS NULL AND is_read = 1 AND is_starred = 0',
+	);
+	assert.equal(
+		db.batches[0][7]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_items_starred_date ON items(received_at DESC) WHERE is_starred = 1',
+	);
+	assert.equal(db.batches[0][8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_feed ON items(feed_key) WHERE is_read = 0');
+	assert.equal(db.batches[0][9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
+	assert.equal(db.batches[0][10]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
+	assert.equal(
+		db.batches[0][11]?.sql,
+		'CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed ON refresh_activity(feed_key, attempted_at DESC, id DESC)',
+	);
+	assert.equal(db.batches[0][12]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
+	assert.deepEqual(db.batches[0].at(-1)?.values, ['13', '12']);
+	assert.equal(
+		db.batches[0].some((statement) =>
+			statement.sql.includes('INSERT INTO sync_changes') ||
+			statement.sql.includes('INSERT OR IGNORE INTO item_statuses') ||
+			statement.sql.includes('INSERT OR IGNORE INTO feed_tags') ||
+			statement.sql.startsWith('DROP TRIGGER'),
+		),
+		false,
+	);
+
+	const indexes = database.prepare("PRAGMA index_list('items')").all() as Array<{ name: string }>;
+	for (const indexName of [
+		'idx_items_retention_rank',
+		'idx_items_retention_candidates',
+		'idx_items_starred_date',
+		'idx_items_unread_feed',
+		'idx_items_unread_date',
+		'idx_items_read_date',
+	]) {
+		assert.ok(indexes.some(({ name }) => name === indexName), indexName);
+	}
+	const indexSql = database.prepare(
+		"SELECT name, sql FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?) ORDER BY name",
+	).all('idx_items_retention_rank', 'idx_items_retention_candidates', 'idx_items_starred_date') as Array<{
+		name: string;
+		sql: string;
+	}>;
+	assert.match(indexSql.find(({ name }) => name === 'idx_items_retention_rank')?.sql ?? '', /datetime\(received_at\) DESC, id DESC/);
+	assert.match(indexSql.find(({ name }) => name === 'idx_items_retention_candidates')?.sql ?? '', /content_pruned_at IS NULL/);
+	assert.match(indexSql.find(({ name }) => name === 'idx_items_starred_date')?.sql ?? '', /WHERE is_starred = 1/);
+	assert.equal(indexes.some(({ name }) => name === 'idx_items_unread'), false);
+	const activityIndexColumns = database.prepare(
+		"PRAGMA index_info('idx_refresh_activity_feed')",
+	).all() as Array<{ seqno: number; name: string }>;
+	assert.deepEqual(activityIndexColumns.map(({ seqno, name }) => ({ seqno, name })), [
+		{ seqno: 0, name: 'feed_key' },
+		{ seqno: 1, name: 'attempted_at' },
+		{ seqno: 2, name: 'id' },
+	]);
+	const entityIndexColumns = database.prepare(
+		"PRAGMA index_info('idx_sync_changes_entity')",
+	).all() as Array<{ seqno: number; name: string }>;
+	assert.deepEqual(entityIndexColumns.map(({ seqno, name }) => ({ seqno, name })), [
+		{ seqno: 0, name: 'entity_type' },
+		{ seqno: 1, name: 'entity_id' },
+	]);
+	const maintenanceRow = database.prepare(
+		'SELECT job_name, completed_day, claimed_day, claim_token, lease_until, cursor_feed_key FROM maintenance_state',
+	).get() as Record<string, string | null>;
+	assert.deepEqual({ ...maintenanceRow }, {
+		job_name: 'daily_retention',
+		completed_day: null,
+		claimed_day: null,
+		claim_token: null,
+		lease_until: null,
+		cursor_feed_key: null,
+	});
+	database.close();
+});
+
+test('SQLite v12 migration serializes two cold wrappers without legacy scans', async () => {
+	const database = createSqliteV12Fixture();
+	const shared: SqliteD1SharedState = {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(2),
+	};
+	const firstDb = new SqliteMigrationDatabase(database, shared);
+	const secondDb = new SqliteMigrationDatabase(database, shared);
+
+	await Promise.all([
+		ensureDatabaseSchema({ DB: firstDb } as never),
+		ensureDatabaseSchema({ DB: secondDb } as never),
+	]);
+
+	for (const wrapper of [firstDb, secondDb]) {
+		assert.equal(wrapper.batches.length, 1);
+		assert.deepEqual(wrapper.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
+		assert.deepEqual(wrapper.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
+		assert.equal(
+			wrapper.executedSql.some((statement) =>
+				Boolean(seedKindForSql(statement.sql)) || Boolean(legacyBackfillKindForSql(statement.sql)),
+			),
+			false,
+		);
+	}
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'13',
+	);
+	assert.equal(
+		database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_state'").get() !== undefined,
+		true,
+	);
+	const entityIndexColumns = database.prepare(
+		"PRAGMA index_info('idx_sync_changes_entity')",
+	).all() as Array<{ seqno: number; name: string }>;
+	assert.deepEqual(entityIndexColumns.map(({ seqno, name }) => ({ seqno, name })), [
+		{ seqno: 0, name: 'entity_type' },
+		{ seqno: 1, name: 'entity_id' },
+	]);
+	database.close();
+});
+
+test('SQLite v13 migration failures propagate instead of silently returning', async () => {
+	const database = createSqliteV12Fixture();
+	const db = new FailingV13MigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await assert.rejects(ensureDatabaseSchema({ DB: db } as never), /simulated v13 migration failure/);
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'12',
 	);
 	database.close();
 });

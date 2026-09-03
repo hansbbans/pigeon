@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v12
+-- D1 Schema v13
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '12');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '13');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -92,7 +92,23 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE INDEX IF NOT EXISTS idx_items_feed_key_date ON items(feed_key, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_received_at ON items(received_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
-CREATE INDEX IF NOT EXISTS idx_items_unread ON items(is_read, feed_key);
+CREATE INDEX IF NOT EXISTS idx_items_retention_rank
+  ON items(feed_key, datetime(received_at) DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_items_retention_candidates
+  ON items(feed_key, datetime(received_at), id)
+  WHERE content_pruned_at IS NULL AND is_read = 1 AND is_starred = 0;
+CREATE INDEX IF NOT EXISTS idx_items_starred_date
+  ON items(received_at DESC)
+  WHERE is_starred = 1;
+CREATE INDEX IF NOT EXISTS idx_items_unread_feed
+  ON items(feed_key)
+  WHERE is_read = 0;
+CREATE INDEX IF NOT EXISTS idx_items_unread_date
+  ON items(received_at DESC)
+  WHERE is_read = 0;
+CREATE INDEX IF NOT EXISTS idx_items_read_date
+  ON items(received_at DESC)
+  WHERE is_read = 1;
 CREATE INDEX IF NOT EXISTS idx_feeds_next_fetch
   ON feeds(source_type, last_fetched_at)
   WHERE source_type = 'rss' AND is_active = 1;
@@ -160,9 +176,22 @@ CREATE TABLE IF NOT EXISTS refresh_activity (
 );
 
 CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed
-  ON refresh_activity(feed_key, attempted_at DESC);
+  ON refresh_activity(feed_key, attempted_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_refresh_activity_attempted
   ON refresh_activity(attempted_at DESC);
+
+-- Once-per-UTC-day maintenance coordination. The claim token and finite lease
+-- make the winner recoverable if its isolate exits before completion.
+CREATE TABLE IF NOT EXISTS maintenance_state (
+  job_name TEXT PRIMARY KEY,
+  completed_day TEXT,
+  claimed_day TEXT,
+  claim_token TEXT,
+  lease_until TEXT,
+  cursor_feed_key TEXT
+);
+
+INSERT OR IGNORE INTO maintenance_state (job_name) VALUES ('daily_retention');
 
 -- Ordered change log for bounded, cursor-based native synchronization.
 CREATE TABLE IF NOT EXISTS sync_changes (
