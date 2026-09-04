@@ -161,7 +161,7 @@ struct ReaderNavigationTests {
 		let client = NavigationHTTPClient(now: now, dayBounds: bounds)
 		let model = try makeModel(httpClient: client)
 
-		await model.loadNavigation(force: true, now: now, dayBounds: bounds)
+		_ = await model.loadNavigation(force: true, now: now, dayBounds: bounds)
 
 		#expect(model.folderNavigationItems.first(where: { $0.title == "Work" })?.unreadCount == 7)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .starred })?.unreadCount == 2)
@@ -206,7 +206,7 @@ struct ReaderNavigationTests {
 			),
 		)
 
-		await model.loadNavigation(force: true, now: now, dayBounds: bounds)
+		_ = await model.loadNavigation(force: true, now: now, dayBounds: bounds)
 
 		#expect(model.folderNavigationItems.first(where: { $0.title == "Work" })?.unreadCount == 7)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .unread })?.unreadCount == 8)
@@ -224,7 +224,7 @@ struct ReaderNavigationTests {
 		await client.waitForFirstSnapshot()
 
 		let newerLoad = Task { await model.loadNavigation(force: true) }
-		await newerLoad.value
+		_ = await newerLoad.value
 
 		let currentFolder = try #require(model.folderNavigationItems.first)
 		#expect(currentFolder.title == "Fresh")
@@ -232,7 +232,7 @@ struct ReaderNavigationTests {
 		#expect(model.isLoadingNavigation)
 
 		await client.releaseFirstSnapshot()
-		await olderLoad.value
+		_ = await olderLoad.value
 
 		let finalFolder = try #require(model.folderNavigationItems.first)
 		#expect(finalFolder.title == "Fresh")

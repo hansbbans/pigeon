@@ -473,8 +473,14 @@ struct ReaderAppModelTests {
 			feedKey: "alpha",
 			html: "<p>Keep reading this newsletter.</p>",
 		)
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
 		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
 		try await store.saveArticles([newer, older], collectionID: feed.id, accountID: accountID)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
 		try await store.saveRestoration(
 			ReaderRestorationState(
 				selectedNavigationID: feed.id,
@@ -1485,7 +1491,13 @@ struct ReaderAppModelTests {
 			readerModes: [article.feedKey: ReaderMode.readerView.rawValue],
 			articleScrollOffsets: [article.id: 0.72],
 		)
+		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_001))
 		try await store.saveArticles([article], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
 		try await store.saveRestoration(restoration, accountID: session.storageIdentity)
 		let model = try makeModel(
@@ -1495,7 +1507,6 @@ struct ReaderAppModelTests {
 		)
 
 		await model.prepareOfflineLibrary()
-
 		#expect(model.isOffline)
 		#expect(model.articles(for: .forYou).map(\.id) == [article.id])
 		#expect(model.selectedArticleID == article.id)
@@ -1635,6 +1646,105 @@ struct ReaderAppModelTests {
 
 		#expect(model.isOffline)
 		#expect(await controlled.requestCount() == 1)
+	}
+
+	@Test func legacyCacheAutomaticallyRebuildsOnceThenUsesTheWarmCursor() async throws {
+		let session = try makeSession(token: "legacy-repair-token")
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "legacy-article")],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [
+				.init(data: emptySyncPage(cursor: "repaired-cursor"), statusCode: 200),
+				.init(data: emptySyncPage(cursor: "repaired-cursor"), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		#expect(model.offlineStorageStats.navigationFreshness == .authoritative)
+		#expect(model.allArticles(for: .forYou).isEmpty)
+
+		await model.prepareOfflineLibrary()
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.count == 2)
+		#expect(syncRequests[0].query["cursor"] == nil)
+		#expect(syncRequests[0].query["limit"] == "50")
+		#expect(syncRequests[1].query["cursor"] == "repaired-cursor")
+		#expect(syncRequests[1].query["limit"] == "200")
+	}
+
+	@Test func verifiedWarmCacheUsesOneIncrementalRequestWithoutNavigationRefetch() async throws {
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
+		)
+		let model = try await makeWarmPreparationModel(httpClient: client)
+
+		await model.prepareOfflineLibrary()
+
+		let requests = await client.requests()
+		#expect(requests.filter { $0.path == "/api/v1/sync" }.count == 1)
+		#expect(requests.contains(where: { $0.path == "/reader/api/0/subscription/list" }) == false)
+		#expect(model.offlineLibraryStatus == .upToDate)
+		#expect(model.offlineLibraryStatusTitle == "Up to date")
+	}
+
+	@Test func transientSyncFailuresRetryTheSameCursorWithASmallerLimit() async throws {
+		let failures: [(Int, Data)] = [
+			(502, Data()),
+			(503, Data()),
+			(500, Data(#"{"error_code":1102,"error_name":"worker_exceeded_resources"}"#.utf8)),
+		]
+		for (statusCode, data) in failures {
+			let client = IntegritySyncHTTPClient(
+				syncResponses: [
+					.init(data: data, statusCode: statusCode),
+					.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200),
+				],
+			)
+			let model = try await makeWarmPreparationModel(httpClient: client)
+
+			await model.prepareOfflineLibrary()
+			let syncRequests = await client.syncRequests()
+			#expect(syncRequests.count == 2)
+			#expect(syncRequests.map { $0.query["cursor"] } == ["warm-cursor", "warm-cursor"])
+			#expect(syncRequests.map { $0.query["limit"] } == ["200", "100"])
+			#expect(model.offlineStorageStats.cacheState == .complete)
+		}
+	}
+
+	@Test func completeCacheWithoutAuthoritativeNavigationIsNotShownAsUpToDate() async throws {
+		let session = try makeSession(token: "unverified-navigation-token")
+		let store = OfflineLibraryStore.inMemory()
+		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.markDataSynchronizedWithoutNavigation(
+			accountID: session.storageIdentity,
+			at: Date(timeIntervalSince1970: 1_001),
+		)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
+			subscriptionStatusCode: 503,
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		#expect(model.offlineStorageStats.navigationFreshness == .unverified)
+		#expect(model.offlineLibraryStatus == .syncFailed)
+		#expect(model.offlineLibraryStatusTitle == "Sync failed")
 	}
 
 	@Test func warmLaunchStillRefreshesPersonalizedForYouContent() async throws {
@@ -2203,7 +2313,7 @@ struct ReaderAppModelTests {
 			unreadCounts: [],
 			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 0, starred: 0),
 		)
-		let cachedArticle = makeArticle(id: "cached-folder")
+		let cachedArticle = makeArticle(id: "cached-folder", feedKey: "alpha")
 		let restoration = ReaderRestorationState(
 			selectedNavigationID: ReaderSection.forYou.rawValue,
 			selectedArticleIDs: [:],
@@ -2216,9 +2326,15 @@ struct ReaderAppModelTests {
 			articleScrollOffsets: [:],
 		)
 		let accountID = session.storageIdentity
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
 		try await store.saveNavigation(navigation, accountID: accountID)
 		try await store.saveSubscriptions([subscription], accountID: accountID)
 		try await store.saveArticles([cachedArticle], collectionID: "user/-/label/News", accountID: accountID)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
 		try await store.saveRestoration(restoration, accountID: accountID)
 
 		let client = StartupHTTPClient(
@@ -2258,7 +2374,7 @@ struct ReaderAppModelTests {
 	@Test func cancelledURLSessionNavigationLoadDoesNotSetErrorMessage() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient(failure: URLError(.cancelled)))
 
-		await model.loadNavigation(force: true)
+		_ = await model.loadNavigation(force: true)
 
 		#expect(model.errorMessage == nil)
 	}
@@ -2266,7 +2382,7 @@ struct ReaderAppModelTests {
 	@Test func realNavigationFailureStillSetsErrorMessage() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient(failure: URLError(.notConnectedToInternet)))
 
-		await model.loadNavigation(force: true)
+		_ = await model.loadNavigation(force: true)
 
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
@@ -2278,7 +2394,7 @@ struct ReaderAppModelTests {
 		let load = Task { await model.loadLibrary(force: true) }
 		let request = await controlled.nextRequest()
 		await controlled.fail(request, with: URLError(.cancelled))
-		await load.value
+		_ = await load.value
 
 		#expect(model.errorMessage == nil)
 		#expect(model.subscriptions.isEmpty)
@@ -2343,9 +2459,9 @@ struct ReaderAppModelTests {
 		let newerRequest = await controlled.nextRequest()
 
 		await controlled.resolve(newerRequest, data: try responseData(items: [makeArticle(id: "newer")]))
-		await newerLoad.value
+		_ = await newerLoad.value
 		await controlled.resolve(olderRequest, data: try responseData(items: [makeArticle(id: "older")]))
-		await olderLoad.value
+		_ = await olderLoad.value
 
 		#expect(model.articles(for: .forYou).map(\.id) == ["newer"])
 	}
@@ -3126,7 +3242,7 @@ struct ReaderAppModelTests {
 		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([visibleHit.readerId, hiddenNeighbor.readerId]))
 		}
 
-		@Test func todayHidesYesterdayStoriesAfterLocalMidnight() async throws {
+	@Test func todayHidesYesterdayStoriesAfterLocalMidnight() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
 		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
@@ -3243,10 +3359,16 @@ struct ReaderAppModelTests {
 		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
 		let yesterday = makeArticle(id: "yesterday", receivedDate: bounds.start.addingTimeInterval(-90))
 		let today = makeArticle(id: "today", receivedDate: bounds.start.addingTimeInterval(180))
-		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 2)
+		let todayItem = ReaderNavigationItem.smart(.today, unreadCount: 1)
 		let accountID = session.storageIdentity
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
 		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
 		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
 
 		let model = try makeModel(
 			httpClient: MockHTTPClient(shouldFail: true),
@@ -3259,7 +3381,7 @@ struct ReaderAppModelTests {
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
 		let snapshot = try await store.loadSnapshot(accountID: accountID)
 		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
-		}
+	}
 
 	@Test func restoringAnEmptyTodayCacheDropsAnUntrustedContinuation() async throws {
 		let session = try makeSession(token: "today-empty-continuation")
@@ -3301,6 +3423,7 @@ struct ReaderAppModelTests {
 			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
 			accountID: accountID,
 		)
+		try await store.finishSynchronization(accountID: accountID, at: .now)
 		let syncPage = Data(
 			"""
 			{
@@ -3338,7 +3461,9 @@ struct ReaderAppModelTests {
 		await model.load(collection: todayItem)
 		await model.loadMore(collection: todayItem)
 		#expect(model.allArticles(for: todayItem).contains(where: { $0.id == "today-page-2" }))
-		#expect(await client.todayPageContinuations() == [nil, "today-page-2"])
+		let todayContinuations = await client.todayPageContinuations()
+		#expect(Array(todayContinuations.suffix(2)) == [nil, "today-page-2"])
+		#expect(todayContinuations.contains("old-day-next") == false)
 	}
 
 	@Test func markAllWithReadFilterLeavesHiddenUnreadNeighborsUnread() async throws {
@@ -4485,7 +4610,7 @@ struct ReaderAppModelTests {
 
 		await controlled.resolve(loadRequest, data: streamIDsData(ids: [], continuation: "stale-next"))
 		await controlled.resolve(mutationRequest)
-		await load.value
+		_ = await load.value
 		#expect(await rename.value)
 
 		let renamed = try #require(model.folderNavigationItems.first)
@@ -4986,13 +5111,13 @@ struct ReaderAppModelTests {
 		let newerRequest = await controlled.nextRequest()
 
 		await controlled.resolve(newerRequest, data: try subscriptionsData([
-			makeSubscription(id: "feed/2", key: "newer", title: "Newer", folder: nil),
-		]))
-		await newerLoad.value
-		await controlled.resolve(olderRequest, data: try subscriptionsData([
-			makeSubscription(id: "feed/1", key: "older", title: "Older", folder: nil),
-		]))
-		await olderLoad.value
+				makeSubscription(id: "feed/2", key: "newer", title: "Newer", folder: nil),
+			]))
+			_ = await newerLoad.value
+			await controlled.resolve(olderRequest, data: try subscriptionsData([
+				makeSubscription(id: "feed/1", key: "older", title: "Older", folder: nil),
+			]))
+			_ = await olderLoad.value
 
 		#expect(model.subscriptions.map(\.title) == ["Newer"])
 	}
@@ -5049,7 +5174,7 @@ struct ReaderAppModelTests {
 		await controlled.resolve(request, data: try subscriptionsData([
 			makeSubscription(id: "feed/old", key: "old", title: "Old account", folder: nil),
 		]))
-		await load.value
+		_ = await load.value
 
 		#expect(model.session == nil)
 		#expect(model.subscriptions.isEmpty)
@@ -5142,8 +5267,8 @@ struct ReaderAppModelTests {
 			)
 			let baselineLaunchStart = Date.now.timeIntervalSinceReferenceDate
 			_ = try await baselineClient.incrementalSync(cursor: "warm-cursor")
-			await baseline.model.loadNavigation(force: true)
-			await baseline.model.loadLibrary(force: true)
+				_ = await baseline.model.loadNavigation(force: true)
+				_ = await baseline.model.loadLibrary(force: true)
 			let baselineLaunchPage = try await baselineClient.recommendationsPage(from: baseline.collection.streamID)
 			try await baseline.store.saveArticles(
 				baselineLaunchPage.items,
@@ -5173,7 +5298,7 @@ struct ReaderAppModelTests {
 			)
 			baseline.model.setArticles(baselineRefreshPage.items, for: baseline.collection)
 			baseline.model.writeWidgetSnapshot()
-			await baseline.model.loadNavigation(force: true)
+				_ = await baseline.model.loadNavigation(force: true)
 			let baselineRefreshElapsed = Date.now.timeIntervalSinceReferenceDate - baselineRefreshStart
 			baselineRefreshSamples.append(baselineRefreshElapsed)
 			print("RELOAD_BENCH baseline run=\(run) launch=\(baselineLaunchElapsed) refresh=\(baselineRefreshElapsed)")
@@ -5227,14 +5352,16 @@ struct ReaderAppModelTests {
 			},
 			expandedFolderIDs: [],
 		)
+		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		try await store.saveArticles(
 			[makeArticle(id: "cached-for-you")],
 			collectionID: collection.id,
-			accountID: session.storageIdentity,
-		)
-		try await store.apply(
-			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
 			accountID: session.storageIdentity,
 		)
 		try await store.saveRestoration(
@@ -5280,6 +5407,11 @@ struct ReaderAppModelTests {
 			items: ReaderSection.allCases.map { ReaderNavigationItem.smart($0) } + [collection],
 			expandedFolderIDs: [],
 		)
+		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
 		try await store.saveSubscriptions(
 			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
@@ -5295,10 +5427,7 @@ struct ReaderAppModelTests {
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
-		try await store.apply(
-			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
-			accountID: session.storageIdentity,
-		)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		try await store.saveRestoration(
 			ReaderRestorationState(
 				selectedNavigationID: collection.id,
@@ -5350,6 +5479,11 @@ struct ReaderAppModelTests {
 				readerId: "item-\(index)",
 			)
 		}
+		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: session.storageIdentity,
+		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
 		try await store.saveSubscriptions(
 			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
@@ -5361,10 +5495,7 @@ struct ReaderAppModelTests {
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
-		try await store.apply(
-			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
-			accountID: session.storageIdentity,
-		)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		let restoration = ReaderRestorationState(
 			selectedNavigationID: collection.id,
 			selectedArticleIDs: [:],
@@ -5449,6 +5580,7 @@ struct ReaderAppModelTests {
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
+		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { _ in },
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
@@ -5459,10 +5591,12 @@ struct ReaderAppModelTests {
 			readwiseTokenStore: TestReadwiseTokenStore(),
 			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
+			smartViewStore: ReaderSmartViewStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
 			keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,
+			offlineSyncDelay: offlineSyncDelay,
 		)
 	}
 
@@ -5669,6 +5803,10 @@ struct ReaderAppModelTests {
 		return try encoder.encode(response)
 	}
 
+	private func emptySyncPage(cursor: String) -> Data {
+		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":false,\"changes\":[]}".utf8)
+	}
+
 	private func subscriptionsData(_ subscriptions: [FeedSubscription]) throws -> Data {
 		try JSONEncoder().encode(SubscriptionListResponse(subscriptions: subscriptions))
 	}
@@ -5692,6 +5830,72 @@ private struct BenchmarkMetrics: Sendable {
 	let requestCount: Int
 	let byteCount: Int
 	let paths: [String]
+}
+
+private actor IntegritySyncHTTPClient: HTTPClient {
+	struct SyncResponse: Sendable {
+		let data: Data
+		let statusCode: Int
+	}
+
+	struct Request: Sendable {
+		let path: String
+		let query: [String: String]
+	}
+
+	private var syncResponses: [SyncResponse]
+	private let subscriptionStatusCode: Int
+	private var capturedRequests: [Request] = []
+
+	init(syncResponses: [SyncResponse], subscriptionStatusCode: Int = 200) {
+		self.syncResponses = syncResponses
+		self.subscriptionStatusCode = subscriptionStatusCode
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else { throw PigeonError.invalidServerURL }
+		let query = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+			.reduce(into: [String: String]()) { result, item in
+				if let value = item.value { result[item.name] = value }
+			}
+		capturedRequests.append(Request(path: url.path, query: query))
+
+		let response: SyncResponse
+		switch url.path {
+		case "/api/v1/sync":
+			response = syncResponses.isEmpty
+				? SyncResponse(data: Data(#"{"cursor":"default","hasMore":false,"changes":[]}"#.utf8), statusCode: 200)
+				: syncResponses.removeFirst()
+		case "/reader/api/0/subscription/list":
+			response = SyncResponse(data: Data(#"{"subscriptions":[]}"#.utf8), statusCode: subscriptionStatusCode)
+		case "/reader/api/0/unread-count", "/reader/api/0/stream/items/ids":
+			response = SyncResponse(data: Data(#"{"unreadcounts":[],"itemRefs":[]}"#.utf8), statusCode: 200)
+		case "/api/v1/recommendations":
+			response = SyncResponse(
+				data: Data(#"{"generatedAt":"2026-08-21T00:00:00Z","view":"for-you","items":[]}"#.utf8),
+				statusCode: 200,
+			)
+		default:
+			response = SyncResponse(data: Data(#"{"error":"not found"}"#.utf8), statusCode: 404)
+		}
+		guard let httpResponse = HTTPURLResponse(
+			url: url,
+			statusCode: response.statusCode,
+			httpVersion: nil,
+			headerFields: nil,
+		) else {
+			throw PigeonError.invalidResponse
+		}
+		return (response.data, httpResponse)
+	}
+
+	func requests() -> [Request] {
+		capturedRequests
+	}
+
+	func syncRequests() -> [Request] {
+		capturedRequests.filter { $0.path == "/api/v1/sync" }
+	}
 }
 
 private actor FailThenSucceedSyncHTTPClient: HTTPClient {
@@ -5770,6 +5974,10 @@ private actor TodayReconciliationHTTPClient: HTTPClient {
 				"{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id)\",\"published\":\(Int(Date.now.timeIntervalSince1970)),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"user/-/state/com.google/reading-list\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
 			}.joined(separator: ",")
 			data = Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+		} else if url.path == "/reader/api/0/subscription/list" {
+			data = Data(#"{"subscriptions":[]}"#.utf8)
+		} else if url.path == "/reader/api/0/unread-count" {
+			data = Data(#"{"unreadcounts":[]}"#.utf8)
 		} else {
 			data = Data()
 		}
@@ -5785,7 +5993,10 @@ private actor TodayReconciliationHTTPClient: HTTPClient {
 
 	func todayPageContinuations() -> [String?] {
 		capturedRequests
-			.filter { $0.path == "/reader/api/0/stream/items/ids" }
+			.filter {
+				$0.path == "/reader/api/0/stream/items/ids"
+				&& $0.query["s"] == "user/-/state/com.google/reading-list"
+			}
 			.map { $0.query["c"] }
 	}
 

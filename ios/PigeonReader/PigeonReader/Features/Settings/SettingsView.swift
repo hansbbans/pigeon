@@ -76,7 +76,7 @@ struct SettingsView: View {
 				}
 
 				Section("Offline Library") {
-					LabeledContent("Status", value: model.isOffline ? "Offline" : "Up to date")
+					LabeledContent("Status", value: model.offlineLibraryStatusTitle)
 					LabeledContent("Saved articles", value: model.offlineStorageStats.articleCount.formatted())
 					LabeledContent(
 						"Local storage",
@@ -86,9 +86,9 @@ struct SettingsView: View {
 						),
 					)
 					LabeledContent("Waiting to sync", value: model.offlineStorageStats.pendingMutationCount.formatted())
-					if let lastSyncAt = model.offlineStorageStats.lastSyncAt {
-						LabeledContent("Last sync") {
-							Text(lastSyncAt, style: .relative)
+					if let lastSuccessAt = model.offlineStorageStats.lastSuccessAt {
+						LabeledContent("Last successful sync") {
+							Text(lastSuccessAt, style: .relative)
 						}
 					}
 					Button("Free space from older read articles", systemImage: "arrow.down.circle") {

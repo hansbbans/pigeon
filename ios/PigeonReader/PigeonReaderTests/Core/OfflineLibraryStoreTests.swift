@@ -4,6 +4,27 @@ import Testing
 @testable import PigeonReader
 
 struct OfflineLibraryStoreTests {
+	@Test func savingNavigationTwiceReplacesTheExistingSnapshot() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let first = ReaderNavigationState(
+			items: [.smart(.forYou, unreadCount: 1)],
+			expandedFolderIDs: [],
+		)
+		let second = ReaderNavigationState(
+			items: [.smart(.unread, unreadCount: 2)],
+			expandedFolderIDs: [],
+		)
+
+		try await store.saveNavigation(first, accountID: accountID)
+		try await store.saveNavigation(second, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation == second)
+		#expect(snapshot.navigation?.item(withID: ReaderSection.forYou.rawValue) == nil)
+		#expect(snapshot.navigation?.item(withID: ReaderSection.unread.rawValue)?.unreadCount == 2)
+	}
+
 	@Test func accountDataAndDurableOutboxStayIsolatedAcrossReopen() async throws {
 		let directory = FileManager.default.temporaryDirectory
 			.appending(path: "pigeon-offline-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -113,6 +134,183 @@ struct OfflineLibraryStoreTests {
 		#expect(article.score == 91)
 		#expect(article.isRead)
 		#expect(article.isStarred)
+	}
+
+	@Test func interruptedSyncStaysIncompleteAndDoesNotRecordLastSuccess() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let attempt = Date(timeIntervalSince1970: 1_000)
+		try await store.beginFullRebuild(accountID: "account-a", at: attempt)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:1", hasMore: true, changes: []),
+			accountID: "account-a",
+		)
+
+		let stats = try await store.storageStats(accountID: "account-a")
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(stats.cacheState == .syncing)
+		#expect(stats.navigationFreshness == .unverified)
+		#expect(stats.lastSuccessAt == nil)
+		#expect(stats.lastSyncAt == nil)
+		#expect(snapshot.cursor == "v1:1")
+	}
+
+	@Test func clearingCachedArticlesInvalidatesCursorAndIntegrity() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:1", hasMore: false, changes: []),
+			accountID: "account-a",
+		)
+		try await store.clearCachedArticles(accountID: "account-a")
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		let stats = try await store.storageStats(accountID: "account-a")
+		#expect(snapshot.cursor == nil)
+		#expect(snapshot.integrity.state == .needsBootstrap)
+		#expect(snapshot.integrity.navigation == .unverified)
+		#expect(stats.lastSyncAt == nil)
+	}
+
+	@Test func fullRebuildPreservesPendingActionsAndReaderState() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: ReaderSection.forYou.rawValue,
+			selectedArticleIDs: [ReaderSection.forYou.rawValue: "article-1"],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: ["article-1": 0.5],
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store.saveArticles([makeArticle(id: "article-1")], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store.saveRestoration(restoration, accountID: accountID)
+		try await store.enqueue(
+			OfflineMutation(id: "pending-1", kind: .setRead, itemIds: ["reader-1"], value: true),
+			accountID: accountID,
+		)
+
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(snapshot.navigation == nil)
+		#expect(snapshot.subscriptions.isEmpty)
+		#expect(snapshot.articlesByCollection.isEmpty)
+		#expect(snapshot.restoration == restoration)
+		#expect(pending.map(\.mutation.id) == ["pending-1"])
+		#expect(snapshot.integrity.state == .syncing)
+		#expect(snapshot.cursor == nil)
+	}
+
+	@Test func missingStatusTargetMarksRepairWithoutAdvancingCursor() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:previous", hasMore: false, changes: []),
+			accountID: "account-a",
+		)
+		let page = IncrementalSyncPage(
+			cursor: "v1:missing-status",
+			hasMore: false,
+			changes: [
+				IncrementalSyncChange(
+					sequence: 1,
+					entityType: .status,
+					entityId: "missing-article",
+					operation: .upsert,
+					changedAt: Date(timeIntervalSince1970: 1_000),
+					payload: IncrementalSyncPayload(
+						feedKey: nil, streamId: nil, title: nil, feedURL: nil, siteURL: nil, iconURL: nil,
+						isActive: nil, folders: nil, id: nil, readerId: nil, source: nil, author: nil,
+						html: nil, text: nil, originalURL: nil, receivedAt: nil, isRead: true,
+						isStarred: nil, isBodyPruned: nil, itemId: "missing-article", updatedAt: nil,
+						version: nil, mutationId: nil,
+					),
+				),
+			],
+		)
+
+		do {
+			try await store.apply(page, accountID: "account-a")
+			Issue.record("A missing status target should fail the page transaction.")
+		} catch let error as OfflineLibraryError {
+			#expect(error == .missingStatusTarget("missing-article"))
+		}
+
+		let stats = try await store.storageStats(accountID: "account-a")
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(stats.cacheState == .needsRepair)
+		#expect(snapshot.integrity.invalidChangeCount == 1)
+		#expect(snapshot.cursor == "v1:previous")
+	}
+
+	@Test func statusBeforeArticleIsResolvedAfterPageArticlesAreApplied() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let receivedAt = Date(timeIntervalSince1970: 1_000)
+		let articlePayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: nil, title: "Story", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: "article-1", readerId: "reader-1", source: "Daily",
+			author: nil, html: "<p>Body</p>", text: nil, originalURL: nil, receivedAt: receivedAt,
+			isRead: false, isStarred: false, isBodyPruned: false, itemId: nil, updatedAt: nil,
+			version: nil, mutationId: nil,
+		)
+		let statusPayload = IncrementalSyncPayload(
+			feedKey: nil, streamId: nil, title: nil, feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: nil, readerId: nil, source: nil, author: nil,
+			html: nil, text: nil, originalURL: nil, receivedAt: nil, isRead: true,
+			isStarred: true, isBodyPruned: nil, itemId: "article-1", updatedAt: nil,
+			version: 2, mutationId: nil,
+		)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:status-after",
+				hasMore: false,
+				changes: [
+					IncrementalSyncChange(sequence: 2, entityType: .status, entityId: "article-1", operation: .upsert, changedAt: receivedAt, payload: statusPayload),
+					IncrementalSyncChange(sequence: 1, entityType: .article, entityId: "article-1", operation: .upsert, changedAt: receivedAt, payload: articlePayload),
+				],
+			),
+			accountID: "account-a",
+		)
+
+		let article = try #require(
+			try await store.searchArticles(query: "Story", collectionID: nil, accountID: "account-a", limit: 10).first,
+		)
+		#expect(article.isRead)
+		#expect(article.isStarred)
+	}
+
+	@Test func finalizationRequiresAuthoritativeNavigationAndRecordsSuccess() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let success = Date(timeIntervalSince1970: 2_000)
+		try await store.beginFullRebuild(accountID: "account-a", at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:final", hasMore: false, changes: []),
+			accountID: "account-a",
+		)
+
+		do {
+			try await store.finishSynchronization(accountID: "account-a", at: success)
+			Issue.record("Finalization without navigation should fail.")
+		} catch let error as OfflineLibraryError {
+			#expect(error == .navigationUnavailable)
+		}
+		#expect((try await store.storageStats(accountID: "account-a")).cacheState == .syncing)
+
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
+			accountID: "account-a",
+		)
+		try await store.finishSynchronization(accountID: "account-a", at: success)
+		let stats = try await store.storageStats(accountID: "account-a")
+		#expect(stats.cacheState == .complete)
+		#expect(stats.navigationFreshness == .authoritative)
+		#expect(stats.lastSuccessAt == success)
+		#expect(stats.lastSyncAt == success)
 	}
 
 	@Test func feedSyncKeepsTheOfflineSubscriptionLibraryCurrent() async throws {

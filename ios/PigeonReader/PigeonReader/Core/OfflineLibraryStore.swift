@@ -74,6 +74,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	func loadSnapshot(accountID: String) throws -> CachedLibrarySnapshot {
 		let database = try openDatabase()
 		try reconcileArticleIdentities(accountID: accountID, database: database)
+		let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
 		let navigation = try loadSinglePayload(
 			ReaderNavigationState.self,
 			sql: "SELECT payload FROM cached_navigation WHERE account_id = ?",
@@ -167,6 +168,196 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			restoration: restoration,
 			cursor: syncState?.0,
 			lastSyncAt: syncState?.1,
+			integrity: integrity,
+		)
+	}
+
+	func beginFullRebuild(accountID: String, at date: Date = .now) async throws {
+		let database = try openDatabase()
+		try transaction(database) {
+			let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+			for table in [
+				"cached_navigation_items",
+				"cached_navigation",
+				"cached_subscriptions",
+				"cached_feeds",
+				"cached_collection_articles",
+				"cached_articles",
+				"cached_collection_pagination",
+				"sync_state",
+			] {
+				try execute(
+					"DELETE FROM \(table) WHERE account_id = ?",
+					bindings: [.text(accountID)],
+					database: database,
+				)
+			}
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+					state: .syncing,
+					navigation: .unverified,
+					lastAttemptAt: date,
+					lastSuccessAt: previous.lastSuccessAt,
+					lastError: nil,
+					invalidChangeCount: previous.invalidChangeCount,
+					lastPageHasMore: nil,
+				),
+				accountID: accountID,
+				database: database,
+			)
+		}
+	}
+
+	func finishSynchronization(
+		accountID: String,
+		at date: Date = .now,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async throws {
+		try finishSynchronization(
+			accountID: accountID,
+			at: date,
+			dayBounds: dayBounds,
+			rebuildMemberships: true,
+		)
+	}
+
+	func finishWarmSynchronization(
+		accountID: String,
+		at date: Date = .now,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async throws {
+		try finishSynchronization(
+			accountID: accountID,
+			at: date,
+			dayBounds: dayBounds,
+			rebuildMemberships: false,
+		)
+	}
+
+	private func finishSynchronization(
+		accountID: String,
+		at date: Date,
+		dayBounds: ReaderLocalDayBounds?,
+		rebuildMemberships: Bool,
+	) throws {
+		let database = try openDatabase()
+		try transaction(database) {
+			let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
+			guard integrity.formatVersion == OfflineCacheIntegrity.currentFormatVersion,
+				integrity.state == .syncing || integrity.state == .complete,
+				integrity.lastPageHasMore == false else {
+				throw OfflineLibraryError.invalidCacheState("The offline library did not reach the end of its sync.")
+			}
+			guard try scalarCount(
+				"SELECT COUNT(*) FROM cached_navigation WHERE account_id = ?",
+				accountID: accountID,
+				database: database,
+			) > 0 else {
+				throw OfflineLibraryError.navigationUnavailable
+			}
+			guard try scalarCount(
+				"SELECT COUNT(*) FROM sync_state WHERE account_id = ?",
+				accountID: accountID,
+				database: database,
+			) > 0 else {
+				throw OfflineLibraryError.invalidCacheState("The offline library had no persisted sync cursor.")
+			}
+			if rebuildMemberships {
+				try rebuildAllMemberships(accountID: accountID, dayBounds: dayBounds, database: database)
+			} else {
+				try validateCachedMemberships(accountID: accountID, database: database)
+			}
+			try execute(
+				"UPDATE sync_state SET last_sync_at = ? WHERE account_id = ?",
+				bindings: [.double(date.timeIntervalSince1970), .text(accountID)],
+				database: database,
+			)
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+					state: .complete,
+					navigation: .authoritative,
+					lastAttemptAt: integrity.lastAttemptAt,
+					lastSuccessAt: date,
+					lastError: nil,
+					invalidChangeCount: integrity.invalidChangeCount,
+					lastPageHasMore: false,
+				),
+				accountID: accountID,
+				database: database,
+			)
+		}
+	}
+
+	func markDataSynchronizedWithoutNavigation(
+		accountID: String,
+		at date: Date = .now,
+		dayBounds: ReaderLocalDayBounds? = nil,
+	) async throws {
+		let database = try openDatabase()
+		try transaction(database) {
+			let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+			guard previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion,
+				previous.lastPageHasMore == false else {
+				throw OfflineLibraryError.invalidCacheState("The offline library did not reach the end of its sync.")
+			}
+			try rebuildAllMemberships(accountID: accountID, dayBounds: dayBounds, database: database)
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+					state: .complete,
+					navigation: .unverified,
+					lastAttemptAt: previous.lastAttemptAt ?? date,
+					lastSuccessAt: previous.lastSuccessAt,
+					lastError: previous.lastError,
+					invalidChangeCount: previous.invalidChangeCount,
+					lastPageHasMore: false,
+				),
+				accountID: accountID,
+				database: database,
+			)
+		}
+	}
+
+	func markCacheRepairNeeded(accountID: String, message: String, at date: Date = .now) async throws {
+		let database = try openDatabase()
+		let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+		let normalizedMessage = String(message.prefix(500))
+		let alreadyRecorded = previous.state == .needsRepair && previous.lastError == normalizedMessage
+		try saveCacheIntegrity(
+			OfflineCacheIntegrity(
+				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+				state: .needsRepair,
+				navigation: .unverified,
+				lastAttemptAt: date,
+				lastSuccessAt: previous.lastSuccessAt,
+				lastError: normalizedMessage,
+				invalidChangeCount: previous.invalidChangeCount + (alreadyRecorded ? 0 : 1),
+				lastPageHasMore: previous.lastPageHasMore,
+			),
+			accountID: accountID,
+			database: database,
+		)
+	}
+
+	func recordSynchronizationFailure(accountID: String, message: String, at date: Date = .now) async throws {
+		let database = try openDatabase()
+		let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+		guard previous.state != .needsRepair else { return }
+		try saveCacheIntegrity(
+			OfflineCacheIntegrity(
+				formatVersion: previous.formatVersion,
+				state: previous.state,
+				navigation: previous.navigation,
+				lastAttemptAt: date,
+				lastSuccessAt: previous.lastSuccessAt,
+				lastError: String(message.prefix(500)),
+				invalidChangeCount: previous.invalidChangeCount,
+				lastPageHasMore: previous.lastPageHasMore,
+			),
+			accountID: accountID,
+			database: database,
 		)
 	}
 
@@ -329,30 +520,90 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		)
 	}
 
-	func apply(_ page: IncrementalSyncPage, accountID: String) throws {
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
+		try await apply(page, accountID: accountID, dayBounds: nil)
+	}
+
+	func apply(
+		_ page: IncrementalSyncPage,
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+	) async throws {
 		let database = try openDatabase()
-		try transaction(database) {
-			try reconcileArticleIdentities(accountID: accountID, database: database)
-			for change in page.changes {
-				try apply(change, accountID: accountID, database: database)
-			}
-			if page.changes.isEmpty == false {
-				// Counts and collection membership are derived from synced rows.
-				// Force the next snapshot to rebuild them with this committed page.
+		do {
+			try transaction(database) {
+				guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+					throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
+				}
+				let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+				try saveCacheIntegrity(
+					OfflineCacheIntegrity(
+						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+						state: .syncing,
+						navigation: .unverified,
+						lastAttemptAt: previous.lastAttemptAt ?? .now,
+						lastSuccessAt: previous.lastSuccessAt,
+						lastError: nil,
+						invalidChangeCount: previous.invalidChangeCount,
+						lastPageHasMore: page.hasMore,
+					),
+					accountID: accountID,
+					database: database,
+				)
+
+				let deletedArticleIDs = Set(
+					page.changes
+						.filter { $0.entityType == .article && $0.operation == .delete }
+						.map(\.entityId),
+				)
+				// Article/feed upserts must land before status changes because a page can
+				// contain both records for a newly-created article.
+				for change in page.changes where change.entityType != .status {
+					try apply(
+						change,
+						accountID: accountID,
+						dayBounds: dayBounds,
+						deletedArticleIDs: deletedArticleIDs,
+						database: database,
+					)
+				}
+				for change in page.changes where change.entityType == .status {
+					try apply(
+						change,
+						accountID: accountID,
+						dayBounds: dayBounds,
+						deletedArticleIDs: deletedArticleIDs,
+						database: database,
+					)
+				}
+				if page.changes.isEmpty == false {
+					// Any change invalidates the cached count snapshot. It is still useful
+					// for rendering, but it cannot authorize a warm sync until refreshed.
+					try execute(
+						"DELETE FROM cached_navigation WHERE account_id = ?",
+						bindings: [.text(accountID)],
+						database: database,
+					)
+					try execute(
+						"DELETE FROM cached_navigation_items WHERE account_id = ?",
+						bindings: [.text(accountID)],
+						database: database,
+					)
+				}
 				try execute(
-					"DELETE FROM cached_navigation WHERE account_id = ?",
-					bindings: [.text(accountID)],
+					"""
+					INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
+					ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
+					""",
+					bindings: [.text(accountID), .text(page.cursor)],
 					database: database,
 				)
 			}
-			try execute(
-				"""
-				INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, ?)
-				ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor, last_sync_at = excluded.last_sync_at
-				""",
-				bindings: [.text(accountID), .text(page.cursor), .double(Date.now.timeIntervalSince1970)],
-				database: database,
-			)
+		} catch {
+			// The page transaction rolls back both rows and cursor. Keep a separate
+			// repair marker so a next launch cannot trust the previous cursor.
+			try? await markCacheRepairNeeded(accountID: accountID, message: error.localizedDescription)
+			throw error
 		}
 	}
 
@@ -376,11 +627,17 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			bindings: [.text(accountID)],
 			database: database,
 		) { date(at: 0, statement: $0) } ?? nil
+		let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
 		return OfflineStorageStats(
 			articleCount: article.0,
 			bodyBytes: article.1,
 			pendingMutationCount: pending,
 			lastSyncAt: lastSync,
+			cacheState: integrity.state,
+			navigationFreshness: integrity.navigation,
+			lastAttemptAt: integrity.lastAttemptAt,
+			lastSuccessAt: integrity.lastSuccessAt,
+			lastError: integrity.lastError,
 		)
 	}
 
@@ -429,6 +686,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
 			try execute("DELETE FROM cached_collection_pagination WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_navigation_items WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_navigation WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM sync_state WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try saveCacheIntegrity(
+				.needsBootstrap,
+				accountID: accountID,
+				database: database,
+			)
 		}
 	}
 
@@ -490,9 +755,56 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}.prefix(boundedLimit).map { $0 }
 	}
 
-	private func apply(_ change: IncrementalSyncChange, accountID: String, database: OpaquePointer) throws {
+	private func apply(
+		_ change: IncrementalSyncChange,
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+		deletedArticleIDs: Set<String>,
+		database: OpaquePointer,
+	) throws {
+		guard change.entityId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+			throw OfflineLibraryError.invalidSyncChange("The sync change had no entity ID.")
+		}
 		switch change.entityType {
 		case .feed:
+			if change.operation == .delete {
+				let previousSubscriptions = try cachedSubscriptions(
+					feedKey: change.entityId,
+					accountID: accountID,
+					database: database,
+				)
+				let previousStreamID = try queryOne(
+					"SELECT stream_id FROM cached_feeds WHERE account_id = ? AND feed_key = ?",
+					bindings: [.text(accountID), .text(change.entityId)],
+					database: database,
+					map: { string(at: 0, statement: $0) },
+				) ?? nil
+				let previousSubscriptionIDs = try cachedSubscriptionIDs(
+					feedKey: change.entityId,
+					accountID: accountID,
+					database: database,
+				)
+				try execute(
+					"DELETE FROM cached_feeds WHERE account_id = ? AND feed_key = ?",
+					bindings: [.text(accountID), .text(change.entityId)],
+					database: database,
+				)
+				for subscriptionID in Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 }) {
+					try execute(
+						"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
+						bindings: [.text(accountID), .text(subscriptionID)],
+						database: database,
+					)
+				}
+				try reconcileFeedMemberships(
+					forFeedKeys: Set([change.entityId] + [previousStreamID].compactMap { $0 }),
+					previousSubscriptions: previousSubscriptions,
+					dayBounds: dayBounds,
+					accountID: accountID,
+					database: database,
+				)
+				return
+			}
 			let previousSubscriptions = try cachedSubscriptions(
 				feedKey: change.entityId,
 				accountID: accountID,
@@ -510,22 +822,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				database: database,
 			)
 			guard change.operation == .upsert, let payload = change.payload,
-				let feedKey = payload.feedKey, let streamID = payload.streamId, let title = payload.title else {
-				try execute("DELETE FROM cached_feeds WHERE account_id = ? AND feed_key = ?", bindings: [.text(accountID), .text(change.entityId)], database: database)
-				for subscriptionID in Set(previousSubscriptionIDs + [previousStreamID].compactMap { $0 }) {
-					try execute(
-						"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
-						bindings: [.text(accountID), .text(subscriptionID)],
-						database: database,
-					)
-				}
-				try reconcileFeedMemberships(
-					forFeedKeys: Set([change.entityId] + [previousStreamID].compactMap { $0 }),
-					previousSubscriptions: previousSubscriptions,
-					accountID: accountID,
-					database: database,
-				)
-				return
+				let feedKey = payload.feedKey, feedKey.isEmpty == false,
+				let streamID = payload.streamId, streamID.isEmpty == false,
+				let title = payload.title, title.isEmpty == false else {
+				throw OfflineLibraryError.invalidSyncChange("The feed change for \(change.entityId) was malformed.")
 			}
 			try execute(
 				"""
@@ -584,15 +884,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			try reconcileFeedMemberships(
 				forFeedKeys: Set([change.entityId, feedKey] + [previousStreamID].compactMap { $0 }),
 				previousSubscriptions: previousSubscriptions,
+				dayBounds: dayBounds,
 				accountID: accountID,
 				database: database,
 			)
 		case .article:
-			guard change.operation == .upsert, let payload = change.payload,
-				let id = payload.id, let readerID = payload.readerId, let feedKey = payload.feedKey,
-				let source = payload.source, let title = payload.title, let receivedAt = payload.receivedAt else {
+			if change.operation == .delete {
 				try deleteArticle(identifier: change.entityId, accountID: accountID, database: database)
 				return
+			}
+			guard change.operation == .upsert, let payload = change.payload,
+				let id = payload.id, id.isEmpty == false,
+				let readerID = payload.readerId, readerID.isEmpty == false,
+				let feedKey = payload.feedKey, feedKey.isEmpty == false,
+				let source = payload.source, source.isEmpty == false,
+				let title = payload.title, title.isEmpty == false,
+				let receivedAt = payload.receivedAt else {
+				throw OfflineLibraryError.invalidSyncChange("The article change for \(change.entityId) was malformed.")
 			}
 			let existing = try loadArticle(identifier: id, accountID: accountID, database: database)
 			let serverPrunedBody = payload.isBodyPruned ?? false
@@ -622,13 +930,22 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				accountID: accountID,
 				database: database,
 			)
-			try rebuildMemberships(for: storedArticle, accountID: accountID, database: database)
+			try rebuildMemberships(for: storedArticle, dayBounds: dayBounds, accountID: accountID, database: database)
 		case .status:
-			guard change.operation == .upsert, let payload = change.payload else { return }
+			guard change.operation == .upsert, let payload = change.payload else {
+				throw OfflineLibraryError.invalidSyncChange("The status change for \(change.entityId) was malformed.")
+			}
+			let articleID = payload.itemId ?? change.entityId
+			guard articleID.isEmpty == false,
+				deletedArticleIDs.contains(articleID) == false,
+				payload.isRead != nil || payload.isStarred != nil else {
+				throw OfflineLibraryError.invalidSyncChange("The status change for \(change.entityId) was malformed.")
+			}
 			try updateStatus(
-				articleID: payload.itemId ?? change.entityId,
+				articleID: articleID,
 				isRead: payload.isRead,
 				isStarred: payload.isStarred,
+				dayBounds: dayBounds,
 				accountID: accountID,
 				database: database,
 			)
@@ -1032,6 +1349,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	private func reconcileFeedMemberships(
 		forFeedKeys feedKeys: Set<String>,
 		previousSubscriptions: [FeedSubscription],
+		dayBounds: ReaderLocalDayBounds?,
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
@@ -1085,9 +1403,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			try rebuildMemberships(
 				for: storedArticle.article,
 				staleSubscriptions: staleSubscriptions,
+				dayBounds: dayBounds,
 				accountID: accountID,
 				database: database,
-			)
+				)
 		}
 	}
 
@@ -1095,21 +1414,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		articleID: String,
 		isRead: Bool?,
 		isStarred: Bool?,
+		dayBounds: ReaderLocalDayBounds?,
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
 		guard var article = try loadArticle(identifier: articleID, accountID: accountID, database: database)?.article else {
-			return
+			throw OfflineLibraryError.missingStatusTarget(articleID)
 		}
 		article.isRead = isRead ?? article.isRead
 		article.isStarred = isStarred ?? article.isStarred
 		let storedArticle = try upsertArticle(article, accountID: accountID, database: database)
-		try rebuildMemberships(for: storedArticle, accountID: accountID, database: database)
+		try rebuildMemberships(for: storedArticle, dayBounds: dayBounds, accountID: accountID, database: database)
 	}
 
 	private func rebuildMemberships(
 		for article: Recommendation,
 		staleSubscriptions: [FeedSubscription] = [],
+		dayBounds: ReaderLocalDayBounds? = nil,
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
@@ -1123,7 +1444,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		if article.isRead == false {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.unread.rawValue, articleID: article.id, position: 0, database: database)
 		}
-		if ReaderLocalDayBounds.localDay(containing: .now).contains(article.receivedAt) {
+		if (dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)).contains(article.receivedAt) {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.today.rawValue, articleID: article.id, position: 0, database: database)
 		}
 		if article.isStarred {
@@ -1156,6 +1477,54 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			: currentCollectionIDs
 		for collectionID in collectionIDsToInsert {
 			try insertCollectionMembership(accountID: accountID, collectionID: collectionID, articleID: article.id, position: 0, database: database)
+		}
+	}
+
+	private func validateCachedMemberships(accountID: String, database: OpaquePointer) throws {
+		let orphanCount = try scalarCount(
+			"""
+			SELECT COUNT(*)
+			FROM cached_collection_articles ca
+			LEFT JOIN cached_articles a
+			  ON a.account_id = ca.account_id AND a.id = ca.article_id
+			WHERE ca.account_id = ? AND a.id IS NULL
+			""",
+			accountID: accountID,
+			database: database,
+		)
+		guard orphanCount == 0 else {
+			throw OfflineLibraryError.invalidCacheState("The offline library contained an orphaned collection membership.")
+		}
+	}
+
+	private func rebuildAllMemberships(
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+		database: OpaquePointer,
+	) throws {
+		try execute(
+			"DELETE FROM cached_collection_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		)
+		var articles: [Recommendation] = []
+		try query(
+			"SELECT payload FROM cached_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let payload = data(at: 0, statement: statement) else {
+				throw OfflineLibraryError.invalidSyncChange("A cached article had no payload.")
+			}
+			articles.append(try decoder.decode(Recommendation.self, from: payload))
+		}
+		for article in articles {
+			try rebuildMemberships(
+				for: article,
+				dayBounds: dayBounds,
+				accountID: accountID,
+				database: database,
+			)
 		}
 	}
 
@@ -1266,6 +1635,79 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		try queryOne(sql, bindings: [.text(accountID)], database: database) { Int(sqlite3_column_int64($0, 0)) } ?? 0
 	}
 
+	private func loadCacheIntegrity(accountID: String, database: OpaquePointer) throws -> OfflineCacheIntegrity {
+		let row = try queryOne(
+			"""
+			SELECT format_version, state, navigation_freshness, last_attempt_at,
+			       last_success_at, last_error, invalid_change_count, last_page_has_more
+			FROM cache_integrity WHERE account_id = ?
+			""",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			(
+				Int(sqlite3_column_int64(statement, 0)),
+				string(at: 1, statement: statement),
+				string(at: 2, statement: statement),
+				date(at: 3, statement: statement),
+				date(at: 4, statement: statement),
+				string(at: 5, statement: statement),
+				Int(sqlite3_column_int64(statement, 6)),
+				sqlite3_column_type(statement, 7) == SQLITE_NULL
+					? nil
+					: sqlite3_column_int64(statement, 7) != 0,
+			)
+		}
+		guard let row,
+			let state = row.1.flatMap(OfflineCacheState.init(rawValue:)),
+			let navigation = row.2.flatMap(OfflineNavigationFreshness.init(rawValue:)) else {
+			return .needsBootstrap
+		}
+		return OfflineCacheIntegrity(
+			formatVersion: row.0,
+			state: state,
+			navigation: navigation,
+			lastAttemptAt: row.3,
+			lastSuccessAt: row.4,
+			lastError: row.5,
+			invalidChangeCount: row.6,
+			lastPageHasMore: row.7,
+		)
+	}
+
+	private func saveCacheIntegrity(
+		_ integrity: OfflineCacheIntegrity,
+		accountID: String,
+		database: OpaquePointer,
+	) throws {
+		try execute(
+			"""
+			INSERT INTO cache_integrity
+			(account_id, format_version, state, navigation_freshness, last_attempt_at,
+			 last_success_at, last_error, invalid_change_count, last_page_has_more, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(account_id) DO UPDATE SET
+			format_version = excluded.format_version,
+			state = excluded.state,
+			navigation_freshness = excluded.navigation_freshness,
+			last_attempt_at = excluded.last_attempt_at,
+			last_success_at = excluded.last_success_at,
+			last_error = excluded.last_error,
+			invalid_change_count = excluded.invalid_change_count,
+			last_page_has_more = excluded.last_page_has_more,
+			updated_at = excluded.updated_at
+			""",
+			bindings: [
+				.text(accountID), .int64(Int64(integrity.formatVersion)), .text(integrity.state.rawValue),
+				.text(integrity.navigation.rawValue), .optionalDouble(integrity.lastAttemptAt?.timeIntervalSince1970),
+				.optionalDouble(integrity.lastSuccessAt?.timeIntervalSince1970), .optionalText(integrity.lastError),
+				.int64(Int64(integrity.invalidChangeCount)), .optionalInt64(integrity.lastPageHasMore.map { $0 ? 1 : 0 }),
+				.double(Date.now.timeIntervalSince1970),
+			],
+			database: database,
+		)
+	}
+
 	private func openDatabase() throws -> OpaquePointer {
 		if let database { return database }
 		if let databaseURL {
@@ -1306,6 +1748,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			"CREATE INDEX IF NOT EXISTS idx_cached_collection_order ON cached_collection_articles(account_id, collection_id, position)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_pagination (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, continuation TEXT NOT NULL, PRIMARY KEY (account_id, collection_id))",
 			"CREATE TABLE IF NOT EXISTS sync_state (account_id TEXT PRIMARY KEY, cursor TEXT, last_sync_at REAL)",
+			"CREATE TABLE IF NOT EXISTS cache_integrity (account_id TEXT PRIMARY KEY, format_version INTEGER NOT NULL, state TEXT NOT NULL, navigation_freshness TEXT NOT NULL, last_attempt_at REAL, last_success_at REAL, last_error TEXT, invalid_change_count INTEGER NOT NULL DEFAULT 0, last_page_has_more INTEGER, updated_at REAL NOT NULL)",
 			"CREATE TABLE IF NOT EXISTS pending_actions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at REAL NOT NULL, UNIQUE (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_pending_actions_account ON pending_actions(account_id, sequence)",
 			"CREATE TABLE IF NOT EXISTS reader_state (account_id TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at REAL NOT NULL)",
@@ -1459,18 +1902,34 @@ private nonisolated enum SQLiteBinding {
 	static func optionalText(_ value: String?) -> SQLiteBinding {
 		value.map(SQLiteBinding.text) ?? .null
 	}
+
+	static func optionalDouble(_ value: Double?) -> SQLiteBinding {
+		value.map(SQLiteBinding.double) ?? .null
+	}
+
+	static func optionalInt64(_ value: Int64?) -> SQLiteBinding {
+		value.map(SQLiteBinding.int64) ?? .null
+	}
 }
 
 nonisolated(unsafe) private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-nonisolated enum OfflineLibraryError: LocalizedError {
+nonisolated enum OfflineLibraryError: LocalizedError, Equatable {
 	case openFailed
 	case sqlite(String)
+	case invalidSyncChange(String)
+	case missingStatusTarget(String)
+	case invalidCacheState(String)
+	case navigationUnavailable
 
 	var errorDescription: String? {
 		switch self {
 		case .openFailed: "Pigeon could not open its offline library."
 		case .sqlite(let message): "Pigeon could not update its offline library: \(message)"
+		case .invalidSyncChange(let message): "Pigeon received an invalid sync change: \(message)"
+		case .missingStatusTarget(let articleID): "Pigeon could not apply a status for missing article \(articleID)."
+		case .invalidCacheState(let message): "Pigeon could not complete offline synchronization: \(message)"
+		case .navigationUnavailable: "Pigeon could not refresh its navigation counts."
 		}
 	}
 }
