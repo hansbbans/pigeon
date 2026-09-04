@@ -168,6 +168,65 @@ nonisolated struct ReaderRestorationState: Codable, Equatable, Sendable {
 	)
 }
 
+nonisolated enum OfflineCacheState: String, Codable, Equatable, Sendable {
+	case needsBootstrap = "needs_bootstrap"
+	case syncing
+	case complete
+	case needsRepair = "needs_repair"
+}
+
+nonisolated enum OfflineNavigationFreshness: String, Codable, Equatable, Sendable {
+	case unverified
+	case authoritative
+}
+
+nonisolated enum OfflineLibraryStatus: Equatable, Sendable {
+	case syncing
+	case repairing
+	case upToDate
+	case waitingToSync
+	case offline
+	case syncFailed
+	case needsRepair
+}
+
+nonisolated struct OfflineCacheIntegrity: Codable, Equatable, Sendable {
+	static let currentFormatVersion = 1
+
+	let formatVersion: Int
+	let state: OfflineCacheState
+	let navigation: OfflineNavigationFreshness
+	let lastAttemptAt: Date?
+	let lastSuccessAt: Date?
+	let lastError: String?
+	let invalidChangeCount: Int
+	let lastPageHasMore: Bool?
+
+	static let needsBootstrap = Self(
+		formatVersion: 0,
+		state: .needsBootstrap,
+		navigation: .unverified,
+		lastAttemptAt: nil,
+		lastSuccessAt: nil,
+		lastError: nil,
+		invalidChangeCount: 0,
+		lastPageHasMore: nil,
+	)
+
+	var usesWarmIncrementalPath: Bool {
+		formatVersion == Self.currentFormatVersion
+			&& state == .complete
+			&& navigation == .authoritative
+	}
+
+	var requiresFullRebuild: Bool {
+		formatVersion != Self.currentFormatVersion
+			|| state == .needsBootstrap
+			|| state == .syncing
+			|| state == .needsRepair
+	}
+}
+
 nonisolated struct CachedLibrarySnapshot: Sendable {
 	let navigation: ReaderNavigationState?
 	let subscriptions: [FeedSubscription]
@@ -176,6 +235,7 @@ nonisolated struct CachedLibrarySnapshot: Sendable {
 	let restoration: ReaderRestorationState?
 	let cursor: String?
 	let lastSyncAt: Date?
+	let integrity: OfflineCacheIntegrity
 
 	var isEmpty: Bool {
 		navigation == nil && subscriptions.isEmpty && articlesByCollection.isEmpty
@@ -187,6 +247,33 @@ nonisolated struct OfflineStorageStats: Equatable, Sendable {
 	let bodyBytes: Int64
 	let pendingMutationCount: Int
 	let lastSyncAt: Date?
+	let cacheState: OfflineCacheState
+	let navigationFreshness: OfflineNavigationFreshness
+	let lastAttemptAt: Date?
+	let lastSuccessAt: Date?
+	let lastError: String?
+
+	init(
+		articleCount: Int,
+		bodyBytes: Int64,
+		pendingMutationCount: Int,
+		lastSyncAt: Date?,
+		cacheState: OfflineCacheState = .needsBootstrap,
+		navigationFreshness: OfflineNavigationFreshness = .unverified,
+		lastAttemptAt: Date? = nil,
+		lastSuccessAt: Date? = nil,
+		lastError: String? = nil,
+	) {
+		self.articleCount = articleCount
+		self.bodyBytes = bodyBytes
+		self.pendingMutationCount = pendingMutationCount
+		self.lastSyncAt = lastSyncAt
+		self.cacheState = cacheState
+		self.navigationFreshness = navigationFreshness
+		self.lastAttemptAt = lastAttemptAt
+		self.lastSuccessAt = lastSuccessAt
+		self.lastError = lastError
+	}
 
 	static let empty = OfflineStorageStats(articleCount: 0, bodyBytes: 0, pendingMutationCount: 0, lastSyncAt: nil)
 }
@@ -216,8 +303,69 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func markMutationApplied(id: String, accountID: String) async throws
 	func recordMutationFailure(id: String, message: String, accountID: String) async throws
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws
+	func beginFullRebuild(accountID: String, at date: Date) async throws
+	func apply(_ page: IncrementalSyncPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws
+	func finishSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
+	func finishWarmSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
+	func markDataSynchronizedWithoutNavigation(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
+	func markCacheRepairNeeded(accountID: String, message: String, at date: Date) async throws
+	func recordSynchronizationFailure(accountID: String, message: String, at date: Date) async throws
 	func storageStats(accountID: String) async throws -> OfflineStorageStats
 	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int
 	func clearCachedArticles(accountID: String) async throws
 	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation]
+}
+
+extension OfflineLibraryStoring {
+	func beginFullRebuild(accountID: String, at date: Date) async throws {}
+
+	func apply(_ page: IncrementalSyncPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws {
+		try await apply(page, accountID: accountID)
+	}
+
+	func finishSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws {}
+
+	func finishWarmSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws {}
+
+	func markDataSynchronizedWithoutNavigation(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws {}
+
+	func markCacheRepairNeeded(accountID: String, message: String, at date: Date) async throws {}
+
+	func recordSynchronizationFailure(accountID: String, message: String, at date: Date) async throws {}
+
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
+		try await apply(page, accountID: accountID, dayBounds: nil)
+	}
+
+	func beginFullRebuild(accountID: String) async throws {
+		try await beginFullRebuild(accountID: accountID, at: .now)
+	}
+
+	func finishSynchronization(accountID: String) async throws {
+		try await finishSynchronization(accountID: accountID, at: .now, dayBounds: nil)
+	}
+
+	func finishSynchronization(accountID: String, at date: Date) async throws {
+		try await finishSynchronization(accountID: accountID, at: date, dayBounds: nil)
+	}
+
+	func finishWarmSynchronization(accountID: String, at date: Date) async throws {
+		try await finishWarmSynchronization(accountID: accountID, at: date, dayBounds: nil)
+	}
+
+	func markDataSynchronizedWithoutNavigation(accountID: String) async throws {
+		try await markDataSynchronizedWithoutNavigation(accountID: accountID, at: .now, dayBounds: nil)
+	}
+
+	func markDataSynchronizedWithoutNavigation(accountID: String, at date: Date) async throws {
+		try await markDataSynchronizedWithoutNavigation(accountID: accountID, at: date, dayBounds: nil)
+	}
+
+	func markCacheRepairNeeded(accountID: String, message: String) async throws {
+		try await markCacheRepairNeeded(accountID: accountID, message: message, at: .now)
+	}
+
+	func recordSynchronizationFailure(accountID: String, message: String) async throws {
+		try await recordSynchronizationFailure(accountID: accountID, message: message, at: .now)
+	}
 }
