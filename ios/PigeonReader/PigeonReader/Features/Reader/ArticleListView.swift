@@ -80,7 +80,7 @@ struct ArticleListView: View {
 				.accessibilityIdentifier("article-list")
 			}
 		}
-		.navigationTitle(collection.title)
+		.navigationTitle(navigationTitle)
 		.searchable(text: $searchText, prompt: "Titles, authors, feeds, and text")
 		.searchScopes($searchScope) {
 			ForEach(ReaderSearchScope.allCases) { scope in
@@ -168,6 +168,12 @@ struct ArticleListView: View {
 			}
 			ReaderSettingsToolbarItem()
 		}
+	}
+
+	private var navigationTitle: String {
+		guard collection.smartSection == .today else { return collection.title }
+		let unreadCount = model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
+		return "\(collection.title) (\(unreadCount.formatted()))"
 	}
 
 	@ViewBuilder

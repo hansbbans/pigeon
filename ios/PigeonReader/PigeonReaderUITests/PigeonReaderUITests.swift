@@ -16,6 +16,39 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 	}
 
+	func testTodayLoadsWithoutRefreshAndShowsLiveUnreadCount() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-today-data",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let list = app.descendants(matching: .any)["article-list"].firstMatch
+		XCTAssertTrue(list.waitForExistence(timeout: 10))
+		XCTAssertTrue(app.navigationBars["Today (2)"].waitForExistence(timeout: 5))
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		let firstStory = app.buttons.containing(NSPredicate(
+			format: "label CONTAINS %@",
+			"Designing calmer tools for people who read every day",
+		)).firstMatch
+		XCTAssertTrue(firstStory.waitForExistence(timeout: 5))
+		attachScreenshot(named: "today-loaded-unread-count")
+
+		firstStory.press(forDuration: 1)
+		let markRead = app.buttons["Mark Read"]
+		XCTAssertTrue(markRead.waitForExistence(timeout: 5))
+		markRead.tap()
+		XCTAssertTrue(app.navigationBars["Today (1)"].waitForExistence(timeout: 5))
+
+		app.buttons["Read actions"].tap()
+		app.buttons["Mark All as Read"].tap()
+		XCTAssertTrue(app.navigationBars["Today (0)"].waitForExistence(timeout: 5))
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		attachScreenshot(named: "today-zero-unread-count")
+	}
+
 	func testLinkedImageAndExistingLinkChoice() throws {
 		try tapLinkedImage()
 		attachScreenshot(named: "linked-image-dialog")

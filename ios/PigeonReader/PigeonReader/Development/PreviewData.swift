@@ -4,6 +4,8 @@ import Foundation
 @MainActor
 enum PreviewData {
 	static func makeModel() -> ReaderAppModel {
+		let showsToday = ProcessInfo.processInfo.arguments.contains("-reader-today-data")
+		let articles = showsToday ? todayArticles : Self.articles
 		guard let baseURL = URL(string: "https://pigeon.preview") else {
 			preconditionFailure("The preview URL must be valid")
 		}
@@ -71,8 +73,33 @@ enum PreviewData {
 			),
 				markAsLoaded: true,
 			)
-			model.select(section: .forYou)
+			model.select(section: showsToday ? .today : .forYou)
 			return model
+	}
+
+	// Keep the Today UI fixture inside the current local day across test dates.
+	private static var todayArticles: [Recommendation] {
+		let start = Calendar.current.startOfDay(for: .now)
+		return articles.prefix(2).map { article in
+			Recommendation(
+				id: article.id,
+				readerId: article.readerId,
+				feedKey: article.feedKey,
+				source: article.source,
+				title: article.title,
+				html: article.html,
+				text: article.text,
+				originalURL: article.originalURL,
+				receivedAt: start,
+				isRead: false,
+				isStarred: article.isStarred,
+				score: article.score,
+				confidence: article.confidence,
+				sampleCount: article.sampleCount,
+				explanation: article.explanation,
+				learningState: article.learningState,
+			)
+		}
 	}
 
 	static let articles: [Recommendation] = [

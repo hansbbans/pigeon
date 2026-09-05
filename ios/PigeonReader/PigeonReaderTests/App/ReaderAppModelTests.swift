@@ -316,7 +316,14 @@ struct ReaderAppModelTests {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
 		let preparation = Task { await model.prepareOfflineLibrary() }
-		let syncRequest = await controlled.nextRequest()
+		let firstRequest = await controlled.nextRequest()
+		let syncRequest: ControlledHTTPClient.PendingRequest
+		if firstRequest.request.url?.path == "/api/v1/recommendations" {
+			await controlled.resolve(firstRequest, data: try responseData(items: []))
+			syncRequest = await controlled.nextRequest()
+		} else {
+			syncRequest = firstRequest
+		}
 		#expect(syncRequest.request.url?.path == "/api/v1/sync")
 
 		let collection = ReaderNavigationItem.smart(.forYou)
@@ -1550,6 +1557,9 @@ struct ReaderAppModelTests {
 		let model = try makeModel(httpClient: controlled)
 
 		let preparation = Task { await model.prepareOfflineLibrary() }
+		let firstRequest = await controlled.nextRequest()
+		#expect(firstRequest.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(firstRequest, data: try responseData(items: []))
 		let syncRequest = await controlled.nextRequest()
 		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
 		await preparation.value
@@ -1613,6 +1623,98 @@ struct ReaderAppModelTests {
 		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
 		await preparation.value
 		#expect(model.isOffline)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func coldSelectedCollectionPublishesItsFirstPageBeforeOfflineSyncFinishes() async throws {
+		for section in [ReaderSection.forYou, .today] {
+			let session = try makeSession(token: "cold-\(section.rawValue)-first-page")
+			let store = OfflineLibraryStore.inMemory()
+			let collection = ReaderNavigationItem.smart(section)
+			let accountID = session.storageIdentity
+			try await store.saveNavigation(
+				ReaderNavigationState(items: [collection], expandedFolderIDs: []),
+				accountID: accountID,
+			)
+			try await store.saveRestoration(
+				ReaderRestorationState(
+					selectedNavigationID: collection.id,
+					selectedArticleIDs: [:],
+					sortOrders: [:],
+					articleFilters: [:],
+					sidebarFilter: ReaderSidebarFilter.all.rawValue,
+					expandedFolderIDs: [],
+					compactColumn: .content,
+					readerModes: [:],
+					articleScrollOffsets: [:],
+				),
+				accountID: accountID,
+			)
+
+			let controlled = ControlledHTTPClient()
+			let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+			let preparation = Task { await model.prepareOfflineLibrary() }
+
+			// A cold visible collection must get its bounded first page while the
+			// full offline sync remains gated. This covers both endpoint shapes used
+			// by the initial For You and Today views.
+			let firstRequest = await controlled.nextRequest()
+			if section == .today {
+				#expect(firstRequest.request.url?.path == "/reader/api/0/stream/items/ids")
+				await controlled.resolve(firstRequest, data: streamIDsData(ids: ["cold-today"], continuation: nil))
+				let contents = await controlled.nextRequest()
+				#expect(contents.request.url?.path == "/reader/api/0/stream/items/contents")
+				await controlled.resolve(contents, data: streamContentsData(ids: ["cold-today"]))
+			} else {
+				#expect(firstRequest.request.url?.path == "/api/v1/recommendations")
+				await controlled.resolve(firstRequest, data: try responseData(items: [makeArticle(id: "cold-for-you")]))
+			}
+
+			let sync = await controlled.nextRequest()
+			#expect(sync.request.url?.path == "/api/v1/sync")
+			// Reaching the sync request proves the first page finished publishing,
+			// while leaving this response gated proves the library sync is not done.
+			let firstPageID = section == .today ? "cold-today" : "cold-for-you"
+			#expect(model.articles(for: collection).map(\.id) == [firstPageID])
+			#expect(model.isLoading(collection: collection) == false)
+			await controlled.resolve(sync, data: Data(#"{"cursor":"cold-cursor","hasMore":false,"changes":[]}"#.utf8))
+			for _ in 0..<4 {
+				let request = await controlled.nextRequest()
+				switch request.request.url?.path {
+				case "/reader/api/0/subscription/list":
+					await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
+				case "/reader/api/0/unread-count":
+					await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+				case "/reader/api/0/stream/items/ids":
+					await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
+				default:
+					Issue.record("Unexpected navigation request: \(request.request.url?.absoluteString ?? "missing URL")")
+					await controlled.resolve(request)
+				}
+			}
+
+			let library = await controlled.nextRequest()
+			#expect(library.request.url?.path == "/reader/api/0/subscription/list")
+			await controlled.resolve(library, data: Data(#"{"subscriptions":[]}"#.utf8))
+
+			if section == .today {
+				let finalIDs = await controlled.nextRequest()
+				#expect(finalIDs.request.url?.path == "/reader/api/0/stream/items/ids")
+				await controlled.resolve(finalIDs, data: streamIDsData(ids: ["cold-today", "cold-today-final"], continuation: nil))
+				let finalContents = await controlled.nextRequest()
+				#expect(finalContents.request.url?.path == "/reader/api/0/stream/items/contents")
+				await controlled.resolve(finalContents, data: streamContentsData(ids: ["cold-today", "cold-today-final"]))
+			} else {
+				let finalRecommendations = await controlled.nextRequest()
+				#expect(finalRecommendations.request.url?.path == "/api/v1/recommendations")
+				await controlled.resolve(finalRecommendations, data: try responseData(items: [makeArticle(id: "cold-for-you-final")]))
+			}
+
+			await preparation.value
+			let expectedIDs = section == .today
+				? ["cold-today", "cold-today-final"]
+				: ["cold-for-you-final"]
+			#expect(model.articles(for: collection).map(\.id) == expectedIDs)
+		}
 	}
 
 	@Test func overlappingPreparationsShareOneSuccessfulSync() async throws {
@@ -1770,6 +1872,75 @@ struct ReaderAppModelTests {
 		#expect(await controlled.requestCount() == 2)
 	}
 
+	@Test(.timeLimit(.minutes(1))) func collectionLoadSurvivesAChangedSyncThatInvalidatesItsCapturedGeneration() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try await makeWarmPreparationModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+
+		// The snapshot has been applied and the account marked prepared before the
+		// sync request finishes. This is the same window in which ArticleListView's
+		// task can start its collection load without joining preparation.
+		let load = Task { await model.load(section: .forYou) }
+		let staleRecommendations = await controlled.nextRequest()
+		#expect(staleRecommendations.request.url?.path == "/api/v1/recommendations")
+
+		await controlled.resolve(
+			sync,
+			data: Data(
+				"""
+				{
+				  "cursor": "after-status",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": 1,
+				    "entityType": "status",
+				    "entityId": "cached-for-you",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-21T12:00:00.000Z",
+				    "payload": {"itemId": "cached-for-you", "isRead": true}
+				  }]
+				}
+				""".utf8,
+			),
+		)
+
+		// A changed sync reloads authoritative navigation and the subscription
+		// library before retrying the selected collection. Answer all four
+		// concurrent navigation requests by endpoint shape.
+		for _ in 0..<4 {
+			let request = await controlled.nextRequest()
+			switch request.request.url?.path {
+			case "/reader/api/0/subscription/list":
+				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
+			case "/reader/api/0/unread-count":
+				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/reader/api/0/stream/items/ids":
+				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
+			default:
+				Issue.record("Unexpected navigation request: \(request.request.url?.absoluteString ?? "missing URL")")
+				await controlled.resolve(request)
+			}
+		}
+
+		let library = await controlled.nextRequest()
+		#expect(library.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(library, data: Data(#"{"subscriptions":[]}"#.utf8))
+
+		let retry = await controlled.nextRequest()
+		#expect(retry.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(retry, data: try responseData(items: [makeArticle(id: "fresh-after-sync")]))
+
+		// The old request is now resumed after its generation was invalidated. It
+		// must be discarded and never replace the retried selected page.
+		await controlled.resolve(staleRecommendations, data: try responseData(items: [makeArticle(id: "stale-before-sync")]))
+		await load.value
+		await preparation.value
+
+		#expect(model.articles(for: .forYou).map(\.id) == ["fresh-after-sync"])
+	}
+
 	@Test func postPreparationForYouLoadStillRefreshesPersonalizedContent() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try await makeWarmPreparationModel(httpClient: controlled)
@@ -1806,9 +1977,9 @@ struct ReaderAppModelTests {
 		#expect(article.id == "cached-feed-article")
 		#expect(article.html == "<p>Recovered body</p>")
 		#expect(await client.paths() == [
-			"/api/v1/sync",
 			"/reader/api/0/stream/items/ids",
 			"/reader/api/0/stream/items/contents",
+			"/api/v1/sync",
 		])
 	}
 
@@ -1945,13 +2116,18 @@ struct ReaderAppModelTests {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 
-		let load = Task { await model.load(section: .forYou, force: true) }
-		let request = await controlled.nextRequest()
-		await controlled.fail(request, with: URLError(.cancelled))
-		await load.value
+		for section in [ReaderSection.forYou, .today] {
+			model.select(section: section)
+			let collection = ReaderNavigationItem.smart(section)
+			let load = Task { await model.load(collection: collection, force: true) }
+			let request = await controlled.nextRequest()
+			await controlled.fail(request, with: URLError(.cancelled))
+			await load.value
 
-		#expect(model.errorMessage == nil)
-		#expect(model.articles(for: .forYou).isEmpty)
+			#expect(model.errorMessage == nil)
+			#expect(model.articles(for: collection).isEmpty)
+			#expect(model.isLoading(collection: collection) == false)
+		}
 	}
 
 	@Test func cancelledNSURLErrorLoadDoesNotSetErrorMessage() async throws {
@@ -1968,12 +2144,17 @@ struct ReaderAppModelTests {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
 
-		let load = Task { await model.load(section: .forYou, force: true) }
-		let request = await controlled.nextRequest()
-		await controlled.fail(request, with: URLError(.notConnectedToInternet))
-		await load.value
+		for section in [ReaderSection.forYou, .today] {
+			model.select(section: section)
+			let collection = ReaderNavigationItem.smart(section)
+			let load = Task { await model.load(collection: collection, force: true) }
+			let request = await controlled.nextRequest()
+			await controlled.fail(request, with: URLError(.notConnectedToInternet))
+			await load.value
 
-		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+			#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
+			#expect(model.isLoading(collection: collection) == false)
+		}
 	}
 
 	@Test func switchingCollectionsClearsStaleLoadErrorBanner() async throws {
@@ -2044,8 +2225,9 @@ struct ReaderAppModelTests {
 
 	@Test func starredListPaginatesOnExplicitLoadMoreInsteadOfTheRecommendationCap() async throws {
 		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/starred")
-		let model = try makeModel(httpClient: httpClient)
+		let model = try makeModel(httpClient: httpClient, offlineSynchronizationEnabled: false)
 		let collection = ReaderNavigationItem.smart(.starred)
+		model.select(section: .starred)
 
 		await model.load(collection: collection)
 
@@ -2067,8 +2249,9 @@ struct ReaderAppModelTests {
 
 	@Test func unreadListPaginatesAndExcludesReadStories() async throws {
 		let httpClient = PaginationHTTPClient(streamID: "user/-/state/com.google/reading-list")
-		let model = try makeModel(httpClient: httpClient)
+		let model = try makeModel(httpClient: httpClient, offlineSynchronizationEnabled: false)
 		let collection = ReaderNavigationItem.smart(.unread)
+		model.select(section: .unread)
 
 		await model.load(collection: collection)
 		await model.loadMore(collection: collection)
@@ -5580,6 +5763,7 @@ struct ReaderAppModelTests {
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
+		offlineSynchronizationEnabled: Bool = true,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { _ in },
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -5593,6 +5777,7 @@ struct ReaderAppModelTests {
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			smartViewStore: ReaderSmartViewStore(defaults: isolatedDefaults),
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
+			offlineSynchronizationEnabled: offlineSynchronizationEnabled,
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
 			keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
 			readerViewExtractor: readerViewExtractor,

@@ -39,9 +39,32 @@ struct PreviewHTTPClient: HTTPClient {
 		case "/reader/api/0/unread-count":
 			data = Data("{\"unreadcounts\":[]}".utf8)
 		case "/reader/api/0/stream/items/ids":
-			data = Data("{\"itemRefs\":[]}".utf8)
+			if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+				data = try JSONSerialization.data(withJSONObject: [
+					"itemRefs": recommendations.map { ["id": $0.readerId] },
+				])
+			} else {
+				data = Data("{\"itemRefs\":[]}".utf8)
+			}
 		case "/reader/api/0/stream/items/contents":
-			data = Data("{\"items\":[]}".utf8)
+			if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+				data = try JSONSerialization.data(withJSONObject: [
+					"id": "user/-/state/com.google/reading-list",
+					"items": recommendations.map { article -> [String: Any] in
+						[
+							"id": article.readerId,
+							"categories": article.isRead ? ["user/-/state/com.google/read"] : [],
+							"title": article.title,
+							"published": Int(article.receivedAt.timeIntervalSince1970),
+							"summary": ["content": article.html],
+							"alternate": [["href": article.originalURL?.absoluteString ?? ""]],
+							"origin": ["streamId": "feed/\(article.feedKey)", "title": article.source],
+						]
+					},
+				])
+			} else {
+				data = Data("{\"items\":[]}".utf8)
+			}
 		default:
 			if ProcessInfo.processInfo.arguments.contains("-reader-reader-success"), url.path == "/design" {
 				data = Data("""
