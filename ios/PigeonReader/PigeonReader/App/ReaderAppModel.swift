@@ -940,6 +940,19 @@ final class ReaderAppModel {
 				preparationID: preparationID,
 				generation: preparationGeneration,
 			) else { return }
+			let selectedCollectionForInitialLoad = selectedCollection
+			if isInitialPreparation,
+				shouldPrioritizeInitialCollectionLoad(selectedCollectionForInitialLoad) {
+				// Fill a cold visible collection before the full sync. This makes the
+				// first bounded page available as soon as its request completes while
+				// keeping queued mutations ahead of the live fetch.
+				await load(collection: selectedCollectionForInitialLoad, force: true, now: synchronizationNow)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+			}
 			let syncResult = try await synchronizeIncrementally(
 				accountID: accountID,
 				apiClient: apiClient,
@@ -1483,7 +1496,7 @@ final class ReaderAppModel {
 			}
 			isOffline = false
 			let loadedArticles = page.items
-			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles)
+			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil)
 			let existingArticles = articleCache[collection.id] ?? []
 			let reusesUnchangedPersistedPage = collection.smartSection?.usesRecommendationEndpoint != true
 				&& page.fetchedContentCount == 0
@@ -1514,7 +1527,10 @@ final class ReaderAppModel {
 			setArticles(loadedArticles, for: collection.id)
 			collectionFreshness[collection.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 			if collection.smartSection == .forYou || collection.smartSection == .today {
-				updateNavigationCount(for: collection.id, to: loadedArticles.count(where: { $0.isRead == false }))
+				updateNavigationCount(
+					for: collection.id,
+					to: unreadCountAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil),
+				)
 			}
 			if isPaginatedCollection(collection) {
 				resolvedPaginationCollections.insert(collection.id)
@@ -1599,7 +1615,7 @@ final class ReaderAppModel {
 				nextSeenContinuations = seenStreamContinuations[collection.id, default: []]
 				nextStreamContinuation = nil
 			}
-			let nextNavigation = navigationAfterLoading(collection: collection, articles: combinedArticles)
+			let nextNavigation = navigationAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil)
 			guard await persistCollectionState(
 				combinedArticles,
 				collectionID: collection.id,
@@ -1619,7 +1635,10 @@ final class ReaderAppModel {
 			seenStreamContinuations[collection.id] = nextSeenContinuations
 			streamContinuations[collection.id] = nextStreamContinuation
 			if collection.smartSection == .today {
-				updateNavigationCount(for: collection.id, to: combinedArticles.count(where: { $0.isRead == false }))
+				updateNavigationCount(
+					for: collection.id,
+					to: unreadCountAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
+				)
 			}
 			writeWidgetSnapshot()
 		} catch let error where isCancellation(error) {
@@ -3292,6 +3311,13 @@ final class ReaderAppModel {
 		return cachedCollectionHasMissingBodies(collection.id)
 	}
 
+	private func shouldPrioritizeInitialCollectionLoad(_ collection: ReaderNavigationItem) -> Bool {
+		guard articles(for: collection).isEmpty == false else {
+			return true
+		}
+		return collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
+	}
+
 	private func cachedCollectionHasMissingBodies(_ collectionID: String) -> Bool {
 		guard let cachedArticles = articleCache[collectionID], cachedArticles.isEmpty == false else {
 			return true
@@ -3316,14 +3342,26 @@ final class ReaderAppModel {
 	private func navigationAfterLoading(
 		collection: ReaderNavigationItem,
 		articles: [Recommendation],
+		hasMore: Bool,
 	) -> ReaderNavigationState {
 		guard collection.smartSection == .forYou || collection.smartSection == .today else {
 			return navigation
 		}
 		return navigation.replacingCount(
 			for: collection.id,
-			with: articles.count(where: { $0.isRead == false }),
+			with: unreadCountAfterLoading(collection: collection, articles: articles, hasMore: hasMore),
 		)
+	}
+
+	private func unreadCountAfterLoading(
+		collection: ReaderNavigationItem,
+		articles: [Recommendation],
+		hasMore: Bool,
+	) -> Int {
+		let loadedUnreadCount = articles.count(where: { $0.isRead == false })
+		guard collection.smartSection == .today, hasMore else { return loadedUnreadCount }
+		// A partial page cannot replace a known total for the whole day.
+		return max(navigation.item(withID: collection.id)?.unreadCount ?? 0, loadedUnreadCount)
 	}
 
 	private func persistCollectionState(
