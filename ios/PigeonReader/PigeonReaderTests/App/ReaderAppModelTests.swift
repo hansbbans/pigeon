@@ -1552,6 +1552,172 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
+	@Test(.timeLimit(.minutes(1))) func failedMutationReplayStillLoadsTheColdCollectionAndPreservesReadIntent() async throws {
+		let session = try makeSession(token: "failed-mutation-replay-launch")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-read",
+			kind: .setRead,
+			itemIds: ["queued-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+
+		let httpClient = MutationReplayFailureHTTPClient()
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["launch-article", "launch-visible"])
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.articles(for: .forYou).map(\.id) == ["launch-visible"])
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.offlineLibraryStatus == .waitingToSync)
+		#expect(await httpClient.paths().contains("/api/v1/mutations"))
+		#expect(await httpClient.paths().contains("/api/v1/recommendations"))
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 100).map(\.mutation.id) == [mutation.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func serverMutationReplayFailureStillLoadsTodayAndPreservesStarIntent() async throws {
+		let session = try makeSession(token: "server-failed-mutation-replay-today")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-star",
+			kind: .setStarred,
+			itemIds: ["today-launch"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.today)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: ReaderSection.today.rawValue,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: session.storageIdentity,
+		)
+
+		let httpClient = MutationReplayFailureHTTPClient(
+			replayFailureStatusCode: 503,
+			selectedSection: .today,
+		)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+		model.select(section: .today)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .today).map(\.id) == ["today-launch"])
+		#expect(model.allArticles(for: .today).first?.isStarred == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.offlineLibraryStatus == .waitingToSync)
+		#expect(await httpClient.paths().contains("/api/v1/mutations"))
+		#expect(await httpClient.paths().contains("/reader/api/0/stream/items/ids"))
+	}
+
+	@Test(.timeLimit(.minutes(1))) func queuedIntentUsesAllActionsLatestStateAndNormalizedItemIDs() async throws {
+		let session = try makeSession(token: "queued-intent-order-and-id-normalization")
+		let store = OfflineLibraryStore.inMemory()
+		let normalizedItemID = "tag:google.com,2005:reader/item/000000000000000a"
+		let readActions = (0..<100).map { index in
+			OfflineMutation(
+				id: "queued-read-\(index)",
+				kind: .setRead,
+				itemIds: ["10"],
+				value: false,
+				scope: .single,
+			)
+		}
+		let starActions = (0..<100).map { index in
+			OfflineMutation(
+				id: "queued-star-\(index)",
+				kind: .setStarred,
+				itemIds: ["10"],
+				value: false,
+				scope: .single,
+			)
+		}
+		for mutation in readActions + starActions + [
+			OfflineMutation(
+				id: "queued-read-latest",
+				kind: .setRead,
+				itemIds: [normalizedItemID],
+				value: true,
+				scope: .single,
+			),
+			OfflineMutation(
+				id: "queued-star-latest",
+				kind: .setStarred,
+				itemIds: [normalizedItemID],
+				value: true,
+				scope: .single,
+			),
+		] {
+			try await store.enqueue(mutation, accountID: session.storageIdentity)
+		}
+
+		let httpClient = MutationReplayFailureHTTPClient(useNormalizedItemFixture: true)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		let article = try #require(model.allArticles(for: .forYou).first)
+		#expect(article.id == "10")
+		#expect(article.isRead)
+		#expect(article.isStarred)
+		#expect(model.offlineStorageStats.pendingMutationCount == 202)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).count == 202)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledMutationReplayDoesNotFallbackToCollectionLoad() async throws {
+		let session = try makeSession(token: "cancelled-mutation-replay-launch")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-cancelled-read",
+			kind: .setRead,
+			itemIds: ["queued-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		let httpClient = MutationReplayFailureHTTPClient(replayCancellation: true)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await httpClient.paths() == ["/api/v1/mutations"])
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.errorMessage == nil)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).map(\.mutation.id) == [mutation.id])
+	}
+
 	@Test func successfulCollectionLoadClearsStaleOfflineState() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -6668,4 +6834,81 @@ private actor PaginationHTTPClient: HTTPClient {
 		}
 		return response
 	}
+}
+
+private actor MutationReplayFailureHTTPClient: HTTPClient {
+	private let replayFailureStatusCode: Int?
+	private let selectedSection: ReaderSection
+	private let replayCancellation: Bool
+	private let useNormalizedItemFixture: Bool
+	private var capturedPaths: [String] = []
+
+	init(
+		replayFailureStatusCode: Int? = nil,
+		selectedSection: ReaderSection = .forYou,
+		replayCancellation: Bool = false,
+		useNormalizedItemFixture: Bool = false,
+	) {
+		self.replayFailureStatusCode = replayFailureStatusCode
+		self.selectedSection = selectedSection
+		self.replayCancellation = replayCancellation
+		self.useNormalizedItemFixture = useNormalizedItemFixture
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		capturedPaths.append(url.path)
+
+		let statusCode: Int
+		let data: Data
+		switch url.path {
+		case "/api/v1/mutations":
+			if replayCancellation {
+				throw CancellationError()
+			}
+			guard let replayFailureStatusCode else {
+				throw URLError(.notConnectedToInternet)
+			}
+			statusCode = replayFailureStatusCode
+			data = Data(#"{"error":"mutation replay unavailable"}"#.utf8)
+		case "/api/v1/recommendations":
+			statusCode = 200
+			data = useNormalizedItemFixture ? Self.normalizedItemRecommendationsData : Self.recommendationsData
+		case "/api/v1/sync":
+			statusCode = 200
+			data = Data(#"{"cursor":"launch-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/reader/api/0/subscription/list":
+			statusCode = 200
+			data = Data(#"{"subscriptions":[]}"#.utf8)
+		case "/reader/api/0/unread-count":
+			statusCode = 200
+			data = Data(#"{"unreadcounts":[]}"#.utf8)
+		case "/reader/api/0/stream/items/ids":
+			statusCode = 200
+			let streamID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "s" })?.value
+			data = selectedSection == .today && streamID == "user/-/state/com.google/reading-list"
+				? Data(#"{"itemRefs":[{"id":"today-launch"}]}"#.utf8)
+				: Data(#"{"itemRefs":[]}"#.utf8)
+		case "/reader/api/0/stream/items/contents":
+			statusCode = 200
+			data = Data(#"{"id":"user/-/state/com.google/reading-list","updated":0,"items":[{"id":"today-launch","categories":[],"title":"Today launch","published":1788696000,"summary":{"content":"<p>Body</p>"},"content":{"content":"<p>Body</p>"},"alternate":[],"origin":{"streamId":"user/-/state/com.google/reading-list","title":"Today","htmlUrl":"https://example.com"}}]}"#.utf8)
+		default:
+			statusCode = 200
+			data = Data(#"{}"#.utf8)
+		}
+
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func paths() -> [String] {
+		capturedPaths
+	}
+
+	nonisolated private static let recommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"launch-article","readerId":"queued-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-article","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"},{"id":"launch-visible","readerId":"launch-visible-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-visible","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":40,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
+	nonisolated private static let normalizedItemRecommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"10","readerId":"10","feedKey":"daily","source":"Daily","author":null,"title":"Story ten","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
 }

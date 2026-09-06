@@ -481,7 +481,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			SELECT sequence, payload, attempts, last_error, created_at
 			FROM pending_actions WHERE account_id = ? ORDER BY sequence LIMIT ?
 			""",
-			bindings: [.text(accountID), .int64(Int64(max(1, min(limit, 100))))],
+			bindings: [.text(accountID), .int64(Int64(max(1, limit)))],
 			database: database,
 		) { statement in
 			guard let payload = data(at: 1, statement: statement),

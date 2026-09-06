@@ -934,12 +934,43 @@ final class ReaderAppModel {
 					lastPageHasMore: nil,
 				)
 			}
-			_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
+			var mutationReplayFailureMessage: String?
+			var mutationReplayFailureIsConnectivity: Bool?
+			do {
+				_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
+			} catch let error where isCancellation(error) {
+				throw error
+			} catch {
+				// A queued mutation is durable and remains in the outbox after a
+				// failed replay. It must not prevent the visible collection from
+				// loading; the next refresh/launch can retry the mutation.
+				mutationReplayFailureMessage = error.localizedDescription
+				mutationReplayFailureIsConnectivity = isConnectivityFailure(error)
+			}
 			guard isCurrentOfflinePreparation(
 				accountID: accountID,
 				preparationID: preparationID,
 				generation: preparationGeneration,
 			) else { return }
+			if let mutationReplayFailureMessage {
+				isOffline = mutationReplayFailureIsConnectivity ?? false
+				let selectedCollectionAfterReplayFailure = selectedCollection
+				await load(collection: selectedCollectionAfterReplayFailure, force: true, now: synchronizationNow)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+				if errorMessage == nil {
+					errorMessage = mutationReplayFailureMessage
+				}
+				await refreshOfflineStorageStats(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				)
+				return
+			}
 			let selectedCollectionForInitialLoad = selectedCollection
 			if isInitialPreparation,
 				shouldPrioritizeInitialCollectionLoad(selectedCollectionForInitialLoad) {
@@ -1494,8 +1525,15 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
 			}
+			let loadedArticles = try await applyingQueuedMutationIntent(
+				to: page.items,
+				accountID: context.accountID,
+			)
+			try Task.checkCancellation()
+			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
+				return
+			}
 			isOffline = false
-			let loadedArticles = page.items
 			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil)
 			let existingArticles = articleCache[collection.id] ?? []
 			let reusesUnchangedPersistedPage = collection.smartSection?.usesRecommendationEndpoint != true
@@ -1594,10 +1632,18 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
 				return
 			}
+			let loadedArticles = try await applyingQueuedMutationIntent(
+				to: page.items,
+				accountID: context.accountID,
+			)
+			try Task.checkCancellation()
+			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
+				return
+			}
 			isOffline = false
 
 			var combinedArticles = articleCache[collection.id] ?? []
-			for article in page.items where combinedArticles.contains(where: { articlesMatch($0, article) }) == false {
+			for article in loadedArticles where combinedArticles.contains(where: { articlesMatch($0, article) }) == false {
 				combinedArticles.append(article)
 			}
 			combinedArticles = sortOrder(for: collection.id).sorted(combinedArticles)
@@ -3542,6 +3588,50 @@ final class ReaderAppModel {
 		}
 		guard isCurrentOperation(context) else { return }
 		await refreshOfflineStorageStats()
+	}
+
+	private func applyingQueuedMutationIntent(
+		to articles: [Recommendation],
+		accountID: String,
+	) async throws -> [Recommendation] {
+		let pending = try await offlineStore.pendingMutations(accountID: accountID, limit: Int.max)
+		guard pending.isEmpty == false else {
+			return articles
+		}
+
+		var adjusted = articles
+		for action in pending {
+			let mutation = action.mutation
+			guard let value = mutation.value else { continue }
+			switch mutation.kind {
+			case .setRead, .setReadBatch:
+				for index in adjusted.indices where mutation.itemIds.contains(where: {
+					Self.normalizedQueuedMutationItemID($0) == Self.normalizedQueuedMutationItemID(adjusted[index].id)
+						|| Self.normalizedQueuedMutationItemID($0) == Self.normalizedQueuedMutationItemID(adjusted[index].readerId)
+				}) {
+					adjusted[index].isRead = value
+				}
+			case .setStarred:
+				for index in adjusted.indices where mutation.itemIds.contains(where: {
+					Self.normalizedQueuedMutationItemID($0) == Self.normalizedQueuedMutationItemID(adjusted[index].id)
+						|| Self.normalizedQueuedMutationItemID($0) == Self.normalizedQueuedMutationItemID(adjusted[index].readerId)
+				}) {
+					adjusted[index].isStarred = value
+				}
+			default:
+				continue
+			}
+		}
+		return adjusted
+	}
+
+	private static func normalizedQueuedMutationItemID(_ itemID: String) -> String {
+		let prefix = "tag:google.com,2005:reader/item/"
+		guard itemID.hasPrefix(prefix),
+			let rowID = UInt64(String(itemID.dropFirst(prefix.count)), radix: 16) else {
+			return itemID
+		}
+		return String(rowID)
 	}
 
 	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async {
