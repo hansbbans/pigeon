@@ -23,6 +23,10 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: ReaderSmartViewStore.key)
 			ReaderArticleFilterStore().removeAll()
 		}
+		if let launchFixtureScenario = PreviewData.launchFixtureScenario {
+			_model = State(initialValue: PreviewData.makeRealStartupModel(for: launchFixtureScenario))
+			return
+		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-sample-data") {
 			let previewModel = PreviewData.makeModel()
 			if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-on-scroll") {

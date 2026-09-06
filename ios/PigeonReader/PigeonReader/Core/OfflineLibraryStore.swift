@@ -17,6 +17,24 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	private let encoder: JSONEncoder
 	private let decoder: JSONDecoder
 	private var previewSeed: PreviewSeed?
+	/// Maps a logical account to the uncommitted generation used by a full rebuild.
+	///
+	/// The mapping is intentionally process-local. A new store instance never treats an
+	/// abandoned staging generation as readable data; the committed account rows remain the
+	/// only cold-start snapshot until a finish transaction promotes the stage.
+	private var stagingAccountIDs: [String: String] = [:]
+	private static let rebuildCacheTables = [
+		"cached_navigation_items",
+		"cached_navigation",
+		"cached_subscriptions",
+		"cached_feeds",
+		"cached_collection_articles",
+		"cached_articles",
+		"cached_collection_pagination",
+		"cached_collection_states",
+		"sync_state",
+		"cache_integrity",
+	]
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
 	#endif
@@ -72,13 +90,43 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func loadSnapshot(accountID: String) throws -> CachedLibrarySnapshot {
+		try loadSnapshotFromStorage(accountID: accountID)
+	}
+
+	#if DEBUG
+	/// Test-only inspection of an in-progress generation. Production reads stay on
+	/// the committed account until promotion completes.
+	func loadStagedSnapshot(accountID: String) throws -> CachedLibrarySnapshot {
+		guard let stagingAccountID = stagingAccountIDs[accountID] else {
+			throw OfflineLibraryError.invalidCacheState("The account has no active full-rebuild generation.")
+		}
+		return try loadSnapshotFromStorage(accountID: stagingAccountID)
+	}
+	#endif
+
+	private func loadSnapshotFromStorage(accountID: String) throws -> CachedLibrarySnapshot {
 		let database = try openDatabase()
 		try reconcileArticleIdentities(accountID: accountID, database: database)
 		let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
-		let navigation = try loadSinglePayload(
-			ReaderNavigationState.self,
-			sql: "SELECT payload FROM cached_navigation WHERE account_id = ?",
-			bindings: [.text(accountID)],
+		var malformedPayload = false
+		let navigation: ReaderNavigationState?
+		do {
+			navigation = try loadSinglePayload(
+				ReaderNavigationState.self,
+				sql: "SELECT payload FROM cached_navigation WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			)
+		} catch {
+			// Keep the rest of the valid cache available. A bad navigation blob must
+			// request repair instead of making a cold launch fail before it can render
+			// cached stories.
+			malformedPayload = true
+			navigation = nil
+		}
+		let subscriptionRowCount = try scalarCount(
+			"SELECT COUNT(*) FROM cached_subscriptions WHERE account_id = ?",
+			accountID: accountID,
 			database: database,
 		)
 		let subscriptions = try loadPayloads(
@@ -87,12 +135,21 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			bindings: [.text(accountID)],
 			database: database,
 		)
-		let restoration = try loadSinglePayload(
-			ReaderRestorationState.self,
-			sql: "SELECT payload FROM reader_state WHERE account_id = ?",
-			bindings: [.text(accountID)],
-			database: database,
-		)
+		if subscriptions.count != subscriptionRowCount {
+			malformedPayload = true
+		}
+		let restoration: ReaderRestorationState?
+		do {
+			restoration = try loadSinglePayload(
+				ReaderRestorationState.self,
+				sql: "SELECT payload FROM reader_state WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			)
+		} catch {
+			malformedPayload = true
+			restoration = nil
+		}
 		let syncState = try queryOne(
 			"SELECT cursor, last_sync_at FROM sync_state WHERE account_id = ?",
 			bindings: [.text(accountID)],
@@ -114,13 +171,85 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			continuationsByCollection[collectionID] = continuation
 		}
 
+		// Derive missing navigation and repair its derived membership projection before
+		// reading articles. Keep both writes in the same transaction so a malformed row
+		// or a disk error cannot leave a half-rebuilt canonical cache behind. The
+		// lightweight validator uses the already decoded subscription rows below and
+		// article metadata columns; full article payloads are decoded exactly once in the
+		// projection pass that follows.
+		var derivedNavigation = navigation
+		do {
+			try transaction(database) {
+				// A missing navigation blob can be reconstructed from cached feeds. An
+				// existing blob remains the last direct snapshot while its freshness is
+				// unverified; feed mutations refresh that blob in their own transaction.
+				if derivedNavigation == nil {
+					derivedNavigation = try makeNavigationFromCachedFeeds(accountID: accountID, database: database)
+				}
+				if try validateCachedMemberships(
+					accountID: accountID,
+					dayBounds: nil,
+					subscriptions: subscriptions,
+					database: database,
+				) == false {
+					try rebuildAllMemberships(
+						accountID: accountID,
+						dayBounds: nil,
+						preservingLocalCollections: true,
+						subscriptions: subscriptions,
+						database: database,
+					)
+				}
+			}
+		} catch let error as OfflineLibraryError {
+			switch error {
+			case .invalidCacheState:
+				// The transaction has rolled back. Continue with the committed rows and
+				// let the tolerant projection below mark the cache for repair.
+				malformedPayload = true
+				derivedNavigation = navigation
+			default:
+				throw error
+			}
+		}
+
 		var articlesByCollection: [String: [Recommendation]] = [:]
-		// A cached article can belong to many collections; decode its payload once,
-		// then reuse the value while preserving the membership query's order.
+		let articleRowCount = try scalarCount(
+			"SELECT COUNT(*) FROM cached_articles WHERE account_id = ?",
+			accountID: accountID,
+			database: database,
+		)
+		// Decode every cached article once, including rows that have lost all of their
+		// memberships. This detects an invalid payload without dropping valid rows from
+		// the first snapshot and avoids repeatedly decoding large HTML blobs when one
+		// article appears in several collections.
 		var decodedArticlesByID: [String: Recommendation] = [:]
 		try query(
+			"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC, id",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let articleID = string(at: 0, statement: statement),
+				let payload = data(at: 2, statement: statement),
+				let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
+				malformedPayload = true
+				return
+			}
+			decodedArticlesByID[articleID] = sqlite3_column_int64(statement, 1) != 0
+				? decodedArticle.replacingHTML("")
+				: decodedArticle
+			#if DEBUG
+			snapshotArticleDecodeCount += 1
+			#endif
+		}
+		if decodedArticlesByID.count != articleRowCount {
+			malformedPayload = true
+		}
+
+		var joinedMembershipCount = 0
+		try query(
 			"""
-			SELECT ca.collection_id, ca.article_id, a.body_pruned, a.payload
+			SELECT ca.collection_id, ca.article_id
 			FROM cached_collection_articles ca
 			JOIN cached_articles a
 			  ON a.account_id = ca.account_id AND a.id = ca.article_id
@@ -130,35 +259,41 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
+			joinedMembershipCount += 1
 			guard let collectionID = string(at: 0, statement: statement),
 				let articleID = string(at: 1, statement: statement),
-				let payload = data(at: 3, statement: statement) else {
+				let article = decodedArticlesByID[articleID] else {
+				malformedPayload = true
 				return
-			}
-			let article: Recommendation
-			if let cachedArticle = decodedArticlesByID[articleID] {
-				article = cachedArticle
-			} else {
-				guard let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
-					return
-				}
-				let resolvedArticle = sqlite3_column_int64(statement, 2) != 0
-					? decodedArticle.replacingHTML("")
-					: decodedArticle
-				decodedArticlesByID[articleID] = resolvedArticle
-				article = resolvedArticle
-				#if DEBUG
-				snapshotArticleDecodeCount += 1
-				#endif
 			}
 			articlesByCollection[collectionID, default: []].append(article)
 		}
+		let persistedMembershipCount = try scalarCount(
+			"SELECT COUNT(*) FROM cached_collection_articles WHERE account_id = ?",
+			accountID: accountID,
+			database: database,
+		)
+		if joinedMembershipCount != persistedMembershipCount {
+			malformedPayload = true
+		}
 
-		let derivedNavigation: ReaderNavigationState?
-		if let navigation {
-			derivedNavigation = navigation
+		let resolvedIntegrity: OfflineCacheIntegrity
+		if malformedPayload {
+			let message = "The offline library contained malformed cached data."
+			let alreadyRecorded = integrity.state == .needsRepair && integrity.lastError == message
+			resolvedIntegrity = OfflineCacheIntegrity(
+				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+				state: .needsRepair,
+				navigation: .unverified,
+				lastAttemptAt: integrity.lastAttemptAt,
+				lastSuccessAt: integrity.lastSuccessAt,
+				lastError: message,
+				invalidChangeCount: integrity.invalidChangeCount + (alreadyRecorded ? 0 : 1),
+				lastPageHasMore: integrity.lastPageHasMore,
+			)
+			try saveCacheIntegrity(resolvedIntegrity, accountID: accountID, database: database)
 		} else {
-			derivedNavigation = try makeNavigationFromCachedFeeds(accountID: accountID, database: database)
+			resolvedIntegrity = integrity
 		}
 		return CachedLibrarySnapshot(
 			navigation: derivedNavigation,
@@ -168,45 +303,92 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			restoration: restoration,
 			cursor: syncState?.0,
 			lastSyncAt: syncState?.1,
-			integrity: integrity,
+			integrity: resolvedIntegrity,
 		)
 	}
 
 	func beginFullRebuild(accountID: String, at date: Date = .now) async throws {
 		let database = try openDatabase()
+		let stagingAccountID = "__pigeon_rebuild__\(UUID().uuidString.lowercased())"
 		try transaction(database) {
 			let previous = try loadCacheIntegrity(accountID: accountID, database: database)
-			for table in [
-				"cached_navigation_items",
-				"cached_navigation",
-				"cached_subscriptions",
-				"cached_feeds",
-				"cached_collection_articles",
-				"cached_articles",
-				"cached_collection_pagination",
-				"sync_state",
-			] {
+			if let previousStagingAccountID = try queryOne(
+				"SELECT staging_account_id FROM cache_rebuilds WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+				map: { string(at: 0, statement: $0) },
+			) ?? nil {
+				try deleteStagingRows(accountID: previousStagingAccountID, database: database)
 				try execute(
-					"DELETE FROM \(table) WHERE account_id = ?",
+					"DELETE FROM cache_rebuilds WHERE account_id = ?",
 					bindings: [.text(accountID)],
 					database: database,
 				)
 			}
+			try execute(
+				"INSERT INTO cache_rebuilds (account_id, staging_account_id, created_at) VALUES (?, ?, ?)",
+				bindings: [.text(accountID), .text(stagingAccountID), .double(date.timeIntervalSince1970)],
+				database: database,
+			)
+			try seedRebuildIntents(
+				accountID: accountID,
+				stagingAccountID: stagingAccountID,
+				database: database,
+			)
 			try saveCacheIntegrity(
 				OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-					state: .syncing,
+					state: .needsRepair,
 					navigation: .unverified,
 					lastAttemptAt: date,
 					lastSuccessAt: previous.lastSuccessAt,
-					lastError: nil,
+					lastError: "A full offline rebuild is in progress.",
 					invalidChangeCount: previous.invalidChangeCount,
 					lastPageHasMore: nil,
 				),
 				accountID: accountID,
 				database: database,
 			)
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+					state: .syncing,
+					navigation: .unverified,
+					lastAttemptAt: date,
+					lastSuccessAt: nil,
+					lastError: nil,
+					invalidChangeCount: previous.invalidChangeCount,
+					lastPageHasMore: nil,
+				),
+				accountID: stagingAccountID,
+				database: database,
+			)
 		}
+		stagingAccountIDs[accountID] = stagingAccountID
+	}
+
+	/// Stop routing writes for a failed or cancelled rebuild back into its
+	/// uncommitted generation. The marker and stage stay durable so a later
+	/// beginFullRebuild can clean them up, while the committed account remains the
+	/// only snapshot visible to a reopened process.
+	func abandonFullRebuild(accountID: String, startedAt: Date) async throws {
+		guard let stagingAccountID = stagingAccountIDs[accountID] else { return }
+		let database = try openDatabase()
+		let marker = try queryOne(
+			"SELECT staging_account_id, created_at FROM cache_rebuilds WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			(string(at: 0, statement: statement), sqlite3_column_double(statement, 1))
+		}
+		guard let marker,
+			marker.0 == stagingAccountID,
+			marker.1 == startedAt.timeIntervalSince1970 else {
+			return
+		}
+		// Do not remove the marker or staged rows here. They are the durable record
+		// of an incomplete generation and are reclaimed atomically by the next begin.
+		stagingAccountIDs[accountID] = nil
 	}
 
 	func finishSynchronization(
@@ -242,8 +424,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		rebuildMemberships: Bool,
 	) throws {
 		let database = try openDatabase()
+		let stagingAccountID = stagingAccountIDs[accountID]
+		let storageAccountID = stagingAccountID ?? accountID
 		try transaction(database) {
-			let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
+			let integrity = try loadCacheIntegrity(accountID: storageAccountID, database: database)
 			guard integrity.formatVersion == OfflineCacheIntegrity.currentFormatVersion,
 				integrity.state == .syncing || integrity.state == .complete,
 				integrity.lastPageHasMore == false else {
@@ -251,26 +435,29 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			}
 			guard try scalarCount(
 				"SELECT COUNT(*) FROM cached_navigation WHERE account_id = ?",
-				accountID: accountID,
+				accountID: storageAccountID,
 				database: database,
 			) > 0 else {
 				throw OfflineLibraryError.navigationUnavailable
 			}
 			guard try scalarCount(
 				"SELECT COUNT(*) FROM sync_state WHERE account_id = ?",
-				accountID: accountID,
+				accountID: storageAccountID,
 				database: database,
 			) > 0 else {
 				throw OfflineLibraryError.invalidCacheState("The offline library had no persisted sync cursor.")
 			}
 			if rebuildMemberships {
-				try rebuildAllMemberships(accountID: accountID, dayBounds: dayBounds, database: database)
+				try applyPendingStatusOverlay(accountID: accountID, storageAccountID: storageAccountID, database: database)
+				try rebuildAllMemberships(accountID: storageAccountID, dayBounds: dayBounds, database: database)
 			} else {
-				try validateCachedMemberships(accountID: accountID, database: database)
+				if try validateCachedMemberships(accountID: storageAccountID, dayBounds: dayBounds, database: database) == false {
+					try rebuildAllMemberships(accountID: storageAccountID, dayBounds: dayBounds, database: database)
+				}
 			}
 			try execute(
 				"UPDATE sync_state SET last_sync_at = ? WHERE account_id = ?",
-				bindings: [.double(date.timeIntervalSince1970), .text(accountID)],
+				bindings: [.double(date.timeIntervalSince1970), .text(storageAccountID)],
 				database: database,
 			)
 			try saveCacheIntegrity(
@@ -284,9 +471,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					invalidChangeCount: integrity.invalidChangeCount,
 					lastPageHasMore: false,
 				),
-				accountID: accountID,
+				accountID: storageAccountID,
 				database: database,
 			)
+			if let stagingAccountID, rebuildMemberships {
+				try promoteStaging(
+					accountID: accountID,
+					stagingAccountID: stagingAccountID,
+					date: date,
+					database: database,
+				)
+			}
+		}
+		if stagingAccountID != nil, rebuildMemberships {
+			stagingAccountIDs[accountID] = nil
 		}
 	}
 
@@ -296,13 +494,15 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		dayBounds: ReaderLocalDayBounds? = nil,
 	) async throws {
 		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		try transaction(database) {
-			let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+			let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
 			guard previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion,
 				previous.lastPageHasMore == false else {
 				throw OfflineLibraryError.invalidCacheState("The offline library did not reach the end of its sync.")
 			}
-			try rebuildAllMemberships(accountID: accountID, dayBounds: dayBounds, database: database)
+			try applyPendingStatusOverlay(accountID: accountID, storageAccountID: storageAccountID, database: database)
+			try rebuildAllMemberships(accountID: storageAccountID, dayBounds: dayBounds, database: database)
 			try saveCacheIntegrity(
 				OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
@@ -314,7 +514,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					invalidChangeCount: previous.invalidChangeCount,
 					lastPageHasMore: false,
 				),
-				accountID: accountID,
+				accountID: storageAccountID,
 				database: database,
 			)
 		}
@@ -373,28 +573,22 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) throws {
 		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		let payload = try encoder.encode(navigation)
 		try transaction(database) {
-			try execute(
-				"""
-				INSERT INTO cached_navigation (account_id, payload, updated_at) VALUES (?, ?, ?)
-				ON CONFLICT(account_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
-				""",
-				bindings: [.text(accountID), .blob(payload), .double(Date.now.timeIntervalSince1970)],
-				database: database,
-			)
-			try cacheNavigationItems(navigation, accountID: accountID, database: database)
+			try writeNavigation(navigation, payload: payload, accountID: storageAccountID, database: database)
 		}
 	}
 
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) throws {
 		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		try transaction(database) {
-			try execute("DELETE FROM cached_subscriptions WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_subscriptions WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
 			for subscription in subscriptions {
 				try execute(
 					"INSERT INTO cached_subscriptions (account_id, id, title, payload) VALUES (?, ?, ?, ?)",
-					bindings: [.text(accountID), .text(subscription.id), .text(subscription.title), .blob(try encoder.encode(subscription))],
+					bindings: [.text(storageAccountID), .text(subscription.id), .text(subscription.title), .blob(try encoder.encode(subscription))],
 					database: database,
 				)
 			}
@@ -403,28 +597,48 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) throws {
 		let database = try openDatabase()
-		try reconcileArticleIdentities(accountID: accountID, database: database)
+		// Selected-page/body hydration is a committed local read cache. Keep it on the
+		// canonical account so a failed or cancelled full rebuild cannot hide a body that
+		// was successfully read while the rebuild was in flight.
+		let storageAccountID = accountID
+		try reconcileArticleIdentities(accountID: storageAccountID, database: database)
 		try transaction(database) {
 			try execute(
 				"DELETE FROM cached_collection_articles WHERE account_id = ? AND collection_id = ?",
-				bindings: [.text(accountID), .text(collectionID)],
+				bindings: [.text(storageAccountID), .text(collectionID)],
 				database: database,
 			)
 			for (position, article) in articles.enumerated() {
-				let storedArticle = try upsertArticle(sanitized(article), accountID: accountID, database: database)
+				let storedArticle = try upsertArticle(sanitized(article), accountID: storageAccountID, database: database)
 				try insertCollectionMembership(
-					accountID: accountID,
+					accountID: storageAccountID,
 					collectionID: collectionID,
 					articleID: storedArticle.id,
 					position: position,
 					database: database,
 				)
 			}
+			// A direct page save owns this collection's membership set. Keep that
+			// provenance even when the page is intentionally empty, so a later
+			// projection repair cannot refill it from unrelated retained articles.
+			try execute(
+				"""
+				INSERT INTO cached_collection_states (account_id, collection_id, explicit_page, updated_at)
+				VALUES (?, ?, 1, ?)
+				ON CONFLICT(account_id, collection_id) DO UPDATE SET explicit_page = 1, updated_at = excluded.updated_at
+				""",
+				bindings: [.text(storageAccountID), .text(collectionID), .double(Date.now.timeIntervalSince1970)],
+				database: database,
+			)
 		}
 	}
 
 	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) throws {
 		let database = try openDatabase()
+		// Continuations belong to the directly loaded collection cache. Sync-owned
+		// cursor state is staged by apply(_:accountID:), but this path must remain
+		// readable if that sync later fails.
+		let storageAccountID = accountID
 		try transaction(database) {
 			if let continuation, continuation.isEmpty == false {
 				try execute(
@@ -433,13 +647,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					VALUES (?, ?, ?)
 					ON CONFLICT(account_id, collection_id) DO UPDATE SET continuation = excluded.continuation
 					""",
-					bindings: [.text(accountID), .text(collectionID), .text(continuation)],
+						bindings: [.text(storageAccountID), .text(collectionID), .text(continuation)],
 					database: database,
 				)
 			} else {
 				try execute(
 					"DELETE FROM cached_collection_pagination WHERE account_id = ? AND collection_id = ?",
-					bindings: [.text(accountID), .text(collectionID)],
+						bindings: [.text(storageAccountID), .text(collectionID)],
 					database: database,
 				)
 			}
@@ -460,17 +674,35 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	func enqueue(_ mutation: OfflineMutation, accountID: String) throws {
 		let database = try openDatabase()
-		try execute(
-			"""
-			INSERT OR IGNORE INTO pending_actions
-			(account_id, id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)
-			""",
-			bindings: [
-				.text(accountID), .text(mutation.id), .text(mutation.kind.rawValue),
-				.blob(try encoder.encode(mutation)), .double(Date.now.timeIntervalSince1970),
-			],
-			database: database,
-		)
+		let payload = try encoder.encode(mutation)
+		let stagingAccountID = stagingAccountIDs[accountID]
+		try transaction(database) {
+			try execute(
+				"""
+				INSERT OR IGNORE INTO pending_actions
+				(account_id, id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)
+				""",
+				bindings: [
+					.text(accountID), .text(mutation.id), .text(mutation.kind.rawValue),
+					.blob(payload), .double(Date.now.timeIntervalSince1970),
+				],
+				database: database,
+			)
+			if let stagingAccountID, mutation.isStatusProjection {
+				try execute(
+					"""
+					INSERT OR IGNORE INTO cache_rebuild_intents
+					(account_id, staging_account_id, mutation_id, sequence, payload, created_at)
+					SELECT ?, ?, id, sequence, payload, created_at
+					FROM pending_actions WHERE account_id = ? AND id = ?
+					""",
+					bindings: [
+						.text(accountID), .text(stagingAccountID), .text(accountID), .text(mutation.id),
+					],
+					database: database,
+				)
+			}
+		}
 	}
 
 	func pendingMutations(accountID: String, limit: Int = 100) throws -> [PendingOfflineMutation] {
@@ -530,12 +762,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		dayBounds: ReaderLocalDayBounds?,
 	) async throws {
 		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		do {
 			try transaction(database) {
 				guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
 					throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
 				}
-				let previous = try loadCacheIntegrity(accountID: accountID, database: database)
+				let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
 				try saveCacheIntegrity(
 					OfflineCacheIntegrity(
 						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
@@ -547,7 +780,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 						invalidChangeCount: previous.invalidChangeCount,
 						lastPageHasMore: page.hasMore,
 					),
-					accountID: accountID,
+					accountID: storageAccountID,
 					database: database,
 				)
 
@@ -561,7 +794,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				for change in page.changes where change.entityType != .status {
 					try apply(
 						change,
-						accountID: accountID,
+						accountID: storageAccountID,
 						dayBounds: dayBounds,
 						deletedArticleIDs: deletedArticleIDs,
 						database: database,
@@ -570,23 +803,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				for change in page.changes where change.entityType == .status {
 					try apply(
 						change,
-						accountID: accountID,
+						accountID: storageAccountID,
 						dayBounds: dayBounds,
 						deletedArticleIDs: deletedArticleIDs,
-						database: database,
-					)
-				}
-				if page.changes.isEmpty == false {
-					// Any change invalidates the cached count snapshot. It is still useful
-					// for rendering, but it cannot authorize a warm sync until refreshed.
-					try execute(
-						"DELETE FROM cached_navigation WHERE account_id = ?",
-						bindings: [.text(accountID)],
-						database: database,
-					)
-					try execute(
-						"DELETE FROM cached_navigation_items WHERE account_id = ?",
-						bindings: [.text(accountID)],
 						database: database,
 					)
 				}
@@ -595,7 +814,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
 					ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
 					""",
-					bindings: [.text(accountID), .text(page.cursor)],
+					bindings: [.text(storageAccountID), .text(page.cursor)],
 					database: database,
 				)
 			}
@@ -643,7 +862,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	func cleanupReadBodies(accountID: String, keepingNewest count: Int = 200) throws -> Int {
 		let database = try openDatabase()
-		try reconcileArticleIdentities(accountID: accountID, database: database)
+		// Incremental/full sync invokes this after applying pages. Keep its pruning
+		// inside the in-progress generation so canonical bodies remain available if
+		// the rebuild is interrupted.
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
+		try reconcileArticleIdentities(accountID: storageAccountID, database: database)
 		var candidates: [(String, Recommendation)] = []
 		try query(
 			"""
@@ -651,7 +874,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			WHERE account_id = ? AND is_read = 1 AND is_starred = 0
 			ORDER BY received_at DESC LIMIT -1 OFFSET ?
 			""",
-			bindings: [.text(accountID), .int64(Int64(max(count, 0)))],
+			bindings: [.text(storageAccountID), .int64(Int64(max(count, 0)))],
 			database: database,
 		) { statement in
 			guard let id = string(at: 0, statement: statement),
@@ -672,7 +895,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				)
 				try execute(
 					"UPDATE cached_articles SET payload = ?, body_pruned = 1 WHERE account_id = ? AND id = ?",
-					bindings: [.blob(try encoder.encode(pruned)), .text(accountID), .text(id)],
+					bindings: [.blob(try encoder.encode(pruned)), .text(storageAccountID), .text(id)],
 					database: database,
 				)
 			}
@@ -682,16 +905,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	func clearCachedArticles(accountID: String) throws {
 		let database = try openDatabase()
+		let storageAccountID = accountID
 		try transaction(database) {
-			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
-			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(accountID)], database: database)
-			try execute("DELETE FROM cached_collection_pagination WHERE account_id = ?", bindings: [.text(accountID)], database: database)
-			try execute("DELETE FROM cached_navigation_items WHERE account_id = ?", bindings: [.text(accountID)], database: database)
-			try execute("DELETE FROM cached_navigation WHERE account_id = ?", bindings: [.text(accountID)], database: database)
-			try execute("DELETE FROM sync_state WHERE account_id = ?", bindings: [.text(accountID)], database: database)
+			try execute("DELETE FROM cached_collection_articles WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cached_articles WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cached_collection_pagination WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cached_collection_states WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cache_collection_state_migrations WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cached_navigation_items WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM cached_navigation WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
+			try execute("DELETE FROM sync_state WHERE account_id = ?", bindings: [.text(storageAccountID)], database: database)
 			try saveCacheIntegrity(
 				.needsBootstrap,
-				accountID: accountID,
+				accountID: storageAccountID,
 				database: database,
 			)
 		}
@@ -803,6 +1029,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					accountID: accountID,
 					database: database,
 				)
+				// Feed changes invalidate navigation folders/order. Rebuild it once in
+				// this page transaction so the next cold load sees the current feed rows.
+				if try makeNavigationFromCachedFeeds(accountID: accountID, database: database) == nil,
+					previousSubscriptions.isEmpty == false || previousStreamID != nil {
+					// An explicitly deleted final feed is authoritative. Remove the old
+					// navigation fallback instead of leaving a selected, nonexistent feed.
+					try clearCachedNavigation(accountID: accountID, database: database)
+				}
 				return
 			}
 			let previousSubscriptions = try cachedSubscriptions(
@@ -888,6 +1122,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				accountID: accountID,
 				database: database,
 			)
+			// Keep the persisted navigation blob in step with feed folder changes.
+			if try makeNavigationFromCachedFeeds(accountID: accountID, database: database) == nil,
+				payload.isActive == false {
+				try clearCachedNavigation(accountID: accountID, database: database)
+			}
 		case .article:
 			if change.operation == .delete {
 				try deleteArticle(identifier: change.entityId, accountID: accountID, database: database)
@@ -930,7 +1169,12 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				accountID: accountID,
 				database: database,
 			)
-			try rebuildMemberships(for: storedArticle, dayBounds: dayBounds, accountID: accountID, database: database)
+			try rebuildMemberships(
+				for: storedArticle,
+				dayBounds: dayBounds,
+				accountID: accountID,
+				database: database,
+			)
 		case .status:
 			guard change.operation == .upsert, let payload = change.payload else {
 				throw OfflineLibraryError.invalidSyncChange("The status change for \(change.entityId) was malformed.")
@@ -997,9 +1241,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		var articles: [StoredArticle] = []
 		try query(sql, bindings: bindings, database: database) { statement in
 			guard let id = string(at: 0, statement: statement),
-				let payload = data(at: 1, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload) else {
-				return
+				let payload = data(at: 1, statement: statement) else {
+				throw OfflineLibraryError.invalidCacheState("A cached article had no identifier or payload.")
+			}
+			guard let article = try? decoder.decode(Recommendation.self, from: payload) else {
+				throw OfflineLibraryError.invalidCacheState("A cached article had an invalid payload.")
 			}
 			articles.append(
 				StoredArticle(
@@ -1026,9 +1272,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			database: database,
 		) { statement in
 			guard let id = string(at: 0, statement: statement),
-				let payload = data(at: 1, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload) else {
-				return
+				let payload = data(at: 1, statement: statement) else {
+				throw OfflineLibraryError.invalidCacheState("A cached article had no identifier or payload.")
+			}
+			guard let article = try? decoder.decode(Recommendation.self, from: payload) else {
+				throw OfflineLibraryError.invalidCacheState("A cached article had an invalid payload.")
 			}
 			articles.append(
 				StoredArticle(
@@ -1069,9 +1317,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
-			guard let payload = data(at: 0, statement: statement),
-				let subscription = try? decoder.decode(FeedSubscription.self, from: payload) else {
-				return
+			guard let payload = data(at: 0, statement: statement) else {
+				throw OfflineLibraryError.invalidCacheState("A cached subscription had no payload.")
+			}
+			guard let subscription = try? decoder.decode(FeedSubscription.self, from: payload) else {
+				throw OfflineLibraryError.invalidCacheState("A cached subscription had an invalid payload.")
 			}
 			subscriptions.append(subscription)
 		}
@@ -1237,12 +1487,31 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}
 
 		for readerID in duplicateReaderIDs {
-			let existing = try loadStoredArticles(
-				readerID: readerID,
-				accountID: accountID,
+			// Identity reconciliation runs before the tolerant snapshot decoder. Skip a
+			// duplicate group containing a malformed payload so one bad row cannot abort
+			// a cold load; the later projection pass will retain valid rows and mark repair.
+			var existing: [StoredArticle] = []
+			var malformedGroup = false
+			try query(
+				"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? AND reader_id = ? ORDER BY id",
+				bindings: [.text(accountID), .text(readerID)],
 				database: database,
-			)
-			guard existing.count > 1 else { continue }
+			) { statement in
+				guard let id = string(at: 0, statement: statement),
+					let payload = data(at: 2, statement: statement),
+					let article = try? decoder.decode(Recommendation.self, from: payload) else {
+					malformedGroup = true
+					return
+				}
+				existing.append(
+					StoredArticle(
+						id: id,
+						article: article,
+						bodyPruned: sqlite3_column_int64(statement, 1) != 0,
+					),
+				)
+			}
+			guard malformedGroup == false, existing.count > 1 else { continue }
 			let storageID = preferredArticleID(
 				incomingID: existing[0].id,
 				readerID: readerID,
@@ -1346,6 +1615,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		return collectionIDs
 	}
 
+	private func cachedExplicitCollectionIDs(accountID: String, database: OpaquePointer) throws -> Set<String> {
+		var collectionIDs = Set<String>()
+		try query(
+			"SELECT collection_id FROM cached_collection_states WHERE account_id = ? AND explicit_page = 1",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			if let collectionID = string(at: 0, statement: statement), collectionID.isEmpty == false {
+				collectionIDs.insert(collectionID)
+			}
+		}
+		return collectionIDs
+	}
+
 	private func reconcileFeedMemberships(
 		forFeedKeys feedKeys: Set<String>,
 		previousSubscriptions: [FeedSubscription],
@@ -1424,45 +1707,64 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		article.isRead = isRead ?? article.isRead
 		article.isStarred = isStarred ?? article.isStarred
 		let storedArticle = try upsertArticle(article, accountID: accountID, database: database)
-		try rebuildMemberships(for: storedArticle, dayBounds: dayBounds, accountID: accountID, database: database)
+		try rebuildMemberships(
+			for: storedArticle,
+			dayBounds: dayBounds,
+			accountID: accountID,
+			database: database,
+		)
 	}
 
 	private func rebuildMemberships(
 		for article: Recommendation,
 		staleSubscriptions: [FeedSubscription] = [],
+		currentSubscriptions suppliedCurrentSubscriptions: [FeedSubscription]? = nil,
+		navigationCollectionIDs suppliedNavigationCollectionIDs: Set<String>? = nil,
 		dayBounds: ReaderLocalDayBounds? = nil,
+		protectedCollectionIDs: Set<String> = [],
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
 		let managedCollections = [ReaderSection.unread.rawValue, ReaderSection.today.rawValue, ReaderSection.starred.rawValue]
-		for collectionID in managedCollections {
+		for collectionID in managedCollections where protectedCollectionIDs.contains(collectionID) == false {
 			try execute(
 				"DELETE FROM cached_collection_articles WHERE account_id = ? AND collection_id = ? AND article_id = ?",
 				bindings: [.text(accountID), .text(collectionID), .text(article.id)], database: database,
 			)
 		}
-		if article.isRead == false {
+		if protectedCollectionIDs.contains(ReaderSection.unread.rawValue) == false, article.isRead == false {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.unread.rawValue, articleID: article.id, position: 0, database: database)
 		}
-		if (dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)).contains(article.receivedAt) {
+		if protectedCollectionIDs.contains(ReaderSection.today.rawValue) == false,
+			(dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)).contains(article.receivedAt) {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.today.rawValue, articleID: article.id, position: 0, database: database)
 		}
-		if article.isStarred {
+		if protectedCollectionIDs.contains(ReaderSection.starred.rawValue) == false, article.isStarred {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.starred.rawValue, articleID: article.id, position: 0, database: database)
 		}
 
-		let currentSubscriptions = try cachedSubscriptions(
-			feedKey: article.feedKey,
-			accountID: accountID,
-			database: database,
-		)
-		let currentCollectionIDs = collectionIDs(for: currentSubscriptions)
-		let staleCollectionIDs = collectionIDs(for: staleSubscriptions)
-		let navigationCollectionIDs = try cachedNavigationCollectionIDs(
-			feedKeys: [article.feedKey],
-			accountID: accountID,
-			database: database,
-		)
+		let currentSubscriptions: [FeedSubscription]
+		if let suppliedCurrentSubscriptions {
+			currentSubscriptions = suppliedCurrentSubscriptions
+		} else {
+			currentSubscriptions = try cachedSubscriptions(
+				feedKey: article.feedKey,
+				accountID: accountID,
+				database: database,
+			)
+		}
+		let currentCollectionIDs = collectionIDs(for: currentSubscriptions).subtracting(protectedCollectionIDs)
+		let staleCollectionIDs = collectionIDs(for: staleSubscriptions).subtracting(protectedCollectionIDs)
+		let navigationCollectionIDs: Set<String>
+		if let suppliedNavigationCollectionIDs {
+			navigationCollectionIDs = suppliedNavigationCollectionIDs.subtracting(protectedCollectionIDs)
+		} else {
+			navigationCollectionIDs = try cachedNavigationCollectionIDs(
+				feedKeys: [article.feedKey],
+				accountID: accountID,
+				database: database,
+			).subtracting(protectedCollectionIDs)
+		}
 		let collectionIDsToClear = currentCollectionIDs
 			.union(staleCollectionIDs)
 			.union(navigationCollectionIDs)
@@ -1480,7 +1782,12 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		}
 	}
 
-	private func validateCachedMemberships(accountID: String, database: OpaquePointer) throws {
+	private func validateCachedMemberships(
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+		subscriptions suppliedSubscriptions: [FeedSubscription]? = nil,
+		database: OpaquePointer,
+	) throws -> Bool {
 		let orphanCount = try scalarCount(
 			"""
 			SELECT COUNT(*)
@@ -1493,20 +1800,110 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			database: database,
 		)
 		guard orphanCount == 0 else {
-			throw OfflineLibraryError.invalidCacheState("The offline library contained an orphaned collection membership.")
+			// An orphaned row is a repairable projection defect. Returning false lets
+			// callers rebuild the membership table while retaining every valid article.
+			return false
 		}
+
+		struct CachedArticleMetadata {
+			let id: String
+			let feedKey: String
+			let receivedAt: Date
+			let isRead: Bool
+			let isStarred: Bool
+		}
+		var articles: [CachedArticleMetadata] = []
+		try query(
+			"SELECT id, feed_key, received_at, is_read, is_starred FROM cached_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let id = string(at: 0, statement: statement),
+				let feedKey = string(at: 1, statement: statement),
+				let receivedAt = date(at: 2, statement: statement) else {
+				throw OfflineLibraryError.invalidCacheState("A cached article had invalid metadata.")
+			}
+			articles.append(
+				CachedArticleMetadata(
+					id: id,
+					feedKey: feedKey,
+					receivedAt: receivedAt,
+					isRead: sqlite3_column_int64(statement, 3) != 0,
+					isStarred: sqlite3_column_int64(statement, 4) != 0,
+				),
+			)
+		}
+
+		var membershipsByArticleID: [String: Set<String>] = [:]
+		try query(
+			"SELECT article_id, collection_id FROM cached_collection_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let articleID = string(at: 0, statement: statement),
+				let collectionID = string(at: 1, statement: statement) else {
+				throw OfflineLibraryError.invalidCacheState("A cached membership had no identifier.")
+			}
+			membershipsByArticleID[articleID, default: []].insert(collectionID)
+		}
+
+		let subscriptions: [FeedSubscription]
+		if let suppliedSubscriptions {
+			subscriptions = suppliedSubscriptions
+		} else {
+			subscriptions = try cachedSubscriptions(accountID: accountID, database: database)
+		}
+		var collectionIDsByFeedKey: [String: Set<String>] = [:]
+		for subscription in subscriptions {
+			let ids = collectionIDs(for: [subscription])
+			collectionIDsByFeedKey[subscription.feedKey, default: []].formUnion(ids)
+			collectionIDsByFeedKey[subscription.id, default: []].formUnion(ids)
+		}
+		var navigationCollectionIDsByFeedKey: [String: Set<String>] = [:]
+		try query(
+			"SELECT id, feed_key FROM cached_navigation_items WHERE account_id = ? AND feed_key IS NOT NULL AND feed_key <> ''",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				let feedKey = string(at: 1, statement: statement),
+				feedKey.isEmpty == false else {
+				return
+			}
+			navigationCollectionIDsByFeedKey[feedKey, default: []].insert(collectionID)
+		}
+
+		let protectedCollectionIDs = try cachedExplicitCollectionIDs(accountID: accountID, database: database)
+		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)
+		for article in articles {
+			var expected = Set<String>()
+			if article.isRead == false {
+				expected.insert(ReaderSection.unread.rawValue)
+			}
+			if bounds.contains(article.receivedAt) {
+				expected.insert(ReaderSection.today.rawValue)
+			}
+			if article.isStarred {
+				expected.insert(ReaderSection.starred.rawValue)
+			}
+			let currentCollectionIDs = collectionIDsByFeedKey[article.feedKey, default: []]
+			let navigationCollectionIDs = navigationCollectionIDsByFeedKey[article.feedKey, default: []]
+			expected.formUnion(currentCollectionIDs.isEmpty ? navigationCollectionIDs : currentCollectionIDs)
+			expected.subtract(protectedCollectionIDs)
+			if expected.subtracting(membershipsByArticleID[article.id, default: []]).isEmpty == false {
+				return false
+			}
+		}
+		return true
 	}
 
 	private func rebuildAllMemberships(
 		accountID: String,
 		dayBounds: ReaderLocalDayBounds?,
+		preservingLocalCollections: Bool = false,
+		subscriptions suppliedSubscriptions: [FeedSubscription]? = nil,
 		database: OpaquePointer,
 	) throws {
-		try execute(
-			"DELETE FROM cached_collection_articles WHERE account_id = ?",
-			bindings: [.text(accountID)],
-			database: database,
-		)
 		var articles: [Recommendation] = []
 		try query(
 			"SELECT payload FROM cached_articles WHERE account_id = ?",
@@ -1514,15 +1911,106 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			database: database,
 		) { statement in
 			guard let payload = data(at: 0, statement: statement) else {
-				throw OfflineLibraryError.invalidSyncChange("A cached article had no payload.")
+				throw OfflineLibraryError.invalidCacheState("A cached article had no payload.")
 			}
-			articles.append(try decoder.decode(Recommendation.self, from: payload))
+			do {
+				articles.append(try decoder.decode(Recommendation.self, from: payload))
+			} catch {
+				throw OfflineLibraryError.invalidCacheState("A cached article had an invalid payload.")
+			}
 		}
+		let activeSubscriptions: [FeedSubscription]
+		if let suppliedSubscriptions {
+			activeSubscriptions = suppliedSubscriptions
+		} else {
+			activeSubscriptions = try cachedSubscriptions(accountID: accountID, database: database)
+		}
+		var subscriptionsByFeedKey: [String: [FeedSubscription]] = [:]
+		for subscription in activeSubscriptions {
+			subscriptionsByFeedKey[subscription.id, default: []].append(subscription)
+			if subscription.feedKey != subscription.id {
+				subscriptionsByFeedKey[subscription.feedKey, default: []].append(subscription)
+			}
+		}
+		var navigationCollectionIDsByFeedKey: [String: Set<String>] = [:]
+		try query(
+			"SELECT id, feed_key FROM cached_navigation_items WHERE account_id = ? AND feed_key IS NOT NULL AND feed_key <> ''",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				let feedKey = string(at: 1, statement: statement),
+				feedKey.isEmpty == false else {
+				return
+			}
+			navigationCollectionIDsByFeedKey[feedKey, default: []].insert(collectionID)
+		}
+		let protectedCollectionIDs = try cachedExplicitCollectionIDs(accountID: accountID, database: database)
+		var localMemberships: [(collectionID: String, articleID: String, position: Int)] = []
+		if preservingLocalCollections || protectedCollectionIDs.isEmpty == false {
+			let managedCollectionIDs = Set([
+				ReaderSection.unread.rawValue,
+				ReaderSection.today.rawValue,
+				ReaderSection.starred.rawValue,
+			])
+			let feedCollectionIDs = collectionIDs(for: activeSubscriptions)
+			var navigationCollectionIDs = Set<String>()
+			try query(
+				"SELECT id FROM cached_navigation_items WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			) { statement in
+				if let collectionID = string(at: 0, statement: statement) {
+					// ForYou is a local recommendation page even though it appears as a
+					// navigation item; keep its ordered rows across a projection repair.
+					if collectionID != ReaderSection.forYou.rawValue {
+						navigationCollectionIDs.insert(collectionID)
+					}
+				}
+			}
+			let derivedCollectionIDs = managedCollectionIDs
+				.union(feedCollectionIDs)
+				.union(navigationCollectionIDs)
+			let validArticleIDs = Set(articles.map(\.id))
+			try query(
+				"SELECT collection_id, article_id, position FROM cached_collection_articles WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			) { statement in
+				guard let collectionID = string(at: 0, statement: statement),
+					let articleID = string(at: 1, statement: statement),
+					(derivedCollectionIDs.contains(collectionID) == false || protectedCollectionIDs.contains(collectionID)),
+					validArticleIDs.contains(articleID) else {
+					return
+				}
+				localMemberships.append((collectionID, articleID, Int(sqlite3_column_int64(statement, 2))))
+			}
+		}
+		// Decode the complete article set before deleting any projection rows. A
+		// malformed article must leave the last valid membership projection intact so a
+		// cold load can still show its valid stories and mark repair for the bad row.
+		try execute(
+			"DELETE FROM cached_collection_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		)
 		for article in articles {
 			try rebuildMemberships(
 				for: article,
+				currentSubscriptions: subscriptionsByFeedKey[article.feedKey, default: []],
+				navigationCollectionIDs: navigationCollectionIDsByFeedKey[article.feedKey, default: []],
 				dayBounds: dayBounds,
+				protectedCollectionIDs: protectedCollectionIDs,
 				accountID: accountID,
+				database: database,
+			)
+		}
+		for membership in localMemberships {
+			try insertCollectionMembership(
+				accountID: accountID,
+				collectionID: membership.collectionID,
+				articleID: membership.articleID,
+				position: membership.position,
 				database: database,
 			)
 		}
@@ -1592,21 +2080,34 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			unreadCounts: unreadCounts + [ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: allArticles)],
 			smartCounts: ReaderNavigationSmartCounts(forYou: forYou, today: today, unread: allArticles, starred: starred),
 		)
-		try cacheNavigationItems(navigation, accountID: accountID, database: database)
-		var cachedArticles: [Recommendation] = []
-		try query(
-			"SELECT payload FROM cached_articles WHERE account_id = ?",
-			bindings: [.text(accountID)], database: database,
-		) { statement in
-			if let payload = data(at: 0, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload) {
-				cachedArticles.append(article)
-			}
-		}
-		for article in cachedArticles {
-			try rebuildMemberships(for: article, accountID: accountID, database: database)
-		}
+		try writeNavigation(navigation, accountID: accountID, database: database)
 		return navigation
+	}
+
+	private func writeNavigation(
+		_ navigation: ReaderNavigationState,
+		payload: Data? = nil,
+		accountID: String,
+		database: OpaquePointer,
+	) throws {
+		let encodedPayload: Data
+		if let payload {
+			encodedPayload = payload
+		} else {
+			encodedPayload = try encoder.encode(navigation)
+		}
+		try execute(
+			"""
+			INSERT INTO cached_navigation (account_id, payload, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT(account_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+			""",
+			bindings: [
+				.text(accountID), .blob(encodedPayload),
+				.double(Date.now.timeIntervalSince1970),
+			],
+			database: database,
+		)
+		try cacheNavigationItems(navigation, accountID: accountID, database: database)
 	}
 
 	private func cacheNavigationItems(_ navigation: ReaderNavigationState, accountID: String, database: OpaquePointer) throws {
@@ -1617,6 +2118,333 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				bindings: [.text(accountID), .text(item.id), .optionalText(item.feedKey)], database: database,
 			)
 		}
+	}
+
+	private func clearCachedNavigation(accountID: String, database: OpaquePointer) throws {
+		try execute(
+			"DELETE FROM cached_navigation_items WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		)
+		try execute(
+			"DELETE FROM cached_navigation WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		)
+	}
+
+	private func deleteStagingRows(accountID: String, database: OpaquePointer) throws {
+		for table in Self.rebuildCacheTables {
+			try execute(
+				"DELETE FROM \(table) WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			)
+		}
+		try execute(
+			"DELETE FROM cache_rebuild_intents WHERE staging_account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		)
+	}
+
+	private func seedRebuildIntents(
+		accountID: String,
+		stagingAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		var pending: [(Int64, String, Data, Double)] = []
+		try query(
+			"SELECT sequence, id, payload, created_at FROM pending_actions WHERE account_id = ? ORDER BY sequence",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let mutationID = string(at: 1, statement: statement),
+				let payload = data(at: 2, statement: statement),
+				let mutation = try? decoder.decode(OfflineMutation.self, from: payload),
+				mutation.isStatusProjection else {
+				return
+			}
+			pending.append((
+				sqlite3_column_int64(statement, 0),
+				mutationID,
+				payload,
+				sqlite3_column_double(statement, 3),
+			))
+		}
+		for (sequence, mutationID, payload, createdAt) in pending {
+			try execute(
+				"INSERT OR IGNORE INTO cache_rebuild_intents (account_id, staging_account_id, mutation_id, sequence, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+				bindings: [
+					.text(accountID), .text(stagingAccountID), .text(mutationID), .int64(sequence),
+					.blob(payload), .double(createdAt),
+				],
+				database: database,
+			)
+		}
+	}
+
+	private func applyPendingStatusOverlay(
+		accountID: String,
+		storageAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		guard let stagingAccountID = stagingAccountIDs[accountID], stagingAccountID == storageAccountID else {
+			return
+		}
+		var mutations: [OfflineMutation] = []
+		try query(
+			"SELECT payload FROM cache_rebuild_intents WHERE account_id = ? AND staging_account_id = ? ORDER BY sequence",
+			bindings: [.text(accountID), .text(stagingAccountID)],
+			database: database,
+		) { statement in
+			guard let payload = data(at: 0, statement: statement),
+				let mutation = try? decoder.decode(OfflineMutation.self, from: payload) else {
+				throw OfflineLibraryError.invalidCacheState("A rebuild status intent had an invalid payload.")
+			}
+			mutations.append(mutation)
+		}
+		for mutation in mutations {
+			try applyStatusProjection(mutation, storageAccountID: storageAccountID, database: database)
+		}
+	}
+
+	private func applyStatusProjection(
+		_ mutation: OfflineMutation,
+		storageAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		guard mutation.isStatusProjection, let value = mutation.value else { return }
+		var updatedArticleIDs: Set<String> = []
+		for itemID in mutation.itemIds {
+			for lookupID in statusLookupIdentifiers(itemID) {
+				for storedArticle in try loadStoredArticles(
+					identifier: lookupID,
+					accountID: storageAccountID,
+					database: database,
+				) where updatedArticleIDs.insert(storedArticle.id).inserted {
+					var article = storedArticle.article
+					switch mutation.kind {
+					case .setRead, .setReadBatch:
+						article.isRead = value
+					case .setStarred:
+						article.isStarred = value
+					default:
+						continue
+					}
+					try writeArticle(
+						article,
+						bodyPruned: storedArticle.bodyPruned,
+						accountID: storageAccountID,
+						database: database,
+					)
+				}
+			}
+		}
+	}
+
+	private func statusLookupIdentifiers(_ itemID: String) -> [String] {
+		let prefix = "tag:google.com,2005:reader/item/"
+		if itemID.hasPrefix(prefix),
+			let rowID = UInt64(String(itemID.dropFirst(prefix.count)), radix: 16) {
+			return [itemID, String(rowID)]
+		}
+		if let rowID = UInt64(itemID) {
+			return [itemID, prefix + String(rowID, radix: 16)]
+		}
+		return [itemID]
+	}
+
+	private func preserveCanonicalForYouMemberships(
+		accountID: String,
+		stagingAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		try execute(
+			"""
+			INSERT INTO cached_collection_articles (account_id, collection_id, article_id, position)
+			SELECT ?, ?, staged.id, canonical_membership.position
+			FROM cached_collection_articles AS canonical_membership
+			JOIN cached_articles AS canonical_article
+			  ON canonical_article.account_id = canonical_membership.account_id
+			 AND canonical_article.id = canonical_membership.article_id
+			JOIN cached_articles AS staged
+			  ON staged.account_id = ?
+			 AND (
+				 staged.id = canonical_article.id
+				 OR (
+					 canonical_article.reader_id <> ''
+					 AND staged.reader_id <> ''
+					 AND staged.reader_id = canonical_article.reader_id
+				 )
+			 )
+			WHERE canonical_membership.account_id = ?
+			  AND canonical_membership.collection_id = ?
+			ON CONFLICT(account_id, collection_id, article_id) DO UPDATE SET
+			position = CASE WHEN cached_collection_articles.position < excluded.position
+				THEN cached_collection_articles.position ELSE excluded.position END
+			""",
+			bindings: [
+				.text(stagingAccountID), .text(ReaderSection.forYou.rawValue), .text(stagingAccountID),
+				.text(accountID), .text(ReaderSection.forYou.rawValue),
+			],
+			database: database,
+		)
+	}
+
+	private func preserveCanonicalArticleBodies(
+		accountID: String,
+		stagingAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		var replacements: [String: Recommendation] = [:]
+		try query(
+			"""
+			SELECT staged.id, staged.payload, canonical.payload
+			FROM cached_articles AS staged
+			JOIN cached_articles AS canonical
+			  ON canonical.account_id = ?
+			 AND (
+				 canonical.id = staged.id
+				 OR (
+					 canonical.reader_id <> ''
+					 AND staged.reader_id <> ''
+					 AND canonical.reader_id = staged.reader_id
+				 )
+				 )
+			JOIN cached_collection_articles AS canonical_recommendation
+			  ON canonical_recommendation.account_id = ?
+			 AND canonical_recommendation.collection_id = ?
+			 AND canonical_recommendation.article_id = canonical.id
+			WHERE staged.account_id = ? AND staged.body_pruned = 1
+			""",
+			bindings: [
+				.text(accountID), .text(accountID), .text(ReaderSection.forYou.rawValue),
+				.text(stagingAccountID),
+			],
+			database: database,
+		) { statement in
+			guard let stageID = string(at: 0, statement: statement),
+				let stagePayload = data(at: 1, statement: statement),
+				let canonicalPayload = data(at: 2, statement: statement),
+				let stagedArticle = try? decoder.decode(Recommendation.self, from: stagePayload),
+				let canonicalArticle = try? decoder.decode(Recommendation.self, from: canonicalPayload),
+				stagedArticle.hasReadableHTML == false,
+				canonicalArticle.hasReadableHTML else {
+				return
+			}
+			replacements[stageID] = articleWithID(stagedArticle.replacingHTML(canonicalArticle.html), id: stageID)
+		}
+		for article in replacements.values {
+			try writeArticle(article, bodyPruned: false, accountID: stagingAccountID, database: database)
+		}
+	}
+
+	private func preserveCanonicalPagination(
+		accountID: String,
+		stagingAccountID: String,
+		database: OpaquePointer,
+	) throws {
+		try execute(
+			"""
+			INSERT INTO cached_collection_pagination (account_id, collection_id, continuation)
+			SELECT ?, collection_id, continuation
+			FROM cached_collection_pagination
+			WHERE account_id = ? AND continuation <> ''
+			ON CONFLICT(account_id, collection_id) DO NOTHING
+			""",
+			bindings: [.text(stagingAccountID), .text(accountID)],
+			database: database,
+		)
+		// Discard canonical continuation tokens for feeds/folders absent from the
+		// staged authoritative navigation. Smart ForYou/Today/Unread pages are retained
+		// because they are local collection views and have no feed item in navigation.
+		try execute(
+			"""
+			DELETE FROM cached_collection_pagination
+			WHERE account_id = ?
+			  AND (
+				  continuation = ''
+				  OR (
+					  collection_id <> ?
+					  AND NOT EXISTS (
+					  SELECT 1 FROM cached_navigation_items staged_navigation
+					  WHERE staged_navigation.account_id = ?
+						AND staged_navigation.id = cached_collection_pagination.collection_id
+					  )
+				  )
+				  )
+			""",
+			bindings: [.text(stagingAccountID), .text(ReaderSection.forYou.rawValue), .text(stagingAccountID)],
+			database: database,
+		)
+	}
+
+	private func promoteStaging(
+		accountID: String,
+		stagingAccountID: String,
+		date _: Date,
+		database: OpaquePointer,
+	) throws {
+		guard accountID != stagingAccountID else {
+			throw OfflineLibraryError.invalidCacheState("The rebuild generation was not isolated from the account cache.")
+		}
+		// Recommendations and selected collection pages are local read state rather
+		// than sync-owned tables. Carry only rows whose article still exists in the
+		// authoritative staged generation; a deleted server article is therefore not
+		// resurrected by this merge.
+		try preserveCanonicalForYouMemberships(
+			accountID: accountID,
+			stagingAccountID: stagingAccountID,
+			database: database,
+		)
+		try preserveCanonicalArticleBodies(
+			accountID: accountID,
+			stagingAccountID: stagingAccountID,
+			database: database,
+		)
+		try preserveCanonicalPagination(
+			accountID: accountID,
+			stagingAccountID: stagingAccountID,
+			database: database,
+		)
+		let copies = [
+			("cached_navigation_items", "id, feed_key"),
+			("cached_navigation", "payload, updated_at"),
+			("cached_subscriptions", "id, title, payload"),
+			("cached_feeds", "feed_key, stream_id, title, feed_url, site_url, icon_url, is_active, folders_json"),
+			("cached_articles", "id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, payload"),
+			("cached_collection_articles", "collection_id, article_id, position"),
+			("cached_collection_pagination", "collection_id, continuation"),
+			("sync_state", "cursor, last_sync_at"),
+			("cache_integrity", "format_version, state, navigation_freshness, last_attempt_at, last_success_at, last_error, invalid_change_count, last_page_has_more, updated_at"),
+		]
+		for (table, columns) in copies {
+			try execute(
+				"DELETE FROM \(table) WHERE account_id = ?",
+				bindings: [.text(accountID)],
+				database: database,
+			)
+			try execute(
+				"INSERT INTO \(table) (account_id, \(columns)) SELECT ?, \(columns) FROM \(table) WHERE account_id = ?",
+				bindings: [.text(accountID), .text(stagingAccountID)],
+				database: database,
+			)
+		}
+		// A completed authoritative rebuild owns sync-derived collections. Keep the
+		// local ForYou page marker, but discard markers for feed/smart pages so later
+		// repair can reconcile the promoted projection with server state.
+		try execute(
+			"DELETE FROM cached_collection_states WHERE account_id = ? AND collection_id <> ?",
+			bindings: [.text(accountID), .text(ReaderSection.forYou.rawValue)],
+			database: database,
+		)
+		try execute(
+			"DELETE FROM cache_rebuilds WHERE account_id = ? AND staging_account_id = ?",
+			bindings: [.text(accountID), .text(stagingAccountID)],
+			database: database,
+		)
+		try deleteStagingRows(accountID: stagingAccountID, database: database)
 	}
 
 	private func membershipUnreadCount(collectionID: String, accountID: String, database: OpaquePointer) throws -> Int {
@@ -1747,13 +2575,137 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			"CREATE TABLE IF NOT EXISTS cached_collection_articles (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, article_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (account_id, collection_id, article_id))",
 			"CREATE INDEX IF NOT EXISTS idx_cached_collection_order ON cached_collection_articles(account_id, collection_id, position)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_pagination (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, continuation TEXT NOT NULL, PRIMARY KEY (account_id, collection_id))",
+			"CREATE TABLE IF NOT EXISTS cached_collection_states (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, explicit_page INTEGER NOT NULL DEFAULT 1, updated_at REAL NOT NULL, PRIMARY KEY (account_id, collection_id))",
+			"CREATE INDEX IF NOT EXISTS idx_cached_collection_states_account ON cached_collection_states(account_id, explicit_page)",
+			"CREATE TABLE IF NOT EXISTS cache_collection_state_migrations (account_id TEXT PRIMARY KEY, seeded_at REAL NOT NULL)",
 			"CREATE TABLE IF NOT EXISTS sync_state (account_id TEXT PRIMARY KEY, cursor TEXT, last_sync_at REAL)",
 			"CREATE TABLE IF NOT EXISTS cache_integrity (account_id TEXT PRIMARY KEY, format_version INTEGER NOT NULL, state TEXT NOT NULL, navigation_freshness TEXT NOT NULL, last_attempt_at REAL, last_success_at REAL, last_error TEXT, invalid_change_count INTEGER NOT NULL DEFAULT 0, last_page_has_more INTEGER, updated_at REAL NOT NULL)",
+			"CREATE TABLE IF NOT EXISTS cache_rebuilds (account_id TEXT PRIMARY KEY, staging_account_id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL)",
+			"CREATE TABLE IF NOT EXISTS cache_rebuild_intents (account_id TEXT NOT NULL, staging_account_id TEXT NOT NULL, mutation_id TEXT NOT NULL, sequence INTEGER NOT NULL, payload BLOB NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (account_id, mutation_id))",
+			"CREATE INDEX IF NOT EXISTS idx_cache_rebuild_intents_stage ON cache_rebuild_intents(staging_account_id)",
 			"CREATE TABLE IF NOT EXISTS pending_actions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at REAL NOT NULL, UNIQUE (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_pending_actions_account ON pending_actions(account_id, sequence)",
 			"CREATE TABLE IF NOT EXISTS reader_state (account_id TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at REAL NOT NULL)",
 		]
 		for sql in statements { try execute(sql, database: database) }
+		try migrateCacheRebuildIntents(database: database)
+		try migrateCollectionStateMarkers(database: database)
+		try execute(
+			"CREATE INDEX IF NOT EXISTS idx_cache_rebuild_intents_stage_sequence ON cache_rebuild_intents(staging_account_id, sequence)",
+			database: database,
+		)
+	}
+
+	private func migrateCollectionStateMarkers(database: OpaquePointer) throws {
+		let schemaMarker = "__schema_v1__"
+		guard try scalarCount(
+			"SELECT COUNT(*) FROM cache_collection_state_migrations WHERE account_id = ?",
+			accountID: schemaMarker,
+			database: database,
+		) == 0 else {
+			return
+		}
+		var accounts = Set<String>()
+		try query(
+			"""
+			SELECT account_id FROM cached_collection_articles
+			UNION SELECT account_id FROM cached_navigation_items
+			UNION SELECT account_id FROM cached_navigation
+			UNION SELECT account_id FROM cached_collection_pagination
+			""",
+			database: database,
+		) { statement in
+			if let accountID = string(at: 0, statement: statement), accountID.hasPrefix("__pigeon_rebuild__") == false {
+				accounts.insert(accountID)
+			}
+		}
+		try transaction(database) {
+			let now = Date.now.timeIntervalSince1970
+			for accountID in accounts {
+				// Older builds did not record whether a collection came from a direct
+				// page replacement or from sync. Preserve every existing projection
+				// conservatively, including empty smart/feed pages represented only by
+				// navigation items, until a subsequent authoritative rebuild reconciles it.
+				try execute(
+					"""
+					INSERT OR IGNORE INTO cached_collection_states
+					(account_id, collection_id, explicit_page, updated_at)
+					SELECT account_id, collection_id, 1, ?
+					FROM cached_collection_articles WHERE account_id = ?
+					""",
+					bindings: [.double(now), .text(accountID)],
+					database: database,
+				)
+				try execute(
+					"""
+					INSERT OR IGNORE INTO cached_collection_states
+					(account_id, collection_id, explicit_page, updated_at)
+					SELECT account_id, id, 1, ?
+					FROM cached_navigation_items WHERE account_id = ?
+					""",
+					bindings: [.double(now), .text(accountID)],
+					database: database,
+				)
+				// Some old databases retained the navigation blob but not its item
+				// index. Decode it opportunistically; malformed navigation is handled by
+				// the normal tolerant snapshot path and must not abort this migration.
+				try query(
+					"SELECT payload FROM cached_navigation WHERE account_id = ?",
+					bindings: [.text(accountID)],
+					database: database,
+				) { statement in
+					guard let payload = data(at: 0, statement: statement),
+						let navigation = try? decoder.decode(ReaderNavigationState.self, from: payload) else {
+						return
+					}
+					for item in navigation.items {
+						try execute(
+							"INSERT OR IGNORE INTO cached_collection_states (account_id, collection_id, explicit_page, updated_at) VALUES (?, ?, 1, ?)",
+							bindings: [.text(accountID), .text(item.id), .double(now)],
+							database: database,
+						)
+					}
+				}
+			}
+			try execute(
+				"INSERT INTO cache_collection_state_migrations (account_id, seeded_at) VALUES (?, ?)",
+				bindings: [.text(schemaMarker), .double(now)],
+				database: database,
+			)
+		}
+	}
+
+	private func migrateCacheRebuildIntents(database: OpaquePointer) throws {
+		var columns = Set<String>()
+		try query("PRAGMA table_info(cache_rebuild_intents)", database: database) { statement in
+			if let name = string(at: 1, statement: statement) {
+				columns.insert(name)
+			}
+		}
+		guard columns.contains("sequence") == false else { return }
+		// This table is private rebuild state. Older development databases may have
+		// created it before the durable pending-action sequence was added. Preserve
+		// those rows and recover their original order from pending_actions where the
+		// mutation is still queued; rowid is a stable best-effort order for an already
+		// acknowledged intent that is intentionally retained through promotion.
+		try execute(
+			"ALTER TABLE cache_rebuild_intents ADD COLUMN sequence INTEGER NOT NULL DEFAULT 0",
+			database: database,
+		)
+		try execute(
+			"""
+			UPDATE cache_rebuild_intents
+			SET sequence = COALESCE(
+				(SELECT pending_actions.sequence
+				 FROM pending_actions
+				 WHERE pending_actions.account_id = cache_rebuild_intents.account_id
+				   AND pending_actions.id = cache_rebuild_intents.mutation_id),
+				rowid
+			)
+			WHERE sequence = 0
+			""",
+			database: database,
+		)
 	}
 
 	private static func defaultDatabaseURL() -> URL {
@@ -1930,6 +2882,17 @@ nonisolated enum OfflineLibraryError: LocalizedError, Equatable {
 		case .missingStatusTarget(let articleID): "Pigeon could not apply a status for missing article \(articleID)."
 		case .invalidCacheState(let message): "Pigeon could not complete offline synchronization: \(message)"
 		case .navigationUnavailable: "Pigeon could not refresh its navigation counts."
+		}
+	}
+}
+
+private nonisolated extension OfflineMutation {
+	var isStatusProjection: Bool {
+		switch kind {
+		case .setRead, .setReadBatch, .setStarred:
+			return value != nil && itemIds.isEmpty == false
+		default:
+			return false
 		}
 	}
 }

@@ -135,7 +135,11 @@ final class ReaderAppModel {
 	private var activeNavigationLoadID: UUID?
 	private var activeNavigationLoadIDs: Set<UUID> = []
 	private var activeLibraryLoadID: UUID?
-	private var libraryGeneration = UUID()
+	private(set) var libraryGeneration = UUID()
+	private var failedInitialLoadCollectionIDs: Set<String> = []
+	private var completedInitialLoadCollectionIDs: Set<String> = []
+	private var automaticDisplaySuppressionCollectionID: String?
+	private var livePagesDuringOfflineSynchronization: [String: [Recommendation]] = [:]
 	private var offlinePersistenceTask: Task<Bool, Never>?
 	private var preparedOfflineAccountID: String?
 	private var offlineSyncCursor: String?
@@ -435,6 +439,26 @@ final class ReaderAppModel {
 		loadingCollections.contains(collection.id)
 	}
 
+	/// Returns whether the selected collection has not produced a live result yet
+	/// and its launch preparation is still reading/restoring the local library.
+	/// The list uses this alongside the request-specific loading flag so a slow
+	/// snapshot read does not look like a confirmed empty collection.
+	func isInitialLoadPending(for collection: ReaderNavigationItem) -> Bool {
+		guard allArticles(for: collection).isEmpty,
+			failedInitialLoadCollectionIDs.contains(collection.id) == false,
+			completedInitialLoadCollectionIDs.contains(collection.id) == false,
+			selectedNavigationID == collection.id,
+			loadingCollections.contains(collection.id) == false,
+			offlinePreparationTask != nil || isSynchronizingOfflineLibrary else {
+			return loadingCollections.contains(collection.id)
+		}
+		return true
+	}
+
+	func hasFailedInitialLoad(for collection: ReaderNavigationItem) -> Bool {
+		failedInitialLoadCollectionIDs.contains(collection.id)
+	}
+
 	func canLoadMore(collection: ReaderNavigationItem) -> Bool {
 		streamContinuations[collection.id] != nil
 	}
@@ -482,11 +506,16 @@ final class ReaderAppModel {
 			offlinePreparationTask = nil
 			offlinePreparationTaskID = nil
 			deferredInitialFeedPaginationCollectionID = nil
+			invalidateCollectionLoads()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
 			session = nil
 			apiClient = nil
 			articleCache = [:]
+			failedInitialLoadCollectionIDs.removeAll()
+			completedInitialLoadCollectionIDs.removeAll()
+			automaticDisplaySuppressionCollectionID = nil
+			livePagesDuringOfflineSynchronization.removeAll()
 			sortOrders = [:]
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
@@ -875,10 +904,18 @@ final class ReaderAppModel {
 		let isInitialPreparation = preparedOfflineAccountID != accountID
 		let preparationID = UUID()
 		activeOfflinePreparationID = preparationID
+		livePagesDuringOfflineSynchronization.removeAll()
 		var preparationGeneration = libraryGeneration
 		var requiresFullRebuild = offlineCacheIntegrity.requiresFullRebuild
+		var fullRebuildStartedAt: Date?
+		var snapshotLoadFailureMessage: String?
+		var shouldPersistTodayAfterRestore = false
 		if preparedOfflineAccountID != accountID {
 			resetInMemoryLibraryForAccountChange()
+			// A newly selected account has no trusted local cursor. Keep the
+			// bootstrap rebuild requirement from the reset state, including when
+			// loading that account's snapshot failed.
+			requiresFullRebuild = offlineCacheIntegrity.requiresFullRebuild
 			// The account reset invalidates any prior preparation. Re-establish this
 			// call's ownership after the reset before awaiting the snapshot.
 			activeOfflinePreparationID = preparationID
@@ -893,7 +930,7 @@ final class ReaderAppModel {
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
 				if applyCachedSnapshot(snapshot) {
-					await persistCollections([ReaderSection.today.rawValue])
+					shouldPersistTodayAfterRestore = true
 				}
 				preparationGeneration = libraryGeneration
 				preparedOfflineAccountID = accountID
@@ -903,8 +940,11 @@ final class ReaderAppModel {
 					preparationID: preparationID,
 					generation: preparationGeneration,
 				) else { return }
-				errorMessage = error.localizedDescription
-				return
+				snapshotLoadFailureMessage = error.localizedDescription
+				errorMessage = snapshotLoadFailureMessage
+				// A cache read failure must not keep a healthy live page from rendering.
+				// Continue with a bootstrap sync and leave the cache error visible.
+				preparedOfflineAccountID = accountID
 			}
 		}
 
@@ -916,28 +956,40 @@ final class ReaderAppModel {
 			if activeOfflinePreparationID == preparationID {
 				isSynchronizingOfflineLibrary = false
 				offlineRepairInProgress = false
+				livePagesDuringOfflineSynchronization.removeAll()
 			}
 		}
 		do {
-			if requiresFullRebuild {
-				try await offlineStore.beginFullRebuild(accountID: accountID, at: synchronizationNow)
-				offlineSyncCursor = nil
-				hasLoadedNavigation = false
-				offlineCacheIntegrity = OfflineCacheIntegrity(
-					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-					state: .syncing,
-					navigation: .unverified,
-					lastAttemptAt: synchronizationNow,
-					lastSuccessAt: offlineCacheIntegrity.lastSuccessAt,
-					lastError: nil,
-					invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
-					lastPageHasMore: nil,
-				)
+			let selectedCollectionForInitialLoad = selectedCollection
+			let shouldLoadInitialCollection = shouldPrioritizeInitialCollectionLoad(selectedCollectionForInitialLoad)
+			automaticDisplaySuppressionCollectionID = shouldLoadInitialCollection
+				? selectedCollectionForInitialLoad.id
+				: nil
+			if shouldLoadInitialCollection {
+				// Render the selected page before unrelated replay, repair, sync,
+				// navigation, or subscription work can delay it.
+				await load(collection: selectedCollectionForInitialLoad, force: true, now: synchronizationNow)
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
+			}
+			if shouldPersistTodayAfterRestore {
+				// Snapshot cleanup is allowed to wait behind the first page, but it
+				// must never prevent that page request from starting.
+				await persistCollections([ReaderSection.today.rawValue])
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else { return }
 			}
 			var mutationReplayFailureMessage: String?
 			var mutationReplayFailureIsConnectivity: Bool?
+			var replayedMutationCount = 0
 			do {
-				_ = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
+				replayedMutationCount = try await mutationReplayer.replay(accountID: accountID, apiClient: apiClient)
 			} catch let error where isCancellation(error) {
 				throw error
 			} catch {
@@ -955,7 +1007,9 @@ final class ReaderAppModel {
 			if let mutationReplayFailureMessage {
 				isOffline = mutationReplayFailureIsConnectivity ?? false
 				let selectedCollectionAfterReplayFailure = selectedCollection
-				await load(collection: selectedCollectionAfterReplayFailure, force: true, now: synchronizationNow)
+				if shouldPrioritizeInitialCollectionLoad(selectedCollectionAfterReplayFailure) {
+					await load(collection: selectedCollectionAfterReplayFailure, force: true, now: synchronizationNow)
+				}
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -971,18 +1025,50 @@ final class ReaderAppModel {
 				)
 				return
 			}
-			let selectedCollectionForInitialLoad = selectedCollection
-			if isInitialPreparation,
-				shouldPrioritizeInitialCollectionLoad(selectedCollectionForInitialLoad) {
-				// Fill a cold visible collection before the full sync. This makes the
-				// first bounded page available as soon as its request completes while
-				// keeping queued mutations ahead of the live fetch.
-				await load(collection: selectedCollectionForInitialLoad, force: true, now: synchronizationNow)
+			let selectedCollectionAfterReplay = selectedCollection
+			if shouldRefreshInitialCollectionAfterReplay(
+				selectedCollectionAfterReplay,
+				replayedMutationCount: replayedMutationCount,
+			) {
+				// Replaying queued reads can hide every item in the prefetched
+				// personalized page. Fetch once more before unrelated sync work so
+				// the unread view does not remain empty until a manual refresh.
+				await load(collection: selectedCollectionAfterReplay, force: true, now: synchronizationNow)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
 					generation: preparationGeneration,
 				) else { return }
+			}
+			if requiresFullRebuild {
+				// Keep the canonical last-readable cache intact until replay has
+				// succeeded and the first page is already visible.
+				try await offlineStore.beginFullRebuild(accountID: accountID, at: synchronizationNow)
+				fullRebuildStartedAt = synchronizationNow
+				guard isCurrentOfflinePreparation(
+					accountID: accountID,
+					preparationID: preparationID,
+					generation: preparationGeneration,
+				) else {
+					await abandonFullRebuildIfNeeded(
+						accountID: accountID,
+						preparationID: preparationID,
+						startedAt: synchronizationNow,
+					)
+					return
+				}
+				offlineSyncCursor = nil
+				hasLoadedNavigation = false
+				offlineCacheIntegrity = OfflineCacheIntegrity(
+					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+					state: .syncing,
+					navigation: .unverified,
+					lastAttemptAt: synchronizationNow,
+					lastSuccessAt: offlineCacheIntegrity.lastSuccessAt,
+					lastError: nil,
+					invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
+					lastPageHasMore: nil,
+				)
 			}
 			let syncResult = try await synchronizeIncrementally(
 				accountID: accountID,
@@ -991,13 +1077,31 @@ final class ReaderAppModel {
 				fullRebuild: requiresFullRebuild,
 				dayBounds: dayBounds,
 			)
-			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				if let fullRebuildStartedAt {
+					await abandonFullRebuildIfNeeded(
+						accountID: accountID,
+						preparationID: preparationID,
+						startedAt: fullRebuildStartedAt,
+					)
+				}
+				return
+			}
 			preparationGeneration = libraryGeneration
 			guard isCurrentOfflinePreparation(
 				accountID: accountID,
 				preparationID: preparationID,
 				generation: preparationGeneration,
-			) else { return }
+			) else {
+				if let fullRebuildStartedAt {
+					await abandonFullRebuildIfNeeded(
+						accountID: accountID,
+						preparationID: preparationID,
+						startedAt: fullRebuildStartedAt,
+					)
+				}
+				return
+			}
 			if isInitialPreparation,
 				syncResult.canUseIncrementalReload,
 				selectedCollection.kind == .feed,
@@ -1016,14 +1120,32 @@ final class ReaderAppModel {
 					accountID: accountID,
 					preparationID: preparationID,
 					generation: preparationGeneration,
-				) else { return }
+				) else {
+					if let fullRebuildStartedAt {
+						await abandonFullRebuildIfNeeded(
+							accountID: accountID,
+							preparationID: preparationID,
+							startedAt: fullRebuildStartedAt,
+						)
+					}
+					return
+				}
 				try Task.checkCancellation()
 				let libraryLoaded = await loadLibrary(force: true, reportError: false)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
 					generation: preparationGeneration,
-				) else { return }
+				) else {
+					if let fullRebuildStartedAt {
+						await abandonFullRebuildIfNeeded(
+							accountID: accountID,
+							preparationID: preparationID,
+							startedAt: fullRebuildStartedAt,
+						)
+					}
+					return
+				}
 				if navigationLoaded && libraryLoaded {
 					let successAt = Date.now
 					try await offlineStore.finishSynchronization(
@@ -1031,6 +1153,22 @@ final class ReaderAppModel {
 						at: successAt,
 						dayBounds: dayBounds,
 					)
+					fullRebuildStartedAt = nil
+					guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+						return
+					}
+					if let hydratedGeneration = await hydrateCommittedOfflineSnapshot(
+						accountID: accountID,
+						preparationID: preparationID,
+					) {
+						guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+							return
+						}
+						preparationGeneration = hydratedGeneration
+					}
+					guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+						return
+					}
 					offlineCacheIntegrity = OfflineCacheIntegrity(
 						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
 						state: .complete,
@@ -1048,6 +1186,19 @@ final class ReaderAppModel {
 					if errorMessage == nil {
 						errorMessage = "Sync failed"
 					}
+					if let fullRebuildStartedAt {
+						await abandonFullRebuildIfNeeded(
+							accountID: accountID,
+							preparationID: preparationID,
+							startedAt: fullRebuildStartedAt,
+						)
+					}
+					await refreshOfflineStorageStats(
+						accountID: accountID,
+						preparationID: preparationID,
+						generation: preparationGeneration,
+					)
+					return
 				}
 			}
 			if syncResult.canUseIncrementalReload == false
@@ -1061,6 +1212,13 @@ final class ReaderAppModel {
 			}
 			isOffline = false
 		} catch let error where isCancellation(error) {
+			if let fullRebuildStartedAt {
+				await abandonFullRebuildIfNeeded(
+					accountID: accountID,
+					preparationID: preparationID,
+					startedAt: fullRebuildStartedAt,
+				)
+			}
 			if isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) {
 				offlineCacheIntegrity = OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
@@ -1075,6 +1233,13 @@ final class ReaderAppModel {
 			}
 			return
 		} catch {
+			if let fullRebuildStartedAt {
+				await abandonFullRebuildIfNeeded(
+					accountID: accountID,
+					preparationID: preparationID,
+					startedAt: fullRebuildStartedAt,
+				)
+			}
 			guard isCurrentOfflinePreparation(
 				accountID: accountID,
 				preparationID: preparationID,
@@ -1096,6 +1261,9 @@ final class ReaderAppModel {
 				)
 			}
 			errorMessage = error.localizedDescription
+		}
+		if let snapshotLoadFailureMessage, errorMessage == nil {
+			errorMessage = snapshotLoadFailureMessage
 		}
 		guard isCurrentOfflinePreparation(
 			accountID: accountID,
@@ -1281,6 +1449,7 @@ final class ReaderAppModel {
 	private func select(collectionID: String) {
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
+			automaticDisplaySuppressionCollectionID = nil
 			clearDetachedSelectedArticle()
 			temporarilyUnavailableSelectedCollection = nil
 			errorMessage = nil
@@ -1422,9 +1591,9 @@ final class ReaderAppModel {
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
-		if selectedNavigationID == collection.id {
-			errorMessage = nil
-		}
+			if selectedNavigationID == collection.id {
+				errorMessage = nil
+			}
 		if offlineSynchronizationEnabled,
 			session != nil,
 			collection.id == selectedCollection.id {
@@ -1442,11 +1611,51 @@ final class ReaderAppModel {
 	}
 
 	func load(collection: ReaderNavigationItem, force: Bool = false, now: Date = .now) async {
+		await load(collection: collection, force: force, now: now, retryAttempt: 0)
+	}
+
+	/// Starts the list's automatic load after the snapshot/restore phase of an
+	/// initial preparation. If that preparation owns this collection's first page,
+	/// wait for it and use its current result. A different collection selected while
+	/// synchronization is still running loads independently, and later revisits
+	/// continue to refresh normally.
+	func loadForDisplay(collection: ReaderNavigationItem, now: Date = .now) async {
+		guard Task.isCancelled == false else { return }
+		let accountNeedsPreparation = offlineSynchronizationEnabled
+			&& (session.map { preparedOfflineAccountID != $0.storageIdentity } ?? false)
+		let shouldWaitForPreparation = accountNeedsPreparation
+			|| automaticDisplaySuppressionCollectionID == collection.id
+			&& completedInitialLoadCollectionIDs.contains(collection.id) == false
+			&& offlinePreparationTask != nil
+		if shouldWaitForPreparation, let preparationTask = offlinePreparationTask {
+			await preparationTask.value
+			guard Task.isCancelled == false else { return }
+		}
+		if automaticDisplaySuppressionCollectionID == collection.id,
+			completedInitialLoadCollectionIDs.contains(collection.id),
+			collection.kind != .feed || cachedCollectionHasMissingBodies(collection.id) == false {
+			automaticDisplaySuppressionCollectionID = nil
+			return
+		}
+		guard Task.isCancelled == false else { return }
+		await load(collection: collection, now: now)
+	}
+
+	private func load(
+		collection: ReaderNavigationItem,
+		force: Bool,
+		now: Date,
+		retryAttempt: Int,
+	) async {
+		guard retryAttempt > 0 || force || activeLoadIDs[collection.id] == nil else {
+			return
+		}
 		if force == false,
 			offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID != session.storageIdentity {
 			await prepareOfflineLibrary()
+			guard Task.isCancelled == false else { return }
 			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
 			if didPruneToday {
 				await persistCollections([collection.id])
@@ -1457,6 +1666,8 @@ final class ReaderAppModel {
 					|| collection.smartSection?.usesRecommendationEndpoint == true
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
 					|| shouldResolveCachedPagination(for: collection)
+					|| articleCache[collection.id]?.isEmpty == true
+						&& completedInitialLoadCollectionIDs.contains(collection.id) == false
 					|| didPruneToday {
 				await load(collection: collection, force: true, now: now)
 			}
@@ -1475,7 +1686,9 @@ final class ReaderAppModel {
 			if defersPaginationResolution == false,
 				collection.smartSection?.usesRecommendationEndpoint == true
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
-					|| shouldResolveCachedPagination(for: collection) {
+					|| shouldResolveCachedPagination(for: collection)
+					|| articleCache[collection.id]?.isEmpty == true
+						&& completedInitialLoadCollectionIDs.contains(collection.id) == false {
 				await load(collection: collection, force: true, now: now)
 			}
 			return
@@ -1525,10 +1738,11 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
 			}
-			let loadedArticles = try await applyingQueuedMutationIntent(
+			let mutationIntentResult = try await applyingQueuedMutationIntentOrFallback(
 				to: page.items,
 				accountID: context.accountID,
 			)
+			let loadedArticles = mutationIntentResult.articles
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
@@ -1542,27 +1756,16 @@ final class ReaderAppModel {
 				&& zip(existingArticles, loadedArticles).allSatisfy { pair in
 					articlesMatch(pair.0, pair.1)
 				}
-				guard await persistCollectionState(
-					loadedArticles,
-					collectionID: collection.id,
-					navigation: nextNavigation,
-					continuation: page.continuation,
-					context: context,
-					operationID: loadID,
-					isLoadMore: false,
-					persistArticles: reusesUnchangedPersistedPage == false,
-				) else {
-					return
-				}
-			try Task.checkCancellation()
-			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
-				return
-			}
 			resetStreamPagination(for: collection.id)
 			streamDayBounds[collection.id] = dayBounds
 			seenStreamContinuations[collection.id] = page.continuation.map { [$0] } ?? []
 			streamContinuations[collection.id] = page.continuation
 			setArticles(loadedArticles, for: collection.id)
+			failedInitialLoadCollectionIDs.remove(collection.id)
+			completedInitialLoadCollectionIDs.insert(collection.id)
+			if isSynchronizingOfflineLibrary {
+				livePagesDuringOfflineSynchronization[collection.id] = loadedArticles
+			}
 			collectionFreshness[collection.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 			if collection.smartSection == .forYou || collection.smartSection == .today {
 				updateNavigationCount(
@@ -1576,10 +1779,61 @@ final class ReaderAppModel {
 			if reusesUnchangedPersistedPage == false {
 				writeWidgetSnapshot()
 			}
+			if let cacheErrorMessage = mutationIntentResult.errorMessage {
+				// The live page is still authoritative for this display even when
+				// reading the durable outbox failed. Keep that cache failure visible
+				// without pretending the queued intent was applied or discarded.
+				errorMessage = cacheErrorMessage
+			}
+			// Keep the fetched page visible even when a disk write is slow or fails.
+			// The persistence task still owns all durable writes and rejects stale
+			// account/generation/collection operations through its existing guards.
+			guard await persistCollectionState(
+				loadedArticles,
+				collectionID: collection.id,
+				navigation: nextNavigation,
+				continuation: page.continuation,
+				context: context,
+				operationID: loadID,
+				isLoadMore: false,
+				persistArticles: reusesUnchangedPersistedPage == false,
+			) else {
+				return
+			}
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
-			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID, selectedNavigationID == collection.id else {
+			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
+				return
+			}
+			if shouldRetryInitialCollectionLoad(
+				error,
+				collection: collection,
+				retryAttempt: retryAttempt,
+			) {
+				do {
+					try await offlineSyncDelay(250_000_000)
+				} catch {
+					if isCancellation(error) { return }
+				}
+				guard Task.isCancelled == false,
+					isCurrentOperation(context),
+					activeLoadIDs[collection.id] == loadID else {
+					return
+				}
+				await load(
+					collection: collection,
+					force: true,
+					now: now,
+					retryAttempt: retryAttempt + 1,
+				)
+				return
+			}
+			if allArticles(for: collection).isEmpty {
+				failedInitialLoadCollectionIDs.insert(collection.id)
+				completedInitialLoadCollectionIDs.remove(collection.id)
+			}
+			guard selectedNavigationID == collection.id else {
 				return
 			}
 			errorMessage = error.localizedDescription
@@ -1632,10 +1886,11 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
 				return
 			}
-			let loadedArticles = try await applyingQueuedMutationIntent(
+			let mutationIntentResult = try await applyingQueuedMutationIntentOrFallback(
 				to: page.items,
 				accountID: context.accountID,
 			)
+			let loadedArticles = mutationIntentResult.articles
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
 				return
@@ -1662,6 +1917,25 @@ final class ReaderAppModel {
 				nextStreamContinuation = nil
 			}
 			let nextNavigation = navigationAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil)
+			setArticles(combinedArticles, for: collection.id)
+			if isSynchronizingOfflineLibrary {
+				livePagesDuringOfflineSynchronization[collection.id] = combinedArticles
+			}
+			seenStreamContinuations[collection.id] = nextSeenContinuations
+			streamContinuations[collection.id] = nextStreamContinuation
+			if collection.smartSection == .today {
+				updateNavigationCount(
+					for: collection.id,
+					to: unreadCountAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
+				)
+			}
+			writeWidgetSnapshot()
+			if let cacheErrorMessage = mutationIntentResult.errorMessage,
+				selectedNavigationID == collection.id {
+				errorMessage = cacheErrorMessage
+			}
+			// Publish the newly fetched rows before waiting on the serialized disk
+			// write, matching the initial-page path above.
 			guard await persistCollectionState(
 				combinedArticles,
 				collectionID: collection.id,
@@ -1673,20 +1947,6 @@ final class ReaderAppModel {
 			) else {
 				return
 			}
-			try Task.checkCancellation()
-			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
-				return
-			}
-			setArticles(combinedArticles, for: collection.id)
-			seenStreamContinuations[collection.id] = nextSeenContinuations
-			streamContinuations[collection.id] = nextStreamContinuation
-			if collection.smartSection == .today {
-				updateNavigationCount(
-					for: collection.id,
-					to: unreadCountAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
-				)
-			}
-			writeWidgetSnapshot()
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
@@ -2829,14 +3089,36 @@ final class ReaderAppModel {
 	/// Drops yesterday's Today rows after local midnight and refreshes if Today is open.
 	@discardableResult
 	func handleLocalDayChange(now: Date = .now) async -> Bool {
-		guard pruneStaleTodayStories(now: now) else {
-			return false
+		if pruneStaleTodayStories(now: now) {
+			if selectedCollection.smartSection == .today {
+				await load(collection: selectedCollection, force: true, now: now)
+			}
+			// Persist the pruned cache after the selected Today page has had a
+			// chance to render and refresh.
+			await persistCollections([ReaderSection.today.rawValue])
+			return true
 		}
-		await persistCollections([ReaderSection.today.rawValue])
-		if selectedCollection.smartSection == .today {
-			await load(collection: selectedCollection, force: true, now: now)
+		await retryFailedInitialCollectionIfNeeded(now: now)
+		return false
+	}
+
+	private func retryFailedInitialCollectionIfNeeded(now: Date) async {
+		guard offlineSynchronizationEnabled,
+			let session,
+			apiClient != nil,
+			preparedOfflineAccountID == session.storageIdentity,
+			let collection = navigation.item(withID: selectedNavigationID) ?? temporarilyUnavailableSelectedCollection,
+			loadingCollections.contains(collection.id) == false,
+			completedInitialLoadCollectionIDs.contains(collection.id) == false else {
+			return
 		}
-		return true
+
+		// Foreground reactivation is a bounded recovery trigger for a cold page
+		// that failed before it could publish anything. A successful empty page
+		// is represented by an empty cached array and therefore does not retry.
+		// Recovery belongs to the visible page. It must use this activation's day
+		// bounds and remain independent of unrelated replay or full-cache repair.
+		await load(collection: collection, force: true, now: now)
 	}
 
 	func undoLastBulkRead() async {
@@ -2885,6 +3167,56 @@ final class ReaderAppModel {
 		}
 		await persistCollections([forYouID])
 		await replayPendingMutations()
+	}
+
+	/// Stop routing writes into a rebuild that this preparation could not finish.
+	/// The store keeps the durable marker and staged rows for the next attempt;
+	/// this call only removes the in-process routing entry after ownership is
+	/// checked, so a stale preparation cannot abandon a newer rebuild.
+	private func abandonFullRebuildIfNeeded(
+		accountID: String,
+		preparationID: UUID,
+		startedAt: Date,
+	) async {
+		// The store compares the exact stage token, so even an old preparation may
+		// clean up its own abandoned stage without affecting a newer one.
+		do {
+			try await offlineStore.abandonFullRebuild(accountID: accountID, startedAt: startedAt)
+		} catch {
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				return
+			}
+			if errorMessage == nil {
+				errorMessage = error.localizedDescription
+			}
+		}
+	}
+
+	private func hydrateCommittedOfflineSnapshot(
+		accountID: String,
+		preparationID: UUID,
+	) async -> UUID? {
+		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+			return nil
+		}
+		do {
+			let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				return nil
+			}
+			_ = applyCachedSnapshot(snapshot, preservingPagination: true)
+			return libraryGeneration
+		} catch let error where isCancellation(error) {
+			return nil
+		} catch {
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				return nil
+			}
+			if errorMessage == nil {
+				errorMessage = error.localizedDescription
+			}
+			return nil
+		}
 	}
 
 	private func synchronizeIncrementally(
@@ -2941,6 +3273,13 @@ final class ReaderAppModel {
 				at: successAt,
 				dayBounds: dayBounds,
 			)
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: false)
+			}
+			// No server data changed, and the initial snapshot already repaired its
+			// projection before display. Keep the visible generation and avoid a
+			// second full-library decode; finishWarmSynchronization still validates
+			// durable memberships before recording success.
 			offlineCacheIntegrity = OfflineCacheIntegrity(
 				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
 				state: .complete,
@@ -3012,6 +3351,41 @@ final class ReaderAppModel {
 		return (error as NSError).localizedDescription.lowercased().contains("1102")
 	}
 
+	private func shouldRetryInitialCollectionLoad(
+		_ error: Error,
+		collection: ReaderNavigationItem,
+		retryAttempt: Int,
+	) -> Bool {
+		guard retryAttempt == 0,
+			isCancellation(error) == false,
+			allArticles(for: collection).isEmpty else {
+			return false
+		}
+		if isTransientInitialCollectionLoadFailure(error) {
+			return true
+		}
+		return false
+	}
+
+	private func isTransientInitialCollectionLoadFailure(_ error: Error) -> Bool {
+		if isConnectivityFailure(error) {
+			return true
+		}
+		if case let PigeonError.server(statusCode, _) = error, [500, 502, 503, 504].contains(statusCode) {
+			return true
+		}
+		// A transiently malformed or non-HTTP response can happen while the
+		// service is restarting. Retry once for a cold page, then expose the
+		// final error instead of looping indefinitely.
+		if error is DecodingError {
+			return true
+		}
+		if case PigeonError.invalidResponse = error {
+			return true
+		}
+		return false
+	}
+
 	private func isStructuralOfflineSyncFailure(_ error: Error) -> Bool {
 		if error is OfflineLibraryError || error is DecodingError {
 			return true
@@ -3066,6 +3440,11 @@ final class ReaderAppModel {
 		offlineCacheIntegrity = snapshot.integrity
 		offlineSyncCursor = snapshot.cursor
 		let openArticle = selectedArticle
+		let currentLiveArticles = isSynchronizingOfflineLibrary
+			? livePagesDuringOfflineSynchronization.reduce(into: [String: [Recommendation]]()) { result, pair in
+				result[pair.key] = articleCache[pair.key] ?? []
+			}
+			: [:]
 		let preserveOpenReader = preferredCompactColumn == .detail
 			&& openArticle != nil
 		let preservedNavigationID = selectedNavigationID
@@ -3078,6 +3457,7 @@ final class ReaderAppModel {
 		let currentTodayBounds = ReaderLocalDayBounds.localDay(containing: .now)
 		let hadTrustedTodayBounds = streamDayBounds[todayID] == currentTodayBounds
 
+		invalidateCollectionLoads()
 		libraryGeneration = UUID()
 		if preservingPagination == false {
 			resetStreamPagination()
@@ -3139,6 +3519,24 @@ final class ReaderAppModel {
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
+		if isSynchronizingOfflineLibrary {
+			// A canonical snapshot can legitimately lag a page that was just
+			// fetched while its disk write failed or while a staged rebuild is
+			// still in flight. Keep that page visible until synchronization has
+			// either committed it or returned an error.
+			for (collectionID, liveArticles) in livePagesDuringOfflineSynchronization {
+				let protectedArticles = liveArticles.map { liveArticle in
+					guard let currentArticle = currentLiveArticles[collectionID]?.first(where: { articlesMatch($0, liveArticle) }) else {
+						return liveArticle
+					}
+					var preserved = liveArticle
+					preserved.isRead = currentArticle.isRead
+					preserved.isStarred = currentArticle.isStarred
+					return preserved
+				}
+				setArticles(protectedArticles, for: collectionID)
+			}
+		}
 		for (collectionID, continuation) in snapshot.continuationsByCollection {
 			if collectionID == todayID, canRestoreTodayPagination == false {
 				discardedUntrustedTodayPagination = true
@@ -3196,6 +3594,7 @@ final class ReaderAppModel {
 	}
 
 	private func resetInMemoryLibraryForAccountChange() {
+		invalidateCollectionLoads()
 		libraryGeneration = UUID()
 		preparedOfflineAccountID = nil
 		offlineSyncCursor = nil
@@ -3204,6 +3603,15 @@ final class ReaderAppModel {
 		activeOfflinePreparationID = nil
 		deferredInitialFeedPaginationCollectionID = nil
 		articleCache = [:]
+		failedInitialLoadCollectionIDs.removeAll()
+		completedInitialLoadCollectionIDs.removeAll()
+		automaticDisplaySuppressionCollectionID = nil
+		livePagesDuringOfflineSynchronization.removeAll()
+		activeNavigationLoadID = nil
+		activeNavigationLoadIDs.removeAll()
+		activeLibraryLoadID = nil
+		isLoadingNavigation = false
+		isLoadingLibrary = false
 		sortOrders = [:]
 		articleFilters.removeAll()
 		selectedArticleIDs = [:]
@@ -3277,6 +3685,11 @@ final class ReaderAppModel {
 			return false
 		}
 
+		// A local-day transition starts a new Today page generation. The previous
+		// completion marker must not suppress the foreground retry if this refresh
+		// is canceled or fails before it publishes a page.
+		failedInitialLoadCollectionIDs.remove(todayID)
+		completedInitialLoadCollectionIDs.remove(todayID)
 		if boundsChanged {
 			resetStreamPagination(for: todayID)
 		}
@@ -3295,6 +3708,14 @@ final class ReaderAppModel {
 		activeLoadMoreIDs[collectionID] = nil
 		loadingMoreCollections.remove(collectionID)
 		loadMoreErrors[collectionID] = nil
+	}
+
+	private func invalidateCollectionLoads() {
+		activeLoadIDs.removeAll()
+		loadingCollections.removeAll()
+		activeLoadMoreIDs.removeAll()
+		loadingMoreCollections.removeAll()
+		loadMoreErrors.removeAll()
 	}
 
 	private func operationContext(for apiClient: PigeonAPIClient) -> OperationContext? {
@@ -3362,6 +3783,16 @@ final class ReaderAppModel {
 			return true
 		}
 		return collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
+	}
+
+	private func shouldRefreshInitialCollectionAfterReplay(
+		_ collection: ReaderNavigationItem,
+		replayedMutationCount: Int,
+	) -> Bool {
+		replayedMutationCount > 0
+			&& collection.smartSection?.usesRecommendationEndpoint == true
+			&& allArticles(for: collection).isEmpty == false
+			&& articles(for: collection).isEmpty
 	}
 
 	private func cachedCollectionHasMissingBodies(_ collectionID: String) -> Bool {
@@ -3623,6 +4054,63 @@ final class ReaderAppModel {
 			}
 		}
 		return adjusted
+	}
+
+	private func applyingQueuedMutationIntentOrFallback(
+		to articles: [Recommendation],
+		accountID: String,
+	) async throws -> (articles: [Recommendation], errorMessage: String?) {
+		do {
+			return (
+				articles: try await applyingQueuedMutationIntent(to: articles, accountID: accountID),
+				errorMessage: nil,
+			)
+		} catch {
+			// Cancellation is part of SwiftUI task ownership. Let it abort the
+			// load instead of converting it into a successful-looking page.
+			guard isCancellation(error) == false else { throw error }
+			// The page itself came from the live API. Display it with any state
+			// already held in memory, retain the durable outbox untouched, and
+			// surface the cache read failure to the user.
+			return (
+				articles: applyingKnownMutationState(to: articles),
+				errorMessage: error.localizedDescription,
+			)
+		}
+	}
+
+	private func applyingKnownMutationState(to articles: [Recommendation]) -> [Recommendation] {
+		articles.map { article in
+			guard let known = knownInMemoryArticle(matching: article) else { return article }
+			var adjusted = article
+			adjusted.isRead = known.isRead
+			adjusted.isStarred = known.isStarred
+			return adjusted
+		}
+	}
+
+	private func knownInMemoryArticle(matching article: Recommendation) -> Recommendation? {
+		if let detachedSelectedArticle,
+			articlesMatch(detachedSelectedArticle, article)
+			|| Self.normalizedQueuedMutationItemID(detachedSelectedArticle.id)
+			== Self.normalizedQueuedMutationItemID(article.id)
+			|| Self.normalizedQueuedMutationItemID(detachedSelectedArticle.readerId)
+			== Self.normalizedQueuedMutationItemID(article.readerId) {
+			return detachedSelectedArticle
+		}
+
+		for collectionID in articleCache.keys.sorted() {
+			if let known = articleCache[collectionID]?.first(where: {
+				articlesMatch($0, article)
+					|| Self.normalizedQueuedMutationItemID($0.id)
+					== Self.normalizedQueuedMutationItemID(article.id)
+					|| Self.normalizedQueuedMutationItemID($0.readerId)
+					== Self.normalizedQueuedMutationItemID(article.readerId)
+			}) {
+				return known
+			}
+		}
+		return nil
 	}
 
 	private static func normalizedQueuedMutationItemID(_ itemID: String) -> String {

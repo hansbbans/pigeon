@@ -12,6 +12,7 @@ struct ArticleListView: View {
 		let isSearchActive = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
 		let articles = isSearchActive ? model.displayedSearchResults : model.articles(for: collection)
 		let isLoading = model.isLoading(collection: collection)
+			|| model.isInitialLoadPending(for: collection)
 		let isFilteredEmpty = isSearchActive
 			? model.isSearchFilterEmpty
 			: model.isArticleFilterEmpty(for: collection)
@@ -25,7 +26,17 @@ struct ArticleListView: View {
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 			} else if articles.isEmpty {
 				VStack {
-					if isSearchActive && isFilteredEmpty == false {
+					if model.hasFailedInitialLoad(for: collection) {
+						ContentUnavailableView(
+							"Could not load stories",
+							systemImage: "exclamationmark.triangle",
+							description: Text("Pigeon could not load this collection. Try again."),
+						)
+						Button("Try Again", systemImage: "arrow.clockwise") {
+							Task { await model.load(collection: collection, force: true) }
+						}
+						.buttonStyle(.borderedProminent)
+					} else if isSearchActive && isFilteredEmpty == false {
 						ContentUnavailableView.search(text: searchText)
 					} else if isFilteredEmpty {
 						ContentUnavailableView(
@@ -90,10 +101,11 @@ struct ArticleListView: View {
 		.refreshable {
 			await model.refresh(collection: collection)
 		}
-		.task(id: collection.id) {
+		.task(id: ArticleListLoadRequest(collectionID: collection.id, libraryGeneration: model.libraryGeneration)) {
 			searchText = ""
 			model.clearArticleSearch()
-			await model.load(collection: collection)
+			guard Task.isCancelled == false else { return }
+			await model.loadForDisplay(collection: collection)
 		}
 		.task(id: ArticleSearchRequest(query: searchText, scope: searchScope, collectionID: collection.id)) {
 			let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -301,4 +313,9 @@ private struct ArticleSearchRequest: Equatable {
 	let query: String
 	let scope: ReaderSearchScope
 	let collectionID: String
+}
+
+private struct ArticleListLoadRequest: Equatable {
+	let collectionID: String
+	let libraryGeneration: UUID
 }
