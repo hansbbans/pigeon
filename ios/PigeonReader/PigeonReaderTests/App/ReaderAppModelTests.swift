@@ -486,8 +486,8 @@ struct ReaderAppModelTests {
 			accountID: accountID,
 		)
 		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
-		try await store.saveArticles([newer, older], collectionID: feed.id, accountID: accountID)
 		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
+		try await store.saveArticles([newer, older], collectionID: feed.id, accountID: accountID)
 		try await store.saveRestoration(
 			ReaderRestorationState(
 				selectedNavigationID: feed.id,
@@ -1552,6 +1552,873 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 	}
 
+	@Test(.timeLimit(.minutes(1))) func failedMutationReplayStillLoadsTheColdCollectionAndPreservesReadIntent() async throws {
+		let session = try makeSession(token: "failed-mutation-replay-launch")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-read",
+			kind: .setRead,
+			itemIds: ["queued-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+
+		let httpClient = MutationReplayFailureHTTPClient()
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["launch-article", "launch-visible"])
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.articles(for: .forYou).map(\.id) == ["launch-visible"])
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.offlineLibraryStatus == .offline)
+		#expect(await httpClient.paths().contains("/api/v1/mutations"))
+		#expect(await httpClient.paths().contains("/api/v1/recommendations"))
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 100).map(\.mutation.id) == [mutation.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func serverMutationReplayFailureStillLoadsTodayAndPreservesStarIntent() async throws {
+		let session = try makeSession(token: "server-failed-mutation-replay-today")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-star",
+			kind: .setStarred,
+			itemIds: ["today-launch"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.today)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: ReaderSection.today.rawValue,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: session.storageIdentity,
+		)
+
+		let httpClient = MutationReplayFailureHTTPClient(
+			replayFailureStatusCode: 503,
+			selectedSection: .today,
+		)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+		model.select(section: .today)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .today).map(\.id) == ["today-launch"])
+		#expect(model.allArticles(for: .today).first?.isStarred == true)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		#expect(model.offlineLibraryStatus == .waitingToSync)
+		#expect(await httpClient.paths().contains("/api/v1/mutations"))
+		#expect(await httpClient.paths().contains("/reader/api/0/stream/items/ids"))
+	}
+
+	@Test(.timeLimit(.minutes(1))) func queuedIntentUsesAllActionsLatestStateAndNormalizedItemIDs() async throws {
+		let session = try makeSession(token: "queued-intent-order-and-id-normalization")
+		let store = OfflineLibraryStore.inMemory()
+		let normalizedItemID = "tag:google.com,2005:reader/item/000000000000000a"
+		let readActions = (0..<100).map { index in
+			OfflineMutation(
+				id: "queued-read-\(index)",
+				kind: .setRead,
+				itemIds: ["10"],
+				value: false,
+				scope: .single,
+			)
+		}
+		let starActions = (0..<100).map { index in
+			OfflineMutation(
+				id: "queued-star-\(index)",
+				kind: .setStarred,
+				itemIds: ["10"],
+				value: false,
+				scope: .single,
+			)
+		}
+		for mutation in readActions + starActions + [
+			OfflineMutation(
+				id: "queued-read-latest",
+				kind: .setRead,
+				itemIds: [normalizedItemID],
+				value: true,
+				scope: .single,
+			),
+			OfflineMutation(
+				id: "queued-star-latest",
+				kind: .setStarred,
+				itemIds: [normalizedItemID],
+				value: true,
+				scope: .single,
+			),
+		] {
+			try await store.enqueue(mutation, accountID: session.storageIdentity)
+		}
+
+		let httpClient = MutationReplayFailureHTTPClient(useNormalizedItemFixture: true)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		let article = try #require(model.allArticles(for: .forYou).first)
+		#expect(article.id == "10")
+		#expect(article.isRead)
+		#expect(article.isStarred)
+		#expect(model.offlineStorageStats.pendingMutationCount == 202)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).count == 202)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledMutationReplayDoesNotFallbackToCollectionLoad() async throws {
+		let session = try makeSession(token: "cancelled-mutation-replay-launch")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-cancelled-read",
+			kind: .setRead,
+			itemIds: ["queued-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		let httpClient = MutationReplayFailureHTTPClient(replayCancellation: true)
+		let model = try makeModel(
+			httpClient: httpClient,
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await httpClient.paths() == ["/api/v1/recommendations", "/api/v1/mutations"])
+		#expect(model.allArticles(for: .forYou).isEmpty == false)
+		#expect(model.errorMessage == nil)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).map(\.mutation.id) == [mutation.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func coldPagePublishesBeforePendingReplayFinishes() async throws {
+		let session = try makeSession(token: "cold-page-before-replay")
+		let store = OfflineLibraryStore.inMemory()
+		let mutation = OfflineMutation(
+			id: "queued-read-before-page",
+			kind: .setRead,
+			itemIds: ["queued-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let firstRequest = await controlled.nextRequest()
+		#expect(firstRequest.request.url?.path == "/api/v1/recommendations")
+		guard firstRequest.request.url?.path == "/api/v1/recommendations" else {
+			await controlled.fail(firstRequest, with: URLError(.notConnectedToInternet))
+			let pageRequest = await controlled.nextRequest()
+			await controlled.resolve(pageRequest, data: try responseData(items: [makeArticle(id: "launch-article", readerId: "queued-reader-id")]))
+			await preparation.value
+			return
+		}
+
+		await controlled.resolve(
+			firstRequest,
+			data: try responseData(items: [makeArticle(id: "launch-article", readerId: "queued-reader-id")]),
+		)
+		let replayRequest = await controlled.nextRequest()
+		#expect(replayRequest.request.url?.path == "/api/v1/mutations")
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["launch-article"])
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		let replayResponse = Data(#"{"results":[{"mutationId":"queued-read-before-page","status":"applied","appliedAt":"2026-09-06T12:00:00Z","error":null}]}"#.utf8)
+		await controlled.resolve(replayRequest, data: replayResponse)
+		let refreshedPage = await controlled.nextRequest()
+		#expect(refreshedPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			refreshedPage,
+			data: try responseData(items: [makeArticle(id: "launch-visible")]),
+		)
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["launch-visible"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func automaticDisplayLoadSkipsOnlyLaunchPreparationResult() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let firstPage = await controlled.nextRequest()
+		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(firstPage, data: try responseData(items: [makeArticle(id: "single-cold-page")]))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		let displayLoad = Task { await model.loadForDisplay(collection: .smart(.forYou)) }
+		await Task.yield()
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		await displayLoad.value
+
+		#expect(await controlled.requestCount() == 2)
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["single-cold-page"])
+
+		let revisit = Task { await model.loadForDisplay(collection: .smart(.forYou)) }
+		let revisitRequest = await controlled.nextRequest()
+		#expect(revisitRequest.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(revisitRequest, data: try responseData(items: [makeArticle(id: "revisited-page")]))
+		await revisit.value
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["revisited-page"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func selectedUncachedCollectionLoadsWhileInitialSyncIsHeld() async throws {
+		let session = try makeSession(token: "selected-collection-during-initial-sync")
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let firstPage = await controlled.nextRequest()
+		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(firstPage, data: try responseData(items: [makeArticle(id: "initial-for-you")]))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setNavigation(ReaderNavigationState(items: [.smart(.forYou), feed]))
+		model.select(item: feed)
+		let displayLoad = Task { await model.loadForDisplay(collection: feed) }
+
+		let itemIDs = await controlled.nextRequest()
+		#expect(itemIDs.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.resolve(itemIDs, data: Data(#"{"itemRefs":[{"id":"feed-live"}]}"#.utf8))
+		let contents = await controlled.nextRequest()
+		#expect(contents.request.url?.path == "/reader/api/0/stream/items/contents")
+		await controlled.resolve(
+			contents,
+			data: Data(#"{"id":"feed/7","updated":0,"items":[{"id":"feed-live","categories":[],"title":"Live feed","published":1786272000,"summary":{"content":"<p>Body</p>"},"content":{"content":"<p>Body</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Alpha","htmlUrl":"https://example.com"}}]}"#.utf8),
+		)
+		await displayLoad.value
+
+		#expect(model.allArticles(for: feed).map(\.id) == ["feed-live"])
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+	}
+
+	@Test(.timeLimit(.minutes(1))) func replayProgressRefetchesPersonalizedPageWhenQueuedReadsHidePrefetch() async throws {
+		let session = try makeSession(token: "replay-refreshes-hidden-personalized-page")
+		let store = OfflineLibraryStore.inMemory()
+		let prefetchedArticles = (0..<30).map { index in
+			makeArticle(id: "prefetched-\(index)", readerId: "prefetched-reader-\(index)")
+		}
+		for article in prefetchedArticles {
+			try await store.enqueue(
+				OfflineMutation(
+					kind: .setRead,
+					itemIds: [article.id],
+					value: true,
+					scope: .single,
+				),
+				accountID: session.storageIdentity,
+			)
+		}
+
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let firstPage = await controlled.nextRequest()
+		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(firstPage, data: try responseData(items: prefetchedArticles))
+
+		let replay = await controlled.nextRequest()
+		#expect(replay.request.url?.path == "/api/v1/mutations")
+		#expect(model.allArticles(for: .forYou).count == prefetchedArticles.count)
+		#expect(model.articles(for: .forYou).isEmpty)
+		await controlled.resolve(replay, data: try appliedMutationResponse(for: replay))
+
+		let refreshedPage = await controlled.nextRequest()
+		#expect(refreshedPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			refreshedPage,
+			data: try responseData(items: [makeArticle(id: "replenished-after-replay")]),
+		)
+
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		#expect(model.articles(for: .forYou).map(\.id) == ["replenished-after-replay"])
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		#expect(model.articles(for: .forYou).map(\.id) == ["replenished-after-replay"])
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["replenished-after-replay"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func coldPagePublishesBeforePersistenceCompletes() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = PausingOfflineLibraryStore()
+		await store.pauseNextArticleSave()
+		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let pageRequest = await controlled.nextRequest()
+		#expect(pageRequest.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(pageRequest, data: try responseData(items: [makeArticle(id: "published-before-save")]))
+		await store.waitUntilArticleSaveIsPaused()
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["published-before-save"])
+
+		await store.resumeArticleSave()
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+	}
+
+	@Test(.timeLimit(.minutes(1))) func snapshotPersistenceDoesNotBlockTheColdPage() async throws {
+		let session = try makeSession(token: "snapshot-persistence-before-page")
+		let store = PausingOfflineLibraryStore()
+		let today = ReaderSection.today.rawValue
+		let forYou = ReaderSection.forYou.rawValue
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou), .smart(.today)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: forYou,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "yesterday", receivedDate: Date(timeIntervalSince1970: 1_700_000_000))],
+			collectionID: today,
+			accountID: session.storageIdentity,
+		)
+		await store.pauseNextArticleSave(for: today)
+
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		for _ in 0..<100 {
+			if await controlled.requestCount() > 0 { break }
+			try await Task.sleep(for: .milliseconds(1))
+		}
+		if await controlled.requestCount() == 0 {
+			#expect(Bool(false), "Snapshot cleanup blocked the first live page")
+			await store.resumeArticleSave()
+		}
+
+		let pageRequest = await controlled.nextRequest()
+		#expect(pageRequest.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(pageRequest, data: try responseData(items: [makeArticle(id: "page-before-snapshot-save")]))
+		for _ in 0..<100 {
+			if await store.articleSavePauseCount() > 0 { break }
+			try await Task.sleep(for: .milliseconds(1))
+		}
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["page-before-snapshot-save"])
+		await store.resumeArticleSave()
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+	}
+
+	@Test(.timeLimit(.minutes(1))) func failedInitialPageSaveSurvivesIntermediateFullSyncSnapshot() async throws {
+		let session = try makeSession(token: "failed-page-save-full-sync")
+		let store = PausingOfflineLibraryStore()
+		let collection = ReaderNavigationItem.smart(.forYou)
+		await store.failNextArticleSave(for: collection.id)
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+		)
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let firstPage = await controlled.nextRequest()
+		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
+		let liveArticle = makeArticle(id: "live-before-full-sync")
+		await controlled.resolve(firstPage, data: try responseData(items: [liveArticle]))
+
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		#expect(model.allArticles(for: collection).map(\.id) == [liveArticle.id])
+		#expect(model.errorMessage == LaunchStoreError.articleSaveUnavailable.localizedDescription)
+		await controlled.resolve(sync, data: emptySyncPage(cursor: "full-sync-after-live-page"))
+
+		// A full rebuild must be allowed to refresh the navigation and subscription
+		// data without replacing the just-published page with an empty snapshot.
+		for _ in 0..<4 {
+			let request = await controlled.nextRequest()
+			switch request.request.url?.path {
+			case "/reader/api/0/subscription/list":
+				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
+			case "/reader/api/0/unread-count":
+				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/reader/api/0/stream/items/ids":
+				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
+			default:
+				Issue.record("Unexpected full-sync navigation request: \(request.request.url?.absoluteString ?? "missing URL")")
+				await controlled.resolve(request)
+			}
+		}
+		let library = await controlled.nextRequest()
+		#expect(library.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(library, data: Data(#"{"subscriptions":[]}"#.utf8))
+
+		let finalPage = await controlled.nextRequest()
+		#expect(finalPage.request.url?.path == "/api/v1/recommendations")
+		#expect(model.allArticles(for: collection).map(\.id) == [liveArticle.id])
+		await controlled.fail(finalPage, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		#expect(model.allArticles(for: collection).map(\.id) == [liveArticle.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func livePageKeepsLatestReadAndStarredStateDuringFullSync() async throws {
+		let session = try makeSession(token: "live-page-latest-state-full-sync")
+		let store = PausingOfflineLibraryStore()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+		)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let liveArticle = makeArticle(id: "live-page-latest-state")
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let firstPage = await controlled.nextRequest()
+		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(firstPage, data: try responseData(items: [liveArticle]))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+
+		let markRead = Task { await model.setRead(liveArticle, read: true) }
+		let readMutation = await controlled.nextRequest()
+		#expect(readMutation.request.url?.path == "/api/v1/mutations")
+		await controlled.resolve(readMutation, data: try appliedMutationResponse(for: readMutation))
+		await markRead.value
+
+		let markStarred = Task {
+			if let currentArticle = model.allArticles(for: collection).first {
+				await model.setStarred(currentArticle, starred: true)
+			}
+		}
+		let starredMutation = await controlled.nextRequest()
+		#expect(starredMutation.request.url?.path == "/api/v1/mutations")
+		await controlled.resolve(starredMutation, data: try appliedMutationResponse(for: starredMutation))
+		await markStarred.value
+		#expect(model.allArticles(for: collection).first?.isRead == true)
+		#expect(model.allArticles(for: collection).first?.isStarred == true)
+
+		await controlled.resolve(sync, data: emptySyncPage(cursor: "latest-state-full-sync"))
+		for _ in 0..<4 {
+			let request = await controlled.nextRequest()
+			switch request.request.url?.path {
+			case "/reader/api/0/subscription/list":
+				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
+			case "/reader/api/0/unread-count":
+				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/reader/api/0/stream/items/ids":
+				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
+			default:
+				Issue.record("Unexpected full-sync state request: \(request.request.url?.absoluteString ?? "missing URL")")
+				await controlled.resolve(request)
+			}
+		}
+		let library = await controlled.nextRequest()
+		#expect(library.request.url?.path == "/reader/api/0/subscription/list")
+		await controlled.resolve(library, data: Data(#"{"subscriptions":[]}"#.utf8))
+
+		let finalPage = await controlled.nextRequest()
+		#expect(finalPage.request.url?.path == "/api/v1/recommendations")
+		let latest = try #require(model.allArticles(for: collection).first)
+		#expect(latest.isRead)
+		#expect(latest.isStarred)
+		await controlled.fail(finalPage, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.allArticles(for: collection).first?.isRead == true)
+		#expect(model.allArticles(for: collection).first?.isStarred == true)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func snapshotReadFailureDoesNotBlockAHealthyColdPage() async throws {
+		let session = try makeSession(token: "snapshot-read-before-page")
+		let store = PausingOfflineLibraryStore()
+		await store.failNextSnapshot()
+		let model = try makeModel(
+			httpClient: MutationReplayFailureHTTPClient(),
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.allArticles(for: .forYou).isEmpty == false)
+		#expect(model.errorMessage == LaunchStoreError.snapshotUnavailable.localizedDescription)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func slowSnapshotReadShowsLoadingInsteadOfConfirmedEmpty() async throws {
+		let session = try makeSession(token: "slow-snapshot-loading-state")
+		let store = PausingOfflineLibraryStore()
+		await store.pauseNextSnapshot()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+		)
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await store.waitUntilSnapshotIsPaused()
+
+		let collection = ReaderNavigationItem.smart(.forYou)
+		#expect(model.allArticles(for: collection).isEmpty)
+		#expect(model.isInitialLoadPending(for: collection))
+		#expect(model.hasFailedInitialLoad(for: collection) == false)
+
+		await store.resumeSnapshot()
+		let pageRequest = await controlled.nextRequest()
+		#expect(pageRequest.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(pageRequest, data: try responseData(items: [makeArticle(id: "after-snapshot-read")]))
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.allArticles(for: collection).map(\.id) == ["after-snapshot-read"])
+}
+
+	@Test(.timeLimit(.minutes(1))) func pendingMutationReadFailureDoesNotHideHealthyColdPage() async throws {
+		let session = try makeSession(token: "pending-read-before-page")
+		let store = PausingOfflineLibraryStore()
+		let mutation = OfflineMutation(
+			id: "pending-read-failure",
+			kind: .setRead,
+			itemIds: ["pending-reader-id"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		await store.failNextPendingMutations()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+			offlineSynchronizationEnabled: false,
+		)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		#expect(request.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			request,
+			data: try responseData(items: [makeArticle(id: "pending-read-page", readerId: "pending-reader-id")]),
+		)
+		await load.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["pending-read-page"])
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		#expect(model.errorMessage == LaunchStoreError.pendingMutationsUnavailable.localizedDescription)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).map(\.mutation.id) == [mutation.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func pendingMutationReadFailurePreservesKnownOptimisticState() async throws {
+		let session = try makeSession(token: "pending-read-known-state")
+		let store = PausingOfflineLibraryStore()
+		let mutation = OfflineMutation(
+			id: "pending-known-state",
+			kind: .setRead,
+			itemIds: ["10"],
+			value: true,
+			scope: .single,
+		)
+		try await store.enqueue(mutation, accountID: session.storageIdentity)
+		await store.failNextPendingMutations()
+		let legacyID = "tag:google.com,2005:reader/item/000000000000000a"
+		let known = makeArticle(id: legacyID, isRead: true, isStarred: true, readerId: legacyID)
+		let live = makeArticle(id: "10", isRead: false, isStarred: false, readerId: "10")
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+			offlineSynchronizationEnabled: false,
+		)
+		model.setArticles([known], for: .forYou)
+
+		let load = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: try responseData(items: [live]))
+		await load.value
+
+		let displayed = try #require(model.allArticles(for: .forYou).first)
+		#expect(displayed.id == live.id)
+		#expect(displayed.isRead)
+		#expect(displayed.isStarred)
+		#expect(model.errorMessage == LaunchStoreError.pendingMutationsUnavailable.localizedDescription)
+	}
+
+	@Test(arguments: [500, 504]) func coldPageRetriesTransientServerStatus(statusCode: Int) async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let failedPage = await controlled.nextRequest()
+		#expect(failedPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(failedPage, data: Data("temporary failure".utf8), statusCode: statusCode)
+
+		let retryPage = await controlled.nextRequest()
+		#expect(retryPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+			retryPage,
+			data: try responseData(items: [makeArticle(id: "server-retry-\(statusCode)")]),
+		)
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["server-retry-\(statusCode)"])
+		#expect(await controlled.requestCount() == 3)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func coldPageRetriesOneTransientFailure() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let failedPage = await controlled.nextRequest()
+		#expect(failedPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.fail(failedPage, with: URLError(.notConnectedToInternet))
+
+		let retryPage = await controlled.nextRequest()
+		#expect(retryPage.request.url?.path == "/api/v1/recommendations")
+		guard retryPage.request.url?.path == "/api/v1/recommendations" else {
+			await controlled.fail(retryPage, with: URLError(.notConnectedToInternet))
+			await preparation.value
+			return
+		}
+		await controlled.resolve(retryPage, data: try responseData(items: [makeArticle(id: "retried-launch-page")]))
+		let syncRequest = await controlled.nextRequest()
+		#expect(syncRequest.request.url?.path == "/api/v1/sync")
+		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["retried-launch-page"])
+		#expect(await controlled.requestCount() == 3)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func sceneActivationRecoversColdPageWhileSyncIsSuspended() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let firstPage = await controlled.nextRequest()
+		await controlled.fail(firstPage, with: PigeonError.server(statusCode: 500, message: "launch page failed"))
+		let exhaustedRetry = await controlled.nextRequest()
+		#expect(exhaustedRetry.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(exhaustedRetry, data: Data("launch page still unavailable".utf8), statusCode: 504)
+		let suspendedSync = await controlled.nextRequest()
+		#expect(suspendedSync.request.url?.path == "/api/v1/sync")
+
+		let recovery = Task { await model.handleLocalDayChange() }
+		let recoveryPage = await controlled.nextRequest()
+		#expect(recoveryPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(
+				recoveryPage,
+				data: try responseData(items: [makeArticle(id: "foreground-recovery")]),
+		)
+		_ = await recovery.value
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["foreground-recovery"])
+
+		await controlled.fail(suspendedSync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["foreground-recovery"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func successfulEmptyColdPageDoesNotRetryOnActivation() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let page = await controlled.nextRequest()
+		#expect(page.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(page, data: try responseData(items: []))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		let requestCount = await controlled.requestCount()
+		await model.handleLocalDayChange()
+		#expect(await controlled.requestCount() == requestCount)
+		#expect(model.allArticles(for: .forYou).isEmpty)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledColdPageWaitsForReactivationBeforeRetrying() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let cancelledPage = await controlled.nextRequest()
+		#expect(cancelledPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.fail(cancelledPage, with: URLError(.cancelled))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		let recovery = Task { await model.handleLocalDayChange() }
+		let retryPage = await controlled.nextRequest()
+		#expect(retryPage.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(retryPage, data: try responseData(items: [makeArticle(id: "cancelled-page-recovery")]))
+		_ = await recovery.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == ["cancelled-page-recovery"])
+		#expect(await controlled.requestCount() == 3)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledTodayRefreshAfterMidnightRetriesOnReactivation() async throws {
+		let session = try makeSession(token: "today-midnight-cancelled-refresh")
+		let store = OfflineLibraryStore.inMemory()
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [today]),
+			accountID: accountID,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: today.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			session: session,
+			offlineStore: store,
+		)
+		let initialDay = ReaderLocalDayBounds.localDay(containing: .now)
+		let nextDay = initialDay.end.addingTimeInterval(60)
+		let published = Int(initialDay.start.addingTimeInterval(60).timeIntervalSince1970)
+		let todayContentsData: (String, Int) -> Data = { id, published in
+			Data(
+				"{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"user/-/state/com.google/reading-list\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}]}".utf8,
+			)
+		}
+
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		let warmIDs = await controlled.nextRequest()
+		#expect(warmIDs.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.resolve(warmIDs, data: streamIDsData(ids: ["warm-today"], continuation: nil))
+		let warmContents = await controlled.nextRequest()
+		#expect(warmContents.request.url?.path == "/reader/api/0/stream/items/contents")
+		await controlled.resolve(
+			warmContents,
+			data: todayContentsData("warm-today", published),
+		)
+		let warmSync = await controlled.nextRequest()
+		#expect(warmSync.request.url?.path == "/api/v1/sync")
+		await controlled.fail(warmSync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+		#expect(model.allArticles(for: today).map(\.id) == ["warm-today"])
+
+		let midnightRefresh = Task { await model.handleLocalDayChange(now: nextDay) }
+		let cancelledIDs = await controlled.nextRequest()
+		#expect(cancelledIDs.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.fail(cancelledIDs, with: URLError(.cancelled))
+		#expect(await midnightRefresh.value)
+		#expect(model.allArticles(for: today).isEmpty)
+
+		let requestCountBeforeReactivation = await controlled.requestCount()
+		let reactivation = Task { await model.handleLocalDayChange(now: nextDay) }
+		for _ in 0..<500 {
+			if await controlled.requestCount() > requestCountBeforeReactivation { break }
+			try await Task.sleep(for: .milliseconds(1))
+		}
+		let didStartRetry = await controlled.requestCount() > requestCountBeforeReactivation
+		#expect(didStartRetry)
+		guard didStartRetry else {
+			// Keep the pre-fix failure bounded and release any preparation task that
+			// the failed assertion may have started before returning.
+			model.disconnect()
+			_ = await reactivation.value
+			return
+		}
+		let retryIDs = await controlled.nextRequest()
+		#expect(retryIDs.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.resolve(retryIDs, data: streamIDsData(ids: ["recovered-today"], continuation: nil))
+		let retryContents = await controlled.nextRequest()
+		#expect(retryContents.request.url?.path == "/reader/api/0/stream/items/contents")
+		await controlled.resolve(
+			retryContents,
+			data: todayContentsData(
+				"recovered-today",
+				Int(nextDay.timeIntervalSince1970),
+			),
+		)
+		_ = await reactivation.value
+
+		// The test advances the request's day while the simulator clock stays on
+		// the original day. Verify the recovered page and badge, not the display
+		// accessor that intentionally filters against the actual system clock.
+		let recoveredSnapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(recoveredSnapshot.articlesByCollection[today.id]?.map(\.id) == ["recovered-today"])
+		#expect(model.navigation.item(withID: today.id)?.unreadCount == 1)
+		let retryQuery = URLComponents(url: try #require(retryIDs.request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+		let retryLowerBound = retryQuery.first(where: { $0.name == "ot" })?.value
+		#expect(retryLowerBound == String(Int(ReaderLocalDayBounds.localDay(containing: nextDay).start.timeIntervalSince1970) - 1))
+	}
+
 	@Test func successfulCollectionLoadClearsStaleOfflineState() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
@@ -1585,7 +2452,7 @@ struct ReaderAppModelTests {
 			url: subscription.url.absoluteString,
 		)
 		let folderID = "user/-/label/News"
-		let cachedArticles = (0..<5).map { makeArticle(id: "cached-folder-\($0)") }
+		let cachedArticles = (0..<5).map { makeArticle(id: "cached-folder-\($0)", feedKey: "alpha") }
 		let navigation = ReaderNavigationCatalog.make(
 			subscriptions: [readerSubscription],
 			unreadCounts: [],
@@ -1615,7 +2482,6 @@ struct ReaderAppModelTests {
 		let syncRequest = await controlled.nextRequest()
 		let elapsed = DispatchTime.now().uptimeNanoseconds - started
 		let folder = try #require(model.folderNavigationItems.first)
-
 		#expect(syncRequest.request.url?.path == "/api/v1/sync")
 		#expect(model.articles(for: folder).map(\.id) == cachedArticles.map(\.id))
 		print("ReaderAppModel cached selected-folder availability: \(String(format: "%.1f", Double(elapsed) / 1_000_000)) ms before sync response")
@@ -1826,14 +2692,23 @@ struct ReaderAppModelTests {
 	@Test func completeCacheWithoutAuthoritativeNavigationIsNotShownAsUpToDate() async throws {
 		let session = try makeSession(token: "unverified-navigation-token")
 		let store = OfflineLibraryStore.inMemory()
+		let navigation = ReaderNavigationState(
+			items: [ReaderNavigationItem.smart(.forYou)],
+			expandedFolderIDs: [],
+		)
 		try await store.beginFullRebuild(accountID: session.storageIdentity, at: Date(timeIntervalSince1970: 1_000))
 		try await store.apply(
 			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
 			accountID: session.storageIdentity,
 		)
-		try await store.markDataSynchronizedWithoutNavigation(
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.finishSynchronization(
 			accountID: session.storageIdentity,
 			at: Date(timeIntervalSince1970: 1_001),
+		)
+		try await store.markDataSynchronizedWithoutNavigation(
+			accountID: session.storageIdentity,
+			at: Date(timeIntervalSince1970: 1_002),
 		)
 		let client = IntegritySyncHTTPClient(
 			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
@@ -2150,6 +3025,12 @@ struct ReaderAppModelTests {
 			let load = Task { await model.load(collection: collection, force: true) }
 			let request = await controlled.nextRequest()
 			await controlled.fail(request, with: URLError(.notConnectedToInternet))
+			let retry = await controlled.nextRequest()
+			let expectedRetryPath = section == .today
+				? "/reader/api/0/stream/items/ids"
+				: "/api/v1/recommendations"
+			#expect(retry.request.url?.path == expectedRetryPath)
+			await controlled.fail(retry, with: URLError(.notConnectedToInternet))
 			await load.value
 
 			#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
@@ -2165,6 +3046,9 @@ struct ReaderAppModelTests {
 		let load = Task { await model.load(section: .forYou, force: true) }
 		let request = await controlled.nextRequest()
 		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		let retry = await controlled.nextRequest()
+		#expect(retry.request.url?.path == "/api/v1/recommendations")
+		await controlled.fail(retry, with: URLError(.notConnectedToInternet))
 		await load.value
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 
@@ -2181,6 +3065,9 @@ struct ReaderAppModelTests {
 		let load = Task { await model.load(section: .forYou, force: true) }
 		let request = await controlled.nextRequest()
 		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		let retry = await controlled.nextRequest()
+		#expect(retry.request.url?.path == "/api/v1/recommendations")
+		await controlled.fail(retry, with: URLError(.notConnectedToInternet))
 		await load.value
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 
@@ -2199,6 +3086,9 @@ struct ReaderAppModelTests {
 		let load = Task { await model.load(section: .forYou, force: true) }
 		let request = await controlled.nextRequest()
 		await controlled.fail(request, with: URLError(.notConnectedToInternet))
+		let retry = await controlled.nextRequest()
+		#expect(retry.request.url?.path == "/api/v1/recommendations")
+		await controlled.fail(retry, with: URLError(.notConnectedToInternet))
 		await load.value
 		#expect(model.errorMessage == URLError(.notConnectedToInternet).localizedDescription)
 
@@ -2474,10 +3364,12 @@ struct ReaderAppModelTests {
 
 		#expect(model.allArticles(for: collection).map(\.id) == ["fresh"])
 		#expect(model.canLoadMore(collection: collection))
-		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		// The earlier page was already visible before its disk write. A new partial
+		// Today page retains that known total until pagination supplies a final page.
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 2)
 		let snapshot = try await store.loadSnapshot(accountID: accountID)
 		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == ["fresh"])
-		#expect(snapshot.navigation?.item(withID: collection.id)?.unreadCount == 1)
+		#expect(snapshot.navigation?.item(withID: collection.id)?.unreadCount == 2)
 	}
 
 	@Test func restoredCachedFolderResolvesPaginationOnceWhenSelectedOnline() async throws {
@@ -2516,8 +3408,8 @@ struct ReaderAppModelTests {
 		)
 		try await store.saveNavigation(navigation, accountID: accountID)
 		try await store.saveSubscriptions([subscription], accountID: accountID)
-		try await store.saveArticles([cachedArticle], collectionID: "user/-/label/News", accountID: accountID)
 		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
+		try await store.saveArticles([cachedArticle], collectionID: "user/-/label/News", accountID: accountID)
 		try await store.saveRestoration(restoration, accountID: accountID)
 
 		let client = StartupHTTPClient(
@@ -3550,8 +4442,8 @@ struct ReaderAppModelTests {
 			accountID: accountID,
 		)
 		try await store.saveNavigation(ReaderNavigationState(items: [todayItem]), accountID: accountID)
-		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
 		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
+		try await store.saveArticles([yesterday, today], collectionID: todayItem.id, accountID: accountID)
 
 		let model = try makeModel(
 			httpClient: MockHTTPClient(shouldFail: true),
@@ -5596,6 +6488,7 @@ struct ReaderAppModelTests {
 			accountID: session.storageIdentity,
 		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		try await store.saveSubscriptions(
 			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
 			accountID: session.storageIdentity,
@@ -5610,7 +6503,6 @@ struct ReaderAppModelTests {
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
-		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		try await store.saveRestoration(
 			ReaderRestorationState(
 				selectedNavigationID: collection.id,
@@ -5668,6 +6560,7 @@ struct ReaderAppModelTests {
 			accountID: session.storageIdentity,
 		)
 		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		try await store.saveSubscriptions(
 			[makeSubscription(id: collection.id, key: "daily", title: collection.title, folder: nil)],
 			accountID: session.storageIdentity,
@@ -5678,7 +6571,6 @@ struct ReaderAppModelTests {
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
-		try await store.finishSynchronization(accountID: session.storageIdentity, at: .now)
 		let restoration = ReaderRestorationState(
 			selectedNavigationID: collection.id,
 			selectedArticleIDs: [:],
@@ -5988,6 +6880,17 @@ struct ReaderAppModelTests {
 		return try encoder.encode(response)
 	}
 
+	private func appliedMutationResponse(for request: ControlledHTTPClient.PendingRequest) throws -> Data {
+		let envelope = try JSONDecoder().decode(
+			OfflineMutationEnvelope.self,
+			from: try #require(request.request.httpBody),
+		)
+		let results = envelope.mutations.map { mutation in
+			"{\"mutationId\":\"\(mutation.id)\",\"status\":\"applied\",\"appliedAt\":\"2026-09-06T12:00:00Z\",\"error\":null}"
+		}.joined(separator: ",")
+		return Data("{\"results\":[\(results)]}".utf8)
+	}
+
 	private func emptySyncPage(cursor: String) -> Data {
 		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":false,\"changes\":[]}".utf8)
 	}
@@ -6286,15 +7189,67 @@ private actor BenchmarkHTTPClient: HTTPClient {
 	}
 }
 
+private enum LaunchStoreError: Error, LocalizedError, Sendable {
+	case snapshotUnavailable
+	case pendingMutationsUnavailable
+	case articleSaveUnavailable
+
+	var errorDescription: String? {
+		switch self {
+		case .snapshotUnavailable: "The cached library snapshot is unavailable."
+		case .pendingMutationsUnavailable: "Pending story changes are unavailable."
+		case .articleSaveUnavailable: "The story cache could not be saved."
+		}
+	}
+}
+
 private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	private let base = OfflineLibraryStore.inMemory()
 	private var shouldPauseNextArticleSave = false
+	private var articleSavePauseCollectionID: String?
+	private var articleSavePauses = 0
 	private var articleSaveIsPaused = false
 	private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
 	private var resumeContinuation: CheckedContinuation<Void, Never>?
+	private var shouldFailNextSnapshot = false
+	private var shouldPauseNextSnapshot = false
+	private var snapshotIsPaused = false
+	private var snapshotPauseWaiters: [CheckedContinuation<Void, Never>] = []
+	private var snapshotResumeContinuation: CheckedContinuation<Void, Never>?
+	private var shouldFailNextPendingMutations = false
+	private var shouldFailNextArticleSaveCollectionID: String?
 
-	func pauseNextArticleSave() {
+	func pauseNextArticleSave(for collectionID: String? = nil) {
 		shouldPauseNextArticleSave = true
+		articleSavePauseCollectionID = collectionID
+	}
+
+	func failNextSnapshot() {
+		shouldFailNextSnapshot = true
+	}
+
+	func pauseNextSnapshot() {
+		shouldPauseNextSnapshot = true
+	}
+
+	func waitUntilSnapshotIsPaused() async {
+		if snapshotIsPaused { return }
+		await withCheckedContinuation { continuation in
+			snapshotPauseWaiters.append(continuation)
+		}
+	}
+
+	func resumeSnapshot() {
+		snapshotResumeContinuation?.resume()
+		snapshotResumeContinuation = nil
+	}
+
+	func failNextPendingMutations() {
+		shouldFailNextPendingMutations = true
+	}
+
+	func failNextArticleSave(for collectionID: String? = nil) {
+		shouldFailNextArticleSaveCollectionID = collectionID ?? "*"
 	}
 
 	func waitUntilArticleSaveIsPaused() async {
@@ -6309,8 +7264,29 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		resumeContinuation = nil
 	}
 
+	func articleSavePauseCount() -> Int {
+		articleSavePauses
+	}
+
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot {
-		try await base.loadSnapshot(accountID: accountID)
+		if shouldFailNextSnapshot {
+			shouldFailNextSnapshot = false
+			throw LaunchStoreError.snapshotUnavailable
+		}
+		if shouldPauseNextSnapshot {
+			shouldPauseNextSnapshot = false
+			snapshotIsPaused = true
+			let waiters = snapshotPauseWaiters
+			snapshotPauseWaiters.removeAll()
+			for waiter in waiters {
+				waiter.resume()
+			}
+			await withCheckedContinuation { continuation in
+				snapshotResumeContinuation = continuation
+			}
+			snapshotIsPaused = false
+		}
+		return try await base.loadSnapshot(accountID: accountID)
 	}
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {
@@ -6322,8 +7298,15 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws {
-		if shouldPauseNextArticleSave {
+		if shouldFailNextArticleSaveCollectionID == "*" || shouldFailNextArticleSaveCollectionID == collectionID {
+			shouldFailNextArticleSaveCollectionID = nil
+			throw LaunchStoreError.articleSaveUnavailable
+		}
+		if shouldPauseNextArticleSave,
+			articleSavePauseCollectionID == nil || articleSavePauseCollectionID == collectionID {
 			shouldPauseNextArticleSave = false
+			articleSavePauseCollectionID = nil
+			articleSavePauses += 1
 			articleSaveIsPaused = true
 			let waiters = pauseWaiters
 			pauseWaiters.removeAll()
@@ -6351,7 +7334,11 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation] {
-		try await base.pendingMutations(accountID: accountID, limit: limit)
+		if shouldFailNextPendingMutations {
+			shouldFailNextPendingMutations = false
+			throw LaunchStoreError.pendingMutationsUnavailable
+		}
+		return try await base.pendingMutations(accountID: accountID, limit: limit)
 	}
 
 	func markMutationApplied(id: String, accountID: String) async throws {
@@ -6364,6 +7351,10 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
 		try await base.apply(page, accountID: accountID)
+	}
+
+	func abandonFullRebuild(accountID: String, startedAt: Date) async throws {
+		try await base.abandonFullRebuild(accountID: accountID, startedAt: startedAt)
 	}
 
 	func storageStats(accountID: String) async throws -> OfflineStorageStats {
@@ -6443,6 +7434,10 @@ private actor ScriptedSearchOfflineLibraryStore: OfflineLibraryStoring {
 
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
 		try await base.apply(page, accountID: accountID)
+	}
+
+	func abandonFullRebuild(accountID: String, startedAt: Date) async throws {
+		try await base.abandonFullRebuild(accountID: accountID, startedAt: startedAt)
 	}
 
 	func storageStats(accountID: String) async throws -> OfflineStorageStats {
@@ -6668,4 +7663,81 @@ private actor PaginationHTTPClient: HTTPClient {
 		}
 		return response
 	}
+}
+
+private actor MutationReplayFailureHTTPClient: HTTPClient {
+	private let replayFailureStatusCode: Int?
+	private let selectedSection: ReaderSection
+	private let replayCancellation: Bool
+	private let useNormalizedItemFixture: Bool
+	private var capturedPaths: [String] = []
+
+	init(
+		replayFailureStatusCode: Int? = nil,
+		selectedSection: ReaderSection = .forYou,
+		replayCancellation: Bool = false,
+		useNormalizedItemFixture: Bool = false,
+	) {
+		self.replayFailureStatusCode = replayFailureStatusCode
+		self.selectedSection = selectedSection
+		self.replayCancellation = replayCancellation
+		self.useNormalizedItemFixture = useNormalizedItemFixture
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		capturedPaths.append(url.path)
+
+		let statusCode: Int
+		let data: Data
+		switch url.path {
+		case "/api/v1/mutations":
+			if replayCancellation {
+				throw CancellationError()
+			}
+			guard let replayFailureStatusCode else {
+				throw URLError(.notConnectedToInternet)
+			}
+			statusCode = replayFailureStatusCode
+			data = Data(#"{"error":"mutation replay unavailable"}"#.utf8)
+		case "/api/v1/recommendations":
+			statusCode = 200
+			data = useNormalizedItemFixture ? Self.normalizedItemRecommendationsData : Self.recommendationsData
+		case "/api/v1/sync":
+			statusCode = 200
+			data = Data(#"{"cursor":"launch-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/reader/api/0/subscription/list":
+			statusCode = 200
+			data = Data(#"{"subscriptions":[]}"#.utf8)
+		case "/reader/api/0/unread-count":
+			statusCode = 200
+			data = Data(#"{"unreadcounts":[]}"#.utf8)
+		case "/reader/api/0/stream/items/ids":
+			statusCode = 200
+			let streamID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "s" })?.value
+			data = selectedSection == .today && streamID == "user/-/state/com.google/reading-list"
+				? Data(#"{"itemRefs":[{"id":"today-launch"}]}"#.utf8)
+				: Data(#"{"itemRefs":[]}"#.utf8)
+		case "/reader/api/0/stream/items/contents":
+			statusCode = 200
+			data = Data(#"{"id":"user/-/state/com.google/reading-list","updated":0,"items":[{"id":"today-launch","categories":[],"title":"Today launch","published":1788696000,"summary":{"content":"<p>Body</p>"},"content":{"content":"<p>Body</p>"},"alternate":[],"origin":{"streamId":"user/-/state/com.google/reading-list","title":"Today","htmlUrl":"https://example.com"}}]}"#.utf8)
+		default:
+			statusCode = 200
+			data = Data(#"{}"#.utf8)
+		}
+
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func paths() -> [String] {
+		capturedPaths
+	}
+
+	nonisolated private static let recommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"launch-article","readerId":"queued-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-article","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"},{"id":"launch-visible","readerId":"launch-visible-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-visible","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":40,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
+	nonisolated private static let normalizedItemRecommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"10","readerId":"10","feedKey":"daily","source":"Daily","author":null,"title":"Story ten","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
 }

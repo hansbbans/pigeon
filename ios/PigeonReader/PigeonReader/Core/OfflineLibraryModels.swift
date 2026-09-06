@@ -291,7 +291,7 @@ nonisolated enum ReaderSearchScope: String, CaseIterable, Identifiable, Sendable
 	}
 }
 
-nonisolated protocol OfflineLibraryStoring: Sendable {
+	nonisolated protocol OfflineLibraryStoring: Sendable {
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws
@@ -304,6 +304,9 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func recordMutationFailure(id: String, message: String, accountID: String) async throws
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws
 	func beginFullRebuild(accountID: String, at date: Date) async throws
+	/// Abandon only the caller's in-progress rebuild generation. The durable marker
+	/// and staged rows remain available for cleanup by the next rebuild attempt.
+	func abandonFullRebuild(accountID: String, startedAt: Date) async throws
 	func apply(_ page: IncrementalSyncPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws
 	func finishSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
 	func finishWarmSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
@@ -318,6 +321,8 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 
 extension OfflineLibraryStoring {
 	func beginFullRebuild(accountID: String, at date: Date) async throws {}
+
+	func abandonFullRebuild(accountID: String, startedAt: Date) async throws {}
 
 	func apply(_ page: IncrementalSyncPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws {
 		try await apply(page, accountID: accountID)

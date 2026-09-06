@@ -124,4 +124,123 @@ struct PreviewHTTPClient: HTTPClient {
 	}
 	"""
 }
+
+/// A DEBUG-only HTTP fixture for proving launch ordering with the real reader
+/// model. It returns bounded Reader API pages immediately while deliberately
+/// holding the unrelated incremental sync request open.
+nonisolated struct LaunchFixtureHTTPClient: HTTPClient {
+	private static let syncHoldNanoseconds: UInt64 = 30_000_000_000
+
+	let scenario: PreviewData.LaunchFixtureScenario
+	let articles: [Recommendation]
+
+	init(scenario: PreviewData.LaunchFixtureScenario, articles: [Recommendation]) {
+		self.scenario = scenario
+		self.articles = articles
+	}
+
+	nonisolated func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let fallbackURL = URL(string: "https://pigeon.launch-fixture") else {
+			throw PigeonError.invalidServerURL
+		}
+		let url = request.url ?? fallbackURL
+		print("[LaunchFixture] \(scenario.rawValue) request \(url.path)")
+
+		if url.path == "/api/v1/sync" {
+			switch scenario {
+			case .emptyColdToday, .cachedSelectedList:
+				// This is the unrelated full/incremental sync. Keep it pending long
+				// enough for a screenshot or UI assertion to prove the visible page
+				// arrived first.
+				try await Task.sleep(nanoseconds: Self.syncHoldNanoseconds)
+			case .replayFailure:
+				break
+			}
+			return try Self.response(data: Self.completeSyncPageData, url: url)
+		}
+
+		if url.path == "/api/v1/mutations", scenario == .replayFailure {
+			throw PigeonError.server(
+				statusCode: 503,
+				message: "{\"error\":\"Launch fixture replay failed\"}",
+			)
+		}
+
+		let data: Data
+		switch url.path {
+		case "/api/v1/recommendations":
+			let payload = PreviewRecommendationsResponse(
+				generatedAt: Date(timeIntervalSince1970: 1_788_000_000),
+				view: "launch-fixture",
+				items: articles,
+			)
+			let encoder = JSONEncoder()
+			encoder.dateEncodingStrategy = .iso8601
+			data = try encoder.encode(payload)
+		case "/reader/api/0/subscription/list":
+			data = Data(Self.subscriptionListData.utf8)
+		case "/reader/api/0/unread-count":
+			data = try JSONSerialization.data(withJSONObject: [
+				"unreadcounts": [
+					["id": "feed/launch-fixture", "count": articles.count],
+					["id": "user/-/state/com.google/reading-list", "count": articles.count],
+				],
+			])
+		case "/reader/api/0/stream/items/ids":
+			data = try JSONSerialization.data(withJSONObject: [
+				"itemRefs": articles.map { ["id": $0.readerId] },
+				"continuation": NSNull(),
+			])
+		case "/reader/api/0/stream/items/contents":
+			data = try Self.streamContentsData(for: articles)
+		default:
+			data = Data("{}".utf8)
+		}
+		return try Self.response(data: data, url: url)
+	}
+
+	private static let completeSyncPageData = Data(
+		"{\"cursor\":\"launch-fixture-cursor\",\"hasMore\":false,\"changes\":[]}".utf8,
+	)
+
+	private static let subscriptionListData = """
+	{"subscriptions":[{"id":"feed/launch-fixture","title":"Launch Fixture Reads","categories":[],"url":"https://pigeon.launch-fixture/feed/launch-fixture","sourceUrl":"https://example.invalid/launch-fixture","htmlUrl":"https://example.invalid/launch-fixture","iconUrl":null}]}
+	"""
+
+	private static func streamContentsData(for articles: [Recommendation]) throws -> Data {
+		let items: [[String: Any]] = articles.map { article in
+			var item: [String: Any] = [
+				"id": article.readerId,
+				"categories": [
+					article.isRead ? "user/-/state/com.google/read" : "",
+					article.isStarred ? "user/-/state/com.google/starred" : "",
+				].filter { $0.isEmpty == false },
+				"title": article.title,
+				"published": Int(article.receivedAt.timeIntervalSince1970),
+				"summary": ["content": article.html],
+				"alternate": [["href": article.originalURL?.absoluteString ?? "https://example.invalid/launch-fixture"]],
+				"origin": [
+					"streamId": "feed/\(article.feedKey)",
+					"title": article.source,
+					"htmlUrl": "https://example.invalid/launch-fixture",
+				],
+			]
+			if let author = article.author {
+				item["author"] = author
+			}
+			return item
+		}
+		return try JSONSerialization.data(withJSONObject: [
+			"id": "user/-/state/com.google/reading-list",
+			"items": items,
+		])
+	}
+
+	private static func response(data: Data, url: URL) throws -> (Data, URLResponse) {
+		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+}
 #endif

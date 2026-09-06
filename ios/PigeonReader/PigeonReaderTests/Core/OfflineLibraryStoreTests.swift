@@ -147,11 +147,15 @@ struct OfflineLibraryStoreTests {
 
 		let stats = try await store.storageStats(accountID: "account-a")
 		let snapshot = try await store.loadSnapshot(accountID: "account-a")
-		#expect(stats.cacheState == .syncing)
+		#expect(stats.cacheState == .needsRepair)
 		#expect(stats.navigationFreshness == .unverified)
 		#expect(stats.lastSuccessAt == nil)
 		#expect(stats.lastSyncAt == nil)
-		#expect(snapshot.cursor == "v1:1")
+		// A rebuild cursor belongs to the uncommitted stage. The committed snapshot
+		// remains readable and its cursor is intentionally unchanged until promotion.
+		#expect(snapshot.cursor == nil)
+		let staged = try await store.loadStagedSnapshot(accountID: "account-a")
+		#expect(staged.cursor == "v1:1")
 	}
 
 	@Test func clearingCachedArticlesInvalidatesCursorAndIntegrity() async throws {
@@ -198,13 +202,563 @@ struct OfflineLibraryStoreTests {
 		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
 		let snapshot = try await store.loadSnapshot(accountID: accountID)
 		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
-		#expect(snapshot.navigation == nil)
+		#expect(snapshot.navigation != nil)
 		#expect(snapshot.subscriptions.isEmpty)
-		#expect(snapshot.articlesByCollection.isEmpty)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == ["article-1"])
 		#expect(snapshot.restoration == restoration)
 		#expect(pending.map(\.mutation.id) == ["pending-1"])
-		#expect(snapshot.integrity.state == .syncing)
+		#expect(snapshot.integrity.state == .needsRepair)
 		#expect(snapshot.cursor == nil)
+	}
+
+	@Test func abandoningFullRebuildRoutesSubsequentWritesToCanonicalSnapshot() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-abandon-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let initial = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: [])
+		let staged = ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)], expandedFolderIDs: [])
+		let afterAbandon = ReaderNavigationState(items: [.smart(.starred, unreadCount: 3)], expandedFolderIDs: [])
+		let startedAt = Date(timeIntervalSince1970: 1_000)
+
+		// Keep a feed-derived fallback around so a stale unverified navigation
+		// rebuild would overwrite the newer direct save below.
+		try await store.apply(
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:feed",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": 1,
+				    "entityType": "feed",
+				    "entityId": "old-feed",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-15T12:00:00.000Z",
+				    "payload": {
+				      "feedKey": "old-feed",
+				      "streamId": "old-stream",
+				      "title": "Old feed",
+				      "isActive": true,
+				      "folders": []
+				    }
+				  }]
+				}
+				"""
+			),
+			accountID: accountID,
+		)
+		try await store.saveNavigation(initial, accountID: accountID)
+		try await store.beginFullRebuild(accountID: accountID, at: startedAt)
+		try await store.saveNavigation(staged, accountID: accountID)
+		#expect(try queryTestInt(
+			"SELECT COUNT(*) FROM cache_rebuilds WHERE account_id = ?",
+			in: databaseURL,
+			bindings: [accountID],
+		) == 1)
+		#expect(try queryTestInt(
+			"SELECT COUNT(*) FROM cached_navigation WHERE account_id GLOB '__pigeon_rebuild__*'",
+			in: databaseURL,
+		) == 1)
+
+		try await store.abandonFullRebuild(accountID: accountID, startedAt: startedAt)
+		try await store.saveNavigation(afterAbandon, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation == afterAbandon)
+		// Abandonment only changes the process-local write route. The durable marker
+		// and stage remain for the next beginFullRebuild to reclaim.
+		#expect(try queryTestInt(
+			"SELECT COUNT(*) FROM cache_rebuilds WHERE account_id = ?",
+			in: databaseURL,
+			bindings: [accountID],
+		) == 1)
+		#expect(try queryTestInt(
+			"SELECT COUNT(*) FROM cached_navigation WHERE account_id GLOB '__pigeon_rebuild__*'",
+			in: databaseURL,
+		) == 1)
+	}
+
+	@Test func staleRebuildTokenCannotAbandonNewGeneration() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let oldNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: [])
+		let stagedNavigation = ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)], expandedFolderIDs: [])
+		let finalNavigation = ReaderNavigationState(items: [.smart(.starred, unreadCount: 3)], expandedFolderIDs: [])
+		let oldStartedAt = Date(timeIntervalSince1970: 1_000)
+		let newStartedAt = Date(timeIntervalSince1970: 2_000)
+
+		try await store.saveNavigation(oldNavigation, accountID: accountID)
+		try await store.beginFullRebuild(accountID: accountID, at: oldStartedAt)
+		try await store.beginFullRebuild(accountID: accountID, at: newStartedAt)
+		try await store.abandonFullRebuild(accountID: accountID, startedAt: oldStartedAt)
+
+		// The old token must not clear the new process-local generation. This write
+		// therefore remains staged and invisible to the committed snapshot.
+		try await store.saveNavigation(stagedNavigation, accountID: accountID)
+		#expect(try await store.loadSnapshot(accountID: accountID).navigation == oldNavigation)
+
+		try await store.abandonFullRebuild(accountID: accountID, startedAt: newStartedAt)
+		try await store.saveNavigation(finalNavigation, accountID: accountID)
+		#expect(try await store.loadSnapshot(accountID: accountID).navigation == finalNavigation)
+	}
+
+	@Test func interruptedFullRebuildReopenPreservesCommittedSnapshot() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-abandon-reopen-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: [])
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		try await store?.saveNavigation(navigation, accountID: accountID)
+		try await store?.saveArticles([makeArticle()], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store?.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store?.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 9)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		store = nil
+
+		let reopened = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await reopened.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation == navigation)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == ["article-1"])
+	}
+
+	@Test func firstSnapshotRepairsMissingNavigationAndMembershipsBeforeProjection() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-first-snapshot-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		try await store.apply(
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:feed",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": 1,
+				    "entityType": "feed",
+				    "entityId": "daily",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-15T12:00:00.000Z",
+				    "payload": {
+				      "feedKey": "daily",
+				      "streamId": "stream-1",
+				      "title": "Daily",
+				      "isActive": true,
+				      "folders": []
+				    }
+				  }]
+				}
+				"""
+			),
+			accountID: accountID,
+		)
+		let article = makeArticle(feedKey: "daily", isRead: false)
+		let articlePayload = IncrementalSyncPayload(
+			feedKey: article.feedKey, streamId: nil, title: article.title, feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: article.id, readerId: article.readerId, source: article.source,
+			author: article.author, html: article.html, text: article.text, originalURL: article.originalURL,
+			receivedAt: article.receivedAt, isRead: article.isRead, isStarred: article.isStarred, isBodyPruned: false,
+			itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+		)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:article",
+				hasMore: false,
+				changes: [
+					IncrementalSyncChange(
+						sequence: 2, entityType: .article, entityId: article.id, operation: .upsert,
+						changedAt: article.receivedAt, payload: articlePayload,
+					),
+				],
+			),
+			accountID: accountID,
+		)
+		try deleteCachedNavigationAndMemberships(in: databaseURL, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: "stream-1") != nil)
+		#expect(snapshot.articlesByCollection["stream-1"]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id) == [article.id])
+	}
+
+	@Test func deletingTheFinalCachedFeedClearsNavigationSnapshot() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let date = Date(timeIntervalSince1970: 1_000)
+		let payload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: "stream-last", title: "Daily", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: true, folders: [], id: nil, readerId: nil, source: nil, author: nil, html: nil, text: nil,
+			originalURL: nil, receivedAt: nil, isRead: nil, isStarred: nil, isBodyPruned: nil, itemId: nil,
+			updatedAt: nil, version: nil, mutationId: nil,
+		)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:feed", hasMore: false,
+				changes: [IncrementalSyncChange(
+					sequence: 1, entityType: .feed, entityId: "daily", operation: .upsert,
+					changedAt: date, payload: payload,
+				)],
+			),
+			accountID: "account-a",
+		)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:delete", hasMore: false,
+				changes: [IncrementalSyncChange(
+					sequence: 2, entityType: .feed, entityId: "daily", operation: .delete,
+					changedAt: date, payload: nil,
+				)],
+			),
+			accountID: "account-a",
+		)
+
+		#expect(try await store.loadSnapshot(accountID: "account-a").navigation == nil)
+	}
+
+	@Test func legacyMarkerMigrationPreservesAnExplicitEmptyPage() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-legacy-page-migration-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		let subscription = makeSubscription(id: "stream-legacy", key: "daily", title: "Daily", folders: [])
+		let article = makeArticle(id: "legacy-removed", feedKey: "daily", isRead: true)
+		try await store?.saveSubscriptions([subscription], accountID: accountID)
+		try await store?.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store?.saveArticles([article], collectionID: subscription.id, accountID: accountID)
+		try await store?.saveArticles([], collectionID: subscription.id, accountID: accountID)
+		store = nil
+		try executeTestSQL("DROP TABLE cached_collection_states", in: databaseURL)
+		try executeTestSQL("DROP TABLE cache_collection_state_migrations", in: databaseURL)
+
+		let reopened = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await reopened.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[subscription.id]?.isEmpty != false)
+	}
+
+	@Test func newDatabaseMigrationSentinelDoesNotFreezeSyncProjectionRepair() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-new-db-migration-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		let feedPayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: "stream-sync", title: "Daily", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: true, folders: [], id: nil, readerId: nil, source: nil, author: nil, html: nil, text: nil,
+			originalURL: nil, receivedAt: nil, isRead: nil, isStarred: nil, isBodyPruned: nil, itemId: nil,
+			updatedAt: nil, version: nil, mutationId: nil,
+		)
+		let article = makeArticle(id: "sync-repair-article", feedKey: "daily", isRead: false)
+		let articlePayload = IncrementalSyncPayload(
+			feedKey: article.feedKey, streamId: nil, title: article.title, feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: article.id, readerId: article.readerId, source: article.source,
+			author: article.author, html: article.html, text: article.text, originalURL: article.originalURL,
+			receivedAt: article.receivedAt, isRead: article.isRead, isStarred: article.isStarred, isBodyPruned: false,
+			itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+		)
+		try await store?.apply(
+			IncrementalSyncPage(
+				cursor: "v1:sync", hasMore: false,
+				changes: [
+					IncrementalSyncChange(sequence: 1, entityType: .feed, entityId: "daily", operation: .upsert, changedAt: article.receivedAt, payload: feedPayload),
+					IncrementalSyncChange(sequence: 2, entityType: .article, entityId: article.id, operation: .upsert, changedAt: article.receivedAt, payload: articlePayload),
+				],
+			),
+			accountID: accountID,
+		)
+		try executeTestSQL(
+			"DELETE FROM cached_collection_articles WHERE account_id = 'account-a' AND collection_id = 'stream-sync'",
+			in: databaseURL,
+		)
+		store = nil
+
+		let reopened = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await reopened.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection["stream-sync"]?.map(\.id) == [article.id])
+	}
+
+	@Test func membershipRepairPreservesExplicitPageReplacement() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(id: "stream-page", key: "daily", title: "Daily", folders: [])
+		let oldArticle = makeArticle(id: "old-page-article", feedKey: "daily", isRead: true)
+		let freshArticle = makeArticle(id: "fresh-page-article", feedKey: "daily", isRead: true)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.saveArticles([oldArticle], collectionID: subscription.id, accountID: accountID)
+		try await store.saveArticles([freshArticle], collectionID: subscription.id, accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[subscription.id]?.map(\.id) == [freshArticle.id])
+	}
+
+	@Test func authoritativeStatusDeltaStillUpdatesManagedMembershipsForExplicitPageArticles() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(id: "stream-status", key: "daily", title: "Daily", folders: [])
+		let article = makeArticle(id: "status-page-article", feedKey: "daily", isRead: false, isStarred: false)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.saveArticles([article], collectionID: subscription.id, accountID: accountID)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:status", hasMore: false,
+				changes: [IncrementalSyncChange(
+					sequence: 1, entityType: .status, entityId: article.id, operation: .upsert,
+					changedAt: article.receivedAt,
+					payload: IncrementalSyncPayload(
+						feedKey: nil, streamId: nil, title: nil, feedURL: nil, siteURL: nil, iconURL: nil,
+						isActive: nil, folders: nil, id: nil, readerId: nil, source: nil, author: nil, html: nil, text: nil,
+						originalURL: nil, receivedAt: nil, isRead: true, isStarred: true, isBodyPruned: nil,
+						itemId: article.id, updatedAt: nil, version: nil, mutationId: nil,
+					),
+				)],
+			),
+			accountID: accountID,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[subscription.id]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.contains(where: { $0.id == article.id }) != true)
+		#expect(snapshot.articlesByCollection[ReaderSection.starred.rawValue]?.map(\.id) == [article.id])
+	}
+
+	@Test func membershipRepairPreservesExplicitEmptyPageAfterUnsubscribeAndResubscribe() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let subscription = makeSubscription(id: "stream-removed", key: "daily", title: "Daily", folders: [])
+		let removedArticle = makeArticle(id: "removed-page-article", feedKey: "daily", isRead: true)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.saveArticles([removedArticle], collectionID: subscription.id, accountID: accountID)
+		// An empty response is an intentional page replacement. The article row is
+		// retained for body/search recovery, but must not repopulate this page.
+		try await store.saveArticles([], collectionID: subscription.id, accountID: accountID)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[subscription.id]?.isEmpty != false)
+	}
+
+	@Test func rebuildIntentPromotionUsesPendingSequenceAfterAcknowledgement() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-rebuild-intents-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let older = OfflineMutation(
+			id: "z-older",
+			kind: .setRead,
+			itemIds: ["article-stage"],
+			value: true,
+			scope: .single,
+		)
+		let newer = OfflineMutation(
+			id: "a-newer",
+			kind: .setRead,
+			itemIds: ["article-stage"],
+			value: false,
+			scope: .single,
+		)
+		try await store.enqueue(older, accountID: accountID)
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		let receivedAt = Date(timeIntervalSince1970: 1_000)
+		let feedPayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: "stream-1", title: "Daily", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: true, folders: [], id: nil, readerId: nil, source: nil, author: nil, html: nil, text: nil,
+			originalURL: nil, receivedAt: nil, isRead: nil, isStarred: nil, isBodyPruned: nil, itemId: nil,
+			updatedAt: nil, version: nil, mutationId: nil,
+		)
+		let articlePayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: nil, title: "Staged story", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: "article-stage", readerId: "reader-stage", source: "Daily", author: nil,
+			html: "<p>Staged body</p>", text: nil, originalURL: nil, receivedAt: receivedAt, isRead: false,
+			isStarred: false, isBodyPruned: false, itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+		)
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:staged",
+				hasMore: false,
+				changes: [
+					IncrementalSyncChange(sequence: 1, entityType: .feed, entityId: "daily", operation: .upsert, changedAt: receivedAt, payload: feedPayload),
+					IncrementalSyncChange(sequence: 2, entityType: .article, entityId: "article-stage", operation: .upsert, changedAt: receivedAt, payload: articlePayload),
+				],
+			),
+			accountID: accountID,
+		)
+		try await store.enqueue(newer, accountID: accountID)
+		try setRebuildIntentCreatedAt(in: databaseURL, accountID: accountID, timestamp: 2_000)
+		// Simulate the replay completing both requests while the rebuild is still
+		// running. Their durable rebuild intents must survive outbox removal.
+		try await store.markMutationApplied(id: older.id, accountID: accountID)
+		try await store.markMutationApplied(id: newer.id, accountID: accountID)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_100))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let article = try #require(snapshot.articlesByCollection["stream-1"]?.first)
+		#expect(article.isRead == false)
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id) == ["article-stage"])
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
+	}
+
+	@Test func fullRebuildPromotionRetainsReadableForYouPageForArticlesStillOnServer() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-rebuild-for-you-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		let article = makeArticle(id: "for-you-1", feedKey: "daily", isRead: true)
+		try await store?.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store?.saveArticles([article], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store?.saveCollectionContinuation(
+			"for-you-next",
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: accountID,
+		)
+		try await store?.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		let receivedAt = Date(timeIntervalSince1970: 1_000)
+		let feedPayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: "stream-1", title: "Daily", feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: true, folders: [], id: nil, readerId: nil, source: nil, author: nil, html: nil, text: nil,
+			originalURL: nil, receivedAt: nil, isRead: nil, isStarred: nil, isBodyPruned: nil, itemId: nil,
+			updatedAt: nil, version: nil, mutationId: nil,
+		)
+		let articlePayload = IncrementalSyncPayload(
+			feedKey: "daily", streamId: nil, title: article.title, feedURL: nil, siteURL: nil, iconURL: nil,
+			isActive: nil, folders: nil, id: article.id, readerId: article.readerId, source: article.source, author: article.author,
+			html: article.html, text: article.text, originalURL: article.originalURL, receivedAt: receivedAt, isRead: true,
+			isStarred: false, isBodyPruned: false, itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+		)
+		try await store?.apply(
+			IncrementalSyncPage(
+				cursor: "v1:for-you",
+				hasMore: false,
+				changes: [
+					IncrementalSyncChange(sequence: 1, entityType: .feed, entityId: "daily", operation: .upsert, changedAt: receivedAt, payload: feedPayload),
+					IncrementalSyncChange(sequence: 2, entityType: .article, entityId: article.id, operation: .upsert, changedAt: receivedAt, payload: articlePayload),
+				],
+			),
+			accountID: accountID,
+		)
+		try await store?.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store?.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+		store = nil
+
+		let reopened = OfflineLibraryStore(databaseURL: databaseURL)
+		let snapshot = try await reopened.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == [article.id])
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.first?.html == article.html)
+		#expect(snapshot.continuationsByCollection[ReaderSection.forYou.rawValue] == "for-you-next")
+	}
+
+	@Test(arguments: [false, true])
+	func rebuildIntentPromotionResolvesDecimalAndTagAliases(queueUsesTagID: Bool) async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-rebuild-aliases-\(queueUsesTagID)-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let rowID: UInt64 = 202
+		let decimalID = String(rowID)
+		let tagID = "tag:google.com,2005:reader/item/\(String(rowID, radix: 16))"
+		let queuedID = queueUsesTagID ? tagID : decimalID
+		let storedReaderID = queueUsesTagID ? decimalID : tagID
+		let subscription = makeSubscription(id: "stream-1", key: "daily", title: "Daily", folders: [])
+		let article = makeArticle(
+			id: "article-alias-\(queueUsesTagID)",
+			feedKey: "daily",
+			readerID: storedReaderID,
+			isRead: false,
+			isStarred: false,
+		)
+
+		let oldRead = OfflineMutation(id: "alias-old-read-\(queueUsesTagID)", kind: .setRead, itemIds: [queuedID], value: false)
+		let oldStar = OfflineMutation(id: "alias-old-star-\(queueUsesTagID)", kind: .setStarred, itemIds: [queuedID], value: false)
+		try await store.enqueue(oldRead, accountID: accountID)
+		try await store.enqueue(oldStar, accountID: accountID)
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		let newerRead = OfflineMutation(id: "alias-new-read-\(queueUsesTagID)", kind: .setRead, itemIds: [queuedID], value: true)
+		let newerStar = OfflineMutation(id: "alias-new-star-\(queueUsesTagID)", kind: .setStarred, itemIds: [queuedID], value: true)
+		try await store.enqueue(newerRead, accountID: accountID)
+		try await store.enqueue(newerStar, accountID: accountID)
+
+		try await store.apply(
+			IncrementalSyncPage(
+				cursor: "v1:aliases",
+				hasMore: false,
+				changes: [
+					IncrementalSyncChange(
+						sequence: 1,
+						entityType: .article,
+						entityId: article.id,
+						operation: .upsert,
+						changedAt: Date(timeIntervalSince1970: 1_100),
+						payload: IncrementalSyncPayload(
+							feedKey: article.feedKey,
+							streamId: subscription.id,
+							title: article.title,
+							feedURL: nil,
+							siteURL: nil,
+							iconURL: nil,
+							isActive: nil,
+							folders: nil,
+							id: article.id,
+							readerId: article.readerId,
+							source: article.source,
+							author: article.author,
+							html: article.html,
+							text: article.text,
+							originalURL: article.originalURL,
+							receivedAt: article.receivedAt,
+							isRead: article.isRead,
+							isStarred: article.isStarred,
+							isBodyPruned: false,
+							itemId: nil,
+							updatedAt: nil,
+							version: nil,
+							mutationId: nil,
+						),
+					),
+				],
+			),
+			accountID: accountID,
+		)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+
+		for mutation in [oldRead, oldStar, newerRead, newerStar] {
+			try await store.markMutationApplied(id: mutation.id, accountID: accountID)
+		}
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		let stored = try #require(snapshot.articlesByCollection[subscription.id]?.first)
+		#expect(stored.isRead)
+		#expect(stored.isStarred)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
 	}
 
 	@Test func missingStatusTargetMarksRepairWithoutAdvancingCursor() async throws {
@@ -299,7 +853,7 @@ struct OfflineLibraryStoreTests {
 		} catch let error as OfflineLibraryError {
 			#expect(error == .navigationUnavailable)
 		}
-		#expect((try await store.storageStats(accountID: "account-a")).cacheState == .syncing)
+		#expect((try await store.storageStats(accountID: "account-a")).cacheState == .needsRepair)
 
 		try await store.saveNavigation(
 			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
@@ -697,6 +1251,301 @@ struct OfflineLibraryStoreTests {
 		#expect(cached.html == "<p>Safe</p>")
 	}
 
+	@Test func malformedUnreferencedArticleIsMarkedWithoutHidingValidCachedRows() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let valid = makeArticle(id: "article-valid", feedKey: "daily", isRead: true)
+		let malformed = makeArticle(id: "article-malformed", feedKey: "daily", isRead: true)
+		try await store.saveArticles([valid, malformed], collectionID: "feed/7", accountID: "account-a")
+		try executeTestSQL(
+			"UPDATE cached_articles SET payload = X'00' WHERE account_id = 'account-a' AND id = 'article-malformed'",
+			in: databaseURL,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.articlesByCollection["feed/7"]?.map(\.id) == [valid.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+		#expect(snapshot.integrity.lastError?.contains("malformed") == true)
+	}
+
+	@Test func malformedDuplicateArticleDoesNotAbortSnapshotReconciliation() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-duplicate-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let article = makeArticle(
+			id: "article-duplicate-valid",
+			readerID: "reader-duplicate",
+			isRead: true,
+		)
+		try await store.saveArticles([article], collectionID: "feed/duplicate", accountID: "account-a")
+		try executeTestSQL(
+			"""
+			INSERT INTO cached_articles
+			(account_id, id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, payload)
+			SELECT account_id, 'article-duplicate-bad', reader_id, feed_key, received_at, is_read, is_starred, body_pruned, payload
+			FROM cached_articles WHERE account_id = 'account-a' AND id = 'article-duplicate-valid'
+			""",
+			in: databaseURL,
+		)
+		try executeTestSQL(
+			"UPDATE cached_articles SET payload = X'00' WHERE account_id = 'account-a' AND id = 'article-duplicate-bad'",
+			in: databaseURL,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.articlesByCollection["feed/duplicate"]?.map(\.id) == [article.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
+	@Test func malformedArticleAndMissingMembershipKeepValidRowsVisible() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-membership-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let subscription = makeSubscription(id: "stream-mixed", key: "daily", title: "Daily", folders: [])
+		let valid = makeArticle(id: "article-mixed-valid", feedKey: "daily", receivedAt: 100, isRead: true)
+		let malformed = makeArticle(id: "article-mixed-malformed", feedKey: "daily", receivedAt: 90, isRead: false)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.saveArticles([valid, malformed], collectionID: subscription.id, accountID: accountID)
+		try executeTestSQL(
+			"UPDATE cached_articles SET payload = X'00' WHERE account_id = 'account-a' AND id = 'article-mixed-malformed'",
+			in: databaseURL,
+		)
+		// The unread projection is deliberately absent. Snapshot repair therefore
+		// attempts a full membership rebuild, which must roll back on the malformed
+		// article before the tolerant projection reads the valid feed row.
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[subscription.id]?.map(\.id) == [valid.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
+	@Test func benchmarkRepresentativeCacheLoad() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-cache-benchmark-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "benchmark-account"
+		let feedCount = 52
+		let articleCount = 5_344
+		let unreadCount = 1_876
+		let retainedReadBodyCount = 500
+		let retainedBodyCount = unreadCount + retainedReadBodyCount
+		let retainedBody = String(repeating: "x", count: 25_000)
+		let subscriptions = (0..<feedCount).map { index in
+			makeSubscription(id: "stream-\(index)", key: "feed-\(index)", title: "Feed \(index)", folders: [])
+		}
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		try await store.saveSubscriptions(subscriptions, accountID: accountID)
+		try await store.saveNavigation(makeNavigation(subscriptions), accountID: accountID)
+		var articlesByFeed = [[Recommendation]](repeating: [], count: feedCount)
+		for index in 0..<articleCount {
+			let feedIndex = index % feedCount
+			let hasRetainedBody = index < retainedBodyCount
+			articlesByFeed[feedIndex].append(
+				makeArticle(
+					id: "benchmark-\(index)",
+					feedKey: "feed-\(feedIndex)",
+					html: hasRetainedBody ? retainedBody : "",
+					receivedAt: TimeInterval(1_000 + index),
+					isRead: index >= unreadCount,
+				),
+			)
+		}
+		for (feedIndex, articles) in articlesByFeed.enumerated() {
+			try await store.saveArticles(articles, collectionID: "stream-\(feedIndex)", accountID: accountID)
+		}
+		try executeTestSQL(
+			"""
+			UPDATE cached_articles
+			SET body_pruned = CASE
+				WHEN CAST(substr(id, 11) AS INTEGER) < \(retainedBodyCount) THEN 0
+				ELSE 1
+			END
+			WHERE account_id = 'benchmark-account'
+			""",
+			in: databaseURL,
+		)
+		try executeTestSQL(
+			"""
+			INSERT OR IGNORE INTO cached_collection_articles (account_id, collection_id, article_id, position)
+			SELECT account_id, 'unread', id, 0
+			FROM cached_articles
+			WHERE account_id = 'benchmark-account' AND is_read = 0
+			""",
+			in: databaseURL,
+		)
+
+		let stats = try await store.storageStats(accountID: accountID)
+		await store.resetSnapshotArticleDecodeCount()
+		let healthyStart = DispatchTime.now().uptimeNanoseconds
+		let healthy = try await store.loadSnapshot(accountID: accountID)
+		let healthyMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - healthyStart) / 1_000_000
+		let healthyArticleIDs = Set(healthy.articlesByCollection.values.flatMap { $0.map(\.id) })
+		print("CACHE_BENCH healthy articles=\(stats.articleCount) feeds=\(feedCount) unread=\(unreadCount) payloadBytes=\(stats.bodyBytes) retainedBodyBytes=\(retainedBodyCount * retainedBody.count) retainedReadBodies=\(retainedReadBodyCount) prunedBodies=\(articleCount - retainedBodyCount) elapsedMs=\(healthyMilliseconds) decoded=\(await store.snapshotArticleDecodeCountForTesting())")
+		#expect(stats.articleCount == articleCount)
+		#expect(healthyArticleIDs.count == articleCount)
+		#expect(healthy.articlesByCollection[ReaderSection.unread.rawValue]?.count == unreadCount)
+
+		try executeTestSQL(
+			"DELETE FROM cached_collection_articles WHERE account_id = 'benchmark-account' AND collection_id = 'unread'",
+			in: databaseURL,
+		)
+		await store.resetSnapshotArticleDecodeCount()
+		let repairStart = DispatchTime.now().uptimeNanoseconds
+		let repaired = try await store.loadSnapshot(accountID: accountID)
+		let repairMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - repairStart) / 1_000_000
+		let repairedArticleIDs = Set(repaired.articlesByCollection.values.flatMap { $0.map(\.id) })
+		print("CACHE_BENCH repair articles=\(stats.articleCount) feeds=\(feedCount) unread=\(unreadCount) payloadBytes=\(stats.bodyBytes) retainedBodyBytes=\(retainedBodyCount * retainedBody.count) retainedReadBodies=\(retainedReadBodyCount) prunedBodies=\(articleCount - retainedBodyCount) elapsedMs=\(repairMilliseconds) decoded=\(await store.snapshotArticleDecodeCountForTesting())")
+		#expect(repairedArticleIDs.count == articleCount)
+		#expect(repaired.articlesByCollection[ReaderSection.unread.rawValue]?.count == unreadCount)
+	}
+
+	@Test func malformedNavigationAndRestorationDoNotHideValidCachedArticles() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-state-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let article = makeArticle(id: "article-valid-state", feedKey: "daily", isRead: true)
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: ReaderSection.forYou.rawValue,
+			selectedArticleIDs: [ReaderSection.forYou.rawValue: article.id],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
+			accountID: "account-a",
+		)
+		try await store.saveArticles([article], collectionID: ReaderSection.forYou.rawValue, accountID: "account-a")
+		try await store.saveRestoration(restoration, accountID: "account-a")
+		try executeTestSQL(
+			"UPDATE cached_navigation SET payload = X'00' WHERE account_id = 'account-a'",
+			in: databaseURL,
+		)
+		try executeTestSQL(
+			"UPDATE reader_state SET payload = X'00' WHERE account_id = 'account-a'",
+			in: databaseURL,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.navigation == nil)
+		#expect(snapshot.restoration == nil)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.map(\.id) == [article.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
+	@Test func malformedSubscriptionLeavesOtherCachedRowsReadable() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-subscription-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let validSubscription = makeSubscription(id: "stream-valid", key: "daily", title: "Daily", folders: [])
+		let malformedSubscription = makeSubscription(id: "stream-bad", key: "bad", title: "Bad", folders: [])
+		let article = makeArticle(id: "article-valid-subscription", feedKey: "daily", isRead: true)
+		try await store.saveSubscriptions([validSubscription, malformedSubscription], accountID: "account-a")
+		try await store.saveNavigation(makeNavigation([validSubscription]), accountID: "account-a")
+		try await store.saveArticles([article], collectionID: validSubscription.id, accountID: "account-a")
+		try executeTestSQL(
+			"UPDATE cached_subscriptions SET payload = X'00' WHERE account_id = 'account-a' AND id = 'stream-bad'",
+			in: databaseURL,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.subscriptions.map(\.id) == [validSubscription.id])
+		#expect(snapshot.articlesByCollection[validSubscription.id]?.map(\.id) == [article.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
+	@Test func membershipRepairWithMalformedSubscriptionKeepsValidRowsReadable() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-membership-rollback-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let subscription = makeSubscription(id: "stream-valid", key: "daily", title: "Daily", folders: [])
+		let article = makeArticle(
+			id: "article-membership-rollback",
+			feedKey: "daily",
+			receivedAt: 100,
+			isRead: false,
+		)
+		let malformedSubscription = makeSubscription(id: "stream-bad", key: "bad", title: "Bad", folders: [])
+		try await store.saveSubscriptions([subscription, malformedSubscription], accountID: "account-a")
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: "account-a")
+		try await store.saveArticles([article], collectionID: subscription.id, accountID: "account-a")
+		try executeTestSQL(
+			"UPDATE cached_subscriptions SET payload = X'00' WHERE account_id = 'account-a' AND id = 'stream-bad'",
+			in: databaseURL,
+		)
+		try executeTestSQL(
+			"DELETE FROM cached_collection_articles WHERE account_id = 'account-a' AND collection_id = 'unread'",
+			in: databaseURL,
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.articlesByCollection[subscription.id]?.map(\.id) == [article.id])
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
+	@Test func membershipRepairRollsBackOnSQLiteFailureBeforeProjectingValidRows() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-membership-sqlite-rollback-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let subscription = makeSubscription(id: "stream-rollback", key: "daily", title: "Daily", folders: [])
+		let article = makeArticle(id: "article-membership-sqlite", feedKey: "daily", receivedAt: 100, isRead: false)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveNavigation(makeNavigation([subscription]), accountID: accountID)
+		try await store.saveArticles([article], collectionID: subscription.id, accountID: accountID)
+		try executeTestSQL(
+			"""
+			CREATE TRIGGER fail_membership_rebuild
+			BEFORE INSERT ON cached_collection_articles
+			WHEN NEW.account_id = 'account-a'
+			BEGIN
+				SELECT RAISE(ABORT, 'test membership insertion failure');
+			END
+			""",
+			in: databaseURL,
+		)
+
+		var failed = false
+		do {
+			_ = try await store.loadSnapshot(accountID: accountID)
+		} catch {
+			failed = true
+		}
+		#expect(failed)
+		#expect(
+			try queryTestInt(
+				"SELECT COUNT(*) FROM cached_collection_articles WHERE account_id = 'account-a' AND collection_id = 'stream-rollback' AND article_id = 'article-membership-sqlite'",
+				in: databaseURL,
+			) == 1
+		)
+
+		try executeTestSQL("DROP TRIGGER fail_membership_rebuild", in: databaseURL)
+		let repaired = try await store.loadSnapshot(accountID: accountID)
+		#expect(repaired.articlesByCollection[subscription.id]?.map(\.id) == [article.id])
+		#expect(repaired.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id) == [article.id])
+	}
+
 	@Test func snapshotDecodesEachCachedArticlePayloadOnlyOnceAcrossCollections() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let articles = (0..<3).map { index in
@@ -1061,6 +1910,69 @@ struct OfflineLibraryStoreTests {
 			sqlite3_step(statement) == SQLITE_DONE else {
 			throw TestSQLiteError.updateFailed
 		}
+	}
+
+	private func deleteCachedNavigationAndMemberships(in databaseURL: URL, accountID: String) throws {
+		for table in ["cached_navigation_items", "cached_navigation", "cached_collection_articles"] {
+			try executeTestSQL("DELETE FROM \(table) WHERE account_id = ?", in: databaseURL, bindings: [accountID])
+		}
+	}
+
+	private func setRebuildIntentCreatedAt(in databaseURL: URL, accountID: String, timestamp: TimeInterval) throws {
+		for table in ["pending_actions", "cache_rebuild_intents"] {
+			try executeTestSQL(
+				"UPDATE \(table) SET created_at = ? WHERE account_id = ?",
+				in: databaseURL,
+				bindings: [String(timestamp), accountID],
+			)
+		}
+	}
+
+	private func executeTestSQL(_ sql: String, in databaseURL: URL, bindings: [String] = []) throws {
+		var database: OpaquePointer?
+		guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+			let database else {
+			throw TestSQLiteError.openFailed
+		}
+		defer { sqlite3_close(database) }
+		var statement: OpaquePointer?
+		guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+			let statement else {
+			throw TestSQLiteError.prepareFailed
+		}
+		defer { sqlite3_finalize(statement) }
+		for (index, binding) in bindings.enumerated() {
+			guard binding.withCString({ sqlite3_bind_text(statement, Int32(index + 1), $0, -1, testSQLiteTransient) }) == SQLITE_OK else {
+				throw TestSQLiteError.updateFailed
+			}
+		}
+		guard sqlite3_step(statement) == SQLITE_DONE else {
+			throw TestSQLiteError.updateFailed
+		}
+	}
+
+	private func queryTestInt(_ sql: String, in databaseURL: URL, bindings: [String] = []) throws -> Int {
+		var database: OpaquePointer?
+		guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+			let database else {
+			throw TestSQLiteError.openFailed
+		}
+		defer { sqlite3_close(database) }
+		var statement: OpaquePointer?
+		guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+			let statement else {
+			throw TestSQLiteError.prepareFailed
+		}
+		defer { sqlite3_finalize(statement) }
+		for (index, binding) in bindings.enumerated() {
+			guard binding.withCString({ sqlite3_bind_text(statement, Int32(index + 1), $0, -1, testSQLiteTransient) }) == SQLITE_OK else {
+				throw TestSQLiteError.updateFailed
+			}
+		}
+		guard sqlite3_step(statement) == SQLITE_ROW else {
+			throw TestSQLiteError.updateFailed
+		}
+		return Int(sqlite3_column_int64(statement, 0))
 	}
 }
 

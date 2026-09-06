@@ -134,7 +134,13 @@ struct PigeonAPIClient: Sendable {
 		request.httpBody = try JSONEncoder().encode(OfflineMutationEnvelope(mutations: Array(mutations.prefix(100))))
 		let (data, response) = try await httpClient.data(for: request)
 		try Self.validate(response: response, data: data)
-		return try decoder.decode(OfflineMutationBatchResponse.self, from: data)
+		let decoded = try decoder.decode(OfflineMutationBatchResponse.self, from: data)
+		guard Set(decoded.results.map(\.mutationId)).count == decoded.results.count else {
+			// OfflineMutationReplayer indexes receipts by mutation ID. Duplicate
+			// receipts would otherwise trap Dictionary(uniqueKeysWithValues:).
+			throw PigeonError.invalidResponse
+		}
+		return decoded
 	}
 
 	func navigationSnapshot(
@@ -314,6 +320,14 @@ struct PigeonAPIClient: Sendable {
 			let endIndex = min(startIndex + Self.streamItemContentChunkSize, missingItemIDs.count)
 			let itemIDChunk = Array(missingItemIDs[startIndex..<endIndex])
 			let contentPage = try await streamItemContents(itemIDs: itemIDChunk)
+			let requestedIDs = Set(itemIDChunk.map(Self.normalizedItemID))
+			let returnedIDs = Set(contentPage.items.map { Self.normalizedItemID($0.id) })
+			guard requestedIDs.isSubset(of: returnedIDs) else {
+				// The IDs endpoint and content endpoint must describe the same
+				// page. Silently dropping missing bodies would persist a fake
+				// empty collection over a previously readable cache.
+				throw PigeonError.invalidResponse
+			}
 			for item in contentPage.items {
 				recommendationsByID[Self.normalizedItemID(item.id)] = recommendation(
 					from: item,

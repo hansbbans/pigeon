@@ -106,6 +106,25 @@ struct PigeonAPIClientTests {
 		#expect(envelope.mutations == [mutation])
 	}
 
+	@Test func mutationBatchRejectsDuplicateReceiptsBeforeReplayCanTrap() async throws {
+		let response = Data(
+			#"{"results":[{"mutationId":"mutation-1","status":"applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null},{"mutationId":"mutation-1","status":"already_applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null}]}"#.utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+		let mutation = OfflineMutation(id: "mutation-1", kind: .setRead, itemIds: ["reader-1"], value: true)
+
+		do {
+			_ = try await client.sendMutations([mutation])
+			Issue.record("Duplicate mutation receipts must be rejected.")
+		} catch PigeonError.invalidResponse {
+			// Expected: the replayer indexes receipts by mutation ID.
+		} catch {
+			Issue.record("Unexpected error: \(error)")
+		}
+	}
+
 	@Test func streamRecommendationsIncludeTheOriginSourceInTheirExplanation() async throws {
 		let mock = SingleStreamHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -403,6 +422,25 @@ struct PigeonAPIClientTests {
 		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == ["21"])
 	}
 
+	@Test func folderRecommendationsRejectIncompleteContentResponses() async throws {
+		let mock = FolderLoadingHTTPClient(omittingContentIDs: ["21"])
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		do {
+			_ = try await client.recommendationsPage(from: "user/-/label/News")
+			Issue.record("An incomplete content response must be rejected.")
+		} catch PigeonError.invalidResponse {
+			// Expected: persisting the page would otherwise turn a missing body into a
+			// fake empty article.
+		} catch {
+			Issue.record("Unexpected error: \(error)")
+		}
+	}
+
 	@Test func legacyRecommendationsEntryPointDoesNotDrainFolderContinuations() async throws {
 		let mock = FolderLoadingHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
@@ -521,6 +559,11 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 	}
 
 	private var capturedRequests: [Request] = []
+	private let omittedContentIDs: Set<String>
+
+	init(omittingContentIDs: Set<String> = []) {
+		self.omittedContentIDs = omittingContentIDs
+	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
 		guard let url = request.url else {
@@ -536,7 +579,7 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 			return try itemIDsResponse(for: url)
 		case "/reader/api/0/stream/items/contents":
 			let ids = Self.formValues(from: request.httpBody, named: "i")
-			return (Self.contentsResponse(for: ids), try Self.response(for: url, statusCode: 200))
+			return (Self.contentsResponse(for: ids.filter { omittedContentIDs.contains($0) == false }), try Self.response(for: url, statusCode: 200))
 		default:
 			return (Data("not found".utf8), try Self.response(for: url, statusCode: 404))
 		}

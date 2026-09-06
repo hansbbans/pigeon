@@ -586,3 +586,64 @@ final class PigeonReaderUITests: XCTestCase {
 		add(attachment)
 	}
 }
+
+/// Launch-order proofs for the opt-in DEBUG real-model fixture. Each test waits
+/// for visible ArticleList content while the fixture's /sync request remains
+/// held for 30 seconds; no refresh action is used to make the content appear.
+@MainActor
+final class PigeonReaderRealStartupUITests: XCTestCase {
+	private var app: XCUIApplication!
+
+	override func setUp() async throws {
+		continueAfterFailure = false
+		app = XCUIApplication()
+	}
+
+	func testEmptyColdTodayShowsArticleBeforeFullSyncCompletes() throws {
+		launch()
+
+		let story = app.staticTexts["Cold-start story appears before sync finishes"]
+		XCTAssertTrue(story.waitForExistence(timeout: 8))
+		XCTAssertTrue(app.navigationBars["Today (1)"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.descendants(matching: .any)["article-list"].firstMatch.exists)
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		attachScreenshot(named: "real-startup-empty-cold-today-before-sync")
+	}
+
+	func testCachedSelectedListShowsSavedArticlesDuringSlowSync() throws {
+		launch(with: "-reader-real-startup-cached-selected-list")
+
+		let firstStory = app.staticTexts["Saved story remains visible during slow updates"]
+		XCTAssertTrue(firstStory.waitForExistence(timeout: 8))
+		XCTAssertTrue(app.staticTexts["A second saved story proves the list is real"].exists)
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		attachScreenshot(named: "real-startup-cached-selected-list-during-sync")
+	}
+
+	func testReplayFailureKeepsCachedArticlesVisible() throws {
+		launch(with: "-reader-real-startup-replay-failure")
+
+		let visibleStory = app.staticTexts["A second saved story proves the list is real"]
+		XCTAssertTrue(visibleStory.waitForExistence(timeout: 8))
+		XCTAssertFalse(app.staticTexts["Saved story remains visible during slow updates"].exists)
+		XCTAssertTrue(app.staticTexts["Launch fixture replay failed (503)."].waitForExistence(timeout: 8))
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		attachScreenshot(named: "real-startup-replay-failure-with-cached-list")
+	}
+
+	private func launch(with extraArgument: String? = nil) {
+		var arguments = ["-reader-real-startup", "-reader-reset-reader-state"]
+		if let extraArgument {
+			arguments.append(extraArgument)
+		}
+		app.launchArguments = arguments
+		app.launch()
+	}
+
+	private func attachScreenshot(named name: String) {
+		let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+		attachment.name = name
+		attachment.lifetime = .keepAlways
+		add(attachment)
+	}
+}
