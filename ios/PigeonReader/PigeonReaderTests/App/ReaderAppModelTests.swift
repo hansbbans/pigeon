@@ -2269,7 +2269,7 @@ struct ReaderAppModelTests {
 				recoveryPage,
 				data: try responseData(items: [makeArticle(id: "foreground-recovery")]),
 		)
-		await recovery.value
+		_ = await recovery.value
 		#expect(model.allArticles(for: .forYou).map(\.id) == ["foreground-recovery"])
 
 		await controlled.fail(suspendedSync, with: URLError(.notConnectedToInternet))
@@ -2311,7 +2311,7 @@ struct ReaderAppModelTests {
 		let retryPage = await controlled.nextRequest()
 		#expect(retryPage.request.url?.path == "/api/v1/recommendations")
 		await controlled.resolve(retryPage, data: try responseData(items: [makeArticle(id: "cancelled-page-recovery")]))
-		await recovery.value
+		_ = await recovery.value
 
 		#expect(model.allArticles(for: .forYou).map(\.id) == ["cancelled-page-recovery"])
 		#expect(await controlled.requestCount() == 3)
@@ -2391,7 +2391,7 @@ struct ReaderAppModelTests {
 			// Keep the pre-fix failure bounded and release any preparation task that
 			// the failed assertion may have started before returning.
 			model.disconnect()
-			await reactivation.value
+			_ = await reactivation.value
 			return
 		}
 		let retryIDs = await controlled.nextRequest()
@@ -2406,7 +2406,7 @@ struct ReaderAppModelTests {
 				Int(nextDay.timeIntervalSince1970),
 			),
 		)
-		await reactivation.value
+		_ = await reactivation.value
 
 		// The test advances the request's day while the simulator clock stays on
 		// the original day. Verify the recovered page and badge, not the display
