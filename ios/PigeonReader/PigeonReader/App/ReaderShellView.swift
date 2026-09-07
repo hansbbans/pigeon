@@ -12,6 +12,7 @@ struct ReaderShellView: View {
 			preferredColumn: model.preferredCompactColumn,
 			hasSelectedArticle: model.selectedArticle != nil,
 		)
+		let showsRegularHome = horizontalSizeClass == .regular && model.preferredCompactColumn == .sidebar
 
 		ZStack {
 			NavigationSplitView(preferredCompactColumn: splitViewColumn) {
@@ -28,8 +29,19 @@ struct ReaderShellView: View {
 				}
 			}
 			.navigationSplitViewStyle(.balanced)
-			.allowsHitTesting(showsCompactArticle == false)
-			.accessibilityHidden(showsCompactArticle)
+			.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
+			.accessibilityHidden(showsCompactArticle || showsRegularHome)
+
+			if showsRegularHome {
+				// An iPad in portrait can hide the sidebar even when all split
+				// columns are requested. Present Home explicitly until a view is
+				// chosen, while keeping the library and reader mounted underneath.
+				NavigationStack {
+					ReaderSidebarView()
+				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.background(.background)
+			}
 
 			if showsCompactArticle, let article = model.selectedArticle {
 				// NavigationSplitView that launches on `.detail` has no stack to pop, so
@@ -72,6 +84,12 @@ struct ReaderShellView: View {
 			if let action = ReaderNotificationManager.shared.consumePendingAction() {
 				await model.handleNotificationAction(action)
 			}
+		}
+		.task(id: model.isSynchronizingOfflineLibrary) {
+			guard model.isSynchronizingOfflineLibrary, model.preferredCompactColumn == .sidebar else { return }
+			// Home needs server totals as soon as its cache is restored, even if
+			// downloading the complete offline library takes much longer.
+			_ = await model.loadNavigation(force: true, reportError: false)
 		}
 		.onChange(of: scenePhase) { _, phase in
 			guard phase == .active else { return }

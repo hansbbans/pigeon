@@ -151,6 +151,8 @@ final class ReaderAppModel {
 	private var deferredInitialFeedPaginationCollectionID: String?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
+	private var hasAppliedLaunchSelectionReset = false
+	private var hasAppliedRestorationSettings = false
 	private var hasAppliedCompactColumnRestoration = false
 	private var temporarilyUnavailableSelectedCollection: ReaderNavigationItem?
 	private var restoredReaderModes: [String: String] = [:]
@@ -929,7 +931,7 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				if applyCachedSnapshot(snapshot) {
+				if applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation) {
 					shouldPersistTodayAfterRestore = true
 				}
 				preparationGeneration = libraryGeneration
@@ -1076,6 +1078,7 @@ final class ReaderAppModel {
 				preparationID: preparationID,
 				fullRebuild: requiresFullRebuild,
 				dayBounds: dayBounds,
+				preservingCurrentSelection: isInitialPreparation,
 			)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				if let fullRebuildStartedAt {
@@ -1160,6 +1163,7 @@ final class ReaderAppModel {
 					if let hydratedGeneration = await hydrateCommittedOfflineSnapshot(
 						accountID: accountID,
 						preparationID: preparationID,
+						preservingCurrentSelection: isInitialPreparation,
 					) {
 						guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 							return
@@ -1720,11 +1724,16 @@ final class ReaderAppModel {
 				dayBounds = nil
 			} else if collection.smartSection == .today {
 				let todayBounds = ReaderLocalDayBounds.localDay(containing: now)
-				page = try await apiClient.recommendationsPage(
-					from: "user/-/state/com.google/reading-list",
+				guard let todayPage = try await loadTodayPage(
+					collectionID: collection.id,
 					dayBounds: todayBounds,
-					cachedRecommendations: articleCache[collection.id] ?? [],
-				)
+					apiClient: apiClient,
+					context: context,
+					operationID: loadID,
+				) else {
+					return
+				}
+				page = todayPage
 				dayBounds = todayBounds
 			} else {
 				page = try await apiClient.recommendationsPage(
@@ -1838,6 +1847,110 @@ final class ReaderAppModel {
 			}
 			errorMessage = error.localizedDescription
 		}
+	}
+
+	/// Today is fetched from the full reading-list stream so All/Read filters keep
+	/// their meaning. The default Unread filter can therefore receive a page made
+	/// entirely of read stories. Resolve those pages until the active filter has a
+	/// row to show or the server reaches the end of its bounded stream.
+	private func loadTodayPage(
+		collectionID: String,
+		dayBounds: ReaderLocalDayBounds,
+		apiClient: PigeonAPIClient,
+		context: OperationContext,
+		operationID: UUID,
+	) async throws -> ReaderRecommendationsPage? {
+		let streamID = "user/-/state/com.google/reading-list"
+		let cachedRecommendations = articleCache[collectionID] ?? []
+		let firstPage = try await apiClient.recommendationsPage(
+			from: streamID,
+			dayBounds: dayBounds,
+			cachedRecommendations: cachedRecommendations,
+		)
+		try Task.checkCancellation()
+		guard isCurrentCollectionOperation(
+			context,
+			collectionID: collectionID,
+			operationID: operationID,
+			isLoadMore: false,
+		) else {
+			return nil
+		}
+
+		var articles = firstPage.items
+		var fetchedContentCount = firstPage.fetchedContentCount
+		var continuation = firstPage.continuation
+		var seenContinuations = Set<String>()
+
+		while true {
+			try Task.checkCancellation()
+			guard isCurrentCollectionOperation(
+				context,
+				collectionID: collectionID,
+				operationID: operationID,
+				isLoadMore: false,
+			) else {
+				return nil
+			}
+
+			let filteredArticles: [Recommendation]
+			do {
+				filteredArticles = try await applyingQueuedMutationIntent(
+					to: articles,
+					accountID: context.accountID,
+				)
+			} catch {
+				guard isCancellation(error) == false else { throw error }
+				// The outer load applies the same fallback and surfaces this cache
+				// error after the complete page has been fetched.
+				filteredArticles = applyingKnownMutationState(to: articles)
+			}
+			try Task.checkCancellation()
+			guard isCurrentCollectionOperation(
+				context,
+				collectionID: collectionID,
+				operationID: operationID,
+				isLoadMore: false,
+			) else {
+				return nil
+			}
+
+			if articleFilter(for: collectionID).filtering(filteredArticles).isEmpty == false {
+				break
+			}
+			guard let nextContinuation = continuation,
+				seenContinuations.insert(nextContinuation).inserted else {
+				continuation = nil
+				break
+			}
+
+			let nextPage = try await apiClient.recommendationsPage(
+				from: streamID,
+				dayBounds: dayBounds,
+				continuation: nextContinuation,
+				cachedRecommendations: articles,
+			)
+			try Task.checkCancellation()
+			guard isCurrentCollectionOperation(
+				context,
+				collectionID: collectionID,
+				operationID: operationID,
+				isLoadMore: false,
+			) else {
+				return nil
+			}
+			for article in nextPage.items where articles.contains(where: { articlesMatch($0, article) }) == false {
+				articles.append(article)
+			}
+			fetchedContentCount += nextPage.fetchedContentCount
+			continuation = nextPage.continuation
+		}
+
+		return ReaderRecommendationsPage(
+			items: articles,
+			continuation: continuation,
+			fetchedContentCount: fetchedContentCount,
+		)
 	}
 
 	func loadMore(collection: ReaderNavigationItem) async {
@@ -3195,6 +3308,7 @@ final class ReaderAppModel {
 	private func hydrateCommittedOfflineSnapshot(
 		accountID: String,
 		preparationID: UUID,
+		preservingCurrentSelection: Bool,
 	) async -> UUID? {
 		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 			return nil
@@ -3204,7 +3318,11 @@ final class ReaderAppModel {
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return nil
 			}
-			_ = applyCachedSnapshot(snapshot, preservingPagination: true)
+			_ = applyCachedSnapshot(
+				snapshot,
+				preservingPagination: true,
+				preservingCurrentSelection: preservingCurrentSelection,
+			)
 			return libraryGeneration
 		} catch let error where isCancellation(error) {
 			return nil
@@ -3225,6 +3343,7 @@ final class ReaderAppModel {
 		preparationID: UUID,
 		fullRebuild: Bool,
 		dayBounds: ReaderLocalDayBounds,
+		preservingCurrentSelection: Bool,
 	) async throws -> OfflineSyncResult {
 		var cursor = fullRebuild ? nil : offlineSyncCursor
 		let canUseIncrementalReload = fullRebuild == false
@@ -3301,7 +3420,11 @@ final class ReaderAppModel {
 		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 			return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 		}
-		if applyCachedSnapshot(snapshot, preservingPagination: true) {
+		if applyCachedSnapshot(
+			snapshot,
+			preservingPagination: true,
+			preservingCurrentSelection: preservingCurrentSelection,
+		) {
 			await persistCollections([ReaderSection.today.rawValue])
 		}
 		try await offlineStore.markDataSynchronizedWithoutNavigation(
@@ -3435,6 +3558,7 @@ final class ReaderAppModel {
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
+		preservingCurrentSelection: Bool = false,
 	) -> Bool {
 		guard let session else { return false }
 		offlineCacheIntegrity = snapshot.integrity
@@ -3476,23 +3600,30 @@ final class ReaderAppModel {
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
-			sortOrders = restoration.sortOrders.reduce(into: [:]) { result, pair in
-				if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
-			}
-			articleFilters = restoration.articleFilters.reduce(into: [:]) { result, pair in
-				if let filter = ReaderArticleFilter(rawValue: pair.value) {
-					result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
+			if hasAppliedRestorationSettings == false {
+				sortOrders = restoration.sortOrders.reduce(into: [:]) { result, pair in
+					if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
 				}
+				articleFilters = restoration.articleFilters.reduce(into: [:]) { result, pair in
+					if let filter = ReaderArticleFilter(rawValue: pair.value) {
+						result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
+					}
+				}
+				sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
+				restoredReaderModes = restoration.readerModes
+				articleScrollOffsets = restoration.articleScrollOffsets
+				hasAppliedRestorationSettings = true
 			}
-			if preserveOpenReader == false {
+			if preserveOpenReader == false,
+				preservingCurrentSelection == false,
+				hasAppliedLaunchSelectionReset == false {
 				selectedArticleIDs = restoration.selectedArticleIDs
 				selectedNavigationID = restoration.selectedNavigationID
 				temporarilyUnavailableSelectedCollection = nil
 			}
-			sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
-			restoredReaderModes = restoration.readerModes
-			articleScrollOffsets = restoration.articleScrollOffsets
-			if hasAppliedCompactColumnRestoration == false {
+			if hasAppliedLaunchSelectionReset == false,
+				preservingCurrentSelection == false,
+				hasAppliedCompactColumnRestoration == false {
 				preferredCompactColumn = compactColumn(from: restoration.compactColumn)
 				hasAppliedCompactColumnRestoration = true
 			}
@@ -3636,7 +3767,12 @@ final class ReaderAppModel {
 		temporarilyUnavailableSelectedCollection = nil
 		sidebarFilter = .all
 		preferredCompactColumn = .sidebar
-		hasAppliedCompactColumnRestoration = false
+		// A process launch always starts at the library root. Reader sort/filter/
+		// mode settings are restored from the snapshot, while its navigation,
+		// article, and compact-column destination are intentionally ignored.
+		hasAppliedLaunchSelectionReset = true
+		hasAppliedRestorationSettings = false
+		hasAppliedCompactColumnRestoration = true
 		hasLoadedNavigation = false
 		offlineStorageStats = .empty
 		isOffline = false

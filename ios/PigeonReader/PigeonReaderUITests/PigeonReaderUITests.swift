@@ -601,6 +601,8 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 
 	func testEmptyColdTodayShowsArticleBeforeFullSyncCompletes() throws {
 		launch()
+		assertHomeIsVisible()
+		app.buttons["Today"].tap()
 
 		let story = app.staticTexts["Cold-start story appears before sync finishes"]
 		XCTAssertTrue(story.waitForExistence(timeout: 8))
@@ -612,6 +614,16 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 
 	func testCachedSelectedListShowsSavedArticlesDuringSlowSync() throws {
 		launch(with: "-reader-real-startup-cached-selected-list")
+		assertHomeIsVisible()
+		let todayCount = XCTNSPredicateExpectation(
+			predicate: NSPredicate(format: "value == %@", "2 unread"),
+			object: app.buttons["Today"],
+		)
+		XCTAssertEqual(XCTWaiter.wait(for: [todayCount], timeout: 5), .completed)
+		attachScreenshot(named: "home-live-counts-before-sync")
+		let feed = app.buttons["Launch Fixture Reads"]
+		XCTAssertTrue(feed.waitForExistence(timeout: 5))
+		feed.tap()
 
 		let firstStory = app.staticTexts["Saved story remains visible during slow updates"]
 		XCTAssertTrue(firstStory.waitForExistence(timeout: 8))
@@ -622,13 +634,37 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 
 	func testReplayFailureKeepsCachedArticlesVisible() throws {
 		launch(with: "-reader-real-startup-replay-failure")
+		assertHomeIsVisible()
+		XCTAssertTrue(app.staticTexts["Launch fixture replay failed (503)."].waitForExistence(timeout: 8))
+		let feed = app.buttons["Launch Fixture Reads"]
+		XCTAssertTrue(feed.waitForExistence(timeout: 5))
+		feed.tap()
 
 		let visibleStory = app.staticTexts["A second saved story proves the list is real"]
 		XCTAssertTrue(visibleStory.waitForExistence(timeout: 8))
 		XCTAssertFalse(app.staticTexts["Saved story remains visible during slow updates"].exists)
-		XCTAssertTrue(app.staticTexts["Launch fixture replay failed (503)."].waitForExistence(timeout: 8))
 		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
 		attachScreenshot(named: "real-startup-replay-failure-with-cached-list")
+	}
+
+	func testForYouLoadsFromHomeBeforeFullSyncCompletes() throws {
+		launch()
+		assertHomeIsVisible()
+		app.buttons["For You"].tap()
+
+		let story = app.staticTexts["Cold-start story appears before sync finishes"]
+		XCTAssertTrue(story.waitForExistence(timeout: 8))
+		XCTAssertTrue(app.descendants(matching: .any)["article-list"].firstMatch.exists)
+		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
+		attachScreenshot(named: "real-startup-for-you-from-home")
+	}
+
+	private func assertHomeIsVisible(file: StaticString = #filePath, line: UInt = #line) {
+		XCTAssertTrue(app.navigationBars["Pigeon"].waitForExistence(timeout: 8), file: file, line: line)
+		XCTAssertTrue(app.buttons["For You"].isHittable, file: file, line: line)
+		XCTAssertTrue(app.buttons["Today"].isHittable, file: file, line: line)
+		XCTAssertFalse(app.scrollViews["article-reader-scroll-view"].exists, file: file, line: line)
+		attachScreenshot(named: "home-on-launch")
 	}
 
 	private func launch(with extraArgument: String? = nil) {
