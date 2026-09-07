@@ -9,7 +9,7 @@ struct ReaderSidebarView: View {
 	var body: some View {
 		@Bindable var model = model
 		let selection = Binding<String?>(
-			get: { model.selectedNavigationID },
+			get: { model.preferredCompactColumn == .sidebar ? nil : model.selectedNavigationID },
 			set: { id in
 				guard let id, let item = model.navigation.item(withID: id) else {
 					return
