@@ -597,6 +597,7 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		XCUIDevice.shared.orientation = .portrait
 	}
 
 	func testEmptyColdTodayShowsArticleBeforeFullSyncCompletes() throws {
@@ -659,9 +660,60 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		attachScreenshot(named: "real-startup-for-you-from-home")
 	}
 
+	func testCachedStartupDoesNotPresentAnEmptyLibraryWhileReadingDisk() throws {
+		XCUIDevice.shared.orientation = .portrait
+		assertCachedStartupWaitsForSavedLibrary()
+	}
+
+	func testIPadLandscapeStartupDoesNotPresentAnEmptyLibraryWhileReadingDisk() throws {
+		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "iPad landscape startup coverage")
+		XCUIDevice.shared.orientation = .landscapeLeft
+		defer { XCUIDevice.shared.orientation = .portrait }
+		assertCachedStartupWaitsForSavedLibrary()
+	}
+
+	private func assertCachedStartupWaitsForSavedLibrary(file: StaticString = #filePath, line: UInt = #line) {
+		app.launchArguments = [
+			"-reader-real-startup", "-reader-real-startup-cached-selected-list",
+			"-reader-delay-initial-snapshot", "-reader-reset-reader-state",
+		]
+		app.launch()
+		attachScreenshot(named: "cached-startup-before-disk-restore")
+
+		let loading = app.descendants(matching: .any)["library-startup-loading"].firstMatch
+		XCTAssertTrue(loading.waitForExistence(timeout: 2), file: file, line: line)
+		XCTAssertFalse(app.buttons["For You"].exists, file: file, line: line)
+		XCTAssertFalse(app.staticTexts["No recommendations yet"].exists, file: file, line: line)
+		XCTAssertFalse(app.staticTexts["No stories yet"].exists, file: file, line: line)
+
+		let feeds = app.buttons.matching(identifier: "Launch Fixture Reads")
+		XCTAssertTrue(feeds.firstMatch.waitForExistence(timeout: 20), file: file, line: line)
+		// The landscape split view remains mounted beneath Home. Interact
+		// with the visible control instead of an offscreen duplicate.
+		guard let feed = feeds.allElementsBoundByIndex.first(where: { $0.isHittable }) else {
+			return XCTFail("The saved feed is not available on Home.", file: file, line: line)
+		}
+		XCTAssertFalse(loading.exists, file: file, line: line)
+		XCTAssertEqual(feed.value as? String, "2 unread", file: file, line: line)
+		XCTAssertTrue(app.buttons.matching(identifier: "For You").allElementsBoundByIndex.contains(where: { $0.isHittable }), file: file, line: line)
+		attachScreenshot(named: "cached-startup-home-with-saved-feeds")
+		feed.tap()
+		XCTAssertTrue(
+			app.staticTexts["Saved story remains visible during slow updates"].waitForExistence(timeout: 8),
+			file: file, line: line,
+		)
+		XCTAssertTrue(app.staticTexts["A second saved story proves the list is real"].exists, file: file, line: line)
+		attachScreenshot(named: "cached-startup-saved-stories-before-network-sync")
+	}
+
 	private func assertHomeIsVisible(file: StaticString = #filePath, line: UInt = #line) {
-		XCTAssertTrue(app.navigationBars["Pigeon"].waitForExistence(timeout: 8), file: file, line: line)
-		XCTAssertTrue(app.buttons["For You"].isHittable, file: file, line: line)
+		// The loading screen shares the Pigeon title, so wait for an actual
+		// Home control before checking that startup has completed.
+		let homeReady = XCTNSPredicateExpectation(
+			predicate: NSPredicate(format: "isHittable == true"),
+			object: app.buttons["For You"],
+		)
+		XCTAssertEqual(XCTWaiter.wait(for: [homeReady], timeout: 8), .completed, file: file, line: line)
 		XCTAssertTrue(app.buttons["Today"].isHittable, file: file, line: line)
 		XCTAssertFalse(app.scrollViews["article-reader-scroll-view"].exists, file: file, line: line)
 		attachScreenshot(named: "home-on-launch")

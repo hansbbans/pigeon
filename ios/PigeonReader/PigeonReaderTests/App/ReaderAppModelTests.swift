@@ -1724,6 +1724,7 @@ struct ReaderAppModelTests {
 		#expect(await httpClient.paths() == ["/api/v1/recommendations", "/api/v1/mutations"])
 		#expect(model.allArticles(for: .forYou).isEmpty == false)
 		#expect(model.errorMessage == nil)
+		#expect(model.isInitialLibraryLoading == false)
 		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max).map(\.mutation.id) == [mutation.id])
 	}
 
@@ -2106,6 +2107,7 @@ struct ReaderAppModelTests {
 
 		#expect(model.allArticles(for: .forYou).isEmpty == false)
 		#expect(model.errorMessage == LaunchStoreError.snapshotUnavailable.localizedDescription)
+		#expect(model.isInitialLibraryLoading == false)
 	}
 
 	@Test(.timeLimit(.minutes(1))) func slowSnapshotReadShowsLoadingInsteadOfConfirmedEmpty() async throws {
@@ -2126,6 +2128,7 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).isEmpty)
 		#expect(model.isInitialLoadPending(for: collection))
 		#expect(model.hasFailedInitialLoad(for: collection) == false)
+		#expect(model.isInitialLibraryLoading)
 
 		await store.resumeSnapshot()
 		let pageRequest = await controlled.nextRequest()
@@ -2136,7 +2139,69 @@ struct ReaderAppModelTests {
 		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
 		await preparation.value
 		#expect(model.allArticles(for: collection).map(\.id) == ["after-snapshot-read"])
-}
+		#expect(model.isInitialLibraryLoading == false)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func persistedEmptyNavigationReleasesInitialLoadingBeforeSyncFinishes() async throws {
+		let session = try makeSession(token: "known-empty-library")
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let page = await controlled.nextRequest()
+		#expect(page.request.url?.path == "/api/v1/recommendations")
+		#expect(model.isInitialLibraryLoading == false)
+		await controlled.resolve(page, data: try responseData(items: []))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		#expect(model.isInitialLibraryLoading == false)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func coldInitialLoadingWaitsForNavigationResolutionWhileSyncIsHeld() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		#expect(model.isInitialLibraryLoading)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+
+		let page = await controlled.nextRequest()
+		#expect(page.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(page, data: try responseData(items: []))
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+
+		let navigation = Task {
+			await model.loadNavigation(force: true, reportError: false)
+		}
+		for _ in 0..<4 {
+			let request = await controlled.nextRequest()
+			switch request.request.url?.path {
+			case "/reader/api/0/subscription/list":
+				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
+			case "/reader/api/0/unread-count":
+				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/reader/api/0/stream/items/ids":
+				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
+			default:
+				Issue.record("Unexpected navigation request: \(request.request.url?.absoluteString ?? "missing URL")")
+				await controlled.resolve(request)
+			}
+		}
+		#expect(await navigation.value)
+		#expect(model.navigation.items.isEmpty == false)
+		#expect(model.isInitialLibraryLoading == false)
+
+		await controlled.fail(sync, with: URLError(.notConnectedToInternet))
+		await preparation.value
+	}
 
 	@Test(.timeLimit(.minutes(1))) func pendingMutationReadFailureDoesNotHideHealthyColdPage() async throws {
 		let session = try makeSession(token: "pending-read-before-page")
@@ -2323,6 +2388,7 @@ struct ReaderAppModelTests {
 		_ = await recovery.value
 
 		#expect(model.allArticles(for: .forYou).map(\.id) == ["cancelled-page-recovery"])
+		#expect(model.isInitialLibraryLoading == false)
 		#expect(await controlled.requestCount() == 3)
 	}
 
@@ -2640,6 +2706,7 @@ struct ReaderAppModelTests {
 		let folder = try #require(model.folderNavigationItems.first)
 		#expect(syncRequest.request.url?.path == "/api/v1/sync")
 		#expect(model.articles(for: folder).map(\.id) == cachedArticles.map(\.id))
+		#expect(model.isInitialLibraryLoading == false)
 		print("ReaderAppModel cached selected-folder availability: \(String(format: "%.1f", Double(elapsed) / 1_000_000)) ms before sync response")
 
 		await controlled.fail(syncRequest, with: URLError(.notConnectedToInternet))
@@ -3038,9 +3105,11 @@ struct ReaderAppModelTests {
 		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "page-2")
 
 		await fixture.model.prepareOfflineLibrary()
+		#expect(fixture.model.isInitialLibraryLoading == false)
 		fixture.model.select(item: fixture.collection)
 		await fixture.model.load(collection: fixture.collection)
 		await fixture.model.refresh(collection: fixture.collection)
+		#expect(fixture.model.isInitialLibraryLoading == false)
 
 		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
 		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
@@ -3630,6 +3699,20 @@ struct ReaderAppModelTests {
 		_ = await model.loadNavigation(force: true)
 
 		#expect(model.errorMessage == nil)
+	}
+
+	@Test func initialLibraryLoadingIsDisabledForPreviewModeAndDisconnect() throws {
+		let connected = try makeModel(httpClient: MockHTTPClient())
+		#expect(connected.isInitialLibraryLoading)
+
+		let preview = try makeModel(
+			httpClient: MockHTTPClient(),
+			offlineSynchronizationEnabled: false,
+		)
+		#expect(preview.isInitialLibraryLoading == false)
+
+		connected.disconnect()
+		#expect(connected.isInitialLibraryLoading == false)
 	}
 
 	@Test func realNavigationFailureStillSetsErrorMessage() async throws {

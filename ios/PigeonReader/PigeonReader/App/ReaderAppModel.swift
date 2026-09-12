@@ -88,6 +88,10 @@ final class ReaderAppModel {
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var enabledSmartViewSections: Set<ReaderSection>
 	private(set) var isLoadingNavigation = false
+	/// Keeps the reader shell from treating the in-memory defaults as a loaded
+	/// library before the persisted snapshot or the first live navigation load
+	/// has resolved.
+	private(set) var isInitialLibraryLoading = false
 	var articleFilter: ReaderArticleFilter {
 		get { articleFilter(for: selectedNavigationID) }
 		set { setArticleFilter(newValue, for: selectedNavigationID) }
@@ -274,6 +278,7 @@ final class ReaderAppModel {
 				errorMessage = PigeonError.invalidServerURL.localizedDescription
 			}
 		}
+		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
 	}
 
 	var canConnect: Bool {
@@ -494,6 +499,7 @@ final class ReaderAppModel {
 			serverURLText = newSession.baseURL.absoluteString
 			password = ""
 			apiClient = PigeonAPIClient(session: newSession, httpClient: httpClient)
+			isInitialLibraryLoading = offlineSynchronizationEnabled
 			await prepareOfflineLibrary()
 		} catch let error where isCancellation(error) {
 			// Leaving the connection screen is a normal cancellation.
@@ -513,6 +519,7 @@ final class ReaderAppModel {
 			try sessionStore.remove()
 			session = nil
 			apiClient = nil
+			isInitialLibraryLoading = false
 			articleCache = [:]
 			failedInitialLoadCollectionIDs.removeAll()
 			completedInitialLoadCollectionIDs.removeAll()
@@ -934,6 +941,12 @@ final class ReaderAppModel {
 				if applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation) {
 					shouldPersistTodayAfterRestore = true
 				}
+				if snapshot.isEmpty == false {
+					// A persisted navigation payload, subscription list, or article
+					// cache is enough to render the known local state. Network repair
+					// must not hold the initial shell gate.
+					isInitialLibraryLoading = false
+				}
 				preparationGeneration = libraryGeneration
 				preparedOfflineAccountID = accountID
 			} catch {
@@ -954,8 +967,12 @@ final class ReaderAppModel {
 		offlineRepairInProgress = requiresFullRebuild
 		let synchronizationNow = Date.now
 		let dayBounds = ReaderLocalDayBounds.localDay(containing: synchronizationNow)
+		var shouldReleaseInitialLibraryLoadingAtEnd = false
 		defer {
 			if activeOfflinePreparationID == preparationID {
+				if shouldReleaseInitialLibraryLoadingAtEnd {
+					isInitialLibraryLoading = false
+				}
 				isSynchronizingOfflineLibrary = false
 				offlineRepairInProgress = false
 				livePagesDuringOfflineSynchronization.removeAll()
@@ -1007,6 +1024,7 @@ final class ReaderAppModel {
 				generation: preparationGeneration,
 			) else { return }
 			if let mutationReplayFailureMessage {
+				shouldReleaseInitialLibraryLoadingAtEnd = true
 				isOffline = mutationReplayFailureIsConnectivity ?? false
 				let selectedCollectionAfterReplayFailure = selectedCollection
 				if shouldPrioritizeInitialCollectionLoad(selectedCollectionAfterReplayFailure) {
@@ -1186,6 +1204,7 @@ final class ReaderAppModel {
 				} else {
 					// Data is complete, but without both successful navigation and
 					// subscription loads it cannot authorize a warm sync yet.
+					shouldReleaseInitialLibraryLoadingAtEnd = true
 					hasLoadedNavigation = false
 					if errorMessage == nil {
 						errorMessage = "Sync failed"
@@ -1216,6 +1235,7 @@ final class ReaderAppModel {
 			}
 			isOffline = false
 		} catch let error where isCancellation(error) {
+			shouldReleaseInitialLibraryLoadingAtEnd = true
 			if let fullRebuildStartedAt {
 				await abandonFullRebuildIfNeeded(
 					accountID: accountID,
@@ -1237,6 +1257,7 @@ final class ReaderAppModel {
 			}
 			return
 		} catch {
+			shouldReleaseInitialLibraryLoadingAtEnd = true
 			if let fullRebuildStartedAt {
 				await abandonFullRebuildIfNeeded(
 					accountID: accountID,
@@ -1576,22 +1597,38 @@ final class ReaderAppModel {
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
+			finishInitialLibraryLoadingAfterNavigationAttempt(context: context, loadID: loadID)
 			try await offlineStore.saveNavigation(state, accountID: context.accountID)
 			guard isCurrentOperation(context), activeNavigationLoadID == loadID else {
 				return false
 			}
 			return true
 		} catch let error where isCancellation(error) {
+			finishInitialLibraryLoadingAfterNavigationAttempt(context: context, loadID: loadID)
 			return false
 		} catch {
 			guard isCurrentOperation(context), activeNavigationLoadID == loadID else {
 				return false
 			}
+			finishInitialLibraryLoadingAfterNavigationAttempt(context: context, loadID: loadID)
 			if session != nil, reportError {
 				errorMessage = error.localizedDescription
 			}
 			return false
 		}
+	}
+
+	private func finishInitialLibraryLoadingAfterNavigationAttempt(
+		context: OperationContext,
+		loadID: UUID,
+	) {
+		guard isInitialLibraryLoading,
+			preparedOfflineAccountID == context.accountID,
+			isCurrentOperation(context),
+			activeNavigationLoadID == loadID else {
+			return
+		}
+		isInitialLibraryLoading = false
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
@@ -3727,6 +3764,7 @@ final class ReaderAppModel {
 	private func resetInMemoryLibraryForAccountChange() {
 		invalidateCollectionLoads()
 		libraryGeneration = UUID()
+		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
 		preparedOfflineAccountID = nil
 		offlineSyncCursor = nil
 		offlineCacheIntegrity = .needsBootstrap
