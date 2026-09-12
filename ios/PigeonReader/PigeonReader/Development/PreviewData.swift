@@ -356,7 +356,7 @@ enum PreviewData {
 /// complete cache, then forwards every operation to that real SQLite-backed
 /// implementation. Keeping the adapter here avoids changing production storage
 /// behavior just to make launch timing reproducible.
-private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
+private actor LaunchFixtureOfflineStore: OfflineLibraryStoring, OfflineLibraryBootstrapProviding {
 	private struct Seed: Sendable {
 		let navigation: ReaderNavigationState
 		let subscriptions: [FeedSubscription]
@@ -372,6 +372,7 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
 
 	private let store: OfflineLibraryStore
 	private let seedMode: SeedMode
+	nonisolated private let bootstrapSeed: Seed?
 	private var didSeed = false
 	private var didDelayInitialSnapshot = false
 
@@ -384,7 +385,7 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
 		pendingMutations: [OfflineMutation],
 	) {
 		self.store = store
-		self.seedMode = .complete(Seed(
+		let seed = Seed(
 			navigation: navigation,
 			subscriptions: subscriptions,
 			articlesByCollection: articlesByCollection,
@@ -400,12 +401,32 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
 				articleScrollOffsets: [:],
 			),
 			pendingMutations: pendingMutations,
-		))
+		)
+		self.seedMode = .complete(seed)
+		self.bootstrapSeed = seed
 	}
 
 	init(store: OfflineLibraryStore, restoration: ReaderRestorationState) {
 		self.store = store
 		self.seedMode = .restorationOnly(restoration)
+		self.bootstrapSeed = nil
+	}
+
+	nonisolated func loadBootstrapSnapshot(accountID: String) -> OfflineLibraryBootstrapSnapshot? {
+		guard let bootstrapSeed else { return nil }
+		return OfflineLibraryBootstrapSnapshot(
+			accountID: accountID,
+			generatedAt: .now,
+			navigation: bootstrapSeed.navigation,
+			subscriptions: bootstrapSeed.subscriptions,
+			preferences: OfflineLibraryBootstrapPreferences(
+				sortOrders: bootstrapSeed.restoration.sortOrders,
+				articleFilters: bootstrapSeed.restoration.articleFilters,
+				sidebarFilter: bootstrapSeed.restoration.sidebarFilter,
+				expandedFolderIDs: bootstrapSeed.restoration.expandedFolderIDs,
+			),
+			todayDayStart: ReaderLocalDayBounds.localDay(containing: .now).start,
+		)
 	}
 
 	private func seedIfNeeded(accountID: String) async throws {

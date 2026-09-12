@@ -660,19 +660,19 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		attachScreenshot(named: "real-startup-for-you-from-home")
 	}
 
-	func testCachedStartupDoesNotPresentAnEmptyLibraryWhileReadingDisk() throws {
+	func testCachedStartupShowsSavedHomeBeforeFullHydration() throws {
 		XCUIDevice.shared.orientation = .portrait
-		assertCachedStartupWaitsForSavedLibrary()
+		assertCachedStartupShowsSavedHomeBeforeFullHydration()
 	}
 
-	func testIPadLandscapeStartupDoesNotPresentAnEmptyLibraryWhileReadingDisk() throws {
+	func testIPadLandscapeStartupShowsSavedHomeBeforeFullHydration() throws {
 		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "iPad landscape startup coverage")
 		XCUIDevice.shared.orientation = .landscapeLeft
 		defer { XCUIDevice.shared.orientation = .portrait }
-		assertCachedStartupWaitsForSavedLibrary()
+		assertCachedStartupShowsSavedHomeBeforeFullHydration()
 	}
 
-	private func assertCachedStartupWaitsForSavedLibrary(file: StaticString = #filePath, line: UInt = #line) {
+	private func assertCachedStartupShowsSavedHomeBeforeFullHydration(file: StaticString = #filePath, line: UInt = #line) {
 		app.launchArguments = [
 			"-reader-real-startup", "-reader-real-startup-cached-selected-list",
 			"-reader-delay-initial-snapshot", "-reader-reset-reader-state",
@@ -681,13 +681,18 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		attachScreenshot(named: "cached-startup-before-disk-restore")
 
 		let loading = app.descendants(matching: .any)["library-startup-loading"].firstMatch
-		XCTAssertTrue(loading.waitForExistence(timeout: 2), file: file, line: line)
-		XCTAssertFalse(app.buttons["For You"].exists, file: file, line: line)
+		let homes = app.buttons.matching(identifier: "For You")
+		XCTAssertTrue(homes.firstMatch.waitForExistence(timeout: 2), file: file, line: line)
+		guard let home = homes.allElementsBoundByIndex.first(where: { $0.isHittable }) else {
+			return XCTFail("The saved Home control is not visible.", file: file, line: line)
+		}
+		XCTAssertTrue(home.isHittable, file: file, line: line)
+		XCTAssertFalse(loading.exists, file: file, line: line)
 		XCTAssertFalse(app.staticTexts["No recommendations yet"].exists, file: file, line: line)
 		XCTAssertFalse(app.staticTexts["No stories yet"].exists, file: file, line: line)
 
 		let feeds = app.buttons.matching(identifier: "Launch Fixture Reads")
-		XCTAssertTrue(feeds.firstMatch.waitForExistence(timeout: 20), file: file, line: line)
+		XCTAssertTrue(feeds.firstMatch.waitForExistence(timeout: 2), file: file, line: line)
 		// The landscape split view remains mounted beneath Home. Interact
 		// with the visible control instead of an offscreen duplicate.
 		guard let feed = feeds.allElementsBoundByIndex.first(where: { $0.isHittable }) else {
@@ -698,8 +703,9 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		XCTAssertTrue(app.buttons.matching(identifier: "For You").allElementsBoundByIndex.contains(where: { $0.isHittable }), file: file, line: line)
 		attachScreenshot(named: "cached-startup-home-with-saved-feeds")
 		feed.tap()
+		XCTAssertTrue(app.staticTexts["Loading stories"].waitForExistence(timeout: 2), file: file, line: line)
 		XCTAssertTrue(
-			app.staticTexts["Saved story remains visible during slow updates"].waitForExistence(timeout: 8),
+			app.staticTexts["Saved story remains visible during slow updates"].waitForExistence(timeout: 20),
 			file: file, line: line,
 		)
 		XCTAssertTrue(app.staticTexts["A second saved story proves the list is real"].exists, file: file, line: line)

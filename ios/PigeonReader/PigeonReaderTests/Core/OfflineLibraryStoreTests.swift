@@ -1384,6 +1384,20 @@ struct OfflineLibraryStoreTests {
 		)
 
 		let stats = try await store.storageStats(accountID: accountID)
+		let bootstrapStore = OfflineLibraryBootstrapFileStore(databaseURL: databaseURL)
+		await store.resetSnapshotArticleDecodeCount()
+		let bootstrapStart = DispatchTime.now().uptimeNanoseconds
+		let bootstrap = try #require(bootstrapStore.loadBootstrapSnapshot(accountID: accountID))
+		let bootstrapMilliseconds = Double(DispatchTime.now().uptimeNanoseconds - bootstrapStart) / 1_000_000
+		let sidecarURL = databaseURL.deletingLastPathComponent()
+			.appending(path: "\(databaseURL.lastPathComponent).bootstrap.json")
+		let sidecarBytes = try Data(contentsOf: sidecarURL).count
+		let bootstrapArticleDecodes = await store.snapshotArticleDecodeCountForTesting()
+		print("BOOTSTRAP_BENCH articles=\(stats.articleCount) feeds=\(feedCount) payloadBytes=\(stats.bodyBytes) sidecarBytes=\(sidecarBytes) elapsedMs=\(bootstrapMilliseconds) decoded=\(bootstrapArticleDecodes)")
+		#expect(bootstrap.navigation?.items.count == feedCount + ReaderSection.allCases.count)
+		#expect(bootstrap.subscriptions.count == feedCount)
+		#expect(sidecarBytes <= OfflineLibraryBootstrapSnapshot.maximumEncodedByteCount)
+		#expect(bootstrapArticleDecodes == 0)
 		await store.resetSnapshotArticleDecodeCount()
 		let healthyStart = DispatchTime.now().uptimeNanoseconds
 		let healthy = try await store.loadSnapshot(accountID: accountID)
