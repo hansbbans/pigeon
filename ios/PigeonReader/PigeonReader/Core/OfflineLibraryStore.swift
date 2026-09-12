@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-actor OfflineLibraryStore: OfflineLibraryStoring {
+actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProviding {
 	static let shared = OfflineLibraryStore()
 
 	private struct PreviewSeed: Sendable {
@@ -10,7 +10,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		let accountID: String
 	}
 
-	private let databaseURL: URL?
+	nonisolated private let databaseURL: URL?
+	nonisolated private let bootstrapFileStore: OfflineLibraryBootstrapFileStore
 	// Access stays actor-confined; unsafe isolation is needed only so deinit can close
 	// SQLite's C pointer under Swift 6's nonisolated deinitializer rule.
 	nonisolated(unsafe) private var database: OpaquePointer?
@@ -45,6 +46,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 
 	private init(databaseURL: URL?, previewSeed: PreviewSeed?) {
 		self.databaseURL = databaseURL
+		self.bootstrapFileStore = OfflineLibraryBootstrapFileStore(databaseURL: databaseURL)
 		self.previewSeed = previewSeed
 		let encoder = JSONEncoder()
 		encoder.dateEncodingStrategy = .iso8601
@@ -90,7 +92,18 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func loadSnapshot(accountID: String) throws -> CachedLibrarySnapshot {
-		try loadSnapshotFromStorage(accountID: accountID)
+		let snapshot = try loadSnapshotFromStorage(accountID: accountID)
+		if accountID.hasPrefix("__pigeon_rebuild__") == false, snapshot.navigation != nil {
+			// `cached_navigation.updated_at` is the provenance for Today counts.
+			// Re-reading a yesterday's snapshot must not relabel those counts as
+			// today's merely because this full restore ran after midnight.
+			bootstrapFileStore.refreshMetadata(accountID: accountID)
+		}
+		return snapshot
+	}
+
+	nonisolated func loadBootstrapSnapshot(accountID: String) -> OfflineLibraryBootstrapSnapshot? {
+		bootstrapFileStore.loadBootstrapSnapshot(accountID: accountID)
 	}
 
 	#if DEBUG
@@ -486,6 +499,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		if stagingAccountID != nil, rebuildMemberships {
 			stagingAccountIDs[accountID] = nil
 		}
+		// A staged navigation/subscription write becomes visible only after the
+		// promotion transaction commits. Refresh the lightweight projection from
+		// committed metadata so a later launch cannot observe the staged generation.
+		bootstrapFileStore.refreshMetadata(accountID: accountID)
 	}
 
 	func markDataSynchronizedWithoutNavigation(
@@ -578,6 +595,24 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 		try transaction(database) {
 			try writeNavigation(navigation, payload: payload, accountID: storageAccountID, database: database)
 		}
+		if storageAccountID == accountID {
+			let now = Date.now
+			try? bootstrapFileStore.update(accountID: accountID) { snapshot in
+				let previousTodayCount = snapshot.navigation?.item(withID: ReaderSection.today.rawValue)?.unreadCount
+				let nextTodayCount = navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount
+				let todayDayStart = previousTodayCount == nextTodayCount
+					? snapshot.todayDayStart
+					: ReaderLocalDayBounds.localDay(containing: now).start
+				snapshot = OfflineLibraryBootstrapSnapshot(
+					accountID: accountID,
+					generatedAt: now,
+					navigation: navigation,
+					subscriptions: snapshot.subscriptions,
+					preferences: snapshot.preferences,
+					todayDayStart: todayDayStart,
+				)
+			}
+		}
 	}
 
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) throws {
@@ -590,6 +625,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 					"INSERT INTO cached_subscriptions (account_id, id, title, payload) VALUES (?, ?, ?, ?)",
 					bindings: [.text(storageAccountID), .text(subscription.id), .text(subscription.title), .blob(try encoder.encode(subscription))],
 					database: database,
+				)
+			}
+		}
+		if storageAccountID == accountID {
+			let now = Date.now
+			try? bootstrapFileStore.update(accountID: accountID) { snapshot in
+				guard let navigation = snapshot.navigation else { return }
+				snapshot = OfflineLibraryBootstrapSnapshot(
+					accountID: accountID,
+					generatedAt: now,
+					navigation: navigation,
+					subscriptions: subscriptions,
+					preferences: snapshot.preferences,
+					todayDayStart: snapshot.todayDayStart,
 				)
 			}
 		}
@@ -670,6 +719,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 			bindings: [.text(accountID), .blob(try encoder.encode(restoration)), .double(Date.now.timeIntervalSince1970)],
 			database: database,
 		)
+		let now = Date.now
+		try? bootstrapFileStore.update(accountID: accountID) { snapshot in
+			guard let navigation = snapshot.navigation else { return }
+			snapshot = OfflineLibraryBootstrapSnapshot(
+				accountID: accountID,
+				generatedAt: now,
+				navigation: navigation,
+				subscriptions: snapshot.subscriptions,
+				preferences: OfflineLibraryBootstrapPreferences(
+					sortOrders: restoration.sortOrders,
+					articleFilters: restoration.articleFilters,
+					sidebarFilter: restoration.sidebarFilter,
+					expandedFolderIDs: restoration.expandedFolderIDs,
+				),
+				todayDayStart: snapshot.todayDayStart,
+			)
+		}
 	}
 
 	func enqueue(_ mutation: OfflineMutation, accountID: String) throws {
@@ -921,6 +987,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring {
 				database: database,
 			)
 		}
+		bootstrapFileStore.remove(accountID: accountID)
 	}
 
 	func searchArticles(

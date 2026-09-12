@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		040BDEDBAD156A88A7773FFD /* OfflineLibraryBootstrapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF6335A49B7A3ABFD229DE4A /* OfflineLibraryBootstrapTests.swift */; };
 		0478333034498D61271D45C6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B99A85858808B3E95F389362 /* Assets.xcassets */; };
 		059C0F36AF84A77036EB0A6C /* ReaderShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFE4401A0C1FFB61EA394441 /* ReaderShareSheet.swift */; };
 		06B62BD860A9C3630A8E425F /* PigeonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 326129381F837CD3FA990C22 /* PigeonSession.swift */; };
@@ -157,6 +158,7 @@
 		DEAD24647B17D34F33484EEA /* OutboundLinkRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AD1C93F9C799AE70951D53A /* OutboundLinkRoute.swift */; };
 		DEC07251D34EC1516DA859AE /* ReaderNavigationLabelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DED463BB677BEDDB9441B157 /* ReaderNavigationLabelView.swift */; };
 		DFD547C5CD0413F4F0221EC8 /* ControlledHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABEE0C4F90390DB1558A15B /* ControlledHTTPClient.swift */; };
+		E317AAF582DBC3A061829EF8 /* OfflineLibraryBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = C696204FA88BC69AC7A409A3 /* OfflineLibraryBootstrap.swift */; };
 		E387110A83CF49FC7361F1E5 /* TestSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F34C1B63B65057D559755C /* TestSessionStore.swift */; };
 		E78523B0A4EEF04AD7E549B1 /* PigeonAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66043B1FA33C07955ACDBDB8 /* PigeonAPIClient.swift */; };
 		E79BFA8674623C4FCC7DC9F3 /* ReaderArticleFilterStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2425C7BEC32F12BCD632E6C3 /* ReaderArticleFilterStoreTests.swift */; };
@@ -355,6 +357,7 @@
 		BE4B91D8B06BF7BE495CFEE0 /* ReaderMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderMode.swift; sourceTree = "<group>"; };
 		C09092CB3E7A5B6809CAA8D8 /* Bookerly-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Bookerly-Regular.ttf"; sourceTree = "<group>"; };
 		C23F918BA06E08A9291D1508 /* OutboundLinkChoiceStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoiceStateTests.swift; sourceTree = "<group>"; };
+		C696204FA88BC69AC7A409A3 /* OfflineLibraryBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryBootstrap.swift; sourceTree = "<group>"; };
 		C6B307BACA7C3B968482FCA8 /* RemoteArticleImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteArticleImageView.swift; sourceTree = "<group>"; };
 		C6E8701A33181654F7155130 /* EngagementAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngagementAggregator.swift; sourceTree = "<group>"; };
 		C8DAB3443559136FCC33A69B /* OutboundLinkChoiceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoiceState.swift; sourceTree = "<group>"; };
@@ -378,6 +381,7 @@
 		DB947CED95B25256754B8759 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		DE057E004417D91A5F1C69CC /* ReaderNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationState.swift; sourceTree = "<group>"; };
 		DED463BB677BEDDB9441B157 /* ReaderNavigationLabelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationLabelView.swift; sourceTree = "<group>"; };
+		DF6335A49B7A3ABFD229DE4A /* OfflineLibraryBootstrapTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryBootstrapTests.swift; sourceTree = "<group>"; };
 		E0A9632625EC7F0AA28E1099 /* ReaderBoundarySwipeRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderBoundarySwipeRecognizer.swift; sourceTree = "<group>"; };
 		E184AD8D2C937D34E5C77CFF /* ReaderBoundaryNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderBoundaryNavigation.swift; sourceTree = "<group>"; };
 		E34E19A8FFF75E55D3425237 /* Bookerly-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Bookerly-Italic.ttf"; sourceTree = "<group>"; };
@@ -586,6 +590,7 @@
 				439F1FE9FC96A2F8A8EE3FDA /* HTTPClient.swift */,
 				13657DEEA734C9BF9107150C /* KeychainReadwiseTokenStore.swift */,
 				E87D4CA007F14F41A3316023 /* KeychainSessionStore.swift */,
+				C696204FA88BC69AC7A409A3 /* OfflineLibraryBootstrap.swift */,
 				ACE8CD7FA13D247EA4E952CC /* OfflineLibraryModels.swift */,
 				C99F9370B4660963E3A83C81 /* OfflineLibraryStore.swift */,
 				6EFF7854046CD98181152B67 /* OfflineMutationReplayer.swift */,
@@ -657,6 +662,7 @@
 				11A38F3C591A8FCEAA046CFD /* MockHTTPClient.swift */,
 				CF72D64880446B8D2B725418 /* ModelDecodingTests.swift */,
 				5D26B396810BD5FE62752B9B /* NavigationHTTPClient.swift */,
+				DF6335A49B7A3ABFD229DE4A /* OfflineLibraryBootstrapTests.swift */,
 				ACEFB21C4DCD6BF99CCC01E9 /* OfflineLibraryStoreTests.swift */,
 				C23F918BA06E08A9291D1508 /* OutboundLinkChoiceStateTests.swift */,
 				13F90A059AFCCB988CFB9B02 /* PigeonAPIClientTests.swift */,
@@ -971,6 +977,7 @@
 				CBDA954DE2F2FAF694328D88 /* LibraryManagementView.swift in Sources */,
 				EE53F06D78BA5556630B00E9 /* OPMLImport.swift in Sources */,
 				81871D7E4912FD7C40299BB6 /* OPMLImportView.swift in Sources */,
+				E317AAF582DBC3A061829EF8 /* OfflineLibraryBootstrap.swift in Sources */,
 				DA1A27CDEFFA041D41A9F330 /* OfflineLibraryModels.swift in Sources */,
 				1F091CD46B90972CB0F57573 /* OfflineLibraryStore.swift in Sources */,
 				325BC8DD7E1C392E4FB56E98 /* OfflineMutationReplayer.swift in Sources */,
@@ -1088,6 +1095,7 @@
 				F2202D5C7D476BAE81CE7C03 /* MockHTTPClient.swift in Sources */,
 				572ACDA4165C25A07DF33E21 /* ModelDecodingTests.swift in Sources */,
 				D610C7B8C64C1B1C9499687E /* NavigationHTTPClient.swift in Sources */,
+				040BDEDBAD156A88A7773FFD /* OfflineLibraryBootstrapTests.swift in Sources */,
 				1DF3FA1CA8B519ED9337EDA3 /* OfflineLibraryStoreTests.swift in Sources */,
 				BB8E545606D4C3164E97C7FD /* OutboundLinkChoiceStateTests.swift in Sources */,
 				A9934F185F1CE8245FB63B32 /* PigeonAPIClientTests.swift in Sources */,

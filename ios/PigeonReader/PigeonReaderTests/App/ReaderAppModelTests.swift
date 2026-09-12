@@ -3,6 +3,14 @@ import SwiftUI
 import Testing
 @testable import PigeonReader
 
+private struct TestBootstrapProvider: OfflineLibraryBootstrapProviding {
+	let snapshots: [String: OfflineLibraryBootstrapSnapshot]
+
+	nonisolated func loadBootstrapSnapshot(accountID: String) -> OfflineLibraryBootstrapSnapshot? {
+		snapshots[accountID]
+	}
+}
+
 @MainActor
 struct ReaderAppModelTests {
 	@Test func explicitOpenDoesNotBannerWhenEngagementItemIsUnknown() async throws {
@@ -2140,6 +2148,217 @@ struct ReaderAppModelTests {
 		await preparation.value
 		#expect(model.allArticles(for: collection).map(\.id) == ["after-snapshot-read"])
 		#expect(model.isInitialLibraryLoading == false)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func metadataBootstrapShowsHomeBeforeFullHydrationAndPreservesEarlyFeedSelection() async throws {
+		let session = try makeSession(token: "metadata-bootstrap-home")
+		let accountID = session.storageIdentity
+		let store = PausingOfflineLibraryStore()
+		let folder = ReaderNavigationItem(
+			id: "user/-/label/News",
+			title: "News",
+			streamID: "user/-/label/News",
+			kind: .folder,
+			unreadCount: 6,
+			parentID: nil,
+			feedKey: nil,
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let feed = ReaderNavigationItem(
+			id: "feed/alpha",
+			title: "Alpha",
+			streamID: "feed/alpha",
+			kind: .feed,
+			unreadCount: 6,
+			parentID: folder.id,
+			feedKey: "alpha",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(
+			items: [.smart(.forYou, unreadCount: 6), folder, feed],
+			expandedFolderIDs: [],
+		)
+		let subscription = makeSubscription(id: feed.id, key: "alpha", title: "Alpha", folder: "News")
+		let article = makeArticle(id: "metadata-bootstrap-story", feedKey: "alpha")
+		try await store.seed(
+			navigation: navigation,
+			subscriptions: [subscription],
+			articlesByCollection: [feed.id: [article]],
+			restoration: ReaderRestorationState.initial,
+			accountID: accountID,
+		)
+		let provider = TestBootstrapProvider(snapshots: [
+			accountID: OfflineLibraryBootstrapSnapshot(
+				accountID: accountID,
+				navigation: navigation,
+				subscriptions: [subscription],
+				preferences: OfflineLibraryBootstrapPreferences(expandedFolderIDs: [folder.id]),
+			),
+		])
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+			bootstrapProvider: provider,
+		)
+
+		#expect(model.isShowingBootstrapSnapshot)
+		#expect(model.isInitialLibraryLoading == false)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 6)
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		// This is a user action before the actor begins its full snapshot read.
+		model.select(item: feed)
+		#expect(model.selectedNavigationID == feed.id)
+		await store.pauseNextSnapshot()
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		// If an assertion or the test time limit cancels this test while the
+		// canonical read is paused, release the actor so the preparation task
+		// cannot remain suspended after the test exits.
+		defer { Task { await store.resumeSnapshot() } }
+		await store.waitUntilSnapshotIsPaused()
+
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.isInitialLoadPending(for: feed))
+		#expect(model.allArticles(for: feed).isEmpty)
+
+		await store.resumeSnapshot()
+		await preparation.value
+
+		#expect(model.isShowingBootstrapSnapshot == false)
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.navigation.item(withID: feed.id)?.unreadCount == 6)
+		#expect(model.isFolderExpanded(folder))
+		#expect(model.allArticles(for: feed).map(\.id) == [article.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func accountSwitchDoesNotCarryBootstrapSelectionIntoTheNextAccount() async throws {
+		let firstSession = try makeSession(token: "bootstrap-first-account")
+		let secondSession = try makeSession(token: "bootstrap-second-account")
+		let firstFeed = ReaderNavigationItem(
+			id: "feed/first",
+			title: "First account feed",
+			streamID: "feed/first",
+			kind: .feed,
+			unreadCount: 2,
+			parentID: nil,
+			feedKey: "first",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let secondFeed = ReaderNavigationItem(
+			id: "feed/second",
+			title: "Second account feed",
+			streamID: "feed/second",
+			kind: .feed,
+			unreadCount: 8,
+			parentID: nil,
+			feedKey: "second",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let firstNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 2), firstFeed])
+		let secondNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 8), secondFeed])
+		let provider = TestBootstrapProvider(snapshots: [
+			firstSession.storageIdentity: OfflineLibraryBootstrapSnapshot(
+				accountID: firstSession.storageIdentity,
+				navigation: firstNavigation,
+			),
+			secondSession.storageIdentity: OfflineLibraryBootstrapSnapshot(
+				accountID: secondSession.storageIdentity,
+				navigation: secondNavigation,
+			),
+		])
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: firstSession,
+			offlineStore: store,
+			bootstrapProvider: provider,
+		)
+		model.select(item: firstFeed)
+		#expect(model.selectedNavigationID == firstFeed.id)
+
+		model.session = secondSession
+		await store.pauseNextSnapshot()
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await store.waitUntilSnapshotIsPaused()
+
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+		#expect(model.navigation.item(withID: firstFeed.id) == nil)
+		#expect(model.navigation.item(withID: secondFeed.id)?.unreadCount == 8)
+
+		await store.resumeSnapshot()
+		await preparation.value
+	}
+
+	@Test(.timeLimit(.minutes(1))) func presentationChangesDuringBootstrapSurviveCanonicalRestoration() async throws {
+		let session = try makeSession(token: "bootstrap-presentation-changes")
+		let accountID = session.storageIdentity
+		let feed = ReaderNavigationItem(
+			id: "feed/presentation",
+			title: "Presentation feed",
+			streamID: "feed/presentation",
+			kind: .feed,
+			unreadCount: 3,
+			parentID: nil,
+			feedKey: "presentation",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 3), feed])
+		let subscription = makeSubscription(id: feed.id, key: "presentation", title: feed.title, folder: nil)
+		let store = PausingOfflineLibraryStore()
+		try await store.seed(
+			navigation: navigation,
+			subscriptions: [subscription],
+			articlesByCollection: [:],
+			restoration: ReaderRestorationState(
+				selectedNavigationID: ReaderSection.forYou.rawValue,
+				selectedArticleIDs: [:],
+				sortOrders: [feed.id: ArticleSortOrder.oldest.rawValue],
+				articleFilters: [feed.id: ReaderArticleFilter.read.rawValue],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .sidebar,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+		let provider = TestBootstrapProvider(snapshots: [
+			accountID: OfflineLibraryBootstrapSnapshot(
+				accountID: accountID,
+				navigation: navigation,
+				subscriptions: [subscription],
+				// Omitted preferences are valid for Home, but must not permit
+				// canonical restoration to overwrite edits made during hydration.
+			),
+		])
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+			bootstrapProvider: provider,
+		)
+
+		await store.pauseNextSnapshot()
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		defer { Task { await store.resumeSnapshot() } }
+		await store.waitUntilSnapshotIsPaused()
+
+		model.setSortOrder(.score, for: feed)
+		model.setArticleFilter(.all, for: feed)
+		model.sidebarFilter = .unread
+
+		await store.resumeSnapshot()
+		await preparation.value
+
+		#expect(model.sortOrder(for: feed) == .score)
+		#expect(model.articleFilter(for: feed) == .all)
+		#expect(model.sidebarFilter == .unread)
 	}
 
 	@Test(.timeLimit(.minutes(1))) func persistedEmptyNavigationReleasesInitialLoadingBeforeSyncFinishes() async throws {
@@ -6927,6 +7146,7 @@ struct ReaderAppModelTests {
 		session: PigeonSession? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		offlineStore: (any OfflineLibraryStoring)? = nil,
+		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSynchronizationEnabled: Bool = true,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { _ in },
 	) throws -> ReaderAppModel {
@@ -6943,9 +7163,10 @@ struct ReaderAppModelTests {
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			offlineSynchronizationEnabled: offlineSynchronizationEnabled,
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
-			keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
-			readerViewExtractor: readerViewExtractor,
-			offlineSyncDelay: offlineSyncDelay,
+				keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
+				readerViewExtractor: readerViewExtractor,
+				bootstrapProvider: bootstrapProvider,
+				offlineSyncDelay: offlineSyncDelay,
 		)
 	}
 
@@ -7608,6 +7829,21 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	func resumeSnapshot() {
 		snapshotResumeContinuation?.resume()
 		snapshotResumeContinuation = nil
+	}
+
+	func seed(
+		navigation: ReaderNavigationState,
+		subscriptions: [FeedSubscription],
+		articlesByCollection: [String: [Recommendation]],
+		restoration: ReaderRestorationState,
+		accountID: String,
+	) async throws {
+		try await base.saveNavigation(navigation, accountID: accountID)
+		try await base.saveSubscriptions(subscriptions, accountID: accountID)
+		for (collectionID, articles) in articlesByCollection {
+			try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID)
+		}
+		try await base.saveRestoration(restoration, accountID: accountID)
 	}
 
 	func failNextPendingMutations() {

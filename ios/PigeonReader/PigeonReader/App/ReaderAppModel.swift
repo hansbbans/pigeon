@@ -46,6 +46,20 @@ final class ReaderAppModel {
 		let collectionID: String
 	}
 
+	private struct BootstrapInteractionState {
+		let selectedNavigationID: String
+		let selectedArticleID: String?
+		let selectedArticleIDs: [String: String]
+		let preferredCompactColumn: NavigationSplitViewColumn
+		let sidebarFilter: ReaderSidebarFilter
+		let sortOrders: [String: ArticleSortOrder]
+		let articleFilters: [ArticleFilterKey: ReaderArticleFilter]
+		let expandedFolderIDs: Set<String>
+		let changedSortOrderIDs: Set<String>
+		let changedArticleFilterKeys: Set<ArticleFilterKey>
+		let changedSidebarFilter: Bool
+	}
+
 	private struct CollectionFreshness: Sendable {
 		let updatedAt: Date
 		let isCached: Bool
@@ -92,13 +106,27 @@ final class ReaderAppModel {
 	/// library before the persisted snapshot or the first live navigation load
 	/// has resolved.
 	private(set) var isInitialLibraryLoading = false
+	/// A bounded startup projection is useful UI state, but it never represents
+	/// a fully hydrated or authoritative offline library.
+	private(set) var isShowingBootstrapSnapshot = false
+	/// Identifies the session that supplied the currently visible bootstrap state.
+	/// A session switch must never carry that state's live selection into another
+	/// account while the canonical snapshot is still loading.
+	private var bootstrapAccountID: String?
 	var articleFilter: ReaderArticleFilter {
 		get { articleFilter(for: selectedNavigationID) }
 		set { setArticleFilter(newValue, for: selectedNavigationID) }
 	}
 	var sidebarFilter = ReaderSidebarFilter.all {
 		didSet {
-			if sidebarFilter != oldValue { scheduleRestorationSave() }
+			if sidebarFilter != oldValue {
+				if isApplyingRestoration == false,
+					isShowingBootstrapSnapshot,
+					hasAppliedRestorationSettings == false {
+					bootstrapChangedSidebarFilter = true
+				}
+				scheduleRestorationSave()
+			}
 		}
 	}
 
@@ -110,6 +138,7 @@ final class ReaderAppModel {
 	private let articleFilterStore: ReaderArticleFilterStore
 	private let smartViewStore: ReaderSmartViewStore
 	private let offlineStore: any OfflineLibraryStoring
+	private let bootstrapProvider: (any OfflineLibraryBootstrapProviding)?
 	private let mutationReplayer: OfflineMutationReplayer
 	private let offlineSynchronizationEnabled: Bool
 	private let offlineSyncDelay: @Sendable (UInt64) async throws -> Void
@@ -157,6 +186,12 @@ final class ReaderAppModel {
 	private var restorationSaveTask: Task<Void, Never>?
 	private var hasAppliedLaunchSelectionReset = false
 	private var hasAppliedRestorationSettings = false
+	/// Tracks presentation changes made while a metadata-only bootstrap is
+	/// visible. If the bootstrap omitted preferences, canonical restoration
+	/// must merge around those live edits instead of replacing them.
+	private var bootstrapChangedSortOrderIDs: Set<String> = []
+	private var bootstrapChangedArticleFilterKeys: Set<ArticleFilterKey> = []
+	private var bootstrapChangedSidebarFilter = false
 	private var hasAppliedCompactColumnRestoration = false
 	private var temporarilyUnavailableSelectedCollection: ReaderNavigationItem?
 	private var restoredReaderModes: [String: String] = [:]
@@ -239,6 +274,7 @@ final class ReaderAppModel {
 		readerTypography: ReaderTypographySettings? = nil,
 		keyboardShortcuts: ReaderKeyboardShortcutSettings? = nil,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
+		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
 			try await Task.sleep(nanoseconds: nanoseconds)
 		},
@@ -252,6 +288,7 @@ final class ReaderAppModel {
 		self.smartViewStore = smartViewStore
 		self.enabledSmartViewSections = smartViewStore.enabledSections
 		self.offlineStore = offlineStore
+		self.bootstrapProvider = bootstrapProvider ?? (offlineStore as? any OfflineLibraryBootstrapProviding)
 		self.mutationReplayer = OfflineMutationReplayer(store: offlineStore)
 		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.offlineSyncDelay = offlineSyncDelay
@@ -279,6 +316,12 @@ final class ReaderAppModel {
 			}
 		}
 		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
+		if offlineSynchronizationEnabled,
+			let session,
+			let bootstrapProvider = self.bootstrapProvider,
+			let snapshot = bootstrapProvider.loadBootstrapSnapshot(accountID: session.storageIdentity) {
+			_ = applyBootstrapSnapshot(snapshot)
+		}
 	}
 
 	var canConnect: Bool {
@@ -456,7 +499,7 @@ final class ReaderAppModel {
 			completedInitialLoadCollectionIDs.contains(collection.id) == false,
 			selectedNavigationID == collection.id,
 			loadingCollections.contains(collection.id) == false,
-			offlinePreparationTask != nil || isSynchronizingOfflineLibrary else {
+			offlinePreparationTask != nil || isSynchronizingOfflineLibrary || isShowingBootstrapSnapshot else {
 			return loadingCollections.contains(collection.id)
 		}
 		return true
@@ -520,6 +563,8 @@ final class ReaderAppModel {
 			session = nil
 			apiClient = nil
 			isInitialLibraryLoading = false
+			isShowingBootstrapSnapshot = false
+			bootstrapAccountID = nil
 			articleCache = [:]
 			failedInitialLoadCollectionIDs.removeAll()
 			completedInitialLoadCollectionIDs.removeAll()
@@ -907,6 +952,37 @@ final class ReaderAppModel {
 		}
 	}
 
+	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
+		BootstrapInteractionState(
+			selectedNavigationID: selectedNavigationID,
+			selectedArticleID: selectedArticleID,
+			selectedArticleIDs: selectedArticleIDs,
+			preferredCompactColumn: preferredCompactColumn,
+			sidebarFilter: sidebarFilter,
+			sortOrders: sortOrders,
+			articleFilters: articleFilters,
+			expandedFolderIDs: navigation.expandedFolderIDs,
+			changedSortOrderIDs: bootstrapChangedSortOrderIDs,
+			changedArticleFilterKeys: bootstrapChangedArticleFilterKeys,
+			changedSidebarFilter: bootstrapChangedSidebarFilter,
+		)
+	}
+
+	private func restoreBootstrapInteractionState(_ state: BootstrapInteractionState) {
+		selectedNavigationID = state.selectedNavigationID
+		selectedArticleID = state.selectedArticleID
+		selectedArticleIDs = state.selectedArticleIDs
+		preferredCompactColumn = state.preferredCompactColumn
+		sidebarFilter = state.sidebarFilter
+		sortOrders = state.sortOrders
+		articleFilters = state.articleFilters
+		navigation.expandedFolderIDs = state.expandedFolderIDs
+			.intersection(Set(navigation.folderItems.map(\.id)))
+		bootstrapChangedSortOrderIDs = state.changedSortOrderIDs
+		bootstrapChangedArticleFilterKeys = state.changedArticleFilterKeys
+		bootstrapChangedSidebarFilter = state.changedSidebarFilter
+	}
+
 	private func performOfflineLibraryPreparation() async {
 		guard offlineSynchronizationEnabled, let session, let apiClient else { return }
 		let accountID = session.storageIdentity
@@ -920,7 +996,18 @@ final class ReaderAppModel {
 		var snapshotLoadFailureMessage: String?
 		var shouldPersistTodayAfterRestore = false
 		if preparedOfflineAccountID != accountID {
+			let preservedBootstrapInteraction = isShowingBootstrapSnapshot
+				&& bootstrapAccountID == accountID
+				? captureBootstrapInteractionState()
+				: nil
 			resetInMemoryLibraryForAccountChange()
+			if let bootstrapProvider,
+				let bootstrap = bootstrapProvider.loadBootstrapSnapshot(accountID: accountID) {
+				_ = applyBootstrapSnapshot(bootstrap)
+			}
+			if let preservedBootstrapInteraction {
+				restoreBootstrapInteractionState(preservedBootstrapInteraction)
+			}
 			// A newly selected account has no trusted local cursor. Keep the
 			// bootstrap rebuild requirement from the reset state, including when
 			// loading that account's snapshot failed.
@@ -1668,7 +1755,9 @@ final class ReaderAppModel {
 			|| automaticDisplaySuppressionCollectionID == collection.id
 			&& completedInitialLoadCollectionIDs.contains(collection.id) == false
 			&& offlinePreparationTask != nil
-		if shouldWaitForPreparation, let preparationTask = offlinePreparationTask {
+		if shouldWaitForPreparation,
+			isShowingBootstrapSnapshot == false,
+			let preparationTask = offlinePreparationTask {
 			await preparationTask.value
 			guard Task.isCancelled == false else { return }
 		}
@@ -1695,6 +1784,12 @@ final class ReaderAppModel {
 			offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID != session.storageIdentity {
+			if isShowingBootstrapSnapshot {
+				// The shell already has trusted navigation metadata. Keep this feed
+				// in its honest loading state while the canonical cache hydrates; the
+				// library-generation change will rerun this display task afterward.
+				return
+			}
 			await prepareOfflineLibrary()
 			guard Task.isCancelled == false else { return }
 			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
@@ -2667,6 +2762,11 @@ final class ReaderAppModel {
 		if activeSearchCollectionID == collectionID {
 			searchResults = newSortOrder.sorted(searchResults)
 		}
+		if isApplyingRestoration == false,
+			isShowingBootstrapSnapshot,
+			hasAppliedRestorationSettings == false {
+			bootstrapChangedSortOrderIDs.insert(collectionID)
+		}
 		scheduleRestorationSave()
 	}
 
@@ -2735,6 +2835,11 @@ final class ReaderAppModel {
 		articleFilters[key] = filter
 		articleFilterStore.setFilter(filter, for: collectionID, session: session)
 		reconcileSelection(for: collectionID)
+		if isApplyingRestoration == false,
+			isShowingBootstrapSnapshot,
+			hasAppliedRestorationSettings == false {
+			bootstrapChangedArticleFilterKeys.insert(key)
+		}
 		scheduleRestorationSave()
 	}
 
@@ -3592,6 +3697,53 @@ final class ReaderAppModel {
 	}
 
 	@discardableResult
+	private func applyBootstrapSnapshot(_ snapshot: OfflineLibraryBootstrapSnapshot) -> Bool {
+		guard let session,
+			snapshot.accountID == session.storageIdentity,
+			let snapshot = snapshot.normalizedForCurrentLocalDay(),
+			snapshot.isStructurallyValid,
+			let cachedNavigation = snapshot.navigation else {
+			return false
+		}
+
+		bootstrapChangedSortOrderIDs.removeAll()
+		bootstrapChangedArticleFilterKeys.removeAll()
+		bootstrapChangedSidebarFilter = false
+		isApplyingRestoration = true
+		defer { isApplyingRestoration = false }
+		if let preferences = snapshot.preferences, hasAppliedRestorationSettings == false {
+			sortOrders = preferences.sortOrders.reduce(into: [:]) { result, pair in
+				if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
+			}
+			articleFilters = preferences.articleFilters.reduce(into: [:]) { result, pair in
+				if let filter = ReaderArticleFilter(rawValue: pair.value) {
+					result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
+				}
+			}
+			sidebarFilter = ReaderSidebarFilter(rawValue: preferences.sidebarFilter) ?? .all
+			hasAppliedRestorationSettings = true
+		}
+
+		var restoredNavigation = cachedNavigation.items.isEmpty ? .initial : cachedNavigation
+		if let preferences = snapshot.preferences {
+			restoredNavigation.expandedFolderIDs = preferences.expandedFolderIDs
+				.intersection(Set(restoredNavigation.folderItems.map(\.id)))
+		}
+		navigation = restoredNavigation
+		subscriptions = sortedSubscriptions(snapshot.subscriptions)
+		articleCache = [:]
+		// A bootstrap must never authorize incremental sync or make a partial row
+		// count look like a complete collection. Full hydration will establish both.
+		hasLoadedNavigation = false
+		offlineSyncCursor = nil
+		offlineCacheIntegrity = .needsBootstrap
+		isShowingBootstrapSnapshot = true
+		bootstrapAccountID = snapshot.accountID
+		isInitialLibraryLoading = false
+		return true
+	}
+
+	@discardableResult
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
@@ -3608,8 +3760,12 @@ final class ReaderAppModel {
 			: [:]
 		let preserveOpenReader = preferredCompactColumn == .detail
 			&& openArticle != nil
+		let preserveBootstrapHomeState = isShowingBootstrapSnapshot
+			&& bootstrapAccountID == session.storageIdentity
 		let preservedNavigationID = selectedNavigationID
 		let preservedSelectedArticleIDs = selectedArticleIDs
+		let preservedSelectedArticleID = selectedArticleID
+		let preservedExpandedFolderIDs = navigation.expandedFolderIDs
 		let preservedCollection = navigation.item(withID: preservedNavigationID)
 			?? (temporarilyUnavailableSelectedCollection?.id == preservedNavigationID
 				? temporarilyUnavailableSelectedCollection
@@ -3638,21 +3794,45 @@ final class ReaderAppModel {
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
 			if hasAppliedRestorationSettings == false {
-				sortOrders = restoration.sortOrders.reduce(into: [:]) { result, pair in
+				let restoredSortOrders: [String: ArticleSortOrder] = restoration.sortOrders.reduce(into: [:]) { result, pair in
 					if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
 				}
-				articleFilters = restoration.articleFilters.reduce(into: [:]) { result, pair in
+				let restoredArticleFilters: [ArticleFilterKey: ReaderArticleFilter] = restoration.articleFilters.reduce(into: [:]) { result, pair in
 					if let filter = ReaderArticleFilter(rawValue: pair.value) {
 						result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
 					}
 				}
-				sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
+				var mergedSortOrders = restoredSortOrders
+				var mergedArticleFilters = restoredArticleFilters
+				if preserveBootstrapHomeState {
+					for collectionID in bootstrapChangedSortOrderIDs {
+						if let currentOrder = sortOrders[collectionID] {
+							mergedSortOrders[collectionID] = currentOrder
+						}
+					}
+					for key in bootstrapChangedArticleFilterKeys {
+						if let currentFilter = articleFilters[key] {
+							mergedArticleFilters[key] = currentFilter
+						}
+					}
+				}
+				sortOrders = mergedSortOrders
+				articleFilters = mergedArticleFilters
+				if preserveBootstrapHomeState == false || bootstrapChangedSidebarFilter == false {
+					sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
+				}
 				restoredReaderModes = restoration.readerModes
 				articleScrollOffsets = restoration.articleScrollOffsets
 				hasAppliedRestorationSettings = true
+			} else if preserveBootstrapHomeState {
+				// Bootstrap restores only Home presentation settings. Complete the
+				// remaining reader-specific state when the canonical snapshot arrives.
+				restoredReaderModes = restoration.readerModes
+				articleScrollOffsets = restoration.articleScrollOffsets
 			}
 			if preserveOpenReader == false,
 				preservingCurrentSelection == false,
+				preserveBootstrapHomeState == false,
 				hasAppliedLaunchSelectionReset == false {
 				selectedArticleIDs = restoration.selectedArticleIDs
 				selectedNavigationID = restoration.selectedNavigationID
@@ -3668,7 +3848,10 @@ final class ReaderAppModel {
 
 		if let cachedNavigation = snapshot.navigation {
 			var restoredNavigation = cachedNavigation
-			if let restoration = snapshot.restoration {
+			if preserveBootstrapHomeState {
+				restoredNavigation.expandedFolderIDs = preservedExpandedFolderIDs
+					.intersection(Set(restoredNavigation.folderItems.map(\.id)))
+			} else if let restoration = snapshot.restoration {
 				restoredNavigation.expandedFolderIDs = restoration.expandedFolderIDs
 					.intersection(Set(restoredNavigation.folderItems.map(\.id)))
 			}
@@ -3687,6 +3870,13 @@ final class ReaderAppModel {
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
 			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
 		}
+		// The canonical cache is now the source of article state. A bootstrap is
+		// metadata only, so it is safe to clear the visible bootstrap marker here.
+		isShowingBootstrapSnapshot = false
+		bootstrapAccountID = nil
+		bootstrapChangedSortOrderIDs.removeAll()
+		bootstrapChangedArticleFilterKeys.removeAll()
+		bootstrapChangedSidebarFilter = false
 		if isSynchronizingOfflineLibrary {
 			// A canonical snapshot can legitimately lag a page that was just
 			// fetched while its disk write failed or while a staged rebuild is
@@ -3744,14 +3934,23 @@ final class ReaderAppModel {
 			return didPruneToday || discardedUntrustedTodayPagination
 		}
 
-		if navigation.item(withID: selectedNavigationID) == nil {
+		if preservingCurrentSelection || preserveBootstrapHomeState {
+			selectedNavigationID = preservedNavigationID
+			temporarilyUnavailableSelectedCollection = navigation.item(withID: preservedNavigationID) == nil
+				? preservedCollection
+				: nil
+			selectedArticleIDs = preservedSelectedArticleIDs
+			selectedArticleID = preservedSelectedArticleID
+		} else if navigation.item(withID: selectedNavigationID) == nil {
 			temporarilyUnavailableSelectedCollection = nil
 			selectedNavigationID = firstEnabledSmartSection.rawValue
 		} else {
 			temporarilyUnavailableSelectedCollection = nil
 		}
 		reconcileSelectedSmartViewIfNeeded()
-		selectedArticleID = selectedArticleIDs[selectedNavigationID]
+		if preservingCurrentSelection == false, preserveBootstrapHomeState == false {
+			selectedArticleID = selectedArticleIDs[selectedNavigationID]
+		}
 		reconcileCurrentArticleSelection()
 		let didPruneToday = pruneStaleTodayStories()
 		if didPruneToday {
@@ -3765,6 +3964,8 @@ final class ReaderAppModel {
 		invalidateCollectionLoads()
 		libraryGeneration = UUID()
 		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
+		isShowingBootstrapSnapshot = false
+		bootstrapAccountID = nil
 		preparedOfflineAccountID = nil
 		offlineSyncCursor = nil
 		offlineCacheIntegrity = .needsBootstrap
@@ -3810,6 +4011,9 @@ final class ReaderAppModel {
 		// article, and compact-column destination are intentionally ignored.
 		hasAppliedLaunchSelectionReset = true
 		hasAppliedRestorationSettings = false
+		bootstrapChangedSortOrderIDs.removeAll()
+		bootstrapChangedArticleFilterKeys.removeAll()
+		bootstrapChangedSidebarFilter = false
 		hasAppliedCompactColumnRestoration = true
 		hasLoadedNavigation = false
 		offlineStorageStats = .empty
