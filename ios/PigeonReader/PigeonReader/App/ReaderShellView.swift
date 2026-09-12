@@ -15,43 +15,52 @@ struct ReaderShellView: View {
 		let showsRegularHome = horizontalSizeClass == .regular && model.preferredCompactColumn == .sidebar
 
 		ZStack {
-			NavigationSplitView(preferredCompactColumn: splitViewColumn) {
-				ReaderSidebarView()
-			} content: {
-				ArticleListView(collection: model.selectedCollection)
-			} detail: {
-				if showsCompactArticle {
-					ReaderPlaceholderView(collection: model.selectedCollection)
-				} else if let article = model.selectedArticle {
-					ArticleReaderView(article: article)
-				} else {
-					ReaderPlaceholderView(collection: model.selectedCollection)
-				}
-			}
-			.navigationSplitViewStyle(.balanced)
-			.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
-			.accessibilityHidden(showsCompactArticle || showsRegularHome)
-
-			if showsRegularHome {
-				// An iPad in portrait can hide the sidebar even when all split
-				// columns are requested. Present Home explicitly until a view is
-				// chosen, while keeping the library and reader mounted underneath.
+			if model.isInitialLibraryLoading {
 				NavigationStack {
+					ProgressView("Loading your library")
+						.frame(maxWidth: .infinity, maxHeight: .infinity)
+						.navigationTitle("Pigeon")
+						.accessibilityIdentifier("library-startup-loading")
+				}
+			} else {
+				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
 					ReaderSidebarView()
+				} content: {
+					ArticleListView(collection: model.selectedCollection)
+				} detail: {
+					if showsCompactArticle {
+						ReaderPlaceholderView(collection: model.selectedCollection)
+					} else if let article = model.selectedArticle {
+						ArticleReaderView(article: article)
+					} else {
+						ReaderPlaceholderView(collection: model.selectedCollection)
+					}
 				}
-				.frame(maxWidth: .infinity, maxHeight: .infinity)
-				.background(.background)
-			}
+				.navigationSplitViewStyle(.balanced)
+				.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
+				.accessibilityHidden(showsCompactArticle || showsRegularHome)
 
-			if showsCompactArticle, let article = model.selectedArticle {
-				// NavigationSplitView that launches on `.detail` has no stack to pop, so
-				// the system back item and interactive pop do nothing. Own the article
-				// on compact without replacing the library list underneath.
-				NavigationStack {
-					ArticleReaderView(article: article)
+				if showsRegularHome {
+					// An iPad in portrait can hide the sidebar even when all split
+					// columns are requested. Present Home explicitly until a view is
+					// chosen, while keeping the library and reader mounted underneath.
+					NavigationStack {
+						ReaderSidebarView()
+					}
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+					.background(.background)
 				}
-				.frame(maxWidth: .infinity, maxHeight: .infinity)
-				.background(.background)
+
+				if showsCompactArticle, let article = model.selectedArticle {
+					// NavigationSplitView that launches on `.detail` has no stack to pop, so
+					// the system back item and interactive pop do nothing. Own the article
+					// on compact without replacing the library list underneath.
+					NavigationStack {
+						ArticleReaderView(article: article)
+					}
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+					.background(.background)
+				}
 			}
 		}
 		.sheet(isPresented: $model.isShowingSettings) {

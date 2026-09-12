@@ -373,6 +373,7 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
 	private let store: OfflineLibraryStore
 	private let seedMode: SeedMode
 	private var didSeed = false
+	private var didDelayInitialSnapshot = false
 
 	init(
 		store: OfflineLibraryStore,
@@ -515,6 +516,13 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring {
 	}
 
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot {
+		if didDelayInitialSnapshot == false,
+			ProcessInfo.processInfo.arguments.contains("-reader-delay-initial-snapshot") {
+			didDelayInitialSnapshot = true
+			// Amplify the disk-read window so UI tests can inspect the first
+			// frame before the real cached library is returned to the model.
+			try await Task.sleep(for: .seconds(15))
+		}
 		try await seedIfNeeded(accountID: accountID)
 		return try await store.loadSnapshot(accountID: accountID)
 	}
