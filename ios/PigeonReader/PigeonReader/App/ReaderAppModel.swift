@@ -71,6 +71,19 @@ final class ReaderAppModel {
 		let preparationID: UUID?
 	}
 
+	private struct MarkAllTargetPlan {
+		let targets: [Recommendation]
+		let completeArticles: [Recommendation]
+		let feedItems: [ReaderNavigationItem]
+		let reconciledCollections: Set<String>
+	}
+
+	private struct MarkAllReadIntentResolution {
+		let articles: [Recommendation]
+		let pendingReadIDs: Set<String>
+		let protectedReadIDs: Set<String>
+	}
+
 	private struct OfflineSyncResult: Sendable {
 		let canUseIncrementalReload: Bool
 		let receivedChanges: Bool
@@ -3316,16 +3329,651 @@ final class ReaderAppModel {
 	}
 
 	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
-		markReadOrderArticles(in: collection).contains { $0.isRead == false }
+		let collection = navigation.item(withID: collection.id) ?? collection
+		let isUnsearchedRealCollection =
+			(collection.kind == .folder || collection.kind == .feed)
+			&& (activeSearchScope == nil || activeSearchCollectionID != collection.id)
+			&& articleFilter(for: collection.id) != .read
+		if isUnsearchedRealCollection {
+			if collection.unreadCount > 0 {
+				return true
+			}
+			if collection.kind == .folder,
+				navigation.children(of: collection.id).contains(where: { $0.unreadCount > 0 }) {
+				return true
+			}
+		}
+		return markReadOrderArticles(in: collection).contains { $0.isRead == false }
 	}
 
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
+		if (collection.kind == .folder || collection.kind == .feed),
+			activeSearchScope == nil || activeSearchCollectionID != collection.id,
+			articleFilter(for: collection.id) != .read,
+			let context = currentOperationContext() {
+			let actionTime = Date.now
+			guard let plan = await completeMarkAllTargets(
+				in: collection,
+				actionTime: actionTime,
+				context: context,
+			), isCurrentOperation(context) else {
+				return
+			}
+			reconcileMarkAllNavigationCounts(
+				in: collection,
+				feedItems: plan.feedItems,
+				completeArticles: plan.completeArticles,
+			)
+			// Persist the corrected navigation even when the complete stream is empty
+			// and there are no cached article rows to repair.
+			await persistCollections(plan.reconciledCollections)
+			guard isCurrentOperation(context) else { return }
+			await markArticlesAsRead(
+				plan.targets,
+				in: collection,
+				scope: .all,
+				undoTitle: "Mark All as Read",
+			)
+			return
+		}
+
 		await markArticlesAsRead(
 			markReadOrderArticles(in: collection).filter { $0.isRead == false },
 			in: collection,
 			scope: .all,
 			undoTitle: "Mark All as Read",
 		)
+	}
+
+	private func currentOperationContext() -> OperationContext? {
+		guard let session else { return nil }
+		return OperationContext(
+			accountID: session.storageIdentity,
+			generation: libraryGeneration,
+			preparationID: activeOfflinePreparationID,
+		)
+	}
+
+	/// Return every unread story that belongs to a real feed/folder before the
+	/// durable read mutation is committed. The visible collection is often only
+	/// the first page, so the canonical cache is searched across every cached
+	/// collection before a complete stream walk is used as a fallback.
+	private func completeMarkAllTargets(
+		in collection: ReaderNavigationItem,
+		actionTime: Date,
+		context: OperationContext,
+	) async -> MarkAllTargetPlan? {
+		// Callers can hold the item from before a navigation refresh. Resolve the
+		// current item so coverage uses the latest authoritative unread totals.
+		let effectiveCollection = navigation.item(withID: collection.id) ?? collection
+		let feedItems = effectiveCollection.kind == .folder
+			? navigation.children(of: effectiveCollection.id)
+			: [effectiveCollection]
+		let initialReadState = markAllInMemoryReadState()
+
+		var snapshot: CachedLibrarySnapshot?
+		var canTrustCachedCollections = true
+		do {
+			guard let accountID = session?.storageIdentity else { return nil }
+			snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+		} catch {
+			// A disk read failure cannot authorize a cache-only bulk action. If the
+			// network is available, the complete stream fallback below can still
+			// establish a safe target set.
+			canTrustCachedCollections = false
+		}
+		guard isCurrentOperation(context) else { return nil }
+
+		let cachedCandidates = markAllCachedCandidates(
+			in: effectiveCollection,
+			feedItems: feedItems,
+			snapshot: snapshot,
+		)
+		let initialCachedResolution: MarkAllReadIntentResolution
+		do {
+			initialCachedResolution = try await resolveMarkAllReadIntent(
+				for: cachedCandidates,
+				accountID: context.accountID,
+				actionTime: actionTime,
+				baselineReadState: initialReadState,
+			)
+		} catch let error where isCancellation(error) {
+			return nil
+		} catch {
+			guard isCurrentOperation(context) else { return nil }
+			errorMessage = error.localizedDescription
+			return nil
+		}
+		guard isCurrentOperation(context) else { return nil }
+		// A refresh can publish a new local article while the outbox lookup above
+		// is suspended. Re-read the candidate set before deciding that cache
+		// coverage is complete, so that arrival is preserved by this action.
+		let latestCachedCandidates = markAllCachedCandidates(
+			in: effectiveCollection,
+			feedItems: feedItems,
+			snapshot: snapshot,
+		)
+		let cachedResolution: MarkAllReadIntentResolution
+		if markAllIdentitySet(for: latestCachedCandidates) == markAllIdentitySet(for: cachedCandidates),
+			markAllInMemoryReadState() == initialReadState {
+			cachedResolution = initialCachedResolution
+		} else {
+			do {
+				cachedResolution = try await resolveMarkAllReadIntent(
+					for: latestCachedCandidates,
+					accountID: context.accountID,
+					actionTime: actionTime,
+					baselineReadState: initialReadState,
+				)
+			} catch let error where isCancellation(error) {
+				return nil
+			} catch {
+				guard isCurrentOperation(context) else { return nil }
+				errorMessage = error.localizedDescription
+				return nil
+			}
+		}
+		guard isCurrentOperation(context) else { return nil }
+		if canTrustCachedCollections,
+			markAllCountsAreCovered(by: cachedResolution.articles, in: effectiveCollection, feedItems: feedItems) {
+			mergeMarkAllSnapshotArticlesIntoCache(
+				snapshot,
+				in: effectiveCollection,
+				feedItems: feedItems,
+			)
+			return makeMarkAllTargetPlan(
+				from: cachedResolution,
+				actionTime: actionTime,
+				feedItems: feedItems,
+				reconciledCollections: [],
+			)
+		}
+
+		guard let apiClient else {
+			return nil
+		}
+		do {
+			let serverUnread = try await fetchAllUnreadMarkAllTargets(
+				in: effectiveCollection,
+				feedItems: feedItems,
+				cachedRecommendations: cachedCandidates,
+				apiClient: apiClient,
+				context: context,
+			)
+			guard isCurrentOperation(context) else { return nil }
+			let serverResolution = try await resolveMarkAllReadIntent(
+				for: serverUnread,
+				accountID: context.accountID,
+				actionTime: actionTime,
+				baselineReadState: initialReadState,
+				serverMembershipAuthoritative: true,
+			)
+			guard isCurrentOperation(context) else { return nil }
+			let latestCandidates = markAllCachedCandidates(
+				in: effectiveCollection,
+				feedItems: feedItems,
+				snapshot: snapshot,
+			)
+			// Resolve the final cache state after pagination unconditionally. The
+			// identity set can be unchanged while a concurrent read toggle changes an
+			// existing row that the server stream omitted.
+			let latestResolution = try await resolveMarkAllReadIntent(
+				for: latestCandidates,
+				accountID: context.accountID,
+				actionTime: actionTime,
+				baselineReadState: initialReadState,
+			)
+			guard isCurrentOperation(context) else { return nil }
+			let serverIdentities = Set(serverResolution.articles.flatMap { markAllIdentityKeys(for: $0) })
+			let protectedReadIDs = serverResolution.pendingReadIDs
+				.union(serverResolution.protectedReadIDs)
+				.union(latestResolution.pendingReadIDs)
+				.union(latestResolution.protectedReadIDs)
+			let staleCachedArticles = latestResolution.articles.filter { article in
+				article.isRead == false
+					&& article.receivedAt <= actionTime
+					&& markAllIdentityKeys(for: article).isDisjoint(with: serverIdentities)
+					&& markAllIdentityKeys(for: article).isDisjoint(with: protectedReadIDs)
+			}
+			let preservedLocalArticles = latestResolution.articles.filter { article in
+				let identities = markAllIdentityKeys(for: article)
+				return identities.isDisjoint(with: serverIdentities)
+					&& (article.receivedAt > actionTime || identities.isDisjoint(with: protectedReadIDs) == false)
+			}
+			let completeResolution = MarkAllReadIntentResolution(
+				articles: deduplicatedMarkAllTargets(serverResolution.articles + preservedLocalArticles),
+				pendingReadIDs: serverResolution.pendingReadIDs.union(latestResolution.pendingReadIDs),
+				protectedReadIDs: protectedReadIDs,
+			)
+			let reconciledCollections = reconcileMarkAllCachedReadState(
+				for: staleCachedArticles,
+				snapshot: snapshot,
+			)
+			mergeMarkAllSnapshotArticlesIntoCache(
+				snapshot,
+				in: effectiveCollection,
+				feedItems: feedItems,
+			)
+			return makeMarkAllTargetPlan(
+				from: completeResolution,
+				actionTime: actionTime,
+				feedItems: feedItems,
+				reconciledCollections: reconciledCollections,
+			)
+		} catch let error where isCancellation(error) {
+			return nil
+		} catch {
+			guard isCurrentOperation(context) else { return nil }
+			errorMessage = error.localizedDescription
+			return nil
+		}
+	}
+
+	private func makeMarkAllTargetPlan(
+		from resolution: MarkAllReadIntentResolution,
+		actionTime: Date,
+		feedItems: [ReaderNavigationItem],
+		reconciledCollections: Set<String>,
+	) -> MarkAllTargetPlan {
+		let protectedReadIDs = resolution.pendingReadIDs.union(resolution.protectedReadIDs)
+		let targets = resolution.articles.filter { article in
+			article.isRead == false
+				&& article.receivedAt <= actionTime
+				&& markAllIdentityKeys(for: article).isDisjoint(with: protectedReadIDs)
+		}
+		return MarkAllTargetPlan(
+			targets: targets,
+			completeArticles: resolution.articles,
+			feedItems: feedItems,
+			reconciledCollections: reconciledCollections,
+		)
+	}
+
+	private func resolveMarkAllReadIntent(
+		for articles: [Recommendation],
+		accountID: String,
+		actionTime: Date,
+		baselineReadState: [String: Bool]? = nil,
+		serverMembershipAuthoritative: Bool = false,
+	) async throws -> MarkAllReadIntentResolution {
+		let pending = try await offlineStore.pendingMutations(accountID: accountID, limit: Int.max)
+		// Read the cache after the async outbox lookup. A read that completes while
+		// discovery is in flight must be reflected even if replay removes its queue
+		// row before this resolution resumes.
+		let inMemoryReadState = markAllInMemoryReadState()
+		var adjusted = articles
+		var pendingReadIDs = Set<String>()
+		var protectedReadIDs = Set<String>()
+		for index in adjusted.indices {
+			let identities = markAllIdentityKeys(for: adjusted[index]).sorted()
+			guard let readState = identities.compactMap({ inMemoryReadState[$0] }).first else {
+				continue
+			}
+			let currentStateChanged = markAllCurrentStateOverridesServer(
+				identities: identities,
+				currentReadState: readState,
+				baselineReadState: baselineReadState,
+			)
+			if serverMembershipAuthoritative == false || currentStateChanged {
+				adjusted[index].isRead = readState
+			}
+			if currentStateChanged {
+				protectedReadIDs.formUnion(identities)
+			}
+		}
+		for action in pending {
+			let mutation = action.mutation
+			guard mutation.kind == .setRead || mutation.kind == .setReadBatch,
+				mutation.value != nil else {
+				continue
+			}
+			let mutationIDs = Set(mutation.itemIds.map(Self.normalizedQueuedMutationItemID))
+			let shouldPreserve = action.createdAt >= actionTime
+			if shouldPreserve {
+				pendingReadIDs.formUnion(mutationIDs)
+			}
+			for index in adjusted.indices {
+				guard markAllIdentityKeys(for: adjusted[index]).contains(where: mutationIDs.contains) else {
+					continue
+				}
+				adjusted[index].isRead = mutation.value ?? adjusted[index].isRead
+			}
+		}
+		return MarkAllReadIntentResolution(
+			articles: adjusted,
+			pendingReadIDs: pendingReadIDs,
+			protectedReadIDs: protectedReadIDs,
+		)
+	}
+
+	private func markAllCurrentStateOverridesServer(
+		identities: [String],
+		currentReadState: Bool,
+		baselineReadState: [String: Bool]?,
+	) -> Bool {
+		guard let baselineReadState else { return false }
+		let baselineStates = identities.compactMap { baselineReadState[$0] }
+		return baselineStates.contains { $0 != currentReadState }
+	}
+
+	private func markAllInMemoryReadState() -> [String: Bool] {
+		var readState: [String: Bool] = [:]
+		if let detachedSelectedArticle {
+			for identity in markAllIdentityKeys(for: detachedSelectedArticle) {
+				readState[identity] = detachedSelectedArticle.isRead
+			}
+		}
+		for collectionID in articleCache.keys.sorted() {
+			for article in articleCache[collectionID] ?? [] {
+				for identity in markAllIdentityKeys(for: article) where readState[identity] == nil {
+					readState[identity] = article.isRead
+				}
+			}
+		}
+		return readState
+	}
+
+	private func markAllCachedCandidates(
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+		snapshot: CachedLibrarySnapshot?,
+	) -> [Recommendation] {
+		let directCollectionIDs = Set([collection.id] + feedItems.map(\.id))
+		let feedIdentifiers = markAllFeedIdentifiers(for: feedItems)
+		var candidates: [Recommendation] = []
+
+		for collectionID in articleCache.keys.sorted() {
+			guard let cachedArticles = articleCache[collectionID] else { continue }
+			for article in cachedArticles {
+				if directCollectionIDs.contains(collectionID) || feedIdentifiers.contains(article.feedKey) {
+					candidates.append(article)
+				}
+			}
+		}
+		if let snapshot {
+			for collectionID in snapshot.articlesByCollection.keys.sorted() {
+				guard let cachedArticles = snapshot.articlesByCollection[collectionID] else { continue }
+				for article in cachedArticles {
+					if directCollectionIDs.contains(collectionID) || feedIdentifiers.contains(article.feedKey) {
+						candidates.append(article)
+					}
+				}
+			}
+		}
+		return deduplicatedMarkAllTargets(candidates)
+	}
+
+	private func mergeMarkAllSnapshotArticlesIntoCache(
+		_ snapshot: CachedLibrarySnapshot?,
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+	) {
+		guard let snapshot else { return }
+		let directCollectionIDs = Set([collection.id] + feedItems.map(\.id))
+		let feedIdentifiers = markAllFeedIdentifiers(for: feedItems)
+		for collectionID in snapshot.articlesByCollection.keys.sorted() {
+			guard let snapshotArticles = snapshot.articlesByCollection[collectionID] else { continue }
+			guard snapshotArticles.contains(where: {
+				directCollectionIDs.contains(collectionID) || feedIdentifiers.contains($0.feedKey)
+			}) else { continue }
+
+			var mergedArticles = articleCache[collectionID] ?? []
+			var indexByIdentity: [String: Int] = [:]
+			for (index, article) in mergedArticles.enumerated() {
+				for identity in markAllIdentityKeys(for: article) {
+					indexByIdentity[identity] = index
+				}
+			}
+			// Once this snapshot collection contributes a selected feed's story, merge
+			// its complete membership. Saving a target later must not discard unrelated
+			// rows that were already persisted in the same canonical collection.
+			for article in snapshotArticles {
+				let identities = markAllIdentityKeys(for: article)
+				guard identities.compactMap({ indexByIdentity[$0] }).isEmpty else { continue }
+				let index = mergedArticles.count
+				mergedArticles.append(article)
+				for identity in identities {
+					indexByIdentity[identity] = index
+				}
+			}
+			if articleCache[collectionID] != mergedArticles {
+				setArticles(mergedArticles, for: collectionID)
+			}
+			if streamContinuations[collectionID] == nil,
+				seenStreamContinuations[collectionID] == nil,
+				let continuation = snapshot.continuationsByCollection[collectionID],
+				continuation.isEmpty == false {
+				streamContinuations[collectionID] = continuation
+				seenStreamContinuations[collectionID] = [continuation]
+				resolvedPaginationCollections.insert(collectionID)
+			}
+		}
+	}
+
+	private func markAllIdentitySet(for articles: [Recommendation]) -> Set<String> {
+		Set(articles.flatMap { markAllIdentityKeys(for: $0) })
+	}
+
+	private func markAllFeedIdentifiers(for feedItems: [ReaderNavigationItem]) -> Set<String> {
+		var identifiers = Set<String>()
+		for item in feedItems {
+			identifiers.insert(item.streamID)
+			if let feedKey = item.feedKey, feedKey.isEmpty == false {
+				identifiers.insert(feedKey)
+			}
+			if let subscription = subscriptions.first(where: { $0.id == item.streamID }) {
+				identifiers.insert(subscription.feedKey)
+			}
+		}
+		return identifiers
+	}
+
+	private func markAllArticleBelongs(
+		_ article: Recommendation,
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+	) -> Bool {
+		if feedItems.isEmpty {
+			return collection.kind == .folder && article.feedKey == collection.streamID
+		}
+		let feedIdentifiers = markAllFeedIdentifiers(for: feedItems)
+		return feedIdentifiers.contains(article.feedKey)
+	}
+
+	private func markAllCountsAreCovered(
+		by articles: [Recommendation],
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+	) -> Bool {
+		// Counts can refresh while the snapshot/outbox lookups are suspended.
+		// Compare coverage with the current totals, not the caller's older item.
+		let requiredCount = navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
+		guard articles.count(where: { $0.isRead == false }) >= requiredCount else { return false }
+		for feedItem in feedItems {
+			let feedCount = articles.count(where: { article in
+				article.isRead == false
+					&& markAllArticleBelongs(article, in: collection, feedItems: [feedItem])
+			})
+			let requiredFeedCount = navigation.item(withID: feedItem.id)?.unreadCount ?? feedItem.unreadCount
+			guard feedCount >= requiredFeedCount else { return false }
+		}
+		return true
+	}
+
+	private func deduplicatedMarkAllTargets(_ articles: [Recommendation]) -> [Recommendation] {
+		var result: [Recommendation] = []
+		var indexByIdentity: [String: Int] = [:]
+		for article in articles {
+			let identities = markAllIdentityKeys(for: article)
+			if let index = identities.compactMap({ indexByIdentity[$0] }).first {
+				if result[index].isRead, article.isRead == false {
+					result[index] = article
+				}
+				for identity in identities {
+					indexByIdentity[identity] = index
+				}
+				continue
+			}
+			let index = result.count
+			result.append(article)
+			for identity in identities {
+				indexByIdentity[identity] = index
+			}
+		}
+		return result
+	}
+
+	private func markAllIdentityKeys(for article: Recommendation) -> Set<String> {
+		Set([
+			Self.normalizedQueuedMutationItemID(article.id),
+			Self.normalizedQueuedMutationItemID(article.readerId),
+		])
+	}
+
+	private func reconcileMarkAllNavigationCounts(
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+		completeArticles: [Recommendation],
+	) {
+		let unreadArticles = completeArticles.filter { $0.isRead == false }
+		var counts: [String: Int] = [:]
+		if collection.kind == .folder {
+			counts[collection.id] = unreadArticles.count
+			for feedItem in feedItems {
+				counts[feedItem.id] = unreadArticles.count(where: {
+					markAllArticleBelongs($0, in: collection, feedItems: [feedItem])
+				})
+			}
+		} else {
+			counts[collection.id] = unreadArticles.count(where: {
+				markAllArticleBelongs($0, in: collection, feedItems: [collection])
+			})
+		}
+		navigation = navigation.replacingCounts(counts)
+	}
+
+	private func reconcileMarkAllCachedReadState(
+		for articles: [Recommendation],
+		snapshot: CachedLibrarySnapshot?,
+	) -> Set<String> {
+		guard articles.isEmpty == false else { return [] }
+		let identities = Set(articles.flatMap { markAllIdentityKeys(for: $0) })
+		var changedCollections = Set<String>()
+		for collectionID in Array(articleCache.keys) {
+			guard var cachedArticles = articleCache[collectionID] else { continue }
+			var changed = false
+			for index in cachedArticles.indices where markAllIdentityKeys(for: cachedArticles[index]).isDisjoint(with: identities) == false {
+				guard cachedArticles[index].isRead == false else { continue }
+				cachedArticles[index].isRead = true
+				changed = true
+			}
+			if changed {
+				articleCache[collectionID] = cachedArticles
+				changedCollections.insert(collectionID)
+			}
+		}
+		if let snapshot {
+			for collectionID in snapshot.articlesByCollection.keys.sorted() {
+				guard let snapshotArticles = snapshot.articlesByCollection[collectionID],
+					snapshotArticles.contains(where: {
+						markAllIdentityKeys(for: $0).isDisjoint(with: identities) == false
+					}) else {
+					continue
+				}
+				var mergedArticles = articleCache[collectionID] ?? []
+				var indexByIdentity: [String: Int] = [:]
+				for (index, article) in mergedArticles.enumerated() {
+					for identity in markAllIdentityKeys(for: article) {
+						indexByIdentity[identity] = index
+					}
+				}
+				// Preserve any current page state, while adding snapshot-only rows so a
+				// repaired unloaded article survives the next save and reload.
+				for article in snapshotArticles {
+					let articleIdentities = markAllIdentityKeys(for: article)
+					guard articleIdentities.compactMap({ indexByIdentity[$0] }).isEmpty else {
+						continue
+					}
+					let index = mergedArticles.count
+					mergedArticles.append(article)
+					for identity in articleIdentities {
+						indexByIdentity[identity] = index
+					}
+				}
+				var changed = false
+				for index in mergedArticles.indices where markAllIdentityKeys(for: mergedArticles[index]).isDisjoint(with: identities) == false {
+					guard mergedArticles[index].isRead == false else { continue }
+					mergedArticles[index].isRead = true
+					changed = true
+				}
+				if changed {
+					articleCache[collectionID] = sortOrder(for: collectionID).sorted(mergedArticles)
+					changedCollections.insert(collectionID)
+				}
+			}
+		}
+		for article in articles {
+			updateSearchResults(matching: article) { result in
+				result.isRead = true
+			}
+		}
+		return changedCollections
+	}
+
+	private func fetchAllUnreadMarkAllTargets(
+		in collection: ReaderNavigationItem,
+		feedItems: [ReaderNavigationItem],
+		cachedRecommendations: [Recommendation],
+		apiClient: PigeonAPIClient,
+		context: OperationContext,
+	) async throws -> [Recommendation] {
+		var continuation: String?
+		var seenContinuations = Set<String>()
+		var allServerUnread: [Recommendation] = []
+		var indexByIdentity: [String: Int] = [:]
+
+		while true {
+			try Task.checkCancellation()
+			guard isCurrentOperation(context) else { throw CancellationError() }
+			let page = try await apiClient.recommendationsPage(
+				from: collection.streamID,
+				excludeTag: "user/-/state/com.google/read",
+				continuation: continuation,
+				cachedRecommendations: cachedRecommendations + allServerUnread,
+			)
+			try Task.checkCancellation()
+			guard isCurrentOperation(context) else { throw CancellationError() }
+
+			for pageArticle in page.items {
+				guard markAllArticleBelongs(pageArticle, in: collection, feedItems: feedItems) else {
+					continue
+				}
+				var unreadArticle = pageArticle
+				// The IDs request excluded the read tag. A cached body may carry an
+				// older read flag, so the server's membership is authoritative here.
+				unreadArticle.isRead = false
+				let identities = markAllIdentityKeys(for: unreadArticle)
+				if let index = identities.compactMap({ indexByIdentity[$0] }).first {
+					for identity in identities {
+						indexByIdentity[identity] = index
+					}
+				} else {
+					let index = allServerUnread.count
+					allServerUnread.append(unreadArticle)
+					for identity in identities {
+						indexByIdentity[identity] = index
+					}
+				}
+			}
+
+			guard let nextContinuation = page.continuation else {
+				return allServerUnread
+			}
+			guard seenContinuations.insert(nextContinuation).inserted else {
+				throw PigeonError.invalidResponse
+			}
+			continuation = nextContinuation
+		}
 	}
 
 	func canMarkStoriesOlderThan(_ date: Date, in collection: ReaderNavigationItem) -> Bool {

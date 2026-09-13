@@ -87,3 +87,12 @@ _Complete_
    curl -X POST 'https://pigeon.hans-cho.workers.dev/accounts/ClientLogin' -d 'Email=pigeon&Passwd=YOUR_PASSWORD'
    ```
 5. Add to Reeder Classic as FreshRSS → URL: `https://pigeon.hans-cho.workers.dev`, username: `pigeon`, password: YOUR_PASSWORD
+
+## Folder mark-as-read feed badges — September 13, 2026
+
+- [x] Inspect released main and preserve the unrelated primary checkout.
+- [x] Reproduce stale child-feed badges in native and iPad UI tests.
+- [x] Fix folder read propagation and add a failing-before/passing-after regression.
+- [x] Verify native tests, folder UI behavior, and clean Release build (496 native tests and two iPad UI tests passed).
+
+Release, tester availability, and simulator cleanup are tracked in the associated PR, Actions runs, and task verification record.

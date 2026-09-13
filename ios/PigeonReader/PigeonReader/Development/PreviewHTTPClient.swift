@@ -39,7 +39,14 @@ struct PreviewHTTPClient: HTTPClient {
 		case "/reader/api/0/unread-count":
 			data = Data("{\"unreadcounts\":[]}".utf8)
 		case "/reader/api/0/stream/items/ids":
-			if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+			if ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data") {
+				let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+				let isSecondPage = query.contains { $0.name == "c" }
+				let items = isSecondPage ? Array(recommendations.dropFirst().prefix(1)) : Array(recommendations.prefix(1))
+				var page: [String: Any] = ["itemRefs": items.map { ["id": $0.readerId] }]
+				if isSecondPage == false { page["continuation"] = "folder-mark-read-next" }
+				data = try JSONSerialization.data(withJSONObject: page)
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
 				data = try JSONSerialization.data(withJSONObject: [
 					"itemRefs": recommendations.map { ["id": $0.readerId] },
 				])
@@ -47,18 +54,25 @@ struct PreviewHTTPClient: HTTPClient {
 				data = Data("{\"itemRefs\":[]}".utf8)
 			}
 		case "/reader/api/0/stream/items/contents":
-			if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+			let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
+			if showsFolderRead || ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+				let requestedIDs = Set((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+					.filter { $0.name == "i" }.compactMap(\.value))
+				let items = showsFolderRead ? recommendations.filter { requestedIDs.contains($0.readerId) } : recommendations
 				data = try JSONSerialization.data(withJSONObject: [
 					"id": "user/-/state/com.google/reading-list",
-					"items": recommendations.map { article -> [String: Any] in
-						[
+					"items": items.map { article -> [String: Any] in
+						let streamID = showsFolderRead
+							? "feed/\((recommendations.firstIndex(where: { $0.id == article.id }) ?? 0) + 1)"
+							: "feed/\(article.feedKey)"
+						return [
 							"id": article.readerId,
 							"categories": article.isRead ? ["user/-/state/com.google/read"] : [],
 							"title": article.title,
 							"published": Int(article.receivedAt.timeIntervalSince1970),
 							"summary": ["content": article.html],
 							"alternate": [["href": article.originalURL?.absoluteString ?? ""]],
-							"origin": ["streamId": "feed/\(article.feedKey)", "title": article.source],
+							"origin": ["streamId": streamID, "title": article.source],
 						]
 					},
 				])

@@ -42,6 +42,9 @@ final class PigeonReaderUITests: XCTestCase {
 		markRead.tap()
 		XCTAssertTrue(app.navigationBars["Today (1)"].waitForExistence(timeout: 5))
 
+		if app.buttons["Read actions"].exists == false {
+			app.buttons["OverflowBarButtonItem"].firstMatch.tap()
+		}
 		app.buttons["Read actions"].tap()
 		app.buttons["Mark All as Read"].tap()
 		XCTAssertTrue(app.navigationBars["Today (0)"].waitForExistence(timeout: 5))
@@ -59,6 +62,44 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.buttons["Open in Browser"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Share to Reader"].exists)
 		attachScreenshot(named: "linked-image-link-choice")
+	}
+
+	func testFolderMarkAllReadClearsEveryFeedBadge() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data", "-reader-folder-read-data",
+			"-reader-show-sidebar", "-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let firstFeed = app.buttons["Dense Discovery"]
+		let secondFeed = app.buttons["Marginal Revolution"]
+		let unrelatedFeed = app.buttons["Stratechery"]
+		XCTAssertTrue(revealSidebar(containing: firstFeed))
+		XCTAssertEqual(firstFeed.value as? String, "1 unread")
+		XCTAssertEqual(secondFeed.value as? String, "1 unread")
+		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
+		attachScreenshot(named: "folder-feed-badges-before-mark-all")
+
+		app.staticTexts["Design"].tap()
+		XCTAssertTrue(app.navigationBars["Design"].firstMatch.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		if app.buttons["Read actions"].exists == false {
+			app.buttons["OverflowBarButtonItem"].firstMatch.tap()
+		}
+		app.buttons["Read actions"].tap()
+		app.buttons["Mark All as Read"].tap()
+
+		if firstFeed.exists == false, app.buttons["Show Sidebar"].exists {
+			app.buttons["Show Sidebar"].tap()
+		}
+		XCTAssertTrue(revealSidebar(containing: firstFeed))
+		let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0 unread"), object: firstFeed)
+		XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
+		attachScreenshot(named: "folder-feed-badges-after-mark-all")
+		XCTAssertEqual(firstFeed.value as? String, "0 unread")
+		XCTAssertEqual(secondFeed.value as? String, "0 unread")
+		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
 	}
 
 	func testLinkedImageOpensZoomViewer() throws {
