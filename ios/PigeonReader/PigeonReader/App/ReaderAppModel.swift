@@ -2299,6 +2299,11 @@ final class ReaderAppModel {
 		subscriptions = sortedSubscriptions(newSubscriptions)
 	}
 
+	func searchYouTubeChannels(query: String) async throws -> YouTubeChannelSearchResponse {
+		guard let apiClient else { throw PigeonError.authenticationFailed }
+		return try await apiClient.searchYouTubeChannels(query: query)
+	}
+
 	@discardableResult
 	func addFeed(urlText: String, folderName: String?) async -> Bool {
 		guard let apiClient else {

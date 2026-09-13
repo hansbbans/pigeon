@@ -664,7 +664,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       .reader-pane-surface {
         display: grid;
-        grid-template-rows: auto auto minmax(0, 1fr);
+        grid-template-rows: auto auto auto minmax(0, 1fr);
         gap: 0;
         min-height: 100%;
         width: 100%;
@@ -715,6 +715,44 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
       .reader-copy h2 {
         margin-bottom: 0;
+      }
+
+      .reader-player-shell {
+        display: grid;
+        gap: 0.55rem;
+        padding: 1rem 1.25rem 0;
+      }
+
+      .reader-player-label {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.74rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .reader-player-container {
+        width: 100%;
+        min-width: 200px;
+        min-height: 200px;
+        aspect-ratio: 16 / 9;
+        background: #000;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .reader-player-frame {
+        display: block;
+        width: 100%;
+        height: 100%;
+        min-width: 200px;
+        min-height: 200px;
+        border: 0;
+      }
+
+      .reader-player-fallback {
+        width: fit-content;
       }
 
       #reader-meta {
@@ -1334,6 +1372,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   <strong id="reader-title">Select an article</strong>
                   <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
                 </div>
+                <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
+                  <p class="reader-player-label">Video</p>
+                  <div class="reader-player-container" id="reader-player-container"></div>
+                  <a class="reader-player-fallback" id="reader-player-fallback" href="" target="_blank" rel="noopener">Open in YouTube</a>
+                </section>
                 <div class="reader-frame-shell">
                   <iframe id="reader-frame" title="Article content" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin" srcdoc=""></iframe>
                 </div>
@@ -1400,6 +1443,9 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerTitle = document.getElementById('reader-title');
   const readerMeta = document.getElementById('reader-meta');
   const readerFrame = document.getElementById('reader-frame');
+  const readerPlayerShell = document.getElementById('reader-player-shell');
+  const readerPlayerContainer = document.getElementById('reader-player-container');
+  const readerPlayerFallback = document.getElementById('reader-player-fallback');
   const settingsContent = document.getElementById('settings-content');
   const DEFAULT_COLUMN_WIDTHS = { sidebar: 416, stream: 524 };
   const COLUMN_WIDTH_LIMITS = {
@@ -1429,6 +1475,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let expandedFolderIds = new Set();
   let activeColumnResize = null;
   let appliedColumnWidths = { ...DEFAULT_COLUMN_WIDTHS };
+  let activeYouTubeVideoId = null;
 
   function getStoredToken() {
     return window.sessionStorage.getItem(storageKey);
@@ -2457,6 +2504,57 @@ export function renderBrowserAppRuntimeScript(): string {
     );
   }
 
+  function clearYouTubePlayer() {
+    activeYouTubeVideoId = null;
+    if (!readerPlayerShell || !readerPlayerContainer || !readerPlayerFallback) {
+      return;
+    }
+
+    readerPlayerContainer.replaceChildren();
+    readerPlayerFallback.setAttribute('href', '');
+    readerPlayerShell.classList.add('hidden');
+  }
+
+  function renderYouTubePlayer(originalUrl, title) {
+    if (!readerPlayerShell || !readerPlayerContainer || !readerPlayerFallback) {
+      return;
+    }
+
+    const embedUrl = client.createYouTubeEmbedUrl(originalUrl);
+    if (!embedUrl) {
+      clearYouTubePlayer();
+      return;
+    }
+
+    const videoId = client.extractYouTubeVideoId(originalUrl);
+    if (!videoId) {
+      clearYouTubePlayer();
+      return;
+    }
+
+    if (activeYouTubeVideoId === videoId) {
+      readerPlayerFallback.setAttribute('href', originalUrl);
+      readerPlayerShell.classList.remove('hidden');
+      return;
+    }
+
+    const playerFrame = createNode('iframe', {
+      classNames: ['reader-player-frame'],
+      attributes: {
+        src: embedUrl,
+        'data-youtube-video-id': videoId,
+        title: title ? 'YouTube video: ' + title : 'YouTube video player',
+        allow: 'accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',
+        referrerpolicy: 'strict-origin-when-cross-origin',
+        allowfullscreen: '',
+      },
+    });
+    readerPlayerContainer.replaceChildren(playerFrame);
+    activeYouTubeVideoId = videoId;
+    readerPlayerFallback.setAttribute('href', originalUrl);
+    readerPlayerShell.classList.remove('hidden');
+  }
+
   function renderReader() {
     if (!selectedItemId) {
       readerSourceLabel.textContent = 'Source';
@@ -2466,6 +2564,7 @@ export function renderBrowserAppRuntimeScript(): string {
       readerTitle.textContent = 'Select an article';
       readerMeta.textContent = 'Full article content stays isolated inside the reader frame.';
       readerFrame.srcdoc = client.createArticleFrameDocument('', theme);
+      clearYouTubePlayer();
       return;
     }
 
@@ -2478,6 +2577,7 @@ export function renderBrowserAppRuntimeScript(): string {
       readerTitle.textContent = 'Loading article…';
       readerMeta.textContent = 'Loading the full article body.';
       readerFrame.srcdoc = client.createArticleFrameDocument('<p class="pigeon-empty">Loading article content…</p>', theme);
+      clearYouTubePlayer();
       return;
     }
 
@@ -2498,6 +2598,7 @@ export function renderBrowserAppRuntimeScript(): string {
     readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
       .filter(Boolean)
       .join(' · ');
+    renderYouTubePlayer(articleHref, item.title || '');
     readerFrame.srcdoc = client.createArticleFrameDocument(
       item.content && item.content.content ? item.content.content : '',
       theme,

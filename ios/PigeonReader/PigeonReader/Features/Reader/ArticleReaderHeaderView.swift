@@ -5,8 +5,27 @@ struct ArticleReaderHeaderView: View {
 	let selectedMode: ReaderMode
 	let hasOriginalURL: Bool
 	let textScale: Double
+	let canUseReaderView: Bool
 	let onSelectMode: (ReaderMode) -> Void
 	let onOpenOriginal: () -> Void
+
+	init(
+		article: Recommendation,
+		selectedMode: ReaderMode,
+		hasOriginalURL: Bool,
+		textScale: Double,
+		canUseReaderView: Bool = true,
+		onSelectMode: @escaping (ReaderMode) -> Void,
+		onOpenOriginal: @escaping () -> Void,
+	) {
+		self.article = article
+		self.selectedMode = selectedMode
+		self.hasOriginalURL = hasOriginalURL
+		self.textScale = textScale
+		self.canUseReaderView = canUseReaderView
+		self.onSelectMode = onSelectMode
+		self.onOpenOriginal = onOpenOriginal
+	}
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 12) {
@@ -42,7 +61,10 @@ struct ArticleReaderHeaderView: View {
 						} label: {
 							Label(mode.title, systemImage: mode.systemImage)
 						}
-						.disabled(mode != .feedContent && hasOriginalURL == false)
+						.disabled(
+							mode != .feedContent
+								&& (hasOriginalURL == false || (mode == .readerView && canUseReaderView == false)),
+						)
 					}
 				} label: {
 					Label(selectedMode.title, systemImage: selectedMode.systemImage)

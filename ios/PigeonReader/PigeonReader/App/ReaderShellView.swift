@@ -67,7 +67,15 @@ struct ReaderShellView: View {
 			SettingsView()
 		}
 		.sheet(item: $model.pendingFeedRequest) { request in
+			#if DEBUG
+			AddFeedView(
+				initialURL: ProcessInfo.processInfo.arguments.contains("-reader-show-add-feed")
+					? ""
+					: request.url.absoluteString,
+			)
+			#else
 			AddFeedView(initialURL: request.url.absoluteString)
+			#endif
 		}
 		.safeAreaInset(edge: .top) {
 			VStack(spacing: 0) {

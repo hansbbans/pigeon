@@ -186,6 +186,19 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(QuickAddResponse.self, from: data)
 	}
 
+	func searchYouTubeChannels(query: String) async throws -> YouTubeChannelSearchResponse {
+		let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard trimmedQuery.count >= 2 else {
+			return YouTubeChannelSearchResponse(channels: [], mode: .search, message: "Enter at least 2 characters to search.")
+		}
+		try Task.checkCancellation()
+		var components = try endpointComponents(path: "feeds/youtube/search")
+		components.queryItems = [URLQueryItem(name: "q", value: trimmedQuery)]
+		let (data, _) = try await requestJSON(components: components)
+		try Task.checkCancellation()
+		return try decoder.decode(YouTubeChannelSearchResponse.self, from: data)
+	}
+
 	func editSubscription(
 		id: String,
 		title: String? = nil,
