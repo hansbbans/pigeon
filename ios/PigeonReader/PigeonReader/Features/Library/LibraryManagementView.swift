@@ -40,22 +40,100 @@ struct AddFeedView: View {
 	@State private var selectedFolder = ""
 	@State private var newFolder = ""
 	@State private var isSaving = false
+	@State private var channelSearch = YouTubeChannelSearchState()
 
 	init(initialURL: String = "") {
 		_urlText = State(initialValue: initialURL)
+		var initialSearch = YouTubeChannelSearchState()
+		initialSearch.updateInput(initialURL)
+		_channelSearch = State(initialValue: initialSearch)
 	}
 
 	var body: some View {
 		NavigationStack {
 			Form {
 				SettingsErrorSection()
-				Section("Feed") {
-					TextField("https://example.com/feed.xml", text: $urlText)
-						.textContentType(.URL)
-						.keyboardType(.URL)
+				Section {
+					TextField("Website URL or YouTube channel", text: $urlText)
 						.textInputAutocapitalization(.never)
 						.autocorrectionDisabled()
 						.accessibilityIdentifier("add-feed-url")
+						.submitLabel(.search)
+						.onSubmit {
+							guard YouTubeChannelSearchInput.searchQuery(from: urlText) != nil else { return }
+							channelSearch.retry()
+						}
+						.onChange(of: urlText) { _, newValue in
+							channelSearch.updateInput(newValue)
+						}
+				} header: {
+					Text("Feed")
+				} footer: {
+					Text("Paste a website or feed link, or enter a YouTube handle such as mkbhd.")
+				}
+				if shouldShowChannelSearch {
+					Section("YouTube Channels") {
+						if channelSearch.isSearching {
+							ProgressView("Searching YouTube")
+								.accessibilityIdentifier("youtube-search-status")
+						}
+						ForEach(channelSearch.channels) { channel in
+							Button {
+								guard channel.validFeedURL != nil else { return }
+								channelSearch.select(channel)
+							} label: {
+								VStack(alignment: .leading, spacing: 4) {
+									HStack {
+										Text(channel.title)
+											.font(.headline)
+										if channelSearch.selectedChannel?.id == channel.id {
+											Image(systemName: "checkmark.circle.fill")
+												.foregroundStyle(.tint)
+										}
+									}
+									Text(channel.channelLabel)
+										.font(.footnote)
+										.foregroundStyle(.secondary)
+									if channel.description.isEmpty == false {
+										Text(channel.description)
+											.font(.subheadline)
+											.foregroundStyle(.secondary)
+											.lineLimit(3)
+									}
+								}
+								.frame(maxWidth: .infinity, alignment: .leading)
+								.contentShape(Rectangle())
+							}
+							.buttonStyle(.plain)
+							.disabled(channel.validFeedURL == nil)
+							.accessibilityIdentifier("youtube-channel-result-\(channel.id)")
+							.accessibilityValue(channelSearch.selectedChannel?.id == channel.id ? "Selected" : "")
+						}
+						if let message = channelSearch.message {
+							Text(message)
+								.font(.footnote)
+								.foregroundStyle(.secondary)
+								.accessibilityIdentifier("youtube-search-message")
+						}
+						if let errorMessage = channelSearch.errorMessage {
+							Label(errorMessage, systemImage: "exclamationmark.triangle")
+								.font(.footnote)
+								.foregroundStyle(.red)
+								.accessibilityIdentifier("youtube-search-error")
+							Button("Retry search", systemImage: "arrow.clockwise") {
+								channelSearch.retry()
+							}
+							.accessibilityIdentifier("youtube-search-retry")
+						}
+						if channelSearch.hasCompletedSearch,
+							channelSearch.channels.isEmpty,
+							channelSearch.message == nil,
+							channelSearch.errorMessage == nil {
+							Text("No matching YouTube channels found.")
+								.foregroundStyle(.secondary)
+								.accessibilityIdentifier("youtube-search-empty")
+						}
+					}
 				}
 				Section("Folder") {
 					Picker("Existing folder", selection: $selectedFolder) {
@@ -65,6 +143,7 @@ struct AddFeedView: View {
 						}
 					}
 					TextField("Or create a new folder", text: $newFolder)
+						.accessibilityIdentifier("add-feed-new-folder")
 				}
 			}
 			.navigationTitle("Add Feed")
@@ -75,7 +154,8 @@ struct AddFeedView: View {
 				}
 				ToolbarItem(placement: .confirmationAction) {
 					Button("Add") { save() }
-						.disabled(urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+						.accessibilityIdentifier("add-feed")
+						.disabled(subscriptionURLText == nil || isSaving)
 				}
 			}
 			.interactiveDismissDisabled(isSaving)
@@ -83,14 +163,61 @@ struct AddFeedView: View {
 				model.clearSettingsError()
 			}
 		}
+		.task(id: channelSearch.request) {
+			await searchYouTube(for: channelSearch.request)
+		}
+	}
+
+	private var shouldShowChannelSearch: Bool {
+		guard YouTubeChannelSearchInput.searchQuery(from: urlText) != nil else { return false }
+		return channelSearch.isSearching
+			|| channelSearch.hasCompletedSearch
+			|| channelSearch.channels.isEmpty == false
+			|| channelSearch.message != nil
+			|| channelSearch.errorMessage != nil
+	}
+
+	private var subscriptionURLText: String? {
+		if let selectedChannel = channelSearch.selectedChannel {
+			let currentQuery = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+			guard channelSearch.query == currentQuery else { return nil }
+			guard selectedChannel.validFeedURL != nil else { return nil }
+			return selectedChannel.feedURL.trimmingCharacters(in: .whitespacesAndNewlines)
+		}
+		let candidate = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard YouTubeChannelSearchInput.httpURL(from: candidate) != nil else { return nil }
+		return candidate
+	}
+
+	private func searchYouTube(for request: YouTubeChannelSearchRequest) async {
+		guard let query = YouTubeChannelSearchInput.searchQuery(from: request.query) else { return }
+		do {
+			try await Task.sleep(for: .milliseconds(500))
+		} catch {
+			return
+		}
+		guard Task.isCancelled == false, channelSearch.accepts(request) else { return }
+		guard channelSearch.beginSearch(for: request) else { return }
+
+		do {
+			let response = try await model.searchYouTubeChannels(query: query)
+			guard Task.isCancelled == false else { return }
+			channelSearch.apply(response, for: request)
+		} catch let error where isCancellation(error) {
+			return
+		} catch {
+			guard Task.isCancelled == false else { return }
+			channelSearch.fail(error.localizedDescription, for: request)
+		}
 	}
 
 	private func save() {
+		guard let subscriptionURLText else { return }
 		isSaving = true
 		let typedFolder = newFolder.trimmingCharacters(in: .whitespacesAndNewlines)
 		let folder = typedFolder.isEmpty ? (selectedFolder.isEmpty ? nil : selectedFolder) : typedFolder
 		Task {
-			if await model.addFeed(urlText: urlText, folderName: folder) {
+			if await model.addFeed(urlText: subscriptionURLText, folderName: folder) {
 				dismiss()
 			} else {
 				isSaving = false

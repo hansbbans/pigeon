@@ -303,6 +303,29 @@ enum PreviewData {
 			explanation: "This source is still new to your reading history.",
 			learningState: "Still learning"
 		),
+		Recommendation(
+			id: "preview-youtube",
+			readerId: "tag:google.com,2005:reader/item/0000000000000004",
+			feedKey: "youtube-creators",
+			source: "YouTube Creators",
+			title: "A practical guide to making better videos",
+			html: """
+			<article>
+				<p>This deterministic fixture represents a video entry from a YouTube channel feed.</p>
+				<p>The official player appears above this feed content and starts only when you press play.</p>
+			</article>
+			""",
+			text: "A practical guide to making better videos.",
+			originalURL: URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+			receivedAt: Date(timeIntervalSince1970: 1_786_172_000),
+			isRead: false,
+			isStarred: false,
+			score: 72,
+			confidence: 0.61,
+			sampleCount: 7,
+			explanation: "A recent video from a source you follow.",
+			learningState: "Learning your interests",
+		),
 	]
 
 	private static var launchTodayArticles: [Recommendation] {

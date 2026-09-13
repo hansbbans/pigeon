@@ -45,7 +45,7 @@ Main files:
 
 ### 2. RSS Subscription And Refresh
 
-Pigeon also supports normal RSS and Atom feeds.
+Pigeon also supports normal RSS and Atom feeds, including public YouTube channel feeds.
 
 Those feeds can be added through:
 
@@ -53,6 +53,12 @@ Those feeds can be added through:
 - the Google Reader compatible quick-add endpoints used by Reeder and similar apps
 
 Subscribed RSS feeds are stored in the same `feeds` table as email-based feeds, but marked as `source_type = 'rss'`.
+
+For YouTube, add a complete public channel URL such as `https://www.youtube.com/@GoogleDevelopers`, a `/channel/UC...` URL, or the channel's official Atom URL (`/feeds/videos.xml?channel_id=...`). Pigeon discovers the published feed, recognizes alternate URLs for the same subscription, and keeps each video's description, original YouTube URL, and thumbnail. New videos arrive through the existing scheduled feed refresh.
+
+The native Add Feed screen also looks up YouTube handles such as `mkbhd` or `@mkbhd` and lets the reader select the matching channel before adding it. Handle lookup uses the channel's published Atom feed and needs no YouTube API key. The authenticated `GET /feeds/youtube/search?q=...` endpoint also supports broader channel-name searches when the Worker has a `YOUTUBE_API_KEY` secret with YouTube Data API v3 enabled. Configure that secret with `npx wrangler secret put YOUTUBE_API_KEY`; never put the key in the app or commit it. Search uses YouTube's official channel-search API, returns at most eight channels, and briefly caches repeated queries. Without the key, lookup is limited to exact handles and channel URLs.
+
+Both readers show YouTube's embedded player for video entries, with standard playback controls, fullscreen, and an Open in YouTube fallback. Playback starts when the viewer presses Play. The native player stops when the reader closes or the app goes into the background. Videos require an internet connection; saved descriptions remain available offline.
 
 Every hour, the Worker's `scheduled()` handler:
 

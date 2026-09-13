@@ -7,6 +7,7 @@
  */
 
 import { XMLParser } from 'fast-xml-parser';
+import { isYouTubeVideoId } from './youtube';
 
 export type FeedFormat = 'rss2' | 'rss1' | 'atom' | 'json';
 
@@ -156,17 +157,35 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 	const entries = arrayValue(findKey(feed, ['entry']));
 	const items = entries.map((rawEntry) => {
 		const entry = asRecord(rawEntry);
-		const link = extractAtomLink(findKey(entry, ['link']), baseUrl);
+		const videoId = textValue(findKey(entry, ['yt:videoId']));
+		const link =
+			extractAtomLink(findKey(entry, ['link']), baseUrl) ??
+			(videoId && isYouTubeVideoId(videoId) ? `https://www.youtube.com/watch?v=${videoId}` : undefined);
 		const authorRecord = asOptionalRecord(findKey(entry, ['author']));
+		const mediaGroup = asOptionalRecord(findKey(entry, ['media:group', 'group']));
+		const mediaTitle = mediaGroup ? textValue(findKey(mediaGroup, ['media:title', 'title'])) : undefined;
+		const mediaDescription = mediaGroup
+			? textValue(findKey(mediaGroup, ['media:description', 'description']))
+			: undefined;
+		const title = textValue(findKey(entry, ['title'])) ?? mediaTitle ?? 'Untitled';
 
 		return {
-			guid: textValue(findKey(entry, ['id'])) ?? link ?? '',
-			title: textValue(findKey(entry, ['title'])) ?? 'Untitled',
+			// YouTube's Atom IDs are already stable. Prefer the explicit video ID
+			// when available so a missing/rewritten entry id cannot duplicate it.
+			guid: videoId && isYouTubeVideoId(videoId)
+				? `yt:video:${videoId}`
+				: textValue(findKey(entry, ['id'])) ?? link ?? '',
+			title,
 			link,
 			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
-			content: textValue(findKey(entry, ['content', 'summary'])) ?? '',
+			content:
+				textValue(findKey(entry, ['content', 'summary'])) ??
+				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
 			author: authorRecord ? textValue(findKey(authorRecord, ['name'])) : undefined,
-			attachments: parseAtomAttachments(findKey(entry, ['link']), baseUrl),
+			attachments: deduplicateAttachments([
+				...parseAtomAttachments(findKey(entry, ['link']), baseUrl),
+				...parseYouTubeMediaAttachments(mediaGroup, baseUrl, mediaTitle),
+			]),
 		};
 	});
 
@@ -246,6 +265,31 @@ function parseAtomAttachments(value: unknown, baseUrl?: string): ParsedAttachmen
 				url,
 				mimeType: attributeValue(link, ['type']),
 				title: attributeValue(link, ['title']),
+			}];
+		}),
+	);
+}
+
+function parseYouTubeMediaAttachments(
+	mediaGroup: FeedRecord | undefined,
+	baseUrl?: string,
+	title?: string,
+): ParsedAttachment[] {
+	if (!mediaGroup) return [];
+
+	const thumbnailValues = arrayValue(findKey(mediaGroup, ['media:thumbnail', 'thumbnail']));
+	return deduplicateAttachments(
+		thumbnailValues.flatMap((rawThumbnail) => {
+			const thumbnail = asRecord(rawThumbnail);
+			const url = resolveUrl(
+				attributeValue(thumbnail, ['url', 'href']) ?? textValue(thumbnail),
+				baseUrl,
+			);
+			if (!url) return [];
+			return [{
+				url,
+				mimeType: attributeValue(thumbnail, ['type']) ?? 'image/jpeg',
+				title: title ? `${title} thumbnail` : 'Video thumbnail',
 			}];
 		}),
 	);

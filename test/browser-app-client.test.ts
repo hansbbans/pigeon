@@ -809,6 +809,9 @@ async function createBrowserHarness(options?: {
 		['open-original-button', createElement('', [], 'button', registerFocus)],
 		['reader-title', createElement('', [], 'strong', registerFocus)],
 		['reader-meta', createElement('', [], 'p', registerFocus)],
+		['reader-player-shell', createElement('', ['hidden'], 'section', registerFocus)],
+		['reader-player-container', createElement('', [], 'div', registerFocus)],
+		['reader-player-fallback', createElement('', [], 'a', registerFocus)],
 		['reader-frame', createElement('', [], 'iframe', registerFocus)],
 		['settings-content', createElement('', [], 'div', registerFocus)],
 	]);
@@ -967,6 +970,7 @@ async function createBrowserHarness(options?: {
 		},
 		FormData,
 		Response,
+		URL,
 		URLSearchParams,
 		Date: options?.now === undefined ? Date : createFixedDateConstructor(options.now),
 		console,
@@ -3219,6 +3223,97 @@ test('runtime script keeps the active article title and metadata outside the ifr
 	assert.equal(elements.get('reader-frame')?.srcdoc, createArticleFrameDocument(articleBody));
 	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Full body copy that belongs in the frame/);
 	assert.doesNotMatch(elements.get('reader-meta')?.textContent ?? '', /Full body copy that belongs in the frame/);
+});
+
+test('runtime YouTube player reuses the same iframe across rerenders and clears on article changes and logout', async () => {
+	const videoUrl = 'https://www.youtube.com/watch?v=M1q063UD-gw';
+	const { elements } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [{ id: 'feed/1', title: 'Google for Developers' }],
+				});
+			}
+
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 2 }] });
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				return Response.json({ itemRefs: [{ id: '101' }, { id: '102' }] });
+			}
+
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({
+					items: [
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000065',
+							title: 'A YouTube video',
+							published: 1_742_460_800,
+							origin: { title: 'Google for Developers' },
+							summary: { content: 'Video summary' },
+							content: { content: '<p>Video body</p>' },
+							alternate: [{ href: videoUrl }],
+						},
+						{
+							id: 'tag:google.com,2005:reader/item/0000000000000066',
+							title: 'A regular article',
+							published: 1_742_460_700,
+							origin: { title: 'Google for Developers' },
+							summary: { content: 'Article summary' },
+							content: { content: '<p>Article body</p>' },
+							alternate: [{ href: 'https://example.com/story' }],
+						},
+					],
+				});
+			}
+
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	const playerContainer = elements.get('reader-player-container');
+	const playerShell = elements.get('reader-player-shell');
+	const playerFallback = elements.get('reader-player-fallback');
+	assert.ok(playerContainer);
+	assert.ok(playerShell);
+	assert.ok(playerFallback);
+	await waitForBrowserCondition(() => playerContainer.children.length === 1);
+
+	const firstFrame = playerContainer.children[0];
+	assert.ok(firstFrame);
+	assert.equal(firstFrame.tagName, 'IFRAME');
+	assert.equal(firstFrame.getAttribute('src'), 'https://www.youtube.com/embed/M1q063UD-gw?controls=1');
+	assert.equal(firstFrame.getAttribute('referrerpolicy'), 'strict-origin-when-cross-origin');
+	assert.equal(firstFrame.getAttribute('allowfullscreen'), '');
+	assert.equal(playerFallback.getAttribute('href'), videoUrl);
+	assert.equal(playerShell.classList.contains('hidden'), false);
+
+	await elements.get('theme-toggle-button')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '').includes('data-theme="dark"'));
+	assert.equal(playerContainer.children[0], firstFrame);
+
+	const regularArticle = findListButtonByItemId(elements.get('articles-list'), '102');
+	assert.ok(regularArticle);
+	await regularArticle.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')?.textContent === 'A regular article');
+	assert.equal(playerContainer.children.length, 0);
+	assert.equal(playerShell.classList.contains('hidden'), true);
+
+	const videoArticle = findListButtonByItemId(elements.get('articles-list'), '101');
+	assert.ok(videoArticle);
+	await videoArticle.dispatch('click');
+	await waitForBrowserCondition(() => playerContainer.children.length === 1);
+	assert.notEqual(playerContainer.children[0], firstFrame);
+
+	await elements.get('logout-button')?.dispatch('click');
+	assert.equal(playerContainer.children.length, 0);
+	assert.equal(playerShell.classList.contains('hidden'), true);
 });
 
 test('runtime script re-renders the active article frame with dark styles when enabled', async () => {

@@ -20,6 +20,7 @@ struct PreviewHTTPClient: HTTPClient {
 		}
 		let url = request.url ?? fallbackURL
 		let data: Data
+		var statusCode = 200
 		switch url.path {
 		case "/api/v1/recommendations":
 			let response = PreviewRecommendationsResponse(
@@ -79,6 +80,42 @@ struct PreviewHTTPClient: HTTPClient {
 			} else {
 				data = Data("{\"items\":[]}".utf8)
 			}
+		case "/feeds/youtube/search":
+			let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+				.queryItems?
+				.first(where: { $0.name == "q" })?.value?.lowercased()
+			data = Data((query == "mkbhd" || query == "@mkbhd"
+				? Self.youtubeSearchFixture
+				: Self.youtubeEmptySearchFixture).utf8)
+		case "/reader/api/0/subscription/quickadd":
+			let requestedURL = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+				.queryItems?
+				.first(where: { $0.name == "quickadd" })?.value
+			if requestedURL == Self.youtubeQuickAddURL {
+				data = Data(Self.youtubeQuickAddFixture.utf8)
+			} else {
+				data = Data("Unexpected preview subscription URL".utf8)
+				statusCode = 400
+			}
+		case "/reader/api/0/subscription/edit":
+			if ProcessInfo.processInfo.arguments.contains("-reader-show-add-feed") {
+				let rawBody = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+				let form = URLComponents(string: "https://pigeon.preview/?\(rawBody)")?.queryItems ?? []
+				let hasExpectedFeed = form.contains {
+					$0.name == "s" && $0.value == "feed/youtube/UCBJycsmduvYEL83R_U4JriQ"
+				}
+				let hasExpectedFolder = form.contains {
+					$0.name == "a" && $0.value == "user/-/label/Creators"
+				}
+				if hasExpectedFeed && hasExpectedFolder {
+					data = Data()
+				} else {
+					data = Data("Unexpected preview folder assignment".utf8)
+					statusCode = 400
+				}
+			} else {
+				data = Data()
+			}
 		default:
 			if ProcessInfo.processInfo.arguments.contains("-reader-reader-success"), url.path == "/design" {
 				data = Data("""
@@ -92,7 +129,7 @@ struct PreviewHTTPClient: HTTPClient {
 				data = Data("<html><head></head><body></body></html>".utf8)
 			}
 		}
-		guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
 			throw PigeonError.invalidResponse
 		}
 		return (data, response)
@@ -135,6 +172,41 @@ struct PreviewHTTPClient: HTTPClient {
 	      "retryAt": null
 	    }]
 	  }
+	}
+	"""
+
+	nonisolated private static let youtubeSearchFixture = """
+	{
+	  "channels": [{
+	    "id": "UCBJycsmduvYEL83R_U4JriQ",
+	    "title": "Marques Brownlee",
+	    "description": "",
+	    "channelUrl": "https://www.youtube.com/@mkbhd",
+	    "feedUrl": "https://www.youtube.com/feeds/videos.xml?channel_id=UCBJycsmduvYEL83R_U4JriQ",
+	    "thumbnailUrl": null
+	  }],
+	  "mode": "handle",
+	  "message": null
+	}
+	"""
+
+	nonisolated private static let youtubeEmptySearchFixture = """
+	{
+	  "channels": [],
+	  "mode": "search",
+	  "message": null
+	}
+	"""
+
+	nonisolated private static let youtubeQuickAddURL = "https://www.youtube.com/feeds/videos.xml?channel_id=UCBJycsmduvYEL83R_U4JriQ"
+
+	nonisolated private static let youtubeQuickAddFixture = """
+	{
+	  "query": "https://www.youtube.com/feeds/videos.xml?channel_id=UCBJycsmduvYEL83R_U4JriQ",
+	  "numResults": 1,
+	  "streamId": "feed/youtube/UCBJycsmduvYEL83R_U4JriQ",
+	  "streamName": "Marques Brownlee",
+	  "isNew": true
 	}
 	"""
 }

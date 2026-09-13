@@ -47,6 +47,16 @@ struct PigeonReaderApp: App {
 					previewModel.select(article: firstArticle)
 					previewModel.setReaderMode(.feedContent, for: firstArticle.feedKey)
 				}
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-youtube") {
+				previewModel.setArticleFilter(.all, for: .forYou)
+				if let videoArticle = previewModel.articles.first(where: { YouTubeVideo(url: $0.safeOriginalURL) != nil }) {
+					previewModel.select(article: videoArticle)
+					previewModel.setReaderMode(.feedContent, for: videoArticle.feedKey)
+				}
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-add-feed") {
+				if let debugURL = URL(string: "https://pigeon.preview/debug-add-feed") {
+					previewModel.pendingFeedRequest = PendingFeedRequest(url: debugURL)
+				}
 			}
 			_model = State(initialValue: previewModel)
 			return

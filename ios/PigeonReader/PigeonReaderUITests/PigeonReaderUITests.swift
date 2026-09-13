@@ -159,6 +159,72 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "reader-view-fallback")
 	}
 
+	func testYouTubeArticleShowsEmbeddedPlayerAndOpenFallback() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-youtube",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		XCTAssertTrue(app.staticTexts["A practical guide to making better videos"].waitForExistence(timeout: 15))
+		XCTAssertTrue(app.otherElements["youtube-player-dQw4w9WgXcQ"].waitForExistence(timeout: 10))
+		let playerWebView = app.webViews["youtube-webview-dQw4w9WgXcQ"]
+		XCTAssertTrue(playerWebView.waitForExistence(timeout: 10))
+		XCTAssertGreaterThanOrEqual(playerWebView.frame.height, 200)
+		XCTAssertTrue(app.buttons["Open in YouTube"].waitForExistence(timeout: 5))
+		// The embedded WKWebView may show YouTube's player or its local failure
+		// surface depending on network availability; either path keeps the
+		// explicit Open in YouTube action available.
+		attachScreenshot(named: "youtube-player")
+	}
+
+	func testAddFeedSearchSelectsAndSavesYouTubeChannel() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-add-feed",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 10))
+		let field = app.textFields["add-feed-url"]
+		XCTAssertTrue(field.waitForExistence(timeout: 5))
+		field.tap()
+		field.typeText("mkbhd")
+
+		let result = app.buttons["youtube-channel-result-UCBJycsmduvYEL83R_U4JriQ"]
+		XCTAssertTrue(result.waitForExistence(timeout: 10))
+		XCTAssertTrue(app.staticTexts["Marques Brownlee"].exists)
+		XCTAssertTrue(app.staticTexts["@mkbhd"].exists)
+		let add = app.buttons["add-feed"]
+		XCTAssertFalse(add.isEnabled)
+		result.tap()
+		XCTAssertTrue(add.isEnabled)
+
+		// Editing the query removes the prior selection/results before the next
+		// debounced response can arrive.
+		field.tap()
+		field.typeText("x")
+		XCTAssertFalse(result.exists)
+		XCTAssertFalse(add.isEnabled)
+		field.typeText(XCUIKeyboardKey.delete.rawValue)
+		XCTAssertTrue(result.waitForExistence(timeout: 10))
+
+		result.tap()
+		XCTAssertTrue(add.isEnabled)
+		let folder = app.textFields["add-feed-new-folder"]
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.tap()
+		folder.typeText("Creators")
+		add.tap()
+
+		XCTAssertTrue(app.navigationBars["For You"].waitForExistence(timeout: 10))
+		attachScreenshot(named: "youtube-channel-search-add")
+	}
+
 	func testSyncHealthShowsFeedDiagnosticsAndManualRetry() throws {
 		openSettings()
 		let syncHealth = app.buttons["Sync Health"]

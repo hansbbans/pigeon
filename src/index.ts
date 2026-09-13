@@ -10,6 +10,7 @@ import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
 import { handleFeedDiscovery } from './feed-discovery';
+import { handleYouTubeChannelSearch } from './youtube-channel-search';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -36,6 +37,10 @@ export default {
 			const migrationError = await ensureSchemaReady(env);
 			if (migrationError) return migrationError;
 			return handleFeedDiscovery(request, env);
+		}
+
+		if (path === '/feeds/youtube/search' && request.method === 'GET') {
+			return handleYouTubeChannelSearch(request, env);
 		}
 
 		if (path === '/feeds') {

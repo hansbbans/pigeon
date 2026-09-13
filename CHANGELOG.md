@@ -4,6 +4,11 @@ All notable changes to Pigeon are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Follow public YouTube channels by URL or look up handles such as `mkbhd` in Add Feed. Broader channel-name search is available when a YouTube API key is configured.
+- Watch YouTube entries inside the iOS and browser readers, with playback controls, fullscreen, and an Open in YouTube fallback.
+
 ### Fixed
 
 - Daily database maintenance now advances through small indexed batches instead of rescanning the full article library every hour. Starred and unread views also use targeted indexes, preventing routine Pigeon traffic from exhausting the D1 daily read allowance.

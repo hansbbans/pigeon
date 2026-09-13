@@ -25,15 +25,17 @@ struct ArticleReaderView: View {
 
 	var body: some View {
 		let current = currentArticle
+		let visibleMode = readerMode(for: current)
 		VStack(spacing: 0) {
 			compactBackBar
-			if selectedMode == .website, let originalURL = current.safeOriginalURL {
+			if visibleMode == .website, let originalURL = current.safeOriginalURL {
 				VStack(spacing: 0) {
 					ArticleReaderHeaderView(
 						article: current,
-						selectedMode: selectedMode,
+						selectedMode: visibleMode,
 						hasOriginalURL: true,
 						textScale: model.readerTypography.textScale,
+						canUseReaderView: YouTubeVideo(url: current.safeOriginalURL) == nil,
 						onSelectMode: selectMode,
 						onOpenOriginal: openOriginal,
 					)
@@ -55,9 +57,10 @@ struct ArticleReaderView: View {
 						VStack(alignment: .leading, spacing: 18) {
 							ArticleReaderHeaderView(
 								article: current,
-								selectedMode: selectedMode,
+								selectedMode: visibleMode,
 								hasOriginalURL: current.safeOriginalURL != nil,
 								textScale: model.readerTypography.textScale,
+								canUseReaderView: YouTubeVideo(url: current.safeOriginalURL) == nil,
 								onSelectMode: selectMode,
 								onOpenOriginal: openOriginal,
 							)
@@ -158,12 +161,13 @@ struct ArticleReaderView: View {
 				stored: model.readerMode(for: current.feedKey),
 				hasOriginalURL: current.safeOriginalURL != nil,
 			)
+			let isYouTubeVideo = YouTubeVideo(url: current.safeOriginalURL) != nil
 			modeResolutionArticleID = current.id
 			restoredModeForArticle = restoredMode
 			selectedMode = restoredMode
 			readerDocument = nil
 			readerDocumentArticleID = nil
-			readerViewState = current.safeOriginalURL == nil ? .unavailable : .idle
+			readerViewState = isYouTubeVideo || current.safeOriginalURL == nil ? .unavailable : .idle
 		}
 		.task(id: readerRequestID(for: current)) {
 			isArticleBodyLaidOut = false
@@ -194,6 +198,9 @@ struct ArticleReaderView: View {
 			await model.monitorActiveReading(for: current.id)
 		}
 		.onChange(of: selectedMode) { _, newMode in
+			if newMode == .readerView && YouTubeVideo(url: current.safeOriginalURL) != nil {
+				return
+			}
 			model.setReaderMode(newMode, for: current)
 			if newMode != .readerView {
 				readerViewState = newMode == .feedContent ? .idle : .unavailable
@@ -203,22 +210,32 @@ struct ArticleReaderView: View {
 
 	@ViewBuilder
 	private func articleContent(for article: Recommendation) -> some View {
-		switch selectedMode {
+		switch readerMode(for: article) {
 		case .feedContent:
-			ArticleBodyView(
-				content: article.html,
-				fallbackText: article.text ?? article.title,
-				baseURL: article.safeOriginalURL,
-				leadImageURL: nil,
-				textScale: model.readerTypography.textScale,
-				lineHeight: model.readerTypography.lineHeight,
-				theme: model.readerTypography.theme,
-				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-				imageProxySession: model.session,
-				openedDestination: openInlineDestination,
-				saveToReader: saveInlineDestination,
-			)
-			.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
+			VStack(alignment: .leading, spacing: 18) {
+				if let video = YouTubeVideo(url: article.safeOriginalURL) {
+					YouTubePlayerView(
+						video: video,
+						playbackAllowed: scenePhase == .active,
+						onOpenYouTube: openOriginal,
+						onOpenLink: openYouTubeLink,
+					)
+				}
+				ArticleBodyView(
+					content: article.html,
+					fallbackText: article.text ?? article.title,
+					baseURL: article.safeOriginalURL,
+					leadImageURL: nil,
+					textScale: model.readerTypography.textScale,
+					lineHeight: model.readerTypography.lineHeight,
+					theme: model.readerTypography.theme,
+					remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+					imageProxySession: model.session,
+					openedDestination: openInlineDestination,
+					saveToReader: saveInlineDestination,
+				)
+				.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
+			}
 		case .readerView:
 			readerViewContent(for: article)
 		case .website:
@@ -287,15 +304,25 @@ struct ArticleReaderView: View {
 		"\(article.id)|\(selectedMode.rawValue)|\(article.safeOriginalURL?.absoluteString ?? "none")"
 	}
 
+	private func readerMode(for article: Recommendation) -> ReaderMode {
+		if selectedMode == .readerView, YouTubeVideo(url: article.safeOriginalURL) != nil {
+			return .feedContent
+		}
+		return selectedMode
+	}
+
 	private func selectMode(_ mode: ReaderMode) {
-		guard mode == .feedContent || currentArticle.safeOriginalURL != nil else {
+		let isYouTubeVideo = YouTubeVideo(url: currentArticle.safeOriginalURL) != nil
+		guard mode == .feedContent
+			|| (mode == .website && currentArticle.safeOriginalURL != nil)
+			|| (mode == .readerView && isYouTubeVideo == false && currentArticle.safeOriginalURL != nil) else {
 			return
 		}
 		selectedMode = mode
 	}
 
 	private func loadReaderViewIfNeeded(for article: Recommendation) async {
-		guard selectedMode == .readerView else {
+		guard selectedMode == .readerView, YouTubeVideo(url: article.safeOriginalURL) == nil else {
 			return
 		}
 		guard article.safeOriginalURL != nil else {
@@ -370,7 +397,7 @@ struct ArticleReaderView: View {
 	}
 
 	private var isShowingArticleBody: Bool {
-		switch selectedMode {
+		switch readerMode(for: currentArticle) {
 		case .feedContent:
 			true
 		case .website:
@@ -448,6 +475,14 @@ struct ArticleReaderView: View {
 
 	private func openOriginal() {
 		guard let url = currentArticle.safeOriginalURL, let destination = OutboundDestination(url: url) else {
+			return
+		}
+		Task { await model.recordOutboundClick(itemId: currentArticle.id, destinationHost: destination.host) }
+		openURL(url)
+	}
+
+	private func openYouTubeLink(_ url: URL) {
+		guard let destination = OutboundDestination(url: url), url.user == nil, url.password == nil else {
 			return
 		}
 		Task { await model.recordOutboundClick(itemId: currentArticle.id, destinationHost: destination.host) }

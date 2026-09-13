@@ -4,10 +4,19 @@ import {
 	fetchBoundedFeedResource,
 	isHtmlContent,
 	MAX_DISCOVERY_HTML_BYTES,
+	MAX_FEED_REDIRECTS,
 	MAX_FEED_BYTES,
 } from './feed-network';
 import { parseFeed, type FeedFormat } from './rss-parser';
 import type { Env } from './types';
+import {
+	canonicalizeYouTubeFeedUrl,
+	extractYouTubeChannelId,
+	isYouTubeChannelPageUrl,
+	isYouTubePageHost,
+	YOUTUBE_DISCOVERY_HTML_BYTES,
+	youtubeChannelFeedUrl,
+} from './youtube';
 
 const DISCOVERY_USER_AGENT = 'Pigeon RSS Reader/1.0';
 const MAX_DISCOVERY_CANDIDATES = 12;
@@ -34,6 +43,7 @@ export interface FeedDiscoveryResult {
 
 interface CandidateUrl {
 	url: URL;
+	aliases: string[];
 	title?: string;
 	source: Exclude<FeedDiscoverySource, 'direct'>;
 	score: number;
@@ -41,10 +51,20 @@ interface CandidateUrl {
 
 export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult> {
 	const inputUrl = normalizeDiscoveryInput(input);
-	const initial = await fetchBoundedFeedResource(inputUrl, {
+	const directChannelId = extractYouTubeChannelId(inputUrl);
+	const publishedYouTubeFeed =
+		!directChannelId && isYouTubeChannelPageUrl(inputUrl)
+			? await discoverPublishedYouTubeFeed(inputUrl)
+			: null;
+	const initialUrl =
+		(directChannelId ? youtubeChannelFeedUrl(directChannelId) : null) ??
+		canonicalizeYouTubeFeedUrl(inputUrl) ??
+		publishedYouTubeFeed ??
+		inputUrl;
+	const initial = await fetchBoundedFeedResource(initialUrl, {
 		headers: { Accept: feedAcceptHeader(), 'User-Agent': DISCOVERY_USER_AGENT },
 		maxBytes: MAX_FEED_BYTES,
-		maxHtmlBytes: MAX_DISCOVERY_HTML_BYTES,
+		maxHtmlBytes: maxDiscoveryHtmlBytes(inputUrl),
 	});
 
 	if (!initial.response.ok) {
@@ -63,8 +83,8 @@ export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult>
 				candidateFromParsedFeed(
 					initial.finalUrl,
 					parsed,
-					'direct',
-					200,
+					publishedYouTubeFeed ? 'alternate' : 'direct',
+					publishedYouTubeFeed ? 120 : 200,
 					redirectAliases(inputUrl, initial.redirects, initial.finalUrl),
 				),
 			],
@@ -88,7 +108,7 @@ export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult>
 			const resource = await fetchBoundedFeedResource(candidateUrl.url, {
 				headers: { Accept: feedAcceptHeader(), 'User-Agent': DISCOVERY_USER_AGENT },
 				maxBytes: MAX_FEED_BYTES,
-				maxHtmlBytes: MAX_DISCOVERY_HTML_BYTES,
+				maxHtmlBytes: maxDiscoveryHtmlBytes(inputUrl),
 			});
 			if (!resource.response.ok) {
 				throw new Error(`HTTP ${resource.response.status}`);
@@ -103,7 +123,10 @@ export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult>
 					parsed,
 					candidateUrl.source,
 					candidateUrl.score,
-					redirectAliases(candidateUrl.url, resource.redirects, resource.finalUrl),
+					[
+						...candidateUrl.aliases,
+						...redirectAliases(candidateUrl.url, resource.redirects, resource.finalUrl),
+					],
 					candidateUrl.title,
 				),
 			);
@@ -149,6 +172,79 @@ export async function handleFeedDiscovery(request: Request, env: Env): Promise<R
 	}
 }
 
+/**
+ * Resolve a YouTube channel page through its published Atom alternate link.
+ *
+ * YouTube channel pages can exceed the normal HTML discovery limit. Reading
+ * only the bounded prefix lets us stop as soon as the published link appears,
+ * while keeping the same safe host, timeout, and byte bound as other feed
+ * discovery requests.
+ */
+export async function discoverPublishedYouTubeFeed(input: string | URL): Promise<URL> {
+	let pageUrl = assertSafeFeedUrl(input);
+	let response: Response;
+	for (let redirectCount = 0; ; redirectCount += 1) {
+		response = await fetch(pageUrl, {
+			headers: {
+				Accept: 'text/html, application/xhtml+xml;q=0.9',
+				'User-Agent': DISCOVERY_USER_AGENT,
+			},
+			redirect: 'manual',
+			signal: AbortSignal.timeout(8_000),
+		});
+		if (![301, 302, 303, 307, 308].includes(response.status)) break;
+		if (redirectCount >= MAX_FEED_REDIRECTS) {
+			response.body?.cancel().catch(() => undefined);
+			throw new Error(`YouTube channel page redirected more than ${MAX_FEED_REDIRECTS} times`);
+		}
+		const location = response.headers.get('Location');
+		response.body?.cancel().catch(() => undefined);
+		if (!location) throw new Error(`YouTube channel page returned HTTP ${response.status} without a Location header`);
+		const nextUrl = assertSafeFeedUrl(new URL(location, pageUrl));
+		if (!isYouTubePageHost(nextUrl.hostname) || !isYouTubeChannelPageUrl(nextUrl)) {
+			throw new Error('YouTube channel page redirected to an unsupported host');
+		}
+		pageUrl = nextUrl;
+	}
+
+	if (!response.ok) {
+		response.body?.cancel().catch(() => undefined);
+		throw new Error(`Discovery URL returned HTTP ${response.status}`);
+	}
+	if (!response.body) throw new Error('No supported feed was found at this website');
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let html = '';
+	let byteLength = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+
+			const remaining = Math.max(0, YOUTUBE_DISCOVERY_HTML_BYTES - byteLength);
+			if (remaining > 0) {
+				html += decoder.decode(value.subarray(0, remaining), { stream: true });
+				const feedUrl = findPublishedYouTubeFeedCandidate(html, pageUrl);
+				if (feedUrl) return feedUrl;
+			}
+
+			byteLength += value.byteLength;
+			if (byteLength > YOUTUBE_DISCOVERY_HTML_BYTES) {
+				throw new Error('YouTube channel page exceeded the bounded discovery size');
+			}
+		}
+
+		html += decoder.decode();
+		const feedUrl = findPublishedYouTubeFeedCandidate(html, pageUrl);
+		if (feedUrl) return feedUrl;
+		throw new Error('No supported feed was found at this website');
+	} finally {
+		await reader.cancel().catch(() => undefined);
+		reader.releaseLock();
+	}
+}
+
 export function collectCandidateUrls(html: string, pageUrl: URL): CandidateUrl[] {
 	const discovered: CandidateUrl[] = [];
 	const seen = new Set<string>();
@@ -181,18 +277,32 @@ export function collectCandidateUrls(html: string, pageUrl: URL): CandidateUrl[]
 	return discovered;
 }
 
+function findPublishedYouTubeFeedCandidate(html: string, pageUrl: URL): URL | null {
+	for (const candidate of collectCandidateUrls(html, pageUrl)) {
+		const canonicalFeed = canonicalizeYouTubeFeedUrl(candidate.url);
+		if (canonicalFeed) return canonicalFeed;
+	}
+	return null;
+}
+
 function addCandidate(
 	candidates: CandidateUrl[],
 	seen: Set<string>,
 	href: string,
 	pageUrl: URL,
-	metadata: Omit<CandidateUrl, 'url'>,
+	metadata: Omit<CandidateUrl, 'url' | 'aliases'>,
 ): void {
 	try {
-		const url = assertSafeFeedUrl(new URL(decodeHtmlEntities(href), pageUrl));
-		if (seen.has(url.href)) return;
+		const safeUrl = assertSafeFeedUrl(new URL(decodeHtmlEntities(href), pageUrl));
+		const url = canonicalizeYouTubeFeedUrl(safeUrl) ?? safeUrl;
+		const alias = safeUrl.href === url.href ? [] : [safeUrl.href];
+		if (seen.has(url.href)) {
+			const existing = candidates.find((candidate) => candidate.url.href === url.href);
+			if (existing) existing.aliases = [...new Set([...existing.aliases, ...alias])].sort();
+			return;
+		}
 		seen.add(url.href);
-		candidates.push({ url, ...metadata });
+		candidates.push({ url, aliases: alias, ...metadata });
 	} catch {
 		// A broken or unsafe alternate link should not invalidate other candidates.
 	}
@@ -216,14 +326,17 @@ function candidateFromParsedFeed(
 	aliases: string[],
 	discoveredTitle?: string,
 ): FeedDiscoveryCandidate {
+	const canonicalUrl = canonicalizeYouTubeFeedUrl(url) ?? url;
 	return {
-		url: url.href,
+		url: canonicalUrl.href,
 		title: parsed.title === 'Untitled Feed' && discoveredTitle ? discoveredTitle : parsed.title,
 		format: parsed.format,
 		site_url: parsed.link ?? null,
 		source,
 		score,
-		aliases,
+		aliases: [...new Set([...aliases, ...(canonicalUrl.href === url.href ? [] : [url.href])])]
+			.filter((alias) => alias !== canonicalUrl.href)
+			.sort(),
 	};
 }
 
@@ -251,6 +364,10 @@ function normalizeDiscoveryInput(input: string): URL {
 	if (!trimmed) throw new Error('Feed URL is required');
 	const withScheme = /^[a-z][a-z\d+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
 	return assertSafeFeedUrl(withScheme);
+}
+
+function maxDiscoveryHtmlBytes(inputUrl: URL): number {
+	return isYouTubeChannelPageUrl(inputUrl) ? YOUTUBE_DISCOVERY_HTML_BYTES : MAX_DISCOVERY_HTML_BYTES;
 }
 
 function isFeedMimeType(type: string): boolean {
