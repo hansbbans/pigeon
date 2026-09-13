@@ -113,7 +113,12 @@ enum PreviewData {
 
 	static func makeModel() -> ReaderAppModel {
 		let showsToday = ProcessInfo.processInfo.arguments.contains("-reader-today-data")
-		let articles = showsToday ? todayArticles : Self.articles
+		let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
+		var articles = showsToday ? todayArticles : Self.articles
+		if showsFolderRead {
+			articles[2].isRead = false
+		}
+		let secondFolder = showsFolderRead ? "Design" : "Technology"
 		guard let baseURL = URL(string: "https://pigeon.preview") else {
 			preconditionFailure("The preview URL must be valid")
 		}
@@ -139,12 +144,13 @@ enum PreviewData {
 				htmlUrl: URL(string: "https://www.densediscovery.com"), iconUrl: nil,
 			),
 			FeedSubscription(
-				id: "feed/2", title: "Marginal Revolution", categories: [FeedCategory(id: "user/-/label/Technology", label: "Technology")],
+				id: "feed/2", title: "Marginal Revolution", categories: [FeedCategory(id: "user/-/label/\(secondFolder)", label: secondFolder)],
 				url: baseURL.appending(path: "feed/marginal-revolution"), sourceUrl: URL(string: "https://marginalrevolution.com/feed"),
 				htmlUrl: URL(string: "https://marginalrevolution.com"), iconUrl: nil,
 			),
 			FeedSubscription(
-				id: "feed/3", title: "Stratechery", categories: [],
+				id: "feed/3", title: "Stratechery",
+				categories: showsFolderRead ? [FeedCategory(id: "user/-/label/Technology", label: "Technology")] : [],
 				url: baseURL.appending(path: "feed/stratechery"), sourceUrl: URL(string: "https://stratechery.com/feed"),
 				htmlUrl: URL(string: "https://stratechery.com"), iconUrl: nil,
 			),
@@ -161,26 +167,39 @@ enum PreviewData {
 					ReaderSubscription(
 						id: "feed/2",
 						title: "Marginal Revolution",
-						categories: [ReaderSubscriptionCategory(id: "user/-/label/Technology", label: "Technology")],
+						categories: [ReaderSubscriptionCategory(id: "user/-/label/\(secondFolder)", label: secondFolder)],
 						url: "https://pigeon.preview/feed/marginal-revolution",
 					),
 					ReaderSubscription(
 						id: "feed/3",
 						title: "Stratechery",
+						categories: showsFolderRead ? [ReaderSubscriptionCategory(id: "user/-/label/Technology", label: "Technology")] : [],
 						url: "https://pigeon.preview/feed/stratechery",
 					),
 				],
 				unreadCounts: [
 					ReaderUnreadCount(id: "feed/1", count: 1),
 					ReaderUnreadCount(id: "feed/2", count: 1),
-					ReaderUnreadCount(id: "user/-/label/Design", count: 1),
+					ReaderUnreadCount(id: "feed/3", count: showsFolderRead ? 1 : 0),
+					ReaderUnreadCount(id: "user/-/label/Design", count: showsFolderRead ? 2 : 1),
 					ReaderUnreadCount(id: "user/-/label/Technology", count: 1),
-					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: 2),
+					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: showsFolderRead ? 3 : 2),
 				],
-				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 1, unread: 2, starred: 1),
+				smartCounts: ReaderNavigationSmartCounts(forYou: showsFolderRead ? 3 : 2, today: 1, unread: showsFolderRead ? 3 : 2, starred: 1),
 			),
 				markAsLoaded: true,
 			)
+			if showsFolderRead {
+				model.sidebarFilter = .all
+				for folder in model.navigation.folderItems {
+					if model.isFolderExpanded(folder) == false { model.toggleFolder(folder) }
+					if folder.title == "Design" {
+						// The selected page omits the second feed, which is present
+						// in the saved library. Mark All must still reach both feeds.
+						model.setArticles([articles[0]], for: folder)
+					}
+				}
+			}
 			model.select(section: showsToday ? .today : .forYou)
 			return model
 	}

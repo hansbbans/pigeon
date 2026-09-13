@@ -5110,6 +5110,636 @@ struct ReaderAppModelTests {
 		#expect(Set(editTagReaderIDs(from: await mock.requests())) == Set([unreadOne.readerId, unreadTwo.readerId]))
 	}
 
+	@Test func folderMarkAllUsesUnreadStoriesFromEveryCachedFeedAndPersistsNavigation() async throws {
+		let mock = MockHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: mock, offlineStore: store)
+		let workFolderID = "user/-/label/Work"
+		let technologyFolderID = "user/-/label/Technology"
+		let subscriptions = [
+			makeSubscription(id: "feed/1", key: "dense", title: "Dense Discovery", folder: "Work"),
+			makeSubscription(id: "feed/2", key: "marginal", title: "Marginal Revolution", folder: "Work"),
+			makeSubscription(id: "feed/3", key: "strategy", title: "Stratechery", folder: "Technology"),
+		]
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+				url: subscription.url.absoluteString,
+			)
+		}
+		let navigation = ReaderNavigationCatalog.make(
+			subscriptions: readerSubscriptions,
+			unreadCounts: [
+				ReaderUnreadCount(id: "feed/1", count: 1),
+				ReaderUnreadCount(id: "feed/2", count: 1),
+				ReaderUnreadCount(id: "feed/3", count: 1),
+				ReaderUnreadCount(id: workFolderID, count: 2),
+				ReaderUnreadCount(id: technologyFolderID, count: 1),
+				ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: 3),
+			],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 3, today: 3, unread: 3, starred: 0),
+		)
+		model.setSubscriptions(subscriptions)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let workFolder = try #require(model.navigation.item(withID: workFolderID))
+		let technologyFolder = try #require(model.navigation.item(withID: technologyFolderID))
+		let dense = makeArticle(id: "dense-story", feedKey: "dense")
+		let marginal = makeArticle(id: "marginal-story", feedKey: "marginal")
+		let strategy = makeArticle(id: "strategy-story", feedKey: "strategy")
+		// The selected folder page is partial: only Dense is cached there. Marginal
+		// is available through the canonical For You cache instead.
+		model.setArticles([dense], for: workFolder)
+		model.setArticles([dense, marginal], for: .forYou)
+		model.setArticles([strategy], for: technologyFolder)
+		model.articleFilter = .all
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveArticles([dense], collectionID: workFolderID, accountID: accountID)
+		try await store.saveArticles([dense, marginal], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store.saveArticles([strategy], collectionID: technologyFolderID, accountID: accountID)
+
+		model.select(item: workFolder)
+		await model.markAllStoriesAsRead(in: workFolder)
+
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(Set(pending.flatMap { $0.mutation.itemIds }) == Set([dense.readerId, marginal.readerId]))
+		#expect(model.navigation.item(withID: workFolderID)?.unreadCount == 0)
+		#expect(model.feedNavigationItems(in: workFolder).allSatisfy { $0.unreadCount == 0 })
+		#expect(model.navigation.item(withID: technologyFolderID)?.unreadCount == 1)
+		#expect(model.feedNavigationItems(in: technologyFolder).first?.unreadCount == 1)
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: workFolderID)?.unreadCount == 0)
+		#expect(snapshot.navigation?.item(withID: technologyFolderID)?.unreadCount == 1)
+	}
+
+	@Test func canMarkAllFolderWhenUnreadStoryIsOutsideVisiblePage() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 2,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [
+			ReaderNavigationItem(
+				id: folder.id,
+				title: folder.title,
+				streamID: folder.streamID,
+				kind: .folder,
+				unreadCount: 2,
+				parentID: nil,
+				feedKey: nil,
+				iconURL: nil,
+				smartSection: nil,
+			),
+			child,
+		])
+		let model = try makeModel(httpClient: MockHTTPClient())
+		model.setNavigation(navigation, markAsLoaded: true)
+		model.setArticles([makeArticle(id: "already-read", isRead: true, feedKey: "feed/1")], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+
+		#expect(model.canMarkAllStoriesAsRead(in: folder))
+	}
+
+	@Test func folderMarkAllUsesCountsRefreshedDuringCacheLookup() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)", title: "News", streamID: "feed/1",
+			kind: .feed, unreadCount: 3, parentID: folder.id, feedKey: "feed/1",
+			iconURL: nil, smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = PausingOfflineLibraryStore()
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let first = makeArticle(id: "first-cached", feedKey: "feed/1")
+		let second = makeArticle(id: "second-cached", feedKey: "feed/1")
+		model.setArticles([first, second], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+		await httpClient.failNextItemIDRequest()
+		await store.pauseNextSnapshot()
+
+		let markTask = Task { await model.markAllStoriesAsRead(in: folder) }
+		await store.waitUntilSnapshotIsPaused()
+		// A navigation refresh completes while the saved library is being read.
+		// The two cached rows now cover the full unread scope, even offline.
+		model.setNavigation(navigation.replacingCounts([folder.id: 2, child.id: 2]), markAsLoaded: true)
+		await store.resumeSnapshot()
+		await markTask.value
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(Set(pending.flatMap { $0.mutation.itemIds }) == Set([first.readerId, second.readerId]))
+		#expect(await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }.isEmpty)
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+		#expect(model.canMarkAllStoriesAsRead(in: folder) == false)
+		#expect(model.canMarkAllStoriesAsRead(in: child) == false)
+	}
+
+	@Test func folderMarkAllIgnoresUnrelatedCanonicalContinuationWhenCacheCoversCounts() async throws {
+		let workFolderID = "user/-/label/Work"
+		let subscriptions = [
+			makeSubscription(id: "feed/1", key: "dense", title: "Dense Discovery", folder: "Work"),
+			makeSubscription(id: "feed/2", key: "marginal", title: "Marginal Revolution", folder: "Work"),
+		]
+		let readerSubscriptions = subscriptions.map { subscription in
+			ReaderSubscription(
+				id: subscription.id,
+				title: subscription.title,
+				categories: subscription.categories.map { ReaderSubscriptionCategory(id: $0.id, label: $0.label) },
+				url: subscription.url.absoluteString,
+			)
+		}
+		let navigation = ReaderNavigationCatalog.make(
+			subscriptions: readerSubscriptions,
+			unreadCounts: [
+				ReaderUnreadCount(id: "feed/1", count: 1),
+				ReaderUnreadCount(id: "feed/2", count: 1),
+				ReaderUnreadCount(id: workFolderID, count: 2),
+			],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 2, unread: 2, starred: 0),
+		)
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(streamID: workFolderID, originStreamID: "feed/1")
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setSubscriptions(subscriptions)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let folder = try #require(model.navigation.item(withID: workFolderID))
+		let dense = makeArticle(id: "dense-story", feedKey: "dense")
+		let marginal = makeArticle(id: "marginal-story", feedKey: "marginal")
+		model.setArticles([dense, marginal], for: folder)
+		model.setArticles([dense, marginal], for: .forYou)
+		model.articleFilter = .all
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveArticles([dense, marginal], collectionID: folder.id, accountID: accountID)
+		try await store.saveArticles([dense, marginal], collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+		try await store.saveCollectionContinuation("for-you-next", collectionID: ReaderSection.forYou.rawValue, accountID: accountID)
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		let itemIDRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(itemIDRequests.isEmpty)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(Set(pending.flatMap { $0.mutation.itemIds }) == Set([dense.readerId, marginal.readerId]))
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllReconcilesStaleCacheAndPersistsEmptyAuthoritativeStream() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 2,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(
+			streamID: folder.streamID,
+			originStreamID: "feed/1",
+			emptyStream: true,
+		)
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let stale = makeArticle(id: "stale", feedKey: "feed/1")
+		model.select(item: folder)
+		model.articleFilter = .all
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveArticles([stale], collectionID: folder.id, accountID: accountID)
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
+		#expect(model.allArticles(for: folder).first?.isRead == true)
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[folder.id]?.first?.isRead == true)
+		#expect(snapshot.navigation?.item(withID: folder.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllPersistsEmptyAuthoritativeNavigationWithoutCachedRows() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: folder.unreadCount,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, emptyStream: true)
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		model.select(item: folder)
+		model.articleFilter = .all
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(navigation, accountID: accountID)
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: folder.id)?.unreadCount == 0)
+		#expect(snapshot.navigation?.item(withID: child.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllOverridesOlderQueuedUnreadIntent() async throws {
+		let folder = ReaderNavigationItem(
+			id: "user/-/label/News",
+			title: "News",
+			streamID: "user/-/label/News",
+			kind: .folder,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: nil,
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let article = makeArticle(id: "old-intent", feedKey: "feed/1")
+		model.setArticles([article], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+
+		await model.setRead(article, read: false)
+		try await Task.sleep(for: .milliseconds(10))
+		await model.markAllStoriesAsRead(in: folder)
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		let batches = pending.filter { $0.mutation.kind == .setReadBatch }
+		#expect(batches.count == 1)
+		#expect(batches.first?.mutation.itemIds == [article.readerId])
+		#expect(model.allArticles(for: folder).first?.isRead == true)
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllPreservesUnreadToggleOnCachedStoryOmittedByServer() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 2,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, emptyStream: true)
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let visibleUnread = makeArticle(id: "visible-unread", feedKey: "feed/1")
+		let cachedRead = makeArticle(id: "cached-read", isRead: true, feedKey: "feed/1")
+		model.setArticles([visibleUnread, cachedRead], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+		await httpClient.pauseNextItemIDRequest()
+		let markTask = Task { await model.markAllStoriesAsRead(in: folder) }
+		for _ in 0..<1_000 {
+			if await httpClient.isItemIDRequestPaused() { break }
+			await Task.yield()
+		}
+		await model.setRead(cachedRead, read: false)
+		let accountID = try #require(model.session?.storageIdentity)
+		let pendingRead = try await store.pendingMutations(accountID: accountID, limit: 100)
+		for action in pendingRead where action.mutation.kind == .setRead {
+			try await store.markMutationApplied(id: action.mutation.id, accountID: accountID)
+		}
+		await httpClient.resumeItemIDRequest()
+		await markTask.value
+
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(pending.filter { $0.mutation.kind == .setReadBatch }.isEmpty)
+		#expect(pending.isEmpty)
+		#expect(model.allArticles(for: folder).contains { $0.id == visibleUnread.id && $0.isRead })
+		#expect(model.allArticles(for: folder).contains { $0.id == cachedRead.id && $0.isRead == false })
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 1)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 1)
+	}
+
+	@Test func folderMarkAllQueuesCachedReadStoryWhenServerReportsItUnread() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: folder.unreadCount,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let cachedReadStory = makeArticle(
+			id: "newest",
+			isRead: true,
+			receivedAt: 1_786_272_003,
+			feedKey: "feed/1",
+		)
+		model.setArticles([cachedReadStory], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		let batchMutations = pending.filter { $0.mutation.kind == .setReadBatch }
+		#expect(batchMutations.count == 1)
+		#expect(batchMutations.first?.mutation.itemIds.contains(cachedReadStory.readerId) == true)
+		#expect(model.allArticles(for: folder).contains { $0.id == cachedReadStory.id && $0.isRead })
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllIncludesUnreadStoryDiscoveredDuringPagination() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 3,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		model.setArticles([firstPageStory], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+
+		await httpClient.pauseNextItemIDRequest()
+		let markTask = Task { await model.markAllStoriesAsRead(in: folder) }
+		await httpClient.waitUntilItemIDRequestIsPaused()
+		// This row arrives in the local cache while the first page is in flight.
+		// The authoritative server page still reports the same unread ID below.
+		let discoveredDuringPagination = makeArticle(
+			id: "older",
+			receivedAt: 1_786_272_001,
+			feedKey: "feed/1",
+		)
+		model.setArticles([firstPageStory, discoveredDuringPagination], for: folder)
+		await httpClient.resumeItemIDRequest()
+		await markTask.value
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		let batches = pending.filter { $0.mutation.kind == .setReadBatch }
+		#expect(batches.count == 1)
+		#expect(Set(batches.flatMap { $0.mutation.itemIds }) == Set([firstPageStory.readerId, "middle", "older"]))
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+	}
+
+	@Test func folderMarkAllPersistsSnapshotOnlyTargetAfterMutationIsAcknowledged() async throws {
+		let folder = ReaderNavigationItem(
+			id: "user/-/label/News",
+			title: "News",
+			streamID: "user/-/label/News",
+			kind: .folder,
+			unreadCount: 2,
+			parentID: nil,
+			feedKey: nil,
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 2,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(
+			httpClient: PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1"),
+			offlineStore: store,
+		)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let visible = makeArticle(id: "visible", feedKey: "feed/1")
+		let hidden = makeArticle(id: "hidden", feedKey: "feed/1")
+		let unrelated = makeArticle(id: "unrelated", feedKey: "other-feed")
+		model.setArticles([visible], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveArticles([visible], collectionID: folder.id, accountID: accountID)
+		try await store.saveArticles([hidden], collectionID: child.id, accountID: accountID)
+		try await store.saveArticles(
+			[hidden, unrelated],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: accountID,
+		)
+		try await store.saveCollectionContinuation(
+			"for-you-next",
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: accountID,
+		)
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		let pendingBeforeAcknowledgement = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(Set(pendingBeforeAcknowledgement.filter { $0.mutation.kind == .setReadBatch }.flatMap { $0.mutation.itemIds }) == Set([visible.readerId, hidden.readerId]))
+		#expect(model.allArticles(for: child).contains { $0.id == hidden.id && $0.isRead })
+		for action in pendingBeforeAcknowledgement {
+			try await store.markMutationApplied(id: action.mutation.id, accountID: accountID)
+		}
+
+		let reloaded = try await store.loadSnapshot(accountID: accountID)
+		#expect(reloaded.articlesByCollection[child.id]?.contains { $0.id == hidden.id && $0.isRead } == true)
+		#expect(reloaded.articlesByCollection[ReaderSection.forYou.rawValue]?.contains { $0.id == unrelated.id && $0.isRead == false } == true)
+		#expect(reloaded.continuationsByCollection[ReaderSection.forYou.rawValue] == "for-you-next")
+	}
+
+	@Test func folderMarkAllPreservesReadIntentCreatedDuringPagination() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 3,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		model.setArticles([firstPageStory], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+		await httpClient.pauseNextItemIDRequest()
+		let markTask = Task { await model.markAllStoriesAsRead(in: folder) }
+		await httpClient.waitUntilItemIDRequestIsPaused()
+		await model.setRead(firstPageStory, read: true)
+		var firstPageStoryRead = firstPageStory
+		firstPageStoryRead.isRead = true
+		let newArrival = makeArticle(
+			id: "arrived-during-mark-all",
+			receivedAt: Date.now.timeIntervalSince1970 + 60,
+			feedKey: "feed/1",
+		)
+		model.setArticles([firstPageStoryRead, newArrival], for: folder)
+		await httpClient.resumeItemIDRequest()
+		await markTask.value
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		let batchMutations = pending.filter { $0.mutation.kind == .setReadBatch }
+		#expect(batchMutations.count == 1)
+		#expect(Set(batchMutations.flatMap { $0.mutation.itemIds }) == Set(["middle", "older"]))
+		#expect(batchMutations.flatMap { $0.mutation.itemIds }.contains(firstPageStory.readerId) == false)
+		let singleReadMutations = pending.filter { $0.mutation.kind == .setRead }
+		#expect(singleReadMutations.count == 1)
+		#expect(singleReadMutations.first?.mutation.itemIds == [firstPageStory.readerId])
+		#expect(model.allArticles(for: folder).contains { $0.id == newArrival.id && $0.isRead == false })
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 1)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 1)
+	}
+
+	@Test func folderMarkAllWalksEveryUnreadPageBeforeQueueingWhenCacheIsPartial() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 3,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		model.setArticles([firstPageStory], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		let accountID = try #require(model.session?.storageIdentity)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		#expect(Set(pending.flatMap { $0.mutation.itemIds }) == Set([
+			firstPageStory.readerId,
+			"middle",
+			"older",
+		]))
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 0)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 0)
+		let itemIDRequests = await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }
+		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2"])
+	}
+
+	@Test func folderMarkAllLeavesCountsAndQueueUntouchedWhenPaginationFails() async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)",
+			title: "News",
+			streamID: "feed/1",
+			kind: .feed,
+			unreadCount: 3,
+			parentID: folder.id,
+			feedKey: "feed/1",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let navigation = ReaderNavigationState(items: [folder, child])
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		model.setNavigation(navigation, markAsLoaded: true)
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		model.setArticles([firstPageStory], for: folder)
+		model.select(item: folder)
+		model.articleFilter = .all
+		await httpClient.failNextItemIDRequest()
+
+		await model.markAllStoriesAsRead(in: folder)
+
+		let accountID = try #require(model.session?.storageIdentity)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
+		#expect(model.navigation.item(withID: folder.id)?.unreadCount == 3)
+		#expect(model.navigation.item(withID: child.id)?.unreadCount == 3)
+		#expect(model.allArticles(for: folder).first?.isRead == false)
+		#expect(model.errorMessage != nil)
+	}
+
 	@Test func markOlderThanWithUnreadFilterMarksOnlyVisibleOlderUnreadRows() async throws {
 		let mock = MockHTTPClient()
 		let model = try makeModel(httpClient: mock)
@@ -8182,12 +8812,26 @@ private actor PaginationHTTPClient: HTTPClient {
 
 	private let repeatsContinuation: Bool
 	private let streamID: String
+	private let originStreamID: String?
+	private let emptyStream: Bool
 	private var capturedRequests: [RequestSnapshot] = []
 	private var shouldFailNextItemIDRequest = false
+	private var shouldPauseNextItemIDRequest = false
+	private var itemIDRequestIsPaused = false
+	private var itemIDResumeRequested = false
+	private var itemIDPauseWaiters: [CheckedContinuation<Void, Never>] = []
+	private var itemIDResumeContinuation: CheckedContinuation<Void, Never>?
 
-	init(repeatsContinuation: Bool = false, streamID: String = "user/-/label/News") {
+	init(
+		repeatsContinuation: Bool = false,
+		streamID: String = "user/-/label/News",
+		originStreamID: String? = nil,
+		emptyStream: Bool = false,
+	) {
 		self.repeatsContinuation = repeatsContinuation
 		self.streamID = streamID
+		self.originStreamID = originStreamID
+		self.emptyStream = emptyStream
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -8203,6 +8847,23 @@ private actor PaginationHTTPClient: HTTPClient {
 			shouldFailNextItemIDRequest = false
 			throw URLError(.notConnectedToInternet)
 		}
+		if url.path == "/reader/api/0/stream/items/ids", shouldPauseNextItemIDRequest {
+			shouldPauseNextItemIDRequest = false
+			itemIDRequestIsPaused = true
+			let waiters = itemIDPauseWaiters
+			itemIDPauseWaiters.removeAll()
+			for waiter in waiters {
+				waiter.resume()
+			}
+			if itemIDResumeRequested {
+				itemIDResumeRequested = false
+			} else {
+				await withCheckedContinuation { continuation in
+					itemIDResumeContinuation = continuation
+				}
+			}
+			itemIDRequestIsPaused = false
+		}
 
 		let data: Data
 		switch url.path {
@@ -8210,6 +8871,10 @@ private actor PaginationHTTPClient: HTTPClient {
 			guard query["s"] == streamID else {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 				return (data, try Self.response(for: url, statusCode: 200))
+			}
+			if emptyStream {
+				data = Data(#"{"itemRefs":[]}"#.utf8)
+				break
 			}
 			switch query["c"] {
 			case nil:
@@ -8223,7 +8888,7 @@ private actor PaginationHTTPClient: HTTPClient {
 		case "/reader/api/0/stream/items/contents":
 			data = Self.contentsResponse(
 				for: Self.formValues(from: request.httpBody, named: "i"),
-				streamID: streamID,
+				streamID: originStreamID ?? streamID,
 			)
 		default:
 			data = Data(#"{"error":"not found"}"#.utf8)
@@ -8239,6 +8904,30 @@ private actor PaginationHTTPClient: HTTPClient {
 
 	func failNextItemIDRequest() {
 		shouldFailNextItemIDRequest = true
+	}
+
+	func pauseNextItemIDRequest() {
+		shouldPauseNextItemIDRequest = true
+	}
+
+	func waitUntilItemIDRequestIsPaused() async {
+		if itemIDRequestIsPaused { return }
+		await withCheckedContinuation { continuation in
+			itemIDPauseWaiters.append(continuation)
+		}
+	}
+
+	func isItemIDRequestPaused() -> Bool {
+		itemIDRequestIsPaused
+	}
+
+	func resumeItemIDRequest() {
+		if let continuation = itemIDResumeContinuation {
+			continuation.resume()
+			itemIDResumeContinuation = nil
+		} else {
+			itemIDResumeRequested = true
+		}
 	}
 
 	private static func contentsResponse(for ids: [String], streamID: String) -> Data {
