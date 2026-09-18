@@ -127,6 +127,7 @@ jobs:
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination "${{ steps.simulator.outputs.destination }}" \
+            -parallel-testing-enabled NO \
             -derivedDataPath "$DERIVED_DATA_PATH" \
             CODE_SIGNING_ALLOWED=NO
 
@@ -456,6 +457,11 @@ jobs:
 
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null
           rm -rf "$RELEASE_ROOT"
+
+      - name: Shut down this job's simulator
+        if: always()
+        shell: bash
+        run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
 
   verify:
     name: Verify App Store Connect build
