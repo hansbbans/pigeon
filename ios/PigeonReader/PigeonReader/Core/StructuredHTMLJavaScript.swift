@@ -146,7 +146,11 @@ enum StructuredHTMLJavaScript {
 		};
 		add(image.dataset.pigeonOriginalSrc);
 		add(image.getAttribute("src"));
+		add(image.getAttribute("data-src"));
 		for (const candidate of String(image.getAttribute("srcset") || "").split(",")) {
+			add(candidate.trim().split(/\\s+/)[0]);
+		}
+		for (const candidate of String(image.dataset.pigeonOriginalSrcset || "").split(",")) {
 			add(candidate.trim().split(/\\s+/)[0]);
 		}
 		add(image.currentSrc);
@@ -173,8 +177,120 @@ enum StructuredHTMLJavaScript {
 		}
 	}
 
+	function __pigeonAnchorHash(value) {
+		// FNV-1a is small, deterministic, and available in every WebKit version
+		// supported by the app. The text itself is never sent to Swift.
+		let hash = 2166136261;
+		for (let index = 0; index < value.length; index += 1) {
+			hash ^= value.charCodeAt(index);
+			hash = Math.imul(hash, 16777619);
+		}
+		return (hash >>> 0).toString(16).padStart(8, "0");
+	}
+
+	function __pigeonPrepareAnchors(root) {
+		const candidates = Array.from(root.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figcaption, td, th"));
+		const occurrences = new Map();
+		for (const element of candidates) {
+			const text = String(element.textContent || "").replace(/\\s+/g, " ").trim();
+			if (!text) {
+				element.removeAttribute("data-pigeon-anchor");
+				continue;
+			}
+			const tag = element.tagName.toLowerCase();
+			const base = "pigeon-" + tag + "-" + __pigeonAnchorHash(tag + "|" + text);
+			const occurrence = occurrences.get(base) || 0;
+			occurrences.set(base, occurrence + 1);
+			element.setAttribute("data-pigeon-anchor", base + "-" + occurrence);
+		}
+	}
+
+	function __pigeonOriginalImageSource(image) {
+		return image.dataset.pigeonOriginalSrc || image.getAttribute("src") || image.currentSrc || null;
+	}
+
+	function __pigeonOriginalImageSrcset(image) {
+		return image.dataset.pigeonOriginalSrcset || image.getAttribute("srcset") || null;
+	}
+
+	function __pigeonRememberImageSource(image) {
+		const source = __pigeonOriginalImageSource(image);
+		if (source && !source.startsWith("pigeon-image:")) image.dataset.pigeonOriginalSrc = source;
+		const srcset = __pigeonOriginalImageSrcset(image);
+		if (srcset) image.dataset.pigeonOriginalSrcset = srcset;
+	}
+
+	function __pigeonRestoreImageSource(image) {
+		const source = image.dataset.pigeonOriginalSrc;
+		const srcset = image.dataset.pigeonOriginalSrcset;
+		if (source) image.setAttribute("src", source);
+		if (srcset) image.setAttribute("srcset", srcset);
+		image.removeAttribute("data-pigeon-image-allowed");
+	}
+
+	function __pigeonBlockedPlaceholder(image) {
+		const placeholder = document.createElement("button");
+		placeholder.type = "button";
+		placeholder.className = "pigeon-image-blocked";
+		placeholder.textContent = "Load this remote image";
+		placeholder.setAttribute("aria-label", "Load this remote image. The publisher may see your network address.");
+		placeholder.__pigeonImage = image;
+		placeholder.addEventListener("click", function(event) {
+			event.preventDefault();
+			event.stopPropagation();
+			const allowedImage = placeholder.__pigeonImage;
+			if (!allowedImage) return;
+			allowedImage.setAttribute("data-pigeon-image-allowed", "true");
+			__pigeonRestoreImageSource(allowedImage);
+			placeholder.replaceWith(allowedImage);
+			__pigeonPrepareAnchors(content);
+			__pigeonMeasure();
+		});
+		return placeholder;
+	}
+
+	function __pigeonApplyRemoteImagePolicy(policy) {
+		for (const placeholder of Array.from(content.querySelectorAll(".pigeon-image-blocked"))) {
+			if (policy === "blocked") continue;
+			const image = placeholder.__pigeonImage;
+			if (!image) continue;
+			__pigeonRestoreImageSource(image);
+			placeholder.replaceWith(image);
+		}
+
+		for (const image of Array.from(content.querySelectorAll("img"))) {
+			__pigeonRememberImageSource(image);
+			if (policy === "blocked" && image.dataset.pigeonImageAllowed !== "true") {
+				image.replaceWith(__pigeonBlockedPlaceholder(image));
+				continue;
+			}
+			if (policy === "privacy-proxied") {
+				const source = image.dataset.pigeonOriginalSrc;
+				if (source) {
+					image.removeAttribute("srcset");
+					const proxiedURL = "pigeon-image://proxy?url=" + encodeURIComponent(source);
+					if (image.getAttribute("src") !== proxiedURL) image.setAttribute("src", proxiedURL);
+				}
+				continue;
+			}
+			if (policy === "normal") {
+				__pigeonRestoreImageSource(image);
+			}
+		}
+	}
+
 	function __pigeonMeasure() {
-		window.webkit.messageHandlers.pigeonEvent.postMessage({ kind: "height", value: Math.ceil(document.body.scrollHeight) });
+		const contentRect = content.getBoundingClientRect();
+		const anchors = Array.from(content.querySelectorAll("[data-pigeon-anchor]")).map((element) => ({
+			id: element.getAttribute("data-pigeon-anchor"),
+			top: Math.max(0, element.getBoundingClientRect().top - contentRect.top),
+			height: Math.max(0, element.getBoundingClientRect().height),
+		}));
+		window.webkit.messageHandlers.pigeonEvent.postMessage({
+			kind: "layout",
+			value: Math.ceil(document.body.scrollHeight),
+			anchors,
+		});
 	}
 	"""
 
@@ -272,33 +388,17 @@ enum StructuredHTMLJavaScript {
 				document.documentElement.style.setProperty("--pigeon-text-scale", String(payload.textScale || 1));
 				document.documentElement.style.setProperty("--pigeon-line-height", String(payload.lineHeight || 1.55));
 				document.body.dataset.theme = payload.theme || "system";
-				const template = document.createElement("template");
-				template.innerHTML = payload.html || "";
-				__pigeonSanitizeRoot(template.content, payload.baseURL || document.baseURI);
-				content.replaceChildren(...Array.from(template.content.childNodes));
-				for (const image of Array.from(content.querySelectorAll("img"))) {
-					const source = image.currentSrc || image.getAttribute("src");
-					if (!source) continue;
-					if (payload.remoteImagePolicy === "blocked") {
-						const placeholder = document.createElement("button");
-						placeholder.type = "button";
-						placeholder.className = "pigeon-image-blocked";
-						placeholder.textContent = "Load this remote image";
-						placeholder.setAttribute("aria-label", "Load this remote image. The publisher may see your network address.");
-						placeholder.addEventListener("click", function(event) {
-							event.preventDefault();
-							event.stopPropagation();
-							placeholder.replaceWith(image);
-							__pigeonMeasure();
-						});
-						image.replaceWith(placeholder);
-					} else if (payload.remoteImagePolicy === "privacy-proxied") {
-						image.dataset.pigeonOriginalSrc = source;
-						image.removeAttribute("srcset");
-						image.src = "pigeon-image://proxy?url=" + encodeURIComponent(source);
-					}
+				const contentSignature = String(payload.contentSignature || "");
+				if (content.dataset.pigeonContentSignature !== contentSignature) {
+					const template = document.createElement("template");
+					template.innerHTML = payload.html || "";
+					__pigeonSanitizeRoot(template.content, payload.baseURL || document.baseURI);
+					content.replaceChildren(...Array.from(template.content.childNodes));
+					content.dataset.pigeonContentSignature = contentSignature;
 				}
+				__pigeonApplyRemoteImagePolicy(payload.remoteImagePolicy || "normal");
 				__pigeonPrepareTables(content);
+				__pigeonPrepareAnchors(content);
 				__pigeonMeasure();
 			};
 			document.addEventListener("click", function(event) {

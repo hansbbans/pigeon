@@ -278,19 +278,6 @@ nonisolated struct OfflineStorageStats: Equatable, Sendable {
 	static let empty = OfflineStorageStats(articleCount: 0, bodyBytes: 0, pendingMutationCount: 0, lastSyncAt: nil)
 }
 
-nonisolated enum ReaderSearchScope: String, CaseIterable, Identifiable, Sendable {
-	case collection
-	case library
-
-	var id: Self { self }
-	var title: String {
-		switch self {
-		case .collection: "This View"
-		case .library: "Full Library"
-		}
-	}
-}
-
 	nonisolated protocol OfflineLibraryStoring: Sendable {
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws

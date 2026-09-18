@@ -16,11 +16,12 @@ struct ArticleBodyView: View {
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let findQuery: String
 	let imageProxySession: PigeonSession?
+	let preparedBody: PreparedReaderBody?
 	let openedDestination: (OutboundDestination) -> Void
 	let saveToReader: (OutboundDestination) async throws -> ReadwiseSaveOutcome
+	let onHTMLLayout: (ReaderHTMLLayout) -> Void
+	let onBodyFrameChange: (CGFloat) -> Void
 
-	private let sanitizedContent: String
-	private let bodyImageURLs: [URL]
 	@Environment(\.openURL) private var openURL
 	@State private var linkChoiceState = OutboundLinkChoiceState()
 	@State private var readwiseSaveRequest: ReadwiseSaveRequest?
@@ -31,8 +32,10 @@ struct ArticleBodyView: View {
 	@State private var isShowingLinkedImageDialog = false
 	@State private var deferredLinkDestination: OutboundDestination?
 	@State private var failedImageURLs: Set<String> = []
-	@State private var webViewHeight: CGFloat = 0
+	@State private var webViewHeight: CGFloat = 1
 	@State private var columnWidth: CGFloat = 0
+	@State private var asynchronouslyPreparedBody: PreparedReaderBody?
+	@State private var asynchronouslyPreparedBodyID: ArticleBodyPreparationID?
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
 	init(
@@ -46,8 +49,11 @@ struct ArticleBodyView: View {
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
 		findQuery: String = "",
 		imageProxySession: PigeonSession? = nil,
+		preparedBody: PreparedReaderBody? = nil,
 		openedDestination: @escaping (OutboundDestination) -> Void,
 		saveToReader: @escaping (OutboundDestination) async throws -> ReadwiseSaveOutcome,
+		onHTMLLayout: @escaping (ReaderHTMLLayout) -> Void = { _ in },
+		onBodyFrameChange: @escaping (CGFloat) -> Void = { _ in },
 	) {
 		self.content = content
 		self.fallbackText = fallbackText
@@ -59,10 +65,11 @@ struct ArticleBodyView: View {
 		self.remoteImagePolicy = remoteImagePolicy
 		self.findQuery = findQuery
 		self.imageProxySession = imageProxySession
+		self.preparedBody = preparedBody
 		self.openedDestination = openedDestination
 		self.saveToReader = saveToReader
-		sanitizedContent = StructuredHTMLSanitizer.sanitize(html: content, baseURL: baseURL)
-		bodyImageURLs = StructuredHTMLSanitizer.imageURLs(in: content, baseURL: baseURL)
+		self.onHTMLLayout = onHTMLLayout
+		self.onBodyFrameChange = onBodyFrameChange
 	}
 
 	var body: some View {
@@ -72,7 +79,6 @@ struct ArticleBodyView: View {
 		)
 
 		renderedContent(textScale: renderedTextScale)
-		.preference(key: ArticleBodyLayoutKey.self, value: isBodyLaidOut)
 		.sheet(item: $imageSelection) { selection in
 			ZoomableImageView(
 				url: selection.url,
@@ -127,15 +133,51 @@ struct ArticleBodyView: View {
 		.task(id: readwiseSaveRequest?.id) {
 			await performReadwiseSave()
 		}
-		.alert("Readwise Reader", isPresented: $isShowingSaveMessage) {
+		.alert("Couldn’t Save to Reader", isPresented: $isShowingSaveMessage) {
 			Button("OK") {}
 		} message: {
 			Text(saveMessage ?? "")
 		}
+		.task(id: preparationID) {
+			await prepareContentIfNeeded()
+		}
 	}
 
-	private var isBodyLaidOut: Bool {
-		sanitizedContent.isEmpty || webViewHeight > 0
+	private var effectivePreparedBody: PreparedReaderBody? {
+		if let preparedBody {
+			return preparedBody
+		}
+		guard asynchronouslyPreparedBodyID == preparationID else { return nil }
+		return asynchronouslyPreparedBody
+	}
+
+	private var sanitizedContent: String {
+		effectivePreparedBody?.sanitizedHTML ?? ""
+	}
+
+	private var bodyImageURLs: [URL] {
+		effectivePreparedBody?.imageURLs ?? []
+	}
+
+	private var preparationID: ArticleBodyPreparationID {
+		ArticleBodyPreparationID(content: content, baseURL: baseURL)
+	}
+
+	private func prepareContentIfNeeded() async {
+		guard preparedBody == nil,
+			asynchronouslyPreparedBodyID != preparationID,
+			content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+			return
+		}
+		let requestID = preparationID
+		let source = content
+		let sourceURL = baseURL
+		let body = await Task.detached(priority: .utility) {
+			PreparedReaderBody.make(sanitizedHTML: source, baseURL: sourceURL)
+		}.value
+		guard Task.isCancelled == false, requestID == preparationID else { return }
+		asynchronouslyPreparedBody = body
+		asynchronouslyPreparedBodyID = requestID
 	}
 
 	private func renderedContent(textScale: Double) -> some View {
@@ -159,16 +201,20 @@ struct ArticleBodyView: View {
 							session: imageProxySession,
 						),
 					)
-					.clipShape(.rect(cornerRadius: 10))
+						.clipShape(.rect(cornerRadius: 10))
 				}
 				.buttonStyle(.plain)
 				.accessibilityLabel("View lead image")
 				.accessibilityHint("Opens a zoomable image viewer")
 			}
 
-			if sanitizedContent.isEmpty {
+			if effectivePreparedBody == nil,
+				asynchronouslyPreparedBodyID != preparationID,
+				content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+				ArticleBodyPreparationPlaceholder()
+			} else if sanitizedContent.isEmpty {
 				Text(fallbackText)
-					.font(ReaderTypography.articleBody(textScale: self.textScale))
+				.font(ReaderTypography.articleBody(textScale: self.textScale))
 					.textSelection(.enabled)
 			} else {
 				structuredContent(textScale: textScale)
@@ -180,6 +226,16 @@ struct ArticleBodyView: View {
 			}
 		}
 		.onPreferenceChange(ArticleColumnWidthKey.self) { columnWidth = $0 }
+		.onPreferenceChange(ArticleBodyFrameKey.self, perform: onBodyFrameChange)
+		.preference(key: ArticleBodyLayoutKey.self, value: bodyLayoutReady)
+	}
+
+	private var bodyLayoutReady: Bool {
+		if effectivePreparedBody == nil {
+			return content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+				&& fallbackText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+		}
+		return sanitizedContent.isEmpty || webViewHeight > 1
 	}
 
 	private var blockedRemoteImagesNotice: some View {
@@ -206,20 +262,27 @@ struct ArticleBodyView: View {
 			onLink: handleLink,
 			onImage: handleImage,
 			onImageFailure: handleImageFailure,
+			onLayout: onHTMLLayout,
 		)
+		.background {
+				GeometryReader { geometry in
+					Color.clear.preference(
+						key: ArticleBodyFrameKey.self,
+						value: geometry.frame(in: .named(ReaderScrollCoordinateSpace.name)).minY,
+					)
+				}
+		}
 		.frame(width: columnWidth > 0 ? columnWidth : nil, alignment: .leading)
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.frame(height: max(webViewHeight, 1))
-		.clipped()
+			.clipped()
 	}
 
 	private var fallbackImageURL: URL? {
 		guard ArticleLeadImageRequest.shouldShowFallback(
 			policy: remoteImagePolicy,
 			session: imageProxySession,
-		) else {
-			return nil
-		}
+		) else { return nil }
 		return ArticleImagePolicy.fallbackLeadImageURL(
 			bodyImageURLs: bodyImageURLs,
 			leadImageURL: leadImageURL,
@@ -279,12 +342,9 @@ struct ArticleBodyView: View {
 		}
 
 		do {
-			switch try await saveToReader(request.destination) {
-			case .saved:
-				presentSaveMessage("Saved to Reader.")
-			case .alreadyInFlight:
-				presentSaveMessage("This link is already being saved.")
-			}
+			// The reader presents successful saves near its controls so the
+			// confirmation stays visible even when this body is scrolled.
+			_ = try await saveToReader(request.destination)
 		} catch is CancellationError {
 			// Leaving the article is a normal cancellation.
 		} catch {
@@ -306,10 +366,32 @@ private struct ArticleColumnWidthKey: PreferenceKey {
 	}
 }
 
-nonisolated struct ArticleBodyLayoutKey: PreferenceKey {
+private struct ArticleBodyFrameKey: PreferenceKey {
+	static let defaultValue: CGFloat = 0
+
+	static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+		value = nextValue()
+	}
+}
+
+struct ArticleBodyLayoutKey: PreferenceKey {
 	static let defaultValue = false
 
 	static func reduce(value: inout Bool, nextValue: () -> Bool) {
-		value = value || nextValue()
+		value = nextValue()
 	}
+}
+
+private struct ArticleBodyPreparationPlaceholder: View {
+	var body: some View {
+		Text("Preparing article")
+			.font(.footnote)
+			.foregroundStyle(.tertiary)
+			.frame(maxWidth: .infinity, minHeight: 72)
+	}
+}
+
+private struct ArticleBodyPreparationID: Equatable {
+	let content: String
+	let baseURL: URL?
 }

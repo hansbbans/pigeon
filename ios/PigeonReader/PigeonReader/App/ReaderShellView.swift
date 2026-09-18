@@ -26,7 +26,7 @@ struct ReaderShellView: View {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
 					ReaderSidebarView()
 				} content: {
-					ArticleListView(collection: model.selectedCollection)
+					ReaderCollectionPane()
 				} detail: {
 					if showsCompactArticle {
 						ReaderPlaceholderView(collection: model.selectedCollection)
@@ -77,21 +77,12 @@ struct ReaderShellView: View {
 			AddFeedView(initialURL: request.url.absoluteString)
 			#endif
 		}
-		.safeAreaInset(edge: .top) {
-			VStack(spacing: 0) {
-				if model.isOffline {
-					Label("Offline — showing your saved library", systemImage: "wifi.slash")
-						.font(.footnote.weight(.medium))
-						.foregroundStyle(.secondary)
-						.frame(maxWidth: .infinity)
-						.padding(.vertical, 7)
-						.background(.bar)
-						.accessibilityIdentifier("offline-library-banner")
-				}
-				if let errorMessage = model.errorMessage {
-					ReaderErrorBanner(message: errorMessage, dismiss: model.clearError)
-				}
+		.overlay(alignment: .bottom) {
+			VStack(spacing: 8) {
+				ReaderStatusOverlay()
+				ReaderArticleUndoBanner()
 			}
+			.padding(.bottom, 8)
 		}
 		.task(id: model.session?.storageIdentity) {
 			model.configurePlatformServices()

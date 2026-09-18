@@ -7769,6 +7769,111 @@ struct ReaderAppModelTests {
 		#expect(model.readerMode(for: "feed/7") == .readerView)
 	}
 
+	@Test func failedSearchKeepsThePreviousResultsUntilASuccessfulReplacement() async throws {
+		let store = ScriptedSearchOfflineLibraryStore()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let article = makeArticle(id: "saved")
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveArticles([article], collectionID: collection.id, accountID: accountID)
+		let first = await model.searchArticles(query: "Story", scope: .collection, in: collection)
+		#expect(first == .completed)
+		#expect(model.searchResults.map(\.id) == [article.id])
+		await store.failNextSearch(with: URLError(.cannotOpenFile))
+		let failed = await model.searchArticles(query: "missing", scope: .collection, in: collection)
+		#expect(failed == .failed)
+		#expect(model.searchResults.map(\.id) == [article.id])
+		#expect(model.isSearchingArticles == false)
+		let retried = await model.searchArticles(query: "missing", scope: .collection, in: collection)
+		#expect(retried == .completed)
+		#expect(model.searchResults.isEmpty)
+	}
+
+	@Test func manualReadUndoRestoresAStoryRemovedByTheUnreadFilter() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "undo-read")
+		model.articles = [article]
+		model.articleFilter = .unread
+
+		await model.setRead(article, read: true, offersUndo: true)
+		let undo = try #require(model.articleUndo)
+		#expect(model.articles.isEmpty)
+		#expect(undo.message == "Marked read")
+		await model.undoArticleAction(id: undo.id)
+
+		#expect(model.articles.map(\.id) == [article.id])
+		#expect(model.articles.first?.isRead == false)
+		#expect(model.articleUndo == nil)
+	}
+
+	@Test func starUndoUpdatesEveryCachedCopy() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "undo-star", receivedAt: Date.now.timeIntervalSince1970)
+		model.setArticles([article], for: .forYou)
+		model.setArticles([article], for: .today)
+		await model.setStarred(article, starred: true, offersUndo: true)
+		let undo = try #require(model.articleUndo)
+		#expect(model.allArticles(for: .today).first?.isStarred == true)
+
+		await model.undoArticleAction(id: undo.id)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(model.allArticles(for: .today).first?.isStarred == false)
+	}
+
+	@Test func oldUndoCannotReverseANewerAction() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let first = makeArticle(id: "first-undo")
+		let second = makeArticle(id: "second-undo")
+		model.articles = [first, second]
+		await model.setRead(first, read: true, offersUndo: true)
+		let previousUndo = try #require(model.articleUndo)
+		await model.setStarred(second, starred: true, offersUndo: true)
+		let latestUndo = try #require(model.articleUndo)
+
+		await model.undoArticleAction(id: previousUndo.id)
+		model.dismissArticleUndo(id: previousUndo.id)
+		#expect(model.article(withId: first.id)?.isRead == true)
+		#expect(model.article(withId: second.id)?.isStarred == true)
+		#expect(model.articleUndo?.id == latestUndo.id)
+	}
+
+	@Test func automaticReadDoesNotOfferUndoAndSupersedesStaleManualUndo() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "auto-read")
+		model.articles = [article]
+		await model.setRead(article, read: true)
+		#expect(model.articleUndo == nil)
+		await model.setRead(article, read: false, offersUndo: true)
+		#expect(model.articleUndo != nil)
+		await model.setRead(article, read: true)
+		#expect(model.articleUndo == nil)
+		#expect(model.article(withId: article.id)?.isRead == true)
+	}
+
+	@Test func disconnectClearsIndividualUndoAndCannotChangeTheNextAccount() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let article = makeArticle(id: "account-undo")
+		model.articles = [article]
+		await model.setStarred(article, starred: true, offersUndo: true)
+		let undo = try #require(model.articleUndo)
+		model.disconnect()
+		#expect(model.articleUndo == nil)
+		await model.undoArticleAction(id: undo.id)
+		#expect(model.articles.isEmpty)
+	}
+
+	@Test func readerDocumentIsReusedUntilItsDownloadedArticleChanges() async throws {
+		let extractor = ScriptedReaderViewExtractor(htmlDocument: try ReaderViewDocument(contentHTML: "<p>Prepared body</p>"))
+		let model = try makeModel(httpClient: MockHTTPClient(), readerViewExtractor: extractor)
+		let article = makeArticle(id: "prepared")
+		_ = try await model.loadReaderView(for: article)
+		_ = try await model.loadReaderView(for: article)
+		#expect(extractor.htmlExtractionCount == 1)
+		let changed = makeArticle(id: article.id, html: "<p>Updated article body</p>")
+		_ = try await model.loadReaderView(for: changed)
+		#expect(extractor.htmlExtractionCount == 2)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
@@ -8710,6 +8815,7 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 	var htmlDocument: ReaderViewDocument?
 	var htmlError: Error?
 	private(set) var extractedHTML: String?
+	private(set) var htmlExtractionCount = 0
 
 	init(urlError: Error? = nil, htmlDocument: ReaderViewDocument? = nil, htmlError: Error? = nil) {
 		self.urlError = urlError
@@ -8725,6 +8831,7 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 	}
 
 	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument {
+		htmlExtractionCount += 1
 		extractedHTML = html
 		if let htmlError {
 			throw htmlError

@@ -19,9 +19,33 @@ struct PreviewHTTPClient: HTTPClient {
 			throw PigeonError.invalidServerURL
 		}
 		let url = request.url ?? fallbackURL
+		if ProcessInfo.processInfo.arguments.contains("-reader-motion-stress-fixture"),
+			let fixture = try PreviewMotionStreamFixture.data(for: request),
+			let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) {
+			return (fixture, response)
+		}
+		if ProcessInfo.processInfo.arguments.contains("-reader-paging-fixture"),
+			url.path == "/reader/api/0/stream/items/contents" {
+			let form = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+			let ids = URLComponents(string: "https://pigeon.preview/?\(form)")?.queryItems?.filter { $0.name == "i" }.compactMap(\.value) ?? []
+			let items: [[String: Any]] = ids.map { id in
+				let number = Int(id.replacingOccurrences(of: "paging-", with: "")) ?? 0
+				return ["id": id, "title": "Paging story \(number)", "published": 1_786_272_000 - number,
+					"summary": ["content": "<p>Deterministic paging and return-position fixture \(number).</p>"],
+					"origin": ["streamId": "feed/1", "title": "Dense Discovery"], "categories": []]
+			}
+			guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+				throw PigeonError.invalidResponse
+			}
+			return (try JSONSerialization.data(withJSONObject: ["id": "feed/1", "items": items]), response)
+		}
 		let data: Data
 		var statusCode = 200
 		switch url.path {
+		case "/api/v3/save/":
+			// Preview mode never contacts Readwise; this drives the save feedback UI.
+			data = Data("{}".utf8)
+			statusCode = 201
 		case "/api/v1/recommendations":
 			let response = PreviewRecommendationsResponse(
 				generatedAt: Date(timeIntervalSince1970: 1_786_276_800),
@@ -36,11 +60,53 @@ struct PreviewHTTPClient: HTTPClient {
 		case "/app/status/retry":
 			data = Data("{\"feed_key\":\"design-weekly\",\"queued_at\":\"2026-08-15T14:30:00.000Z\"}".utf8)
 		case "/reader/api/0/subscription/list":
-			data = Data("{\"subscriptions\":[]}".utf8)
+			if ProcessInfo.processInfo.arguments.contains("-reader-paging-fixture") {
+				// Refreshing navigation must preserve the selected paging feed.
+				data = try JSONSerialization.data(withJSONObject: ["subscriptions": [[
+					"id": "feed/1", "title": "Dense Discovery",
+					"categories": [["id": "user/-/label/Design", "label": "Design"]],
+					"url": "https://pigeon.preview/feed/dense-discovery",
+				]]])
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
+				data = try JSONSerialization.data(withJSONObject: [
+					"subscriptions": Self.navigationFixtureSubscriptions,
+				])
+			} else {
+				data = Data("{\"subscriptions\":[]}".utf8)
+			}
 		case "/reader/api/0/unread-count":
-			data = Data("{\"unreadcounts\":[]}".utf8)
+			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
+				data = try JSONSerialization.data(withJSONObject: [
+					"unreadcounts": Self.navigationFixtureUnreadCounts,
+				])
+			} else {
+				data = Data("{\"unreadcounts\":[]}".utf8)
+			}
 		case "/reader/api/0/stream/items/ids":
-			if ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data") {
+			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
+				let stream = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "s" }?.value
+				if stream == "feed/navigation-1-2" {
+					let navigationError = ProcessInfo.processInfo.arguments.contains("-reader-navigation-error")
+					try await Task.sleep(for: .seconds(navigationError ? 2 : 5))
+					if navigationError {
+						statusCode = 503
+					}
+				}
+				let itemIDs: [String] = switch stream {
+				case "feed/navigation-1-1": ["tag:google.com,2005:reader/item/0000000000000001"]
+				case "feed/navigation-1-3": ["tag:google.com,2005:reader/item/0000000000000002"]
+				case "user/-/state/com.google/starred": recommendations.filter(\.isStarred).map(\.readerId)
+				case "user/-/state/com.google/reading-list": recommendations.filter { $0.isRead == false }.prefix(2).map(\.readerId)
+				default: []
+				}
+				data = try JSONSerialization.data(withJSONObject: ["itemRefs": itemIDs.map { ["id": $0] }])
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-paging-fixture") {
+				let next = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "c" } == true
+				let range = next ? 13...24 : 1...12
+				var payload: [String: Any] = ["itemRefs": range.map { ["id": "paging-\($0)"] }]
+				if next == false { payload["continuation"] = "second-page" }
+				data = try JSONSerialization.data(withJSONObject: payload)
+			} else if ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data") {
 				let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
 				let isSecondPage = query.contains { $0.name == "c" }
 				let items = isSecondPage ? Array(recommendations.dropFirst().prefix(1)) : Array(recommendations.prefix(1))
@@ -133,6 +199,41 @@ struct PreviewHTTPClient: HTTPClient {
 			throw PigeonError.invalidResponse
 		}
 		return (data, response)
+	}
+
+	nonisolated private static var navigationFixtureSubscriptions: [[String: Any]] {
+		let stress = ProcessInfo.processInfo.arguments.contains("-reader-motion-stress-fixture")
+		let folderCount = stress ? 100 : 6
+		let feedCount = stress ? 30 : 6
+		return (1...folderCount).flatMap { folderNumber in
+			let folderTitle = String(format: "Folder %02d", folderNumber)
+			return (1...feedCount).map { feedNumber in
+				let feedID = "feed/navigation-\(folderNumber)-\(feedNumber)"
+				return [
+					"id": feedID,
+					"title": String(format: "Feed %02d.%02d", folderNumber, feedNumber),
+					"categories": [["id": "navigation-folder-\(folderNumber)", "label": folderTitle]],
+					"url": "https://pigeon.preview/\(feedID)",
+				]
+			}
+		}
+	}
+
+	nonisolated private static var navigationFixtureUnreadCounts: [[String: Any]] {
+		let stress = ProcessInfo.processInfo.arguments.contains("-reader-motion-stress-fixture")
+		let folderCount = stress ? 100 : 6
+		let feedCount = stress ? 30 : 6
+		var counts: [[String: Any]] = [
+			["id": "user/-/state/com.google/reading-list", "count": 2],
+			["id": "user/-/state/com.google/starred", "count": 1],
+		]
+		for folderNumber in 1...folderCount {
+			counts.append(["id": "navigation-folder-\(folderNumber)", "count": 6])
+			for feedNumber in 1...feedCount {
+				counts.append(["id": "feed/navigation-\(folderNumber)-\(feedNumber)", "count": 1])
+			}
+		}
+		return counts
 	}
 
 	nonisolated private static let syncHealthFixture = """
