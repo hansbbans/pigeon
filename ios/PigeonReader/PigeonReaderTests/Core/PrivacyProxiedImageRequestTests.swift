@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UIKit
 @testable import PigeonReader
 
 struct PrivacyProxiedImageRequestTests {
@@ -58,6 +59,35 @@ struct PrivacyProxiedImageRequestTests {
 		#expect(normal.url == publisher)
 		#expect(blocked.url == publisher)
 		#expect(normal.value(forHTTPHeaderField: "Authorization") == nil)
+	}
+
+	@Test
+	func zoomableImageCacheIdentitySeparatesAccountsAndPolicies() throws {
+		let publisher = try #require(URL(string: "https://cdn.example.com/hero.jpg"))
+		let image = try #require(UIImage(systemName: "photo"))
+		let firstAccount = PigeonSession(
+			baseURL: try #require(URL(string: "https://pigeon.test")),
+			token: "first-account-token",
+		)
+		let secondAccount = PigeonSession(
+			baseURL: try #require(URL(string: "https://pigeon.test")),
+			token: "second-account-token",
+		)
+
+		let normal = ZoomableImageCacheKey(url: publisher, policy: .normal, session: firstAccount)
+		let sameScope = ZoomableImageCacheKey(url: publisher, policy: .normal, session: firstAccount)
+		let otherAccount = ZoomableImageCacheKey(url: publisher, policy: .normal, session: secondAccount)
+		let proxied = ZoomableImageCacheKey(url: publisher, policy: .privacyProxied, session: firstAccount)
+
+		#expect(normal == sameScope)
+		#expect(normal != otherAccount)
+		#expect(normal != proxied)
+
+		let cache = ZoomableImageMemoryCache(countLimit: 4)
+		cache.insert(image, for: normal)
+		#expect(cache.image(for: sameScope) === image)
+		#expect(cache.image(for: otherAccount) == nil)
+		#expect(cache.image(for: proxied) == nil)
 	}
 
 	@Test

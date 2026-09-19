@@ -169,6 +169,18 @@ struct ArticleReaderControlsTests {
 		#expect(saveState.isShowingSaveMessage == false)
 		#expect(saveState.saveMessage == nil)
 	}
+
+	@Test func successfulSaveCanFinishWithoutPresentingAnError() throws {
+		let url = try #require(URL(string: "https://example.com/article"))
+		let destination = try #require(OutboundDestination(url: url))
+		let saveState = ArticleReaderControlsSaveState()
+		let request = saveState.begin(articleID: "article", destination: destination)
+
+		#expect(saveState.completeQuietly(request))
+		#expect(saveState.isSaving == false)
+		#expect(saveState.isShowingSaveMessage == false)
+		#expect(saveState.saveMessage == nil)
+	}
 }
 
 private actor DelayedReadwiseSave {

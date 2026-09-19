@@ -1,15 +1,14 @@
-import Combine
 import SwiftUI
-import UIKit
 
 struct ZoomableImageView: View {
 	let url: URL
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let imageProxySession: PigeonSession?
 
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.dismiss) private var dismiss
 	@StateObject private var loader: ZoomableImageLoader
-	@State private var scale = 1.0
-	@State private var magnificationStart = 1.0
+	@State private var zoomScale = ZoomableImageInteraction.minimumZoomScale
 
 	init(
 		url: URL,
@@ -30,35 +29,46 @@ struct ZoomableImageView: View {
 
 	var body: some View {
 		NavigationStack {
-			ScrollView([.horizontal, .vertical]) {
+			ZStack {
+				Color.black
+					.ignoresSafeArea()
+
 				imageContent
-					.frame(maxWidth: .infinity, maxHeight: .infinity)
-					.contentShape(Rectangle())
-					.gesture(
-						MagnificationGesture()
-							.onChanged { value in
-								scale = min(max(magnificationStart * value, 1), 5)
-							}
-							.onEnded { _ in
-								magnificationStart = scale
-							},
-					)
 			}
-			.scrollIndicators(.hidden)
-			.background(.black)
-			.navigationTitle("Image")
+			.navigationTitle("Article image")
 			.navigationBarTitleDisplayMode(.inline)
 			.toolbar {
-				ToolbarItem(placement: .topBarTrailing) {
-					Button("Reset zoom", systemImage: "arrow.counterclockwise") {
-						scale = 1
-						magnificationStart = 1
-					}
-					.disabled(scale == 1)
+				ToolbarItem(placement: .topBarLeading) {
+					Button("Close", systemImage: "xmark", action: dismiss.callAsFunction)
+						.accessibilityIdentifier("image-viewer-close")
+				}
+
+				ToolbarItemGroup(placement: .topBarTrailing) {
+					Button("Zoom in", systemImage: "plus.magnifyingglass", action: zoomIn)
+						.disabled(isImageLoaded == false || zoomScale >= ZoomableImageInteraction.maximumZoomScale)
+						.accessibilityHint("Makes the image larger around its center.")
+						.accessibilityIdentifier("image-viewer-zoom-in")
+
+					Button("Reset zoom", systemImage: "arrow.counterclockwise", action: resetZoom)
+						.disabled(isImageLoaded == false || ZoomableImageInteraction.isZoomed(zoomScale) == false)
+						.accessibilityHint("Returns the image to its fitted size.")
+						.accessibilityIdentifier("image-viewer-reset-zoom")
 				}
 			}
-			.task {
-				loader.loadIfNeeded()
+			.toolbarBackground(.black, for: .navigationBar)
+			.toolbarColorScheme(.dark, for: .navigationBar)
+			.tint(.white)
+			.background(.black)
+			.presentationBackground(.black)
+			.presentationDragIndicator(.visible)
+			.presentationContentInteraction(
+				ZoomableImageInteraction.canPanImage(at: zoomScale) ? .scrolls : .resizes,
+			)
+			.interactiveDismissDisabled(ZoomableImageInteraction.canDismissSheet(at: zoomScale) == false)
+			.accessibilityElement(children: .contain)
+			.accessibilityIdentifier("image-viewer")
+			.task(id: url) {
+				await loader.loadIfNeeded()
 			}
 		}
 	}
@@ -67,82 +77,67 @@ struct ZoomableImageView: View {
 	private var imageContent: some View {
 		switch loader.state {
 		case .loading:
-			ProgressView("Loading image")
-				.frame(minWidth: 240, minHeight: 240)
+			ProgressView("Loading article image")
+				.tint(.white)
+				.foregroundStyle(.white)
+				.accessibilityLabel("Loading article image")
+				.accessibilityIdentifier("image-viewer-loading")
 		case .loaded(let image):
-			Image(uiImage: image)
-				.resizable()
-				.scaledToFit()
-				.scaleEffect(scale)
-				.frame(minWidth: 240, minHeight: 240)
+			ZoomableImageScrollView(
+				image: image,
+				zoomScale: $zoomScale,
+				reduceMotion: reduceMotion,
+				onDismiss: dismiss.callAsFunction,
+			)
+			.frame(maxWidth: .infinity, maxHeight: .infinity)
+			.accessibilityElement()
+			.accessibilityIdentifier("image-viewer-image")
+			.accessibilityLabel("Article image")
+			.accessibilityHint("Double-tap to zoom. Use two fingers to pan. With VoiceOver, swipe up or down to adjust zoom.")
+			.accessibilityAddTraits(.isImage)
+			.accessibilityAdjustableAction { direction in
+				switch direction {
+				case .increment:
+					zoomIn()
+				case .decrement:
+					zoomOut()
+				@unknown default:
+					break
+				}
+			}
+			.accessibilityAction(named: "Reset zoom") {
+				resetZoom()
+			}
 		case .failed:
 			ContentUnavailableView(
 				"Image unavailable",
 				systemImage: "photo.badge.exclamationmark",
 				description: Text("This image could not be loaded."),
 			)
-			.frame(minWidth: 240, minHeight: 240)
-		}
-	}
-}
-
-@MainActor
-private final class ZoomableImageLoader: ObservableObject {
-	enum State {
-		case loading
-		case loaded(UIImage)
-		case failed
-	}
-
-	private let url: URL
-	private let policy: ReaderRemoteImagePolicy
-	private let session: PigeonSession?
-	@Published private(set) var state = State.loading
-	private var loadTask: Task<Void, Never>?
-
-	init(url: URL, policy: ReaderRemoteImagePolicy, session: PigeonSession?) {
-		self.url = url
-		self.policy = policy
-		self.session = session
-	}
-
-	func loadIfNeeded() {
-		guard loadTask == nil else {
-			return
-		}
-
-		loadTask = Task { [weak self] in
-			guard let self else { return }
-			defer { loadTask = nil }
-
-			guard let request = PrivacyProxiedImageRequest.loadRequest(
-				for: url,
-				policy: policy,
-				session: session,
-			) else {
-				state = .failed
-				return
-			}
-
-			do {
-				let (data, response) = try await URLSession.shared.data(for: request)
-				try Task.checkCancellation()
-				guard data.count <= PrivacyProxiedImageRequest.maximumResponseBytes,
-					let response = response as? HTTPURLResponse,
-					(200..<300).contains(response.statusCode),
-					let image = UIImage(data: data) else {
-					throw URLError(.cannotDecodeContentData)
-				}
-				state = .loaded(image)
-			} catch is CancellationError {
-				return
-			} catch {
-				state = .failed
-			}
+			.foregroundStyle(.white)
+			.accessibilityLabel("Article image unavailable")
+			.accessibilityHint("Close the viewer and try opening the image again later.")
+			.accessibilityIdentifier("image-viewer-unavailable")
 		}
 	}
 
-	deinit {
-		loadTask?.cancel()
+	private var isImageLoaded: Bool {
+		if case .loaded = loader.state {
+			true
+		} else {
+			false
+		}
+	}
+
+	private func zoomIn() {
+		zoomScale = ZoomableImageInteraction.accessibilityIncrement(from: zoomScale)
+	}
+
+	private func zoomOut() {
+		zoomScale = ZoomableImageInteraction.accessibilityDecrement(from: zoomScale)
+	}
+
+	private func resetZoom() {
+		zoomScale = ZoomableImageInteraction.minimumZoomScale
 	}
 }

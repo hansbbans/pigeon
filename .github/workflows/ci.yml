@@ -47,6 +47,8 @@ jobs:
           command -v xcodebuild
           xcodebuild -version
           swift --version
+      - name: Verify simulator ownership guards
+        run: python3 .github/scripts/test_ios_simulator_session.py
       - name: Generate Xcode project
         working-directory: ${{ env.APP_DIRECTORY }}
         run: xcodegen generate
@@ -70,6 +72,7 @@ jobs:
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination "${{ steps.simulator.outputs.destination }}" \
+            -parallel-testing-enabled NO \
             -derivedDataPath "$DERIVED_DATA_PATH" \
             -resultBundlePath "$TEST_RESULT_BUNDLE" \
             CODE_SIGNING_ALLOWED=NO \
@@ -100,3 +103,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$build_log"
           .github/scripts/fail-on-first-party-warnings.sh "$build_log"
+
+      - name: Shut down this job's simulator
+        if: always()
+        shell: bash
+        run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"

@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class PreviewReadwiseTokenStore: ReadwiseTokenStore {
 	func load() throws -> String? {
-		nil
+		ProcessInfo.processInfo.arguments.contains("-reader-save-success") ? "preview-readwise-token" : nil
 	}
 
 	func save(_ token: String) throws {}

@@ -4,6 +4,8 @@ Pigeon has a manual GitHub Actions workflow at `.github/workflows/release-testfl
 
 Each run checks out trusted `main`, runs the Worker tests and TypeScript check, regenerates the iOS project with XcodeGen, runs the Swift tests on an available iPhone simulator, archives the universal iPhone/iPad app, and uploads it to TestFlight. The first release should leave `internal_only` enabled.
 
+CI and release jobs reserve an idle simulator and record its ownership before booting it. Tests run without parallel simulator workers. An always-running cleanup step verifies that no test process or manual Simulator session is using the device, shuts down only the device booted by that job, and verifies its final state. Devices already booted before the job are preserved; uncertain use is reported as a warning.
+
 ## Apple setup
 
 Create or confirm these Apple resources before the first run:

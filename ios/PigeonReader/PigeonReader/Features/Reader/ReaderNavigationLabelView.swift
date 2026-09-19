@@ -1,34 +1,14 @@
 import SwiftUI
 
 struct ReaderNavigationLabelView: View {
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	let item: ReaderNavigationItem
 	let indentation: CGFloat
+	var isFolderExpanded = false
 
 	var body: some View {
 		HStack(spacing: 10) {
-			if item.kind == .feed, let iconURL = item.iconURL {
-				AsyncImage(url: iconURL) { phase in
-					if let image = phase.image {
-						image
-							.resizable()
-							.scaledToFit()
-							.frame(width: 20, height: 20)
-							.clipShape(.rect(cornerRadius: 4))
-					} else {
-						Image(systemName: item.systemImage)
-							.symbolRenderingMode(.hierarchical)
-							.foregroundStyle(.tint)
-					}
-				}
-				.frame(width: 20, height: 20)
-				.accessibilityHidden(true)
-			} else {
-				Image(systemName: item.systemImage)
-					.symbolRenderingMode(.hierarchical)
-					.foregroundStyle(.tint)
-					.frame(width: 20, height: 20)
-					.accessibilityHidden(true)
-			}
+			icon
 			Text(item.title)
 				.lineLimit(1)
 				.truncationMode(.tail)
@@ -37,6 +17,11 @@ struct ReaderNavigationLabelView: View {
 				.font(.body.monospacedDigit())
 				.foregroundStyle(item.unreadCount > 0 ? .primary : .secondary)
 				.fixedSize(horizontal: true, vertical: false)
+				.contentTransition(reduceMotion ? .identity : .numericText())
+				.animation(
+					reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false),
+					value: item.unreadCount,
+				)
 		}
 		.padding(.leading, indentation)
 		.frame(minHeight: 44, alignment: .leading)
@@ -44,13 +29,55 @@ struct ReaderNavigationLabelView: View {
 		.accessibilityElement(children: .combine)
 		.accessibilityValue("\(item.unreadCount) unread")
 	}
+
+	private var icon: some View {
+		Group {
+			if item.kind == .feed, let iconURL = item.iconURL {
+				AsyncImage(url: iconURL) { phase in
+					ZStack {
+						fallbackIcon
+							.opacity(phase.image == nil ? 1 : 0)
+						if let image = phase.image {
+							image
+								.resizable()
+								.scaledToFit()
+								.clipShape(.rect(cornerRadius: 4))
+								.transition(.opacity)
+						}
+					}
+					.animation(
+						reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false),
+						value: phase.image != nil,
+					)
+				}
+			} else {
+				fallbackIcon
+			}
+		}
+		.frame(width: 20, height: 20)
+		.accessibilityHidden(true)
+	}
+
+	private var fallbackIcon: some View {
+		Image(systemName: item.systemImage(isFolderExpanded: isFolderExpanded))
+			.symbolRenderingMode(.hierarchical)
+			.foregroundStyle(.tint)
+			.contentTransition(
+				item.kind == .folder && reduceMotion == false
+					? .symbolEffect(.replace)
+					: .identity,
+			)
+	}
 }
 
 private extension ReaderNavigationItem {
-	var systemImage: String {
+	func systemImage(isFolderExpanded: Bool) -> String {
 		if let smartSection {
 			return smartSection.systemImage
 		}
-		return kind == .folder ? "folder" : "newspaper"
+		if kind == .folder {
+			return isFolderExpanded ? "folder.fill" : "folder"
+		}
+		return "newspaper"
 	}
 }

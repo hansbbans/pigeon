@@ -3,6 +3,13 @@ import Testing
 @testable import PigeonReader
 
 struct ArticleReadingProgressTests {
+	@Test func laidOutBodyRemainsReadyWhenSiblingViewsContributeDefaultPreferences() {
+		var ready = ArticleBodyLayoutKey.defaultValue
+		ArticleBodyLayoutKey.reduce(value: &ready) { true }
+		ArticleBodyLayoutKey.reduce(value: &ready) { ArticleBodyLayoutKey.defaultValue }
+		#expect(ready)
+	}
+
 	@Test func bodyLayoutIdentityChangesWhenTheArticleOrContentChanges() {
 		let first = ArticleBodyLayoutIdentity(articleID: "story-a", content: "<p>First</p>")
 		#expect(first == ArticleBodyLayoutIdentity(articleID: "story-a", content: "<p>First</p>"))

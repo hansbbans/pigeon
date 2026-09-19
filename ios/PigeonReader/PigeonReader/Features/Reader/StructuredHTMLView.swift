@@ -14,6 +14,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 	let onLink: (URL) -> Void
 	let onImage: (URL, URL?) -> Void
 	let onImageFailure: ([URL]) -> Void
+	let onLayout: (ReaderHTMLLayout) -> Void
 
 	init(
 		html: String,
@@ -28,6 +29,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		onLink: @escaping (URL) -> Void,
 		onImage: @escaping (URL, URL?) -> Void,
 		onImageFailure: @escaping ([URL]) -> Void,
+		onLayout: @escaping (ReaderHTMLLayout) -> Void = { _ in },
 	) {
 		self.html = html
 		self.baseURL = baseURL
@@ -41,14 +43,16 @@ struct StructuredHTMLView: UIViewRepresentable {
 		self.onLink = onLink
 		self.onImage = onImage
 		self.onImageFailure = onImageFailure
+		self.onLayout = onLayout
 	}
 
 	func makeCoordinator() -> Coordinator {
 		let heightBinding = _contentHeight
 		return Coordinator(
-			onLink: onLink,
-			onImage: onImage,
-			onImageFailure: onImageFailure,
+				onLink: onLink,
+				onImage: onImage,
+				onImageFailure: onImageFailure,
+				onLayout: onLayout,
 			onHeight: { height in
 				heightBinding.wrappedValue = height
 			},
@@ -87,6 +91,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		context.coordinator.onLink = onLink
 		context.coordinator.onImage = onImage
 		context.coordinator.onImageFailure = onImageFailure
+		context.coordinator.onLayout = onLayout
 		context.coordinator.onHeight = { height in
 			heightBinding.wrappedValue = height
 		}
@@ -106,26 +111,34 @@ struct StructuredHTMLView: UIViewRepresentable {
 		var onLink: (URL) -> Void
 		var onImage: (URL, URL?) -> Void
 		var onImageFailure: ([URL]) -> Void
+		var onLayout: (ReaderHTMLLayout) -> Void
 		var onHeight: (CGFloat) -> Void
 		private var isShellLoaded = false
 		private var pendingPayload: Payload?
 		private var renderedSignature: String?
+		private var renderingGeneration: UInt = 0
 		private var pendingFindQuery = ""
 
 		init(
 			onLink: @escaping (URL) -> Void,
 			onImage: @escaping (URL, URL?) -> Void,
 			onImageFailure: @escaping ([URL]) -> Void,
+			onLayout: @escaping (ReaderHTMLLayout) -> Void,
 			onHeight: @escaping (CGFloat) -> Void,
 		) {
 			self.onLink = onLink
 			self.onImage = onImage
 			self.onImageFailure = onImageFailure
+			self.onLayout = onLayout
 			self.onHeight = onHeight
 			super.init()
 		}
 
 		func loadShell(baseURL: URL?) {
+			isShellLoaded = false
+			pendingPayload = nil
+			renderedSignature = nil
+			renderingGeneration &+= 1
 			webView?.loadHTMLString(StructuredHTMLJavaScript.renderingShell, baseURL: baseURL)
 		}
 
@@ -170,6 +183,18 @@ struct StructuredHTMLView: UIViewRepresentable {
 				if let value = payload["value"] as? NSNumber {
 					onHeight(max(CGFloat(value.doubleValue), 1))
 				}
+			case "layout":
+				guard let value = payload["value"] as? NSNumber else { return }
+				let anchors = (payload["anchors"] as? [[String: Any]] ?? []).compactMap { anchor -> ReaderSemanticAnchor? in
+					guard let id = anchor["id"] as? String,
+						let top = anchor["top"] as? NSNumber,
+						let height = anchor["height"] as? NSNumber else {
+						return nil
+					}
+					return ReaderSemanticAnchor(id: id, top: top.doubleValue, height: max(height.doubleValue, 0))
+				}
+				onHeight(max(CGFloat(value.doubleValue), 1))
+				onLayout(ReaderHTMLLayout(contentHeight: value.doubleValue, anchors: anchors))
 			case "link":
 				guard let rawURL = payload["url"] as? String,
 					let url = StructuredHTMLSanitizer.safeWebURL(rawURL, relativeTo: nil) else { return }
@@ -222,8 +247,11 @@ struct StructuredHTMLView: UIViewRepresentable {
 				let json = String(data: data, encoding: .utf8) else {
 				return
 			}
-			webView?.evaluateJavaScript("window.__pigeonRender(\(json));") { [weak self] _, _ in
+			renderingGeneration &+= 1
+			let generation = renderingGeneration
+			webView?.evaluateJavaScript("window.__pigeonRender(\(json));") { [weak self] _, error in
 				guard let self else { return }
+				guard self.renderingGeneration == generation, error == nil else { return }
 				self.renderedSignature = payload.signature
 				self.find(self.pendingFindQuery)
 			}
@@ -237,6 +265,10 @@ struct StructuredHTMLView: UIViewRepresentable {
 			let theme: String
 			let remoteImagePolicy: String
 
+			var contentSignature: String {
+				"\(html)|\(baseURL ?? "")"
+			}
+
 			var signature: String {
 				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(remoteImagePolicy)"
 			}
@@ -244,6 +276,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			var dictionary: [String: Any] {
 				var dictionary: [String: Any] = [
 					"html": html,
+					"contentSignature": contentSignature,
 					"textScale": textScale,
 					"lineHeight": lineHeight,
 					"theme": theme,

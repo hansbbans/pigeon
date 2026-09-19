@@ -10,6 +10,7 @@ struct ReaderErrorBanner: View {
 				.frame(maxWidth: .infinity, alignment: .leading)
 			Button("Dismiss", systemImage: "xmark", action: dismiss)
 				.labelStyle(.iconOnly)
+				.frame(minWidth: 44, minHeight: 44)
 		}
 		.padding()
 		.background(.regularMaterial)

@@ -17,6 +17,8 @@ nonisolated struct ReaderBoundaryNavigationState: Equatable, Sendable {
 /// gesture.
 nonisolated enum ReaderBoundaryNavigation {
 	static let minimumVerticalTranslation = 80.0
+	static let pullArmDistance = 80.0
+	static let pullMaximumDistance = 128.0
 	static let minimumHorizontalTranslation = 80.0
 	static let backSwipeEdgeWidth = 32.0
 
@@ -51,6 +53,20 @@ nonisolated enum ReaderBoundaryNavigation {
 			return .previous
 		}
 		return nil
+	}
+
+	/// Returns the direction of a fresh pull that began at a reader boundary.
+	static func pullDirection(
+		startedAt state: ReaderBoundaryNavigationState,
+		velocityX: Double,
+		velocityY: Double,
+	) -> ReaderBoundaryNavigationDirection? {
+		direction(
+			startedAt: state,
+			translationX: velocityX,
+			translationY: velocityY,
+			minimumVerticalTranslation: 0,
+		)
 	}
 
 	static func targetIndex(

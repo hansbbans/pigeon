@@ -211,6 +211,16 @@ final class ArticleReaderControlsSaveState {
 		return true
 	}
 
+	@discardableResult
+	func completeQuietly(_ request: ArticleReaderControlsSaveRequest) -> Bool {
+		guard self.request == request else {
+			return false
+		}
+
+		self.request = nil
+		return true
+	}
+
 	func cancel(_ request: ArticleReaderControlsSaveRequest) {
 		guard self.request == request else {
 			return
@@ -222,9 +232,23 @@ final class ArticleReaderControlsSaveState {
 
 struct ArticleReaderControlsBar: View {
 	let article: Recommendation
+	let onShowReadingControls: () -> Void
+	let onSaveConfirmation: (ReaderSaveConfirmation) -> Void
 
 	@Environment(ReaderAppModel.self) private var model
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@State private var saveState = ArticleReaderControlsSaveState()
+	@State private var actionFeedbackCount = 0
+
+	init(
+		article: Recommendation,
+		onShowReadingControls: @escaping () -> Void = {},
+		onSaveConfirmation: @escaping (ReaderSaveConfirmation) -> Void = { _ in },
+	) {
+		self.article = article
+		self.onShowReadingControls = onShowReadingControls
+		self.onSaveConfirmation = onSaveConfirmation
+	}
 
 	var body: some View {
 		VStack(spacing: 0) {
@@ -253,6 +277,7 @@ struct ArticleReaderControlsBar: View {
 		.onChange(of: article.id) { _, newArticleID in
 			saveState.articleDidChange(to: newArticleID)
 		}
+		.sensoryFeedback(.selection, trigger: actionFeedbackCount)
 		.alert("Readwise Reader", isPresented: $saveState.isShowingSaveMessage) {
 			Button("OK") {}
 		} message: {
@@ -269,15 +294,18 @@ struct ArticleReaderControlsBar: View {
 				}
 				.keyboardShortcut("s", modifiers: [.command, .shift])
 				.accessibilityHint("Opens the system share sheet")
+				.accessibilityIdentifier("article-reader-share")
 			case .text(let text):
 				ShareLink(item: text, subject: Text(article.title)) {
 					shareLabel
 				}
 				.keyboardShortcut("s", modifiers: [.command, .shift])
 				.accessibilityHint("Opens the system share sheet")
+				.accessibilityIdentifier("article-reader-share")
 			case nil:
 				Button(ArticleReaderControl.share.title, systemImage: ArticleReaderControl.share.systemImage) {}
 					.disabled(true)
+					.accessibilityIdentifier("article-reader-share")
 			}
 		}
 	}
@@ -292,7 +320,15 @@ struct ArticleReaderControlsBar: View {
 				ArticleReaderControl.markRead.title(isRead: article.isRead),
 				systemImage: ArticleReaderControl.markRead.systemImage(isRead: article.isRead),
 			) {
-				Task { await model.setRead(article, read: !article.isRead) }
+				actionFeedbackCount &+= 1
+				Task {
+					await model.setRead(
+						article,
+						read: !article.isRead,
+						animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false),
+						offersUndo: true,
+					)
+				}
 			}
 			.keyboardShortcut("u", modifiers: .command)
 		}
@@ -317,31 +353,12 @@ struct ArticleReaderControlsBar: View {
 
 	private var readingControlsButton: some View {
 		controlSlot {
-			Menu(ArticleReaderControl.readingControls.title, systemImage: ArticleReaderControl.readingControls.systemImage) {
-				ForEach(ArticleReaderReadingAdjustment.allCases) { adjustment in
-					Button(adjustment.title, systemImage: adjustment.systemImage) {
-						applyReadingAdjustment(adjustment)
-					}
-					.disabled(
-						adjustment.isEnabled(
-							textScale: model.readerTypography.textScale,
-							lineHeight: model.readerTypography.lineHeight,
-						) == false
-					)
-				}
-				Picker("Theme", selection: Binding(
-					get: { model.readerTypography.theme },
-					set: { model.readerTypography.theme = $0 },
-				)) {
-					ForEach(ReaderTheme.allCases) { theme in
-						Text(theme.title).tag(theme)
-					}
-				}
-				Divider()
-				Button("Reset reading controls", systemImage: "arrow.counterclockwise") {
-					model.readerTypography.reset()
-				}
-			}
+			Button(
+				ArticleReaderControl.readingControls.title,
+				systemImage: ArticleReaderControl.readingControls.systemImage,
+				action: onShowReadingControls,
+			)
+			.accessibilityIdentifier("reader-reading-controls")
 		}
 	}
 
@@ -359,15 +376,6 @@ struct ArticleReaderControlsBar: View {
 	private func controlSlot<Content: View>(@ViewBuilder content: () -> Content) -> some View {
 		content()
 			.frame(maxWidth: .infinity, minHeight: 44)
-	}
-
-	private func applyReadingAdjustment(_ adjustment: ArticleReaderReadingAdjustment) {
-		switch adjustment {
-		case .largerText: model.readerTypography.increaseTextScale()
-		case .smallerText: model.readerTypography.decreaseTextScale()
-		case .looserLines: model.readerTypography.increaseLineHeight()
-		case .tighterLines: model.readerTypography.decreaseLineHeight()
-		}
 	}
 
 	private func shareToReadwise() {
@@ -397,7 +405,8 @@ struct ArticleReaderControlsBar: View {
 			switch try await model.saveToReader(request.readwiseRequest.destination) {
 			case .saved:
 				try Task.checkCancellation()
-				_ = saveState.complete(request, with: "Saved to Reader.")
+				guard saveState.completeQuietly(request) else { return }
+				onSaveConfirmation(ReaderSaveConfirmation(message: "Saved to Reader", isSuccess: true))
 			case .alreadyInFlight:
 				try Task.checkCancellation()
 				_ = saveState.complete(request, with: "This article is already being saved.")

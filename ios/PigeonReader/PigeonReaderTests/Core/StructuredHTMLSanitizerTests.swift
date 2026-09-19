@@ -170,6 +170,54 @@ struct StructuredHTMLSanitizerTests {
 		#expect(values["dataBorderWidth"] == "1px")
 	}
 
+	@MainActor
+	@Test
+	func paragraphsAndDOMSurviveImageAndTypographyRelayouts() async throws {
+		let configuration = WKWebViewConfiguration()
+		configuration.websiteDataStore = .nonPersistent()
+		configuration.userContentController.add(ReaderLayoutMessageSink(), name: "pigeonEvent")
+		let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 420, height: 700), configuration: configuration)
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+		let result = try await webView.evaluateJavaScript("""
+			(() => {
+			  const html = '<p>First paragraph with enough words to wrap across several lines in a narrow reading column.</p><div></div><p>Second paragraph stays at the reading position.</p><p>Repeated text.</p><p>Repeated text.</p>';
+			  const payload = {html, contentSignature: 'fixture-one', textScale: 1, lineHeight: 1.55, theme: 'light', remoteImagePolicy: 'normal'};
+			  window.__pigeonRender(payload);
+			  const root = document.getElementById('pigeon-content');
+			  const rows = () => Array.from(root.querySelectorAll('[data-pigeon-anchor]')).map(e => ({ id:e.dataset.pigeonAnchor, top:e.getBoundingClientRect().top-root.getBoundingClientRect().top,height:e.getBoundingClientRect().height }));
+			  const before = rows();
+			  const firstNode = root.querySelector('p');
+			  root.querySelector('div').style.height = '220px';
+			  const afterImage = rows();
+			  window.__pigeonRender({...payload, textScale:1.5,lineHeight:1.8});
+			  const afterType = rows();
+			  const result = {
+			    anchorCount: before.length,
+			    uniqueDuplicateParagraphs: before[2].id !== before[3].id,
+			    imageKeepsIdentity: before.every((a,i) => a.id === afterImage[i].id),
+			    imageShift: afterImage[1].top-before[1].top,
+			    typeKeepsIdentity: before.every((a,i) => a.id === afterType[i].id),
+			    typeChangesHeight: afterType[0].height > before[0].height,
+			    preservesDOMForTypography: firstNode === root.querySelector('p')
+			  };
+			  window.__pigeonRender({...payload,html:'<p>Entirely different story.</p>', contentSignature:'fixture-two'});
+			  result.newStoryReplacesAnchors = rows().length === 1 && rows()[0].id !== before[0].id;
+			  return JSON.stringify(result);
+			})()
+			""")
+		let json = try #require(result as? String)
+		let data = try #require(json.data(using: .utf8))
+		let values = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+		#expect(values["anchorCount"] as? Int == 4)
+		let shift = try #require(values["imageShift"] as? Double)
+		#expect(abs(shift - 220) < 1)
+		for key in ["uniqueDuplicateParagraphs", "imageKeepsIdentity", "typeKeepsIdentity", "typeChangesHeight", "preservesDOMForTypography", "newStoryReplacesAnchors"] {
+			#expect(values[key] as? Bool == true, "Continuity check: \(key)")
+		}
+	}
+
 	@Test func renderingShellSupportsExplicitThemesBlockedImagesAndTheAuthenticatedProxyScheme() {
 		let shell = StructuredHTMLJavaScript.renderingShell
 
@@ -178,10 +226,10 @@ struct StructuredHTMLSanitizerTests {
 		#expect(shell.contains("body[data-theme=\"dark-gray\"] { background: #1c1c1e; color: #f2f2f7; }"))
 		#expect(shell.contains("body[data-theme=\"dark-gray\"] a { color: #64d2ff; }"))
 		#expect(shell.contains("body[data-theme=\"dark-gray\"] pre"))
-		#expect(shell.contains("payload.remoteImagePolicy === \"blocked\""))
+		#expect(shell.contains("policy === \"blocked\""))
 		#expect(shell.contains("Load this remote image"))
 		#expect(shell.contains("target.closest(\".pigeon-image-blocked\")"))
-		#expect(shell.contains("payload.remoteImagePolicy === \"privacy-proxied\""))
+		#expect(shell.contains("policy === \"privacy-proxied\""))
 		#expect(shell.contains("pigeon-image://proxy?url="))
 		#expect(shell.contains("image.dataset.pigeonOriginalSrc"))
 		#expect(shell.contains("image.dataset.pigeonOriginalSrc || image.currentSrc || image.src"))
@@ -198,6 +246,7 @@ struct StructuredHTMLSanitizerTests {
 			onLink: { _ in },
 			onImage: { _, _ in },
 			onImageFailure: { _ in },
+			onLayout: { _ in },
 			onHeight: { _ in },
 		)
 		let configuration = WKWebViewConfiguration()
@@ -329,4 +378,9 @@ private final class StructuredHTMLNavigationWaiter: NSObject, WKNavigationDelega
 		continuation?.resume(throwing: error)
 		continuation = nil
 	}
+}
+
+@MainActor
+private final class ReaderLayoutMessageSink: NSObject, WKScriptMessageHandler {
+	func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) { }
 }

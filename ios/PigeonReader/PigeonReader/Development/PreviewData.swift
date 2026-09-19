@@ -114,6 +114,7 @@ enum PreviewData {
 	static func makeModel() -> ReaderAppModel {
 		let showsToday = ProcessInfo.processInfo.arguments.contains("-reader-today-data")
 		let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
+		let usesNavigationFixture = ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture")
 		var articles = showsToday ? todayArticles : Self.articles
 		if showsFolderRead {
 			articles[2].isRead = false
@@ -123,13 +124,23 @@ enum PreviewData {
 			preconditionFailure("The preview URL must be valid")
 		}
 		let session = PigeonSession(baseURL: baseURL, token: "preview-token")
+		// Collection-scoped search reads the persisted collection membership. The
+		// navigation fixture starts with its stories in the in-memory page cache,
+		// so seed the selected feed as well to keep search deterministic when a
+		// refresh reuses the unchanged preview page.
+		let previewSeedCollectionID = usesNavigationFixture
+			? "feed/navigation-1-1"
+			: ReaderSection.forYou.rawValue
+		let previewSeedArticles = usesNavigationFixture
+			? Array(articles.prefix(1))
+			: articles
 		let model = ReaderAppModel(
 			sessionStore: PreviewSessionStore(session: session),
 			httpClient: PreviewHTTPClient(recommendations: articles),
 			readwiseTokenStore: PreviewReadwiseTokenStore(),
 			offlineStore: OfflineLibraryStore.inMemory(
-				seeding: articles,
-				collectionID: ReaderSection.forYou.rawValue,
+				seeding: previewSeedArticles,
+				collectionID: previewSeedCollectionID,
 				accountID: session.storageIdentity,
 			),
 			offlineSynchronizationEnabled: false,
@@ -201,6 +212,15 @@ enum PreviewData {
 				}
 			}
 			model.select(section: showsToday ? .today : .forYou)
+			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
+				PreviewNavigationFixture.install(in: model)
+			}
+			if ProcessInfo.processInfo.arguments.contains("-reader-paging-fixture") {
+				if let feed = model.navigation.items.first(where: { $0.kind == .feed && $0.streamID == "feed/1" }) {
+					model.select(item: feed)
+				}
+				model.setArticleFilter(.all, for: model.selectedCollection)
+			}
 			return model
 	}
 
