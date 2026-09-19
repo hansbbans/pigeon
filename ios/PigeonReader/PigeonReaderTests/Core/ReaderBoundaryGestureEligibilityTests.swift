@@ -22,4 +22,53 @@ struct ReaderBoundaryGestureEligibilityTests {
 		#expect(ReaderBoundaryNavigation.pullDirection(startedAt: short, velocityX: 0, velocityY: 20) == .previous)
 		#expect(ReaderBoundaryNavigation.pullDirection(startedAt: short, velocityX: 0, velocityY: 0) == nil)
 	}
+
+	@Test func nativeGeometryHonorsAdjustedInsetsAtBothEnds() {
+		let atTop = ReaderBoundaryScrollGeometry.boundaryState(
+			contentOffsetY: -24,
+			contentSizeHeight: 1_200,
+			boundsHeight: 800,
+			adjustedInsetTop: 24,
+			adjustedInsetBottom: 34,
+		)
+		#expect(atTop == ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: false))
+
+		let atBottom = ReaderBoundaryScrollGeometry.boundaryState(
+			contentOffsetY: 434,
+			contentSizeHeight: 1_200,
+			boundsHeight: 800,
+			adjustedInsetTop: 24,
+			adjustedInsetBottom: 34,
+		)
+		#expect(atBottom == ReaderBoundaryNavigationState(isAtTop: false, isAtBottom: true))
+	}
+
+	@Test func nativeGeometryMarksShortContentAtBothBoundaries() {
+		let shortContent = ReaderBoundaryScrollGeometry.boundaryState(
+			contentOffsetY: -20,
+			contentSizeHeight: 300,
+			boundsHeight: 600,
+			adjustedInsetTop: 20,
+			adjustedInsetBottom: 34,
+		)
+		#expect(shortContent == ReaderBoundaryNavigationState(isAtTop: true, isAtBottom: true))
+	}
+
+	@Test func freshNativeSnapshotReplacesStaleSwiftUIBoundaryState() {
+		let staleSwiftUIState = ReaderBoundaryNavigationState(isAtTop: false, isAtBottom: true)
+		let freshNativeState = ReaderBoundaryScrollGeometry.boundaryState(
+			contentOffsetY: -20,
+			contentSizeHeight: 300,
+			boundsHeight: 600,
+			adjustedInsetTop: 20,
+			adjustedInsetBottom: 34,
+		)
+
+		#expect(staleSwiftUIState != freshNativeState)
+		#expect(ReaderBoundaryNavigation.pullDirection(
+			startedAt: freshNativeState,
+			velocityX: 0,
+			velocityY: 500,
+		) == .previous)
+	}
 }

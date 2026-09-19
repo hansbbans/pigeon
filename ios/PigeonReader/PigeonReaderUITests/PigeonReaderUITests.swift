@@ -61,11 +61,15 @@ final class PigeonReaderUITests: XCTestCase {
 		markRead.tap()
 		XCTAssertTrue(app.navigationBars["Today (1)"].waitForExistence(timeout: 5))
 
-		if app.buttons["Read actions"].exists == false {
-			app.buttons["OverflowBarButtonItem"].firstMatch.tap()
-		}
-		app.buttons["Read actions"].tap()
-		app.buttons["Mark All as Read"].tap()
+		let more = app.buttons["article-list-more"]
+		XCTAssertTrue(more.waitForExistence(timeout: 5))
+		more.tap()
+		let readActions = app.buttons["Read actions"]
+		XCTAssertTrue(readActions.waitForExistence(timeout: 5))
+		readActions.tap()
+		let markAll = app.buttons["Mark All as Read"]
+		XCTAssertTrue(markAll.waitForExistence(timeout: 5))
+		markAll.tap()
 		XCTAssertTrue(app.navigationBars["Today (0)"].waitForExistence(timeout: 5))
 		XCTAssertFalse(app.staticTexts["Loading stories"].exists)
 		attachScreenshot(named: "today-zero-unread-count")
@@ -103,11 +107,15 @@ final class PigeonReaderUITests: XCTestCase {
 		app.staticTexts["Design"].tap()
 		XCTAssertTrue(app.navigationBars["Design"].firstMatch.waitForExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
-		if app.buttons["Read actions"].exists == false {
-			app.buttons["OverflowBarButtonItem"].firstMatch.tap()
-		}
-		app.buttons["Read actions"].tap()
-		app.buttons["Mark All as Read"].tap()
+		let more = app.buttons["article-list-more"]
+		XCTAssertTrue(more.waitForExistence(timeout: 5))
+		more.tap()
+		let readActions = app.buttons["Read actions"]
+		XCTAssertTrue(readActions.waitForExistence(timeout: 5))
+		readActions.tap()
+		let markAll = app.buttons["Mark All as Read"]
+		XCTAssertTrue(markAll.waitForExistence(timeout: 5))
+		markAll.tap()
 
 		if firstFeed.exists == false, app.buttons["Show Sidebar"].exists {
 			app.buttons["Show Sidebar"].tap()
@@ -634,8 +642,8 @@ final class PigeonReaderUITests: XCTestCase {
 		try launchFeedList()
 		app.buttons["article-list-more"].tap()
 
-		XCTAssertTrue(app.buttons["Sort For You stories"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Display"].exists)
+		XCTAssertTrue(app.buttons["article-list-sort"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["article-list-density"].exists)
 		XCTAssertTrue(app.buttons["Read actions"].exists)
 		XCTAssertTrue(app.buttons["Refresh"].exists)
 		app.buttons["Settings"].tap()
@@ -786,6 +794,25 @@ final class PigeonReaderUITests: XCTestCase {
 
 		XCTAssertTrue(app.navigationBars["For You"].waitForExistence(timeout: 5))
 		XCTAssertFalse(reader.exists)
+	}
+
+	func testLongArticleMarksReadOnlyAfterScrollingWithAfterSixtyPercentSetting() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data", "-reader-show-article",
+			"-reader-reset-reader-state", "-reader-mark-read-on-scroll",
+		]
+		app.launch()
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		XCTAssertTrue(reader.waitForExistence(timeout: 5))
+		XCTAssertTrue(reader.staticTexts["The quiet craft of a good reading surface"].waitForExistence(timeout: 10))
+		XCTAssertTrue(app.buttons["Mark read"].exists, "Loading the top of a long article must not count as fully read")
+		let markedRead = app.buttons["Mark unread"]
+		for _ in 0..<3 where markedRead.exists == false {
+			reader.swipeUp()
+		}
+		XCTAssertTrue(markedRead.waitForExistence(timeout: 5), "Reading progress must continue after initial position restoration")
+		XCTAssertTrue(reader.staticTexts["Designing calmer tools for people who read every day"].exists)
 	}
 
 	func testShortArticleMarksReadAfterBodyLayoutWithAfterSixtyPercentSetting() throws {

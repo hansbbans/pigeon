@@ -117,26 +117,114 @@ struct ReaderListViewportControllerResizeTests {
 		#expect(position.articleID == fixture.articleID)
 		#expect(position.viewportOffset < 0)
 	}
+
+	@Test func shrinkingAVisibleAnchorKeepsItsFollowingContentInTheViewport() async throws {
+		let fixture = try ReaderListViewportResizeFixture(
+			initialRowHeight: 120,
+			initialContentOffsetY: 370,
+			includeFollowingContent: true,
+		)
+		defer { fixture.teardown() }
+		await fixture.settle()
+
+		guard let before = fixture.store.position(for: fixture.context) else {
+			Issue.record("The initial tall-row position was not captured")
+			return
+		}
+		#expect(before.viewportOffset == -70)
+
+		fixture.resize(width: 240, rowY: 300, rowHeight: 16, contentOffsetY: 370)
+		await fixture.settle()
+
+		#expect(abs(fixture.rowViewportOffset - (-15)) <= 0.5)
+		#expect(fixture.followingContentIsVisible)
+	}
+
+	@Test func densityReflowWaitsForTheAnchoredRowsOwnLayout() async throws {
+		let fixture = try ReaderListViewportResizeFixture()
+		defer { fixture.teardown() }
+		await fixture.settle()
+		let before = try #require(fixture.store.position(for: fixture.context))
+		var completed = false
+		fixture.controller.prepareForLayoutReflow { completed = true }
+
+		// A native list first revises its estimated content size and lays out
+		// other cells. Neither proves that the captured row has its final size.
+		let otherRow = UIView(frame: CGRect(x: 0, y: 900, width: 320, height: 40))
+		fixture.scrollView.addSubview(otherRow)
+		fixture.controller.register(otherRow, articleID: "another-story")
+		fixture.scrollView.contentSize.height = 1_800
+		fixture.controller.noteRowLayoutPass(otherRow)
+		fixture.controller.captureCurrentPosition()
+		#expect(completed == false)
+
+		fixture.row.frame = CGRect(x: 0, y: 220, width: 320, height: 40)
+		fixture.row.setNeedsLayout()
+		fixture.row.layoutIfNeeded()
+		await fixture.settle()
+		#expect(completed)
+		#expect(abs(fixture.rowViewportOffset - before.viewportOffset) <= 0.5)
+	}
+
+	@Test func densityReflowMeasuresTheRowAfterItsNativeContainerFinishesLayout() async throws {
+		let fixture = try ReaderListViewportResizeFixture()
+		defer { fixture.teardown() }
+		await fixture.settle()
+		let before = try #require(fixture.store.position(for: fixture.context))
+		fixture.controller.prepareForLayoutReflow()
+
+		// SwiftUI lays out the smaller row before UIKit applies its final cell
+		// position. Restoring from this intermediate frame would scroll too far.
+		fixture.row.frame.size.height = 40
+		fixture.row.setNeedsLayout()
+		fixture.row.layoutIfNeeded()
+		fixture.scrollView.pendingRowLayout = { fixture.row.frame.origin.y = 220 }
+		fixture.scrollView.setNeedsLayout()
+		fixture.controller.captureCurrentPosition()
+		fixture.scrollView.layoutIfNeeded()
+		await fixture.settle()
+
+		#expect(abs(fixture.rowViewportOffset - before.viewportOffset) <= 0.5)
+	}
+}
+
+@MainActor
+private final class DeferredRowLayoutScrollView: UIScrollView {
+	var pendingRowLayout: (() -> Void)?
+
+	override func layoutSubviews() {
+		super.layoutSubviews()
+		let layout = pendingRowLayout
+		pendingRowLayout = nil
+		layout?()
+	}
 }
 
 @MainActor
 private final class ReaderListViewportResizeFixture {
 	let window: UIWindow
 	let rootViewController: UIViewController
-	let scrollView: UIScrollView
+	let scrollView: DeferredRowLayoutScrollView
 	let row: ReaderListRowAnchor.AnchorView
+	let followingContent: UIView
 	let controller: ReaderListViewportController
 	let store: ReaderListPositionStore
 	let context = "resize-fixture"
 	let articleID = "story"
 
-	init(registerBeforeWrapperAttachment: Bool = false) throws {
+	init(
+		registerBeforeWrapperAttachment: Bool = false,
+		initialRowHeight: CGFloat = 80,
+		initialContentOffsetY: CGFloat = 330,
+		includeFollowingContent: Bool = false,
+	) throws {
 		let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
 		window = UIWindow(windowScene: scene)
 		window.frame = CGRect(x: 0, y: 0, width: 320, height: 520)
 		rootViewController = UIViewController()
-		scrollView = UIScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 520))
+		scrollView = DeferredRowLayoutScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 520))
 		row = ReaderListRowAnchor.AnchorView()
+		followingContent = UIView(frame: CGRect(x: 0, y: 300 + initialRowHeight, width: 320, height: 40))
 		controller = ReaderListViewportController()
 		store = ReaderListPositionStore()
 
@@ -150,16 +238,18 @@ private final class ReaderListViewportResizeFixture {
 
 		row.controller = controller
 		row.articleID = articleID
-		row.frame = CGRect(x: 0, y: 300, width: 320, height: 80)
+		row.frame = CGRect(x: 0, y: 300, width: 320, height: initialRowHeight)
 		if registerBeforeWrapperAttachment {
 			let hostingWrapper = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 2_000))
 			hostingWrapper.addSubview(row)
+			if includeFollowingContent { hostingWrapper.addSubview(followingContent) }
 			// Match SwiftUI's ordering: the representable registers while its
 			// hosting wrapper is detached, then that wrapper joins the List later.
 			controller.register(row, articleID: articleID)
 			scrollView.addSubview(hostingWrapper)
 		} else {
 			scrollView.addSubview(row)
+			if includeFollowingContent { scrollView.addSubview(followingContent) }
 			controller.register(row, articleID: articleID)
 		}
 		_ = controller.activate(
@@ -171,7 +261,7 @@ private final class ReaderListViewportResizeFixture {
 			onRestorationComplete: {},
 			onNavigationActivity: { _ in },
 		)
-		scrollView.contentOffset = CGPoint(x: 0, y: 330)
+		scrollView.contentOffset = CGPoint(x: 0, y: initialContentOffsetY)
 		rootViewController.view.layoutIfNeeded()
 	}
 
@@ -179,6 +269,13 @@ private final class ReaderListViewportResizeFixture {
 		let frame = row.convert(row.bounds, to: scrollView)
 		let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
 		return Double(frame.minY - top)
+	}
+
+	var followingContentIsVisible: Bool {
+		let frame = followingContent.convert(followingContent.bounds, to: scrollView)
+		let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+		let bottom = scrollView.contentOffset.y + scrollView.bounds.height - scrollView.adjustedContentInset.bottom
+		return frame.maxY > top && frame.minY < bottom
 	}
 
 	func resize(
@@ -192,6 +289,7 @@ private final class ReaderListViewportResizeFixture {
 		scrollView.frame.size = CGSize(width: width, height: height)
 		scrollView.contentSize = CGSize(width: width, height: contentHeight)
 		row.frame = CGRect(x: 0, y: rowY, width: width, height: rowHeight)
+		followingContent.frame = CGRect(x: 0, y: rowY + rowHeight, width: width, height: followingContent.bounds.height)
 		scrollView.contentOffset = CGPoint(x: 0, y: contentOffsetY)
 		rootViewController.view.setNeedsLayout()
 		rootViewController.view.layoutIfNeeded()

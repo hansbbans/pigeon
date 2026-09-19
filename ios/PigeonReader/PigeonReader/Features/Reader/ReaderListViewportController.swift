@@ -9,6 +9,7 @@ final class ReaderListViewportController {
 	private struct Row {
 		weak var view: UIView?
 		let articleID: String
+		var layoutPass: UInt = 0
 	}
 	private struct LayoutSnapshot {
 		let frames: [String: CGRect]
@@ -33,7 +34,7 @@ final class ReaderListViewportController {
 		let context: String
 		let position: ReaderListPosition
 		let baseline: LayoutSnapshot
-		let layoutPass: UInt
+		let anchorLayoutPass: UInt
 	}
 	private struct StableViewport {
 		let context: String
@@ -214,7 +215,7 @@ final class ReaderListViewportController {
 			context: context,
 			position: position,
 			baseline: baseline,
-			layoutPass: layoutPass,
+			anchorLayoutPass: latestRowLayoutPass(for: position.articleID),
 		)
 		reflowTimeout = Task { [weak self] in
 			do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
@@ -228,9 +229,14 @@ final class ReaderListViewportController {
 		update()
 	}
 
-	func noteRowLayoutPass() {
+	func noteRowLayoutPass(_ view: UIView) {
 		layoutPass &+= 1
+		rows[ObjectIdentifier(view)]?.layoutPass = layoutPass
 		scheduleUpdate()
+	}
+
+	private func latestRowLayoutPass(for articleID: String) -> UInt {
+		rows.values.filter { $0.articleID == articleID }.map(\.layoutPass).max() ?? 0
 	}
 
 	func deactivate() {
@@ -260,7 +266,10 @@ final class ReaderListViewportController {
 	}
 
 	func register(_ view: UIView, articleID: String) {
-		rows[ObjectIdentifier(view)] = Row(view: view, articleID: articleID)
+		let id = ObjectIdentifier(view)
+		if rows[id]?.articleID != articleID || rows[id]?.view !== view {
+			rows[id] = Row(view: view, articleID: articleID)
+		}
 		scheduleUpdate()
 		var ancestor = view.superview
 		while let candidate = ancestor {
@@ -306,6 +315,9 @@ final class ReaderListViewportController {
 	private func update() {
 		guard active, let scrollView, scrollView.window != nil,
 			let context, let store else { return }
+		// A row can finish its SwiftUI layout before its native cell moves to
+		// the new list position. Flush that pending layout before measuring it.
+		if pendingReflow != nil { scrollView.layoutIfNeeded() }
 		rows = rows.filter { $0.value.view != nil }
 		if let row = rows.values.first?.view { observeNavigationTransition(from: row) }
 		if scrollView.isDragging || scrollView.isDecelerating {
@@ -342,9 +354,12 @@ final class ReaderListViewportController {
 				self.pendingReflow = pendingReflow
 				return
 			}
-			if snapshot.changed(from: pendingReflow.baseline) || layoutPass != pendingReflow.layoutPass {
-				restore(pendingReflow.position, row: row, in: scrollView)
-				let restoredPosition = pendingReflow.position
+			// Native lists may move estimated cell frames before laying out their
+			// content. A different row's layout cannot confirm this anchor's new
+			// height; wait for the anchor itself before consuming the restoration.
+			if snapshot.changed(from: pendingReflow.baseline),
+				latestRowLayoutPass(for: target) > pendingReflow.anchorLayoutPass {
+				let restoredPosition = restore(pendingReflow.position, row: row, in: scrollView)
 				finishPendingReflow()
 				stableViewport = StableViewport(
 					context: context,
@@ -407,8 +422,7 @@ final class ReaderListViewportController {
 			}
 			if snapshot.changed(from: pendingViewportResize.baseline)
 				|| layoutPass != pendingViewportResize.layoutPass {
-				restore(pendingViewportResize.position, row: row, in: scrollView)
-				let restoredPosition = pendingViewportResize.position
+				let restoredPosition = restore(pendingViewportResize.position, row: row, in: scrollView)
 				finishPendingViewportResize()
 				stableViewport = StableViewport(
 					context: context,
@@ -428,7 +442,7 @@ final class ReaderListViewportController {
 
 		if coarseRestoreFinished, let restore = pendingRestore, let target = restore.target(in: articleIDs),
 			let row = measured.first(where: { $0.0 == target }) {
-			self.restore(restore, row: row, in: scrollView)
+			_ = self.restore(restore, row: row, in: scrollView)
 			finishRestoration()
 			scheduleUpdate()
 			return
@@ -470,13 +484,22 @@ final class ReaderListViewportController {
 		)
 	}
 
-	private func restore(_ position: ReaderListPosition, row: (String, CGRect), in scrollView: UIScrollView) {
-		let desiredOffset = row.1.minY - scrollView.adjustedContentInset.top - position.viewportOffset
+	private func restore(_ position: ReaderListPosition, row: (String, CGRect), in scrollView: UIScrollView) -> ReaderListPosition {
+		// Preserve the exact partial-row offset whenever possible. If a row shrinks
+		// below the old negative offset, leave one point visible so the anchor and
+		// the content immediately after it remain in the viewport.
+		let viewportOffset = max(position.viewportOffset, -Double(max(0, row.1.height - 1)))
+		let desiredOffset = row.1.minY - scrollView.adjustedContentInset.top - viewportOffset
 		let minimum = -scrollView.adjustedContentInset.top
 		let maximum = max(minimum, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
 		scrollView.setContentOffset(
 			CGPoint(x: scrollView.contentOffset.x, y: min(max(desiredOffset, minimum), maximum)),
 			animated: false,
+		)
+		return ReaderListPosition(
+			articleID: position.articleID,
+			viewportOffset: viewportOffset,
+			neighbors: position.neighbors,
 		)
 	}
 
@@ -603,7 +626,7 @@ struct ReaderListRowAnchor: UIViewRepresentable {
 		}
 		override func layoutSubviews() {
 			super.layoutSubviews()
-			controller?.noteRowLayoutPass()
+			controller?.noteRowLayoutPass(self)
 		}
 	}
 }

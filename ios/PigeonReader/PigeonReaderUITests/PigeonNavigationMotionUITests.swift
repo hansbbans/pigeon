@@ -166,6 +166,7 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 		app.buttons["Compact"].tap()
 		let staysVisible = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: story)
 		XCTAssertEqual(XCTWaiter.wait(for: [staysVisible], timeout: 5), .completed)
+		XCTAssertGreaterThanOrEqual(story.frame.minY, app.navigationBars["Feed 01.01"].frame.maxY - 1)
 		XCTAssertFalse(app.staticTexts["Motion story 1"].isHittable)
 	}
 
@@ -226,9 +227,18 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 		pane.swipeUp()
 		pane.swipeUp()
 		let stories = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Motion story "))
-		let surviving = stories.allElementsBoundByIndex.filter { element in
-			guard element.isHittable, let number = Int(element.label.replacingOccurrences(of: "Motion story ", with: "")) else { return false }
-			return number > 1 && number.isMultiple(of: 3) == false
+		let visibleTop = max(pane.frame.minY, app.navigationBars["Feed 01.01"].frame.maxY)
+		let surviving = stories.allElementsBoundByIndex.compactMap { element -> XCUIElement? in
+			let label = element.label
+			guard let number = Int(label.replacingOccurrences(of: "Motion story ", with: "")),
+				number > 1, number.isMultiple(of: 3) == false else { return nil }
+			// Resolve stable identity before checking visibility. UIKit can report
+			// a clipped title beneath the translucent bar as hittable; require its
+			// entire title to be inside the visible feed before testing continuity.
+			let story = app.staticTexts[label].firstMatch
+			guard story.isHittable, story.frame.minY >= visibleTop,
+				story.frame.maxY <= pane.frame.maxY else { return nil }
+			return story
 		}.sorted { $0.frame.minY < $1.frame.minY }
 		return try XCTUnwrap(surviving.first)
 	}

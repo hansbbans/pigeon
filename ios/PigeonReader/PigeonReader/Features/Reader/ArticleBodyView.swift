@@ -79,6 +79,7 @@ struct ArticleBodyView: View {
 		)
 
 		renderedContent(textScale: renderedTextScale)
+		.preference(key: ArticleBodyLayoutKey.self, value: bodyLayoutReady)
 		.sheet(item: $imageSelection) { selection in
 			ZoomableImageView(
 				url: selection.url,
@@ -227,7 +228,6 @@ struct ArticleBodyView: View {
 		}
 		.onPreferenceChange(ArticleColumnWidthKey.self) { columnWidth = $0 }
 		.onPreferenceChange(ArticleBodyFrameKey.self, perform: onBodyFrameChange)
-		.preference(key: ArticleBodyLayoutKey.self, value: bodyLayoutReady)
 	}
 
 	private var bodyLayoutReady: Bool {
@@ -374,11 +374,11 @@ private struct ArticleBodyFrameKey: PreferenceKey {
 	}
 }
 
-struct ArticleBodyLayoutKey: PreferenceKey {
+nonisolated struct ArticleBodyLayoutKey: PreferenceKey {
 	static let defaultValue = false
 
 	static func reduce(value: inout Bool, nextValue: () -> Bool) {
-		value = nextValue()
+		value = value || nextValue()
 	}
 }
 

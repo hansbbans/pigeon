@@ -172,11 +172,11 @@ struct ArticleListView: View {
 						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
 						await ReaderFeedThumbnailStore.shared.prefetch(articles: thumbnailRequest.articles, scope: scope)
 					}
-					.opacity(isPositionReady ? (isLayoutReflowing ? 0.92 : 1) : 0)
+					.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion)) { content in
+						content.opacity(isPositionReady ? (isLayoutReflowing ? 0.92 : 1) : 0)
+					}
 					.allowsHitTesting(isPositionReady && isLayoutReflowing == false)
 					.accessibilityHidden(isPositionReady == false || isLayoutReflowing)
-					.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: isPositionReady)
-					.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: isLayoutReflowing)
 					.onScrollPhaseChange { _, phase in
 						isScrolling = phase != .idle
 					}

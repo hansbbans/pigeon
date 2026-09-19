@@ -1,6 +1,31 @@
 import SwiftUI
 import UIKit
 
+/// Converts the attached scroll view's native geometry into the boundary
+/// snapshot used by the reader pull recognizer. `contentSize` excludes the
+/// adjusted insets, so the legal offset range starts at `-top` and ends at
+/// `contentSize + bottom - bounds`.
+nonisolated enum ReaderBoundaryScrollGeometry {
+	static func boundaryState(
+		contentOffsetY: Double,
+		contentSizeHeight: Double,
+		boundsHeight: Double,
+		adjustedInsetTop: Double,
+		adjustedInsetBottom: Double,
+		tolerance: Double = 2,
+	) -> ReaderBoundaryNavigationState {
+		let minimumOffset = -adjustedInsetTop
+		let maximumOffset = max(
+			minimumOffset,
+			contentSizeHeight + adjustedInsetBottom - boundsHeight,
+		)
+		return ReaderBoundaryNavigationState(
+			isAtTop: contentOffsetY <= minimumOffset + tolerance,
+			isAtBottom: contentOffsetY >= maximumOffset - tolerance,
+		)
+	}
+}
+
 /// Installs a simultaneous pan recognizer on the native scroll view that owns
 /// the reader content. Attaching to the scroll view keeps next/previous article
 /// swipes observable when a tall, non-scrolling WKWebView is under the user's
@@ -65,6 +90,15 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 	}
 
 	final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+		private final class BoundaryPanGestureRecognizer: UIPanGestureRecognizer {
+			var onReset: (() -> Void)?
+
+			override func reset() {
+				super.reset()
+				onReset?()
+			}
+		}
+
 		var boundaryState: () -> ReaderBoundaryNavigationState
 		var onPullBegan: (ReaderBoundaryNavigationState, ReaderBoundaryNavigationDirection) -> Void
 		var onPullChanged: (ReaderBoundaryNavigationState, ReaderBoundaryNavigationDirection, CGFloat, CGFloat) -> Void
@@ -72,14 +106,18 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 		var onPullCancelled: () -> Void
 		var onBackSwipe: (() -> Void)?
 		private weak var attachedScrollView: UIScrollView?
+		private var boundaryAtTouchDown: ReaderBoundaryNavigationState?
 		private var boundaryAtStart: ReaderBoundaryNavigationState?
 		private var directionAtStart: ReaderBoundaryNavigationDirection?
 		private var startX: CGFloat?
 
-		private lazy var panGesture: UIPanGestureRecognizer = {
-			let gesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+		private lazy var panGesture: BoundaryPanGestureRecognizer = {
+			let gesture = BoundaryPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
 			gesture.cancelsTouchesInView = false
 			gesture.delegate = self
+			gesture.onReset = { [weak self] in
+				self?.resetCapturedGestureState()
+			}
 			return gesture
 		}()
 
@@ -110,6 +148,11 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 		func detach() {
 			attachedScrollView?.removeGestureRecognizer(panGesture)
 			attachedScrollView = nil
+			resetCapturedGestureState()
+		}
+
+		private func resetCapturedGestureState() {
+			boundaryAtTouchDown = nil
 			boundaryAtStart = nil
 			directionAtStart = nil
 			startX = nil
@@ -127,7 +170,7 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 			switch gesture.state {
 			case .began:
 				guard let view = gesture.view else { return }
-				let startedAt = boundaryState()
+				let startedAt = boundaryAtTouchDown ?? currentBoundaryState(for: view as? UIScrollView)
 				boundaryAtStart = startedAt
 				if startX == nil {
 					let reference = gesture.view?.window ?? gesture.view
@@ -147,11 +190,7 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 				let translation = gesture.translation(in: view)
 				onPullChanged(boundaryAtStart, directionAtStart, translation.x, translation.y)
 			case .ended:
-				defer {
-					boundaryAtStart = nil
-					directionAtStart = nil
-					startX = nil
-				}
+				defer { resetCapturedGestureState() }
 				guard let view = gesture.view else { return }
 				let translation = gesture.translation(in: view)
 				if let startX, ReaderBoundaryNavigation.isBackToFeedSwipe(
@@ -168,17 +207,51 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 				if boundaryAtStart != nil, directionAtStart != nil {
 					onPullCancelled()
 				}
-				boundaryAtStart = nil
-				directionAtStart = nil
-				startX = nil
+				resetCapturedGestureState()
 			default:
 				break
 			}
 		}
 
+		private func currentBoundaryState(
+			for scrollView: UIScrollView? = nil,
+		) -> ReaderBoundaryNavigationState {
+			guard let scrollView = scrollView ?? attachedScrollView else {
+				return boundaryState()
+			}
+			return ReaderBoundaryScrollGeometry.boundaryState(
+				contentOffsetY: Double(scrollView.contentOffset.y),
+				contentSizeHeight: Double(scrollView.contentSize.height),
+				boundsHeight: Double(scrollView.bounds.height),
+				adjustedInsetTop: Double(scrollView.adjustedContentInset.top),
+				adjustedInsetBottom: Double(scrollView.adjustedContentInset.bottom),
+			)
+		}
+
+		func gestureRecognizer(
+			_ gestureRecognizer: UIGestureRecognizer,
+			shouldReceive touch: UITouch,
+		) -> Bool {
+			// Keep the first touch's geometry for this pan. The recognizer reset
+			// hook clears it before the next gesture, including taps that fail
+			// before the pan action receives a terminal state.
+			if boundaryAtTouchDown == nil {
+				boundaryAtTouchDown = currentBoundaryState(for: gestureRecognizer.view as? UIScrollView)
+			}
+			if startX == nil {
+				let reference = attachedScrollView?.window ?? touch.view
+				if let reference {
+					startX = touch.location(in: reference).x
+				}
+			}
+			return true
+		}
+
 		func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
 			guard let panGesture = gestureRecognizer as? UIPanGestureRecognizer,
 				let view = panGesture.view else {
+				boundaryAtTouchDown = nil
+				startX = nil
 				return false
 			}
 			let velocity = panGesture.velocity(in: view)
@@ -190,11 +263,16 @@ struct ReaderBoundarySwipeRecognizer: UIViewRepresentable {
 				) {
 				return true
 			}
-			return ReaderBoundaryNavigation.pullDirection(
-				startedAt: boundaryState(),
+			let shouldBegin = ReaderBoundaryNavigation.pullDirection(
+				startedAt: boundaryAtTouchDown ?? currentBoundaryState(for: view as? UIScrollView),
 				velocityX: Double(velocity.x),
 				velocityY: Double(velocity.y),
 			) != nil
+			if shouldBegin == false {
+				boundaryAtTouchDown = nil
+				startX = nil
+			}
+			return shouldBegin
 		}
 
 		func gestureRecognizer(

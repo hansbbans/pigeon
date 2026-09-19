@@ -147,21 +147,23 @@ struct ArticleReaderView: View {
 								return
 							}
 							let isBodyLaidOut = isArticleBodyLaidOut && isShowingArticleBody
-							if let pendingRestoredDepth, geometry.maximumOffset > 1,
-								pendingReaderAnchor == nil,
-								isScrollInteractionActive == false {
-								scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+							if let pendingRestoredDepth {
+								if geometry.maximumOffset > 1,
+									pendingReaderAnchor == nil,
+									isScrollInteractionActive == false {
+									scrollPosition.scrollTo(y: pendingRestoredDepth * geometry.maximumOffset)
+									self.pendingRestoredDepth = nil
+									return
+								}
+								guard ArticleReadingProgress.shouldConsumePendingRestoredDepth(
+									pendingDepth: pendingRestoredDepth,
+									maximumOffset: Double(geometry.maximumOffset),
+									isBodyLaidOut: isBodyLaidOut,
+								) else {
+									return
+								}
 								self.pendingRestoredDepth = nil
-								return
 							}
-							guard ArticleReadingProgress.shouldConsumePendingRestoredDepth(
-								pendingDepth: pendingRestoredDepth,
-								maximumOffset: Double(geometry.maximumOffset),
-								isBodyLaidOut: isBodyLaidOut,
-							) else {
-								return
-							}
-							self.pendingRestoredDepth = nil
 							let depth = ArticleReadingProgress.depth(
 								offset: Double(geometry.offset),
 								maximumOffset: Double(geometry.maximumOffset),
