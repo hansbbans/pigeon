@@ -7,6 +7,8 @@ nonisolated struct ReaderListUpdateBuffer {
 	private(set) var articles: [Recommendation] = []
 	private(set) var pendingArticles: [Recommendation]?
 	private var pendingMayReorder = false
+	private var initialLoadContext: String?
+	private var initialLoadID: UUID?
 
 	var hasPendingUpdate: Bool { pendingArticles != nil }
 	var needsAcceptance: Bool {
@@ -21,11 +23,43 @@ nonisolated struct ReaderListUpdateBuffer {
 		self.context == context ? articles : fallback
 	}
 
+	/// Marks the collection load that establishes the initial presentation.
+	/// A persisted cache may be a sparse, old subset of the live page; those
+	/// rows are hydration data, not stories that arrived while the reader was
+	/// open.
+	mutating func beginInitialLoad(context: String) -> UUID {
+		let loadID = UUID()
+		initialLoadContext = context
+		initialLoadID = loadID
+		pendingArticles = nil
+		pendingMayReorder = false
+		return loadID
+	}
+
+	/// Ends an initial load only when it is still the load that owns the buffer.
+	/// This prevents a cancelled request from clearing a newer request's phase.
+	mutating func finishInitialLoad(context: String, loadID: UUID) {
+		guard initialLoadContext == context, initialLoadID == loadID else { return }
+		let isCurrentContext = self.context == context
+		initialLoadContext = nil
+		initialLoadID = nil
+		if isCurrentContext {
+			pendingArticles = nil
+			pendingMayReorder = false
+		}
+	}
+
 	mutating func receive(_ latest: [Recommendation], context: String, holding: Bool, explicit: Bool = false,
 		knownArticles: [Recommendation] = [], acceptsReordering: Bool = false, manuallyChangedArticleID: String? = nil) {
 		let mayReorder = acceptsReordering || (pendingMayReorder && pendingArticles == latest)
 		guard self.context == context else {
 			self.context = context
+			articles = latest
+			pendingArticles = nil
+			pendingMayReorder = false
+			return
+		}
+		if initialLoadContext == context {
 			articles = latest
 			pendingArticles = nil
 			pendingMayReorder = false

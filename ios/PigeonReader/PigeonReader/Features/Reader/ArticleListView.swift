@@ -23,6 +23,7 @@ struct ArticleListView: View {
 	@State private var paginationMovement = 0
 	@State private var loadingState = ReaderCollectionLoadingState()
 	@State private var reloadGeneration = 0
+	@State private var initialLoadScope: String?
 	@State private var updateBuffer = ReaderListUpdateBuffer()
 	@State private var displayedMutationRevision: UInt64?
 	@State private var isScrolling = false
@@ -422,16 +423,43 @@ struct ArticleListView: View {
 
 	private func loadCollection() async {
 		guard model.selectedNavigationID == collection.id else { return }
-		let requestID = loadingState.begin(context: loadRequestKey)
+		let requestKey = loadRequestKey
+		let requestID = loadingState.begin(context: requestKey)
 		searchText = ""
 		searchPresentation = ReaderArticleSearchPresentation()
 		model.clearArticleSearch()
+		let context = listContext
+		let scope = "\(model.session?.storageIdentity ?? "none")|\(collection.id)"
+		let initialLoadID = initialLoadScope == scope
+			? nil
+			: updateBuffer.beginInitialLoad(context: context)
+		defer {
+			if let initialLoadID {
+				updateBuffer.finishInitialLoad(context: context, loadID: initialLoadID)
+			}
+		}
 		if reloadGeneration == 0 {
 			await model.loadForDisplay(collection: collection)
 		} else {
 			await model.load(collection: collection, force: true)
 		}
-		guard Task.isCancelled == false else { return }
+		guard Task.isCancelled == false,
+			model.selectedNavigationID == collection.id,
+			listContext == context,
+			loadRequestKey == requestKey else { return }
+		if initialLoadID != nil {
+			let request = currentSearchRequest
+			let current = request.isActive
+				? (searchPresentation.canDisplayResults(for: request) ? model.searchResults : [])
+				: model.articles(for: collection)
+			updateBuffer.receive(current, context: context, holding: false, explicit: true)
+		}
+		let initialLoadSucceeded = model.hasCachedCollection(collection)
+			&& model.hasFailedInitialLoad(for: collection) == false
+			&& model.isInitialLoadPending(for: collection) == false
+		if initialLoadID != nil, initialLoadSucceeded {
+			initialLoadScope = scope
+		}
 		loadingState.finish(requestID: requestID)
 	}
 

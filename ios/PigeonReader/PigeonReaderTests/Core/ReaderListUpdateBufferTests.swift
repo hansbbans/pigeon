@@ -19,6 +19,64 @@ struct ReaderListUpdateBufferTests {
 		#expect(buffer.hasPendingUpdate == false)
 	}
 
+	@Test func sparseCacheHydrationDoesNotAdvertiseExistingLiveStories() {
+		var buffer = ReaderListUpdateBuffer()
+		let cached = [story("august"), story("may"), story("march")]
+		let hydrated = [story("today"), story("september"), story("august"), story("may"), story("march")]
+		buffer.receive(cached, context: "feed", holding: false)
+		let loadID = buffer.beginInitialLoad(context: "feed")
+		buffer.receive(hydrated, context: "feed", holding: true)
+		#expect(buffer.articles == hydrated)
+		#expect(buffer.needsAcceptance == false)
+		#expect(buffer.newStoryCount == 0)
+		#expect(buffer.hasPendingUpdate == false)
+		buffer.finishInitialLoad(context: "feed", loadID: loadID)
+		#expect(buffer.articles == hydrated)
+		#expect(buffer.needsAcceptance == false)
+	}
+
+	@Test func cancelledHydrationCannotClearAnotherContextUpdate() {
+		var buffer = ReaderListUpdateBuffer()
+		buffer.receive([story("cached")], context: "feed-a", holding: false)
+		let loadID = buffer.beginInitialLoad(context: "feed-a")
+		buffer.receive([story("cached-b")], context: "feed-b", holding: false)
+		buffer.receive([story("new"), story("cached-b")], context: "feed-b", holding: false)
+		#expect(buffer.needsAcceptance)
+		buffer.finishInitialLoad(context: "feed-a", loadID: loadID)
+		#expect(buffer.needsAcceptance)
+		#expect(buffer.newStoryCount == 1)
+	}
+
+	@Test func staleHydrationCompletionCannotEndANewerLoad() {
+		var buffer = ReaderListUpdateBuffer()
+		buffer.receive([story("cached")], context: "feed", holding: false)
+		let firstLoadID = buffer.beginInitialLoad(context: "feed")
+		let secondLoadID = buffer.beginInitialLoad(context: "feed")
+		buffer.receive([story("today"), story("cached")], context: "feed", holding: true)
+		buffer.finishInitialLoad(context: "feed", loadID: firstLoadID)
+		buffer.receive([story("newer"), story("today"), story("cached")], context: "feed", holding: true)
+		#expect(buffer.articles.map(\.id) == ["newer", "today", "cached"])
+		#expect(buffer.hasPendingUpdate == false)
+		buffer.finishInitialLoad(context: "feed", loadID: secondLoadID)
+		buffer.receive([story("actual"), story("newer"), story("today"), story("cached")], context: "feed", holding: false)
+		#expect(buffer.needsAcceptance)
+		#expect(buffer.newStoryCount == 1)
+	}
+
+	@Test func acceptedStoriesStayAcknowledgedWhenTheSameSourceReplays() {
+		var buffer = ReaderListUpdateBuffer()
+		let original = [story("a"), story("b")]
+		let updated = [story("new"), story("a"), story("b")]
+		buffer.receive(original, context: "feed", holding: false)
+		buffer.receive(updated, context: "feed", holding: false)
+		#expect(buffer.needsAcceptance)
+		buffer.acceptPending()
+		buffer.receive(updated, context: "feed", holding: false)
+		#expect(buffer.articles == updated)
+		#expect(buffer.hasPendingUpdate == false)
+		#expect(buffer.needsAcceptance == false)
+	}
+
 	@Test func paginationAndRemovalsWaitForIdleButDoNotNeedANewStoriesPrompt() {
 		var buffer = ReaderListUpdateBuffer()
 		buffer.receive([story("a"), story("b")], context: "feed", holding: false)
