@@ -1,0 +1,15 @@
+name = "pigeon-recommendations"
+main = "src/recommendation-worker.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+workers_dev = false
+preview_urls = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pigeon-db"
+database_id = "65ec27b1-54fa-4c5f-ba3c-577ea5e334ad"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RecommendationEngine"]

@@ -4,7 +4,9 @@ import { test } from 'node:test';
 
 import { generateApiToken } from '../src/api-auth';
 import { handleGreaderRequest } from '../src/greader';
+import { ensureDatabaseSchema } from '../src/migrations';
 import { handleNativeApiRequest } from '../src/native-api';
+import { handleRecommendations } from '../src/recommendations';
 
 const PASSWORD = 'secret-password';
 const BASE_URL = 'https://pigeon.example';
@@ -86,7 +88,10 @@ class SqliteD1Database {
 	}
 }
 
-function createFixture(items: FixtureItem[], options: { failEngagementWrites?: boolean } = {}) {
+function createFixture(items: FixtureItem[], options: {
+	failEngagementWrites?: boolean;
+	failRecommendationRequests?: boolean;
+} = {}) {
 	const db = new DatabaseSync(':memory:');
 	db.exec(`
 		PRAGMA foreign_keys = ON;
@@ -165,7 +170,33 @@ function createFixture(items: FixtureItem[], options: { failEngagementWrites?: b
 		BASE_URL,
 		DB: database,
 	};
-	return { db, database, env: env as never };
+	const recommendationLog = {
+		calls: 0,
+		names: [] as string[],
+		urls: [] as string[],
+		authorization: [] as (string | null)[],
+		cookies: [] as (string | null)[],
+	};
+	const recommendationStub = {
+		fetch: async (request: Request): Promise<Response> => {
+			recommendationLog.calls += 1;
+			recommendationLog.urls.push(request.url);
+			recommendationLog.authorization.push(request.headers.get('authorization'));
+			recommendationLog.cookies.push(request.headers.get('cookie'));
+			if (options.failRecommendationRequests) {
+				throw new Error('simulated recommendation service failure');
+			}
+			await ensureDatabaseSchema(env as never);
+			return handleRecommendations(request, env as never);
+		},
+	};
+	(env as { RECOMMENDATIONS: { getByName(name: string): typeof recommendationStub } }).RECOMMENDATIONS = {
+		getByName(name: string) {
+			recommendationLog.names.push(name);
+			return recommendationStub;
+		},
+	};
+	return { db, database, env: env as never, recommendationLog };
 }
 
 async function authorization(): Promise<string> {
@@ -201,6 +232,70 @@ async function greaderRequest(
 		env,
 	);
 }
+
+test('recommendations authenticate before the Durable Object proxy and preserve the original query', async () => {
+	const { env, recommendationLog } = createFixture([
+		{
+			id: 'item-1',
+			feedKey: 'daily-feed',
+			title: 'Daily story',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+
+	const unauthorized = await handleNativeApiRequest(
+		new Request(`${BASE_URL}/api/v1/recommendations?view=unread&limit=1`),
+		env,
+	);
+	assert.equal(unauthorized.status, 401);
+	assert.equal(recommendationLog.calls, 0);
+
+	const wrongMethod = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1', { method: 'POST' });
+	assert.equal(wrongMethod.status, 404);
+	assert.equal(recommendationLog.calls, 0);
+
+	const wrongPath = await nativeRequest(env, '/api/v1/recommendations/extra?view=unread&limit=1');
+	assert.equal(wrongPath.status, 404);
+	assert.equal(recommendationLog.calls, 0);
+
+	const forwarded = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1', {
+		headers: { Cookie: 'session=caller-only' },
+	});
+	assert.equal(forwarded.status, 200);
+	assert.equal(recommendationLog.calls, 1);
+	assert.deepEqual(recommendationLog.names, ['default']);
+	assert.equal(recommendationLog.urls[0], `${BASE_URL}/api/v1/recommendations?view=unread&limit=1`);
+	assert.deepEqual(recommendationLog.authorization, [null]);
+	assert.deepEqual(recommendationLog.cookies, [null]);
+});
+
+test('recommendation proxy fails closed when the helper Durable Object is unavailable', async () => {
+	const failed = createFixture(
+		[
+			{
+				id: 'item-1',
+				feedKey: 'daily-feed',
+				title: 'Daily story',
+				receivedAt: '2026-08-09T11:00:00.000Z',
+			},
+		],
+		{ failRecommendationRequests: true },
+	);
+	const helperFailure = await nativeRequest(failed.env, '/api/v1/recommendations?limit=1');
+	assert.equal(helperFailure.status, 503);
+
+	const missingBinding = createFixture([
+		{
+			id: 'item-2',
+			feedKey: 'daily-feed',
+			title: 'Another story',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+	delete (missingBinding.env as { RECOMMENDATIONS?: unknown }).RECOMMENDATIONS;
+	const missing = await nativeRequest(missingBinding.env, '/api/v1/recommendations?limit=1');
+	assert.equal(missing.status, 503);
+});
 
 test('native engagement is authenticated, validated, migrated, and idempotent', async () => {
 	const { db, env } = createFixture([
@@ -798,8 +893,7 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	const boundedExcerptSelects = itemSelects.filter(
 		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
 	);
-	assert.equal(boundedExcerptSelects.length, 1);
-	assert.match(boundedExcerptSelects[0].sql, /1, 32000/);
+	assert.equal(boundedExcerptSelects.length, 0);
 
 	const engagementSelects = database.executedSql.filter(
 		(entry) => entry.sql.includes('FROM engagement_events') && entry.sql.includes('GROUP BY'),
@@ -808,6 +902,37 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	assert.match(engagementSelects[0].sql, /feed_key IN \(/i);
 	assert.ok(engagementSelects[0].values.every((value) => value === 'saved-feed' || value === 'other-feed'));
 	assert.equal(new Set(engagementSelects[0].values).size, 2);
+});
+
+test('non-For You topic excerpts follow the final timestamp and id order on ties', async () => {
+	const { env } = createFixture([
+		{
+			id: 'z-item',
+			feedKey: 'daily-feed',
+			title: 'A general report',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+		{
+			id: 'a-item',
+			feedKey: 'daily-feed',
+			title: 'Another general report',
+			htmlContent: '<p>Detailed notes about home gyms.</p>',
+			textContent: null,
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+	const save = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
+	});
+	assert.equal(save.status, 200);
+
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1');
+	assert.equal(response.status, 200);
+	const payload = await response.json() as { items: Array<{ id: string; matchedTopics: string[] }> };
+	assert.equal(payload.items[0]?.id, 'a-item');
+	assert.deepEqual(payload.items[0]?.matchedTopics, ['home gyms']);
 });
 
 test('personalization history is transparent, individually deletable, exportable, and resettable', async () => {
@@ -854,7 +979,7 @@ test('personalization history is transparent, individually deletable, exportable
 });
 
 test('recommendations match monitored topics in bounded HTML when text content is absent', async () => {
-	const { db, env } = createFixture([
+	const { db, database, env } = createFixture([
 		{
 			id: 'rss-body',
 			feedKey: 'rss-source',
@@ -878,6 +1003,7 @@ test('recommendations match monitored topics in bounded HTML when text content i
 		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
 	});
 	assert.equal(save.status, 200);
+	database.clearExecutedSql();
 
 	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
 	assert.equal(response.status, 200);
@@ -891,4 +1017,9 @@ test('recommendations match monitored topics in bounded HTML when text content i
 		(db.prepare("SELECT text_content FROM items WHERE id = 'rss-body'").get() as { text_content: string | null }).text_content,
 		null,
 	);
+	const boundedExcerptSelect = database.executedSql.find(
+		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
+	);
+	assert.ok(boundedExcerptSelect);
+	assert.match(boundedExcerptSelect.sql, /1, 8000/);
 });

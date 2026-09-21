@@ -2,6 +2,7 @@ import { scoreRecommendation, type ScoringEventType, type SignalSummary } from '
 import {
 	buildTopicProfile,
 	extractTopicFeatures,
+	MAX_TOPIC_EXCERPT_CHARS,
 	scoreTopics,
 	type TopicLearningEvent,
 } from './topic-matching';
@@ -9,7 +10,6 @@ import { loadMonitoredTopics } from './topic-preferences';
 import {
 	htmlToBoundedText,
 	MAX_RSS_TEXT_CONTENT_SIZE,
-	MAX_RSS_TEXT_SOURCE_SIZE,
 } from './rss-fetcher';
 import type { Env } from './types';
 
@@ -63,6 +63,10 @@ const PER_FEED_CANDIDATE_LIMIT = 25;
 const MAX_FEED_SLICES = 40;
 const MAX_SIGNAL_HISTORY_ROWS = 2_000;
 const MAX_TOPIC_HISTORY_ROWS = 600;
+// Topic matching only consumes the first MAX_TOPIC_EXCERPT_CHARS of text. Keep
+// enough source for markup-heavy entries to reach that excerpt without parsing
+// an entire article for every candidate in a recommendation request.
+const MAX_TOPIC_HTML_SOURCE_SIZE = MAX_TOPIC_EXCERPT_CHARS * 4;
 const MAX_IN_QUERY_BIND_PARAMS = 100;
 const TOPIC_LEARNING_EVENT_TYPES = ['more_like_this', 'star', 'not_interested', 'unstar', 'outbound_link'] as const;
 
@@ -77,6 +81,14 @@ interface RankedRecommendation {
 	explanation: string;
 	matchedTopics?: string[];
 	topicStrength?: number;
+}
+
+function compareCandidateRecency(left: RecommendationCandidate, right: RecommendationCandidate): number {
+	return right.received_at.localeCompare(left.received_at) || left.id.localeCompare(right.id);
+}
+
+function compareRankedRecency(left: RankedRecommendation, right: RankedRecommendation): number {
+	return right.receivedAt.localeCompare(left.receivedAt) || left.id.localeCompare(right.id);
 }
 
 function hasStrongTopicMatch(candidate: RankedRecommendation): boolean {
@@ -97,14 +109,11 @@ export function selectDiverseRecommendations<T extends RankedRecommendation>(
 	const feedCounts = new Map<string, number>();
 	const target = exploration ? limit - 1 : limit;
 	const remaining = ranked.filter((candidate) => candidate.id !== exploration?.id);
-	const similarityCache = new Map<string, number>();
 	const titleFeatures = new Map<string, Set<string>>(
 		remaining.map((candidate) => [candidate.id, extractTopicFeatures({ title: candidate.title })]),
 	);
+	const utilityById = new Map<string, number>(remaining.map((candidate) => [candidate.id, candidate.score]));
 	const similarityBetween = (left: T, right: T): number => {
-		const key = left.id < right.id ? `${left.id}\u0000${right.id}` : `${right.id}\u0000${left.id}`;
-		const cached = similarityCache.get(key);
-		if (cached !== undefined) return cached;
 		const leftFeatures = titleFeatures.get(left.id) ?? new Set<string>();
 		const rightFeatures = titleFeatures.get(right.id) ?? new Set<string>();
 		let intersection = 0;
@@ -112,7 +121,6 @@ export function selectDiverseRecommendations<T extends RankedRecommendation>(
 		const similarity = leftFeatures.size === 0 || rightFeatures.size === 0
 			? 0
 			: intersection / (leftFeatures.size + rightFeatures.size - intersection);
-		similarityCache.set(key, similarity);
 		return similarity;
 	};
 
@@ -130,10 +138,7 @@ export function selectDiverseRecommendations<T extends RankedRecommendation>(
 			const strongTopic = hasStrongTopicMatch(candidate);
 			if (feedCount >= perFeedLimit && !strongTopic && alternativeAvailable) continue;
 
-			let utility = candidate.score;
-			for (const prior of selected) {
-				utility -= similarityBetween(candidate, prior) * 10;
-			}
+			let utility = utilityById.get(candidate.id) ?? candidate.score;
 			if (previous?.feedKey === candidate.feedKey && alternativeAvailable && !strongTopic) {
 				utility -= 5;
 			}
@@ -147,6 +152,12 @@ export function selectDiverseRecommendations<T extends RankedRecommendation>(
 		const [chosen] = remaining.splice(bestIndex, 1);
 		selected.push(chosen);
 		feedCounts.set(chosen.feedKey, (feedCounts.get(chosen.feedKey) ?? 0) + 1);
+		if (selected.length < target) {
+			for (const candidate of remaining) {
+				const utility = utilityById.get(candidate.id) ?? candidate.score;
+				utilityById.set(candidate.id, utility - similarityBetween(candidate, chosen) * 10);
+			}
+		}
 	}
 
 	// A soft cap is preferable to returning too few stories when one publisher
@@ -313,8 +324,8 @@ async function loadTopicProfile(env: Env, now: string) {
 			SELECT e.item_id, e.event_type, e.occurred_at,
 			       i.subject AS title,
 			       CASE WHEN NULLIF(TRIM(i.text_content), '') IS NULL
-			            THEN substr(COALESCE(i.html_content, ''), 1, ${MAX_RSS_TEXT_SOURCE_SIZE})
-			            ELSE substr(i.text_content, 1, ${MAX_RSS_TEXT_CONTENT_SIZE})
+			            THEN substr(COALESCE(i.html_content, ''), 1, ${MAX_TOPIC_HTML_SOURCE_SIZE})
+			            ELSE substr(i.text_content, 1, ${MAX_TOPIC_EXCERPT_CHARS})
 			       END AS text_source,
 			       CASE WHEN NULLIF(TRIM(i.text_content), '') IS NULL THEN 1 ELSE 0 END AS text_source_is_html
 		  FROM recent_topic_events e
@@ -352,8 +363,8 @@ async function loadCandidateExcerpts(env: Env, itemIds: string[]): Promise<Map<s
 			return env.DB.prepare(
 				`SELECT id,
 				        CASE WHEN NULLIF(TRIM(text_content), '') IS NULL
-				             THEN substr(COALESCE(html_content, ''), 1, ${MAX_RSS_TEXT_SOURCE_SIZE})
-				             ELSE substr(text_content, 1, ${MAX_RSS_TEXT_CONTENT_SIZE})
+				             THEN substr(COALESCE(html_content, ''), 1, ${MAX_TOPIC_HTML_SOURCE_SIZE})
+				             ELSE substr(text_content, 1, ${MAX_TOPIC_EXCERPT_CHARS})
 				        END AS text_source,
 				        CASE WHEN NULLIF(TRIM(text_content), '') IS NULL THEN 1 ELSE 0 END AS text_source_is_html
 				   FROM items
@@ -483,12 +494,18 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		return Response.json({ generatedAt: now, view, items: [] });
 	}
 
-	const [signalSummary, topicProfile, monitoredTopics, excerptsById] = await Promise.all([
+	const [signalSummary, topicProfile, monitoredTopics] = await Promise.all([
 		loadSignalsForFeeds(env, candidates.map((candidate) => candidate.feed_key)),
 		loadTopicProfile(env, now),
 		loadMonitoredTopics(env),
-		loadCandidateExcerpts(env, candidates.map((candidate) => candidate.id)),
 	]);
+	const hasTopicSignals = monitoredTopics.length > 0 || topicProfile.entries.size > 0;
+	const topicItemIds = !hasTopicSignals
+		? []
+		: view === 'for-you'
+			? candidates.map((candidate) => candidate.id)
+			: candidates.slice().sort(compareCandidateRecency).slice(0, limit).map((candidate) => candidate.id);
+	const excerptsById = await loadCandidateExcerpts(env, topicItemIds);
 	const { feedSignals, itemSignals } = signalSummary;
 	const ranked = candidates.map((candidate) => {
 		const candidateFeedSignals = feedSignals.get(candidate.feed_key) ?? {};
@@ -539,7 +556,7 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		if (view === 'for-you' && right.score !== left.score) {
 			return right.score - left.score;
 		}
-		return right.receivedAt.localeCompare(left.receivedAt) || left.id.localeCompare(right.id);
+		return compareRankedRecency(left, right);
 	});
 
 	const selected = view === 'for-you'
