@@ -26,6 +26,15 @@ export interface ScoringInput {
 	sampleCount: number;
 	feedSignals: SignalSummary;
 	itemSignals: SignalSummary;
+	topic?: TopicScoreInput;
+}
+
+export interface TopicScoreInput {
+	monitoredMatches?: readonly string[];
+	learnedMatches?: readonly string[];
+	learnedNegativeMatches?: readonly string[];
+	monitoredBoost?: number;
+	learnedBoost?: number;
 }
 
 export interface ScoreResult {
@@ -56,7 +65,10 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 function totalSignalWeight(signals: SignalSummary): number {
 	const transitionWeight = (Object.entries(SIGNAL_WEIGHTS) as Array<[ScoringEventType, number]>).reduce(
-		(total, [eventType, weight]) => total + (signals[eventType] ?? 0) * weight,
+		(total, [eventType, weight]) => {
+			const count = Math.min(Math.max(Number(signals[eventType]) || 0, 0), eventType === 'bulk_mark_all_read' ? 0 : 1);
+			return total + count * weight;
+		},
 		0,
 	);
 	const activeReadingSeconds = signals.activeReadingSeconds ?? (signals.active_reading ?? 0) * 30;
@@ -82,12 +94,16 @@ function hasSignal(signals: SignalSummary, eventType: ScoringEventType): boolean
 
 function buildExplanation(
 	input: ScoringInput,
-	feedAffinity: number,
+	sourceAffinity: number,
 	itemAffinity: number,
 	freshness: number,
 ): string {
 	if (hasSignal(input.itemSignals, 'not_interested')) {
 		return 'You marked this story as not interested.';
+	}
+	const monitoredMatches = input.topic?.monitoredMatches ?? [];
+	if (monitoredMatches.length > 0) {
+		return `Matches your monitored topic${monitoredMatches.length === 1 ? '' : 's'}: ${monitoredMatches.join(', ')}.`;
 	}
 	if (hasSignal(input.itemSignals, 'more_like_this')) {
 		return 'You asked for more stories like this.';
@@ -101,6 +117,14 @@ function buildExplanation(
 	if (hasSignal(input.itemSignals, 'star')) {
 		return 'You starred this story.';
 	}
+	const learnedMatches = input.topic?.learnedMatches ?? [];
+	if (learnedMatches.length > 0) {
+		return `Matches topics you have engaged with: ${learnedMatches.join(', ')}.`;
+	}
+	const learnedNegativeMatches = input.topic?.learnedNegativeMatches ?? [];
+	if (learnedNegativeMatches.length > 0) {
+		return `A weaker match for topics you have marked down: ${learnedNegativeMatches.join(', ')}.`;
+	}
 	if (hasSignal(input.feedSignals, 'not_interested')) {
 		return 'You marked other stories from this source as not interested.';
 	}
@@ -113,10 +137,10 @@ function buildExplanation(
 	if (hasSignal(input.feedSignals, 'active_reading')) {
 		return 'You tend to spend time reading stories from this source.';
 	}
-	if (feedAffinity > 4) {
+	if (sourceAffinity > 1.5) {
 		return 'This source matches what you have been reading and saving.';
 	}
-	if (feedAffinity < -4) {
+	if (sourceAffinity < -1.5) {
 		return 'Your recent feedback makes this source a weaker match.';
 	}
 	if (freshness > 24) {
@@ -143,11 +167,19 @@ function learningState(sampleCount: number): string {
  * deterministic, and easy to explain; this is not an external AI service.
  */
 export function scoreRecommendation(input: ScoringInput): ScoreResult {
-	const feedAffinity = clamp(totalSignalWeight(input.feedSignals) * 1.5, -25, 25);
-	const itemAffinity = clamp(totalSignalWeight(input.itemSignals) * 1.5, -55, 35);
+	// Source history is deliberately a small tie-breaker. It should never
+	// overpower a relevant topic from another publisher.
+	const sourceAffinity = clamp(totalSignalWeight(input.feedSignals) * 0.25, -3, 3);
+	const itemAffinity = clamp(totalSignalWeight(input.itemSignals) * 0.75, -24, 18);
 	const freshness = recencyScore(input.receivedAt, input.now);
 	const starBoost = input.isStarred ? 15 : 0;
-	const score = Math.round(clamp(15 + freshness + feedAffinity + itemAffinity + starBoost, 0, 100));
+	const monitoredBoost = clamp(Number(input.topic?.monitoredBoost) || 0, 0, 45);
+	const learnedBoost = clamp(Number(input.topic?.learnedBoost) || 0, -32, 40);
+	const score = Math.round(clamp(
+		15 + freshness + sourceAffinity + itemAffinity + monitoredBoost + learnedBoost + starBoost,
+		0,
+		100,
+	));
 	const sampleCount = Math.max(0, Math.floor(input.sampleCount));
 	const confidence = clamp(1 - Math.exp(-sampleCount / 6), 0, 1);
 
@@ -155,7 +187,7 @@ export function scoreRecommendation(input: ScoringInput): ScoreResult {
 		score,
 		confidence,
 		sampleCount,
-		explanation: buildExplanation(input, feedAffinity, itemAffinity, freshness),
+		explanation: buildExplanation(input, sourceAffinity, itemAffinity, freshness),
 		learningState: learningState(sampleCount),
 	};
 }

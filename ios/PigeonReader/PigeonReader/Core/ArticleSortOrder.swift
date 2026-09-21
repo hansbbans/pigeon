@@ -1,6 +1,7 @@
 import Foundation
 
 enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
+	case recommended
 	case newest
 	case oldest
 	case score
@@ -9,6 +10,7 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 
 	var title: String {
 		switch self {
+		case .recommended: "Recommended"
 		case .newest: "Newest to Oldest"
 		case .oldest: "Oldest to Newest"
 		case .score: "Score"
@@ -17,6 +19,7 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 
 	var systemImage: String {
 		switch self {
+		case .recommended: "sparkles"
 		case .newest: "calendar.badge.clock"
 		case .oldest: "calendar"
 		case .score: "chart.bar.fill"
@@ -24,11 +27,14 @@ enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 	}
 
 	static func defaultOrder(for section: ReaderSection) -> Self {
-		section == .forYou ? .score : .newest
+		section == .forYou ? .recommended : .newest
 	}
 
 	func sorted(_ articles: [Recommendation]) -> [Recommendation] {
-		articles.sorted { left, right in
+		guard self != .recommended else {
+			return articles
+		}
+		return articles.sorted { left, right in
 			if self == .score, left.score != right.score {
 				return left.score > right.score
 			}

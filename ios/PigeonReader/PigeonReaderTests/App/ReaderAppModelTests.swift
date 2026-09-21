@@ -4021,6 +4021,83 @@ struct ReaderAppModelTests {
 		#expect(model.articles(for: .forYou).map(\.id) == ["newer"])
 	}
 
+	@Test func savingTopicsRefreshesForYouWithoutChangingTheCurrentSelection() async throws {
+		let client = TopicMutationHTTPClient(snapshotData: try personalizationData(topics: ["Swift UI"]))
+		let model = try makeModel(httpClient: client)
+		model.setNavigation(try makeNavigationState(unreadCount: 1))
+		model.select(section: .unread)
+
+		let saved = await model.saveMonitoredTopics(["  Swift  UI "])
+
+		#expect(saved)
+		#expect(model.personalization?.monitoredTopics == ["Swift UI"])
+		#expect(model.selectedNavigationID == ReaderSection.unread.rawValue)
+		#expect(await client.paths() == ["/api/v1/personalization", "/api/v1/recommendations"])
+	}
+
+	@Test func failedTopicSaveKeepsTheExistingModelStateAndShowsAnError() async throws {
+		let client = TopicMutationHTTPClient(
+			snapshotData: try personalizationData(topics: ["Swift UI"]),
+			updateStatusCode: 503,
+		)
+		let model = try makeModel(httpClient: client)
+
+		#expect(await model.saveMonitoredTopics(["Swift UI"]) == false)
+		#expect(model.personalization == nil)
+		#expect(model.personalizationErrorMessage != nil)
+		#expect(await client.paths() == ["/api/v1/personalization"])
+	}
+
+	@Test func resettingPersonalizationClearsTopicsAndRefreshesForYou() async throws {
+		let client = TopicMutationHTTPClient(
+			snapshotData: try personalizationData(topics: ["Swift UI"]),
+			resetSnapshotData: try personalizationData(topics: []),
+		)
+		let model = try makeModel(httpClient: client)
+
+		#expect(await model.resetPersonalization())
+		#expect(model.personalization?.monitoredTopics.isEmpty == true)
+		#expect(await client.paths() == [
+			"/api/v1/personalization",
+			"/api/v1/personalization",
+			"/api/v1/recommendations",
+		])
+	}
+
+	@Test func stalePersonalizationLoadCannotOverwriteACompletedTopicSave() async throws {
+		let client = ControlledHTTPClient()
+		let model = try makeModel(httpClient: client)
+
+		let load = Task { await model.loadPersonalization() }
+		let staleGet = await client.nextRequest()
+		let save = Task { await model.saveMonitoredTopics(["Swift UI"]) }
+		let put = await client.nextRequest()
+		await client.resolve(put, data: try personalizationData(topics: ["Swift UI"]))
+		let refresh = await client.nextRequest()
+		#expect(refresh.request.url?.path == "/api/v1/recommendations")
+		await client.resolve(refresh, data: try responseData(items: []))
+		#expect(await save.value)
+
+		await client.resolve(staleGet, data: try personalizationData(topics: ["Old Topic"]))
+		await load.value
+
+		#expect(model.personalization?.monitoredTopics == ["Swift UI"])
+	}
+
+	@Test func personalizationLoadIsIgnoredAfterTheAccountIsDisconnected() async throws {
+		let client = ControlledHTTPClient()
+		let model = try makeModel(httpClient: client)
+
+		let load = Task { await model.loadPersonalization() }
+		let request = await client.nextRequest()
+		model.disconnect()
+		await client.resolve(request, data: try personalizationData(topics: ["Old Topic"]))
+		await load.value
+
+		#expect(model.personalization == nil)
+		#expect(model.personalizationErrorMessage == nil)
+	}
+
 	@Test(arguments: ReaderSection.allCases)
 	func everySectionSortsByNewestOrScoreWithoutLosingSelection(section: ReaderSection) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
@@ -4045,12 +4122,70 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == newerHighScore.id)
 	}
 
+	@Test func recommendedKeepsServerOrderAfterExplicitSortToggles() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let serverFirst = makeArticle(id: "server-first", receivedAt: 1, score: 10)
+		let serverSecond = makeArticle(id: "server-second", receivedAt: 2, score: 90)
+
+		model.setArticles([serverFirst, serverSecond], for: collection)
+		#expect(model.sortOrder(for: collection) == .recommended)
+		#expect(model.allArticles(for: collection).map(\.id) == [serverFirst.id, serverSecond.id])
+
+		model.setSortOrder(.score, for: collection)
+		#expect(model.allArticles(for: collection).map(\.id) == [serverSecond.id, serverFirst.id])
+
+		model.setSortOrder(.recommended, for: collection)
+		#expect(model.allArticles(for: collection).map(\.id) == [serverFirst.id, serverSecond.id])
+	}
+
 	@Test func sortDefaultsPreserveExistingServerOrdering() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 
-		#expect(model.sortOrder(for: .forYou) == .score)
+		#expect(model.sortOrder(for: .forYou) == .recommended)
 		#expect(model.sortOrder(for: .unread) == .newest)
 		#expect(model.sortOrder(for: .starred) == .newest)
+	}
+
+	@Test func cachedForYouRestorationUsesTheSavedCanonicalServerOrder() async throws {
+		let session = try makeSession(token: "cached-recommendations-token")
+		let store = OfflineLibraryStore.inMemory()
+		let first = makeArticle(id: "server-first")
+		let second = makeArticle(id: "server-second")
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 2)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[first, second],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		try await store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: ReaderSection.forYou.rawValue,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [:],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .content,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+				canonicalArticleOrder: [ReaderSection.forYou.rawValue: [second.id, first.id]],
+			),
+			accountID: session.storageIdentity,
+		)
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			session: session,
+			offlineStore: store,
+		)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.sortOrder(for: .forYou) == .recommended)
+		#expect(model.articles(for: .forYou).map(\.id) == [second.id, first.id])
 	}
 
 	@Test(arguments: [ReaderNavigationKind.smart, ReaderNavigationKind.folder, ReaderNavigationKind.feed])
@@ -5795,6 +5930,7 @@ struct ReaderAppModelTests {
 		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
 		model.setNavigation(ReaderNavigationState(items: [collection]))
 		model.select(item: collection)
+		model.setSortOrder(.newest, for: collection)
 		let above = makeArticle(id: "above", receivedAt: 1_786_272_200)
 		let boundary = makeArticle(id: "boundary", receivedAt: 1_786_272_100)
 		model.setArticles([boundary, above], for: collection)
@@ -5814,6 +5950,38 @@ struct ReaderAppModelTests {
 		#expect(model.selectedArticleID == boundary.id)
 		#expect(model.selectedArticle?.id == boundary.id)
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+	}
+
+	@Test func filteredBulkReadUsesRecommendedServerOrderForDisplayedBoundary() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(
+			httpClient: MockHTTPClient(statusCode: 500),
+			offlineStore: store,
+		)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.select(item: collection)
+
+		// Recommended preserves the server's order even when recency and score
+		// would put the boundary story first under an explicit local sort.
+		let above = makeArticle(id: "recommended-above", receivedAt: 1_786_272_100, score: 10)
+		let boundary = makeArticle(id: "recommended-boundary", receivedAt: 1_786_272_200, score: 90)
+		model.setArticles([above, boundary], for: collection)
+		model.select(article: boundary)
+		model.articleFilter = .unread
+
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+
+		#expect(model.allArticles(for: collection).first(where: { $0.id == above.id })?.isRead == true)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == boundary.id })?.isRead == false)
+		#expect(model.articles(for: collection).map(\.id) == [boundary.id])
+		#expect(model.selectedArticleID == boundary.id)
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+		let requests = try await store.pendingMutations(
+			accountID: try #require(model.session).storageIdentity,
+			limit: 10,
+		)
+		#expect(requests.first?.mutation.itemIds == [above.readerId])
 	}
 
 	@Test func markOlderThanDuringFilteredSearchIgnoresHiddenUnreadHits() async throws {
@@ -8108,6 +8276,23 @@ struct ReaderAppModelTests {
 		return try encoder.encode(response)
 	}
 
+	private func personalizationData(topics: [String]) throws -> Data {
+		let snapshot = PersonalizationSnapshot(
+			exportedAt: Date(timeIntervalSince1970: 1_786_272_000),
+			policy: PersonalizationPolicy(
+				plainLanguageSummary: "Signals",
+				confirmedSignals: [],
+				confirmationRule: "Confirmed",
+				retention: "Retained",
+			),
+			history: [],
+			monitoredTopics: topics,
+		)
+		let encoder = JSONEncoder()
+		encoder.dateEncodingStrategy = .iso8601
+		return try encoder.encode(snapshot)
+	}
+
 	private func appliedMutationResponse(for request: ControlledHTTPClient.PendingRequest) throws -> Data {
 		let envelope = try JSONDecoder().decode(
 			OfflineMutationEnvelope.self,
@@ -8139,6 +8324,63 @@ struct ReaderAppModelTests {
 			"{\"id\":\"\($0)\",\"categories\":[],\"title\":\"\($0)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"Today\",\"htmlUrl\":\"https://example.com\"}}"
 		}.joined(separator: ",")
 		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
+	}
+}
+
+private actor TopicMutationHTTPClient: HTTPClient {
+	private let snapshotData: Data
+	private let resetSnapshotData: Data?
+	private let updateStatusCode: Int
+	private var capturedPaths: [String] = []
+	private var currentSnapshotData: Data
+
+	init(snapshotData: Data, resetSnapshotData: Data? = nil, updateStatusCode: Int = 200) {
+		self.snapshotData = snapshotData
+		self.resetSnapshotData = resetSnapshotData
+		self.updateStatusCode = updateStatusCode
+		self.currentSnapshotData = snapshotData
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else { throw PigeonError.invalidServerURL }
+		capturedPaths.append(url.path)
+		let data: Data
+		let statusCode: Int
+		switch (url.path, request.httpMethod) {
+		case ("/api/v1/personalization", "PUT"):
+			if updateStatusCode == 200 {
+				currentSnapshotData = snapshotData
+				data = snapshotData
+			} else {
+				data = Data("server unavailable".utf8)
+			}
+			statusCode = updateStatusCode
+		case ("/api/v1/personalization", "DELETE"):
+			let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+			if queryItems.contains(where: { $0.name == "all" && $0.value == "1" }),
+				let resetSnapshotData {
+				currentSnapshotData = resetSnapshotData
+			}
+			data = Data()
+			statusCode = 200
+		case ("/api/v1/personalization", _):
+			data = currentSnapshotData
+			statusCode = 200
+		case ("/api/v1/recommendations", _):
+			data = Data(#"{"generatedAt":"2026-08-21T00:00:00Z","view":"for-you","items":[]}"#.utf8)
+			statusCode = 200
+		default:
+			data = Data(#"{"error":"not found"}"#.utf8)
+			statusCode = 404
+		}
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func paths() -> [String] {
+		capturedPaths
 	}
 }
 

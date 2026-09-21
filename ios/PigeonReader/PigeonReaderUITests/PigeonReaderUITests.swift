@@ -323,6 +323,50 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testPersonalizationTopicsCanBeAddedRemovedAndReset() throws {
+		openSettings()
+
+		let personalization = app.buttons["Signals, History, and Privacy"]
+		XCTAssertTrue(
+			revealSettingsRow(personalization),
+			"The Personalization settings row should be reachable by scrolling the Settings form.",
+		)
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+
+		let topicInput = app.textFields["monitored-topic-input"]
+		XCTAssertTrue(topicInput.waitForExistence(timeout: 5))
+		topicInput.tap()
+		topicInput.typeText("SwiftUI")
+		app.buttons["Add Topic"].tap()
+
+		let swiftUITopic = app.descendants(matching: .any)["monitored-topic-SwiftUI"]
+		XCTAssertTrue(swiftUITopic.waitForExistence(timeout: 10))
+		XCTAssertTrue(app.staticTexts["Topics saved."].waitForExistence(timeout: 5))
+		attachScreenshot(named: "personalization-topic-added")
+
+		let remove = app.buttons["Remove SwiftUI"]
+		XCTAssertTrue(remove.waitForExistence(timeout: 5))
+		remove.tap()
+		XCTAssertTrue(swiftUITopic.waitForNonExistence(timeout: 5))
+
+		topicInput.tap()
+		topicInput.typeText("Design systems")
+		app.buttons["Add Topic"].tap()
+		let designTopic = app.descendants(matching: .any)["monitored-topic-Design systems"]
+		XCTAssertTrue(designTopic.waitForExistence(timeout: 10))
+
+		let reset = app.buttons["Reset All Preferences"]
+		XCTAssertTrue(revealSettingsRow(reset))
+		reset.tap()
+		let confirmReset = app.sheets.buttons["Reset All Preferences"]
+		XCTAssertTrue(confirmReset.waitForExistence(timeout: 5))
+		confirmReset.tap()
+		XCTAssertTrue(revealSettingsRow(app.staticTexts["Preferences reset."], swipeDown: true))
+		XCTAssertTrue(designTopic.waitForNonExistence(timeout: 10))
+		attachScreenshot(named: "personalization-topics-reset")
+	}
+
 	func testSidebarAddFeedOpensTheSubscribeSheet() throws {
 		app.terminate()
 		app.launchArguments = [
@@ -869,6 +913,20 @@ final class PigeonReaderUITests: XCTestCase {
 		let settings = app.descendants(matching: .any)["Settings"]
 		XCTAssertTrue(revealSidebar(containing: settings))
 		settings.tap()
+	}
+
+	private func revealSettingsRow(_ target: XCUIElement, timeout: TimeInterval = 15, swipeDown: Bool = false) -> Bool {
+		let deadline = Date().addingTimeInterval(timeout)
+
+		while Date() < deadline {
+			if target.exists, target.isHittable {
+				return true
+			}
+			if swipeDown { app.swipeDown() } else { app.swipeUp() }
+			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.15))
+		}
+
+		return target.exists && target.isHittable
 	}
 
 	private func revealSidebar(containing target: XCUIElement, timeout: TimeInterval = 10) -> Bool {

@@ -4,6 +4,27 @@ import Testing
 @testable import PigeonReader
 
 struct OfflineLibraryStoreTests {
+	@Test func restorationRoundTripsCanonicalServerArticleOrder() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: ReaderSection.forYou.rawValue,
+			selectedArticleIDs: [:],
+			sortOrders: [ReaderSection.forYou.rawValue: ArticleSortOrder.recommended.rawValue],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+			canonicalArticleOrder: [ReaderSection.forYou.rawValue: ["server-first", "server-second"]],
+		)
+
+		try await store.saveRestoration(restoration, accountID: "account-a")
+
+		let loaded = try await store.loadSnapshot(accountID: "account-a")
+		#expect(loaded.restoration?.canonicalArticleOrder == [ReaderSection.forYou.rawValue: ["server-first", "server-second"]])
+	}
+
 	@Test func savingNavigationTwiceReplacesTheExistingSnapshot() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let accountID = "account-a"

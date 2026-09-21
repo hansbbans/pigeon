@@ -42,6 +42,9 @@ class Statement {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
 			return { value: '13' } as T;
 		}
+		if (this.sql === 'SELECT value FROM _meta WHERE key = ?') {
+			return null;
+		}
 		throw new Error(`Unexpected first(): ${this.sql}`);
 	}
 	async run(): Promise<{ meta: { changes: number } }> {

@@ -14,6 +14,8 @@ interface FixtureItem {
 	feedKey: string;
 	title: string;
 	receivedAt: string;
+	textContent?: string | null;
+	htmlContent?: string;
 	isRead?: number;
 	isStarred?: number;
 }
@@ -141,13 +143,15 @@ function createFixture(items: FixtureItem[], options: { failEngagementWrites?: b
 	const insertItem = db.prepare(
 		`INSERT INTO items (
 			id, feed_key, subject, html_content, text_content, original_url, received_at, is_read, is_starred
-		) VALUES (?, ?, ?, '<p>Article body</p>', 'Article body', ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const item of items) {
 		insertItem.run(
 			item.id,
 			item.feedKey,
 			item.title,
+			item.htmlContent ?? '<p>Article body</p>',
+			item.textContent === undefined ? 'Article body' : item.textContent,
 			`https://example.com/${item.id}`,
 			item.receivedAt,
 			item.isRead ?? 0,
@@ -282,6 +286,203 @@ test('native engagement is authenticated, validated, migrated, and idempotent', 
 		});
 		assert.equal(invalidHost.status, 400);
 	}
+});
+test('monitored topics normalize, reload, reject invalid writes without changes, and reset with history', async () => {
+	const { db, env } = createFixture([
+		{ id: 'item-1', feedKey: 'daily-feed', title: 'A useful story', receivedAt: '2026-09-15T11:00:00.000Z' },
+	]);
+
+	const initial = await nativeRequest(env, '/api/v1/personalization');
+	assert.equal(initial.status, 200);
+	assert.deepEqual((await initial.json() as { monitoredTopics: string[] }).monitoredTopics, []);
+
+	const saved = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['  AI  ', 'ai', 'home   gyms'] }),
+	});
+	assert.equal(saved.status, 200);
+	assert.deepEqual((await saved.json() as { monitoredTopics: string[] }).monitoredTopics, ['AI', 'home gyms']);
+
+	for (const body of [
+		JSON.stringify({ monitoredTopics: 'AI' }),
+		JSON.stringify({ monitoredTopics: ['a'] }),
+		JSON.stringify({ monitoredTopics: ['!!'] }),
+		JSON.stringify({ monitoredTopics: Array.from({ length: 21 }, () => 'AI') }),
+		'a'.repeat(17_000),
+	]) {
+		const invalid = await nativeRequest(env, '/api/v1/personalization', {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body,
+		});
+		assert.equal(invalid.status, 400);
+	}
+	const afterInvalid = await nativeRequest(env, '/api/v1/personalization');
+	assert.deepEqual((await afterInvalid.json() as { monitoredTopics: string[] }).monitoredTopics, ['AI', 'home gyms']);
+
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'history-1', itemId: 'item-1', type: 'star' }] }),
+	});
+	const history = await nativeRequest(env, '/api/v1/personalization');
+	const historyPayload = await history.json() as { history: Array<{ id: string }>; monitoredTopics: string[] };
+	assert.equal(historyPayload.history.length, 1);
+	const deletedEntry = await nativeRequest(
+		env,
+		`/api/v1/personalization?id=${encodeURIComponent(historyPayload.history[0].id)}`,
+		{ method: 'DELETE' },
+	);
+	assert.equal(deletedEntry.status, 200);
+	const afterEntryDelete = await nativeRequest(env, '/api/v1/personalization');
+	assert.deepEqual((await afterEntryDelete.json() as { monitoredTopics: string[] }).monitoredTopics, ['AI', 'home gyms']);
+
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'history-2', itemId: 'item-1', type: 'more_like_this' }] }),
+	});
+	const reset = await nativeRequest(env, '/api/v1/personalization?all=1', { method: 'DELETE' });
+	assert.equal(reset.status, 200);
+	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+	const afterReset = await nativeRequest(env, '/api/v1/personalization');
+	const resetPayload = await afterReset.json() as { monitoredTopics: string[]; history: unknown[] };
+	assert.deepEqual(resetPayload.monitoredTopics, []);
+	assert.deepEqual(resetPayload.history, []);
+});
+
+test('topic preference transfers across publishers and beats a favorite source with an unrelated story', async () => {
+	const now = Date.now();
+	const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+	const { env } = createFixture([
+		{
+			id: 'liked-history',
+			feedKey: 'liked-source',
+			title: 'AI research breakthroughs',
+			textContent: 'AI research helps engineers understand new systems.',
+			receivedAt: minutesAgo(1_500),
+			isRead: 1,
+		},
+		{
+			id: 'favorite-history',
+			feedKey: 'favorite-source',
+			title: 'Restaurant opening guide',
+			receivedAt: minutesAgo(1_500),
+			isRead: 1,
+		},
+		{
+			id: 'favorite-irrelevant',
+			feedKey: 'favorite-source',
+			title: 'Paid newsletter operations',
+			receivedAt: minutesAgo(5),
+		},
+		{
+			id: 'other-relevant',
+			feedKey: 'quiet-source',
+			title: 'Fresh AI chip benchmarks',
+			textContent: 'New AI processor results and hardware measurements.',
+			receivedAt: minutesAgo(10),
+		},
+		{
+			id: 'unrelated-unseen',
+			feedKey: 'new-source',
+			title: 'Weekend gardening tools',
+			receivedAt: minutesAgo(20),
+		},
+	]);
+	const feedback = await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			events: [
+				{ id: 'liked-ai', itemId: 'liked-history', type: 'star', occurredAt: minutesAgo(15) },
+				{ id: 'favorite-source', itemId: 'favorite-history', type: 'star', occurredAt: minutesAgo(15) },
+			],
+		}),
+	});
+	assert.equal(feedback.status, 200);
+
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=4');
+	assert.equal(response.status, 200);
+	const payload = await response.json() as {
+		items: Array<{ id: string; explanation: string; matchedTopics: string[]; score: number; sampleCount: number; learningState: string }>;
+	};
+	assert.equal(payload.items[0].id, 'other-relevant');
+	assert.ok(payload.items[0].matchedTopics.some((topic) => /AI/i.test(topic)));
+	assert.match(payload.items[0].explanation, /AI|engaged/i);
+	assert.ok(payload.items[0].score > (payload.items.find((item) => item.id === 'favorite-irrelevant')?.score ?? 0));
+	const unrelated = payload.items.find((item) => item.id === 'unrelated-unseen');
+	assert.equal(unrelated?.sampleCount, 0);
+	assert.equal(unrelated?.learningState, 'Starting with recency');
+});
+
+test('saving a monitored phrase immediately changes ranking across sources and clearing it removes the boost', async () => {
+	const { env } = createFixture([
+		{
+			id: 'fresh-unrelated',
+			feedKey: 'favorite-source',
+			title: 'Paid newsletter operations',
+			receivedAt: '2026-09-15T11:00:00.000Z',
+		},
+		{
+			id: 'older-monitored',
+			feedKey: 'quiet-source',
+			title: 'A guide to choosing a home gym',
+			receivedAt: '2026-09-15T10:00:00.000Z',
+		},
+	]);
+	const before = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
+	assert.equal((await before.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+
+	const save = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
+	});
+	assert.equal(save.status, 200);
+	const afterSave = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
+	const savedPayload = await afterSave.json() as { items: Array<{ id: string; matchedTopics: string[]; explanation: string }> };
+	assert.equal(savedPayload.items[0].id, 'older-monitored');
+	assert.deepEqual(savedPayload.items[0].matchedTopics, ['home gyms']);
+	assert.match(savedPayload.items[0].explanation, /monitored/i);
+
+	const clear = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: [] }),
+	});
+	assert.equal(clear.status, 200);
+	const afterClear = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
+	assert.equal((await afterClear.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+});
+
+test('balanced candidate slices keep an older relevant feed from behind one prolific source', async () => {
+	const dominant = Array.from({ length: 110 }, (_, index) => ({
+		id: `dominant-${index}`,
+		feedKey: 'dominant-source',
+		title: `Routine update ${index}`,
+		receivedAt: new Date(Date.parse('2026-09-15T11:00:00.000Z') - index * 60_000).toISOString(),
+	}));
+	const { env } = createFixture([
+		...dominant,
+		{
+			id: 'quiet-old-topic',
+			feedKey: 'quiet-source',
+			title: 'A guide to choosing a home gym',
+			receivedAt: '2026-09-14T10:00:00.000Z',
+		},
+	]);
+	const save = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
+	});
+	assert.equal(save.status, 200);
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=1');
+	const payload = await response.json() as { items: Array<{ id: string; matchedTopics: string[] }> };
+	assert.equal(payload.items[0].id, 'quiet-old-topic');
+	assert.deepEqual(payload.items[0].matchedTopics, ['home gyms']);
 });
 
 test('native engagement accepts Google Reader item IDs used by the iOS stream API', async () => {
@@ -585,10 +786,20 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	assert.equal(candidateSelect.sql.includes('text_content'), false);
 	assert.deepEqual(candidateSelect.values, [100]);
 
-	const bodySelects = itemSelects.filter((entry) => entry.sql.includes('html_content') && /WHERE id IN/i.test(entry.sql));
+	const bodySelects = itemSelects.filter(
+		(entry) =>
+			entry.sql.includes('html_content') &&
+			/WHERE id IN/i.test(entry.sql) &&
+			!entry.sql.includes('substr('),
+	);
 	assert.equal(bodySelects.length, 1);
 	assert.equal(bodySelects[0].values.length, 3);
 	assert.deepEqual(bodySelects[0].values, payload.items.map((item) => item.id));
+	const boundedExcerptSelects = itemSelects.filter(
+		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
+	);
+	assert.equal(boundedExcerptSelects.length, 1);
+	assert.match(boundedExcerptSelects[0].sql, /1, 32000/);
 
 	const engagementSelects = database.executedSql.filter(
 		(entry) => entry.sql.includes('FROM engagement_events') && entry.sql.includes('GROUP BY'),
@@ -640,4 +851,44 @@ test('personalization history is transparent, individually deletable, exportable
 	const reset = await nativeRequest(env, '/api/v1/personalization?all=1', { method: 'DELETE' });
 	assert.equal(reset.status, 200);
 	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+});
+
+test('recommendations match monitored topics in bounded HTML when text content is absent', async () => {
+	const { db, env } = createFixture([
+		{
+			id: 'rss-body',
+			feedKey: 'rss-source',
+			title: 'A general report',
+			htmlContent: '<head><style>home gyms</style></head><!-- home gyms --><p>Deep notes about home gyms and progressive training.</p><script>home gyms</script>',
+			textContent: null,
+			receivedAt: '2026-09-18T11:00:00.000Z',
+		},
+		{
+			id: 'fresh-unrelated',
+			feedKey: 'other-source',
+			title: 'Daily market report',
+			htmlContent: '<p>Market news and business updates.</p>',
+			receivedAt: '2026-09-19T11:00:00.000Z',
+		},
+	]);
+
+	const save = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
+	});
+	assert.equal(save.status, 200);
+
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
+	assert.equal(response.status, 200);
+	const payload = await response.json() as {
+		items: Array<{ id: string; matchedTopics: string[]; explanation: string }>;
+	};
+	assert.equal(payload.items[0]?.id, 'rss-body');
+	assert.deepEqual(payload.items[0]?.matchedTopics, ['home gyms']);
+	assert.match(payload.items[0]?.explanation ?? '', /monitored topic/i);
+	assert.equal(
+		(db.prepare("SELECT text_content FROM items WHERE id = 'rss-body'").get() as { text_content: string | null }).text_content,
+		null,
+	);
 });

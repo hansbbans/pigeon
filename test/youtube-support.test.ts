@@ -203,6 +203,11 @@ class SqliteD1Database {
 
 	constructor() {
 		this.database.exec(`
+			CREATE TABLE _meta (
+				key TEXT PRIMARY KEY,
+				value TEXT
+			);
+			INSERT INTO _meta (key, value) VALUES ('schema_version', '13');
 			CREATE TABLE feeds (
 				feed_key TEXT PRIMARY KEY,
 				display_name TEXT NOT NULL,
@@ -214,8 +219,29 @@ class SqliteD1Database {
 				category TEXT,
 				icon_url TEXT,
 				is_active INTEGER,
+				stale_archived INTEGER NOT NULL DEFAULT 0,
 				first_seen_at TEXT,
-				next_fetch_at TEXT
+				next_fetch_at TEXT,
+				last_fetched_at TEXT,
+				last_attempt_at TEXT,
+				last_success_at TEXT,
+				fetch_error TEXT,
+				consecutive_failures INTEGER NOT NULL DEFAULT 0,
+				last_http_status INTEGER,
+				last_item_at TEXT,
+				item_count INTEGER DEFAULT 0
+			);
+			CREATE TABLE items (
+				id TEXT PRIMARY KEY,
+				message_id TEXT UNIQUE,
+				feed_key TEXT NOT NULL,
+				subject TEXT NOT NULL,
+				from_email TEXT,
+				received_at TEXT NOT NULL,
+				html_content TEXT NOT NULL,
+				text_content TEXT,
+				original_url TEXT,
+				content_pruned_at TEXT
 			);
 			CREATE TABLE feed_url_aliases (
 				alias_url TEXT PRIMARY KEY,

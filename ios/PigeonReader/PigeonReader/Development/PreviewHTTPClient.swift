@@ -55,6 +55,13 @@ struct PreviewHTTPClient: HTTPClient {
 			let encoder = JSONEncoder()
 			encoder.dateEncodingStrategy = .iso8601
 			data = try encoder.encode(response)
+		case "/api/v1/personalization":
+			if request.httpMethod == "DELETE" {
+				data = Data()
+			} else {
+				let topics = request.httpMethod == "PUT" ? Self.monitoredTopics(from: request.httpBody) : []
+				data = try Self.personalizationData(topics: topics)
+			}
 		case "/app/status":
 			data = Data(Self.syncHealthFixture.utf8)
 		case "/app/status/retry":
@@ -199,6 +206,29 @@ struct PreviewHTTPClient: HTTPClient {
 			throw PigeonError.invalidResponse
 		}
 		return (data, response)
+	}
+
+	private static func monitoredTopics(from body: Data?) -> [String] {
+		guard let body,
+			let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+			let topics = object["monitoredTopics"] as? [String] else {
+			return []
+		}
+		return topics
+	}
+
+	private static func personalizationData(topics: [String]) throws -> Data {
+		try JSONSerialization.data(withJSONObject: [
+			"exportedAt": "2026-08-15T12:00:00Z",
+			"policy": [
+				"plainLanguageSummary": "Preview signals",
+				"confirmedSignals": [],
+				"confirmationRule": "Confirmed",
+				"retention": "Retained",
+			],
+			"history": [],
+			"monitoredTopics": topics,
+		])
 	}
 
 	nonisolated private static var navigationFixtureSubscriptions: [[String: Any]] {

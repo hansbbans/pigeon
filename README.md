@@ -54,6 +54,8 @@ Those feeds can be added through:
 
 Subscribed RSS feeds are stored in the same `feeds` table as email-based feeds, but marked as `source_type = 'rss'`.
 
+New subscriptions immediately import up to three newest distinct stories as unread. Later refreshes admit new stories while keeping the initially skipped backlog out of the library. Adding an existing subscription again preserves its read state and does not repeat the initial import.
+
 For YouTube, add a complete public channel URL such as `https://www.youtube.com/@GoogleDevelopers`, a `/channel/UC...` URL, or the channel's official Atom URL (`/feeds/videos.xml?channel_id=...`). Pigeon discovers the published feed, recognizes alternate URLs for the same subscription, and keeps each video's description, original YouTube URL, and thumbnail. New videos arrive through the existing scheduled feed refresh.
 
 The native Add Feed screen also looks up YouTube handles such as `mkbhd` or `@mkbhd` and lets the reader select the matching channel before adding it. Handle lookup uses the channel's published Atom feed and needs no YouTube API key. The authenticated `GET /feeds/youtube/search?q=...` endpoint also supports broader channel-name searches when the Worker has a `YOUTUBE_API_KEY` secret with YouTube Data API v3 enabled. Configure that secret with `npx wrangler secret put YOUTUBE_API_KEY`; never put the key in the app or commit it. Search uses YouTube's official channel-search API, returns at most eight channels, and briefly caches repeated queries. Without the key, lookup is limited to exact handles and channel URLs.
@@ -108,6 +110,8 @@ Pigeon includes two authenticated Reader clients backed by the Google Reader sty
 The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
 
 The browser client and native client both use the authenticated `/reader/api/0/*` endpoints; the browser Mark All Read action uses `/reader/api/0/mark-all-as-read`.
+
+The native reader's For You recommendations prioritize freshness and topic relevance across publishers. Stars and More Like This help learn interests; Not Interested excludes the story and reduces related topic matches. Source history is a small tie-breaker. Settings supports up to 20 monitored topics, stored through `PUT /api/v1/personalization` with a body such as `{"monitoredTopics":["AI","home gyms"]}`. Matching uses bounded token and phrase overlap with aliases, rather than embeddings. The Recommended sort preserves the server's ranking; explicit reader-selected sorts remain available. Resetting personalization clears monitored topics and ranking history without changing read or starred states.
 
 Native local checks, from `ios/PigeonReader`, are:
 
