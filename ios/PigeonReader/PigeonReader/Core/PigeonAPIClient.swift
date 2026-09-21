@@ -446,6 +446,19 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(PersonalizationSnapshot.self, from: data)
 	}
 
+	func updatePersonalization(monitoredTopics: [String]) async throws -> PersonalizationSnapshot {
+		let topics = try PersonalizationTopicRules.validated(monitoredTopics)
+		try Task.checkCancellation()
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/personalization"))
+		request.httpMethod = "PUT"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(PersonalizationTopicsUpdate(monitoredTopics: topics))
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		try Task.checkCancellation()
+		return try decoder.decode(PersonalizationSnapshot.self, from: data)
+	}
+
 	func deletePersonalizationHistory(id: String) async throws {
 		var components = try endpointComponents(path: "api/v1/personalization")
 		components.queryItems = [URLQueryItem(name: "id", value: id)]
@@ -603,4 +616,8 @@ struct PigeonAPIClient: Sendable {
 
 private struct EngagementEnvelope: Codable, Sendable {
 	let events: [EngagementEvent]
+}
+
+private struct PersonalizationTopicsUpdate: Codable, Sendable {
+	let monitoredTopics: [String]
 }

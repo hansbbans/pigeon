@@ -7,7 +7,7 @@ import {
 	MAX_FEED_REDIRECTS,
 	MAX_FEED_BYTES,
 } from './feed-network';
-import { parseFeed, type FeedFormat } from './rss-parser';
+import { parseFeed, type FeedFormat, type ParsedItem } from './rss-parser';
 import type { Env } from './types';
 import {
 	canonicalizeYouTubeFeedUrl,
@@ -32,6 +32,8 @@ export interface FeedDiscoveryCandidate {
 	source: FeedDiscoverySource;
 	score: number;
 	aliases: string[];
+	/** Parsed entries are included only for internal subscription handoff. */
+	items?: ParsedItem[];
 }
 
 export interface FeedDiscoveryResult {
@@ -49,7 +51,15 @@ interface CandidateUrl {
 	score: number;
 }
 
-export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult> {
+export interface FeedDiscoveryOptions {
+	/** Keep parsed feed items in memory for callers that will persist them. */
+	includeItems?: boolean;
+}
+
+export async function discoverFeeds(
+	input: string,
+	options: FeedDiscoveryOptions = {},
+): Promise<FeedDiscoveryResult> {
 	const inputUrl = normalizeDiscoveryInput(input);
 	const directChannelId = extractYouTubeChannelId(inputUrl);
 	const publishedYouTubeFeed =
@@ -86,6 +96,8 @@ export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult>
 					publishedYouTubeFeed ? 'alternate' : 'direct',
 					publishedYouTubeFeed ? 120 : 200,
 					redirectAliases(inputUrl, initial.redirects, initial.finalUrl),
+					undefined,
+					options.includeItems === true,
 				),
 			],
 			failures: [],
@@ -128,6 +140,7 @@ export async function discoverFeeds(input: string): Promise<FeedDiscoveryResult>
 						...redirectAliases(candidateUrl.url, resource.redirects, resource.finalUrl),
 					],
 					candidateUrl.title,
+					options.includeItems === true,
 				),
 			);
 		} catch (error) {
@@ -325,9 +338,10 @@ function candidateFromParsedFeed(
 	score: number,
 	aliases: string[],
 	discoveredTitle?: string,
+	includeItems = false,
 ): FeedDiscoveryCandidate {
 	const canonicalUrl = canonicalizeYouTubeFeedUrl(url) ?? url;
-	return {
+	const candidate: FeedDiscoveryCandidate = {
 		url: canonicalUrl.href,
 		title: parsed.title === 'Untitled Feed' && discoveredTitle ? discoveredTitle : parsed.title,
 		format: parsed.format,
@@ -338,6 +352,8 @@ function candidateFromParsedFeed(
 			.filter((alias) => alias !== canonicalUrl.href)
 			.sort(),
 	};
+	if (includeItems) candidate.items = parsed.items;
+	return candidate;
 }
 
 function deduplicateCandidates(candidates: FeedDiscoveryCandidate[]): FeedDiscoveryCandidate[] {
@@ -348,6 +364,7 @@ function deduplicateCandidates(candidates: FeedDiscoveryCandidate[]): FeedDiscov
 			byUrl.set(candidate.url, candidate);
 		} else {
 			existing.aliases = [...new Set([...existing.aliases, ...candidate.aliases])].sort();
+			if (!existing.items && candidate.items) existing.items = candidate.items;
 		}
 	}
 	return [...byUrl.values()];

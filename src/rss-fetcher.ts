@@ -16,7 +16,7 @@ import {
 	shouldUseConditionalRequest,
 	type RefreshOutcome,
 } from './refresh-policy';
-import { parseFeed, type FeedFormat } from './rss-parser';
+import { parseFeed, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
 import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import type { Env } from './types';
 
@@ -81,8 +81,109 @@ class RefreshFailure extends Error {
 
 const MAX_ITEMS_PER_FETCH = 50;
 const MAX_CONTENT_SIZE = 900_000;
+/** Maximum stored plain-text excerpt used by topic matching. */
+export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
+/** Maximum HTML source inspected when deriving a plain-text excerpt. */
+export const MAX_RSS_TEXT_SOURCE_SIZE = 32_000;
 const PERSISTENCE_LEASE_MINUTES = 3;
 const USER_AGENT = 'Pigeon RSS Reader/1.0';
+const INITIAL_BASELINE_VERSION = 1;
+const INITIAL_BASELINE_KEY_PREFIX = 'feed_initial_baseline:';
+
+export interface InitialImportBaseline {
+	version: 1;
+	cutoffAt: string | null;
+	excludedMessageIds: string[];
+	selectedMessageIds: string[];
+}
+
+export function initialImportBaselineKey(feedKey: string): string {
+	return `${INITIAL_BASELINE_KEY_PREFIX}${feedKey}`;
+}
+
+export function serializeInitialImportBaseline(baseline: InitialImportBaseline): string {
+	return JSON.stringify(baseline);
+}
+
+export function deduplicateParsedItems(items: ParsedItem[]): ParsedItem[] {
+	const seen = new Set<string>();
+	return items.filter((item) => {
+		const identity = item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
+}
+
+export async function buildRssItemStatements(
+	db: D1Database,
+	feedKey: string,
+	parsed: Pick<ParsedFeed, 'link'> & { sourceUrl: string },
+	items: ParsedItem[],
+	fallbackReceivedAt: string,
+	options: { updateExisting?: boolean } = {},
+): Promise<D1PreparedStatement[]> {
+	const statements: D1PreparedStatement[] = [];
+	for (const item of items) {
+		const identity = await createRssItemIdentity(feedKey, item);
+		const originalUrl = resolveRssItemUrl({
+			itemGuid: item.guid,
+			itemLink: item.link,
+			content: item.content,
+			title: item.title,
+			feedSiteUrl: parsed.link,
+			feedSourceUrl: parsed.sourceUrl,
+		});
+		const contentBaseUrl = originalUrl || parsed.link || parsed.sourceUrl;
+		let content = rewriteRssContentLinks(
+			appendFeedAttachments(item.content, item.attachments),
+			contentBaseUrl,
+		);
+		if (content.length > MAX_CONTENT_SIZE) {
+			content = `${content.slice(0, MAX_CONTENT_SIZE)}\n\n[Content truncated]`;
+		}
+		const textContent = htmlToBoundedText(content);
+
+		const insertSql = options.updateExisting
+			? `INSERT INTO items (
+					id, message_id, feed_key, subject,
+					from_email, received_at, html_content, text_content, original_url
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(message_id) DO UPDATE SET
+						html_content = excluded.html_content,
+						text_content = excluded.text_content,
+						content_pruned_at = NULL,
+					original_url = CASE
+							WHEN excluded.original_url IS NOT NULL
+							  AND (
+								items.original_url IS NULL
+								OR items.original_url LIKE 'https://feeds.feedblitz.com/%'
+								OR excluded.feed_key LIKE '%feedblitz%'
+							  )
+							THEN excluded.original_url
+							ELSE items.original_url
+						END`
+			: `INSERT OR IGNORE INTO items (
+					id, message_id, feed_key, subject,
+					from_email, received_at, html_content, text_content, original_url
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+		statements.push(
+			db.prepare(insertSql).bind(
+				identity.id,
+				identity.messageId,
+				feedKey,
+				item.title,
+				item.author || null,
+				item.pubDate || fallbackReceivedAt,
+				content,
+				textContent,
+				originalUrl,
+			),
+		);
+	}
+	return statements;
+}
 
 export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise<RefreshResult> {
 	await ensureDatabaseSchema(env);
@@ -90,6 +191,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 	const attemptedAt = new Date(startedAt).toISOString();
 
 	try {
+		const initialBaseline = await loadInitialImportBaseline(env.DB, feed.feed_key);
 		const headers: Record<string, string> = {
 			Accept: 'application/rss+xml, application/atom+xml, application/feed+json, application/rdf+xml, application/xml, text/xml, */*;q=0.1',
 			'User-Agent': USER_AGENT,
@@ -197,59 +299,24 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			);
 		}
 
-		const items = parsed.items.slice(0, MAX_ITEMS_PER_FETCH);
-		const statements: D1PreparedStatement[] = [];
-		for (const item of items) {
-			const identity = await createRssItemIdentity(feed.feed_key, item);
-			const originalUrl = resolveRssItemUrl({
-				itemGuid: item.guid,
-				itemLink: item.link,
-				content: item.content,
-				title: item.title,
-				feedSiteUrl: parsed.link,
-				feedSourceUrl: resource.finalUrl.href,
-			});
-			const contentBaseUrl = originalUrl || parsed.link || resource.finalUrl.href;
-			let content = rewriteRssContentLinks(
-				appendFeedAttachments(item.content, item.attachments),
-				contentBaseUrl,
-			);
-			if (content.length > MAX_CONTENT_SIZE) {
-				content = `${content.slice(0, MAX_CONTENT_SIZE)}\n\n[Content truncated]`;
-			}
-
-			statements.push(
-				env.DB.prepare(
-					`INSERT INTO items (
-						id, message_id, feed_key, subject,
-						from_email, received_at, html_content, text_content, original_url
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT(message_id) DO UPDATE SET
-						html_content = excluded.html_content,
-						content_pruned_at = NULL,
-						original_url = CASE
-								WHEN excluded.original_url IS NOT NULL
-								  AND (
-									items.original_url IS NULL
-									OR items.original_url LIKE 'https://feeds.feedblitz.com/%'
-									OR excluded.feed_key LIKE '%feedblitz%'
-								  )
-								THEN excluded.original_url
-							ELSE items.original_url
-						END`,
-				).bind(
-					identity.id,
-					identity.messageId,
-					feed.feed_key,
-					item.title,
-					item.author || null,
-					item.pubDate || attemptedAt,
-					content,
-					null,
-					originalUrl,
-				),
-			);
-		}
+		// Keep the same bounded source window used by established feeds. Applying
+		// the initial baseline to the window avoids hashing or importing an older
+		// undated backlog that falls beyond the normal poll limit.
+		const pollWindow = parsed.items.slice(0, MAX_ITEMS_PER_FETCH);
+		const filteredItems = initialBaseline
+			? await filterItemsForInitialBaseline(feed, pollWindow, initialBaseline)
+			: pollWindow;
+		const items = initialBaseline
+			? deduplicateParsedItems(filteredItems).slice(0, MAX_ITEMS_PER_FETCH)
+			: filteredItems;
+		const statements = await buildRssItemStatements(
+			env.DB,
+			feed.feed_key,
+			{ link: parsed.link, sourceUrl: resource.finalUrl.href },
+			items,
+			attemptedAt,
+			{ updateExisting: true },
+		);
 
 		const content: SuccessfulContent = {
 			statements,
@@ -356,6 +423,56 @@ function escapeHtmlAttribute(value: string): string {
 
 function escapeHtmlText(value: string): string {
 	return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/**
+ * Convert bounded RSS HTML to a compact text excerpt for topic matching.
+ * Feed markup is untrusted, so comments and non-content containers are
+ * removed before tags are stripped. Numeric entities are decoded only when
+ * their code point is valid; malformed entities remain literal text.
+ */
+export function htmlToBoundedText(value: string): string | null {
+	const source = value.slice(0, MAX_RSS_TEXT_SOURCE_SIZE);
+	const text = decodeHtmlEntities(
+		source
+			.replace(/<!--[\s\S]*?(?:-->|$)/g, ' ')
+			.replace(/<head\b[^>]*>[\s\S]*?(?:<\/head\s*>|$)/gi, ' ')
+			.replace(/<(style|script)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+			.replace(/<br\b[^>]*\/?>/gi, ' ')
+			.replace(/<\/(p|div|li|tr|td|th|section|article|h[1-6])>/gi, ' ')
+			.replace(/<[^>]+>/g, ' '),
+	);
+	const normalized = text
+		.replace(/\u00a0/g, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, MAX_RSS_TEXT_CONTENT_SIZE);
+	return normalized || null;
+}
+
+function decodeHtmlEntities(value: string): string {
+	return value
+		.replace(/&nbsp;|&#160;/gi, ' ')
+		.replace(/&amp;/gi, '&')
+		.replace(/&lt;/gi, '<')
+		.replace(/&gt;/gi, '>')
+		.replace(/&quot;|&#34;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/&#x([0-9a-f]+);/gi, (entity: string, digits: string) => decodeNumericEntity(entity, digits, 16))
+		.replace(/&#(\d+);/g, (entity: string, digits: string) => decodeNumericEntity(entity, digits, 10));
+}
+
+function decodeNumericEntity(entity: string, digits: string, radix: number): string {
+	const codePoint = Number.parseInt(digits, radix);
+	if (
+		!Number.isInteger(codePoint) ||
+		codePoint < 0 ||
+		codePoint > 0x10ffff ||
+		(codePoint >= 0xd800 && codePoint <= 0xdfff)
+	) {
+		return entity;
+	}
+	return String.fromCodePoint(codePoint);
 }
 
 function makeResult(input: {
@@ -545,7 +662,7 @@ function activityStatement(db: D1Database, result: RefreshResult): D1PreparedSta
 	);
 }
 
-async function createRssItemIdentity(
+export async function createRssItemIdentity(
 	feedKey: string,
 	item: {
 		guid: string;
@@ -560,6 +677,64 @@ async function createRssItemIdentity(
 		item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
 	const digest = await sha256Hex(`${feedKey}\n${rawIdentity}`);
 	return { id: hexToUuid(digest), messageId: `rss:${digest}` };
+}
+
+async function loadInitialImportBaseline(
+	db: D1Database,
+	feedKey: string,
+): Promise<InitialImportBaseline | null> {
+	const row = await db
+		.prepare('SELECT value FROM _meta WHERE key = ?')
+		.bind(initialImportBaselineKey(feedKey))
+		.first<{ value: string | null }>();
+	if (!row?.value) return null;
+	try {
+		const parsed = JSON.parse(row.value) as Partial<InitialImportBaseline>;
+		if (
+			parsed.version !== INITIAL_BASELINE_VERSION ||
+			(parsed.cutoffAt !== null && typeof parsed.cutoffAt !== 'string') ||
+			!Array.isArray(parsed.excludedMessageIds) ||
+			parsed.excludedMessageIds.some((id) => typeof id !== 'string') ||
+			(parsed.selectedMessageIds !== undefined &&
+				(!Array.isArray(parsed.selectedMessageIds) || parsed.selectedMessageIds.some((id) => typeof id !== 'string')))
+		) {
+			return null;
+		}
+		return {
+			version: 1,
+			cutoffAt: parsed.cutoffAt ?? null,
+			excludedMessageIds: [...new Set(parsed.excludedMessageIds)],
+			selectedMessageIds: [...new Set(parsed.selectedMessageIds ?? [])],
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function filterItemsForInitialBaseline(
+	feed: FeedToFetch,
+	items: ParsedItem[],
+	baseline: InitialImportBaseline,
+): Promise<ParsedItem[]> {
+	const excluded = new Set(baseline.excludedMessageIds);
+	const selected = new Set(baseline.selectedMessageIds);
+	const cutoffAt = baseline.cutoffAt === null ? Number.NaN : Date.parse(baseline.cutoffAt);
+	const candidates = await Promise.all(
+		items.map(async (item) => ({
+			item,
+			messageId: (await createRssItemIdentity(feed.feed_key, item)).messageId,
+		})),
+	);
+
+	return candidates
+		.filter(({ item, messageId }) => {
+			if (selected.has(messageId)) return true;
+			if (excluded.has(messageId)) return false;
+			if (!item.pubDate) return true;
+			const publishedAt = Date.parse(item.pubDate);
+			return !Number.isFinite(cutoffAt) || !Number.isFinite(publishedAt) || publishedAt >= cutoffAt;
+		})
+		.map(({ item }) => item);
 }
 
 async function sha256Hex(input: string): Promise<string> {

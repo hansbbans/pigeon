@@ -6,6 +6,8 @@ All notable changes to Pigeon are documented in this file.
 
 ### Added
 
+- Choose up to 20 monitored topics in Settings to prioritize matching For You stories across publishers, with a Recommended sort that preserves their ranking.
+- New feed subscriptions immediately show up to three newest stories without importing the older backlog on later refreshes.
 - Follow public YouTube channels by URL or look up handles such as `mkbhd` in Add Feed. Broader channel-name search is available when a YouTube API key is configured.
 - Watch YouTube entries inside the iOS and browser readers, with playback controls, fullscreen, and an Open in YouTube fallback.
 

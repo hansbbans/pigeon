@@ -7,6 +7,14 @@ import type { Env } from './types';
 import { getFaviconForUrl } from './favicon';
 import { requireApiAuth } from './api-auth';
 import { discoverFeeds } from './feed-discovery';
+import {
+	buildRssItemStatements,
+	createRssItemIdentity,
+	initialImportBaselineKey,
+	serializeInitialImportBaseline,
+	type InitialImportBaseline,
+} from './rss-fetcher';
+import type { ParsedItem } from './rss-parser';
 
 interface SubscribeRequest {
 	url: string;
@@ -17,6 +25,12 @@ interface SubscribeResponse {
 	feed_key: string;
 	display_name: string;
 	feed_url: string;
+}
+
+interface ExistingFeed {
+	rowid: number;
+	feed_key: string;
+	display_name: string;
 }
 
 /**
@@ -31,7 +45,7 @@ export async function subscribeToFeed(
 ): Promise<{ feed_key: string; display_name: string; rowid: number; wasCreated: boolean }> {
 	let discovery: Awaited<ReturnType<typeof discoverFeeds>>;
 	try {
-		discovery = await discoverFeeds(feedUrl);
+		discovery = await discoverFeeds(feedUrl, { includeItems: true });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(`Failed to discover feed: ${message}`);
@@ -46,35 +60,17 @@ export async function subscribeToFeed(
 	const feedKey = await generateFeedKey(canonicalUrl);
 
 	// Canonical URLs and their redirect aliases all resolve to one subscription.
-	let existing = await env.DB.prepare(
-		'SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ? OR canonical_url = ? OR source_url = ? LIMIT 1',
-	)
-		.bind(feedKey, canonicalUrl.href, canonicalUrl.href)
-		.first<{ rowid: number; feed_key: string; display_name: string }>();
-	if (!existing) {
-		const urls = [...new Set([discovery.input_url, ...candidate.aliases])].filter(
-			(url) => url !== canonicalUrl.href,
-		);
-		for (const aliasUrl of urls) {
-			existing = await env.DB.prepare(
-				`SELECT f.rowid, f.feed_key, f.display_name
-				 FROM feed_url_aliases a
-				 JOIN feeds f ON f.feed_key = a.feed_key
-				 WHERE a.alias_url = ?
-				 LIMIT 1`,
-			)
-				.bind(aliasUrl)
-				.first<{ rowid: number; feed_key: string; display_name: string }>();
-			if (existing) break;
-		}
-	}
+	const aliasUrls = [...new Set([discovery.input_url, ...candidate.aliases])].filter(
+		(url) => url !== canonicalUrl.href,
+	);
+	const existing = await findExistingFeed(env.DB, feedKey, canonicalUrl.href, aliasUrls);
 
 	if (existing) {
 		// Reactivate if inactive
 		await env.DB.prepare(
 			`UPDATE feeds
 			 SET display_name = ?, source_url = ?, canonical_url = ?, feed_format = ?,
-			     site_url = COALESCE(?, site_url), is_active = 1,
+			     site_url = COALESCE(?, site_url), is_active = 1, stale_archived = 0,
 			     next_fetch_at = COALESCE(next_fetch_at, ?)
 			 WHERE feed_key = ?`
 		)
@@ -100,10 +96,23 @@ export async function subscribeToFeed(
 		};
 	}
 
-	// Insert into feeds table
+	// Insert the feed and its initial unread items atomically. Discovery already
+	// fetched and parsed the resource, so a new subscription should not wait for
+	// the scheduler before appearing in the library.
 	const now = new Date().toISOString();
 	const iconUrl = getFaviconForUrl(siteUrl ?? canonicalUrl.href);
-	await env.DB.prepare(
+	const initialItems = selectInitialItems(candidate.items ?? []);
+	const itemStatements = await buildRssItemStatements(
+		env.DB,
+		feedKey,
+		{ link: siteUrl ?? undefined, sourceUrl: canonicalUrl.href },
+		initialItems,
+		now,
+		{ updateExisting: false },
+	);
+	const baseline = await buildInitialImportBaseline(feedKey, candidate.items ?? [], initialItems);
+	const nextFetchAt = new Date(Date.parse(now) + 60 * 60_000).toISOString();
+	const feedInsert = env.DB.prepare(
 		`INSERT INTO feeds (
 			feed_key, display_name, source_type, source_url, canonical_url, feed_format,
 			site_url, category, icon_url, is_active, first_seen_at, next_fetch_at
@@ -120,14 +129,47 @@ export async function subscribeToFeed(
 			iconUrl,
 			now,
 			now,
-		)
-		.run();
-	await storeFeedAliases(env.DB, feedKey, canonicalUrl.href, [
-		discovery.input_url,
-		...candidate.aliases,
-	]);
+		);
+	const baselineInsert = env.DB.prepare(
+		'INSERT OR IGNORE INTO _meta (key, value) VALUES (?, ?)',
+	).bind(initialImportBaselineKey(feedKey), serializeInitialImportBaseline(baseline));
+	const initialState = env.DB.prepare(
+		`UPDATE feeds
+		 SET last_fetched_at = ?,
+		     last_attempt_at = ?,
+		     last_success_at = ?,
+		     fetch_error = NULL,
+		     consecutive_failures = 0,
+		     last_http_status = 200,
+		     next_fetch_at = ?,
+		     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
+		     item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
+		 WHERE feed_key = ?`,
+	).bind(now, now, now, nextFetchAt, feedKey, feedKey, feedKey);
+	try {
+		await env.DB.batch([
+			feedInsert,
+			baselineInsert,
+			...itemStatements,
+			...feedAliasStatements(env.DB, feedKey, canonicalUrl.href, aliasUrls),
+			initialState,
+		]);
+	} catch (error) {
+		// Two first-time subscribers can pass the preflight read together. A
+		// unique feed conflict means another request won; return that row without
+		// replaying its initial items or changing its read state.
+		if (!isLikelyFeedConflict(error)) throw error;
+		const concurrent = await findExistingFeed(env.DB, feedKey, canonicalUrl.href, aliasUrls);
+		if (!concurrent) throw error;
+		return {
+			rowid: concurrent.rowid,
+			feed_key: concurrent.feed_key,
+			display_name: concurrent.display_name,
+			wasCreated: false,
+		};
+	}
 
-	// Get the rowid of the inserted feed
+	// Get the rowid of the inserted feed after the atomic write.
 	const inserted = await env.DB.prepare('SELECT rowid FROM feeds WHERE feed_key = ?')
 		.bind(feedKey)
 		.first<{ rowid: number }>();
@@ -144,24 +186,121 @@ export async function subscribeToFeed(
 	};
 }
 
+async function findExistingFeed(
+	db: D1Database,
+	feedKey: string,
+	canonicalUrl: string,
+	aliasUrls: string[],
+): Promise<ExistingFeed | null> {
+	const canonical = await db.prepare(
+		'SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ? OR canonical_url = ? OR source_url = ? LIMIT 1',
+	)
+		.bind(feedKey, canonicalUrl, canonicalUrl)
+		.first<ExistingFeed>();
+	if (canonical) return canonical;
+
+	for (const aliasUrl of aliasUrls) {
+		const alias = await db.prepare(
+			`SELECT f.rowid, f.feed_key, f.display_name
+			 FROM feed_url_aliases a
+			 JOIN feeds f ON f.feed_key = a.feed_key
+			 WHERE a.alias_url = ?
+			 LIMIT 1`,
+		)
+			.bind(aliasUrl)
+			.first<ExistingFeed>();
+		if (alias) return alias;
+	}
+	return null;
+}
+
+function isLikelyFeedConflict(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /unique|duplicate/i.test(message) &&
+		/(?:feeds?\.(?:feed_key|canonical_url|source_url)|idx_feeds_canonical_url|feed_url_aliases\.(?:alias_url|feed_key))/i.test(message);
+}
+
+function selectInitialItems(items: ParsedItem[]): ParsedItem[] {
+	const sortedItems = items
+		.map((item, index) => ({ item, index, timestamp: item.pubDate ? Date.parse(item.pubDate) : Number.NaN }))
+		.sort((left, right) => {
+			const leftDated = Number.isFinite(left.timestamp);
+			const rightDated = Number.isFinite(right.timestamp);
+			if (leftDated && rightDated) return right.timestamp - left.timestamp || left.index - right.index;
+			if (leftDated) return -1;
+			if (rightDated) return 1;
+			return left.index - right.index;
+		});
+	const seen = new Set<string>();
+	return sortedItems
+		.filter(({ item }) => {
+			const identity = item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+			if (seen.has(identity)) return false;
+			seen.add(identity);
+			return true;
+		})
+		.slice(0, 3)
+		.map(({ item }) => item);
+}
+
+async function buildInitialImportBaseline(
+	feedKey: string,
+	allItems: ParsedItem[],
+	selectedItems: ParsedItem[],
+): Promise<InitialImportBaseline> {
+	const selectedMessageIds = new Set(
+		(await Promise.all(selectedItems.map((item) => createRssItemIdentity(feedKey, item)))).map(
+			(identity) => identity.messageId,
+		),
+	);
+	const excludedMessageIds = new Set<string>();
+	for (const item of allItems.slice(0, 50)) {
+		const identity = await createRssItemIdentity(feedKey, item);
+		if (!selectedMessageIds.has(identity.messageId)) {
+			excludedMessageIds.add(identity.messageId);
+		}
+	}
+
+	const datedSelected = selectedItems
+		.map((item) => (item.pubDate ? Date.parse(item.pubDate) : Number.NaN))
+		.filter((timestamp) => Number.isFinite(timestamp));
+	const cutoffAt = datedSelected.length > 0
+		? new Date(Math.min(...datedSelected)).toISOString()
+		: null;
+	return {
+		version: 1,
+		cutoffAt,
+		excludedMessageIds: [...excludedMessageIds],
+		selectedMessageIds: [...selectedMessageIds],
+	};
+}
+
+function feedAliasStatements(
+	db: D1Database,
+	feedKey: string,
+	canonicalUrl: string,
+	aliases: string[],
+): D1PreparedStatement[] {
+	const uniqueAliases = [...new Set(aliases)].filter((alias) => alias !== canonicalUrl);
+	return uniqueAliases.map((alias) =>
+		db
+			.prepare(
+				`INSERT OR IGNORE INTO feed_url_aliases (alias_url, feed_key, canonical_url)
+				 VALUES (?, ?, ?)`,
+			)
+			.bind(alias, feedKey, canonicalUrl),
+	);
+}
+
 async function storeFeedAliases(
 	db: D1Database,
 	feedKey: string,
 	canonicalUrl: string,
 	aliases: string[],
 ): Promise<void> {
-	const uniqueAliases = [...new Set(aliases)].filter((alias) => alias !== canonicalUrl);
-	if (uniqueAliases.length === 0) return;
-	await db.batch(
-		uniqueAliases.map((alias) =>
-			db
-				.prepare(
-					`INSERT OR IGNORE INTO feed_url_aliases (alias_url, feed_key, canonical_url)
-					 VALUES (?, ?, ?)`,
-				)
-				.bind(alias, feedKey, canonicalUrl),
-		),
-	);
+	const statements = feedAliasStatements(db, feedKey, canonicalUrl, aliases);
+	if (statements.length === 0) return;
+	await db.batch(statements);
 }
 
 /**

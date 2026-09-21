@@ -60,3 +60,10 @@ xcodebuild test -project PigeonReader.xcodeproj \
 On first launch, enter the HTTPS base URL for Pigeon and the existing API password. The app refuses unencrypted HTTP connections before sending credentials. The password is used only for ClientLogin; the resulting token and normalized base URL are stored in Keychain. No production credential belongs in this repository.
 
 TestFlight releases are manual and run on Pigeon's dedicated self-hosted Mac runner. See `../../docs/testflight-release.md` for the Apple resources, GitHub secrets, and release procedure.
+
+
+## Motion performance checks
+
+Run `python3 scripts/benchmark-sidebar.py` from this directory to compare the previous sidebar projection with the current single-pass implementation. It compiles optimized Swift, verifies identical snapshots, alternates measurement order, and reports median CPU time after warmup. These are host measurements, not iOS frame-rate results.
+
+The `PigeonMotionPerformanceUITests` suite records CPU, memory, elapsed time, and rendering hitches for large-folder toggles, repeated cached feed navigation, and sidebar scrolling. Its deterministic Debug fixture contains 100 folders, 3,000 feeds, and 80 stories in each exercised feed. Compare runs on the same device, OS, build configuration, and accessibility settings. `PigeonNavigationMotionUITests` also covers cancelled back navigation, feed previews, and error-banner position stability. Simulator/device execution requires a working licensed Xcode installation; compiler checks alone do not validate visual smoothness.

@@ -1,7 +1,11 @@
 import * as assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 
-import { fetchAndStoreRssFeed } from '../src/rss-fetcher';
+import {
+	fetchAndStoreRssFeed,
+	htmlToBoundedText,
+	MAX_RSS_TEXT_CONTENT_SIZE,
+} from '../src/rss-fetcher';
 import { subscribeToFeed } from '../src/subscribe';
 import { handleGreaderRequest } from '../src/greader';
 import { generateApiToken } from '../src/api-auth';
@@ -135,6 +139,9 @@ class RecordingDb {
 				if (sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
 					return { value: '13' } as T;
 				}
+				if (sql === 'SELECT value FROM _meta WHERE key = ?') {
+					return null;
+				}
 
 				throw new Error(`Unexpected SQL in first(): ${sql}`);
 			},
@@ -225,6 +232,9 @@ class FeedStoreStatement {
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
 			return { value: '13' } as T;
+		}
+		if (this.sql === 'SELECT value FROM _meta WHERE key = ?') {
+			return null;
 		}
 
 		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {
@@ -334,6 +344,14 @@ class FeedStoreStatement {
 			return;
 		}
 
+		if (this.sql.startsWith('INSERT OR IGNORE INTO items')) {
+			return;
+		}
+
+		if (this.sql.startsWith('UPDATE feeds') && this.sql.includes('last_fetched_at')) {
+			return;
+		}
+
 		throw new Error(`Unexpected SQL in run(): ${this.sql}`);
 	}
 }
@@ -410,6 +428,23 @@ test('fetchAndStoreRssFeed stores a stable non-null item id for imported RSS ite
 	assert.equal(typeof firstId, 'string');
 	assert.match(firstId as string, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 	assert.equal(firstId, secondId);
+	assert.equal(firstInsert.values[7], 'Hello world');
+});
+
+test('RSS text excerpts remove non-content markup, bound resources, and preserve malformed entities', () => {
+	const excerpt = htmlToBoundedText(
+		'<head><style>home gyms</style></head><!-- hidden home gyms --><script>home gyms</script>' +
+			'<p>Home &amp; gyms &#x1f4aa; &#x110000; &#55296; </p>' +
+			'x'.repeat(MAX_RSS_TEXT_CONTENT_SIZE + 2_000),
+	);
+	assert.ok(excerpt);
+	assert.match(excerpt, /Home & gyms/);
+	assert.match(excerpt, /&#x110000;/);
+	assert.match(excerpt, /&#55296;/);
+	assert.doesNotMatch(excerpt, /home gyms/);
+	assert.ok(excerpt.length <= MAX_RSS_TEXT_CONTENT_SIZE);
+	assert.equal(htmlToBoundedText('<p>Visible</p><script>hidden home gyms'), 'Visible');
+	assert.equal(htmlToBoundedText('<p>Visible</p><!-- hidden home gyms'), 'Visible');
 });
 
 test('fetchAndStoreRssFeed preserves the original item URL for imported RSS items', async () => {

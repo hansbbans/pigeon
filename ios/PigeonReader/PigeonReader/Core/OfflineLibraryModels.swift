@@ -154,6 +154,75 @@ nonisolated struct ReaderRestorationState: Codable, Equatable, Sendable {
 	var compactColumn: ReaderRestoredCompactColumn
 	var readerModes: [String: String]
 	var articleScrollOffsets: [String: Double]
+	/// The order supplied by the server for collections whose response carries
+	/// meaning beyond local fields (currently For You). It survives local sort
+	/// toggles and offline cache restoration.
+	var canonicalArticleOrder: [String: [String]]
+
+	private enum CodingKeys: String, CodingKey {
+		case selectedNavigationID
+		case selectedArticleIDs
+		case sortOrders
+		case articleFilters
+		case sidebarFilter
+		case expandedFolderIDs
+		case compactColumn
+		case readerModes
+		case articleScrollOffsets
+		case canonicalArticleOrder
+	}
+
+	init(
+		selectedNavigationID: String,
+		selectedArticleIDs: [String: String],
+		sortOrders: [String: String],
+		articleFilters: [String: String],
+		sidebarFilter: String,
+		expandedFolderIDs: Set<String>,
+		compactColumn: ReaderRestoredCompactColumn,
+		readerModes: [String: String],
+		articleScrollOffsets: [String: Double],
+		canonicalArticleOrder: [String: [String]] = [:],
+	) {
+		self.selectedNavigationID = selectedNavigationID
+		self.selectedArticleIDs = selectedArticleIDs
+		self.sortOrders = sortOrders
+		self.articleFilters = articleFilters
+		self.sidebarFilter = sidebarFilter
+		self.expandedFolderIDs = expandedFolderIDs
+		self.compactColumn = compactColumn
+		self.readerModes = readerModes
+		self.articleScrollOffsets = articleScrollOffsets
+		self.canonicalArticleOrder = canonicalArticleOrder
+	}
+
+	init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		selectedNavigationID = try container.decode(String.self, forKey: .selectedNavigationID)
+		selectedArticleIDs = try container.decode([String: String].self, forKey: .selectedArticleIDs)
+		sortOrders = try container.decode([String: String].self, forKey: .sortOrders)
+		articleFilters = try container.decode([String: String].self, forKey: .articleFilters)
+		sidebarFilter = try container.decode(String.self, forKey: .sidebarFilter)
+		expandedFolderIDs = try container.decode(Set<String>.self, forKey: .expandedFolderIDs)
+		compactColumn = try container.decode(ReaderRestoredCompactColumn.self, forKey: .compactColumn)
+		readerModes = try container.decode([String: String].self, forKey: .readerModes)
+		articleScrollOffsets = try container.decode([String: Double].self, forKey: .articleScrollOffsets)
+		canonicalArticleOrder = try container.decodeIfPresent([String: [String]].self, forKey: .canonicalArticleOrder) ?? [:]
+	}
+
+	func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(selectedNavigationID, forKey: .selectedNavigationID)
+		try container.encode(selectedArticleIDs, forKey: .selectedArticleIDs)
+		try container.encode(sortOrders, forKey: .sortOrders)
+		try container.encode(articleFilters, forKey: .articleFilters)
+		try container.encode(sidebarFilter, forKey: .sidebarFilter)
+		try container.encode(expandedFolderIDs, forKey: .expandedFolderIDs)
+		try container.encode(compactColumn, forKey: .compactColumn)
+		try container.encode(readerModes, forKey: .readerModes)
+		try container.encode(articleScrollOffsets, forKey: .articleScrollOffsets)
+		try container.encode(canonicalArticleOrder, forKey: .canonicalArticleOrder)
+	}
 
 	static let initial = ReaderRestorationState(
 		selectedNavigationID: ReaderSection.forYou.rawValue,

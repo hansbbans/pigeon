@@ -46,6 +46,55 @@ struct PigeonAPIClientTests {
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
 	}
 
+	@Test func personalizationTopicsNormalizeBeforeSendingAndDecodeTheUpdatedSnapshot() async throws {
+		let response = Data(
+			"""
+			{"exportedAt":"2026-08-09T12:00:00Z","policy":{"plainLanguageSummary":"A short summary","confirmedSignals":[],"confirmationRule":"confirmed","retention":"30 days"},"history":[],"monitoredTopics":["SwiftUI","climate policy"]}
+			""".utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let snapshot = try await client.updatePersonalization(monitoredTopics: ["  SwiftUI ", "swiftui", "climate   policy"])
+
+		#expect(snapshot.monitoredTopics == ["SwiftUI", "climate policy"])
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path == "/api/v1/personalization")
+		#expect(request.method == "PUT")
+		#expect(request.contentType == "application/json; charset=utf-8")
+		let body = try #require(request.body)
+		let payload = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+		#expect(payload["monitoredTopics"] as? [String] == ["SwiftUI", "climate policy"])
+	}
+
+	@Test func personalizationDecodeTreatsAnOmittedTopicFieldAsEmpty() async throws {
+		let response = Data(
+			#"{"exportedAt":"2026-08-09T12:00:00Z","policy":{"plainLanguageSummary":"Signals","confirmedSignals":[],"confirmationRule":"Confirmed","retention":"Retained"},"history":[]}"#.utf8,
+		)
+		let mock = MockHTTPClient(responseData: response)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let snapshot = try await client.personalization()
+
+		#expect(snapshot.monitoredTopics.isEmpty)
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path == "/api/v1/personalization")
+		#expect(request.method == "GET")
+	}
+
+	@Test func personalizationTopicsRejectMoreThanTwentyBeforeNetworking() async throws {
+		let mock = MockHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		await #expect(throws: PersonalizationTopicValidationError.tooMany) {
+			try await client.updatePersonalization(monitoredTopics: (1...21).map { "topic-\($0)" })
+		}
+		#expect(await mock.lastRequest() == nil)
+	}
+
 #if DEBUG
 	@Test func previewRecommendationsRefreshRetainsSeededArticles() async throws {
 		let seededArticles = Array(PreviewData.articles.prefix(2))

@@ -71,6 +71,11 @@ final class ReaderAppModel {
 		let preparationID: UUID?
 	}
 
+	private struct PersonalizationOperationContext: Sendable, Equatable {
+		let accountID: String
+		let generation: UUID
+	}
+
 	private struct FeedPrewarmOperationContext: Sendable, Equatable {
 		let accountID: String
 		let libraryGeneration: UUID
@@ -182,6 +187,7 @@ final class ReaderAppModel {
 	private var apiClient: PigeonAPIClient?
 	private var articleCache: [String: [Recommendation]] = [:]
 	private var sortOrders: [String: ArticleSortOrder] = [:]
+	private var canonicalArticleOrder: [String: [String]] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
 	private var selectedArticleIDs: [String: String] = [:]
 	private var detachedSelectedArticle: Recommendation?
@@ -207,6 +213,9 @@ final class ReaderAppModel {
 	private var activeNavigationLoadID: UUID?
 	private var activeNavigationLoadIDs: Set<UUID> = []
 	private var activeLibraryLoadID: UUID?
+	// Cache refreshes must not invalidate personalization mutations that are
+	// already in flight, but changing accounts must invalidate them.
+	private var sessionGeneration = UUID()
 	private(set) var libraryGeneration = UUID()
 	private var failedInitialLoadCollectionIDs: Set<String> = []
 	private var completedInitialLoadCollectionIDs: Set<String> = []
@@ -292,6 +301,10 @@ final class ReaderAppModel {
 	}
 	private(set) var personalization: PersonalizationSnapshot?
 	private(set) var isLoadingPersonalization = false
+	private(set) var isUpdatingPersonalization = false
+	private(set) var personalizationErrorMessage: String?
+	private var activePersonalizationLoadID: UUID?
+	private var activePersonalizationMutationID: UUID?
 	var pendingFeedRequest: PendingFeedRequest?
 	private(set) var staleFeedSnapshot: StaleFeedSnapshot?
 	private(set) var isLoadingStaleFeeds = false
@@ -671,6 +684,7 @@ final class ReaderAppModel {
 			offlinePreparationTaskID = nil
 			deferredInitialFeedPaginationCollectionID = nil
 			invalidateCollectionLoads()
+			sessionGeneration = UUID()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
 			session = nil
@@ -684,6 +698,7 @@ final class ReaderAppModel {
 			automaticDisplaySuppressionCollectionID = nil
 			livePagesDuringOfflineSynchronization.removeAll()
 			sortOrders = [:]
+			canonicalArticleOrder = [:]
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
 			clearDetachedSelectedArticle()
@@ -726,6 +741,10 @@ final class ReaderAppModel {
 			isOffline = false
 			personalization = nil
 			isLoadingPersonalization = false
+			isUpdatingPersonalization = false
+			personalizationErrorMessage = nil
+			activePersonalizationLoadID = nil
+			activePersonalizationMutationID = nil
 			pendingFeedRequest = nil
 			staleFeedSnapshot = nil
 			isLoadingStaleFeeds = false
@@ -751,37 +770,187 @@ final class ReaderAppModel {
 	}
 
 	func loadPersonalization() async {
-		guard let apiClient else { return }
+		guard let apiClient,
+			let context = personalizationContext(for: apiClient),
+			isUpdatingPersonalization == false,
+			activePersonalizationLoadID == nil else { return }
+		let loadID = UUID()
+		activePersonalizationLoadID = loadID
 		isLoadingPersonalization = true
-		defer { isLoadingPersonalization = false }
+		personalizationErrorMessage = nil
+		defer {
+			if activePersonalizationLoadID == loadID {
+				activePersonalizationLoadID = nil
+				isLoadingPersonalization = false
+			}
+		}
 		do {
-			personalization = try await apiClient.personalization()
+			try Task.checkCancellation()
+			let snapshot = try await apiClient.personalization()
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationLoadID == loadID else {
+				return
+			}
+			personalization = snapshot
 			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
+			guard isCurrentPersonalizationOperation(context), activePersonalizationLoadID == loadID else {
+				return
+			}
+			personalizationErrorMessage = error.localizedDescription
 			presentSettingsError(error)
 		}
 	}
 
-	func deletePersonalizationHistory(id: String) async {
-		guard let apiClient else { return }
+	@discardableResult
+	func saveMonitoredTopics(_ topics: [String]) async -> Bool {
+		guard isUpdatingPersonalization == false,
+			let apiClient,
+			let context = personalizationContext(for: apiClient) else {
+			return false
+		}
+
+		let normalizedTopics: [String]
 		do {
-			try await apiClient.deletePersonalizationHistory(id: id)
-			await loadPersonalization()
+			normalizedTopics = try PersonalizationTopicRules.validated(topics)
 		} catch {
-			presentSettingsError(error)
+			personalizationErrorMessage = error.localizedDescription
+			return false
 		}
-	}
 
-	func resetPersonalization() async {
-		guard let apiClient else { return }
+		let mutationID = UUID()
+		// A GET started before this mutation must not overwrite the response we
+		// are about to commit.
+		activePersonalizationLoadID = nil
+		isLoadingPersonalization = false
+		activePersonalizationMutationID = mutationID
+		isUpdatingPersonalization = true
+		personalizationErrorMessage = nil
+		defer {
+			if activePersonalizationMutationID == mutationID {
+				activePersonalizationMutationID = nil
+				isUpdatingPersonalization = false
+			}
+		}
+
 		do {
-			try await apiClient.resetPersonalization()
-			await loadPersonalization()
+			let snapshot = try await apiClient.updatePersonalization(monitoredTopics: normalizedTopics)
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalization = snapshot
+			settingsErrorMessage = nil
 			await load(section: .forYou, force: true)
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			return true
+		} catch let error where isCancellation(error) {
+			return false
 		} catch {
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalizationErrorMessage = error.localizedDescription
 			presentSettingsError(error)
+			return false
+		}
+	}
+
+	@discardableResult
+	func deletePersonalizationHistory(id: String) async -> Bool {
+		guard isUpdatingPersonalization == false,
+			let apiClient,
+			let context = personalizationContext(for: apiClient) else {
+			return false
+		}
+		let mutationID = UUID()
+		activePersonalizationLoadID = nil
+		isLoadingPersonalization = false
+		activePersonalizationMutationID = mutationID
+		isUpdatingPersonalization = true
+		personalizationErrorMessage = nil
+		defer {
+			if activePersonalizationMutationID == mutationID {
+				activePersonalizationMutationID = nil
+				isUpdatingPersonalization = false
+			}
+		}
+
+		do {
+			try Task.checkCancellation()
+			try await apiClient.deletePersonalizationHistory(id: id)
+			let snapshot = try await apiClient.personalization()
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalization = snapshot
+			settingsErrorMessage = nil
+			await load(section: .forYou, force: true)
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			return true
+		} catch let error where isCancellation(error) {
+			return false
+		} catch {
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalizationErrorMessage = error.localizedDescription
+			presentSettingsError(error)
+			return false
+		}
+	}
+
+	@discardableResult
+	func resetPersonalization() async -> Bool {
+		guard isUpdatingPersonalization == false,
+			let apiClient,
+			let context = personalizationContext(for: apiClient) else {
+			return false
+		}
+		let mutationID = UUID()
+		activePersonalizationLoadID = nil
+		isLoadingPersonalization = false
+		activePersonalizationMutationID = mutationID
+		isUpdatingPersonalization = true
+		personalizationErrorMessage = nil
+		defer {
+			if activePersonalizationMutationID == mutationID {
+				activePersonalizationMutationID = nil
+				isUpdatingPersonalization = false
+			}
+		}
+
+		do {
+			try Task.checkCancellation()
+			try await apiClient.resetPersonalization()
+			let snapshot = try await apiClient.personalization()
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalization = snapshot
+			settingsErrorMessage = nil
+			await load(section: .forYou, force: true)
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			return true
+		} catch let error where isCancellation(error) {
+			return false
+		} catch {
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
+			personalizationErrorMessage = error.localizedDescription
+			presentSettingsError(error)
+			return false
 		}
 	}
 
@@ -2895,7 +3064,9 @@ final class ReaderAppModel {
 	}
 
 	func availableSortOrders(for collection: ReaderNavigationItem) -> [ArticleSortOrder] {
-		ArticleSortOrder.allCases
+		ArticleSortOrder.allCases.filter { order in
+			order != .recommended || collection.smartSection == .forYou
+		}
 	}
 
 	private func sortOrder(for collectionID: String) -> ArticleSortOrder {
@@ -2903,13 +3074,18 @@ final class ReaderAppModel {
 	}
 
 	private func setSortOrder(_ newSortOrder: ArticleSortOrder, for collectionID: String) {
+		guard newSortOrder != .recommended || ReaderSection(rawValue: collectionID) == .forYou else {
+			return
+		}
 		guard sortOrder(for: collectionID) != newSortOrder else {
 			return
 		}
 		articleStateGeneration = UUID()
 		sortOrders[collectionID] = newSortOrder
 		if let cachedArticles = articleCache[collectionID] {
-			articleCache[collectionID] = newSortOrder.sorted(cachedArticles)
+			articleCache[collectionID] = newSortOrder.sorted(
+				canonicalArticles(for: collectionID, fallback: cachedArticles),
+			)
 		}
 		if activeSearchCollectionID == collectionID {
 			searchResults = newSortOrder.sorted(searchResults)
@@ -2936,21 +3112,45 @@ final class ReaderAppModel {
 		preserveOpenSelection: Bool = true,
 	) {
 		articleStateGeneration = UUID()
+		if ReaderSection(rawValue: collectionID) == .forYou {
+			canonicalArticleOrder[collectionID] = newArticles.map(\.id)
+		}
 		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
 			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
 		}
 		let articlesToSort = preserveOpenSelection
 			? articlesPreservingOpenSelection(newArticles, for: collectionID)
 			: newArticles
-		let sortedArticles = sortOrder(for: collectionID).sorted(
-			articlesToSort,
-		)
+		let sortedArticles = sortOrder(for: collectionID).sorted(articlesToSort)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
 			let refreshedSelectedArticle = sortedArticles.first(where: { articlesMatch($0, previouslySelectedArticle) }) {
 			selectedArticleIDs[collectionID] = refreshedSelectedArticle.id
 		}
 		reconcileSelection(for: collectionID)
+		if ReaderSection(rawValue: collectionID) == .forYou {
+			scheduleRestorationSave()
+		}
+	}
+
+	private func canonicalArticles(for collectionID: String, fallback: [Recommendation]) -> [Recommendation] {
+		guard let canonicalIDs = canonicalArticleOrder[collectionID], canonicalIDs.isEmpty == false else {
+			return fallback
+		}
+		var articlesByID = Dictionary(
+			fallback.map { ($0.id, $0) },
+			uniquingKeysWith: { first, _ in first },
+		)
+		var ordered: [Recommendation] = []
+		ordered.reserveCapacity(fallback.count)
+		for id in canonicalIDs {
+			if let article = articlesByID.removeValue(forKey: id) {
+				ordered.append(article)
+			}
+		}
+		let knownIDs = Set(canonicalIDs)
+		ordered.append(contentsOf: fallback.filter { knownIDs.contains($0.id) == false })
+		return ordered
 	}
 
 	private func articlesPreservingOpenSelection(
@@ -4628,6 +4828,7 @@ final class ReaderAppModel {
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
+			canonicalArticleOrder = restoration.canonicalArticleOrder
 			if hasAppliedRestorationSettings == false {
 				let restoredSortOrders: [String: ArticleSortOrder] = restoration.sortOrders.reduce(into: [:]) { result, pair in
 					if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
@@ -4703,7 +4904,9 @@ final class ReaderAppModel {
 			hasLoadedNavigation = false
 		}
 		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
-			result[pair.key] = sortOrder(for: pair.key).sorted(pair.value)
+			result[pair.key] = sortOrder(for: pair.key).sorted(
+				canonicalArticles(for: pair.key, fallback: pair.value),
+			)
 		}
 		// The canonical cache is now the source of article state. A bootstrap is
 		// metadata only, so it is safe to clear the visible bootstrap marker here.
@@ -4802,6 +5005,7 @@ final class ReaderAppModel {
 		articleMutationTask?.cancel()
 		articleMutationTask = nil
 		invalidateCollectionLoads()
+		sessionGeneration = UUID()
 		libraryGeneration = UUID()
 		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
 		isShowingBootstrapSnapshot = false
@@ -4823,6 +5027,7 @@ final class ReaderAppModel {
 		isLoadingNavigation = false
 		isLoadingLibrary = false
 		sortOrders = [:]
+		canonicalArticleOrder = [:]
 		articleFilters.removeAll()
 		selectedArticleIDs = [:]
 		resetStreamPagination()
@@ -4863,6 +5068,10 @@ final class ReaderAppModel {
 		isOffline = false
 		personalization = nil
 		isLoadingPersonalization = false
+		isUpdatingPersonalization = false
+		personalizationErrorMessage = nil
+		activePersonalizationLoadID = nil
+		activePersonalizationMutationID = nil
 		writeWidgetSnapshot()
 	}
 
@@ -5119,6 +5328,21 @@ final class ReaderAppModel {
 		)
 	}
 
+	private func personalizationContext(for apiClient: PigeonAPIClient) -> PersonalizationOperationContext? {
+		guard let session, session.storageIdentity == apiClient.session.storageIdentity else {
+			return nil
+		}
+		return PersonalizationOperationContext(
+			accountID: session.storageIdentity,
+			generation: sessionGeneration,
+		)
+	}
+
+	private func isCurrentPersonalizationOperation(_ context: PersonalizationOperationContext) -> Bool {
+		session?.storageIdentity == context.accountID
+			&& sessionGeneration == context.generation
+	}
+
 	private func isCurrentOperation(_ context: OperationContext) -> Bool {
 		session?.storageIdentity == context.accountID
 			&& libraryGeneration == context.generation
@@ -5353,6 +5577,7 @@ final class ReaderAppModel {
 			compactColumn: restoredCompactColumn(from: preferredCompactColumn),
 			readerModes: restoredReaderModes,
 			articleScrollOffsets: articleScrollOffsets,
+			canonicalArticleOrder: canonicalArticleOrder,
 		)
 	}
 
@@ -5588,6 +5813,10 @@ final class ReaderAppModel {
 
 	func clearSettingsError() {
 		settingsErrorMessage = nil
+	}
+
+	func clearPersonalizationError() {
+		personalizationErrorMessage = nil
 	}
 
 	private func presentSettingsError(_ error: Error) {
