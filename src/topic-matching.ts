@@ -11,6 +11,7 @@ const MAX_TOPIC_FEATURES_PER_ARTICLE = 240;
 const MAX_TOPIC_PROFILE_ENTRIES = 1_200;
 
 const TOKEN_PATTERN = /[\p{L}\p{N}]+/gu;
+const IRREGULAR_PLURAL_TOKENS = new Set(['alias', 'analysis', 'business', 'news', 'series', 'status']);
 
 // These words are common in newsletter wrappers and article labels. They add
 // little preference information and otherwise make unrelated stories look
@@ -51,13 +52,15 @@ const ALIAS_GROUPS: readonly (readonly string[])[] = [
 
 const ALIAS_TO_CANONICAL = new Map<string, string>();
 const ALIAS_TOKEN_FORMS: Array<{ tokens: string[]; canonical: string }> = [];
+const QUERY_FORMS_CACHE = new Map<string, string[]>();
+const MAX_QUERY_FORMS_CACHE = 64;
 for (const group of ALIAS_GROUPS) {
 	const canonical = group[0];
 	for (const alias of group) {
 		ALIAS_TO_CANONICAL.set(alias, canonical);
 		if (alias !== canonical) {
 			ALIAS_TOKEN_FORMS.push({
-				tokens: alias.match(TOKEN_PATTERN)?.map((token) => token.toLowerCase()) ?? [],
+				tokens: alias.match(TOKEN_PATTERN)?.map((token) => canonicalToken(token)) ?? [],
 				canonical,
 			});
 		}
@@ -110,8 +113,7 @@ function canonicalToken(token: string): string {
 		normalized = `${normalized.slice(0, -3)}y`;
 	} else if (
 		normalized.length >= 4 && normalized.endsWith('s') &&
-		!normalized.endsWith('ss') &&
-		!new Set(['alias', 'analysis', 'business', 'news', 'series', 'status']).has(normalized)
+		!normalized.endsWith('ss') && !IRREGULAR_PLURAL_TOKENS.has(normalized)
 	) {
 		normalized = normalized.slice(0, -1);
 	}
@@ -124,21 +126,27 @@ function rawTokens(value: string): string[] {
 
 function canonicalTokens(value: string): string[] {
 	const raw = rawTokens(value);
+	const canonical = raw.map(canonicalToken);
 	const result: string[] = [];
-	for (let index = 0; index < raw.length; index += 1) {
-		const token = canonicalToken(raw[index]);
+	for (let index = 0; index < canonical.length; index += 1) {
 		const alias = ALIAS_TOKEN_FORMS.find(({ tokens }) =>
-			tokens.length <= raw.length - index &&
-			tokens.every((aliasToken, offset) => canonicalToken(raw[index + offset]) === canonicalToken(aliasToken)),
+			tokens.length <= canonical.length - index &&
+			tokens.every((aliasToken, offset) => canonical[index + offset] === aliasToken),
 		);
 		if (alias) {
 			result.push(alias.canonical);
 			index += alias.tokens.length - 1;
 			continue;
 		}
-		result.push(token);
+		result.push(canonical[index]);
 	}
 	return result;
+}
+
+function topicFeaturesFromTokens(tokens: string[]): Set<string> {
+	const features = new Set<string>();
+	addNgramFeatures(tokens.filter(isUsefulTopicToken), features);
+	return features;
 }
 
 function stripMarkup(value: string): string {
@@ -165,18 +173,17 @@ function isUsefulTopicToken(token: string): boolean {
 function addNgramFeatures(tokens: string[], features: Set<string>): void {
 	for (let index = 0; index < tokens.length; index += 1) {
 		features.add(tokens[index]);
+		if (features.size >= MAX_TOPIC_FEATURES_PER_ARTICLE) return;
 		for (let width = 2; width <= 3 && index + width <= tokens.length; width += 1) {
 			features.add(tokens.slice(index, index + width).join(' '));
+			if (features.size >= MAX_TOPIC_FEATURES_PER_ARTICLE) return;
 		}
 	}
 }
 
 /** Return all meaningful single-token and contiguous phrase features. */
 export function extractTopicFeatures(article: TopicArticleText): Set<string> {
-	const tokens = canonicalTokens(articleText(article)).filter(isUsefulTopicToken);
-	const features = new Set<string>();
-	addNgramFeatures(tokens, features);
-	return new Set([...features].slice(0, MAX_TOPIC_FEATURES_PER_ARTICLE));
+	return topicFeaturesFromTokens(canonicalTokens(articleText(article)));
 }
 
 /** Return canonical tokens without stop-word filtering for user-entered matches. */
@@ -185,6 +192,9 @@ function queryTokens(topic: string): string[] {
 }
 
 function queryForms(topic: string): string[] {
+	const cacheKey = topic.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+	const cached = QUERY_FORMS_CACHE.get(cacheKey);
+	if (cached) return cached;
 	const canonical = queryTokens(topic);
 	if (canonical.length === 0) return [];
 	const key = canonical.join(' ');
@@ -196,7 +206,13 @@ function queryForms(topic: string): string[] {
 			for (const alias of group) forms.add(queryTokens(alias).join(' '));
 		}
 	}
-	return [...forms].filter(Boolean);
+	const result = [...forms].filter(Boolean);
+	if (QUERY_FORMS_CACHE.size >= MAX_QUERY_FORMS_CACHE) {
+		const oldest = QUERY_FORMS_CACHE.keys().next().value as string | undefined;
+		if (oldest) QUERY_FORMS_CACHE.delete(oldest);
+	}
+	QUERY_FORMS_CACHE.set(cacheKey, result);
+	return result;
 }
 
 function containsTokenSequence(tokens: string[], query: string[]): boolean {
@@ -207,9 +223,7 @@ function containsTokenSequence(tokens: string[], query: string[]): boolean {
 	return false;
 }
 
-/** Match user-entered topics against complete tokens and aliases. */
-export function matchMonitoredTopics(article: TopicArticleText, monitoredTopics: string[]): TopicMatch[] {
-	const tokens = canonicalTokens(articleText(article));
+function matchMonitoredTopicsFromTokens(tokens: string[], monitoredTopics: string[]): TopicMatch[] {
 	const matches: TopicMatch[] = [];
 	for (const topic of monitoredTopics) {
 		const forms = queryForms(topic);
@@ -218,6 +232,12 @@ export function matchMonitoredTopics(article: TopicArticleText, monitoredTopics:
 		}
 	}
 	return matches;
+}
+
+/** Match user-entered topics against complete tokens and aliases. */
+export function matchMonitoredTopics(article: TopicArticleText, monitoredTopics: string[]): TopicMatch[] {
+	if (monitoredTopics.length === 0) return [];
+	return matchMonitoredTopicsFromTokens(canonicalTokens(articleText(article)), monitoredTopics);
 }
 
 function topicLabel(key: string): string {
@@ -320,8 +340,21 @@ export function scoreTopics(
 	monitoredTopics: string[],
 	profile: TopicProfile,
 ): TopicScore {
-	const monitoredMatches = matchMonitoredTopics(article, monitoredTopics);
-	const features = extractTopicFeatures(article);
+	if (monitoredTopics.length === 0 && profile.entries.size === 0) {
+		return {
+			monitoredMatches: [],
+			learnedMatches: [],
+			learnedNegativeMatches: [],
+			monitoredBoost: 0,
+			learnedBoost: 0,
+			evidenceCount: profile.evidenceCount,
+		};
+	}
+	const tokens = canonicalTokens(articleText(article));
+	const monitoredMatches = monitoredTopics.length > 0
+		? matchMonitoredTopicsFromTokens(tokens, monitoredTopics)
+		: [];
+	const features = profile.entries.size > 0 ? topicFeaturesFromTokens(tokens) : new Set<string>();
 	const learnedMatches: string[] = [];
 	const learnedNegativeMatches: string[] = [];
 	let learnedBoost = 0;

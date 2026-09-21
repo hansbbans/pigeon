@@ -27,6 +27,29 @@ test('monitored topics use token boundaries, aliases, and phrases beyond the hea
 	);
 });
 
+test('an empty topic profile returns without scanning candidate text', () => {
+	const article = {
+		get title(): string {
+			throw new Error('title should not be read when no topic signals exist');
+		},
+		get text(): string {
+			throw new Error('text should not be read when no topic signals exist');
+		},
+	} as unknown as { title: string; text: string };
+
+	assert.deepEqual(
+		scoreTopics(article, [], { entries: new Map(), evidenceCount: 0 }),
+		{
+			monitoredMatches: [],
+			learnedMatches: [],
+			learnedNegativeMatches: [],
+			monitoredBoost: 0,
+			learnedBoost: 0,
+			evidenceCount: 0,
+		},
+	);
+});
+
 test('repeated deliberate topic signals transfer across publishers and cap per item', () => {
 	const repeated = Array.from({ length: 20 }, (_, index) => ({
 		itemId: 'liked-ai',

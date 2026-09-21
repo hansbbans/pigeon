@@ -798,8 +798,7 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	const boundedExcerptSelects = itemSelects.filter(
 		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
 	);
-	assert.equal(boundedExcerptSelects.length, 1);
-	assert.match(boundedExcerptSelects[0].sql, /1, 32000/);
+	assert.equal(boundedExcerptSelects.length, 0);
 
 	const engagementSelects = database.executedSql.filter(
 		(entry) => entry.sql.includes('FROM engagement_events') && entry.sql.includes('GROUP BY'),
@@ -808,6 +807,37 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	assert.match(engagementSelects[0].sql, /feed_key IN \(/i);
 	assert.ok(engagementSelects[0].values.every((value) => value === 'saved-feed' || value === 'other-feed'));
 	assert.equal(new Set(engagementSelects[0].values).size, 2);
+});
+
+test('non-For You topic excerpts follow the final timestamp and id order on ties', async () => {
+	const { env } = createFixture([
+		{
+			id: 'z-item',
+			feedKey: 'daily-feed',
+			title: 'A general report',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+		{
+			id: 'a-item',
+			feedKey: 'daily-feed',
+			title: 'Another general report',
+			htmlContent: '<p>Detailed notes about home gyms.</p>',
+			textContent: null,
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+	const save = await nativeRequest(env, '/api/v1/personalization', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
+	});
+	assert.equal(save.status, 200);
+
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1');
+	assert.equal(response.status, 200);
+	const payload = await response.json() as { items: Array<{ id: string; matchedTopics: string[] }> };
+	assert.equal(payload.items[0]?.id, 'a-item');
+	assert.deepEqual(payload.items[0]?.matchedTopics, ['home gyms']);
 });
 
 test('personalization history is transparent, individually deletable, exportable, and resettable', async () => {
@@ -854,7 +884,7 @@ test('personalization history is transparent, individually deletable, exportable
 });
 
 test('recommendations match monitored topics in bounded HTML when text content is absent', async () => {
-	const { db, env } = createFixture([
+	const { db, database, env } = createFixture([
 		{
 			id: 'rss-body',
 			feedKey: 'rss-source',
@@ -878,6 +908,7 @@ test('recommendations match monitored topics in bounded HTML when text content i
 		body: JSON.stringify({ monitoredTopics: ['home gyms'] }),
 	});
 	assert.equal(save.status, 200);
+	database.clearExecutedSql();
 
 	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
 	assert.equal(response.status, 200);
@@ -891,4 +922,9 @@ test('recommendations match monitored topics in bounded HTML when text content i
 		(db.prepare("SELECT text_content FROM items WHERE id = 'rss-body'").get() as { text_content: string | null }).text_content,
 		null,
 	);
+	const boundedExcerptSelect = database.executedSql.find(
+		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
+	);
+	assert.ok(boundedExcerptSelect);
+	assert.match(boundedExcerptSelect.sql, /1, 8000/);
 });
