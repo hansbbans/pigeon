@@ -70,6 +70,33 @@ pattern = "pigeon.hanscho.com"
 custom_domain = true
 ```
 
+## Step 4a: Configure the recommendation helper
+
+Recommendation ranking runs in a separate Worker and SQLite-backed Durable
+Object so the public Worker stays within the Free-plan HTTP CPU budget. Keep
+the external binding in `wrangler.toml` and the helper's class migration in
+`wrangler.recommendations.toml`. The helper has the same D1 database binding,
+no public route, and no recommendation cache.
+
+Deploy in this order whenever either Worker changes:
+
+```bash
+npm run deploy:recommendations
+npm run deploy:main
+```
+
+`npm run deploy` runs both commands in this order. Keep the helper deployed
+when rolling back the public Worker; the public binding still points at the
+same `RecommendationEngine` namespace, and the helper stores no ranking data.
+Use a full `wrangler deploy` for the helper because its SQLite Durable Object
+migration cannot be introduced through a versions upload or gradual deploy.
+
+For local development, `npm run dev` starts both Wrangler sessions. The
+recommendation helper listens on port 8788 and the public Worker on port 8787;
+Wrangler connects the external Durable Object binding by Worker name. The
+individual commands are available as `npm run dev:recommendations` and
+`npm run dev:main` when separate terminals are preferred.
+
 ## Step 5: Set Up Custom Domain for Worker
 
 Declare the custom domain in `wrangler.toml` and deploy the Worker.
@@ -82,7 +109,7 @@ This means your feed URLs will be `https://pigeon.hanscho.com/feed/:feed_key`
 
 ## Step 6: Link Email Routing to Worker
 
-1. Deploy the Worker first: `wrangler deploy`
+1. Deploy both Workers first: `npm run deploy`
 2. Go back to Email → Email Routing → Routing Rules
 3. Edit the rule for `rss@hanscho.com`
 4. Destination: "Send to Worker" → select `pigeon`
@@ -91,8 +118,8 @@ This means your feed URLs will be `https://pigeon.hanscho.com/feed/:feed_key`
 ## Step 7: Local Development
 
 ```bash
-# Start local dev server (HTTP routes)
-wrangler dev --local
+# Start both the public Worker and recommendation helper
+npm run dev
 
 # D1 works locally with --local flag
 # Email events can be tested via Miniflare or by sending real emails after deploy

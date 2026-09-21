@@ -4,7 +4,9 @@ import { test } from 'node:test';
 
 import { generateApiToken } from '../src/api-auth';
 import { handleGreaderRequest } from '../src/greader';
+import { ensureDatabaseSchema } from '../src/migrations';
 import { handleNativeApiRequest } from '../src/native-api';
+import { handleRecommendations } from '../src/recommendations';
 
 const PASSWORD = 'secret-password';
 const BASE_URL = 'https://pigeon.example';
@@ -86,7 +88,10 @@ class SqliteD1Database {
 	}
 }
 
-function createFixture(items: FixtureItem[], options: { failEngagementWrites?: boolean } = {}) {
+function createFixture(items: FixtureItem[], options: {
+	failEngagementWrites?: boolean;
+	failRecommendationRequests?: boolean;
+} = {}) {
 	const db = new DatabaseSync(':memory:');
 	db.exec(`
 		PRAGMA foreign_keys = ON;
@@ -165,7 +170,33 @@ function createFixture(items: FixtureItem[], options: { failEngagementWrites?: b
 		BASE_URL,
 		DB: database,
 	};
-	return { db, database, env: env as never };
+	const recommendationLog = {
+		calls: 0,
+		names: [] as string[],
+		urls: [] as string[],
+		authorization: [] as (string | null)[],
+		cookies: [] as (string | null)[],
+	};
+	const recommendationStub = {
+		fetch: async (request: Request): Promise<Response> => {
+			recommendationLog.calls += 1;
+			recommendationLog.urls.push(request.url);
+			recommendationLog.authorization.push(request.headers.get('authorization'));
+			recommendationLog.cookies.push(request.headers.get('cookie'));
+			if (options.failRecommendationRequests) {
+				throw new Error('simulated recommendation service failure');
+			}
+			await ensureDatabaseSchema(env as never);
+			return handleRecommendations(request, env as never);
+		},
+	};
+	(env as { RECOMMENDATIONS: { getByName(name: string): typeof recommendationStub } }).RECOMMENDATIONS = {
+		getByName(name: string) {
+			recommendationLog.names.push(name);
+			return recommendationStub;
+		},
+	};
+	return { db, database, env: env as never, recommendationLog };
 }
 
 async function authorization(): Promise<string> {
@@ -201,6 +232,70 @@ async function greaderRequest(
 		env,
 	);
 }
+
+test('recommendations authenticate before the Durable Object proxy and preserve the original query', async () => {
+	const { env, recommendationLog } = createFixture([
+		{
+			id: 'item-1',
+			feedKey: 'daily-feed',
+			title: 'Daily story',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+
+	const unauthorized = await handleNativeApiRequest(
+		new Request(`${BASE_URL}/api/v1/recommendations?view=unread&limit=1`),
+		env,
+	);
+	assert.equal(unauthorized.status, 401);
+	assert.equal(recommendationLog.calls, 0);
+
+	const wrongMethod = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1', { method: 'POST' });
+	assert.equal(wrongMethod.status, 404);
+	assert.equal(recommendationLog.calls, 0);
+
+	const wrongPath = await nativeRequest(env, '/api/v1/recommendations/extra?view=unread&limit=1');
+	assert.equal(wrongPath.status, 404);
+	assert.equal(recommendationLog.calls, 0);
+
+	const forwarded = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=1', {
+		headers: { Cookie: 'session=caller-only' },
+	});
+	assert.equal(forwarded.status, 200);
+	assert.equal(recommendationLog.calls, 1);
+	assert.deepEqual(recommendationLog.names, ['default']);
+	assert.equal(recommendationLog.urls[0], `${BASE_URL}/api/v1/recommendations?view=unread&limit=1`);
+	assert.deepEqual(recommendationLog.authorization, [null]);
+	assert.deepEqual(recommendationLog.cookies, [null]);
+});
+
+test('recommendation proxy fails closed when the helper Durable Object is unavailable', async () => {
+	const failed = createFixture(
+		[
+			{
+				id: 'item-1',
+				feedKey: 'daily-feed',
+				title: 'Daily story',
+				receivedAt: '2026-08-09T11:00:00.000Z',
+			},
+		],
+		{ failRecommendationRequests: true },
+	);
+	const helperFailure = await nativeRequest(failed.env, '/api/v1/recommendations?limit=1');
+	assert.equal(helperFailure.status, 503);
+
+	const missingBinding = createFixture([
+		{
+			id: 'item-2',
+			feedKey: 'daily-feed',
+			title: 'Another story',
+			receivedAt: '2026-08-09T11:00:00.000Z',
+		},
+	]);
+	delete (missingBinding.env as { RECOMMENDATIONS?: unknown }).RECOMMENDATIONS;
+	const missing = await nativeRequest(missingBinding.env, '/api/v1/recommendations?limit=1');
+	assert.equal(missing.status, 503);
+});
 
 test('native engagement is authenticated, validated, migrated, and idempotent', async () => {
 	const { db, env } = createFixture([

@@ -16,6 +16,14 @@ binding = "DB"
 database_name = "pigeon-db"
 database_id = "65ec27b1-54fa-4c5f-ba3c-577ea5e334ad"
 
+# Keep the CPU-heavy recommendation implementation out of the public
+# Worker's 10 ms Free-plan HTTP budget. The helper Worker owns the SQLite
+# Durable Object class; this binding intentionally targets that Worker.
+[[durable_objects.bindings]]
+name = "RECOMMENDATIONS"
+class_name = "RecommendationEngine"
+script_name = "pigeon-recommendations"
+
 # --- Environment Variables ---
 [vars]
 BASE_URL = "https://pigeon.hanscho.com"

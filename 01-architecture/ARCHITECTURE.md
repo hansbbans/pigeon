@@ -67,6 +67,43 @@ export default {
 };
 ```
 
+### Recommendation CPU isolation
+
+The authenticated `/api/v1/recommendations` request has a separate execution
+path because topic extraction and diversity selection can exceed the Workers
+Free HTTP CPU budget. The public `pigeon` Worker authenticates the request,
+then forwards the original `GET` request through its `RECOMMENDATIONS` binding.
+It does not parse the request or response, run a schema check, or retain a
+fallback that would repeat the expensive work. Missing or failed helper
+requests return `503`.
+
+The `pigeon-recommendations` helper Worker exposes no public route. Its
+`RecommendationEngine` SQLite-backed Durable Object accepts only the exact
+`GET /api/v1/recommendations` path, runs the existing recommendation handler,
+and binds to the same D1 database. The object does not cache recommendation
+results, so current engagement events, monitored topics, and preferences are
+read on every request. The current single-account deployment uses the stable
+object name `default`; a future multi-account deployment must use an
+account-scoped object name.
+
+This adds one Durable Object namespace migration in
+`wrangler.recommendations.toml`. It does not change the D1 schema and needs no
+data migration or backfill. Deploy the helper Worker before the public Worker
+so the external binding always has a live class. The helper must be deployed
+with `wrangler deploy`; version uploads and gradual deployments cannot create
+the pending Durable Object migration. Public Worker rollback can leave the
+helper deployed because the helper has no independent public route and stores
+no recommendation state. If helper code itself must be rolled back, deploy the
+matching helper version as well; keep the `RecommendationEngine` namespace
+and migration in place.
+
+Validate the split in two places: unit tests must prove authentication happens
+before the binding, the original query survives forwarding, invalid helper
+requests return `404`, and helper failures fail closed; production canaries
+must measure public Worker CPU separately from Durable Object CPU and confirm
+that topic matches, source diversity, quiet-publisher behavior, and fresh
+preference reads match the existing response fixtures.
+
 ## Environment Bindings
 
 ```toml
