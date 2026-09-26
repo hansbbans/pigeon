@@ -99,8 +99,20 @@ struct PreviewHTTPClient: HTTPClient {
 						statusCode = 503
 					}
 				}
+				let refreshFixture = ProcessInfo.processInfo.arguments.contains("-reader-folder-refresh-fixture")
 				let itemIDs: [String] = switch stream {
-				case "feed/navigation-1-1": ["tag:google.com,2005:reader/item/0000000000000001"]
+				case "user/-/label/Folder 01" where refreshFixture:
+					[
+						"tag:google.com,2005:reader/item/0000000000000001",
+						"tag:google.com,2005:reader/item/0000000000000005",
+					]
+				case "feed/navigation-1-1":
+					refreshFixture
+						? [
+							"tag:google.com,2005:reader/item/0000000000000001",
+							"tag:google.com,2005:reader/item/0000000000000005",
+						]
+						: ["tag:google.com,2005:reader/item/0000000000000001"]
 				case "feed/navigation-1-3": ["tag:google.com,2005:reader/item/0000000000000002"]
 				case "user/-/state/com.google/starred": recommendations.filter(\.isStarred).map(\.readerId)
 				case "user/-/state/com.google/reading-list": recommendations.filter { $0.isRead == false }.prefix(2).map(\.readerId)
@@ -128,30 +140,63 @@ struct PreviewHTTPClient: HTTPClient {
 				data = Data("{\"itemRefs\":[]}".utf8)
 			}
 		case "/reader/api/0/stream/items/contents":
-			let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
-			if showsFolderRead || ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
-				let requestedIDs = Set((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
-					.filter { $0.name == "i" }.compactMap(\.value))
-				let items = showsFolderRead ? recommendations.filter { requestedIDs.contains($0.readerId) } : recommendations
-				data = try JSONSerialization.data(withJSONObject: [
-					"id": "user/-/state/com.google/reading-list",
-					"items": items.map { article -> [String: Any] in
-						let streamID = showsFolderRead
-							? "feed/\((recommendations.firstIndex(where: { $0.id == article.id }) ?? 0) + 1)"
-							: "feed/\(article.feedKey)"
+			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture"),
+				ProcessInfo.processInfo.arguments.contains("-reader-folder-refresh-fixture") {
+				let form = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+				let ids = URLComponents(string: "https://pigeon.preview/?\(form)")?.queryItems?.filter { $0.name == "i" }.compactMap(\.value) ?? []
+				let items: [[String: Any]] = ids.compactMap { id in
+					switch id {
+					case "tag:google.com,2005:reader/item/0000000000000001":
 						return [
-							"id": article.readerId,
-							"categories": article.isRead ? ["user/-/state/com.google/read"] : [],
-							"title": article.title,
-							"published": Int(article.receivedAt.timeIntervalSince1970),
-							"summary": ["content": article.html],
-							"alternate": [["href": article.originalURL?.absoluteString ?? ""]],
-							"origin": ["streamId": streamID, "title": article.source],
+							"id": id,
+							"title": "Designing calmer tools after refresh",
+							"published": 1_786_272_200,
+							"summary": ["content": "<p>The cached story now has its revised body.</p>"],
+							"content": ["content": "<p>The cached story now has its revised body.</p>"],
+							"origin": ["streamId": "user/-/label/Folder 01", "title": "Folder 01", "htmlUrl": "https://example.com"],
 						]
-					},
+					case "tag:google.com,2005:reader/item/0000000000000005":
+						return [
+							"id": id,
+							"title": "A new story arrived while you were away",
+							"published": 1_786_272_201,
+							"summary": ["content": "<p>A new story appeared during the automatic refresh.</p>"],
+							"content": ["content": "<p>A new story appeared during the automatic refresh.</p>"],
+							"origin": ["streamId": "user/-/label/Folder 01", "title": "Folder 01", "htmlUrl": "https://example.com"],
+						]
+					default: return nil
+					}
+				}
+				data = try JSONSerialization.data(withJSONObject: [
+					"id": "user/-/label/Folder 01",
+					"items": items,
 				])
 			} else {
-				data = Data("{\"items\":[]}".utf8)
+				let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
+				if showsFolderRead || ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
+					let requestedIDs = Set((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+						.filter { $0.name == "i" }.compactMap(\.value))
+					let items = showsFolderRead ? recommendations.filter { requestedIDs.contains($0.readerId) } : recommendations
+					data = try JSONSerialization.data(withJSONObject: [
+						"id": "user/-/state/com.google/reading-list",
+						"items": items.map { article -> [String: Any] in
+							let streamID = showsFolderRead
+								? "feed/\((recommendations.firstIndex(where: { $0.id == article.id }) ?? 0) + 1)"
+								: "feed/\(article.feedKey)"
+							return [
+								"id": article.readerId,
+								"categories": article.isRead ? ["user/-/state/com.google/read"] : [],
+								"title": article.title,
+								"published": Int(article.receivedAt.timeIntervalSince1970),
+								"summary": ["content": article.html],
+								"alternate": [["href": article.originalURL?.absoluteString ?? ""]],
+								"origin": ["streamId": streamID, "title": article.source],
+							]
+						},
+					])
+				} else {
+					data = Data("{\"items\":[]}".utf8)
+				}
 			}
 		case "/feeds/youtube/search":
 			let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?

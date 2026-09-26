@@ -13,6 +13,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
+- Reader collection entry and lifecycle refreshes now revalidate cached articles automatically while retaining cached content during offline or failed refreshes. Shared article identities keep bodies and status updates consistent across lists, queued edits survive held responses, and warm synchronization preserves unrelated pagination and the open article.
 - Daily database maintenance now advances through small indexed batches instead of rescanning the full article library every hour. Starred and unread views also use targeted indexes, preventing routine Pigeon traffic from exhausting the D1 daily read allowance.
 - Sidebar folders can be renamed and deleted. The folder list updates immediately, and deleting the open folder no longer leaves a ghost collection.
 - Feed notifications now treat a subscription's stream ID (`feed/7`) and feed slug as the same feed, so enabling a feed in Settings actually alerts after background refresh.

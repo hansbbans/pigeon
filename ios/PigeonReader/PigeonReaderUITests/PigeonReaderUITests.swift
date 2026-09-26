@@ -480,8 +480,13 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForExistence(timeout: 5))
 		let nameField = app.textFields["rename-folder-name"]
 		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
-		nameField.doubleTap()
+		nameField.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+		let existingName = nameField.value as? String ?? ""
+		for _ in 0..<existingName.count {
+			nameField.typeText(XCUIKeyboardKey.delete.rawValue)
+		}
 		nameField.typeText("Technology")
+		XCTAssertEqual(nameField.value as? String, "Technology")
 		app.buttons["Save"].tap()
 
 		XCTAssertTrue(app.staticTexts["A folder with that name already exists."].waitForExistence(timeout: 5))

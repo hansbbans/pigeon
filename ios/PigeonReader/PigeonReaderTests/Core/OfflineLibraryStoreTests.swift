@@ -157,6 +157,207 @@ struct OfflineLibraryStoreTests {
 		#expect(article.isStarred)
 	}
 
+	@Test func scopedSnapshotIsolatesMembershipsAndIncludesRequestedEmptyCollections() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let navigation = ReaderNavigationState(
+			items: [.smart(.forYou, unreadCount: 4), .smart(.today, unreadCount: 2)],
+			expandedFolderIDs: [],
+		)
+		try await store.saveNavigation(navigation, accountID: "account-a")
+		try await store.saveArticles([makeArticle(id: "scope-a")], collectionID: "scope-a", accountID: "account-a")
+		try await store.saveArticles([makeArticle(id: "scope-b")], collectionID: "scope-b", accountID: "account-a")
+
+		let scoped = try await store.loadSnapshot(
+			accountID: "account-a",
+			collectionIDs: ["scope-a", "missing"],
+		)
+		let full = try await store.loadSnapshot(accountID: "account-a")
+
+		#expect(scoped.navigation == navigation)
+		#expect(Set(scoped.articlesByCollection.keys) == Set(["scope-a", "missing"]))
+		#expect(scoped.articlesByCollection["scope-a"]?.map(\.id) == ["scope-a"])
+		#expect(scoped.articlesByCollection["missing"]?.isEmpty == true)
+		#expect(full.articlesByCollection["scope-b"]?.map(\.id) == ["scope-b"])
+	}
+
+	@Test func pendingStatusesWinBySequenceAcrossSharedScopesAndAccounts() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let original = makeArticle(id: "shared", isRead: true, isStarred: false)
+		try await store.saveArticles([original], collectionID: "scope-a", accountID: "account-a")
+		try await store.saveArticles([original], collectionID: "scope-b", accountID: "account-a")
+		try await store.saveArticles([original], collectionID: "scope-a", accountID: "account-b")
+
+		try await store.enqueue(
+			OfflineMutation(id: "read-old", kind: .setRead, itemIds: ["reader-shared"], value: false, scope: .single),
+			accountID: "account-a",
+		)
+		try await store.enqueue(
+			OfflineMutation(id: "read-new", kind: .setReadBatch, itemIds: ["reader-shared"], value: true, scope: .all),
+			accountID: "account-a",
+		)
+		try await store.enqueue(
+			OfflineMutation(id: "star-new", kind: .setStarred, itemIds: ["reader-shared"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+
+		let staleRemote = makeArticle(
+			id: "shared",
+			html: "<p>Updated body</p>",
+			isRead: false,
+			isStarred: false,
+		)
+		try await store.saveArticles([staleRemote], collectionID: "scope-a", accountID: "account-a")
+		try await store.recordMutationFailure(id: "read-new", message: "offline", accountID: "account-a")
+
+		let scoped = try await store.loadSnapshot(
+			accountID: "account-a",
+			collectionIDs: ["scope-a", "scope-b"],
+		)
+		let otherAccount = try await store.loadSnapshot(
+			accountID: "account-b",
+			collectionIDs: ["scope-a"],
+		)
+		let pending = try await store.pendingMutations(accountID: "account-a", limit: 100)
+
+		for collectionID in ["scope-a", "scope-b"] {
+			let article = try #require(scoped.articlesByCollection[collectionID]?.first)
+			#expect(article.isRead)
+			#expect(article.isStarred)
+			#expect(article.html == "<p>Updated body</p>")
+		}
+		let accountBArticle = try #require(otherAccount.articlesByCollection["scope-a"]?.first)
+		#expect(accountBArticle.isRead)
+		#expect(accountBArticle.isStarred == false)
+		#expect(pending.map(\.mutation.id) == ["read-old", "read-new", "star-new"])
+	}
+
+	@Test func pendingReadDeltaPreservesAuthoritativeUnreadTotalForPartialCache() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 100)], expandedFolderIDs: []),
+			accountID: "account-a",
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "partial", isRead: false)],
+			collectionID: ReaderSection.unread.rawValue,
+			accountID: "account-a",
+		)
+		try await store.enqueue(
+			OfflineMutation(id: "read-partial", kind: .setRead, itemIds: ["reader-partial"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+
+		let navigation = try #require(
+			try await store.loadSnapshot(accountID: "account-a").navigation,
+		)
+		#expect(navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount == 99)
+	}
+
+	@Test func pendingStatusProjectionPreservesCachedPagePositions() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let first = makeArticle(id: "position-first", isRead: false)
+		let target = makeArticle(id: "position-target", isRead: false)
+
+		try await store.saveArticles([first, target], collectionID: "feed/7", accountID: accountID)
+		try await store.saveArticles([target, first], collectionID: "folder/one", accountID: accountID)
+		try await store.enqueue(
+			OfflineMutation(
+				id: "read-position-target",
+				kind: .setRead,
+				itemIds: [target.readerId],
+				value: true,
+				scope: .single,
+			),
+			accountID: accountID,
+		)
+		try await store.enqueue(
+			OfflineMutation(
+				id: "star-position-target",
+				kind: .setStarred,
+				itemIds: [target.readerId],
+				value: true,
+				scope: .single,
+			),
+			accountID: accountID,
+		)
+
+		let snapshot = try await store.loadSnapshot(
+			accountID: accountID,
+			collectionIDs: ["feed/7", "folder/one"],
+		)
+		#expect(snapshot.articlesByCollection["feed/7"]?.map(\.id) == [first.id, target.id])
+		#expect(snapshot.articlesByCollection["folder/one"]?.map(\.id) == [target.id, first.id])
+	}
+
+	@Test func canonicalSyncAliasCollapsesInitialReaderRowAndPreservesMembershipBodyAndPendingStatus() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let readerID = "tag:google.com,2005:reader/item/0000000000000001"
+		let initial = Recommendation(
+			id: readerID,
+			readerId: readerID,
+			feedKey: "origin-feed",
+			source: "Origin",
+			title: "Initial title",
+			html: "<p>Full cached body</p>",
+			text: "Full cached body",
+			originalURL: URL(string: "https://example.com/initial"),
+			receivedAt: Date(timeIntervalSince1970: 100),
+			isRead: true,
+			isStarred: false,
+			score: 11,
+			confidence: 0.4,
+			sampleCount: 2,
+			explanation: "Initial",
+			learningState: "Cached",
+		)
+		try await store.saveArticles([initial], collectionID: "scope-a", accountID: "account-a")
+		try await store.saveArticles([initial], collectionID: "scope-b", accountID: "account-a")
+		try await store.enqueue(
+			OfflineMutation(id: "star-alias", kind: .setStarred, itemIds: [readerID], value: true, scope: .single),
+			accountID: "account-a",
+		)
+
+		let page = IncrementalSyncPage(
+			cursor: "v1:canonical",
+			hasMore: false,
+			changes: [
+				IncrementalSyncChange(
+					sequence: 1,
+					entityType: .article,
+					entityId: "internal-uuid",
+					operation: .upsert,
+					changedAt: Date(timeIntervalSince1970: 200),
+					payload: IncrementalSyncPayload(
+						feedKey: "canonical-feed", streamId: "feed/7", title: "Synced title",
+						feedURL: nil, siteURL: nil, iconURL: nil, isActive: nil, folders: nil,
+						id: "internal-uuid", readerId: readerID, source: "Canonical",
+						author: nil, html: "", text: nil, originalURL: nil,
+						receivedAt: Date(timeIntervalSince1970: 200), isRead: false, isStarred: false,
+						isBodyPruned: true, itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+					),
+				),
+			],
+		)
+		try await store.apply(page, accountID: "account-a")
+
+		let snapshot = try await store.loadSnapshot(
+			accountID: "account-a",
+			collectionIDs: ["scope-a", "scope-b"],
+		)
+		let stats = try await store.storageStats(accountID: "account-a")
+
+		for collectionID in ["scope-a", "scope-b"] {
+			let article = try #require(snapshot.articlesByCollection[collectionID]?.first)
+			#expect(article.id == "internal-uuid")
+			#expect(article.readerId == readerID)
+			#expect(article.feedKey == "canonical-feed")
+			#expect(article.html == "<p>Full cached body</p>")
+			#expect(article.isStarred)
+		}
+		#expect(stats.articleCount == 1)
+	}
+
 	@Test func interruptedSyncStaysIncompleteAndDoesNotRecordLastSuccess() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let attempt = Date(timeIntervalSince1970: 1_000)
@@ -1260,6 +1461,31 @@ struct OfflineLibraryStoreTests {
 		#expect(bodies["starred"]?.isEmpty == false)
 	}
 
+	@Test func pendingUnreadAndStarredStatusesProtectBodiesFromCleanup() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let article = makeArticle(id: "protected", isRead: true, isStarred: false)
+		try await store.saveArticles([article], collectionID: "scope-a", accountID: "account-a")
+		try await store.enqueue(
+			OfflineMutation(id: "protect-read", kind: .setRead, itemIds: ["reader-protected"], value: false, scope: .single),
+			accountID: "account-a",
+		)
+		try await store.enqueue(
+			OfflineMutation(id: "protect-star", kind: .setStarred, itemIds: ["reader-protected"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+
+		let count = try await store.cleanupReadBodies(accountID: "account-a", keepingNewest: 0)
+		let cached = try #require(
+			try await store.loadSnapshot(accountID: "account-a", collectionIDs: ["scope-a"])
+				.articlesByCollection["scope-a"]?.first,
+		)
+
+		#expect(count == 0)
+		#expect(cached.html.isEmpty == false)
+		#expect(cached.isRead == false)
+		#expect(cached.isStarred)
+	}
+
 	@Test func cachedBodiesAreSanitizedBeforeTheyReachSQLite() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let unsafe = makeArticle(html: #"<p>Safe</p><script>steal()</script><img src="javascript:bad">"#)
@@ -1270,6 +1496,41 @@ struct OfflineLibraryStoreTests {
 			try await store.loadSnapshot(accountID: "account-a").articlesByCollection["feed/7"]?.first
 		)
 		#expect(cached.html == "<p>Safe</p>")
+	}
+
+	@Test func malformedScopedPayloadFailsWithoutTruncatingUsefulCache() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-malformed-scoped-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		let valid = makeArticle(id: "scoped-valid", feedKey: "daily", isRead: true)
+		let malformed = makeArticle(id: "scoped-malformed", feedKey: "daily", isRead: true)
+		try await store.saveArticles([valid, malformed], collectionID: "feed/7", accountID: accountID)
+		try executeTestSQL(
+			"UPDATE cached_articles SET payload = X'00' WHERE account_id = 'account-a' AND id = 'scoped-malformed'",
+			in: databaseURL,
+		)
+
+		do {
+			_ = try await store.loadSnapshot(accountID: accountID, collectionIDs: ["feed/7"])
+			Issue.record("A scoped snapshot with a malformed article should preserve the old collection for repair.")
+		} catch let error as OfflineLibraryError {
+			#expect(error == .invalidCacheState("The offline library contained malformed cached data."))
+		}
+
+		let abstractStore: any OfflineLibraryStoring = store
+		do {
+			_ = try await abstractStore.loadSnapshot(accountID: accountID, collectionIDs: ["feed/7"])
+			Issue.record("The protocol-based scoped reader must also reject malformed cached articles.")
+		} catch let error as OfflineLibraryError {
+			#expect(error == .invalidCacheState("The offline library contained malformed cached data."))
+		}
+
+		let fullSnapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(fullSnapshot.articlesByCollection["feed/7"]?.map(\.id) == [valid.id])
+		#expect(fullSnapshot.integrity.state == .needsRepair)
 	}
 
 	@Test func malformedUnreferencedArticleIsMarkedWithoutHidingValidCachedRows() async throws {

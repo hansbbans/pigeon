@@ -347,8 +347,9 @@ nonisolated struct OfflineStorageStats: Equatable, Sendable {
 	static let empty = OfflineStorageStats(articleCount: 0, bodyBytes: 0, pendingMutationCount: 0, lastSyncAt: nil)
 }
 
-	nonisolated protocol OfflineLibraryStoring: Sendable {
+nonisolated protocol OfflineLibraryStoring: Sendable {
 	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot
+	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws
 	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws
@@ -376,6 +377,30 @@ nonisolated struct OfflineStorageStats: Equatable, Sendable {
 }
 
 extension OfflineLibraryStoring {
+	/// Compatibility fallback for lightweight stores and test doubles. The SQLite
+	/// implementation overrides this with a scoped membership query.
+	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot {
+		let snapshot = try await loadSnapshot(accountID: accountID)
+		let articlesByCollection = collectionIDs.reduce(into: [String: [Recommendation]]()) { result, collectionID in
+			result[collectionID] = snapshot.articlesByCollection[collectionID] ?? []
+		}
+		let continuationsByCollection = collectionIDs.reduce(into: [String: String]()) { result, collectionID in
+			if let continuation = snapshot.continuationsByCollection[collectionID] {
+				result[collectionID] = continuation
+			}
+		}
+		return CachedLibrarySnapshot(
+			navigation: snapshot.navigation,
+			subscriptions: snapshot.subscriptions,
+			articlesByCollection: articlesByCollection,
+			continuationsByCollection: continuationsByCollection,
+			restoration: snapshot.restoration,
+			cursor: snapshot.cursor,
+			lastSyncAt: snapshot.lastSyncAt,
+			integrity: snapshot.integrity,
+		)
+	}
+
 	func beginFullRebuild(accountID: String, at date: Date) async throws {}
 
 	func abandonFullRebuild(accountID: String, startedAt: Date) async throws {}

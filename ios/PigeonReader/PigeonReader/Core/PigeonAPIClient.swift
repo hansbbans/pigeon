@@ -305,6 +305,7 @@ struct PigeonAPIClient: Sendable {
 		excludeTag: String? = nil,
 		continuation: String? = nil,
 		cachedRecommendations: [Recommendation] = [],
+		refreshExistingContent: Bool = false,
 		limit: Int = Self.streamItemIDPageLimit,
 	) async throws -> ReaderRecommendationsPage {
 		try Task.checkCancellation()
@@ -317,25 +318,28 @@ struct PigeonAPIClient: Sendable {
 		)
 		var seenItemIDs = Set<String>()
 		let orderedItemIDs = page.itemRefs.map(\.id).filter { itemID in
-			seenItemIDs.insert(Self.normalizedItemID(itemID)).inserted
+			seenItemIDs.insert(ReaderArticleIdentity.normalized(itemID)).inserted
 		}
 
 		var recommendationsByID: [String: Recommendation] = [:]
-		for recommendation in cachedRecommendations where recommendation.html.isEmpty == false {
-			recommendationsByID[Self.normalizedItemID(recommendation.id)] = recommendation
-			recommendationsByID[Self.normalizedItemID(recommendation.readerId)] = recommendation
+		if refreshExistingContent == false {
+			for recommendation in cachedRecommendations where recommendation.html.isEmpty == false {
+				for alias in ReaderArticleIdentity.aliases(id: recommendation.id, readerID: recommendation.readerId) {
+					recommendationsByID[alias] = recommendation
+				}
+			}
 		}
 
 		let missingItemIDs = orderedItemIDs.filter {
-			recommendationsByID[Self.normalizedItemID($0)] == nil
+			recommendationsByID[ReaderArticleIdentity.normalized($0)] == nil
 		}
 		for startIndex in stride(from: 0, to: missingItemIDs.count, by: Self.streamItemContentChunkSize) {
 			try Task.checkCancellation()
 			let endIndex = min(startIndex + Self.streamItemContentChunkSize, missingItemIDs.count)
 			let itemIDChunk = Array(missingItemIDs[startIndex..<endIndex])
 			let contentPage = try await streamItemContents(itemIDs: itemIDChunk)
-			let requestedIDs = Set(itemIDChunk.map(Self.normalizedItemID))
-			let returnedIDs = Set(contentPage.items.map { Self.normalizedItemID($0.id) })
+			let requestedIDs = Set(itemIDChunk.map(ReaderArticleIdentity.normalized))
+			let returnedIDs = Set(contentPage.items.map { ReaderArticleIdentity.normalized($0.id) })
 			guard requestedIDs.isSubset(of: returnedIDs) else {
 				// The IDs endpoint and content endpoint must describe the same
 				// page. Silently dropping missing bodies would persist a fake
@@ -343,15 +347,15 @@ struct PigeonAPIClient: Sendable {
 				throw PigeonError.invalidResponse
 			}
 			for item in contentPage.items {
-				recommendationsByID[Self.normalizedItemID(item.id)] = recommendation(
-					from: item,
-					fallbackStreamID: streamID,
-				)
+				let article = recommendation(from: item, fallbackStreamID: streamID)
+				for alias in ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId) {
+					recommendationsByID[alias] = article
+				}
 			}
 		}
 
 		let recommendations = orderedItemIDs.compactMap {
-			recommendationsByID[Self.normalizedItemID($0)]
+			recommendationsByID[ReaderArticleIdentity.normalized($0)]
 		}.filter { recommendation in
 			guard let dayBounds else { return true }
 			return dayBounds.contains(recommendation.receivedAt)
@@ -482,15 +486,6 @@ struct PigeonAPIClient: Sendable {
 		components.queryItems = [URLQueryItem(name: "download", value: "1")]
 		let (data, _) = try await requestJSON(components: components)
 		return String(decoding: data, as: UTF8.self)
-	}
-
-	private static func normalizedItemID(_ itemID: String) -> String {
-		let prefix = "tag:google.com,2005:reader/item/"
-		guard itemID.hasPrefix(prefix),
-			let rowID = UInt64(String(itemID.dropFirst(prefix.count)), radix: 16) else {
-			return itemID
-		}
-		return String(rowID)
 	}
 
 	private func recommendation(from item: ReaderStreamItem, fallbackStreamID: String) -> Recommendation {

@@ -3239,37 +3239,16 @@ struct ReaderAppModelTests {
 			),
 		)
 
-		// A changed sync reloads authoritative navigation and the subscription
-		// library before retrying the selected collection. Answer all four
-		// concurrent navigation requests by endpoint shape.
-		for _ in 0..<4 {
-			let request = await controlled.nextRequest()
-			switch request.request.url?.path {
-			case "/reader/api/0/subscription/list":
-				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
-			case "/reader/api/0/unread-count":
-				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
-			case "/reader/api/0/stream/items/ids":
-				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
-			default:
-				Issue.record("Unexpected navigation request: \(request.request.url?.absoluteString ?? "missing URL")")
-				await controlled.resolve(request)
-			}
-		}
-
-		let library = await controlled.nextRequest()
-		#expect(library.request.url?.path == "/reader/api/0/subscription/list")
-		await controlled.resolve(library, data: Data(#"{"subscriptions":[]}"#.utf8))
-
+		// A scoped status change updates the cached collection and generation in
+		// place. It does not refetch unrelated navigation; the old request must
+		// finish before the coordinator retries it against the new generation.
+		await preparation.value
+		await controlled.resolve(staleRecommendations, data: try responseData(items: [makeArticle(id: "stale-before-sync")]))
 		let retry = await controlled.nextRequest()
 		#expect(retry.request.url?.path == "/api/v1/recommendations")
+		#expect(model.articles(for: .forYou).map(\.id) != ["stale-before-sync"])
 		await controlled.resolve(retry, data: try responseData(items: [makeArticle(id: "fresh-after-sync")]))
-
-		// The old request is now resumed after its generation was invalidated. It
-		// must be discarded and never replace the retried selected page.
-		await controlled.resolve(staleRecommendations, data: try responseData(items: [makeArticle(id: "stale-before-sync")]))
 		await load.value
-		await preparation.value
 
 		#expect(model.articles(for: .forYou).map(\.id) == ["fresh-after-sync"])
 	}
@@ -3317,6 +3296,24 @@ struct ReaderAppModelTests {
 		])
 	}
 
+	@Test func loadForDisplayRevalidatesPreparedCachedFeedWithoutRefetchingBodies() async throws {
+		let client = WarmFeedRecoveryHTTPClient()
+		let fixture = try await makeWarmFeedModel(httpClient: client, continuation: "cached-next-page")
+
+		await fixture.model.prepareOfflineLibrary()
+		fixture.model.select(section: .forYou)
+		fixture.model.select(item: fixture.collection)
+		await fixture.model.loadForDisplay(collection: fixture.collection)
+		fixture.model.select(section: .forYou)
+		fixture.model.select(item: fixture.collection)
+		await fixture.model.loadForDisplay(collection: fixture.collection)
+
+		let paths = await client.paths()
+		#expect(paths.filter { $0 == "/reader/api/0/stream/items/ids" }.isEmpty)
+		#expect(paths.filter { $0 == "/reader/api/0/stream/items/contents" }.isEmpty)
+		#expect(paths.filter { $0 == "/api/v1/sync" }.count == 3)
+	}
+
 	@Test func warmFeedLaunchAndRefreshUseAuthoritativeSyncWithoutRefetchingCachedBodies() async throws {
 		let client = MockHTTPClient(
 			responseData: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8)
@@ -3332,6 +3329,48 @@ struct ReaderAppModelTests {
 
 		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
 		#expect(await client.requests().map(\.url.path) == ["/api/v1/sync", "/api/v1/sync"])
+	}
+
+	@Test func warmStatusRefreshClearsUnreadMembershipButKeepsTheOpenArticleDetail() async throws {
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [
+				.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200),
+				.init(data: statusSyncPage(itemID: "cached-feed-article"), statusCode: 200),
+			],
+		)
+		let fixture = try await makeWarmFeedModel(httpClient: client)
+		let accountID = try #require(fixture.model.session?.storageIdentity)
+		let unread = ReaderNavigationItem.smart(.unread)
+		let article = makeArticle(id: "cached-feed-article", feedKey: "daily")
+		try await fixture.store.saveArticles([article], collectionID: unread.id, accountID: accountID)
+		try await fixture.store.saveRestoration(
+			ReaderRestorationState(
+				selectedNavigationID: unread.id,
+				selectedArticleIDs: [:],
+				sortOrders: [:],
+				articleFilters: [unread.id: ReaderArticleFilter.unread.rawValue],
+				sidebarFilter: ReaderSidebarFilter.all.rawValue,
+				expandedFolderIDs: [],
+				compactColumn: .detail,
+				readerModes: [:],
+				articleScrollOffsets: [:],
+			),
+			accountID: accountID,
+		)
+
+		await fixture.model.prepareOfflineLibrary()
+		fixture.model.select(item: unread)
+		let cached = try #require(fixture.model.allArticles(for: unread).first)
+		fixture.model.select(article: cached)
+		fixture.model.articleFilter = .unread
+		#expect(fixture.model.selectedArticleID == cached.id)
+
+		await fixture.model.prepareOfflineLibrary(force: true)
+
+		#expect(fixture.model.articles(for: unread).isEmpty)
+		#expect(fixture.model.selectedArticleID == cached.id)
+		#expect(fixture.model.selectedArticle?.isRead == true)
+		#expect(fixture.model.preferredCompactColumn == .detail)
 	}
 
 	@Test func successfulFeedRefreshClearsAStaleLoadErrorBanner() async throws {
@@ -3727,7 +3766,7 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == "Feed failed to load")
 	}
 
-	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshResetsContinuation() async throws {
+	@Test func folderLoadPaginatesOnlyOnExplicitLoadMoreAndRefreshPreservesLoadedTail() async throws {
 		let httpClient = PaginationHTTPClient()
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: httpClient, offlineStore: store)
@@ -3751,13 +3790,13 @@ struct ReaderAppModelTests {
 
 		await model.refresh(collection: collection)
 
-		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle"])
-		#expect(model.canLoadMore(collection: collection))
+		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: collection) == false)
 		let requests = await httpClient.requests()
 		let itemIDRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
 		#expect(itemIDRequests.count == 3)
 		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil])
-		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 2)
+		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 3)
 	}
 
 	@Test func repeatedFolderContinuationStopsWithoutAppendingDuplicateArticlesOrRequestingAgain() async throws {
@@ -3794,7 +3833,7 @@ struct ReaderAppModelTests {
 	@Test func supersededLoadMoreCannotOverwriteRefreshOrOfflineState() async throws {
 		let controlled = ControlledHTTPClient()
 		let store = PausingOfflineLibraryStore()
-		let model = try makeModel(httpClient: controlled, offlineStore: store)
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
 		let collection = ReaderNavigationItem.smart(.today)
 		let accountID = try #require(model.session?.storageIdentity)
 
@@ -3838,64 +3877,82 @@ struct ReaderAppModelTests {
 		#expect(snapshot.navigation?.item(withID: collection.id)?.unreadCount == 2)
 	}
 
-	@Test func restoredCachedFolderResolvesPaginationOnceWhenSelectedOnline() async throws {
-		let baseURL = try #require(URL(string: "https://pigeon.test"))
-		let session = PigeonSession(baseURL: baseURL, token: "cached-folder-account")
-		let store = OfflineLibraryStore.inMemory()
-		let subscription = makeSubscription(id: "feed/7", key: "alpha", title: "Alpha", folder: "News")
-		let readerSubscription = ReaderSubscription(
-			id: subscription.id,
-			title: subscription.title,
-			categories: [ReaderSubscriptionCategory(id: "user/-/label/News", label: "News")],
-			url: subscription.url.absoluteString,
+	@Test func cachedFolderLoadsLatestArticlesWhileInitialPreparationIsPending() async throws {
+		let fixture = try await makeCachedFolderFixture(
+			token: "cached-folder-cold-account",
+			selectedNavigationID: "user/-/label/News",
 		)
-		let navigation = ReaderNavigationCatalog.make(
-			subscriptions: [readerSubscription],
-			unreadCounts: [],
-			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 0, starred: 0),
-		)
-		let cachedArticle = makeArticle(id: "cached-folder", feedKey: "alpha")
-		let restoration = ReaderRestorationState(
-			selectedNavigationID: ReaderSection.forYou.rawValue,
-			selectedArticleIDs: [:],
-			sortOrders: [:],
-			articleFilters: [:],
-			sidebarFilter: ReaderSidebarFilter.all.rawValue,
-			expandedFolderIDs: [],
-			compactColumn: .content,
-			readerModes: [:],
-			articleScrollOffsets: [:],
-		)
-		let accountID = session.storageIdentity
-		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
-		try await store.apply(
-			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
-			accountID: accountID,
-		)
-		try await store.saveNavigation(navigation, accountID: accountID)
-		try await store.saveSubscriptions([subscription], accountID: accountID)
-		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 1_001))
-		try await store.saveArticles([cachedArticle], collectionID: "user/-/label/News", accountID: accountID)
-		try await store.saveRestoration(restoration, accountID: accountID)
-
 		let client = StartupHTTPClient(
-			subscriptionsData: try subscriptionsData([subscription]),
+			subscriptionsData: try subscriptionsData([fixture.subscription]),
 			recommendationsData: try responseData(items: [makeArticle(id: "for-you")]),
-			folderItemID: "live-folder",
+			folderItemIDs: ["cold-live-folder"],
 		)
-		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		let model = try makeModel(httpClient: client, session: fixture.session, offlineStore: fixture.store)
+		model.select(item: fixture.folder)
+		await model.load(collection: fixture.folder)
+
+		#expect(await client.folderPageRequestCount() == 1)
+		#expect(model.articles(for: fixture.folder).map(\.id) == ["cached-folder", "cold-live-folder"])
+	}
+
+	@Test func cachedFolderKeepsItsOfflineArticlesWhenInitialPreparationFails() async throws {
+		let fixture = try await makeCachedFolderFixture(
+			token: "cached-folder-offline-account",
+			selectedNavigationID: "user/-/label/News",
+		)
+		let client = MockHTTPClient(failure: URLError(.notConnectedToInternet))
+		let model = try makeModel(httpClient: client, session: fixture.session, offlineStore: fixture.store)
+
+		model.select(item: fixture.folder)
+		await model.load(collection: fixture.folder)
+
+		#expect(model.isOffline)
+		#expect(model.articles(for: fixture.folder).map(\.id) == [fixture.cachedArticle.id])
+		#expect(model.errorMessage != nil)
+	}
+
+	@Test func cachedFolderRefreshRecoversAfterAnOfflinePreparationFailure() async throws {
+		let fixture = try await makeCachedFolderFixture(token: "cached-folder-recovery-account")
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData([fixture.subscription]),
+			recommendationsData: try responseData(items: [makeArticle(id: "for-you")]),
+			folderItemIDs: ["recovered-live-folder"],
+			syncFailures: 1,
+		)
+		let model = try makeModel(httpClient: client, session: fixture.session, offlineStore: fixture.store)
 
 		await model.prepareOfflineLibrary()
-		let folder = try #require(model.folderNavigationItems.first)
-		#expect(model.articles(for: folder).map(\.id) == [cachedArticle.id])
+		#expect(model.isOffline)
+		#expect(model.articles(for: fixture.folder).map(\.id) == [fixture.cachedArticle.id])
 
-		model.select(item: folder)
-		await model.load(collection: folder)
-		#expect(await client.folderPageRequestCount() == 1)
-		#expect(model.articles(for: folder).map(\.id) == ["live-folder"])
+		model.select(item: fixture.folder)
+		await model.prepareOfflineLibrary(force: true)
 
-		await model.load(collection: folder)
+		#expect(model.isOffline == false)
 		#expect(await client.folderPageRequestCount() == 1)
+		#expect(model.articles(for: fixture.folder).map(\.id) == [fixture.cachedArticle.id, "recovered-live-folder"])
+	}
+
+	@Test func restoredCachedFolderRefreshesOnEverySelectedLoadOnline() async throws {
+		let fixture = try await makeCachedFolderFixture()
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData([fixture.subscription]),
+			recommendationsData: try responseData(items: [makeArticle(id: "for-you")]),
+			folderItemIDs: ["live-folder-first", "live-folder-second"],
+		)
+		let model = try makeModel(httpClient: client, session: fixture.session, offlineStore: fixture.store)
+
+		await model.prepareOfflineLibrary()
+		#expect(model.articles(for: fixture.folder).map(\.id) == [fixture.cachedArticle.id])
+
+		model.select(item: fixture.folder)
+		await model.load(collection: fixture.folder)
+		#expect(await client.folderPageRequestCount() == 1)
+		#expect(model.articles(for: fixture.folder).map(\.id) == ["cached-folder", "live-folder-first"])
+
+		await model.load(collection: fixture.folder)
+		#expect(await client.folderPageRequestCount() == 2)
+		#expect(model.articles(for: fixture.folder).map(\.id) == ["cached-folder", "live-folder-first", "live-folder-second"])
 	}
 
 	@Test func cloudflareResourceLimitStillSurfacesOnLoad() async throws {
@@ -4004,21 +4061,18 @@ struct ReaderAppModelTests {
 		#expect(isConnectivityFailure(decodingError) == false)
 	}
 
-	@Test func olderLoadCannotReplaceASectionWithStaleResults() async throws {
+	@Test func overlappingForcedLoadsShareTheSameFreshResult() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)
-
-		let olderLoad = Task { await model.load(section: .forYou, force: true) }
-		let olderRequest = await controlled.nextRequest()
-		let newerLoad = Task { await model.load(section: .forYou, force: true) }
-		let newerRequest = await controlled.nextRequest()
-
-		await controlled.resolve(newerRequest, data: try responseData(items: [makeArticle(id: "newer")]))
-		_ = await newerLoad.value
-		await controlled.resolve(olderRequest, data: try responseData(items: [makeArticle(id: "older")]))
-		_ = await olderLoad.value
-
-		#expect(model.articles(for: .forYou).map(\.id) == ["newer"])
+		let first = Task { await model.load(section: .forYou, force: true) }
+		let request = await controlled.nextRequest()
+		let second = Task { await model.load(section: .forYou, force: true) }
+		await Task.yield()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "fresh")]))
+		await first.value
+		await second.value
+		#expect(await controlled.requestCount() == 1)
+		#expect(model.articles(for: .forYou).map(\.id) == ["fresh"])
 	}
 
 	@Test func savingTopicsRefreshesForYouWithoutChangingTheCurrentSelection() async throws {
@@ -5952,6 +6006,386 @@ struct ReaderAppModelTests {
 		#expect(model.offlineStorageStats.pendingMutationCount == 1)
 	}
 
+	@Test func concurrentLoadsForOneCollectionShareOneRawRequest() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+
+		let first = Task { await model.load(collection: collection, force: true) }
+		let request = await controlled.nextRequest()
+		let second = Task { await model.load(collection: collection, force: true) }
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "coalesced")]))
+		await first.value
+		await second.value
+
+		#expect(await controlled.requestCount() == 1)
+		#expect(model.allArticles(for: collection).map(\.id) == ["coalesced"])
+	}
+
+	@Test func cancellingOneLoadWaiterDoesNotCancelTheSharedCollectionRequest() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+
+		let owner = Task { await model.load(collection: collection, force: true) }
+		let request = await controlled.nextRequest()
+		let cancelledWaiter = Task { await model.load(collection: collection, force: true) }
+		await Task.yield()
+		cancelledWaiter.cancel()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "shared-work")]))
+		await owner.value
+		await cancelledWaiter.value
+
+		#expect(await controlled.requestCount() == 1)
+		#expect(model.allArticles(for: collection).map(\.id) == ["shared-work"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func concurrentViewEntryPreparationAndCollectionLoadShareOneSync() async throws {
+		let controlled = ControlledHTTPClient()
+		let fixture = try await makeWarmFeedModel(httpClient: controlled, continuation: "cached-next-page")
+
+		let preparation = Task { await fixture.model.prepareOfflineLibrary() }
+		await Task.yield()
+		let sync = await controlled.nextRequest()
+		#expect(sync.request.url?.path == "/api/v1/sync")
+		// Launch starts at Home; enter the feed after the cached snapshot is ready.
+		fixture.model.select(item: fixture.collection)
+		let (entryStarted, entryStart) = AsyncStream<Void>.makeStream()
+		let entry = Task { @MainActor in
+			entryStart.yield(())
+			await fixture.model.load(collection: fixture.collection)
+		}
+		var entryStartedIterator = entryStarted.makeAsyncIterator()
+		_ = await entryStartedIterator.next()
+		await controlled.resolve(
+			sync,
+			data: Data(#"{"cursor":"warm-cursor","hasMore":false,"changes":[]}"#.utf8),
+		)
+		await preparation.value
+		await entry.value
+
+		#expect(await controlled.requestCount() == 1)
+		#expect(fixture.model.articles(for: fixture.collection).map(\.id) == ["cached-feed-article"])
+	}
+
+	@Test func disconnectedAccountCannotCommitACompletedCollectionLoad() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+
+		let load = Task { await model.load(collection: collection, force: true) }
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "old-account")]))
+		await load.value
+
+		#expect(model.session == nil)
+		#expect(model.allArticles(for: collection).isEmpty)
+	}
+
+	@Test func canonicalBodyAndStatusUpdatesReachEveryViewWithoutChangingForYouRanking() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "feed/7",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let readerID = "tag:google.com,2005:reader/item/0000000000000001"
+		let forYouArticle = makeArticle(
+			id: "folder-item-1",
+			score: 91,
+			feedKey: "feed/7",
+			readerId: readerID,
+			html: "<p>Old body</p>",
+		)
+		let feedArticle = makeArticle(
+			id: "folder-item-1",
+			score: 0,
+			feedKey: "feed/7",
+			readerId: readerID,
+			html: "<p>Old body</p>",
+		)
+		model.setArticles([forYouArticle], for: forYou)
+		model.setArticles([feedArticle], for: feed)
+		model.select(item: feed)
+
+		let load = Task { await model.load(collection: feed, force: true) }
+		let request = await controlled.nextRequest()
+		#expect(request.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.resolve(request, data: streamIDsData(ids: ["1"], continuation: nil))
+		let contents = await controlled.nextRequest()
+		#expect(contents.request.url?.path == "/reader/api/0/stream/items/contents")
+		let revisedContents: [String: Any] = [
+			"id": "feed/7", "updated": 0,
+			"items": [[
+				"id": readerID,
+				"title": "Revised story", "published": 1_786_272_100,
+				"categories": ["user/-/state/com.google/read", "user/-/state/com.google/starred"],
+				"content": ["content": "<p>Revised body</p>"],
+				"summary": ["content": "Revised body"],
+				"alternate": [],
+				"origin": ["streamId": "feed/7", "title": "Alpha", "htmlUrl": "https://example.com"],
+			]],
+		]
+		await controlled.resolve(contents, data: try JSONSerialization.data(withJSONObject: revisedContents))
+		await load.value
+
+		let refreshedForYou = try #require(model.allArticles(for: forYou).first(where: { $0.readerId == readerID }))
+		let refreshedFeed = try #require(model.allArticles(for: feed).first(where: { $0.readerId == readerID }))
+		#expect(refreshedForYou.html == "<p>Revised body</p>")
+		#expect(refreshedForYou.isRead)
+		#expect(refreshedForYou.isStarred)
+		#expect(refreshedForYou.score == 91)
+		#expect(refreshedFeed.html == "<p>Revised body</p>")
+		#expect(refreshedFeed.isRead)
+		#expect(refreshedFeed.isStarred)
+	}
+
+	@Test func forYouCanonicalOrderSurvivesCrossCollectionRefreshWithStableArticleIDs() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou)
+		let feed = ReaderNavigationItem(
+			id: "feed/7",
+			title: "Alpha",
+			streamID: "feed/7",
+			kind: .feed,
+			unreadCount: 1,
+			parentID: nil,
+			feedKey: "feed/7",
+			iconURL: nil,
+			smartSection: nil,
+		)
+		let firstReaderID = "tag:google.com,2005:reader/item/0000000000000001"
+		let secondReaderID = "tag:google.com,2005:reader/item/0000000000000002"
+		let first = makeArticle(
+			id: "uuid-first",
+			score: 91,
+			feedKey: "feed/7",
+			readerId: firstReaderID,
+			receivedDate: Date(timeIntervalSince1970: 1_786_272_100),
+			html: "<p>Original first body</p>",
+		)
+		let second = makeArticle(
+			id: "uuid-second",
+			score: 10,
+			feedKey: "feed/7",
+			readerId: secondReaderID,
+			receivedDate: Date(timeIntervalSince1970: 1_786_272_200),
+		)
+		model.setArticles([first, second], for: forYou)
+		model.setArticles([], for: feed)
+
+		let load = Task { await model.load(collection: feed, force: true) }
+		let ids = await controlled.nextRequest()
+		#expect(ids.request.url?.path == "/reader/api/0/stream/items/ids")
+		await controlled.resolve(ids, data: streamIDsData(ids: ["1"], continuation: nil))
+		let contents = await controlled.nextRequest()
+		#expect(contents.request.url?.path == "/reader/api/0/stream/items/contents")
+		await controlled.resolve(
+			contents,
+			data: Data("""
+			{"id":"feed/7","updated":0,"items":[{"id":"\(firstReaderID)","categories":[],"title":"Revised first","published":1786272100,"summary":{"content":"<p>Revised first body</p>"},"content":{"content":"<p>Revised first body</p>"},"alternate":[],"origin":{"streamId":"feed/7","title":"Alpha","htmlUrl":"https://example.com"}}]}
+			""".utf8),
+		)
+		await load.value
+
+		let refreshedForYou = try #require(model.allArticles(for: forYou).first(where: { $0.readerId == firstReaderID }))
+		#expect(refreshedForYou.id == first.id)
+		#expect(refreshedForYou.html == "<p>Revised first body</p>")
+		#expect(refreshedForYou.score == first.score)
+		#expect(model.allArticles(for: forYou).map(\.id) == [first.id, second.id])
+
+		model.setSortOrder(.newest, for: forYou)
+		#expect(model.allArticles(for: forYou).map(\.id) == [second.id, first.id])
+		model.setSortOrder(.recommended, for: forYou)
+		#expect(model.allArticles(for: forYou).map(\.id) == [first.id, second.id])
+		#expect(model.allArticles(for: forYou).map(\.score) == [first.score, second.score])
+	}
+
+	@Test func acknowledgedReadAndStarEditsSurviveAStaleHeldCollectionResponse() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let article = makeArticle(id: "edited", isRead: false)
+		model.setArticles([article], for: collection)
+
+		let load = Task { await model.load(collection: collection, force: true) }
+		let staleResponse = await controlled.nextRequest()
+
+		let read = Task { await model.setRead(article, read: true) }
+		let readRequest = await controlled.nextRequest()
+		await controlled.resolve(readRequest, data: try appliedMutationResponse(for: readRequest))
+		await read.value
+
+		let starred = Task { await model.setStarred(article, starred: true) }
+		let starredRequest = await controlled.nextRequest()
+		await controlled.resolve(starredRequest, data: try appliedMutationResponse(for: starredRequest))
+		await starred.value
+
+		await controlled.resolve(staleResponse, data: try responseData(items: [article]))
+		await load.value
+
+		let current = try #require(model.allArticles(for: collection).first)
+		#expect(current.isRead)
+		#expect(current.isStarred)
+	}
+
+	@Test func unrelatedCollectionMutationDoesNotSuppressAConcurrentRemoteStatusUpdate() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou)
+		let starred = ReaderNavigationItem.smart(.starred)
+		let target = makeArticle(id: "remote-status", isRead: false)
+		let unrelated = makeArticle(id: "unrelated", isRead: false)
+		model.setArticles([target], for: forYou)
+
+		let load = Task { await model.load(collection: forYou, force: true) }
+		let request = await controlled.nextRequest()
+		model.setArticles([unrelated], for: starred)
+		let remoteUpdate = Recommendation(
+			id: target.id,
+			readerId: target.readerId,
+			feedKey: target.feedKey,
+			source: target.source,
+			title: target.title,
+			html: target.html,
+			text: target.text,
+			originalURL: target.originalURL,
+			receivedAt: target.receivedAt,
+			isRead: true,
+			isStarred: target.isStarred,
+			score: target.score,
+			confidence: target.confidence,
+			sampleCount: target.sampleCount,
+			explanation: target.explanation,
+			learningState: target.learningState,
+		)
+		await controlled.resolve(request, data: try responseData(items: [remoteUpdate]))
+		await load.value
+
+		#expect(model.allArticles(for: forYou).first?.isRead == true)
+	}
+
+	@Test func targetedRefreshPreservesAnotherCollectionPaginationAndOlderPages() async throws {
+		let client = PaginationHTTPClient()
+		let model = try makeModel(httpClient: client, offlineSynchronizationEnabled: false)
+		let first = makePaginationCollection()
+		let second = ReaderNavigationItem(
+			id: "user/-/label/Other",
+			title: "Other",
+			streamID: first.streamID,
+			kind: .folder,
+			unreadCount: 3,
+			parentID: nil,
+			feedKey: nil,
+			iconURL: nil,
+			smartSection: nil,
+		)
+		model.setNavigation(ReaderNavigationState(items: [first, second]))
+
+		await model.load(collection: first)
+		await model.loadMore(collection: first)
+		await model.load(collection: second)
+		#expect(model.canLoadMore(collection: second))
+		#expect(model.allArticles(for: first).map(\.id) == ["newest", "middle", "older"])
+
+		await model.refresh(collection: first)
+
+		#expect(model.allArticles(for: first).map(\.id) == ["newest", "middle", "older"])
+		#expect(model.canLoadMore(collection: second))
+		#expect(model.allArticles(for: second).map(\.id) == ["newest", "middle"])
+	}
+
+	@Test func lifecycleReconnectRetriesAfterARecentFailure() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		model.configurePlatformServices()
+		model.setApplicationActive(true)
+
+		let firstAttempt = Task { await model.refreshForLifecycle() }
+		let failedRequest = await controlled.nextRequest()
+		await controlled.fail(failedRequest, with: URLError(.notConnectedToInternet))
+		let retryAttempt = await controlled.nextRequest()
+		await controlled.fail(retryAttempt, with: URLError(.notConnectedToInternet))
+		await firstAttempt.value
+		#expect(model.isOffline)
+
+		let restored = Task {
+			await BackgroundRefreshManager.shared.pathChangeHandler?()
+		}
+		let retryRequest = await controlled.nextRequest()
+		await controlled.resolve(retryRequest, data: try responseData(items: [makeArticle(id: "after-reconnect")]))
+		await restored.value
+
+		#expect(model.isOffline == false)
+		#expect(model.allArticles(for: .smart(.forYou)).map(\.id) == ["after-reconnect"])
+	}
+
+	@Test func lifecycleRefreshDoesNotMarkAClosedAccountOfflineAfterAHeldLoad() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		model.configurePlatformServices()
+		model.setApplicationActive(true)
+
+		let refresh = Task { await model.refreshForLifecycle() }
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "stale-account")]))
+		await refresh.value
+
+		#expect(model.isOffline == false)
+		#expect(model.errorMessage == nil)
+		#expect(model.allArticles(for: .smart(.forYou)).isEmpty)
+	}
+
+	@Test func refreshKeepsAnOpenArticleWhenAStatusChangeRemovesItsUnreadRow() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		let article = makeArticle(id: "open-unread", isRead: false)
+		model.setArticles([article], for: collection)
+		model.select(item: collection)
+		model.select(article: article)
+		model.articleFilter = .unread
+
+		let load = Task { await model.load(collection: collection, force: true) }
+		let request = await controlled.nextRequest()
+		let readArticle = Recommendation(
+			id: article.id,
+			readerId: article.readerId,
+			feedKey: article.feedKey,
+			source: article.source,
+			title: article.title,
+			html: article.html,
+			text: article.text,
+			originalURL: article.originalURL,
+			receivedAt: article.receivedAt,
+			isRead: true,
+			isStarred: article.isStarred,
+			score: article.score,
+			confidence: article.confidence,
+			sampleCount: article.sampleCount,
+			explanation: article.explanation,
+			learningState: article.learningState,
+		)
+		await controlled.resolve(request, data: try responseData(items: [readArticle]))
+		await load.value
+
+		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.selectedArticleID == article.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
 	@Test func filteredBulkReadUsesRecommendedServerOrderForDisplayedBoundary() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(
@@ -7696,6 +8130,56 @@ struct ReaderAppModelTests {
 		return sorted[sorted.count / 2]
 	}
 
+	private func makeCachedFolderFixture(
+		token: String = "cached-folder-account",
+		selectedNavigationID: String = ReaderSection.forYou.rawValue,
+	) async throws -> (
+		session: PigeonSession,
+		store: OfflineLibraryStore,
+		subscription: FeedSubscription,
+		folder: ReaderNavigationItem,
+		cachedArticle: Recommendation
+	) {
+		let session = try makeSession(token: token)
+		let store = OfflineLibraryStore.inMemory()
+		let subscription = makeSubscription(id: "feed/7", key: "alpha", title: "Alpha", folder: "News")
+		let readerSubscription = ReaderSubscription(
+			id: subscription.id,
+			title: subscription.title,
+			categories: [ReaderSubscriptionCategory(id: "user/-/label/News", label: "News")],
+			url: subscription.url.absoluteString,
+		)
+		let navigation = ReaderNavigationCatalog.make(
+			subscriptions: [readerSubscription],
+			unreadCounts: [],
+			smartCounts: ReaderNavigationSmartCounts(forYou: 0, today: 0, unread: 0, starred: 0),
+		)
+		let folder = try #require(navigation.folderItems.first)
+		let cachedArticle = makeArticle(id: "cached-folder", feedKey: "alpha")
+		let restoration = ReaderRestorationState(
+			selectedNavigationID: selectedNavigationID,
+			selectedArticleIDs: [:],
+			sortOrders: [:],
+			articleFilters: [:],
+			sidebarFilter: ReaderSidebarFilter.all.rawValue,
+			expandedFolderIDs: [],
+			compactColumn: .content,
+			readerModes: [:],
+			articleScrollOffsets: [:],
+		)
+		let accountID = session.storageIdentity
+		try await store.saveNavigation(navigation, accountID: accountID)
+		try await store.saveSubscriptions([subscription], accountID: accountID)
+		try await store.saveArticles([cachedArticle], collectionID: folder.id, accountID: accountID)
+		try await store.saveRestoration(restoration, accountID: accountID)
+		try await store.apply(
+			IncrementalSyncPage(cursor: "warm-cursor", hasMore: false, changes: []),
+			accountID: accountID,
+		)
+		try await store.finishSynchronization(accountID: accountID)
+		return (session, store, subscription, folder, cachedArticle)
+	}
+
 	private func makeWarmPreparationModel(httpClient: any HTTPClient) async throws -> ReaderAppModel {
 		let session = try makeSession(token: "warm-preparation-token")
 		let store = OfflineLibraryStore.inMemory()
@@ -7743,7 +8227,7 @@ struct ReaderAppModelTests {
 		httpClient: any HTTPClient,
 		cachedHTML: String = "<p>Body</p>",
 		continuation: String? = nil,
-	) async throws -> (model: ReaderAppModel, collection: ReaderNavigationItem) {
+	) async throws -> (model: ReaderAppModel, collection: ReaderNavigationItem, store: OfflineLibraryStore) {
 		let session = try makeSession(token: "warm-feed-token")
 		let store = OfflineLibraryStore.inMemory()
 		let collection = ReaderNavigationItem(
@@ -7802,7 +8286,7 @@ struct ReaderAppModelTests {
 			accountID: session.storageIdentity,
 		)
 		let model = try makeModel(httpClient: httpClient, session: session, offlineStore: store)
-		return (model, collection)
+		return (model, collection, store)
 	}
 
 	private func makeWarmBenchmarkModel() async throws -> (
@@ -8306,6 +8790,12 @@ struct ReaderAppModelTests {
 
 	private func emptySyncPage(cursor: String) -> Data {
 		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":false,\"changes\":[]}".utf8)
+	}
+
+	private func statusSyncPage(itemID: String) -> Data {
+		Data("""
+		{"cursor":"status-cursor","hasMore":false,"changes":[{"sequence":2,"entityType":"status","entityId":"\(itemID)","operation":"upsert","changedAt":"2026-08-21T12:00:00.000Z","payload":{"itemId":"\(itemID)","isRead":true,"isStarred":false,"updatedAt":"2026-08-21T12:00:00.000Z","version":2,"mutationId":null}}]}
+		""".utf8)
 	}
 
 	private func subscriptionsData(_ subscriptions: [FeedSubscription]) throws -> Data {
@@ -9088,14 +9578,23 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 private actor StartupHTTPClient: HTTPClient {
 	private let subscriptionsData: Data
 	private let recommendationsData: Data
-	private let folderItemID: String?
+	private let folderItemIDs: [String]
+	private var remainingSyncFailures: Int
 	private var subscriptionRequestCount = 0
 	private var folderPageRequests = 0
+	private var currentFolderItemID: String?
 
-	init(subscriptionsData: Data, recommendationsData: Data, folderItemID: String? = nil) {
+	init(
+		subscriptionsData: Data,
+		recommendationsData: Data,
+		folderItemID: String? = nil,
+		folderItemIDs: [String]? = nil,
+		syncFailures: Int = 0,
+	) {
 		self.subscriptionsData = subscriptionsData
 		self.recommendationsData = recommendationsData
-		self.folderItemID = folderItemID
+		self.folderItemIDs = folderItemIDs ?? folderItemID.map { [$0] } ?? []
+		self.remainingSyncFailures = syncFailures
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -9107,6 +9606,10 @@ private actor StartupHTTPClient: HTTPClient {
 		let statusCode: Int
 		switch url.path {
 		case "/api/v1/sync":
+			if remainingSyncFailures > 0 {
+				remainingSyncFailures -= 1
+				throw URLError(.notConnectedToInternet)
+			}
 			data = Data(#"{"cursor":"0","hasMore":false,"changes":[]}"#.utf8)
 			statusCode = 200
 		case "/reader/api/0/subscription/list":
@@ -9118,15 +9621,18 @@ private actor StartupHTTPClient: HTTPClient {
 			statusCode = 200
 		case "/reader/api/0/stream/items/ids":
 			let streamID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "s" })?.value
-			if streamID == "user/-/label/News", let folderItemID {
+			if streamID == "user/-/label/News", folderItemIDs.isEmpty == false {
+				let index = min(folderPageRequests, folderItemIDs.count - 1)
+				let folderItemID = folderItemIDs[index]
 				folderPageRequests += 1
+				currentFolderItemID = folderItemID
 				data = Data("{\"itemRefs\":[{\"id\":\"\(folderItemID)\"}],\"continuation\":\"folder-next\"}".utf8)
 			} else {
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 			}
 			statusCode = 200
 		case "/reader/api/0/stream/items/contents":
-			if let folderItemID {
+			if let folderItemID = currentFolderItemID {
 				data = Data("{\"id\":\"user/-/label/News\",\"updated\":0,\"items\":[{\"id\":\"\(folderItemID)\",\"categories\":[],\"title\":\"Live folder\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}]}".utf8)
 			} else {
 				data = Data(#"{"items":[]}"#.utf8)

@@ -4,15 +4,17 @@ import Foundation
 enum PreviewNavigationFixture {
 	static func install(in model: ReaderAppModel) {
 		let stress = ProcessInfo.processInfo.arguments.contains("-reader-motion-stress-fixture")
+		let refreshFixture = ProcessInfo.processInfo.arguments.contains("-reader-folder-refresh-fixture")
 		var items = model.navigation.smartItems
 		for folderNumber in 1...(stress ? 100 : 6) {
 			let title = String(format: "Folder %02d", folderNumber)
 			let folderID = "navigation-folder-\(folderNumber)"
-			items.append(ReaderNavigationItem(
+			let folder = ReaderNavigationItem(
 				id: folderID, title: title, streamID: "user/-/label/\(title)",
 				kind: .folder, unreadCount: 6, parentID: nil,
 				feedKey: nil, iconURL: nil, smartSection: nil
-			))
+			)
+			items.append(folder)
 			for feedNumber in 1...(stress ? 30 : 6) {
 				let id = "feed/navigation-\(folderNumber)-\(feedNumber)"
 				let feed = ReaderNavigationItem(
@@ -26,6 +28,10 @@ enum PreviewNavigationFixture {
 					model.setArticles(stories, for: feed)
 					model.setArticleFilter(.all, for: feed)
 				}
+			}
+			if folderNumber == 1, refreshFixture {
+				model.setArticles([PreviewData.articles[0]], for: folder)
+				model.setArticleFilter(.all, for: folder)
 			}
 		}
 		model.setNavigation(ReaderNavigationState(items: items), markAsLoaded: true)

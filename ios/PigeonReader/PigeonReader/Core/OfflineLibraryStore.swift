@@ -1,6 +1,16 @@
 import Foundation
 import SQLite3
 
+private struct PendingStatusValue: Sendable {
+	let value: Bool
+	let sequence: Int64
+}
+
+private struct PendingStatusOverlay: Sendable {
+	var read: PendingStatusValue?
+	var starred: PendingStatusValue?
+}
+
 actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProviding {
 	static let shared = OfflineLibraryStore()
 
@@ -92,7 +102,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	}
 
 	func loadSnapshot(accountID: String) throws -> CachedLibrarySnapshot {
-		let snapshot = try loadSnapshotFromStorage(accountID: accountID)
+		let snapshot = try loadSnapshot(accountID: accountID, scopedTo: nil)
 		if accountID.hasPrefix("__pigeon_rebuild__") == false, snapshot.navigation != nil {
 			// `cached_navigation.updated_at` is the provenance for Today counts.
 			// Re-reading a yesterday's snapshot must not relabel those counts as
@@ -100,6 +110,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			bootstrapFileStore.refreshMetadata(accountID: accountID)
 		}
 		return snapshot
+	}
+
+	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot {
+		try loadSnapshot(accountID: accountID, scopedTo: collectionIDs)
 	}
 
 	nonisolated func loadBootstrapSnapshot(accountID: String) -> OfflineLibraryBootstrapSnapshot? {
@@ -113,12 +127,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		guard let stagingAccountID = stagingAccountIDs[accountID] else {
 			throw OfflineLibraryError.invalidCacheState("The account has no active full-rebuild generation.")
 		}
-		return try loadSnapshotFromStorage(accountID: stagingAccountID)
+		return try loadSnapshot(accountID: stagingAccountID, scopedTo: nil)
 	}
 	#endif
 
-	private func loadSnapshotFromStorage(accountID: String) throws -> CachedLibrarySnapshot {
+	private func loadSnapshot(accountID: String, scopedTo collectionIDs: Set<String>?) throws -> CachedLibrarySnapshot {
 		let database = try openDatabase()
+		if let collectionIDs {
+			// Validate the requested projection before identity reconciliation or any
+			// membership repair can hide a malformed selected row. A scoped caller may
+			// replace only those collections, so it must take the same repair path as a
+			// full snapshot instead of receiving a silently truncated projection.
+			try validateScopedArticlePayloads(
+				accountID: accountID,
+				collectionIDs: collectionIDs,
+				database: database,
+			)
+		}
 		try reconcileArticleIdentities(accountID: accountID, database: database)
 		let integrity = try loadCacheIntegrity(accountID: accountID, database: database)
 		var malformedPayload = false
@@ -227,6 +252,29 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		}
 
 		var articlesByCollection: [String: [Recommendation]] = [:]
+		if let collectionIDs {
+			guard malformedPayload == false else {
+				// A scoped merge replaces only the requested in-memory collections. Do not
+				// hand the caller a partial projection after any cache row was rejected;
+				// the caller's repair path can retain its last useful collection instead.
+				throw OfflineLibraryError.invalidCacheState("The offline library contained malformed cached data.")
+			}
+			let scopedArticles = try loadScopedArticles(
+				accountID: accountID,
+				collectionIDs: collectionIDs,
+				database: database,
+			)
+			return CachedLibrarySnapshot(
+				navigation: derivedNavigation,
+				subscriptions: subscriptions,
+				articlesByCollection: scopedArticles,
+				continuationsByCollection: continuationsByCollection.filter { collectionIDs.contains($0.key) },
+				restoration: restoration,
+				cursor: syncState?.0,
+				lastSyncAt: syncState?.1,
+				integrity: integrity,
+			)
+		}
 		let articleRowCount = try scalarCount(
 			"SELECT COUNT(*) FROM cached_articles WHERE account_id = ?",
 			accountID: accountID,
@@ -237,6 +285,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// the first snapshot and avoids repeatedly decoding large HTML blobs when one
 		// article appears in several collections.
 		var decodedArticlesByID: [String: Recommendation] = [:]
+		let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
 		try query(
 			"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC, id",
 			bindings: [.text(accountID)],
@@ -248,9 +297,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				malformedPayload = true
 				return
 			}
-			decodedArticlesByID[articleID] = sqlite3_column_int64(statement, 1) != 0
+			let article = sqlite3_column_int64(statement, 1) != 0
 				? decodedArticle.replacingHTML("")
 				: decodedArticle
+			decodedArticlesByID[articleID] = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
 			#if DEBUG
 			snapshotArticleDecodeCount += 1
 			#endif
@@ -652,13 +702,18 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let storageAccountID = accountID
 		try reconcileArticleIdentities(accountID: storageAccountID, database: database)
 		try transaction(database) {
+			let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
 			try execute(
 				"DELETE FROM cached_collection_articles WHERE account_id = ? AND collection_id = ?",
 				bindings: [.text(storageAccountID), .text(collectionID)],
 				database: database,
 			)
 			for (position, article) in articles.enumerated() {
-				let storedArticle = try upsertArticle(sanitized(article), accountID: storageAccountID, database: database)
+				let overlaidArticle = applyPendingStatusOverlay(
+					to: sanitized(article),
+					overlays: pendingOverlays,
+				)
+				let storedArticle = try upsertArticle(overlaidArticle, accountID: storageAccountID, database: database)
 				try insertCollectionMembership(
 					accountID: storageAccountID,
 					collectionID: collectionID,
@@ -768,6 +823,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					database: database,
 				)
 			}
+			try materializePendingStatusOverlay(accountID: accountID, database: database)
 		}
 	}
 
@@ -800,11 +856,15 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	}
 
 	func markMutationApplied(id: String, accountID: String) throws {
-		try execute(
-			"DELETE FROM pending_actions WHERE account_id = ? AND id = ?",
-			bindings: [.text(accountID), .text(id)],
-			database: try openDatabase(),
-		)
+		let database = try openDatabase()
+		try transaction(database) {
+			try execute(
+				"DELETE FROM pending_actions WHERE account_id = ? AND id = ?",
+				bindings: [.text(accountID), .text(id)],
+				database: database,
+			)
+			try materializePendingStatusOverlay(accountID: accountID, database: database)
+		}
 	}
 
 	func recordMutationFailure(id: String, message: String, accountID: String) throws {
@@ -933,6 +993,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// the rebuild is interrupted.
 		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		try reconcileArticleIdentities(accountID: storageAccountID, database: database)
+		let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
 		var candidates: [(String, Recommendation)] = []
 		try query(
 			"""
@@ -947,7 +1008,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				let payload = data(at: 1, statement: statement),
 				let article = try? decoder.decode(Recommendation.self, from: payload),
 				article.html.isEmpty == false else { return }
-			candidates.append((id, article))
+			let effectiveArticle = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
+			guard effectiveArticle.isRead, effectiveArticle.isStarred == false else { return }
+			candidates.append((id, effectiveArticle))
 		}
 		try transaction(database) {
 			for (id, article) in candidates {
@@ -1217,7 +1280,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			let resolvedHTML = shouldPreserveBody
 				? (existing?.article.html ?? "")
 				: (serverPrunedBody ? "" : incomingHTML)
-			let article = sanitized(Recommendation(
+			let article = applyPendingStatusOverlay(
+				to: sanitized(Recommendation(
 				id: id, readerId: readerID, feedKey: feedKey, source: source, author: payload.author, title: title,
 				html: resolvedHTML,
 				text: payload.text ?? existing?.article.text,
@@ -1229,7 +1293,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				sampleCount: existing?.article.sampleCount ?? 0,
 				explanation: existing?.article.explanation ?? "From \(source)",
 				learningState: existing?.article.learningState ?? "Synced article",
-			))
+				)),
+				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
+			)
 			let storedArticle = try upsertArticle(
 				article,
 				bodyPruned: serverPrunedBody && shouldPreserveBody == false,
@@ -1399,6 +1465,261 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		article.replacingHTML(
 			StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
 		)
+	}
+
+	private func loadPendingStatusOverlays(
+		accountID: String,
+		database: OpaquePointer,
+	) throws -> [String: PendingStatusOverlay] {
+		var overlays: [String: PendingStatusOverlay] = [:]
+		try query(
+			"SELECT sequence, payload FROM pending_actions WHERE account_id = ? ORDER BY sequence",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let payload = data(at: 1, statement: statement),
+				let mutation = try? decoder.decode(OfflineMutation.self, from: payload),
+				mutation.kind == .setRead || mutation.kind == .setReadBatch || mutation.kind == .setStarred,
+				let value = mutation.value else {
+				return
+			}
+			let sequence = sqlite3_column_int64(statement, 0)
+			for itemID in mutation.itemIds {
+				let key = ReaderArticleIdentity.normalized(itemID)
+				guard key.isEmpty == false else { continue }
+				var overlay = overlays[key, default: PendingStatusOverlay()]
+				if mutation.kind == .setStarred {
+					if overlay.starred == nil || overlay.starred!.sequence <= sequence {
+						overlay.starred = PendingStatusValue(value: value, sequence: sequence)
+					}
+				} else if overlay.read == nil || overlay.read!.sequence <= sequence {
+					overlay.read = PendingStatusValue(value: value, sequence: sequence)
+				}
+				overlays[key] = overlay
+			}
+		}
+		return overlays
+	}
+
+	private func applyPendingStatusOverlay(
+		to article: Recommendation,
+		overlays: [String: PendingStatusOverlay],
+	) -> Recommendation {
+		let keys = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+		let matches = keys.compactMap { overlays[$0] }
+		let read = matches.compactMap(\.read).max { $0.sequence < $1.sequence }
+		let starred = matches.compactMap(\.starred).max { $0.sequence < $1.sequence }
+		guard read != nil || starred != nil else { return article }
+		return Recommendation(
+			id: article.id,
+			readerId: article.readerId,
+			feedKey: article.feedKey,
+			source: article.source,
+			author: article.author,
+			title: article.title,
+			html: article.html,
+			text: article.text,
+			originalURL: article.originalURL,
+			receivedAt: article.receivedAt,
+			isRead: read?.value ?? article.isRead,
+			isStarred: starred?.value ?? article.isStarred,
+			score: article.score,
+			confidence: article.confidence,
+			sampleCount: article.sampleCount,
+			explanation: article.explanation,
+			learningState: article.learningState,
+		)
+	}
+
+	/// Materialize a pending status projection for rows already in the cache.
+	///
+	/// The pending action is the source of truth for the article status, but the
+	/// navigation unread totals are an authoritative server snapshot. A local
+	/// status change must adjust those totals by the cached membership delta so a
+	/// partial collection cache does not reset a server count to its local row
+	/// count.
+	private func materializePendingStatusOverlay(
+		accountID: String,
+		database: OpaquePointer,
+	) throws {
+		let overlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
+		guard overlays.isEmpty == false else { return }
+		var records: [StoredArticle] = []
+		try query(
+			"SELECT id, payload, body_pruned FROM cached_articles WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			guard let id = string(at: 0, statement: statement),
+				let payload = data(at: 1, statement: statement),
+				let article = try? decoder.decode(Recommendation.self, from: payload),
+				overlays.keys.contains(where: { ReaderArticleIdentity.matches(article, id: $0) }) else {
+				return
+			}
+			records.append(
+				StoredArticle(
+					id: id,
+					article: article,
+					bodyPruned: sqlite3_column_int64(statement, 2) != 0,
+				),
+			)
+		}
+
+		for record in records {
+			let projectedArticle = applyPendingStatusOverlay(to: record.article, overlays: overlays)
+			guard projectedArticle.isRead != record.article.isRead
+				|| projectedArticle.isStarred != record.article.isStarred else {
+				continue
+			}
+			let previousCollectionIDs = try cachedMembershipCollectionIDs(
+				articleID: record.id,
+				accountID: accountID,
+				database: database,
+			)
+			let storedArticle = try upsertArticle(
+				projectedArticle,
+				bodyPruned: record.bodyPruned,
+				accountID: accountID,
+				database: database,
+			)
+			try rebuildPendingStatusMemberships(
+				for: storedArticle,
+				accountID: accountID,
+				database: database,
+			)
+			try applyNavigationUnreadDelta(
+				accountID: accountID,
+				database: database,
+				beforeRead: record.article.isRead,
+				afterRead: storedArticle.isRead,
+				beforeStarred: record.article.isStarred,
+				afterStarred: storedArticle.isStarred,
+				beforeCollectionIDs: previousCollectionIDs,
+				articleID: storedArticle.id,
+			)
+		}
+	}
+
+	private func rebuildPendingStatusMemberships(
+		for article: Recommendation,
+		accountID: String,
+		database: OpaquePointer,
+	) throws {
+		let managedCollectionIDs = [
+			ReaderSection.unread.rawValue,
+			ReaderSection.today.rawValue,
+			ReaderSection.starred.rawValue,
+		]
+		for collectionID in managedCollectionIDs {
+			try execute(
+				"DELETE FROM cached_collection_articles WHERE account_id = ? AND collection_id = ? AND article_id = ?",
+				bindings: [.text(accountID), .text(collectionID), .text(article.id)],
+				database: database,
+			)
+		}
+		if article.isRead == false {
+			try insertCollectionMembership(
+				accountID: accountID,
+				collectionID: ReaderSection.unread.rawValue,
+				articleID: article.id,
+				position: 0,
+				database: database,
+			)
+		}
+		if ReaderLocalDayBounds.localDay(containing: .now).contains(article.receivedAt) {
+			try insertCollectionMembership(
+				accountID: accountID,
+				collectionID: ReaderSection.today.rawValue,
+				articleID: article.id,
+				position: 0,
+				database: database,
+			)
+		}
+		if article.isStarred {
+			try insertCollectionMembership(
+				accountID: accountID,
+				collectionID: ReaderSection.starred.rawValue,
+				articleID: article.id,
+				position: 0,
+				database: database,
+			)
+		}
+	}
+
+	private func cachedMembershipCollectionIDs(
+		articleID: String,
+		accountID: String,
+		database: OpaquePointer,
+	) throws -> Set<String> {
+		var collectionIDs = Set<String>()
+		try query(
+			"SELECT collection_id FROM cached_collection_articles WHERE account_id = ? AND article_id = ?",
+			bindings: [.text(accountID), .text(articleID)],
+			database: database,
+		) { statement in
+			if let collectionID = string(at: 0, statement: statement) {
+				collectionIDs.insert(collectionID)
+			}
+		}
+		return collectionIDs
+	}
+
+	private func applyNavigationUnreadDelta(
+		accountID: String,
+		database: OpaquePointer,
+		beforeRead: Bool,
+		afterRead: Bool,
+		beforeStarred: Bool,
+		afterStarred: Bool,
+		beforeCollectionIDs: Set<String>,
+		articleID: String,
+	) throws {
+		guard beforeRead != afterRead || beforeStarred != afterStarred else { return }
+		guard var navigation = try loadSinglePayload(
+			ReaderNavigationState.self,
+			sql: "SELECT payload FROM cached_navigation WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) else {
+			return
+		}
+		var afterCollectionIDs = Set<String>()
+		try query(
+			"SELECT collection_id FROM cached_collection_articles WHERE account_id = ? AND article_id = ?",
+			bindings: [.text(accountID), .text(articleID)],
+			database: database,
+		) { statement in
+			if let collectionID = string(at: 0, statement: statement) {
+				afterCollectionIDs.insert(collectionID)
+			}
+		}
+
+		var changed = false
+		for item in navigation.items {
+			let matchesCollection: (Set<String>) -> Bool = { collectionIDs in
+				collectionIDs.contains(item.id) || collectionIDs.contains(item.streamID)
+			}
+			let wasUnread = beforeRead == false && matchesCollection(beforeCollectionIDs)
+			let isUnread = afterRead == false && matchesCollection(afterCollectionIDs)
+			let wasStarredUnread = beforeStarred
+				&& beforeRead == false
+				&& matchesCollection(beforeCollectionIDs)
+			let isStarredUnread = afterStarred
+				&& afterRead == false
+				&& matchesCollection(afterCollectionIDs)
+			let delta: Int
+			if item.smartSection == .starred {
+				delta = (isStarredUnread ? 1 : 0) - (wasStarredUnread ? 1 : 0)
+			} else {
+				delta = (isUnread ? 1 : 0) - (wasUnread ? 1 : 0)
+			}
+			guard delta != 0 else { continue }
+			navigation = navigation.replacingCount(for: item.id, with: item.unreadCount + delta)
+			changed = true
+		}
+		if changed {
+			try writeNavigation(navigation, accountID: accountID, database: database)
+		}
 	}
 
 	private func upsertArticle(
@@ -2789,6 +3110,83 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		} catch {
 			try? execute("ROLLBACK", database: database)
 			throw error
+		}
+	}
+
+	private func loadScopedArticles(
+		accountID: String,
+		collectionIDs: Set<String>,
+		database: OpaquePointer,
+	) throws -> [String: [Recommendation]] {
+		let sortedCollectionIDs = collectionIDs.sorted()
+		var articlesByCollection = Dictionary(
+			uniqueKeysWithValues: sortedCollectionIDs.map { ($0, [Recommendation]()) },
+		)
+		guard sortedCollectionIDs.isEmpty == false else { return articlesByCollection }
+		let placeholders = Array(repeating: "?", count: sortedCollectionIDs.count).joined(separator: ", ")
+		let bindings: [SQLiteBinding] = [.text(accountID)] + sortedCollectionIDs.map(SQLiteBinding.text)
+		let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
+		try query(
+			"""
+			SELECT ca.collection_id, ca.article_id, a.body_pruned, a.payload
+			FROM cached_collection_articles ca
+			LEFT JOIN cached_articles a
+			  ON a.account_id = ca.account_id AND a.id = ca.article_id
+			WHERE ca.account_id = ? AND ca.collection_id IN (\(placeholders))
+			ORDER BY ca.collection_id, ca.position, a.received_at DESC, a.id
+			""",
+			bindings: bindings,
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				let articleID = string(at: 1, statement: statement),
+				let payload = data(at: 3, statement: statement),
+				let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
+				throw OfflineLibraryError.invalidCacheState("The offline library contained malformed cached data.")
+			}
+			guard articleID.isEmpty == false else {
+				throw OfflineLibraryError.invalidCacheState("The offline library contained malformed cached data.")
+			}
+			let article = sqlite3_column_int64(statement, 2) != 0
+				? decodedArticle.replacingHTML("")
+				: decodedArticle
+			let effectiveArticle = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
+			#if DEBUG
+			snapshotArticleDecodeCount += 1
+			#endif
+			articlesByCollection[collectionID, default: []].append(effectiveArticle)
+		}
+		return articlesByCollection
+	}
+
+	private func validateScopedArticlePayloads(
+		accountID: String,
+		collectionIDs: Set<String>,
+		database: OpaquePointer,
+	) throws {
+		let sortedCollectionIDs = collectionIDs.sorted()
+		guard sortedCollectionIDs.isEmpty == false else { return }
+		let placeholders = Array(repeating: "?", count: sortedCollectionIDs.count).joined(separator: ", ")
+		let bindings: [SQLiteBinding] = [.text(accountID)] + sortedCollectionIDs.map(SQLiteBinding.text)
+		try query(
+			"""
+			SELECT ca.collection_id, ca.article_id, a.payload
+			FROM cached_collection_articles ca
+			LEFT JOIN cached_articles a
+			  ON a.account_id = ca.account_id AND a.id = ca.article_id
+			WHERE ca.account_id = ? AND ca.collection_id IN (\(placeholders))
+			""",
+			bindings: bindings,
+			database: database,
+		) { statement in
+			guard let collectionID = string(at: 0, statement: statement),
+				collectionID.isEmpty == false,
+				let articleID = string(at: 1, statement: statement),
+				articleID.isEmpty == false,
+				let payload = data(at: 2, statement: statement),
+				(try? decoder.decode(Recommendation.self, from: payload)) != nil else {
+				throw OfflineLibraryError.invalidCacheState("The offline library contained malformed cached data.")
+			}
 		}
 	}
 
