@@ -110,6 +110,31 @@ final class ReaderAppModel {
 		let receivedChanges: Bool
 	}
 
+	private struct PendingArticleState: Sendable {
+		var isRead: Bool?
+		var isStarred: Bool?
+
+		init(isRead: Bool? = nil, isStarred: Bool? = nil) {
+			self.isRead = isRead
+			self.isStarred = isStarred
+		}
+	}
+
+	private struct PendingArticleStateRevision: Sendable {
+		var read: Int?
+		var starred: Int?
+
+		init(read: Int? = nil, starred: Int? = nil) {
+			self.read = read
+			self.starred = starred
+		}
+	}
+
+	private enum IncrementalReloadScope: Sendable {
+		case full
+		case collections(Set<String>)
+	}
+
 	private enum StaleFeedUndo: Sendable {
 		case archive([String])
 		case unarchive([String])
@@ -185,7 +210,16 @@ final class ReaderAppModel {
 	private var articleMutationTask: Task<Void, Never>?
 	private let readerViewExtractor: any ReaderViewExtracting
 	private var apiClient: PigeonAPIClient?
+	private let collectionLoadCoordinator = ReaderCollectionLoadCoordinator()
 	private var articleCache: [String: [Recommendation]] = [:]
+	private var canonicalArticleRecords: [String: Recommendation] = [:]
+	private var pendingArticleStates: [String: PendingArticleState] = [:]
+	private var pendingArticleStateRevisions: [String: PendingArticleStateRevision] = [:]
+	// Keep the latest local value after a queued mutation is acknowledged. An
+	// in-flight collection request may still carry an older server value.
+	private var localArticleStates: [String: PendingArticleState] = [:]
+	private var localArticleStateRevisions: [String: PendingArticleStateRevision] = [:]
+	private var nextPendingArticleStateRevision = 0
 	private var sortOrders: [String: ArticleSortOrder] = [:]
 	private var canonicalArticleOrder: [String: [String]] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
@@ -266,6 +300,14 @@ final class ReaderAppModel {
 	private(set) var offlineStorageStats = OfflineStorageStats.empty
 	private(set) var isSynchronizingOfflineLibrary = false
 	private(set) var isOffline = false
+	private var isApplicationActive = false
+	private var lifecycleRefreshTask: Task<Void, Never>?
+	private var lifecycleRefreshTaskID: UUID?
+	private var lastLifecycleRefreshFailureAt: Date?
+	private var lastLifecycleRefreshFailureAccountID: String?
+	private var lastOfflinePreparationFailureAt: Date?
+	private var lastOfflinePreparationFailureAccountID: String?
+	private static let lifecycleRetryInterval: TimeInterval = 60
 	var offlineLibraryStatus: OfflineLibraryStatus {
 		if isSynchronizingOfflineLibrary {
 			return offlineRepairInProgress ? .repairing : .syncing
@@ -684,6 +726,10 @@ final class ReaderAppModel {
 			offlinePreparationTaskID = nil
 			deferredInitialFeedPaginationCollectionID = nil
 			invalidateCollectionLoads()
+			collectionLoadCoordinator.removeAll()
+			lifecycleRefreshTask?.cancel()
+			lifecycleRefreshTask = nil
+			lifecycleRefreshTaskID = nil
 			sessionGeneration = UUID()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
@@ -693,6 +739,12 @@ final class ReaderAppModel {
 			isShowingBootstrapSnapshot = false
 			bootstrapAccountID = nil
 			articleCache = [:]
+			canonicalArticleRecords = [:]
+			pendingArticleStates = [:]
+			pendingArticleStateRevisions = [:]
+			localArticleStates = [:]
+			localArticleStateRevisions = [:]
+			nextPendingArticleStateRevision = 0
 			failedInitialLoadCollectionIDs.removeAll()
 			completedInitialLoadCollectionIDs.removeAll()
 			automaticDisplaySuppressionCollectionID = nil
@@ -960,9 +1012,107 @@ final class ReaderAppModel {
 			guard let self else { return false }
 			return await self.performBackgroundRefresh()
 		}
+		background.pathChangeHandler = { [weak self] in
+			guard let self else { return }
+			await self.handleNetworkRestored()
+		}
 		background.schedule()
 		_ = ReaderNotificationManager.shared
 		consumePendingFeedRequest()
+	}
+
+	func setApplicationActive(_ active: Bool) {
+		isApplicationActive = active
+		if active == false {
+			lifecycleRefreshTask?.cancel()
+			lifecycleRefreshTask = nil
+			lifecycleRefreshTaskID = nil
+		}
+	}
+
+	func refreshForLifecycle() async {
+		guard isApplicationActive,
+			let accountID = session?.storageIdentity,
+			BackgroundRefreshPolicy.shouldRefresh(
+				pathIsSatisfied: BackgroundRefreshManager.shared.pathIsSatisfied,
+				isConstrained: BackgroundRefreshManager.shared.pathIsConstrained,
+				allowsLowDataMode: allowsLowDataBackgroundRefresh,
+			) else {
+			return
+		}
+		if let failureAccountID = lastLifecycleRefreshFailureAccountID,
+			failureAccountID == accountID,
+			let failureAt = lastLifecycleRefreshFailureAt,
+			Date.now.timeIntervalSince(failureAt) < Self.lifecycleRetryInterval {
+			return
+		}
+		if let lifecycleRefreshTask {
+			await lifecycleRefreshTask.value
+			return
+		}
+
+		let taskID = UUID()
+		let task = Task { @MainActor [weak self] in
+			guard let self else { return }
+			await self.performLifecycleRefresh(accountID: accountID)
+		}
+		lifecycleRefreshTaskID = taskID
+		lifecycleRefreshTask = task
+		await task.value
+		if lifecycleRefreshTaskID == taskID {
+			lifecycleRefreshTask = nil
+			lifecycleRefreshTaskID = nil
+		}
+	}
+
+	private func handleNetworkRestored() async {
+		guard isApplicationActive, session != nil else { return }
+		lastLifecycleRefreshFailureAt = nil
+		lastLifecycleRefreshFailureAccountID = nil
+		lastOfflinePreparationFailureAt = nil
+		lastOfflinePreparationFailureAccountID = nil
+		isOffline = false
+		await refreshForLifecycle()
+	}
+
+	private func performLifecycleRefresh(accountID: String) async {
+		guard isApplicationActive, session?.storageIdentity == accountID else { return }
+		let preparationFailureAtBefore = lastOfflinePreparationFailureAt
+		await prepareOfflineLibrary(force: true)
+		guard isApplicationActive, session?.storageIdentity == accountID else { return }
+		if lastOfflinePreparationFailureAt != preparationFailureAtBefore {
+			lastLifecycleRefreshFailureAccountID = accountID
+			lastLifecycleRefreshFailureAt = .now
+			return
+		}
+		guard isOffline == false else {
+			lastLifecycleRefreshFailureAccountID = accountID
+			lastLifecycleRefreshFailureAt = .now
+			return
+		}
+		guard let apiClient,
+			let context = operationContext(for: apiClient) else {
+			return
+		}
+		let selectedCollectionToRefresh = selectedCollection
+		let selectedCollectionID = selectedCollectionToRefresh.id
+		let freshnessBefore = collectionFreshness[selectedCollectionID]?.updatedAt
+		await load(collection: selectedCollectionToRefresh, force: true)
+		guard Task.isCancelled == false,
+			isApplicationActive,
+			isCurrentOperation(context),
+			selectedNavigationID == selectedCollectionID else {
+			return
+		}
+		let collectionRefreshed = collectionFreshness[selectedCollectionID]?.updatedAt != freshnessBefore
+		if isOffline || collectionRefreshed == false {
+			isOffline = true
+			lastLifecycleRefreshFailureAccountID = accountID
+			lastLifecycleRefreshFailureAt = .now
+		} else {
+			lastLifecycleRefreshFailureAccountID = nil
+			lastLifecycleRefreshFailureAt = nil
+		}
 	}
 
 	func performBackgroundRefresh() async -> Bool {
@@ -1216,8 +1366,12 @@ final class ReaderAppModel {
 		scheduleRestorationSave()
 	}
 
-	func prepareOfflineLibrary() async {
+	func prepareOfflineLibrary(force: Bool = false) async {
 		guard offlineSynchronizationEnabled, session != nil, apiClient != nil else { return }
+		if force {
+			lastOfflinePreparationFailureAt = nil
+			lastOfflinePreparationFailureAccountID = nil
+		}
 		if let offlinePreparationTask {
 			await offlinePreparationTask.value
 			return
@@ -1398,6 +1552,12 @@ final class ReaderAppModel {
 			if let mutationReplayFailureMessage {
 				shouldReleaseInitialLibraryLoadingAtEnd = true
 				isOffline = mutationReplayFailureIsConnectivity ?? false
+				// Treat a replay failure as a failed preparation even when the
+				// server is reachable. Lifecycle refresh can be launched alongside
+				// the initial task; it must not immediately clear this durable
+				// failure by starting a second selected-page load.
+				lastOfflinePreparationFailureAccountID = accountID
+				lastOfflinePreparationFailureAt = Date.now
 				let selectedCollectionAfterReplayFailure = selectedCollection
 				if shouldPrioritizeInitialCollectionLoad(selectedCollectionAfterReplayFailure) {
 					await load(collection: selectedCollectionAfterReplayFailure, force: true, now: synchronizationNow)
@@ -1644,6 +1804,8 @@ final class ReaderAppModel {
 			) else { return }
 			isOffline = isConnectivityFailure(error)
 			let failureAt = Date.now
+			lastOfflinePreparationFailureAccountID = accountID
+			lastOfflinePreparationFailureAt = failureAt
 			if isStructuralOfflineSyncFailure(error) {
 				try? await offlineStore.markCacheRepairNeeded(
 					accountID: accountID,
@@ -1658,6 +1820,10 @@ final class ReaderAppModel {
 				)
 			}
 			errorMessage = error.localizedDescription
+		}
+		if isOffline == false {
+			lastOfflinePreparationFailureAccountID = nil
+			lastOfflinePreparationFailureAt = nil
 		}
 		if let snapshotLoadFailureMessage, errorMessage == nil {
 			errorMessage = snapshotLoadFailureMessage
@@ -2020,16 +2186,30 @@ final class ReaderAppModel {
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
-			if selectedNavigationID == collection.id {
-				errorMessage = nil
-			}
+		if selectedNavigationID == collection.id {
+			errorMessage = nil
+		}
+		let freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
 		if offlineSynchronizationEnabled,
 			session != nil,
-			collection.id == selectedCollection.id {
-			await prepareOfflineLibrary()
+			apiClient != nil {
+			await prepareOfflineLibrary(force: true)
+			guard Task.isCancelled == false, isOffline == false else { return }
+		}
+		let loadedDuringPreparation = collectionFreshness[collection.id].map {
+			$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
+		} ?? false
+		let syncBackedCompleteFeed = offlineSynchronizationEnabled
+			&& session != nil
+			&& apiClient != nil
+			&& collection.kind == .feed
+			&& cachedCollectionHasMissingBodies(collection.id) == false
+		if syncBackedCompleteFeed, loadedDuringPreparation == false {
 			return
 		}
-		await load(collection: collection, force: true)
+		if loadedDuringPreparation == false, syncBackedCompleteFeed == false {
+			await loadCollectionFromNetwork(collection: collection, force: true, now: .now)
+		}
 		if hasLoadedNavigation {
 			await loadNavigation(force: true)
 		}
@@ -2040,7 +2220,7 @@ final class ReaderAppModel {
 	}
 
 	func load(collection: ReaderNavigationItem, force: Bool = false, now: Date = .now) async {
-		await load(collection: collection, force: force, now: now, retryAttempt: 0)
+		await loadCollectionFromNetwork(collection: collection, force: force, now: now)
 	}
 
 	/// Starts the list's automatic load after the snapshot/restore phase of an
@@ -2071,16 +2251,88 @@ final class ReaderAppModel {
 			return
 		}
 		guard Task.isCancelled == false else { return }
-		await load(collection: collection, now: now)
+		if offlineSynchronizationEnabled,
+			let session,
+			preparedOfflineAccountID == session.storageIdentity,
+			offlinePreparationTask == nil,
+			collection.kind == .feed,
+			articleCache[collection.id] != nil,
+			cachedCollectionHasMissingBodies(collection.id) == false {
+			// Re-entering a prepared feed needs an authoritative membership check,
+			// but a complete cached page does not need its bodies downloaded again.
+			await refresh(collection: collection)
+		} else {
+			await load(collection: collection, now: now)
+		}
 		guard Task.isCancelled == false else { return }
 		await persistPrewarmedCollectionIfNeeded(collection)
 	}
 
-	private func load(
+	private func loadCollectionFromNetwork(
+		collection: ReaderNavigationItem,
+		force: Bool,
+		now: Date,
+	) async {
+		guard let apiClient else {
+			return
+		}
+		var freshnessBeforePreparation: Date?
+		let collectionHasCachedState = articleCache[collection.id] != nil
+			|| collectionFreshness[collection.id] != nil
+		if force == false,
+			offlineSynchronizationEnabled,
+			let session,
+			(preparedOfflineAccountID != session.storageIdentity
+				|| offlinePreparationTask != nil && collectionHasCachedState && collection.kind != .smart
+				|| lastOfflinePreparationFailureAccountID == session.storageIdentity
+					&& lastOfflinePreparationFailureAt != nil
+					&& collectionHasCachedState
+					&& collection.kind != .smart) {
+			freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
+			await prepareOfflineLibrary()
+			guard Task.isCancelled == false else { return }
+			let loadedDuringPreparation = collectionFreshness[collection.id].map {
+				$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
+			} ?? false
+			if loadedDuringPreparation || isOffline {
+				return
+			}
+		}
+		guard var context = operationContext(for: apiClient) else {
+			return
+		}
+		while Task.isCancelled == false {
+			let key = ReaderCollectionLoadKey(
+				accountID: context.accountID,
+				collectionID: collection.id,
+				libraryGeneration: context.generation,
+				preparationID: context.preparationID,
+			)
+			await collectionLoadCoordinator.run(for: key) { @MainActor [weak self] in
+				guard let self else { return }
+				await self.performCollectionLoad(
+					collection: collection,
+					force: force,
+					now: now,
+					retryAttempt: 0,
+					apiClientOverride: apiClient,
+					contextOverride: context,
+				)
+			}
+			guard let currentContext = operationContext(for: apiClient), currentContext != context else {
+				return
+			}
+			context = currentContext
+		}
+	}
+
+	private func performCollectionLoad(
 		collection: ReaderNavigationItem,
 		force: Bool,
 		now: Date,
 		retryAttempt: Int,
+		apiClientOverride: PigeonAPIClient? = nil,
+		contextOverride: OperationContext? = nil,
 	) async {
 		guard retryAttempt > 0 || force || activeLoadIDs[collection.id] == nil else {
 			return
@@ -2089,6 +2341,7 @@ final class ReaderAppModel {
 			offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID != session.storageIdentity {
+			guard contextOverride == nil else { return }
 			if isShowingBootstrapSnapshot {
 				// The shell already has trusted navigation metadata. Keep this feed
 				// in its honest loading state while the canonical cache hydrates; the
@@ -2105,32 +2358,41 @@ final class ReaderAppModel {
 			if defersPaginationResolution == false,
 				articleCache[collection.id] == nil
 					|| collection.smartSection?.usesRecommendationEndpoint == true
+					|| collection.kind == .folder && isOffline == false
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
-					|| shouldResolveCachedPagination(for: collection)
-					|| articleCache[collection.id]?.isEmpty == true
-						&& completedInitialLoadCollectionIDs.contains(collection.id) == false
-					|| didPruneToday {
-				await load(collection: collection, force: true, now: now)
+				|| shouldResolveCachedPagination(for: collection)
+				|| articleCache[collection.id]?.isEmpty == true
+					&& completedInitialLoadCollectionIDs.contains(collection.id) == false
+				|| didPruneToday {
+				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
 			}
 			return
 		}
-		guard let apiClient, let context = operationContext(for: apiClient) else {
+		guard let currentAPIClient = self.apiClient else {
+			return
+		}
+		let apiClient = apiClientOverride ?? currentAPIClient
+		guard let context = contextOverride ?? operationContext(for: apiClient) else {
+			return
+		}
+		guard contextOverride == nil || isCurrentOperation(context) else {
 			return
 		}
 		if force == false, articleCache[collection.id] != nil {
 			if pruneTodayIfNeeded(collection, now: now) {
 				await persistCollections([collection.id])
-				await load(collection: collection, force: true, now: now)
+				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
 				return
 			}
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				collection.smartSection?.usesRecommendationEndpoint == true
+					|| collection.kind == .folder && isOffline == false
 					|| collection.kind == .feed && cachedCollectionHasMissingBodies(collection.id)
-					|| shouldResolveCachedPagination(for: collection)
-					|| articleCache[collection.id]?.isEmpty == true
-						&& completedInitialLoadCollectionIDs.contains(collection.id) == false {
-				await load(collection: collection, force: true, now: now)
+				|| shouldResolveCachedPagination(for: collection)
+				|| articleCache[collection.id]?.isEmpty == true
+					&& completedInitialLoadCollectionIDs.contains(collection.id) == false {
+				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
 			}
 			return
 		}
@@ -2143,6 +2405,7 @@ final class ReaderAppModel {
 		if selectedNavigationID == collection.id {
 			errorMessage = nil
 		}
+		let articleStateRevisionsAtStart = localArticleStateRevisions
 
 		defer {
 			if activeLoadIDs[collection.id] == loadID {
@@ -2178,6 +2441,7 @@ final class ReaderAppModel {
 					from: collection.streamID,
 					excludeTag: collection.smartSection?.streamExcludeTag,
 					cachedRecommendations: articleCache[collection.id] ?? [],
+					refreshExistingContent: true,
 				)
 				dayBounds = nil
 			}
@@ -2189,24 +2453,44 @@ final class ReaderAppModel {
 				to: page.items,
 				accountID: context.accountID,
 			)
-			let loadedArticles = mutationIntentResult.articles
+			if mutationIntentResult.errorMessage == nil {
+				await refreshPendingArticleStates(accountID: context.accountID)
+			}
+			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
+				return
+			}
+			let incomingArticles = preserveArticleStatesChangedSince(
+				applyPendingArticleStates(mutationIntentResult.articles),
+				since: articleStateRevisionsAtStart,
+			)
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
 			}
 			isOffline = false
-			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil)
 			let existingArticles = articleCache[collection.id] ?? []
+			let loadedArticles = mergedHeadArticles(
+				incomingArticles,
+				existing: existingArticles,
+				for: collection,
+			)
+			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil)
 			let reusesUnchangedPersistedPage = collection.smartSection?.usesRecommendationEndpoint != true
 				&& page.fetchedContentCount == 0
 				&& existingArticles.count == loadedArticles.count
 				&& zip(existingArticles, loadedArticles).allSatisfy { pair in
 					articlesMatch(pair.0, pair.1)
 				}
-			resetStreamPagination(for: collection.id)
+			let preserveLoadedTail = shouldPreserveLoadedTail(for: collection, existing: existingArticles)
+			if preserveLoadedTail == false {
+				resetStreamPagination(for: collection.id)
+			}
 			streamDayBounds[collection.id] = dayBounds
-			seenStreamContinuations[collection.id] = page.continuation.map { [$0] } ?? []
-			streamContinuations[collection.id] = page.continuation
+			let hasExistingPaginationState = resolvedPaginationCollections.contains(collection.id)
+			if preserveLoadedTail == false || hasExistingPaginationState == false {
+				seenStreamContinuations[collection.id] = page.continuation.map { [$0] } ?? []
+				streamContinuations[collection.id] = page.continuation
+			}
 			setArticles(loadedArticles, for: collection.id)
 			failedInitialLoadCollectionIDs.remove(collection.id)
 			completedInitialLoadCollectionIDs.insert(collection.id)
@@ -2239,7 +2523,9 @@ final class ReaderAppModel {
 				loadedArticles,
 				collectionID: collection.id,
 				navigation: nextNavigation,
-				continuation: page.continuation,
+				continuation: preserveLoadedTail && hasExistingPaginationState
+					? streamContinuations[collection.id]
+					: page.continuation,
 				context: context,
 				operationID: loadID,
 				isLoadMore: false,
@@ -2268,7 +2554,7 @@ final class ReaderAppModel {
 					activeLoadIDs[collection.id] == loadID else {
 					return
 				}
-				await load(
+				await performCollectionLoad(
 					collection: collection,
 					force: true,
 					now: now,
@@ -2304,6 +2590,7 @@ final class ReaderAppModel {
 			from: streamID,
 			dayBounds: dayBounds,
 			cachedRecommendations: cachedRecommendations,
+			refreshExistingContent: true,
 		)
 		try Task.checkCancellation()
 		guard isCurrentCollectionOperation(
@@ -2367,6 +2654,7 @@ final class ReaderAppModel {
 				dayBounds: dayBounds,
 				continuation: nextContinuation,
 				cachedRecommendations: articles,
+				refreshExistingContent: true,
 			)
 			try Task.checkCancellation()
 			guard isCurrentCollectionOperation(
@@ -2405,6 +2693,7 @@ final class ReaderAppModel {
 		activeLoadMoreIDs[collection.id] = loadID
 		loadingMoreCollections.insert(collection.id)
 		loadMoreErrors[collection.id] = nil
+		let articleStateRevisionsAtStart = localArticleStateRevisions
 
 		defer {
 			if activeLoadMoreIDs[collection.id] == loadID {
@@ -2422,6 +2711,7 @@ final class ReaderAppModel {
 					dayBounds: dayBounds,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
+					refreshExistingContent: true,
 				)
 			} else if collection.smartSection?.usesRecommendationEndpoint == true {
 				streamContinuations[collection.id] = nil
@@ -2432,6 +2722,7 @@ final class ReaderAppModel {
 					excludeTag: collection.smartSection?.streamExcludeTag,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
+					refreshExistingContent: true,
 				)
 			}
 			try Task.checkCancellation()
@@ -2442,7 +2733,16 @@ final class ReaderAppModel {
 				to: page.items,
 				accountID: context.accountID,
 			)
-			let loadedArticles = mutationIntentResult.articles
+			if mutationIntentResult.errorMessage == nil {
+				await refreshPendingArticleStates(accountID: context.accountID)
+			}
+			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
+				return
+			}
+			let loadedArticles = preserveArticleStatesChangedSince(
+				applyPendingArticleStates(mutationIntentResult.articles),
+				since: articleStateRevisionsAtStart,
+			)
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadMoreIDs[collection.id] == loadID, activeLoadIDs[collection.id] == nil else {
 				return
@@ -2450,8 +2750,12 @@ final class ReaderAppModel {
 			isOffline = false
 
 			var combinedArticles = articleCache[collection.id] ?? []
-			for article in loadedArticles where combinedArticles.contains(where: { articlesMatch($0, article) }) == false {
-				combinedArticles.append(article)
+			for article in loadedArticles {
+				if let index = combinedArticles.firstIndex(where: { articlesMatch($0, article) }) {
+					combinedArticles[index] = mergedArticle(article, with: combinedArticles[index])
+				} else {
+					combinedArticles.append(article)
+				}
 			}
 			combinedArticles = sortOrder(for: collection.id).sorted(combinedArticles)
 			let nextSeenContinuations: Set<String>
@@ -3112,15 +3416,17 @@ final class ReaderAppModel {
 		preserveOpenSelection: Bool = true,
 	) {
 		articleStateGeneration = UUID()
+		let incomingArticles = applyPendingArticleStates(newArticles)
+		let canonicalized = canonicalizedArticles(incomingArticles, for: collectionID)
 		if ReaderSection(rawValue: collectionID) == .forYou {
-			canonicalArticleOrder[collectionID] = newArticles.map(\.id)
+			canonicalArticleOrder[collectionID] = canonicalized.map(ReaderArticleIdentity.key(for:))
 		}
 		let previouslySelectedArticle = selectedArticleIDs[collectionID].flatMap { rememberedID in
-			articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID })
+			articleCache[collectionID]?.first(where: { articleMatches($0, id: rememberedID) })
 		}
 		let articlesToSort = preserveOpenSelection
-			? articlesPreservingOpenSelection(newArticles, for: collectionID)
-			: newArticles
+			? articlesPreservingOpenSelection(canonicalized, for: collectionID)
+			: canonicalized
 		let sortedArticles = sortOrder(for: collectionID).sorted(articlesToSort)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
@@ -3128,28 +3434,167 @@ final class ReaderAppModel {
 			selectedArticleIDs[collectionID] = refreshedSelectedArticle.id
 		}
 		reconcileSelection(for: collectionID)
+		propagateSharedArticleUpdates(from: canonicalized, excluding: collectionID)
 		if ReaderSection(rawValue: collectionID) == .forYou {
 			scheduleRestorationSave()
 		}
+	}
+
+	private func canonicalizedArticles(
+		_ incomingArticles: [Recommendation],
+		for collectionID: String,
+	) -> [Recommendation] {
+		let previousArticles = articleCache[collectionID] ?? []
+		return incomingArticles.map { incoming in
+			let aliases = ReaderArticleIdentity.aliases(id: incoming.id, readerID: incoming.readerId)
+			let previousCanonical = aliases.lazy.compactMap { self.canonicalArticleRecords[$0] }.first
+			let previousInCollection = previousArticles.first(where: { articlesMatch($0, incoming) })
+			let isForYou = ReaderSection(rawValue: collectionID) == .forYou
+			let merged = mergedArticle(
+				incoming,
+				with: previousCanonical ?? previousInCollection,
+				preservingRanking: incoming.score == 0 && (
+					(isForYou && previousInCollection != nil)
+						|| (!isForYou && (previousCanonical?.score ?? 0) != 0)
+				),
+			)
+			for alias in ReaderArticleIdentity.aliases(id: merged.id, readerID: merged.readerId) {
+				canonicalArticleRecords[alias] = merged
+			}
+			return merged
+		}
+	}
+
+	private func propagateSharedArticleUpdates(
+		from incomingArticles: [Recommendation],
+		excluding collectionID: String,
+	) {
+		guard incomingArticles.isEmpty == false else { return }
+		for otherCollectionID in articleCache.keys where otherCollectionID != collectionID {
+			guard let existingArticles = articleCache[otherCollectionID] else { continue }
+			articleCache[otherCollectionID] = existingArticles.map { existing in
+				guard let incoming = incomingArticles.first(where: { articlesMatch($0, existing) }) else {
+					return existing
+				}
+				return sharedFields(from: incoming, preserving: existing)
+			}
+			reconcileSelection(for: otherCollectionID)
+		}
+	}
+
+	private func mergedArticle(
+		_ incoming: Recommendation,
+		with existing: Recommendation?,
+		preservingRanking: Bool = false,
+	) -> Recommendation {
+		guard let existing else { return incoming }
+		return Recommendation(
+			id: incoming.id.isEmpty ? existing.id : incoming.id,
+			readerId: incoming.readerId.isEmpty ? existing.readerId : incoming.readerId,
+			feedKey: preferredFeedKey(incoming: incoming.feedKey, existing: existing.feedKey),
+			source: incoming.source.isEmpty ? existing.source : incoming.source,
+			author: incoming.author ?? existing.author,
+			title: incoming.title.isEmpty ? existing.title : incoming.title,
+			html: incoming.html.isEmpty ? existing.html : incoming.html,
+			text: incoming.text ?? existing.text,
+			originalURL: incoming.originalURL ?? existing.originalURL,
+			receivedAt: incoming.receivedAt,
+			isRead: incoming.isRead,
+			isStarred: incoming.isStarred,
+			score: preservingRanking ? existing.score : incoming.score,
+			confidence: preservingRanking ? existing.confidence : incoming.confidence,
+			sampleCount: preservingRanking ? existing.sampleCount : incoming.sampleCount,
+			explanation: preservingRanking
+				? existing.explanation
+				: incoming.explanation.isEmpty ? existing.explanation : incoming.explanation,
+			learningState: preservingRanking
+				? existing.learningState
+				: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
+		)
+	}
+
+	private func articleWithStatuses(
+		from incoming: Recommendation,
+		preserving existing: Recommendation,
+		read: Bool? = nil,
+		starred: Bool? = nil,
+	) -> Recommendation {
+		Recommendation(
+			id: incoming.id.isEmpty ? existing.id : incoming.id,
+			readerId: incoming.readerId.isEmpty ? existing.readerId : incoming.readerId,
+			feedKey: preferredFeedKey(incoming: incoming.feedKey, existing: existing.feedKey),
+			source: incoming.source.isEmpty ? existing.source : incoming.source,
+			author: incoming.author ?? existing.author,
+			title: incoming.title.isEmpty ? existing.title : incoming.title,
+			html: incoming.html.isEmpty ? existing.html : incoming.html,
+			text: incoming.text ?? existing.text,
+			originalURL: incoming.originalURL ?? existing.originalURL,
+			receivedAt: incoming.receivedAt,
+			isRead: read ?? existing.isRead,
+			isStarred: starred ?? existing.isStarred,
+			score: incoming.score,
+			confidence: incoming.confidence,
+			sampleCount: incoming.sampleCount,
+			explanation: incoming.explanation.isEmpty ? existing.explanation : incoming.explanation,
+			learningState: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
+		)
+	}
+
+	private func sharedFields(from incoming: Recommendation, preserving existing: Recommendation) -> Recommendation {
+		let merged = mergedArticle(incoming, with: existing, preservingRanking: true)
+		return Recommendation(
+			id: existing.id,
+			readerId: existing.readerId,
+			feedKey: merged.feedKey,
+			source: merged.source,
+			author: merged.author,
+			title: merged.title,
+			html: merged.html,
+			text: merged.text,
+			originalURL: merged.originalURL,
+			receivedAt: merged.receivedAt,
+			isRead: merged.isRead,
+			isStarred: merged.isStarred,
+			score: merged.score,
+			confidence: merged.confidence,
+			sampleCount: merged.sampleCount,
+			explanation: merged.explanation,
+			learningState: merged.learningState,
+		)
+	}
+
+	private func preferredFeedKey(incoming: String, existing: String) -> String {
+		guard incoming.isEmpty == false else { return existing }
+		guard existing.isEmpty == false else { return incoming }
+		if incoming.hasPrefix("feed/"), existing.hasPrefix("feed/") == false {
+			return existing
+		}
+		return incoming
 	}
 
 	private func canonicalArticles(for collectionID: String, fallback: [Recommendation]) -> [Recommendation] {
 		guard let canonicalIDs = canonicalArticleOrder[collectionID], canonicalIDs.isEmpty == false else {
 			return fallback
 		}
-		var articlesByID = Dictionary(
-			fallback.map { ($0.id, $0) },
-			uniquingKeysWith: { first, _ in first },
-		)
-		var ordered: [Recommendation] = []
-		ordered.reserveCapacity(fallback.count)
-		for id in canonicalIDs {
-			if let article = articlesByID.removeValue(forKey: id) {
-				ordered.append(article)
+		var articlesByID: [String: Recommendation] = [:]
+		for article in fallback {
+			for alias in ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId) {
+				articlesByID[alias] = article
 			}
 		}
-		let knownIDs = Set(canonicalIDs)
-		ordered.append(contentsOf: fallback.filter { knownIDs.contains($0.id) == false })
+		var ordered: [Recommendation] = []
+		ordered.reserveCapacity(fallback.count)
+		var orderedAliases = Set<String>()
+		for id in canonicalIDs {
+			if let article = articlesByID[ReaderArticleIdentity.normalized(id)],
+				orderedAliases.isDisjoint(with: ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)) {
+				ordered.append(article)
+				orderedAliases.formUnion(ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId))
+			}
+		}
+		ordered.append(contentsOf: fallback.filter {
+			orderedAliases.isDisjoint(with: ReaderArticleIdentity.aliases(id: $0.id, readerID: $0.readerId))
+		})
 		return ordered
 	}
 
@@ -3160,7 +3605,7 @@ final class ReaderAppModel {
 		guard
 			selectedNavigationID == collectionID,
 			let selectedArticleID,
-			let activeArticle = articleCache[collectionID]?.first(where: { $0.id == selectedArticleID }),
+			let activeArticle = articleCache[collectionID]?.first(where: { articleMatches($0, id: selectedArticleID) }),
 			incomingArticles.contains(where: { articlesMatch($0, activeArticle) }) == false
 		else {
 			return incomingArticles
@@ -3215,7 +3660,7 @@ final class ReaderAppModel {
 			return
 		}
 
-		if let cached = articleCache[collectionID]?.first(where: { $0.id == rememberedID || $0.readerId == rememberedID }) {
+		if let cached = articleCache[collectionID]?.first(where: { articleMatches($0, id: rememberedID) }) {
 			guard selectedNavigationID == collectionID else {
 				return
 			}
@@ -3227,7 +3672,7 @@ final class ReaderAppModel {
 
 		if selectedNavigationID == collectionID,
 			let detachedSelectedArticle,
-			detachedSelectedArticle.id == rememberedID || detachedSelectedArticle.readerId == rememberedID {
+			articleMatches(detachedSelectedArticle, id: rememberedID) {
 			selectedArticleID = detachedSelectedArticle.id
 			selectedArticleIDs[collectionID] = detachedSelectedArticle.id
 			return
@@ -3382,10 +3827,11 @@ final class ReaderAppModel {
 	}
 
 	private func articlesMatch(_ left: Recommendation, _ right: Recommendation) -> Bool {
-		left.id == right.id
-			|| left.readerId == right.readerId
-			|| left.id == right.readerId
-			|| left.readerId == right.id
+		ReaderArticleIdentity.matches(left, right)
+	}
+
+	private func articleMatches(_ article: Recommendation, id: String) -> Bool {
+		ReaderArticleIdentity.matches(article, id: id)
 	}
 
 	private func deduplicatedArticles(_ articles: [Recommendation]) -> [Recommendation] {
@@ -4528,6 +4974,8 @@ final class ReaderAppModel {
 		var requestLimit = fullRebuild ? 50 : 200
 		var seenCursors = Set<String>()
 		var receivedChanges = false
+		var receivedChangesList: [IncrementalSyncChange] = []
+		var canUseWarmNavigationAfterReload = false
 		while true {
 			try Task.checkCancellation()
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
@@ -4552,6 +5000,7 @@ final class ReaderAppModel {
 				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
 			receivedChanges = receivedChanges || page.changes.isEmpty == false
+			receivedChangesList.append(contentsOf: page.changes)
 			cursor = page.cursor
 			offlineSyncCursor = page.cursor
 			if page.hasMore == false { break }
@@ -4560,62 +5009,61 @@ final class ReaderAppModel {
 			return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 		}
 		let canKeepWarmNavigation = canUseIncrementalReload && receivedChanges == false
-		if canKeepWarmNavigation {
-			let successAt = Date.now
-			try await offlineStore.finishWarmSynchronization(
-				accountID: accountID,
-				at: successAt,
-				dayBounds: dayBounds,
-			)
+		if receivedChanges || fullRebuild || canKeepWarmNavigation == false {
+			_ = try? await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 500)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
-				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: false)
+				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
-			// No server data changed, and the initial snapshot already repaired its
-			// projection before display. Keep the visible generation and avoid a
-			// second full-library decode; finishWarmSynchronization still validates
-			// durable memberships before recording success.
-			offlineCacheIntegrity = OfflineCacheIntegrity(
-				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-				state: .complete,
-				navigation: .authoritative,
-				lastAttemptAt: offlineCacheIntegrity.lastAttemptAt,
-				lastSuccessAt: successAt,
-				lastError: nil,
-				invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
-				lastPageHasMore: false,
-			)
-			return OfflineSyncResult(canUseIncrementalReload: true, receivedChanges: false)
+			if receivedChanges {
+				await refreshPendingArticleStates(accountID: accountID)
+				guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+					return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
+				}
+			}
+			let reloadScope = fullRebuild
+				? IncrementalReloadScope.full
+				: incrementalReloadScope(for: receivedChangesList)
+			let snapshot: CachedLibrarySnapshot
+			switch reloadScope {
+			case .full:
+				snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+			case .collections(let collectionIDs):
+				snapshot = try await offlineStore.loadSnapshot(
+					accountID: accountID,
+					collectionIDs: collectionIDs,
+				)
+			}
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
+			}
+			switch reloadScope {
+			case .full:
+				if applyCachedSnapshot(
+					snapshot,
+					preservingPagination: true,
+					preservingCurrentSelection: preservingCurrentSelection,
+				) {
+					await persistCollections([ReaderSection.today.rawValue])
+				}
+			case .collections(let collectionIDs):
+				mergeCachedSnapshot(snapshot, collectionIDs: collectionIDs)
+				canUseWarmNavigationAfterReload = canUseIncrementalReload && collectionIDs.isEmpty == false
+			}
 		}
 
-		_ = try? await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 500)
-		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
-			return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
+		if canKeepWarmNavigation || canUseWarmNavigationAfterReload {
+			try await offlineStore.finishWarmSynchronization(
+				accountID: accountID,
+				at: Date.now,
+				dayBounds: dayBounds,
+			)
+			return OfflineSyncResult(canUseIncrementalReload: true, receivedChanges: receivedChanges)
 		}
-		let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
-		guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
-			return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
-		}
-		if applyCachedSnapshot(
-			snapshot,
-			preservingPagination: true,
-			preservingCurrentSelection: preservingCurrentSelection,
-		) {
-			await persistCollections([ReaderSection.today.rawValue])
-		}
+
 		try await offlineStore.markDataSynchronizedWithoutNavigation(
 			accountID: accountID,
 			at: Date.now,
 			dayBounds: dayBounds,
-		)
-		offlineCacheIntegrity = OfflineCacheIntegrity(
-			formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-			state: .complete,
-			navigation: .unverified,
-			lastAttemptAt: offlineCacheIntegrity.lastAttemptAt ?? Date.now,
-			lastSuccessAt: offlineCacheIntegrity.lastSuccessAt,
-			lastError: offlineCacheIntegrity.lastError,
-			invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
-			lastPageHasMore: false,
 		)
 		return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 	}
@@ -4998,9 +5446,138 @@ final class ReaderAppModel {
 		return didPruneToday || discardedUntrustedTodayPagination
 	}
 
+	private func mergeCachedSnapshot(
+		_ snapshot: CachedLibrarySnapshot,
+		collectionIDs: Set<String>,
+	) {
+		// A scoped storage merge changes the data generation just like a full
+		// snapshot. Requests started against the previous projection must finish
+		// without committing into the refreshed view.
+		libraryGeneration = UUID()
+		offlineCacheIntegrity = snapshot.integrity
+		offlineSyncCursor = snapshot.cursor
+		if let cachedNavigation = snapshot.navigation {
+			var mergedNavigation = cachedNavigation
+			mergedNavigation.preserveExpansion(from: navigation)
+			navigation = mergedNavigation
+			hasLoadedNavigation = snapshot.integrity.usesWarmIncrementalPath
+			subscriptions = sortedSubscriptions(snapshot.subscriptions)
+			restoreNavigationFromSubscriptionsIfNeeded()
+		}
+
+		var incomingByCollection: [String: [Recommendation]] = [:]
+		for collectionID in collectionIDs {
+			incomingByCollection[collectionID] = snapshot.articlesByCollection[collectionID] ?? []
+		}
+		let todayID = ReaderSection.today.rawValue
+		let canRestoreTodayPagination = streamDayBounds[todayID] == ReaderLocalDayBounds.localDay(containing: .now)
+		var canonicalizedByCollection: [String: [Recommendation]] = [:]
+		for (collectionID, articles) in incomingByCollection {
+			let canonicalized = canonicalizedArticles(
+				applyPendingArticleStates(articles),
+				for: collectionID,
+			)
+			canonicalizedByCollection[collectionID] = canonicalized
+			articleCache[collectionID] = sortOrder(for: collectionID).sorted(
+				articlesPreservingOpenSelection(canonicalized, for: collectionID),
+			)
+			if ReaderSection(rawValue: collectionID) == .forYou {
+				canonicalArticleOrder[collectionID] = canonicalized.map(ReaderArticleIdentity.key(for:))
+			}
+			if collectionID == todayID, canRestoreTodayPagination == false {
+				// A scoped status merge can observe a persisted token from an older
+				// local day. Leave Today unresolved so its next load establishes fresh
+				// day bounds and a valid continuation before load-more runs.
+				streamContinuations[collectionID] = nil
+				seenStreamContinuations[collectionID] = []
+				resolvedPaginationCollections.remove(collectionID)
+			} else if let continuation = snapshot.continuationsByCollection[collectionID] {
+				streamContinuations[collectionID] = continuation
+				seenStreamContinuations[collectionID] = [continuation]
+				resolvedPaginationCollections.insert(collectionID)
+			} else if isPaginatedCollection(navigation.item(withID: collectionID) ?? .smart(.forYou)) {
+				streamContinuations[collectionID] = nil
+				seenStreamContinuations[collectionID] = []
+				resolvedPaginationCollections.insert(collectionID)
+			}
+		}
+		for (collectionID, incomingArticles) in canonicalizedByCollection {
+			propagateSharedArticleUpdates(
+				from: incomingArticles,
+				excluding: collectionID,
+			)
+			if let updatedAt = snapshot.lastSyncAt {
+				collectionFreshness[collectionID] = CollectionFreshness(updatedAt: updatedAt, isCached: true)
+			}
+		}
+		reconcileSelectedSmartViewIfNeeded()
+		reconcileCurrentArticleSelection()
+	}
+
+	private func incrementalReloadScope(for changes: [IncrementalSyncChange]) -> IncrementalReloadScope {
+		guard changes.isEmpty == false else { return .collections([]) }
+		var collectionIDs = Set<String>()
+		for change in changes {
+			switch change.entityType {
+			case .feed:
+				// Feed changes can alter memberships and navigation folders. A full
+				// snapshot is the only safe projection for those changes.
+				return .full
+			case .article, .status:
+				let payload = change.payload
+				let aliases = Set([
+					change.entityId,
+					payload?.id,
+					payload?.readerId,
+					payload?.itemId,
+				].compactMap { $0 }.map(ReaderArticleIdentity.normalized).filter { $0.isEmpty == false })
+				let matchingCollections = articleCache.compactMap { collectionID, articles in
+					articles.contains(where: { article in
+						!ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+							.isDisjoint(with: aliases)
+					}) ? collectionID : nil
+				}
+				collectionIDs.formUnion(matchingCollections)
+
+				let destinationKeys = [payload?.feedKey, payload?.streamId]
+					.compactMap { $0 }
+					.filter { $0.isEmpty == false }
+				var matchedDestination = false
+				for destinationKey in destinationKeys {
+					let destinationCollections = collectionIDsForFeedKey(destinationKey)
+					matchedDestination = matchedDestination || destinationCollections.isEmpty == false
+					collectionIDs.formUnion(destinationCollections)
+				}
+				if matchingCollections.isEmpty, matchedDestination == false {
+					return .full
+				}
+				// Body/status changes can affect unread, starred, Today, or For You
+				// membership even when the article was not already cached there.
+				collectionIDs.formUnion(navigation.smartItems.map(\.id))
+			}
+		}
+		return collectionIDs.isEmpty ? .full : .collections(collectionIDs)
+	}
+
+	private func collectionIDsForFeedKey(_ feedKey: String) -> Set<String> {
+		var result = Set<String>()
+		for item in navigation.items where item.kind == .feed || item.kind == .folder {
+			guard item.feedKey == feedKey || item.streamID == feedKey || item.id == feedKey else { continue }
+			result.insert(item.id)
+			if let parentID = item.parentID {
+				result.insert(parentID)
+			}
+		}
+		return result
+	}
+
 	private func resetInMemoryLibraryForAccountChange() {
 		cancelPrewarmPersistence()
 		invalidateSpeculativeFeedWork()
+		collectionLoadCoordinator.removeAll()
+		lifecycleRefreshTask?.cancel()
+		lifecycleRefreshTask = nil
+		lifecycleRefreshTaskID = nil
 		articleStateGeneration = UUID()
 		articleMutationTask?.cancel()
 		articleMutationTask = nil
@@ -5017,6 +5594,12 @@ final class ReaderAppModel {
 		activeOfflinePreparationID = nil
 		deferredInitialFeedPaginationCollectionID = nil
 		articleCache = [:]
+		canonicalArticleRecords = [:]
+		pendingArticleStates = [:]
+		pendingArticleStateRevisions = [:]
+		localArticleStates = [:]
+		localArticleStateRevisions = [:]
+		nextPendingArticleStateRevision = 0
 		failedInitialLoadCollectionIDs.removeAll()
 		completedInitialLoadCollectionIDs.removeAll()
 		automaticDisplaySuppressionCollectionID = nil
@@ -5416,6 +5999,29 @@ final class ReaderAppModel {
 		return cachedArticles.contains(where: { $0.html.isEmpty })
 	}
 
+	private func shouldPreserveLoadedTail(
+		for collection: ReaderNavigationItem,
+		existing: [Recommendation],
+	) -> Bool {
+		guard existing.isEmpty == false else { return false }
+		return collection.kind == .feed || collection.kind == .folder
+	}
+
+	private func mergedHeadArticles(
+		_ incoming: [Recommendation],
+		existing: [Recommendation],
+		for collection: ReaderNavigationItem,
+	) -> [Recommendation] {
+		guard shouldPreserveLoadedTail(for: collection, existing: existing) else {
+			return incoming
+		}
+		var merged = incoming
+		for oldArticle in existing where merged.contains(where: { articlesMatch($0, oldArticle) }) == false {
+			merged.append(oldArticle)
+		}
+		return sortOrder(for: collection.id).sorted(merged)
+	}
+
 	private func hasCachedPaginationContinuation(_ collectionID: String) -> Bool {
 		guard let continuation = streamContinuations[collectionID] else { return false }
 		return continuation.isEmpty == false
@@ -5726,6 +6332,143 @@ final class ReaderAppModel {
 			}
 		}
 		return nil
+	}
+
+	private func applyPendingArticleStates(_ articles: [Recommendation]) -> [Recommendation] {
+		articles.map { article in
+			let aliases = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+			let pending = aliases.compactMap { pendingArticleStates[$0] }.reduce(
+				into: PendingArticleState(),
+			) { result, state in
+				result.isRead = state.isRead ?? result.isRead
+				result.isStarred = state.isStarred ?? result.isStarred
+			}
+			let read = pending.isRead ?? article.isRead
+			let starred = pending.isStarred ?? article.isStarred
+			guard read != article.isRead || starred != article.isStarred else { return article }
+			return articleWithStatuses(from: article, preserving: article, read: read, starred: starred)
+		}
+	}
+
+	private func preserveArticleStatesChangedSince(
+		_ articles: [Recommendation],
+		since revisionsAtStart: [String: PendingArticleStateRevision],
+	) -> [Recommendation] {
+		articles.map { article in
+			let aliases = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+			var preserveRead = false
+			var preserveStarred = false
+			for alias in aliases {
+				let currentRevision = localArticleStateRevisions[alias]
+				let initialRevision = revisionsAtStart[alias]
+				if (currentRevision?.read ?? 0) > (initialRevision?.read ?? 0) { preserveRead = true }
+				if (currentRevision?.starred ?? 0) > (initialRevision?.starred ?? 0) { preserveStarred = true }
+			}
+			guard preserveRead || preserveStarred else { return article }
+			let current = articleCache.values.lazy.flatMap { $0 }.first(where: { articlesMatch($0, article) })
+			let ledgerState = aliases.compactMap { localArticleStates[$0] }.reduce(
+				into: PendingArticleState(),
+			) { result, state in
+				result.isRead = state.isRead ?? result.isRead
+				result.isStarred = state.isStarred ?? result.isStarred
+			}
+			guard current != nil || ledgerState.isRead != nil || ledgerState.isStarred != nil else { return article }
+			let read = preserveRead ? current?.isRead ?? ledgerState.isRead : nil
+			let starred = preserveStarred ? current?.isStarred ?? ledgerState.isStarred : nil
+			return articleWithStatuses(from: article, preserving: current ?? article, read: read, starred: starred)
+		}
+	}
+
+	private enum PendingArticleField {
+		case read
+		case starred
+	}
+
+	private func rememberPendingArticleStates(_ mutation: OfflineMutation) {
+		guard let value = mutation.value else { return }
+		let field: PendingArticleField
+		switch mutation.kind {
+		case .setRead, .setReadBatch: field = .read
+		case .setStarred: field = .starred
+		default: return
+		}
+		nextPendingArticleStateRevision += 1
+		let revision = nextPendingArticleStateRevision
+		for itemID in mutation.itemIds {
+			let key = ReaderArticleIdentity.normalized(itemID)
+			guard key.isEmpty == false else { continue }
+			var state = pendingArticleStates[key, default: PendingArticleState()]
+			var revisions = pendingArticleStateRevisions[key, default: PendingArticleStateRevision()]
+			var localState = localArticleStates[key, default: PendingArticleState()]
+			var localRevisions = localArticleStateRevisions[key, default: PendingArticleStateRevision()]
+			switch field {
+			case .read:
+				state.isRead = value
+				revisions.read = revision
+				localState.isRead = value
+				localRevisions.read = revision
+			case .starred:
+				state.isStarred = value
+				revisions.starred = revision
+				localState.isStarred = value
+				localRevisions.starred = revision
+			}
+			pendingArticleStates[key] = state
+			pendingArticleStateRevisions[key] = revisions
+			localArticleStates[key] = localState
+			localArticleStateRevisions[key] = localRevisions
+		}
+	}
+
+	private func pendingArticleStates(
+		from pendingMutations: [PendingOfflineMutation],
+	) -> [String: PendingArticleState] {
+		var states: [String: PendingArticleState] = [:]
+		for pending in pendingMutations {
+			guard let value = pending.mutation.value else { continue }
+			let field: PendingArticleField
+			switch pending.mutation.kind {
+			case .setRead, .setReadBatch: field = .read
+			case .setStarred: field = .starred
+			default: continue
+			}
+			for itemID in pending.mutation.itemIds {
+				let key = ReaderArticleIdentity.normalized(itemID)
+				guard key.isEmpty == false else { continue }
+				var state = states[key, default: PendingArticleState()]
+				switch field {
+				case .read: state.isRead = value
+				case .starred: state.isStarred = value
+				}
+				states[key] = state
+			}
+		}
+		return states
+	}
+
+	private func refreshPendingArticleStates(accountID: String) async {
+		guard session?.storageIdentity == accountID else { return }
+		let revisionsAtStart = pendingArticleStateRevisions
+		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: 10_000) else {
+			return
+		}
+		guard session?.storageIdentity == accountID else { return }
+		let durableStates = pendingArticleStates(from: pendingMutations)
+		let keys = Set(pendingArticleStates.keys).union(durableStates.keys)
+		for key in keys {
+			let durable = durableStates[key]
+			var current = pendingArticleStates[key, default: PendingArticleState()]
+			let currentRevisions = pendingArticleStateRevisions[key] ?? PendingArticleStateRevision()
+			let initialRevisions = revisionsAtStart[key] ?? PendingArticleStateRevision()
+			if currentRevisions.read == initialRevisions.read { current.isRead = durable?.isRead }
+			if currentRevisions.starred == initialRevisions.starred { current.isStarred = durable?.isStarred }
+			if current.isRead == nil, current.isStarred == nil {
+				pendingArticleStates[key] = nil
+				pendingArticleStateRevisions[key] = nil
+			} else {
+				pendingArticleStates[key] = current
+			}
+		}
 	}
 
 	private static func normalizedQueuedMutationItemID(_ itemID: String) -> String {
@@ -6308,10 +7051,11 @@ final class ReaderAppModel {
 				kind: .setReadBatch,
 				itemIds: Array(targetIDs[start..<end]),
 				value: read,
-				scope: scope,
-			)
-			guard await enqueueOfflineMutation(mutation) else { return }
-		}
+					scope: scope,
+				)
+				guard await enqueueOfflineMutation(mutation) else { return }
+				rememberPendingArticleStates(mutation)
+			}
 
 		var changedCollections = Set<String>()
 		for target in targets {
@@ -6429,6 +7173,7 @@ final class ReaderAppModel {
 			scope: .single,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return }
+		rememberPendingArticleStates(mutation)
 
 		var changedCollections = Set<String>()
 		withAnimation(animation) {

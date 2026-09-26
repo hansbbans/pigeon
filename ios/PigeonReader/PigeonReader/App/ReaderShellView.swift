@@ -99,6 +99,12 @@ struct ReaderShellView: View {
 			// downloading the complete offline library takes much longer.
 			_ = await model.loadNavigation(force: true, reportError: false)
 		}
+		.task(id: scenePhase) {
+			let active = scenePhase == .active
+			model.setApplicationActive(active)
+			guard active else { return }
+			await model.refreshForLifecycle()
+		}
 		.onChange(of: scenePhase) { _, phase in
 			guard phase == .active else { return }
 			Task { await model.handleLocalDayChange() }

@@ -1335,7 +1335,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   >Mark all as read</button>
                 </div>
               </div>
-              <div class="list-shell">
+              <div class="list-shell" id="articles-list-shell">
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
               </div>
@@ -1434,6 +1434,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const feedsList = document.getElementById('feeds-list');
   const articlesHeading = document.getElementById('articles-heading');
   const articlesStatus = document.getElementById('articles-status');
+  const articlesListShell = document.getElementById('articles-list-shell');
   const articlesList = document.getElementById('articles-list');
   const loadMoreButton = document.getElementById('load-more-button');
   const markAllAsReadButton = document.getElementById('mark-all-as-read-button');
@@ -1476,6 +1477,21 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeColumnResize = null;
   let appliedColumnWidths = { ...DEFAULT_COLUMN_WIDTHS };
   let activeYouTubeVideoId = null;
+  const MAX_CACHED_ARTICLES = 500;
+  const MAX_CACHED_ARTICLE_METADATA = 2000;
+  const CONTENT_REQUEST_CONCURRENCY = 2;
+  let accountGeneration = 0;
+  let articleCache = new Map();
+  let articleMetadataCache = new Map();
+  let viewStates = new Map();
+  let inFlightMembershipRequests = new Map();
+  let inFlightContentRequests = new Map();
+  let activeContentRequestCount = 0;
+  let contentRequestQueue = [];
+  let activeContentRequestJobs = new Set();
+  let renderedReaderItemId = null;
+  let readerFrameScrollTop = 0;
+  let pendingReaderFrameScrollTop = null;
 
   function getStoredToken() {
     return window.sessionStorage.getItem(storageKey);
@@ -1869,7 +1885,184 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function cancelContentLoads() {
     activeContentRequestId += 1;
+    refreshInFlightContentIds();
+  }
+
+  function createViewState() {
+    return {
+      itemIds: [],
+      continuation: '',
+      hasMembership: false,
+      selectedItemId: null,
+      scrollTop: 0,
+      refreshedAt: 0,
+      contentLoadedIds: new Set(),
+    };
+  }
+
+  function getViewState(viewId, create = true) {
+    let state = viewStates.get(viewId);
+    if (!state && create) {
+      state = createViewState();
+      viewStates.set(viewId, state);
+    }
+    return state || null;
+  }
+
+  function getArticleScrollContainer() {
+    return articlesListShell || articlesList;
+  }
+
+  function getArticleScrollTop() {
+    const container = getArticleScrollContainer();
+    return container && typeof container.scrollTop === 'number' ? container.scrollTop : 0;
+  }
+
+  function restoreArticleScrollTop(scrollTop) {
+    const container = getArticleScrollContainer();
+    if (container && typeof scrollTop === 'number' && Number.isFinite(scrollTop)) {
+      container.scrollTop = scrollTop;
+    }
+  }
+
+  function saveActiveViewState() {
+    const state = getViewState(activeViewId);
+    if (!state) {
+      return;
+    }
+
+    state.itemIds = [...itemIds];
+    state.continuation = nextItemIdsContinuation;
+    state.hasMembership = state.hasMembership || itemIds.length > 0;
+    state.selectedItemId = selectedItemId && itemIds.includes(selectedItemId) ? selectedItemId : null;
+    state.scrollTop = getArticleScrollTop();
+  }
+
+  function syncLoadedItemsFromCache() {
+    loadedItemsById = {};
+    for (const [itemId, item] of articleMetadataCache) {
+      loadedItemsById[itemId] = item;
+    }
+    for (const [itemId, item] of articleCache) {
+      loadedItemsById[itemId] = item;
+    }
+  }
+
+  function createArticleMetadata(item) {
+    const summaryContent = item.summary && typeof item.summary.content === 'string' ? item.summary.content : '';
+    const alternateHref =
+      item.alternate && item.alternate[0] && typeof item.alternate[0].href === 'string'
+        ? item.alternate[0].href
+        : '';
+    return {
+      id: item.id,
+      title: item.title || 'Untitled article',
+      published: item.published,
+      origin: item.origin && item.origin.title ? { title: item.origin.title } : undefined,
+      alternate: alternateHref ? [{ href: alternateHref }] : undefined,
+      summary: summaryContent ? { content: summaryContent.slice(0, 4000) } : undefined,
+    };
+  }
+
+  function trimArticleMetadataCache() {
+    if (articleMetadataCache.size <= MAX_CACHED_ARTICLE_METADATA) {
+      return;
+    }
+
+    const protectedIds = new Set();
+    if (selectedItemId) {
+      protectedIds.add(selectedItemId);
+    }
+
+    while (articleMetadataCache.size > MAX_CACHED_ARTICLE_METADATA) {
+      const evictableId = [...articleMetadataCache.keys()].find((itemId) => !protectedIds.has(itemId));
+      const itemId = evictableId || articleMetadataCache.keys().next().value;
+      if (!itemId) {
+        break;
+      }
+      articleMetadataCache.delete(itemId);
+      if (!articleCache.has(itemId)) {
+        delete loadedItemsById[itemId];
+      }
+    }
+  }
+
+  function trimArticleCache() {
+    if (articleCache.size <= MAX_CACHED_ARTICLES) {
+      return;
+    }
+
+    const protectedIds = new Set();
+    if (selectedItemId) {
+      protectedIds.add(selectedItemId);
+    }
+
+    while (articleCache.size > MAX_CACHED_ARTICLES) {
+      const evictableId = [...articleCache.keys()].find((itemId) => !protectedIds.has(itemId));
+      const itemId = evictableId || articleCache.keys().next().value;
+      if (!itemId) {
+        break;
+      }
+      articleCache.delete(itemId);
+      const metadata = articleMetadataCache.get(itemId);
+      if (metadata) {
+        loadedItemsById[itemId] = metadata;
+      } else {
+        delete loadedItemsById[itemId];
+      }
+    }
+  }
+
+  function mergeArticleIntoCache(item, generation = accountGeneration) {
+    if (generation !== accountGeneration || !item || !item.id) {
+      return null;
+    }
+
+    const itemId = client.normalizeBrowserItemId(String(item.id));
+    if (!itemId) {
+      return null;
+    }
+
+    articleMetadataCache.delete(itemId);
+    articleMetadataCache.set(itemId, createArticleMetadata(item));
+    articleCache.delete(itemId);
+    articleCache.set(itemId, item);
+    loadedItemsById[itemId] = item;
+    for (const state of viewStates.values()) {
+      if (state.itemIds.includes(itemId)) {
+        state.contentLoadedIds.add(itemId);
+      }
+    }
+    trimArticleMetadataCache();
+    trimArticleCache();
+    syncLoadedItemsFromCache();
+    return itemId;
+  }
+
+  function clearAccountCache() {
+    accountGeneration += 1;
+    activeViewRequestId += 1;
+    activeContentRequestId += 1;
     inFlightContentIds = [];
+    for (const job of contentRequestQueue) {
+      job.resolve([]);
+    }
+    contentRequestQueue = [];
+    // Keep active jobs counted until their network promises settle. The old
+    // account cannot update this cache, but dropping the count here would let
+    // a new account exceed the global request limit while those requests run.
+    articleCache.clear();
+    articleMetadataCache.clear();
+    viewStates.clear();
+    inFlightMembershipRequests.clear();
+    inFlightContentRequests.clear();
+  }
+
+  function beginAuthenticatedSession(token) {
+    if (session.token !== token) {
+      clearAccountCache();
+    }
+    session = client.createSessionFromToken(token);
   }
 
   function startStatusRequest() {
@@ -1891,6 +2084,8 @@ export function renderBrowserAppRuntimeScript(): string {
       throw new Error('Missing session token');
     }
 
+    const requestGeneration = accountGeneration;
+    const requestToken = session.token;
     const response = await fetch(input, {
       ...init,
       headers: {
@@ -1899,7 +2094,7 @@ export function renderBrowserAppRuntimeScript(): string {
       },
     });
 
-    if (response.status === 401) {
+    if (response.status === 401 && requestBelongsToCurrentSession(requestGeneration, requestToken)) {
       setLoggedOut('Session expired.');
       throw new Error('Unauthorized');
     }
@@ -1909,7 +2104,216 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function authenticatedJson(input, init) {
     const response = await authenticatedFetch(input, init);
+    if (!response.ok) {
+      throw new Error('Request failed: ' + response.status);
+    }
     return response.json();
+  }
+
+  function requestBelongsToCurrentSession(generation, token) {
+    return generation === accountGeneration && token === session.token && session.status === 'authenticated';
+  }
+
+  function refreshInFlightContentIds() {
+    inFlightContentIds = [...inFlightContentRequests.keys()];
+  }
+
+  function startContentRequest(itemIdsForRequest, generation, token) {
+    const uniqueItemIds = [...new Set(itemIdsForRequest)].filter(Boolean);
+    if (uniqueItemIds.length === 0) {
+      return Promise.resolve([]);
+    }
+
+    let resolveRequest;
+    let rejectRequest;
+    const requestPromise = new Promise((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    const job = {
+      itemIds: uniqueItemIds,
+      generation,
+      token,
+      promise: requestPromise,
+      resolve: resolveRequest,
+      reject: rejectRequest,
+      counted: false,
+    };
+
+    for (const itemId of uniqueItemIds) {
+      inFlightContentRequests.set(itemId, requestPromise);
+    }
+    contentRequestQueue.push(job);
+    refreshInFlightContentIds();
+    pumpContentRequests();
+    return requestPromise;
+  }
+
+  function finishContentRequestJob(job) {
+    if (job.counted) {
+      job.counted = false;
+      activeContentRequestCount -= 1;
+      activeContentRequestJobs.delete(job);
+    }
+    for (const itemId of job.itemIds) {
+      if (inFlightContentRequests.get(itemId) === job.promise) {
+        inFlightContentRequests.delete(itemId);
+      }
+    }
+    refreshInFlightContentIds();
+    pumpContentRequests();
+  }
+
+  function pumpContentRequests() {
+    while (activeContentRequestCount < CONTENT_REQUEST_CONCURRENCY && contentRequestQueue.length > 0) {
+      const job = contentRequestQueue.shift();
+      job.counted = true;
+      activeContentRequestCount += 1;
+      activeContentRequestJobs.add(job);
+
+      if (!requestBelongsToCurrentSession(job.generation, job.token)) {
+        job.resolve([]);
+        finishContentRequestJob(job);
+        continue;
+      }
+
+      const form = new FormData();
+      for (const itemId of job.itemIds) {
+        form.append('i', itemId);
+      }
+
+      Promise.resolve()
+        .then(() =>
+          authenticatedJson('/reader/api/0/stream/items/contents', {
+            method: 'POST',
+            body: form,
+          }),
+        )
+        .then((payload) => {
+          if (!requestBelongsToCurrentSession(job.generation, job.token)) {
+            return [];
+          }
+
+          if (!payload || !Array.isArray(payload.items)) {
+            throw new Error('Invalid article content response');
+          }
+          const returnedItems = payload.items;
+          const returnedIds = new Set(
+            returnedItems
+              .map((item) => (item && item.id ? client.normalizeBrowserItemId(String(item.id)) : ''))
+              .filter(Boolean),
+          );
+          const missingIds = job.itemIds
+            .map((itemId) => client.normalizeBrowserItemId(String(itemId)))
+            .filter((itemId) => !returnedIds.has(itemId));
+          if (missingIds.length > 0) {
+            throw new Error('Incomplete article content response');
+          }
+          for (const item of returnedItems) {
+            mergeArticleIntoCache(item, job.generation);
+          }
+          if (activeViewRequestId > 0 && requestBelongsToCurrentSession(job.generation, job.token)) {
+            renderArticles();
+            renderReader();
+          }
+          return returnedItems;
+        })
+        .then(
+          (returnedItems) => {
+            finishContentRequestJob(job);
+            job.resolve(returnedItems);
+          },
+          (error) => {
+            finishContentRequestJob(job);
+            job.reject(error);
+          },
+        );
+    }
+  }
+
+  async function ensureArticleContent(itemIdsToLoad, options) {
+    const generation = options?.generation ?? accountGeneration;
+    const token = options?.token ?? session.token;
+    if (!requestBelongsToCurrentSession(generation, token)) {
+      return;
+    }
+
+    const uniqueItemIds = [...new Set(itemIdsToLoad)].filter(Boolean);
+    const pendingRequests = new Map();
+    const newItemIds = [];
+    for (const itemId of uniqueItemIds) {
+      const existingRequest = inFlightContentRequests.get(itemId);
+      if (existingRequest) {
+        const requestItemIds = pendingRequests.get(existingRequest) || [];
+        requestItemIds.push(itemId);
+        pendingRequests.set(existingRequest, requestItemIds);
+      } else {
+        newItemIds.push(itemId);
+      }
+    }
+
+    const batches = [];
+    for (let index = 0; index < newItemIds.length; index += client.CONTENT_CHUNK_SIZE) {
+      batches.push(newItemIds.slice(index, index + client.CONTENT_CHUNK_SIZE));
+    }
+
+    let nextBatchIndex = 0;
+    const workers = Array.from(
+      { length: Math.min(CONTENT_REQUEST_CONCURRENCY, batches.length) },
+      async () => {
+        let returnedItemCount = 0;
+        while (nextBatchIndex < batches.length) {
+          const batch = batches[nextBatchIndex];
+          nextBatchIndex += 1;
+          const returnedItems = await startContentRequest(batch, generation, token);
+          returnedItemCount += Array.isArray(returnedItems) ? returnedItems.length : 0;
+        }
+        return returnedItemCount;
+      },
+    );
+
+    const existingEntries = [...pendingRequests.entries()];
+    const results = await Promise.allSettled([
+      ...existingEntries.map(([request]) => request),
+      ...workers,
+    ]);
+    let returnedItemCount = 0;
+    const retryItemIds = [];
+    for (let index = 0; index < existingEntries.length; index += 1) {
+      const result = results[index];
+      const requestItemIds = existingEntries[index][1];
+      if (result.status === 'fulfilled') {
+        returnedItemCount += Array.isArray(result.value) ? result.value.length : 0;
+      }
+      if (result.status === 'rejected') {
+        retryItemIds.push(...requestItemIds);
+      } else if (requestItemIds.some((itemId) => !articleCache.has(itemId))) {
+        retryItemIds.push(...requestItemIds.filter((itemId) => !articleCache.has(itemId)));
+      }
+    }
+
+    const workerResults = results.slice(existingEntries.length);
+    const failedWorker = workerResults.find((result) => result.status === 'rejected');
+    if (failedWorker) {
+      throw failedWorker.reason;
+    }
+    returnedItemCount += workerResults.reduce(
+      (count, result) => count + (result.status === 'fulfilled' ? Number(result.value) || 0 : 0),
+      0,
+    );
+
+    if (
+      retryItemIds.length > 0 &&
+      options?.retryFailedShared !== false &&
+      requestBelongsToCurrentSession(generation, token)
+    ) {
+      returnedItemCount += await ensureArticleContent(
+        [...new Set(retryItemIds)],
+        { ...options, generation, token, retryFailedShared: false },
+      );
+    }
+
+    return returnedItemCount;
   }
 
   function addClassNames(element, classNames) {
@@ -1986,7 +2390,8 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const bounds = client.getLocalDayBounds();
-    return Object.values(loadedItemsById).some((item) => {
+    return itemIds.some((itemId) => {
+      const item = loadedItemsById[itemId];
       const published = item && item.published;
       return typeof published === 'number' && Number.isFinite(published) && published < bounds.startSeconds;
     });
@@ -2170,19 +2575,26 @@ export function renderBrowserAppRuntimeScript(): string {
       return [];
     }
 
-    const loadedIds = new Set(Object.keys(loadedItemsById));
-    const inFlightIds = new Set(inFlightContentIds);
+    const loadedIds = new Set(articleCache.keys());
+    const activeState = getViewState(activeViewId, false);
+    const knownContentIds = activeState?.contentLoadedIds || new Set();
     const plannedIds = [];
     const targetItemId = preferredItemId || selectedItemId;
 
-    const addId = (itemId) => {
-      if (!itemId || loadedIds.has(itemId) || inFlightIds.has(itemId) || plannedIds.includes(itemId) || !itemIds.includes(itemId)) {
+    const addId = (itemId, force = false) => {
+      if (
+        !itemId ||
+        loadedIds.has(itemId) ||
+        (!force && knownContentIds.has(itemId)) ||
+        plannedIds.includes(itemId) ||
+        !itemIds.includes(itemId)
+      ) {
         return;
       }
       plannedIds.push(itemId);
     };
 
-    addId(targetItemId);
+    addId(targetItemId, true);
 
     for (const itemId of itemIds) {
       addId(itemId);
@@ -2210,6 +2622,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function setLoggedOut(message) {
+    clearAccountCache();
     session = client.applyUnauthorizedState(session);
     clearStoredToken();
     cancelPendingValidation();
@@ -2426,6 +2839,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderArticles() {
+    const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
@@ -2443,6 +2857,7 @@ export function renderBrowserAppRuntimeScript(): string {
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
       loadMoreButton.classList.add('hidden');
+      restoreArticleScrollTop(preservedScrollTop);
       return;
     }
 
@@ -2502,6 +2917,7 @@ export function renderBrowserAppRuntimeScript(): string {
       'hidden',
       !todayCanLoadMore || (pendingPlan.length === 0 && !nextItemIdsContinuation),
     );
+    restoreArticleScrollTop(preservedScrollTop);
   }
 
   function clearYouTubePlayer() {
@@ -2555,6 +2971,68 @@ export function renderBrowserAppRuntimeScript(): string {
     readerPlayerShell.classList.remove('hidden');
   }
 
+  function handleReaderFrameLoad() {
+    attachFrameNavigationListener();
+    if (pendingReaderFrameScrollTop !== null) {
+      const scrollTop = pendingReaderFrameScrollTop;
+      pendingReaderFrameScrollTop = null;
+      try {
+        const frameWindow = readerFrame.contentWindow;
+        const frameDocument = readerFrame.contentDocument;
+        if (frameWindow && typeof frameWindow.scrollTo === 'function') {
+          frameWindow.scrollTo(0, scrollTop);
+        }
+        if (frameDocument && frameDocument.documentElement) {
+          frameDocument.documentElement.scrollTop = scrollTop;
+        }
+        if (frameDocument && frameDocument.body) {
+          frameDocument.body.scrollTop = scrollTop;
+        }
+        readerFrameScrollTop = scrollTop;
+      } catch (_error) {
+        // The frame may be unavailable while navigating to the refreshed article.
+      }
+    }
+  }
+
+  function readReaderFrameScrollTop() {
+    const candidates = [];
+    try {
+      const frameWindow = readerFrame.contentWindow;
+      const frameDocument = readerFrame.contentDocument;
+      if (frameWindow && typeof frameWindow.scrollY === 'number') {
+        candidates.push(frameWindow.scrollY);
+      }
+      if (frameDocument && frameDocument.documentElement && typeof frameDocument.documentElement.scrollTop === 'number') {
+        candidates.push(frameDocument.documentElement.scrollTop);
+      }
+      if (frameDocument && frameDocument.body && typeof frameDocument.body.scrollTop === 'number') {
+        candidates.push(frameDocument.body.scrollTop);
+      }
+    } catch (_error) {
+      // The frame may be navigating or unavailable while the reader changes articles.
+    }
+
+    if (candidates.length > 0) {
+      return candidates.reduce((maximum, value) => (Number.isFinite(value) ? Math.max(maximum, value) : maximum), 0);
+    }
+    return readerFrameScrollTop;
+  }
+
+  function renderReaderFrame(itemId, documentHtml) {
+    const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
+    if (!shouldReplace) {
+      return;
+    }
+
+    const shouldPreserveScroll = renderedReaderItemId === itemId && Boolean(readerFrame.srcdoc);
+    const preservedScrollTop = shouldPreserveScroll ? readReaderFrameScrollTop() : 0;
+    pendingReaderFrameScrollTop = shouldPreserveScroll ? preservedScrollTop : null;
+    renderedReaderItemId = itemId;
+    readerFrameScrollTop = preservedScrollTop;
+    readerFrame.srcdoc = documentHtml;
+  }
+
   function renderReader() {
     if (!selectedItemId) {
       readerSourceLabel.textContent = 'Source';
@@ -2563,7 +3041,7 @@ export function renderBrowserAppRuntimeScript(): string {
       openOriginalButton.setAttribute('data-href', '');
       readerTitle.textContent = 'Select an article';
       readerMeta.textContent = 'Full article content stays isolated inside the reader frame.';
-      readerFrame.srcdoc = client.createArticleFrameDocument('', theme);
+      renderReaderFrame(null, client.createArticleFrameDocument('', theme));
       clearYouTubePlayer();
       return;
     }
@@ -2576,10 +3054,15 @@ export function renderBrowserAppRuntimeScript(): string {
       openOriginalButton.setAttribute('data-href', '');
       readerTitle.textContent = 'Loading article…';
       readerMeta.textContent = 'Loading the full article body.';
-      readerFrame.srcdoc = client.createArticleFrameDocument('<p class="pigeon-empty">Loading article content…</p>', theme);
+      renderReaderFrame(
+        selectedItemId,
+        client.createArticleFrameDocument('<p class="pigeon-empty">Loading article content…</p>', theme),
+      );
       clearYouTubePlayer();
       return;
     }
+
+    const hasFullArticle = articleCache.has(selectedItemId);
 
     const articleHref =
       item.alternate && item.alternate[0] && item.alternate[0].href ? item.alternate[0].href : '';
@@ -2598,10 +3081,20 @@ export function renderBrowserAppRuntimeScript(): string {
     readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
       .filter(Boolean)
       .join(' · ');
+    if (!hasFullArticle) {
+      readerMeta.textContent = [readerMeta.textContent, 'Loading article content…'].filter(Boolean).join(' · ');
+    }
     renderYouTubePlayer(articleHref, item.title || '');
-    readerFrame.srcdoc = client.createArticleFrameDocument(
-      item.content && item.content.content ? item.content.content : '',
-      theme,
+    renderReaderFrame(
+      selectedItemId,
+      client.createArticleFrameDocument(
+        hasFullArticle && item.content && item.content.content
+          ? item.content.content
+          : hasFullArticle
+            ? ''
+            : '<p class="pigeon-empty">Loading article content…</p>',
+        theme,
+      ),
     );
     attachFrameNavigationListener();
   }
@@ -2726,6 +3219,132 @@ export function renderBrowserAppRuntimeScript(): string {
     return '/reader/api/0/stream/items/ids?' + params.toString();
   }
 
+  function applyMembershipPayload(viewId, payload, options) {
+    if (!views.some((view) => view.id === viewId)) {
+      return [];
+    }
+    const state = getViewState(viewId);
+    if (!state) {
+      return [];
+    }
+
+    const returnedIds = [...new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)).filter(Boolean))];
+    const continuation = payload.continuation ? String(payload.continuation) : '';
+    const isContinuationPage = Boolean(options?.continuation);
+    if (isContinuationPage) {
+      const knownIds = new Set(state.itemIds);
+      state.itemIds.push(...returnedIds.filter((itemId) => !knownIds.has(itemId)));
+      state.continuation = continuation && continuation !== options.continuation ? continuation : '';
+    } else if (continuation) {
+      const returnedSet = new Set(returnedIds);
+      const retainedTail = state.hasMembership ? state.itemIds.filter((itemId) => !returnedSet.has(itemId)) : [];
+      state.itemIds = [...returnedIds, ...retainedTail];
+      state.continuation = continuation;
+    } else {
+      state.itemIds = returnedIds;
+      state.continuation = '';
+    }
+    state.hasMembership = true;
+    state.refreshedAt = Date.now();
+    if (!state.selectedItemId || !state.itemIds.includes(state.selectedItemId)) {
+      const view = views.find((candidate) => candidate.id === viewId);
+      state.selectedItemId = view?.kind === 'today' ? null : state.itemIds[0] || null;
+    }
+
+    if (viewId === activeViewId) {
+      const preservedScrollTop = getArticleScrollTop();
+      itemIds = [...state.itemIds];
+      nextItemIdsContinuation = state.continuation;
+      selectedItemId = state.selectedItemId;
+      syncLoadedItemsFromCache();
+      renderArticles();
+      renderReader();
+      restoreArticleScrollTop(preservedScrollTop || state.scrollTop);
+    }
+
+    return returnedIds;
+  }
+
+  function requestMembershipPage(view, continuation, options) {
+    const generation = accountGeneration;
+    const token = session.token;
+    const pageKey = continuation || 'root';
+    const requestKey = generation + ':' + view.id + ':' + pageKey;
+    const existingRequest = inFlightMembershipRequests.get(requestKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const requestPromise = authenticatedJson(buildStreamIdsUrl(view, continuation))
+      .then((payload) => {
+        if (!requestBelongsToCurrentSession(generation, token)) {
+          return null;
+        }
+        if (!payload || !Array.isArray(payload.itemRefs)) {
+          throw new Error('Invalid stream membership response');
+        }
+        const returnedIds = [
+          ...new Set(payload.itemRefs.map((itemRef) => String(itemRef.id)).filter(Boolean)),
+        ];
+        return { payload, returnedIds, generation, token, viewId: view.id };
+      })
+      .finally(() => {
+        if (inFlightMembershipRequests.get(requestKey) === requestPromise) {
+          inFlightMembershipRequests.delete(requestKey);
+        }
+      });
+
+    inFlightMembershipRequests.set(requestKey, requestPromise);
+    return requestPromise;
+  }
+
+  async function revalidateActiveView() {
+    const activeView = getActiveView();
+    if (!activeView || !session.token || session.status !== 'authenticated') {
+      return;
+    }
+
+    const generation = accountGeneration;
+    const token = session.token;
+    if (window.navigator && window.navigator.onLine === false) {
+      if (getViewState(activeView.id, false)?.hasMembership) {
+        articlesStatus.textContent = 'Offline · showing cached articles.';
+      }
+      return;
+    }
+
+    try {
+      const activeState = getViewState(activeView.id, false);
+      const selectedTailId = activeState?.selectedItemId && activeState.itemIds.includes(activeState.selectedItemId)
+        ? activeState.selectedItemId
+        : null;
+      const result = await requestMembershipPage(activeView, '', { refresh: true });
+      if (!result || !requestBelongsToCurrentSession(generation, token)) {
+        return;
+      }
+      const contentIds = [...result.returnedIds];
+      if (selectedTailId && !contentIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
+        contentIds.push(selectedTailId);
+      }
+      await ensureArticleContent(contentIds, { generation, token });
+      if (requestBelongsToCurrentSession(generation, token)) {
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+        if (activeView.id === activeViewId) {
+          saveActiveViewState();
+          renderArticles();
+          renderReader();
+        }
+      }
+    } catch (_error) {
+      if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId) {
+        if (getViewState(activeView.id, false)?.hasMembership) {
+          articlesStatus.textContent = 'Refresh failed · showing cached articles.';
+        }
+        renderArticles();
+      }
+    }
+  }
+
   function shouldContinueLoadingToday() {
     if (!isTodayView() || hasReachedTodayBoundary()) {
       return false;
@@ -2748,67 +3367,72 @@ export function renderBrowserAppRuntimeScript(): string {
     await loadNextItemIdsPage(requestId);
   }
 
-  async function loadContentChunk(preferredItemId, requestId) {
-    const plan = createPendingContentPlan(preferredItemId);
+  async function loadContentChunk(preferredItemId, requestId, options) {
+    const plan = options?.forceItemIds?.length
+      ? [...new Set(options.forceItemIds)].filter((itemId) => itemIds.includes(itemId))
+      : createPendingContentPlan(preferredItemId);
 
     if (plan.length === 0) {
       renderArticles();
       renderReader();
+      if (isTodayView() && shouldContinueLoadingToday()) {
+        await continueLoadingToday(requestId);
+      }
       return;
     }
 
-    const contentRequestId = activeContentRequestId + 1;
-    activeContentRequestId = contentRequestId;
-    inFlightContentIds = plan;
+    const generation = accountGeneration;
+    const token = session.token;
+    inFlightContentIds = [...new Set([...inFlightContentIds, ...plan])];
     renderArticles();
 
-    const form = new FormData();
-    for (const itemId of plan) {
-      form.append('i', itemId);
-    }
-
-    const loadedItemCountBefore = Object.keys(loadedItemsById).length;
+    const stateBefore = getViewState(activeViewId, false);
+    const loadedContentCountBefore = stateBefore?.contentLoadedIds.size ?? 0;
+    const itemCountBefore = itemIds.length;
+    const continuationBefore = nextItemIdsContinuation;
     try {
-      const payload = await authenticatedJson('/reader/api/0/stream/items/contents', {
-        method: 'POST',
-        body: form,
-      });
-      if (requestId !== activeViewRequestId || contentRequestId !== activeContentRequestId) {
+      const returnedItemCount = await ensureArticleContent(plan, { generation, token });
+      if (
+        requestId !== activeViewRequestId ||
+        !requestBelongsToCurrentSession(generation, token)
+      ) {
         return;
       }
 
-      for (const item of payload.items || []) {
-        loadedItemsById[client.normalizeBrowserItemId(item.id)] = item;
-      }
-
-      inFlightContentIds = [];
       const visibleItemIds = getVisibleItemIds();
       if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
         selectedItemId = visibleItemIds[0] || null;
       }
+      saveActiveViewState();
       renderArticles();
       renderReader();
+      const stateAfter = getViewState(activeViewId, false);
+      const madeProgress =
+        returnedItemCount > 0 ||
+        (stateAfter?.contentLoadedIds.size ?? 0) > loadedContentCountBefore ||
+        itemIds.length > itemCountBefore ||
+        nextItemIdsContinuation !== continuationBefore;
       if (
         isTodayView() &&
-        Object.keys(loadedItemsById).length > loadedItemCountBefore &&
+        madeProgress &&
         shouldContinueLoadingToday()
       ) {
         await continueLoadingToday(requestId);
       }
     } catch (_error) {
-      if (requestId === activeViewRequestId && contentRequestId === activeContentRequestId) {
-        inFlightContentIds = [];
-      }
-      if (requestId === activeViewRequestId && contentRequestId === activeContentRequestId && session.token) {
+      if (requestId === activeViewRequestId && requestBelongsToCurrentSession(generation, token)) {
         articlesStatus.textContent = 'Could not load article bodies.';
+        renderArticles();
       }
-      renderArticles();
+    } finally {
+      refreshInFlightContentIds();
     }
   }
 
   async function loadNextItemIdsPage(requestId) {
     const activeView = getActiveView();
-    const continuation = nextItemIdsContinuation;
+    const activeState = activeView ? getViewState(activeView.id) : null;
+    const continuation = activeState?.continuation || nextItemIdsContinuation;
     if (!activeView || !continuation || isLoadingItemIdsPage || (isTodayView() && hasReachedTodayBoundary())) {
       return;
     }
@@ -2838,6 +3462,11 @@ export function renderBrowserAppRuntimeScript(): string {
         returnedContinuation && (appendedIds.length > 0 || returnedContinuation !== continuation)
           ? returnedContinuation
           : '';
+      if (activeState) {
+        activeState.itemIds = [...itemIds];
+        activeState.continuation = nextItemIdsContinuation;
+        activeState.hasMembership = true;
+      }
       isLoadingItemIdsPage = false;
       renderArticles();
 
@@ -2868,37 +3497,51 @@ export function renderBrowserAppRuntimeScript(): string {
     const requestId = activeViewRequestId + 1;
     activeViewRequestId = requestId;
     cancelContentLoads();
-    itemIds = [];
-    nextItemIdsContinuation = '';
+    const state = getViewState(activeView.id);
+    itemIds = [...state.itemIds];
+    nextItemIdsContinuation = state.continuation;
     isLoadingItemIdsPage = false;
-    loadedItemsById = {};
-    selectedItemId = null;
-    articlesStatus.textContent = 'Loading articles…';
+    syncLoadedItemsFromCache();
+    selectedItemId = state.selectedItemId && itemIds.includes(state.selectedItemId)
+      ? state.selectedItemId
+      : isTodayView()
+        ? null
+        : itemIds[0] || null;
+    state.selectedItemId = selectedItemId;
+    articlesStatus.textContent = state.hasMembership ? 'Refreshing…' : 'Loading articles…';
     clearElement(articlesList);
     loadMoreButton.classList.add('hidden');
     renderFeeds();
+    renderArticles();
     renderReader();
+    restoreArticleScrollTop(state.scrollTop);
 
-    try {
-      const payload = await authenticatedJson(buildStreamIdsUrl(activeView, ''));
-      if (requestId !== activeViewRequestId) {
-        return;
+    if (!state.hasMembership) {
+      try {
+        const result = await requestMembershipPage(activeView, '', { initial: true });
+        if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token)) {
+          return;
+        }
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+        const currentState = getViewState(activeView.id);
+        itemIds = [...currentState.itemIds];
+        nextItemIdsContinuation = currentState.continuation;
+        selectedItemId = currentState.selectedItemId;
+        renderArticles();
+        renderReader();
+        if (itemIds.length > 0) {
+          await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
+        }
+      } catch (_error) {
+        if (requestId === activeViewRequestId && session.token) {
+          articlesStatus.textContent = 'Could not load this view.';
+          renderArticles();
+        }
       }
-
-      itemIds = [...new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)))];
-      nextItemIdsContinuation = payload.continuation ? String(payload.continuation) : '';
-      selectedItemId = isTodayView() ? null : itemIds[0] || null;
-      renderArticles();
-      renderReader();
-
-      if (itemIds.length > 0) {
-        await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
-      }
-    } catch (_error) {
-      if (requestId === activeViewRequestId && session.token) {
-        articlesStatus.textContent = 'Could not load this view.';
-      }
+      return;
     }
+
+    void revalidateActiveView();
   }
 
   async function markAllAsRead() {
@@ -2949,6 +3592,11 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function loadSubscriptionsAndUnreadCounts() {
+    const generation = accountGeneration;
+    const token = session.token;
+    if (!token || session.status !== 'authenticated') {
+      return false;
+    }
     feedsStatus.textContent = 'Loading feeds…';
 
     try {
@@ -2956,16 +3604,24 @@ export function renderBrowserAppRuntimeScript(): string {
         authenticatedJson('/reader/api/0/subscription/list'),
         authenticatedJson('/reader/api/0/unread-count'),
       ]);
+      if (!requestBelongsToCurrentSession(generation, token)) {
+        return false;
+      }
       views = client.buildFeedViews(subscriptionPayload.subscriptions || [], unreadPayload.unreadcounts || []);
+      const validViewIds = new Set(views.map((view) => view.id));
+      viewStates = new Map([...viewStates].filter(([viewId]) => validViewIds.has(viewId)));
       pruneExpandedFolders();
       if (!views.some((view) => view.id === activeViewId)) {
         activeViewId = 'all';
       }
       renderFeeds();
       await loadActiveView();
+      if (!requestBelongsToCurrentSession(generation, token)) {
+        return false;
+      }
       return true;
     } catch (_error) {
-      if (session.token) {
+      if (requestBelongsToCurrentSession(generation, token)) {
         feedsStatus.textContent = 'Could not load feeds.';
       }
       return false;
@@ -2974,6 +3630,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function selectView(viewId) {
     if (viewId === activeViewId) {
+      void revalidateActiveView();
       return;
     }
 
@@ -2982,6 +3639,7 @@ export function renderBrowserAppRuntimeScript(): string {
       expandedFolderIds.add(nextView.parentId);
     }
 
+    saveActiveViewState();
     activeViewId = viewId;
     await loadActiveView();
   }
@@ -2992,9 +3650,10 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     selectedItemId = itemId;
+    saveActiveViewState();
     renderArticles();
     renderReader();
-    if (!loadedItemsById[itemId]) {
+    if (!articleCache.has(itemId)) {
       await loadContentChunk(itemId, activeViewRequestId);
     }
   }
@@ -3033,7 +3692,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
-    session = client.createSessionFromToken(token);
+    beginAuthenticatedSession(token);
     cancelPendingValidation();
     setStoredToken(token);
     setLoggedIn();
@@ -3104,9 +3763,7 @@ export function renderBrowserAppRuntimeScript(): string {
     void loadNextItemIdsPage(activeViewRequestId);
   });
 
-  readerFrame.addEventListener('load', () => {
-    attachFrameNavigationListener();
-  });
+  readerFrame.addEventListener('load', handleReaderFrameLoad);
 
   document.addEventListener('keydown', (event) => {
     handleArticleNavigationKeydown(event);
@@ -3132,6 +3789,16 @@ export function renderBrowserAppRuntimeScript(): string {
         applyStoredColumnWidths();
       }
     });
+    window.addEventListener('online', () => {
+      void revalidateActiveView();
+    });
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.visibilityState || document.visibilityState === 'visible') {
+        void revalidateActiveView();
+      }
+    });
   }
 
   if (config.baseUrl) {
@@ -3144,7 +3811,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   const existingToken = getStoredToken();
   if (existingToken) {
-    session = client.createSessionFromToken(existingToken);
+    beginAuthenticatedSession(existingToken);
     const validationId = startValidation();
     validateToken(existingToken).then((isValid) => {
       if (!isActiveValidation(validationId)) {

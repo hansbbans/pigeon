@@ -10,7 +10,7 @@ nonisolated enum BackgroundRefreshPolicy {
 
 nonisolated enum BackgroundRefreshArticlePlanner {
 	private static func aliases(of article: Recommendation) -> [String] {
-		[article.id, article.readerId].filter { $0.isEmpty == false }
+		Array(ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId))
 	}
 
 	static func knownIDs(inMemory: [Recommendation], cached: [Recommendation]) -> Set<String> {
@@ -65,14 +65,20 @@ final class BackgroundRefreshManager {
 	private(set) var pathIsSatisfied = true
 	private(set) var pathIsConstrained = false
 	var refreshHandler: (@MainActor @Sendable () async -> Bool)?
+	var pathChangeHandler: (@MainActor @Sendable () async -> Void)?
 
 	private init() {
 		monitor.pathUpdateHandler = { [weak self] path in
 			let isSatisfied = path.status == .satisfied
 			let isConstrained = path.isConstrained
 			Task { @MainActor [weak self] in
-				self?.pathIsSatisfied = isSatisfied
-				self?.pathIsConstrained = isConstrained
+				guard let self else { return }
+				let wasSatisfied = self.pathIsSatisfied
+				self.pathIsSatisfied = isSatisfied
+				self.pathIsConstrained = isConstrained
+				if wasSatisfied == false, isSatisfied {
+					await self.pathChangeHandler?()
+				}
 			}
 		}
 		monitor.start(queue: queue)

@@ -84,6 +84,19 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 		XCTAssertTrue(feed(1, 1).isHittable)
 	}
 
+	func testCachedFolderEntryRefreshesExistingAndAddsNewStoryWithoutPullToRefresh() {
+		launchFixture(additionalArguments: ["-reader-folder-refresh-fixture"])
+		let folder = app.descendants(matching: .any)["reader-sidebar-item-navigation-folder-1"].firstMatch
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.tap()
+
+		let pane = app.descendants(matching: .any)["collection-pane-navigation-folder-1"].firstMatch
+		XCTAssertTrue(pane.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools after refresh"].waitForExistence(timeout: 6))
+		XCTAssertTrue(app.staticTexts["A new story arrived while you were away"].waitForExistence(timeout: 6))
+		XCTAssertFalse(app.descendants(matching: .any)["collection-loading-placeholder"].exists)
+	}
+
 	func testUncachedFeedKeepsItsTitleWhileLoadingWithoutAnEmptyFlash() {
 		folderToggle(1).tap()
 		feed(1, 2).tap()
