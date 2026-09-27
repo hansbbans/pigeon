@@ -8526,6 +8526,49 @@ struct ReaderAppModelTests {
 		#expect(extractor.htmlExtractionCount == 2)
 	}
 
+	@Test func addFeedLoadsTheFirstYouTubeSubscriptionIntoTheUnreadSidebarAndShowsItsLatestItems() async throws {
+		let httpClient = PostAddYouTubeFeedHTTPClient()
+		let model = try makeModel(httpClient: httpClient)
+		model.sidebarFilter = .unread
+		#expect(model.subscriptions.isEmpty)
+
+		let added = await model.addFeed(
+			urlText: "https://www.youtube.com/feeds/videos.xml?channel_id=UCnative3feed",
+			folderName: "Creators",
+		)
+
+		#expect(added)
+		#expect(model.subscriptions.count == 1)
+		#expect(model.subscriptions.first?.title == "Native YouTube Channel")
+		#expect(model.subscriptions.first?.folderNames == ["Creators"])
+
+		let folder = try #require(model.folderNavigationItems.first(where: { $0.id == PostAddYouTubeFeedHTTPClient.folderID }))
+		let feed = try #require(model.feedNavigationItems(in: folder).first(where: { $0.streamID == PostAddYouTubeFeedHTTPClient.feedID }))
+		#expect(folder.unreadCount == 3)
+		#expect(feed.unreadCount == 3)
+		#expect(model.navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount == 3)
+		#expect(model.visibleFolderNavigationItems.map(\.id) == [folder.id])
+		#expect(model.visibleFeedNavigationItems(in: folder).map(\.id) == [feed.id])
+
+		model.select(item: feed)
+		await model.load(collection: feed, force: true)
+
+		#expect(model.selectedCollection.id == feed.id)
+		#expect(model.articles(for: feed).count == 3)
+		#expect(model.articles(for: feed).map(\.id) == [
+			"youtube-video-3",
+			"youtube-video-2",
+			"youtube-video-1",
+		])
+		#expect(model.articles(for: feed).allSatisfy { $0.feedKey == PostAddYouTubeFeedHTTPClient.feedID })
+
+		let requests = await httpClient.requests()
+		#expect(requests.contains { $0.path == "/reader/api/0/subscription/quickadd" })
+		#expect(requests.contains { $0.path == "/reader/api/0/subscription/edit" })
+		#expect(requests.filter { $0.path == "/reader/api/0/subscription/list" }.count >= 2)
+		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 1)
+	}
+
 	private func makeModel(
 		httpClient: any HTTPClient,
 		articleFilterStore: ReaderArticleFilterStore? = nil,
@@ -9921,4 +9964,145 @@ private actor MutationReplayFailureHTTPClient: HTTPClient {
 
 	nonisolated private static let recommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"launch-article","readerId":"queued-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-article","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"},{"id":"launch-visible","readerId":"launch-visible-reader-id","feedKey":"daily","source":"Daily","author":null,"title":"Story launch-visible","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":40,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
 	nonisolated private static let normalizedItemRecommendationsData = Data(#"{"generatedAt":"2026-09-06T12:00:00Z","view":"for-you","items":[{"id":"10","readerId":"10","feedKey":"daily","source":"Daily","author":null,"title":"Story ten","html":"<p>Body</p>","text":"Body","originalURL":null,"receivedAt":"2026-09-06T12:00:00Z","isRead":false,"isStarred":false,"score":50,"confidence":0,"sampleCount":0,"explanation":"Starting with recency","learningState":"Starting with recency"}]}"#.utf8)
+}
+
+private actor PostAddYouTubeFeedHTTPClient: HTTPClient {
+	static let feedID = "feed/youtube-native"
+	static let folderID = "user/-/label/Creators"
+
+	struct RequestSnapshot: Sendable {
+		let path: String
+		let query: [String: String]
+		let method: String?
+		let body: Data?
+	}
+
+	private var didAddFeed = false
+	private var didAssignFolder = false
+	private var capturedRequests: [RequestSnapshot] = []
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url else {
+			throw PigeonError.invalidServerURL
+		}
+		let query = (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+			.reduce(into: [String: String]()) { result, item in
+				if let value = item.value {
+					result[item.name] = value
+				}
+			}
+		capturedRequests.append(
+			RequestSnapshot(path: url.path, query: query, method: request.httpMethod, body: request.httpBody),
+		)
+
+		let data: Data
+		let statusCode: Int
+		switch url.path {
+		case "/reader/api/0/subscription/quickadd":
+			didAddFeed = true
+			data = Data(
+				#"{"query":"https://www.youtube.com/feeds/videos.xml?channel_id=UCnative3feed","numResults":1,"streamId":"feed/youtube-native","streamName":"Native YouTube Channel","isNew":true}"#.utf8,
+			)
+			statusCode = 200
+		case "/reader/api/0/subscription/edit":
+			guard didAddFeed else {
+				data = Data(#"{"error":"feed was not added first"}"#.utf8)
+				statusCode = 409
+				break
+			}
+			let form = Self.formValues(from: request.httpBody)
+			guard form["s"] == [Self.feedID], form["a"] == [Self.folderID] else {
+				data = Data(#"{"error":"unexpected subscription edit"}"#.utf8)
+				statusCode = 422
+				break
+			}
+			didAssignFolder = true
+			data = Data()
+			statusCode = 200
+		case "/reader/api/0/subscription/list":
+			data = subscriptionListData()
+			statusCode = 200
+		case "/reader/api/0/unread-count":
+			data = unreadCountsData()
+			statusCode = 200
+		case "/reader/api/0/stream/items/ids":
+			data = streamIDsData(for: query["s"])
+			statusCode = 200
+		case "/reader/api/0/stream/items/contents":
+			let ids = Self.formValues(from: request.httpBody, named: "i")
+			data = streamContentsData(ids: ids)
+			statusCode = 200
+		default:
+			data = Data(#"{"error":"not found"}"#.utf8)
+			statusCode = 404
+		}
+
+		guard let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		return (data, response)
+	}
+
+	func requests() -> [RequestSnapshot] {
+		capturedRequests
+	}
+
+	private func subscriptionListData() -> Data {
+		guard didAddFeed else {
+			return Data(#"{"subscriptions":[]}"#.utf8)
+		}
+		let categories = didAssignFolder
+			? #"[{"id":"user/-/label/Creators","label":"Creators"}]"#
+			: "[]"
+		return Data(
+			"{\"subscriptions\":[{\"id\":\"\(Self.feedID)\",\"title\":\"Native YouTube Channel\",\"categories\":\(categories),\"url\":\"https://pigeon.test/feed/youtube-native\",\"iconUrl\":null}]}".utf8,
+		)
+	}
+
+	private func unreadCountsData() -> Data {
+		guard didAddFeed else {
+			return Data(#"{"unreadcounts":[]}"#.utf8)
+		}
+		return Data(
+			"{\"unreadcounts\":[{\"id\":\"\(Self.feedID)\",\"count\":3},{\"id\":\"\(Self.folderID)\",\"count\":3},{\"id\":\"user/-/state/com.google/reading-list\",\"count\":3}]}".utf8,
+		)
+	}
+
+	private func streamIDsData(for streamID: String?) -> Data {
+		guard didAddFeed else {
+			return Data(#"{"itemRefs":[]}"#.utf8)
+		}
+		guard streamID == Self.feedID || streamID == "user/-/state/com.google/reading-list" else {
+			return Data(#"{"itemRefs":[]}"#.utf8)
+		}
+		return Data(
+			#"{"itemRefs":[{"id":"youtube-video-3"},{"id":"youtube-video-2"},{"id":"youtube-video-1"}]}"#.utf8,
+		)
+	}
+
+	private func streamContentsData(ids: [String]) -> Data {
+		let items = ids.enumerated().map { offset, id in
+			let published = 1_786_272_003 - offset
+			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"Native upload \(4 - offset)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Video summary \(offset)</p>\"},\"content\":{\"content\":\"<p>Video body \(offset)</p>\"},\"alternate\":[{\"href\":\"https://www.youtube.com/watch?v=\(id)\"}],\"origin\":{\"streamId\":\"\(Self.feedID)\",\"title\":\"Native YouTube Channel\",\"htmlUrl\":\"https://www.youtube.com/channel/UCnative3feed\"}}"
+		}.joined(separator: ",")
+		return Data(
+			"{\"id\":\"\(Self.feedID)\",\"updated\":0,\"items\":[\(items)]}".utf8,
+		)
+	}
+
+	private static func formValues(from body: Data?, named name: String? = nil) -> [String] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return queryItems
+			.filter { name == nil || $0.name == name }
+			.compactMap(\.value)
+	}
+
+	private static func formValues(from body: Data?) -> [String: [String]] {
+		let rawBody = String(decoding: body ?? Data(), as: UTF8.self)
+		let queryItems = URLComponents(string: "https://pigeon.test/?\(rawBody)")?.queryItems ?? []
+		return Dictionary(grouping: queryItems, by: \.name).mapValues { items in
+			items.compactMap(\.value)
+		}
+	}
 }

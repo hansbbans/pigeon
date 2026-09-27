@@ -394,6 +394,45 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "personalization-topics-reset")
 	}
 
+	func testPersonalizationTopicsCanBeAddedRemovedAndRestored() throws {
+		openSettings()
+
+		let personalization = app.buttons["Signals, History, and Privacy"]
+		XCTAssertTrue(
+			revealSettingsRow(personalization),
+			"The Personalization settings row should be reachable by scrolling the Settings form.",
+		)
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+
+		let input = app.textFields["monitored-topic-input"]
+		XCTAssertTrue(input.waitForExistence(timeout: 5))
+		input.tap()
+		input.typeText("SwiftUI")
+		app.buttons["Add Topic"].tap()
+		let swiftUITopic = app.descendants(matching: .any)["monitored-topic-SwiftUI"]
+		XCTAssertTrue(swiftUITopic.waitForExistence(timeout: 10))
+		XCTAssertTrue(app.staticTexts["Topics saved."].waitForExistence(timeout: 10))
+
+		// Return to Settings and open the screen again so the view must reload the
+		// saved server-backed snapshot instead of reusing its local state.
+		app.navigationBars.buttons.firstMatch.tap()
+		XCTAssertTrue(revealSettingsRow(personalization))
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+		XCTAssertTrue(swiftUITopic.waitForExistence(timeout: 10))
+
+		app.buttons["Remove SwiftUI"].tap()
+		XCTAssertTrue(app.staticTexts["Topics saved."].waitForExistence(timeout: 10))
+		XCTAssertTrue(swiftUITopic.waitForNonExistence(timeout: 10))
+
+		app.navigationBars.buttons.firstMatch.tap()
+		XCTAssertTrue(revealSettingsRow(personalization))
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["No monitored topics"].waitForExistence(timeout: 10))
+	}
+
 	func testSidebarAddFeedOpensTheSubscribeSheet() throws {
 		app.terminate()
 		app.launchArguments = [
