@@ -466,7 +466,7 @@ final class ReaderAppModel {
 
 	var visibleSmartNavigationItems: [ReaderNavigationItem] {
 		smartNavigationItems.filter { item in
-			guard let section = item.smartSection, section != .unread else {
+			guard let section = item.smartSection else {
 				return false
 			}
 			return enabledSmartViewSections.contains(section)
@@ -476,6 +476,11 @@ final class ReaderAppModel {
 	var isForYouSmartViewEnabled: Bool {
 		get { enabledSmartViewSections.contains(.forYou) }
 		set { setSmartViewEnabled(newValue, for: .forYou) }
+	}
+
+	var isUnreadSmartViewEnabled: Bool {
+		get { enabledSmartViewSections.contains(.unread) }
+		set { setSmartViewEnabled(newValue, for: .unread) }
 	}
 
 	var isStarredSmartViewEnabled: Bool {
@@ -2068,7 +2073,6 @@ final class ReaderAppModel {
 
 	private func reconcileSelectedSmartViewIfNeeded() {
 		guard let selectedSection = ReaderSection(rawValue: selectedNavigationID),
-			selectedSection != .unread,
 			ReaderSmartViewStore.configurableSections.contains(selectedSection),
 			enabledSmartViewSections.contains(selectedSection) == false else {
 			return

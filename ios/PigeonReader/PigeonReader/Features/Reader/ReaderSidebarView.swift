@@ -37,7 +37,7 @@ struct ReaderSidebarView: View {
 
 		ScrollViewReader { proxy in
 			List(selection: selection) {
-				Section("Smart Views") {
+				Section("Views") {
 					ForEach(presentedSnapshot.smartItems) { item in
 						let frameGeneration = sidebarViewportCoordinator.currentGeneration
 						ReaderNavigationRowView(

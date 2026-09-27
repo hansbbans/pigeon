@@ -6732,7 +6732,7 @@ struct ReaderAppModelTests {
 		#expect(after.forYou.isEmpty)
 		}
 
-	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewInternalOnly() throws {
+	@Test func sidebarFilterRestoresCollectionsAndKeepsUnreadSmartViewVisible() throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let workFolderID = "user/-/label/Work"
 		let emptyFolderID = "user/-/label/Empty"
@@ -6760,7 +6760,7 @@ struct ReaderAppModelTests {
 		let workFolder = try #require(model.folderNavigationItems.first(where: { $0.id == workFolderID }))
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
-		#expect(model.visibleSmartNavigationItems.contains(where: { $0.smartSection == .unread }) == false)
+		#expect(model.visibleSmartNavigationItems.contains(where: { $0.smartSection == .unread }))
 		#expect(model.visibleFolderNavigationItems.map(\.id) == [emptyFolderID, workFolderID])
 		#expect(model.visibleFeedNavigationItems(in: workFolder).map(\.title) == ["Read folder feed", "Unread folder feed"])
 		#expect(model.visibleUncategorizedFeedNavigationItems.map(\.title) == ["Read uncategorized feed", "Unread uncategorized feed"])

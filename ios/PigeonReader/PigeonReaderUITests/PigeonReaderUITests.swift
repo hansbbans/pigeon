@@ -217,6 +217,33 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "reader-view-success")
 	}
 
+	func testUnreadSmartViewShowsItsCountAndOnlyUnreadStories() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data",
+			"-reader-show-sidebar",
+			"-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let unread = app.descendants(matching: .any)["reader-sidebar-item-unread"].firstMatch
+		if unread.waitForExistence(timeout: 2) == false {
+			let showSidebar = app.navigationBars.buttons.firstMatch
+			XCTAssertTrue(showSidebar.waitForExistence(timeout: 5))
+			showSidebar.tap()
+		}
+		XCTAssertTrue(unread.waitForExistence(timeout: 10))
+		XCTAssertEqual(unread.value as? String, "3 unread")
+		unread.tap()
+
+		XCTAssertTrue(app.navigationBars["Unread"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].exists)
+		XCTAssertTrue(app.staticTexts["A practical guide to making better videos"].exists)
+		XCTAssertFalse(app.staticTexts["The durable advantage of software with a clear point of view"].exists)
+		attachScreenshot(named: "unread-smart-view")
+	}
+
 	func testReaderViewExplicitFallback() throws {
 		app.buttons["Feed Content"].tap()
 		app.buttons["Reader View"].tap()

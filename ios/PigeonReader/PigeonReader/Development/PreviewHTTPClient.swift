@@ -136,6 +136,15 @@ struct PreviewHTTPClient: HTTPClient {
 				data = try JSONSerialization.data(withJSONObject: [
 					"itemRefs": recommendations.map { ["id": $0.readerId] },
 				])
+			} else if URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains(where: {
+				$0.name == "s" && $0.value == "user/-/state/com.google/reading-list"
+			}) == true {
+				let excludesRead = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains {
+					$0.name == "xt" && $0.value == "user/-/state/com.google/read"
+				} == true
+				let itemRefs = recommendations.filter { excludesRead == false || $0.isRead == false }
+					.map { ["id": $0.readerId] }
+				data = try JSONSerialization.data(withJSONObject: ["itemRefs": itemRefs])
 			} else {
 				data = Data("{\"itemRefs\":[]}".utf8)
 			}

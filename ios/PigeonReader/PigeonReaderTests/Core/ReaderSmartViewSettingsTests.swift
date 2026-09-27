@@ -10,8 +10,22 @@ struct ReaderSmartViewSettingsTests {
 		let store = ReaderSmartViewStore(defaults: defaults)
 
 		#expect(store.enabledSections == ReaderSmartViewStore.defaultEnabledSections)
-		#expect(store.enabledSections.contains(.unread) == false)
-		#expect(ReaderSmartViewStore.configurableSections == [.forYou, .starred, .today])
+		#expect(store.enabledSections.contains(.unread))
+		#expect(ReaderSmartViewStore.configurableSections == [.forYou, .unread, .starred, .today])
+	}
+
+	@MainActor
+	@Test func existingPreferencesGainUnreadOnceDuringMigration() throws {
+		let (defaults, suiteName) = try makeDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+
+		defaults.set([ReaderSection.starred.rawValue, ReaderSection.today.rawValue], forKey: ReaderSmartViewStore.key)
+
+		let migrated = ReaderSmartViewStore(defaults: defaults)
+		#expect(migrated.enabledSections == [.unread, .starred, .today])
+		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.unread, .starred, .today])
+		let model = try makeModel(defaults: defaults, smartViewStore: migrated)
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .today])
 	}
 
 	@MainActor
@@ -34,11 +48,11 @@ struct ReaderSmartViewSettingsTests {
 		let model = try makeModel(defaults: defaults)
 
 		model.isForYouSmartViewEnabled = false
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.starred, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .today])
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 
 		model.isForYouSmartViewEnabled = true
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .starred, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .starred, .today])
 	}
 
 	@MainActor
@@ -58,10 +72,12 @@ struct ReaderSmartViewSettingsTests {
 	}
 
 	@MainActor
-	@Test func unreadRemainsInternalAndNeverAppearsInSettingsOrVisibleNavigation() throws {
+	@Test func unreadIsConfigurableAndAppearsInVisibleNavigation() throws {
 		let (defaults, suiteName) = try makeDefaults()
 		defer { defaults.removePersistentDomain(forName: suiteName) }
-		let model = try makeModel(defaults: defaults)
+		let store = ReaderSmartViewStore(defaults: defaults)
+		store.setEnabledSections([.forYou, .unread])
+		let model = try makeModel(defaults: defaults, smartViewStore: store)
 		let article = makeArticle(id: "unread-article")
 
 		model.setArticles([article], for: .unread)
@@ -69,13 +85,14 @@ struct ReaderSmartViewSettingsTests {
 
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
-		#expect(model.visibleSmartNavigationItems.contains(where: { $0.smartSection == .unread }) == false)
-		#expect(ReaderSmartViewStore.configurableSections.contains(.unread) == false)
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread])
+		#expect(ReaderSmartViewStore.configurableSections.contains(.unread))
 		#expect(model.allArticles(for: .unread).map(\.id) == [article.id])
 
-		ReaderSmartViewStore(defaults: defaults).setEnabledSections([.forYou, .unread])
+		model.isUnreadSmartViewEnabled = false
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou])
 		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.forYou])
-		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
+		#expect(model.isUnreadSmartViewEnabled == false)
 	}
 
 	@MainActor
@@ -92,7 +109,7 @@ struct ReaderSmartViewSettingsTests {
 
 		model.isForYouSmartViewEnabled = false
 
-		#expect(model.selectedNavigationID == ReaderSection.starred.rawValue)
+		#expect(model.selectedNavigationID == ReaderSection.unread.rawValue)
 		#expect(model.selectedArticleID == nil)
 		#expect(model.preferredCompactColumn == .content)
 		#expect(model.allArticles(for: .forYou).map(\.id) == [forYouArticle.id])
