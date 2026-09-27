@@ -63,9 +63,11 @@ struct SettingsView: View {
 						.foregroundStyle(.secondary)
 				}
 
-				Section("Smart Views") {
+				Section("Views") {
 					Toggle("For You", isOn: $model.isForYouSmartViewEnabled)
 						.disabled(model.canDisableSmartView(.forYou) == false)
+					Toggle("Unread", isOn: $model.isUnreadSmartViewEnabled)
+						.disabled(model.canDisableSmartView(.unread) == false)
 					Toggle("Starred", isOn: $model.isStarredSmartViewEnabled)
 						.disabled(model.canDisableSmartView(.starred) == false)
 					Toggle("Today", isOn: $model.isTodaySmartViewEnabled)

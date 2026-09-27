@@ -24,7 +24,7 @@ struct ReaderSidebarPresentationProjectionTests {
 			accountID: "account", selectedNavigationID: "folder-a", sidebarFilter: filter,
 			enabledSmartViewSections: enabled,
 			smartItems: navigation.smartItems.filter { item in
-				guard let section = item.smartSection, section != .unread else { return false }
+				guard let section = item.smartSection else { return false }
 				return enabled.contains(section)
 			}, folderItems: folders,
 			feedsByFolderID: Dictionary(uniqueKeysWithValues: folders.map { ($0.id, navigation.children(of: $0.id).filter(visible)) }),

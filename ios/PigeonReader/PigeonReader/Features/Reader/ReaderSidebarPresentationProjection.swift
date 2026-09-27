@@ -17,7 +17,7 @@ extension ReaderSidebarPresentationSnapshot {
 		for item in navigation.items {
 			switch item.kind {
 			case .smart:
-				if let section = item.smartSection, section != .unread,
+				if let section = item.smartSection,
 					enabledSmartViewSections.contains(section) {
 					smartItems.append(item)
 				}

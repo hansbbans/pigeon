@@ -194,9 +194,9 @@ enum PreviewData {
 					ReaderUnreadCount(id: "feed/3", count: showsFolderRead ? 1 : 0),
 					ReaderUnreadCount(id: "user/-/label/Design", count: showsFolderRead ? 2 : 1),
 					ReaderUnreadCount(id: "user/-/label/Technology", count: 1),
-					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: showsFolderRead ? 3 : 2),
+					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: articles.count(where: { $0.isRead == false })),
 				],
-				smartCounts: ReaderNavigationSmartCounts(forYou: showsFolderRead ? 3 : 2, today: 1, unread: showsFolderRead ? 3 : 2, starred: 1),
+				smartCounts: ReaderNavigationSmartCounts(forYou: showsFolderRead ? 3 : 2, today: 1, unread: articles.count(where: { $0.isRead == false }), starred: 1),
 			),
 				markAsLoaded: true,
 			)

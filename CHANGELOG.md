@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.5.0] - 2026-09-27
+
+### Added
+
+- The native Reader now exposes an Unread smart view with the global unread count, including existing saved view preferences.
+
 ## [Unreleased]
 
 ### Added
