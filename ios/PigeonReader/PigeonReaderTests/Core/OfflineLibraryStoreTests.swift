@@ -1024,6 +1024,31 @@ struct OfflineLibraryStoreTests {
 		#expect(snapshot.cursor == "v1:previous")
 	}
 
+	@Test func unsupportedStatusDeleteMarksRepairWithoutAdvancingCursor() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let page = IncrementalSyncPage(
+			cursor: "v1:status-delete",
+			hasMore: false,
+			changes: [
+				IncrementalSyncChange(
+					sequence: 1,
+					entityType: .status,
+					entityId: "article-1",
+					operation: .delete,
+					changedAt: Date(timeIntervalSince1970: 1_000),
+					payload: nil,
+				),
+			],
+		)
+
+		await #expect(throws: OfflineLibraryError.invalidSyncChange("The status change for article-1 was malformed.")) {
+			try await store.apply(page, accountID: "account-a")
+		}
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.cursor == nil)
+		#expect(snapshot.integrity.state == .needsRepair)
+	}
+
 	@Test func statusBeforeArticleIsResolvedAfterPageArticlesAreApplied() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let receivedAt = Date(timeIntervalSince1970: 1_000)

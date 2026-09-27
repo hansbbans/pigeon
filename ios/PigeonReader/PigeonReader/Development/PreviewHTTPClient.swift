@@ -1,6 +1,44 @@
 #if DEBUG
 import Foundation
 
+private actor PreviewPersonalizationStore {
+	private var monitoredTopics: [String] = []
+
+	func snapshotData() -> Data {
+		let snapshot = PersonalizationSnapshot(
+			exportedAt: Date(timeIntervalSince1970: 1_786_272_000),
+			policy: PersonalizationPolicy(
+				plainLanguageSummary: "Pigeon learns from confirmed reading signals and the topics you choose to monitor.",
+				confirmedSignals: [
+					PersonalizationSignal(name: "Reading", effect: "Longer reading increases similar recommendations."),
+					PersonalizationSignal(name: "Stars", effect: "Starred stories increase similar recommendations."),
+				],
+				confirmationRule: "Only confirmed interactions affect your recommendations.",
+				retention: "Confirmed history is retained until you delete it or reset personalization.",
+			),
+			history: [],
+			monitoredTopics: monitoredTopics,
+		)
+		let encoder = JSONEncoder()
+		encoder.dateEncodingStrategy = .iso8601
+		return (try? encoder.encode(snapshot)) ?? Data("{}".utf8)
+	}
+
+	func update(topics: [String]) throws -> Data {
+		monitoredTopics = try PersonalizationTopicRules.validated(topics)
+		return snapshotData()
+	}
+
+	func reset() -> Data {
+		monitoredTopics = []
+		return snapshotData()
+	}
+}
+
+private nonisolated struct PreviewPersonalizationTopicsUpdate: Decodable, Sendable {
+	let monitoredTopics: [String]
+}
+
 private nonisolated struct PreviewRecommendationsResponse: Encodable, Sendable {
 	let generatedAt: Date
 	let view: String
@@ -9,9 +47,11 @@ private nonisolated struct PreviewRecommendationsResponse: Encodable, Sendable {
 
 struct PreviewHTTPClient: HTTPClient {
 	private let recommendations: [Recommendation]
+	private let personalizationStore: PreviewPersonalizationStore
 
 	init(recommendations: [Recommendation] = []) {
 		self.recommendations = recommendations
+		self.personalizationStore = PreviewPersonalizationStore()
 	}
 
 	nonisolated func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -56,11 +96,27 @@ struct PreviewHTTPClient: HTTPClient {
 			encoder.dateEncodingStrategy = .iso8601
 			data = try encoder.encode(response)
 		case "/api/v1/personalization":
-			if request.httpMethod == "DELETE" {
-				data = Data()
-			} else {
-				let topics = request.httpMethod == "PUT" ? Self.monitoredTopics(from: request.httpBody) : []
-				data = try Self.personalizationData(topics: topics)
+			switch request.httpMethod {
+			case "PUT":
+				do {
+					let update = try JSONDecoder().decode(
+						PreviewPersonalizationTopicsUpdate.self,
+						from: request.httpBody ?? Data(),
+					)
+					data = try await personalizationStore.update(topics: update.monitoredTopics)
+				} catch {
+					data = Data(error.localizedDescription.utf8)
+					statusCode = 400
+				}
+			case "DELETE":
+				let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+				if queryItems.contains(where: { $0.name == "all" && $0.value == "1" }) {
+					data = await personalizationStore.reset()
+				} else {
+					data = await personalizationStore.snapshotData()
+				}
+			default:
+				data = await personalizationStore.snapshotData()
 			}
 		case "/app/status":
 			data = Data(Self.syncHealthFixture.utf8)
@@ -260,29 +316,6 @@ struct PreviewHTTPClient: HTTPClient {
 			throw PigeonError.invalidResponse
 		}
 		return (data, response)
-	}
-
-	private static func monitoredTopics(from body: Data?) -> [String] {
-		guard let body,
-			let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-			let topics = object["monitoredTopics"] as? [String] else {
-			return []
-		}
-		return topics
-	}
-
-	private static func personalizationData(topics: [String]) throws -> Data {
-		try JSONSerialization.data(withJSONObject: [
-			"exportedAt": "2026-08-15T12:00:00Z",
-			"policy": [
-				"plainLanguageSummary": "Preview signals",
-				"confirmedSignals": [],
-				"confirmationRule": "Confirmed",
-				"retention": "Retained",
-			],
-			"history": [],
-			"monitoredTopics": topics,
-		])
 	}
 
 	nonisolated private static var navigationFixtureSubscriptions: [[String: Any]] {
