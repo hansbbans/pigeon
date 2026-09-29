@@ -20,6 +20,14 @@ struct ArticleListToolbar: ToolbarContent {
 		let isLoading = model.isLoading(collection: collection)
 
 		ToolbarItemGroup(placement: .topBarTrailing) {
+			if collection.kind == .feed {
+				Button("Mark Read", systemImage: "checkmark.circle") {
+					Task { await model.markAllStoriesAsRead(in: collection) }
+				}
+				.disabled(model.canMarkAllStoriesAsRead(in: collection) == false)
+				.accessibilityHint("Marks all unread stories in this feed as read")
+				.accessibilityIdentifier("article-list-mark-read")
+			}
 			Menu("Filter", systemImage: "line.3.horizontal.decrease") {
 				Picker("Filter stories", selection: filterBinding) {
 					ForEach(ReaderArticleFilter.allCases) { filter in

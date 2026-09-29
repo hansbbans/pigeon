@@ -183,10 +183,14 @@ struct PreviewHTTPClient: HTTPClient {
 				data = try JSONSerialization.data(withJSONObject: payload)
 			} else if ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data") {
 				let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+				let stream = query.first { $0.name == "s" }?.value
 				let isSecondPage = query.contains { $0.name == "c" }
-				let items = isSecondPage ? Array(recommendations.dropFirst().prefix(1)) : Array(recommendations.prefix(1))
+				let isFeed = stream?.hasPrefix("feed/") == true
+				let items = isFeed
+					? recommendations.enumerated().filter { "feed/\($0.offset + 1)" == stream }.map(\.element)
+					: (isSecondPage ? Array(recommendations.dropFirst().prefix(1)) : Array(recommendations.prefix(1)))
 				var page: [String: Any] = ["itemRefs": items.map { ["id": $0.readerId] }]
-				if isSecondPage == false { page["continuation"] = "folder-mark-read-next" }
+				if isFeed == false, isSecondPage == false { page["continuation"] = "folder-mark-read-next" }
 				data = try JSONSerialization.data(withJSONObject: page)
 			} else if ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
 				data = try JSONSerialization.data(withJSONObject: [
@@ -239,7 +243,8 @@ struct PreviewHTTPClient: HTTPClient {
 			} else {
 				let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
 				if showsFolderRead || ProcessInfo.processInfo.arguments.contains("-reader-today-data") {
-					let requestedIDs = Set((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+					let form = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+					let requestedIDs = Set((URLComponents(string: "https://pigeon.preview/?\(form)")?.queryItems ?? [])
 						.filter { $0.name == "i" }.compactMap(\.value))
 					let items = showsFolderRead ? recommendations.filter { requestedIDs.contains($0.readerId) } : recommendations
 					data = try JSONSerialization.data(withJSONObject: [
