@@ -13,8 +13,11 @@ const run = {
 };
 const successfulStep = (name) => ({ name, status: "completed", conclusion: "success" });
 const jobs = [
-	{ name: "Worker tests, types, and audit", steps: [successfulStep("Run npm run check"), successfulStep("Verify TestFlight release tooling")] },
+	{ name: "Worker tests, types, and audit", steps: [successfulStep("Run npm run check")] },
 	{ name: "iOS tests and clean Release build", steps: [successfulStep("Run unit and UI tests"), successfulStep("Clean Release build")] },
+	{ name: "CI and release tooling fixtures", steps: [successfulStep("Test scope and required gate"), successfulStep("Verify TestFlight release tooling")] },
+	{ name: "CI required validation", steps: [successfulStep("Require successful selected validation")] },
+	{ name: "Classify validation scope", steps: [successfulStep("Classify complete change range")] },
 ].map((job) => ({ ...job, head_sha: sha, run_id: run.id, run_attempt: 1, status: "completed", conclusion: "success" }));
 
 function fixture({ runs = [run], ciJobs = jobs, current = run, selectedWorkflow = workflow, runsPages, jobsPages } = {}) {
@@ -78,14 +81,14 @@ test("missing CI falls back", async () => {
 });
 
 test("missing, skipped, duplicate, or wrong-SHA native jobs fall back", async () => {
-	for (const ciJobs of [jobs.slice(0, 1), [jobs[0], { ...jobs[1], conclusion: "skipped" }], [...jobs, jobs[1]], [jobs[0], { ...jobs[1], head_sha: "b".repeat(40) }]]) {
+	for (const ciJobs of [jobs.slice(0, 1), [jobs[0], { ...jobs[1], conclusion: "skipped" }, ...jobs.slice(2)], [...jobs, jobs[1]], [jobs[0], { ...jobs[1], head_sha: "b".repeat(40) }, ...jobs.slice(2)]]) {
 		assert.equal((await evaluate(fixture({ ciJobs }))).reuseCi, false);
 	}
 });
 
 test("missing or skipped unit/UI and clean-build steps fall back", async () => {
 	for (const steps of [[], [successfulStep("Clean Release build")], [successfulStep("Run unit and UI tests"), { ...successfulStep("Clean Release build"), conclusion: "skipped" }]]) {
-		assert.equal((await evaluate(fixture({ ciJobs: [jobs[0], { ...jobs[1], steps }] }))).reuseCi, false);
+		assert.equal((await evaluate(fixture({ ciJobs: [jobs[0], { ...jobs[1], steps }, ...jobs.slice(2)] }))).reuseCi, false);
 	}
 });
 
@@ -115,4 +118,24 @@ test("job pagination includes required jobs on the second page", async () => {
 test("bounded pagination exhaustion falls back", async () => {
 	const many = Array.from({ length: 100 }, () => run);
 	assert.equal((await evaluate(fixture({ runs: many }))).reuseCi, false);
+});
+
+test("proportional green CI without native proof runs full release tests", async () => {
+    const required = jobs[3];
+    const scope = jobs[4];
+    for (const ciJobs of [
+        [scope, jobs[2], required, { ...jobs[0], conclusion: "skipped" }, { ...jobs[1], conclusion: "skipped" }],
+        [scope, jobs[2], required, jobs[0], { ...jobs[1], conclusion: "skipped" }],
+        [scope, jobs[2], required, jobs[0]],
+        [scope, jobs[2], required, jobs[0], { ...jobs[1], steps: [] }],
+    ]) {
+        assert.equal((await evaluate(fixture({ ciJobs }))).reuseCi, false);
+    }
+});
+
+test("full proportional CI requires scope, gate, tooling, and real native proof", async () => {
+    assert.equal((await evaluate(fixture())).reuseCi, true);
+    for (const name of ["CI and release tooling fixtures", "CI required validation", "Classify validation scope"]) {
+        assert.equal((await evaluate(fixture({ ciJobs: jobs.filter((job) => job.name !== name) }))).reuseCi, false);
+    }
 });

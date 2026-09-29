@@ -9,11 +9,44 @@ permissions:
   contents: read
 
 concurrency:
-  group: pigeon-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: pigeon-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  scope:
+    name: Classify validation scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      native: ${{ steps.scope.outputs.native }}
+      worker: ${{ steps.scope.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Classify complete change range
+        id: scope
+        run: python3 .github/scripts/ci_scope.py scope --repo pigeon
+
+  tooling:
+    name: CI and release tooling fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test scope and required gate
+        run: python3 .github/scripts/test_ci_scope.py
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Verify TestFlight release tooling
+        run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
+      - name: Verify simulator ownership guards
+        run: python3 .github/scripts/test_ios_simulator_session.py
+
   worker:
+    needs: scope
+    if: needs.scope.outputs.worker == 'true'
     name: Worker tests, types, and audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -25,10 +58,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Verify TestFlight release tooling
-        run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
 
   native:
+    needs: scope
+    if: needs.scope.outputs.native == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     name: iOS tests and clean Release build
     runs-on:
       - self-hosted
@@ -110,3 +143,16 @@ jobs:
         if: always()
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
+
+  required:
+    name: CI required validation
+    if: always()
+    needs: [scope, tooling, native, worker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require successful selected validation
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/ci_scope.py gate --repo pigeon
