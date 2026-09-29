@@ -25,6 +25,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Verify TestFlight release tooling
+        run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
 
   native:
     name: iOS tests and clean Release build
