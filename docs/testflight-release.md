@@ -2,7 +2,7 @@
 
 Pigeon has a manual GitHub Actions workflow at `.github/workflows/release-testflight.yml`. It runs on the repository-scoped Apple Silicon Mac runner labeled `pigeon-ci`; it does not use GitHub-hosted macOS minutes and it never uploads automatically after a push or merge.
 
-Each run checks out trusted `main`, runs the Worker tests and TypeScript check, regenerates the iOS project with XcodeGen, runs the Swift tests on an available iPhone simulator, archives the universal iPhone/iPad app, and uploads it to TestFlight. The first release should leave `internal_only` enabled.
+Each run checks out the exact dispatched `main` commit and checks its CI evidence. If that exact commit's latest authoritative push-to-main `CI` run succeeded, including the Worker checks, native unit/UI tests, clean Release build, and release-tooling fixtures, release reuses those results. PR runs, other branches/workflows, skipped jobs, incomplete or failed runs, changed attempts, and unavailable API evidence do not qualify: release runs the full Worker and simulator tests instead. The `force_full_tests` dispatch option always runs those tests. Every mode regenerates the iOS project, archives the universal iPhone/iPad app, uploads it once, and verifies the exact build and tester access. The first release should leave `internal_only` enabled.
 
 CI and release jobs reserve an idle simulator and record its ownership before booting it. Tests run without parallel simulator workers. An always-running cleanup step verifies that no test process or manual Simulator session is using the device, shuts down only the device booted by that job, and verifies its final state. Devices already booted before the job are preserved; uncertain use is reported as a warning.
 
@@ -63,9 +63,33 @@ From GitHub Actions, select `Release to TestFlight` on `main` and choose `Run wo
 
 The workflow has two jobs:
 
-1. `upload` runs the tests, archive, export, and exactly one TestFlight upload. It records the marketing version and archive build number as job outputs and removes the temporary keychain, profiles, certificate, private-key file, and release directory in its final cleanup step.
+1. `upload` checks exact-commit CI evidence, runs tests when needed, then archives, exports, and performs exactly one TestFlight upload. It records the marketing version, archive build number, and CI reuse evidence as job outputs and removes the temporary keychain, profiles, certificate, private-key file, and release directory in its final cleanup step. Simulator selection and cleanup are skipped only when CI reuse skips simulator tests; existing two-job build limits and simulator ownership protections remain in place.
 2. `verify` runs only after a successful upload. The repository-owned `scripts/app-store-connect-verify.mjs` creates a short-lived App Store Connect JWT with the existing key, issuer, and private-key secrets; resolves the app by `com.hans.pigeon.reader`; polls the exact workflow-derived build until it is `VALID`; fails immediately for `FAILED` or `INVALID` and clearly on timeout; resolves the exact `Pigeon Internal` group; attaches the build through the official beta-group/build relationship when necessary; verifies that relationship and at least one tester; and writes the app, bundle, version, build, processing, group, and tester evidence to the step summary.
 
 The API verifier retries transient `429` and `5xx` reads, honors `Retry-After` when present, and uses a JWT lifetime below App Store Connect's limit. Relationship attachment is idempotent: after a conflict or ambiguous server response it re-reads the group's builds with bounded backoff and accepts the operation only when the exact build is present. After a successful attach it waits for the same exact relationship to propagate. A group with `hasAccessToAllBuilds` does not receive a duplicate attach request, but it is still polled until the exact build is listed; an absent relationship is never summarized as covered.
 
 If verification fails after the upload job succeeds, rerun only the failed `verify` job. GitHub Actions retains the successful upload job and its outputs, so verification retries do not upload a second build. Do not rerun the entire workflow after an upload has succeeded unless a new build is intentionally authorized. This path uses the App Store Connect API directly; it has no browser login, cookie import, or third-party release service. A successful upload still needs the verification job to finish before it is reported as available to testers.
+
+## Quiet monitoring from Codex or a terminal
+
+Use Node.js 22+ and an authenticated `gh` CLI. This command releases remote `main`; it does not commit, push, merge, or release a local feature branch:
+
+```bash
+node scripts/release-new-build-to-testflight.mjs \
+  --monitor-state /tmp/pigeon-release-request.json \
+  --monitor-receipt /tmp/pigeon-release-receipt.json
+```
+
+The wrapper resolves the exact remote main SHA, saves a unique request before dispatch, passes that SHA as `expected_sha`, dispatches once, and quietly polls the identified workflow. The workflow rejects a changed dispatch SHA or checkout before any tests, signing, archive or upload. Direct manual dispatches can leave the optional `expected_sha` input blank. The wrapper prints one final `testflight-monitor/v1` JSON receipt and writes it to the receipt file. A successful receipt proves the matching run, attempt, request and SHA, upload, `VALID` processing, exact `Pigeon Internal` build relationship, and at least one tester. The verification job emits the same receipt as a structured log marker and an optional artifact; artifact quota failures do not invalidate verified tester access, and the wrapper falls back to the exact attempt's verification log.
+
+To continue after a timeout, network error, or verification-only retry, reuse the saved request:
+
+```bash
+node scripts/release-new-build-to-testflight.mjs \
+  --resume-monitor /tmp/pigeon-release-request.json \
+  --monitor-receipt /tmp/pigeon-release-receipt.json
+```
+
+Resume only reads GitHub and downloads evidence. Existing state refuses another dispatch. Unknown dispatch responses, failed/cancelled runs, wrong SHAs, missing receipts and timeouts produce `needs_attention`, preserve the request/run identity, and never trigger an automatic re-upload. If main advances between resolution and dispatch, the workflow stops before uploading and the wrapper preserves the run identity. Partial receipts distinguish proven archive/export/upload success from unknown processing/tester access; upload failures stay unknown because acceptance could already have happened. Optional new-release flags are `--force-full-tests`, `--marketing-version 1.0.1`, and `--internal-only true|false`; monitoring defaults to a two-hour timeout and 30-second interval, adjustable with `--timeout SECONDS` and `--interval SECONDS`. Resume rejects flags that would change the saved release request.
+
+These changes take effect only after this workflow and its helpers reach GitHub `main`. Local fixture tests do not prove a live fast-path release; the first authorized release must confirm CI reuse, unchanged archive/upload behavior, and receipt retrieval without creating a second upload.

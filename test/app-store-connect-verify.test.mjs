@@ -7,10 +7,32 @@ import {
 	AppStoreConnectClient,
 	formatVerificationSummary,
 	verifyTestFlightBuild,
+	createReleaseReceipt,
 } from "../scripts/app-store-connect-verify.mjs";
 
 const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+
+test("release receipt requires upload and exact VALID build/tester evidence", () => {
+	const result = {
+		processingState: "VALID", testerCount: 1, attachmentEvidence: "exact build build-1 is listed",
+		bundleId: "com.hans.pigeon.reader", marketingVersion: "1.0", buildNumber: "101",
+		build: { id: "build-1" }, group: { id: "group-1" }, groupName: "Pigeon Internal",
+	};
+	const environment = {
+		RELEASE_UPLOAD_SUCCEEDED: "true", GITHUB_SHA: "a".repeat(40), GITHUB_REPOSITORY: "hansbbans/pigeon",
+		GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", RELEASE_REUSED_CI: "true", RELEASE_CI_RUN_ID: "120",
+	};
+	const receipt = createReleaseReceipt(result, environment);
+	assert.equal(receipt.mode, "reuse-exact-ci");
+	assert.equal(receipt.source_sha, environment.GITHUB_SHA);
+	assert.equal(receipt.groups[0].exact_build_available, true);
+	for (const badResult of [{ ...result, processingState: "PROCESSING" }, { ...result, testerCount: 0 }, { ...result, attachmentEvidence: "" }]) {
+		assert.throws(() => createReleaseReceipt(badResult, environment));
+	}
+	assert.throws(() => createReleaseReceipt(result, { ...environment, RELEASE_UPLOAD_SUCCEEDED: "false" }));
+	assert.throws(() => createReleaseReceipt(result, { ...environment, GITHUB_SHA: "short" }));
+});
 
 function response(payload, status = 200, headers = {}) {
 	const statusText = status === 204 ? "No Content" : status >= 400 ? "Error" : "OK";

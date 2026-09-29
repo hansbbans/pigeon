@@ -9,6 +9,11 @@ on:
         required: false
         default: ""
         type: string
+      expected_sha:
+        description: Optional exact main commit required by the release caller
+        required: false
+        default: ""
+        type: string
       marketing_version:
         description: Optional marketing version override, such as 1.0.1
         required: false
@@ -19,8 +24,14 @@ on:
         required: true
         default: true
         type: boolean
+      force_full_tests:
+        description: Run all release tests even when this exact main commit passed CI
+        required: true
+        default: false
+        type: boolean
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -40,6 +51,9 @@ jobs:
     outputs:
       marketing_version: ${{ steps.release_metadata.outputs.marketing_version }}
       build_number: ${{ steps.release_metadata.outputs.build_number }}
+      reused_ci: ${{ steps.ci_evidence.outputs.reuse_ci }}
+      ci_run_id: ${{ steps.ci_evidence.outputs.ci_run_id }}
+      ci_run_attempt: ${{ steps.ci_evidence.outputs.ci_run_attempt }}
     env:
       APP_DIRECTORY: ios/PigeonReader
       BUNDLE_ID: com.hans.pigeon.reader
@@ -67,17 +81,13 @@ jobs:
         uses: actions/checkout@v5
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Require the dispatched main commit
         shell: bash
-        run: |
-          set -euo pipefail
-          checked_out_sha="$(git rev-parse HEAD)"
-          if [[ "$checked_out_sha" != "$GITHUB_SHA" ]]; then
-            echo "main advanced between dispatch and checkout; refusing to release a different commit." >&2
-            exit 1
-          fi
+        env:
+          EXPECTED_RELEASE_SHA: ${{ inputs.expected_sha }}
+        run: bash scripts/require-testflight-commit.sh
 
       - name: Require a main-branch dispatch
         shell: bash
@@ -101,14 +111,25 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Check exact-commit CI evidence
+        id: ci_evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_FULL_TESTS: ${{ inputs.force_full_tests }}
+        run: node scripts/testflight-ci-gate.mjs
+
       - name: Install Worker dependencies
+        if: steps.ci_evidence.outputs.reuse_ci != 'true'
         run: npm ci
 
       - name: Run Worker tests and type checking
+        if: steps.ci_evidence.outputs.reuse_ci != 'true'
         run: |
           set -euo pipefail
           npm test
           npm run test:testflight
+          node --test test/testflight-ci-gate.test.mjs
+          node --test test/testflight-release-monitor.test.mjs
           npx tsc --noEmit
 
       - name: Generate Xcode project
@@ -117,9 +138,11 @@ jobs:
 
       - name: Select an available iPhone simulator
         id: simulator
+        if: steps.ci_evidence.outputs.reuse_ci != 'true'
         run: .github/scripts/select-ios-simulator.sh
 
       - name: Run Pigeon tests
+        if: steps.ci_evidence.outputs.reuse_ci != 'true'
         run: |
           set -o pipefail
           xcodebuild test \
@@ -459,7 +482,7 @@ jobs:
           rm -rf "$RELEASE_ROOT"
 
       - name: Shut down this job's simulator
-        if: always()
+        if: always() && steps.simulator.outputs.ownership_file != ''
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
 
@@ -481,6 +504,12 @@ jobs:
       BETA_GROUP_NAME: Pigeon Internal
       ASC_TIMEOUT_SECONDS: "900"
       ASC_POLL_INTERVAL_SECONDS: "15"
+      RELEASE_RECEIPT_PATH: ${{ github.workspace }}/pigeon-testflight-receipt-${{ github.run_id }}-${{ github.run_attempt }}.json
+      RELEASE_UPLOAD_SUCCEEDED: ${{ needs.upload.result == 'success' }}
+      RELEASE_REQUEST_ID: ${{ inputs.request_id }}
+      RELEASE_REUSED_CI: ${{ needs.upload.outputs.reused_ci }}
+      RELEASE_CI_RUN_ID: ${{ needs.upload.outputs.ci_run_id }}
+      RELEASE_CI_RUN_ATTEMPT: ${{ needs.upload.outputs.ci_run_attempt }}
 
     steps:
       - name: Check out the uploaded commit
@@ -510,4 +539,14 @@ jobs:
             printf '%s\n' "$verification_summary" >&2
             exit 1
           fi
-          printf '%s\n' "$verification_summary" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$verification_summary" | sed '/^TESTFLIGHT_RECEIPT_JSON:/d' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$verification_summary"
+
+      - name: Publish verified release receipt
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pigeon-testflight-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RELEASE_RECEIPT_PATH }}
+          if-no-files-found: error
+          retention-days: 14

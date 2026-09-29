@@ -1,6 +1,7 @@
 import { sign } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
 
 const DEFAULT_API_BASE_URL = "https://api.appstoreconnect.apple.com/v1";
 const DEFAULT_GROUP_NAME = "Pigeon Internal";
@@ -430,6 +431,37 @@ export function formatVerificationSummary(result) {
 	].join("\n");
 }
 
+export function createReleaseReceipt(result, environment) {
+	if (environment.RELEASE_UPLOAD_SUCCEEDED !== "true" || result.processingState !== "VALID" || result.testerCount < 1 || !result.attachmentEvidence) {
+		throw new Error("Cannot create a release receipt without successful upload, VALID processing, and exact build/tester evidence.");
+	}
+	const sourceSha = requiredString(environment.GITHUB_SHA, "GITHUB_SHA");
+	if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw new Error("Release receipt requires a full commit SHA.");
+	return {
+		schema: "testflight-monitor/v1",
+		status: "success",
+		app: "pigeon",
+		repository: requiredString(environment.GITHUB_REPOSITORY, "GITHUB_REPOSITORY"),
+		request_id: environment.RELEASE_REQUEST_ID ?? "",
+		source_sha: sourceSha,
+		release_run_id: requiredString(environment.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
+		run_attempt: requiredString(environment.GITHUB_RUN_ATTEMPT, "GITHUB_RUN_ATTEMPT"),
+		uploaded: true,
+		apple_valid: true,
+		tester_available: true,
+		stages: { archive: "success", export: "success", upload: "success", apple_processing: "success", tester_access: "success" },
+		mode: environment.RELEASE_REUSED_CI === "true" ? "reuse-exact-ci" : "full-tests",
+		ci_run_id: environment.RELEASE_CI_RUN_ID || null,
+		ci_run_attempt: environment.RELEASE_CI_RUN_ATTEMPT || null,
+		bundle_id: result.bundleId,
+		marketing_version: result.marketingVersion,
+		build_number: result.buildNumber,
+		apple_build_id: result.build.id,
+		processing_state: result.processingState,
+		groups: [{ name: result.groupName, id: result.group.id, exact_build_available: true, tester_count: result.testerCount, evidence: result.attachmentEvidence }],
+	};
+}
+
 function environmentInteger(environment, name, fallback) {
 	const value = environment[name];
 	if (value === undefined || value === "") return fallback;
@@ -460,7 +492,13 @@ export async function verifyFromEnvironment(environment = process.env, dependenc
 async function main() {
 	try {
 		const result = await verifyFromEnvironment();
+		let receipt;
+		if (process.env.RELEASE_RECEIPT_PATH) {
+			receipt = createReleaseReceipt(result, process.env);
+			await writeFile(process.env.RELEASE_RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+		}
 		console.log(formatVerificationSummary(result));
+		if (receipt) console.log(`TESTFLIGHT_RECEIPT_JSON:${JSON.stringify(receipt)}`);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`App Store Connect verification failed: ${message}`);
