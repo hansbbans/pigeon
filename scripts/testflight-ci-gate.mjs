@@ -3,12 +3,16 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REQUIRED_STEPS = {
-	"Worker tests, types, and audit": ["Run npm run check", "Verify TestFlight release tooling"],
+	"Classify validation scope": ["Classify complete change range"],
+	"CI required validation": ["Require successful selected validation"],
+	"Worker tests, types, and audit": ["Run npm run check"],
+	"CI and release tooling fixtures": ["Test scope and required gate", "Verify TestFlight release tooling"],
 	"iOS tests and clean Release build": ["Run unit and UI tests", "Clean Release build"],
 };
 
 // Only this repository's push-to-main CI can replace release tests. A PR run
 // (including its synthetic merge commit), another workflow, or partial success cannot.
+// A successful proportional required gate alone is not native test/build proof.
 export async function evaluateCiEvidence({ repository, sha, forceFullTests = false, get }) {
 	const fallback = (reason) => ({ reuseCi: false, reason });
 	if (forceFullTests) return fallback("Full release tests explicitly requested.");
