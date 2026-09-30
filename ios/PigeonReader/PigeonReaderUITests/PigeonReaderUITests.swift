@@ -129,6 +129,57 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
 	}
 
+	func testFeedMarkReadIsAvailableInNavigationAndCanBeUndone() throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data", "-reader-folder-read-data",
+			"-reader-show-sidebar", "-reader-reset-reader-state",
+		]
+		app.launch()
+
+		let feed = app.buttons["Dense Discovery"]
+		XCTAssertTrue(revealSidebar(containing: feed))
+		XCTAssertEqual(feed.value as? String, "1 unread")
+		let unread = app.descendants(matching: .any)["reader-sidebar-item-unread"].firstMatch
+		// This fixture also includes an unread YouTube story outside these feeds.
+		XCTAssertEqual(unread.value as? String, "4 unread")
+		feed.tap()
+		XCTAssertTrue(app.navigationBars["Dense Discovery"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		let markRead = app.buttons["article-list-mark-read"]
+		XCTAssertTrue(markRead.waitForExistence(timeout: 5))
+		XCTAssertTrue(markRead.isHittable)
+		XCTAssertTrue(markRead.isEnabled)
+		attachScreenshot(named: "feed-direct-mark-read")
+		markRead.tap()
+		let disabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == false"), object: markRead)
+		XCTAssertEqual(XCTWaiter.wait(for: [disabled], timeout: 5), .completed)
+		XCTAssertTrue(app.staticTexts["No unread stories"].waitForExistence(timeout: 5))
+		XCTAssertTrue(revealSidebar(containing: feed))
+		XCTAssertEqual(unread.value as? String, "3 unread")
+		feed.tap()
+
+		app.buttons["article-list-more"].tap()
+		app.buttons["Read actions"].tap()
+		let undo = app.buttons["Undo Mark All as Read"]
+		XCTAssertTrue(undo.waitForExistence(timeout: 5))
+		undo.tap()
+		let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: markRead)
+		XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 5))
+		XCTAssertTrue(revealSidebar(containing: feed))
+		XCTAssertEqual(unread.value as? String, "4 unread")
+		feed.tap()
+		markRead.tap()
+
+		XCTAssertTrue(revealSidebar(containing: feed))
+		XCTAssertEqual(feed.value as? String, "0 unread")
+		XCTAssertEqual(app.buttons["Marginal Revolution"].value as? String, "1 unread")
+		XCTAssertEqual(app.buttons["Stratechery"].value as? String, "1 unread")
+		XCTAssertEqual(unread.value as? String, "3 unread")
+		attachScreenshot(named: "feed-direct-mark-read-updated-counts")
+	}
+
 	func testLinkedImageOpensZoomViewer() throws {
 		try tapLinkedImage()
 		app.buttons["View image"].tap()
