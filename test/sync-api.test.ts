@@ -931,6 +931,126 @@ for (const endpoint of ['stream/items/contents', 'edit-tag']) {
 	});
 }
 
+for (const scenario of ['one publisher', 'distinct publishers']) {
+	test(`GReader item contents complete a large ID request with ${scenario} inside the database budget`, async () => {
+		const state = fixture();
+		try {
+			const count = scenario === 'one publisher' ? 5_000 : 2_000;
+			const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES (?, ?, 'Legacy folder')");
+			const tagInsert = state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES (?, 'Tagged folder')");
+			const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, ?, 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
+			const form = new URLSearchParams();
+			for (let index = 0; index < count; index += 1) {
+				const key = scenario === 'one publisher' ? 'large-content-library' : `large-content-publisher-${index}`;
+				if (scenario !== 'one publisher' || index === 0) {
+					feedInsert.run(key, `Publisher ${index}`);
+					tagInsert.run(key);
+				}
+				itemInsert.run(`large-content-${index}`, key, `large-content-${index}`);
+				form.append('i', String(count - index));
+			}
+			const limits = { maxQueries: 50, queries: 0 };
+			const password = 'test-password';
+			const env = { DB: new SqliteD1(state.database, limits), BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents', {
+				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+			}), env);
+			assert.equal(response.status, 200);
+			const body = await response.json() as { items: { id: string; categories: string[]; origin: { title: string } }[] };
+			assert.equal(body.items.length, count);
+			assert.equal(body.items[0].id, `tag:google.com,2005:reader/item/${count.toString(16).padStart(16, '0')}`);
+			assert.equal(body.items[count - 1].id, 'tag:google.com,2005:reader/item/0000000000000001');
+			assert.ok(body.items.every((item) => item.categories.includes('user/-/label/Legacy folder') && item.categories.includes('user/-/label/Tagged folder')));
+			assert.equal(body.items[0].origin.title, scenario === 'one publisher' ? 'Publisher 0' : `Publisher ${count - 1}`);
+			assert.ok(limits.queries <= 8, `used ${limits.queries} statements`);
+		} finally { state.database.close(); }
+	});
+}
+
+for (const failLaterPage of [false, true]) {
+	test(`GReader long publisher memberships ${failLaterPage ? 'reject a failed later page without returning partial contents' : 'stay within bounded JSON parameters'}`, async () => {
+		const state = fixture();
+		try {
+			const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES (?, ?, 'Legacy folder')");
+			const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, ?, 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
+			const form = new URLSearchParams();
+			for (let index = 0; index < 160; index += 1) {
+				const key = `rss-long-publisher-${index}-${'a'.repeat(7_900)}`;
+				feedInsert.run(key, `Publisher ${index}`);
+				state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES (?, 'Tagged folder')").run(key);
+				itemInsert.run(`long-content-${index}`, key, `long-content-${index}`);
+				form.append('i', String(index + 1));
+			}
+			const limits = { maxQueries: 50, queries: 0 };
+			const db = new SqliteD1(state.database, limits);
+			const prepare = db.prepare.bind(db);
+			let metadataPages = 0;
+			db.prepare = (sql) => {
+				const statement = prepare(sql);
+				const bind = statement.bind.bind(statement);
+				statement.bind = (...values) => {
+					assert.ok(values.length <= 100);
+					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
+					return bind(...values);
+				};
+				if (sql.startsWith('SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url')) {
+					metadataPages += 1;
+					if (failLaterPage && metadataPages === 2) statement.all = async () => { throw new Error('Injected later metadata failure'); };
+				}
+				return statement;
+			};
+			const password = 'test-password';
+			const env = { DB: db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const request = new Request('https://pigeon.example/reader/api/0/stream/items/contents', {
+				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+			});
+			if (failLaterPage) {
+				await assert.rejects(handleGreaderRequest(request, env), /Injected later metadata failure/);
+			} else {
+				const response = await handleGreaderRequest(request, env);
+				const body = await response.json() as { items: { categories: string[]; origin: { title: string } }[] };
+				assert.equal(response.status, 200);
+				assert.equal(body.items.length, 160);
+				assert.ok(body.items.every((item) => item.categories.includes('user/-/label/Legacy folder') && item.categories.includes('user/-/label/Tagged folder')));
+				assert.equal(body.items[159].origin.title, 'Publisher 159');
+				assert.equal(metadataPages, 2);
+				assert.ok(limits.queries <= 10, `used ${limits.queries} statements`);
+			}
+		} finally { state.database.close(); }
+	});
+}
+
+test('GReader JSON memberships retain missing-column and missing-label-table fallbacks', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		state.database.prepare("UPDATE feeds SET category = 'Legacy folder' WHERE feed_key = 'design-weekly'").run();
+		const prepare = state.db.prepare.bind(state.db);
+		state.db.prepare = (sql) => {
+			const statement = prepare(sql);
+			if (sql.startsWith('SELECT i.rowid, i.id, i.feed_key') && sql.includes('i.original_url')) {
+				statement.all = async () => { throw new Error('no such column: i.original_url'); };
+			} else if (sql.includes('JOIN feed_tags ft')) {
+				statement.all = async () => { throw new Error('no such table: feed_tags'); };
+			}
+			return statement;
+		};
+		const password = 'test-password';
+		const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+		const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=11', {
+			headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+		}), env);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { items: { categories: string[]; alternate?: unknown[]; content: { content: string } }[] };
+		assert.equal(body.items.length, 1);
+		assert.ok(body.items[0].categories.includes('user/-/label/Legacy folder'));
+		assert.equal(body.items[0].alternate, undefined);
+		assert.match(body.items[0].content.content, /Cached body/);
+	} finally { state.database.close(); }
+});
+
 test('GReader item contents preserve labels across more than one hundred publishers', async () => {
 	const state = fixture();
 	try {

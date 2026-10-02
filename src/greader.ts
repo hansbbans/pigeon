@@ -87,7 +87,7 @@ function parseMarkAllTimestamp(raw: string | null): MarkAllTimestampCutoff {
 	return { kind: 'invalid' };
 }
 
-const MAX_IN_QUERY_BIND_PARAMS = 100;
+const MAX_MEMBERSHIP_PAYLOAD_BYTES = 900_000;
 const MAX_D1_BATCH_STATEMENTS = 50;
 
 const STREAM_CONTINUATION_VERSION = 1;
@@ -118,6 +118,29 @@ function chunkValues<T>(values: T[], size: number): T[][] {
 		chunks.push(values.slice(i, i + size));
 	}
 	return chunks;
+}
+
+// JSON membership uses one binding instead of one per ID, while bounded groups
+// keep unusually long stored feed keys below the database's parameter limit.
+function membershipPages(values: Array<string | number>): string[] {
+	const pages: string[] = [];
+	const encoder = new TextEncoder();
+	let entries: string[] = [];
+	let bytes = 2;
+	for (const value of values) {
+		const entry = JSON.stringify(value);
+		const entryBytes = encoder.encode(entry).byteLength;
+		if (entryBytes + 2 > MAX_MEMBERSHIP_PAYLOAD_BYTES) throw new Error('Feed identifier exceeds database parameter limit');
+		if (entries.length > 0 && bytes + 1 + entryBytes > MAX_MEMBERSHIP_PAYLOAD_BYTES) {
+			pages.push(`[${entries.join(',')}]`);
+			entries = [];
+			bytes = 2;
+		}
+		bytes += entryBytes + (entries.length > 0 ? 1 : 0);
+		entries.push(entry);
+	}
+	if (entries.length > 0) pages.push(`[${entries.join(',')}]`);
+	return pages;
 }
 
 async function runStatementChunks(env: Env, statements: D1PreparedStatement[]): Promise<void> {
@@ -226,10 +249,10 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 		return tagsByFeedKey;
 	}
 
-	const keyPages = hasFeedKeyFilter ? chunkValues(filteredFeedKeys, MAX_IN_QUERY_BIND_PARAMS) : [[]];
+	const keyPages = hasFeedKeyFilter ? membershipPages(filteredFeedKeys) : [null];
 	for (const feedKeyPage of keyPages) {
 		const feedKeyCondition = hasFeedKeyFilter
-			? ` AND f.feed_key IN (${feedKeyPage.map(() => '?').join(',')})`
+			? ' AND f.feed_key IN (SELECT value FROM json_each(?))'
 			: '';
 
 		try {
@@ -240,7 +263,7 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 				  WHERE f.is_active = 1${feedKeyCondition}
 				  ORDER BY ft.label COLLATE NOCASE`,
 			)
-				.bind(...feedKeyPage)
+				.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
 				.all<{ feed_key: string; label: string }>();
 			for (const row of results) {
 				addTag(row.feed_key, row.label);
@@ -252,7 +275,7 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 		}
 
 		const categoryFeedKeyCondition = hasFeedKeyFilter
-			? ` AND feed_key IN (${feedKeyPage.map(() => '?').join(',')})`
+			? ' AND feed_key IN (SELECT value FROM json_each(?))'
 			: '';
 		const { results: categoryResults } = await env.DB.prepare(
 			`SELECT feed_key, category
@@ -260,7 +283,7 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 			  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
 			  ORDER BY category COLLATE NOCASE`,
 		)
-			.bind(...feedKeyPage)
+			.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
 			.all<{ feed_key: string; category: string | null }>();
 		for (const row of categoryResults) {
 			addTag(row.feed_key, row.category);
@@ -652,14 +675,13 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		is_starred: number;
 	};
 	const itemResults = await Promise.all(
-		chunkValues(rowids, MAX_IN_QUERY_BIND_PARAMS).map(async (rowidChunk) => {
-			const placeholders = rowidChunk.map(() => '?').join(',');
+		membershipPages(rowids).map(async (rowidPage) => {
 			const selectRows = (originalUrlExpression: string) =>
 				env.DB.prepare(
 					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
-					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (${placeholders})`,
+					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 				)
-					.bind(...rowidChunk)
+					.bind(rowidPage)
 					.all<ResponseItemRow>();
 
 			try {
@@ -690,12 +712,11 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 
 	if (feedKeys.length > 0) {
 		const feedResults = await Promise.all(
-			chunkValues(feedKeys, MAX_IN_QUERY_BIND_PARAMS).map((feedKeyChunk) => {
-				const feedPlaceholders = feedKeyChunk.map(() => '?').join(',');
+			membershipPages(feedKeys).map((feedKeyPage) => {
 				return env.DB.prepare(
-					`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${feedPlaceholders})`,
+					'SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (SELECT value FROM json_each(?))',
 				)
-					.bind(...feedKeyChunk)
+					.bind(feedKeyPage)
 					.all<{
 						rowid: number;
 						feed_key: string;
