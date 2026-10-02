@@ -158,16 +158,12 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 		return new Response('Feed not found', { status: 404 });
 	}
 
-	// ETag / conditional GET
-	const etag = `"${feed.last_item_at || 'empty'}"`;
-	const ifNoneMatch = request.headers.get('If-None-Match');
-	if (ifNoneMatch === etag) {
-		return new Response(null, { status: 304 });
-	}
-
 	// Get items
 	const defaultLimit = isLight ? (env.LIGHT_ITEMS_PER_FEED || '12') : (env.ITEMS_PER_FEED || '50');
-	const limit = Math.min(parseInt(url.searchParams.get('limit') || defaultLimit), 100);
+	const configuredLimit = Number.parseInt(defaultLimit, 10);
+	const fallbackLimit = Number.isFinite(configuredLimit) ? configuredLimit : (isLight ? 12 : 50);
+	const requestedLimit = Number.parseInt(url.searchParams.get('limit') || defaultLimit, 10);
+	const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : fallbackLimit, 1), 100);
 
 	const { results: items } = await env.DB.prepare(
 		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
@@ -186,15 +182,30 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 		}>();
 
 	const feedUrl = `${env.BASE_URL}/feed/${feedKey}${isLight ? '/light' : ''}`;
+	// The newest publication timestamp cannot detect edits, backfilled items,
+	// metadata changes, or a different feed variant/limit. Hash the actual
+	// response inputs, before rendering, so an unchanged request stays cheap.
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(
+		JSON.stringify({ feed, items, variant, limit, feedUrl, baseUrl: env.BASE_URL }),
+	));
+	const etag = `W/"${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}"`;
+	const headers = {
+		'Content-Type': 'application/atom+xml; charset=utf-8',
+		'Cache-Control': 'public, max-age=300',
+		'ETag': etag,
+		'Access-Control-Allow-Origin': '*',
+	};
+	const ifNoneMatch = request.headers.get('If-None-Match');
+	if (ifNoneMatch?.split(',').some((value) => {
+		const candidate = value.trim();
+		return candidate === '*' || candidate.replace(/^W\//, '') === etag.replace(/^W\//, '');
+	})) {
+		return new Response(null, { status: 304, headers });
+	}
 	const xml = await generateAtomFeed(feed, items, env.BASE_URL, { variant, feedUrl });
 
 	return new Response(xml, {
-		headers: {
-			'Content-Type': 'application/atom+xml; charset=utf-8',
-			'Cache-Control': 'public, max-age=300',
-			'ETag': etag,
-			'Access-Control-Allow-Origin': '*',
-		},
+		headers,
 	});
 }
 
