@@ -161,9 +161,23 @@ private nonisolated final class OPMLParserDelegate: NSObject, XMLParserDelegate 
 		qualifiedName qName: String?,
 		attributes attributeDict: [String: String] = [:]
 	) {
-		if elementName.caseInsensitiveCompare("opml") == .orderedSame { sawOPMLRoot = true }
+		if sawOPMLRoot == false {
+			guard elementName.caseInsensitiveCompare("opml") == .orderedSame else {
+				parser.abortParsing()
+				return
+			}
+			sawOPMLRoot = true
+		}
 		guard elementName.caseInsensitiveCompare("outline") == .orderedSame else { return }
-		let attributes = Dictionary(uniqueKeysWithValues: attributeDict.map { ($0.key.lowercased(), $0.value) })
+		var attributes: [String: String] = [:]
+		for (name, value) in attributeDict {
+			// XML attribute names are case-sensitive. Normalizing two distinct
+			// names must reject ambiguity rather than trap or pick a random value.
+			guard attributes.updateValue(value, forKey: name.lowercased()) == nil else {
+				parser.abortParsing()
+				return
+			}
+		}
 		let rawURL = attributes["xmlurl"]
 		if let rawURL, let url = URL(string: rawURL), let scheme = url.scheme?.lowercased(),
 			["http", "https"].contains(scheme), url.host != nil {

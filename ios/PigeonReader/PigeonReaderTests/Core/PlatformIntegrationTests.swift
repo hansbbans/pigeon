@@ -246,6 +246,24 @@ struct PlatformIntegrationTests {
 		}
 	}
 
+	@Test(arguments: [
+		#"xmlUrl="https://one.example/feed" XMLURL="https://two.example/feed""#,
+		#"title="One" TITLE="Two" xmlUrl="https://one.example/feed""#,
+	])
+	func opmlRejectsAttributesThatBecomeAmbiguousWhenCaseNormalized(attributes: String) {
+		let xml = "<opml version=\"2.0\"><body><outline \(attributes) /></body></opml>"
+		#expect(throws: OPMLImportError.invalidDocument) {
+			try OPMLImportPlanner.parse(data: Data(xml.utf8))
+		}
+	}
+
+	@Test func opmlRejectsAnOPMLElementNestedUnderAnotherRoot() {
+		let xml = #"<html><opml version="2.0"><body><outline xmlUrl="https://one.example/feed" /></body></opml></html>"#
+		#expect(throws: OPMLImportError.invalidDocument) {
+			try OPMLImportPlanner.parse(data: Data(xml.utf8))
+		}
+	}
+
 	@Test func opmlImportRollsBackEveryFeedAddedBeforeAFailure() async throws {
 		let service = RecordingImportService(failOnHost: "fail.example")
 		let entries = [
