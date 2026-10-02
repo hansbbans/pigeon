@@ -260,3 +260,20 @@ test('Namespace-less Atom compatibility does not let foreign default namespaces 
 test('A feed root in a foreign namespace is not detected as Atom', () => {
  assert.throws(() => parseFeed('<feed xmlns="urn:foreign"><title>Not Atom</title><entry><id>one</id><content>Wrong</content></entry></feed>'), /Unsupported feed format/);
 });
+
+
+test('Atom out-of-line and empty content uses a typed summary without replacing inline content', () => {
+ for (const prefix of ['', 'a:']) {
+  const declaration = prefix ? 'xmlns:a="http://www.w3.org/2005/Atom"' : 'xmlns="http://www.w3.org/2005/Atom"';
+  const entries = [
+   '<content src="https://example.com/body.html" type="text/html"/><summary type="html">&lt;span&gt;Readable &amp;amp; summary&lt;/span&gt;</summary>',
+   '<content/><summary type="text">Literal &lt;code&gt; &amp; summary</summary>',
+   '<content src="https://example.com/body.html"/><summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Formatted <b>summary</b></p></div></summary>',
+   '<content type="html">&lt;p&gt;Inline body&lt;/p&gt;</content><summary>Wrong fallback</summary>',
+   '<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"/></content><summary>Wrong fallback</summary>',
+  ].map((entry, index) => `<entry><id>${index}</id>${entry}</entry>`).join('');
+  const source = `<feed ${declaration}>${entries}</feed>`;
+  const qualified = prefix ? source.replace(/<(\/?)(feed|entry|id|content|summary)(?=[\s/>])/g, `<$1${prefix}$2`) : source;
+  assert.deepEqual(parseFeed(qualified).items.map((item) => item.content), ['<div><span>Readable &amp; summary</span></div>', '<p>Literal &lt;code&gt; &amp; summary</p>', '<p>Formatted <b>summary</b></p>', '<div><p>Inline body</p></div>', '']);
+ }
+});

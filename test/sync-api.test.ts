@@ -1469,3 +1469,21 @@ test('fetched plaintext attribute examples stay literal through storage and read
   assert.ok((await generateAtomFeed({ feed_key: 'literal-link-feed', display_name: 'Examples', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example')).includes(`<content type="html"><![CDATA[${stored.html_content}]]></content>`));
  } finally { globalThis.fetch = originalFetch; state.database.close(); }
 });
+
+
+test('fetched out-of-line Atom content retains its summary in stored and reader bodies', async () => {
+ const state = fixture(); const originalFetch = globalThis.fetch;
+ try {
+  state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('summary-feed', 'Summary', 'rss', 'https://feeds.example.com/summary')").run();
+  let requests = 0;
+  globalThis.fetch = async () => { requests += 1; return new Response('<a:feed xmlns:a="http://www.w3.org/2005/Atom"><a:entry><a:id>summary</a:id><a:content src="https://example.com/body.html" type="text/html"/><a:summary type="html">&lt;span&gt;Readable &amp;amp; summary&lt;/span&gt;</a:summary></a:entry></a:feed>'); };
+  assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'summary-feed', source_url: 'https://feeds.example.com/summary', etag: null, last_modified: null })).outcome, 'success');
+  assert.equal(requests, 1);
+  const stored = state.database.prepare('SELECT * FROM items').get() as Parameters<typeof generateAtomFeed>[1][number];
+  assert.equal(stored.html_content, '<div><span>Readable &amp; summary</span></div>');
+  assert.equal(stored.text_content, 'Readable & summary');
+  const password = 'test-password';
+  const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+  assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, stored.html_content);
+ } finally { globalThis.fetch = originalFetch; state.database.close(); }
+});

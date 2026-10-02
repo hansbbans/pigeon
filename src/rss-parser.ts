@@ -273,7 +273,8 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: Namesp
 			link,
 			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
 			content:
-				atomContentValue(findKey(entry, ['content', 'summary']), xhtmlScopes) ??
+				atomContentValue(findKey(entry, ['content']), xhtmlScopes) ??
+				atomContentValue(findKey(entry, ['summary']), xhtmlScopes) ??
 				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
 			author,
 			attachments: deduplicateAttachments([
