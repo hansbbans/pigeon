@@ -31,7 +31,7 @@ interface PreparedFeedItem extends FeedItem {
 }
 
 function escapeXml(str: string): string {
-	return str
+	return stripInvalidXmlCharacters(str)
 		.replace(/&/g, '&amp;')
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')
@@ -39,8 +39,14 @@ function escapeXml(str: string): string {
 		.replace(/'/g, '&apos;');
 }
 
+function stripInvalidXmlCharacters(value: string): string {
+	// XML 1.0 forbids these controls, BMP noncharacters, and lone surrogates.
+	// Unicode mode preserves valid supplementary characters such as emoji.
+	return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/gu, '');
+}
+
 function wrapCDATA(html: string): string {
-	const safe = html.replace(/]]>/g, ']]]]><![CDATA[>');
+	const safe = stripInvalidXmlCharacters(html).replace(/]]>/g, ']]]]><![CDATA[>');
 	return `<![CDATA[${safe}]]>`;
 }
 
