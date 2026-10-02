@@ -829,3 +829,8 @@ test('content link rewriting leaves comments and raw-text examples intact', () =
  assert.equal(rewriteRssContentLinks(`${comment}${raw}<a href="/real">Real</a>`, 'https://example.com/'), `${comment}${raw}<a href="https://example.com/real">Real</a>`);
  assert.equal(rewriteRssContentLinks(`<!-- unfinished ${examples}`, 'https://example.com/'), `<!-- unfinished ${examples}`);
 });
+
+
+test('self-closing SVG style does not suppress later real content links', () => {
+ assert.equal(rewriteRssContentLinks('<svg><style/><image href="/icon.svg"/></svg><a href="/story">Story</a>', 'https://example.com/feed.xml'), '<svg><style/><image href="https://example.com/icon.svg"/></svg><a href="https://example.com/story">Story</a>');
+});

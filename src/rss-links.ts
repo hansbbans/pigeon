@@ -303,7 +303,7 @@ export function rewriteRssContentLinks(html: string, baseUrl: string): string {
 			return tag;
 		}
 		if (closing) return tag;
-		if (RAW_TEXT_TAGS.has(name)) rawTextTag = name;
+		if (RAW_TEXT_TAGS.has(name) && !tag.endsWith('/>')) rawTextTag = name;
 		const prefix = nameMatch[0];
 		const attributes = tag.slice(prefix.length, -1).replace(CONTENT_ATTRIBUTE_PATTERN, (attribute, attributeName: string, rawValue?: string) => {
 			if (!rawValue || !/^(?:href|src)$/i.test(attributeName)) return attribute;
