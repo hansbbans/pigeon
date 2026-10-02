@@ -492,11 +492,13 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       .list-shell {
         flex: 1;
         display: grid;
+        align-content: start;
         overflow: auto;
       }
 
       .list-reset {
         display: grid;
+        align-content: start;
         gap: 0;
         padding: 0;
         margin: 0;
@@ -1336,6 +1338,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                 </div>
               </div>
               <div class="list-shell" id="articles-list-shell">
+                <div id="today-page-controls" class="hidden" role="group" aria-label="Today article pages">
+                  <button id="today-newer-button" type="button" class="secondary-button">Newer</button>
+                  <button id="today-older-button" type="button" class="secondary-button">Older</button>
+                </div>
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
               </div>
@@ -1435,6 +1441,9 @@ export function renderBrowserAppRuntimeScript(): string {
   const articlesHeading = document.getElementById('articles-heading');
   const articlesStatus = document.getElementById('articles-status');
   const articlesListShell = document.getElementById('articles-list-shell');
+  const todayWindowControls = document.getElementById('today-page-controls');
+  const todayNewerButton = document.getElementById('today-newer-button');
+  const todayOlderButton = document.getElementById('today-older-button');
   const articlesList = document.getElementById('articles-list');
   const loadMoreButton = document.getElementById('load-more-button');
   const markAllAsReadButton = document.getElementById('mark-all-as-read-button');
@@ -1483,6 +1492,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeColumnResize = null;
   let appliedColumnWidths = { ...DEFAULT_COLUMN_WIDTHS };
   let activeYouTubeVideoId = null;
+  const TODAY_WINDOW_SIZE = 200;
   const MAX_CACHED_ARTICLES = 500;
   const MAX_CACHED_ARTICLE_METADATA = 2000;
   const CONTENT_REQUEST_CONCURRENCY = 2;
@@ -1871,6 +1881,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleListMode = normalizeArticleListMode(nextMode);
     renderArticleListModeToggle();
     renderArticles();
+    renderReader();
   }
 
   function startValidation() {
@@ -1904,6 +1915,10 @@ export function renderBrowserAppRuntimeScript(): string {
       scrollTop: 0,
       refreshedAt: 0,
       contentLoadedIds: new Set(),
+      publicationDates: new Map(),
+      todayDay: '',
+      todayWindowStart: 0,
+      todayWindowAnchorId: null,
       confirmedItemIds: new Set(),
       membershipEpoch: 0,
       rootRequestId: 0,
@@ -1980,7 +1995,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set();
+    const protectedIds = new Set(isTodayView() ? getVisibleItemIds() : []);
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -2003,7 +2018,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set();
+    const protectedIds = new Set(isTodayView() ? getVisibleItemIds() : []);
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -2042,6 +2057,9 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const state of viewStates.values()) {
       if (state.itemIds.includes(itemId)) {
         state.contentLoadedIds.add(itemId);
+        if (state === getViewState('today', false) && typeof item.published === 'number' && Number.isFinite(item.published)) {
+          state.publicationDates.set(itemId, item.published);
+        }
       }
     }
     trimArticleMetadataCache();
@@ -2185,6 +2203,7 @@ export function renderBrowserAppRuntimeScript(): string {
     pumpContentRequests();
     if (session.status === 'authenticated') {
       loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+      renderTodayWindowControls();
     }
   }
 
@@ -2403,23 +2422,81 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'today';
   }
 
+  function getTodayCandidateIds() {
+    const state = getViewState(activeViewId);
+    const bounds = client.getLocalDayBounds();
+    const day = bounds.startSeconds + ':' + bounds.endSeconds;
+    if (state.todayDay !== day) {
+      state.todayDay = day;
+      state.todayWindowStart = 0;
+      state.todayWindowAnchorId = null;
+    }
+    // Only a number is retained per membership ID. Evictable titles and bodies
+    // must not decide whether a previously verified story still belongs today.
+    return itemIds.filter((id) => {
+      const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
+      if (typeof published !== 'number' || !Number.isFinite(published)) return true;
+      state.publicationDates.set(id, published);
+      return published >= bounds.startSeconds && published < bounds.endSeconds;
+    });
+  }
+
   function getVisibleItemIds() {
-    return isTodayView()
-      ? client.filterItemIdsForLocalDay(itemIds, loadedItemsById)
-      : itemIds;
+    if (!isTodayView()) return itemIds;
+    const state = getViewState(activeViewId);
+    const candidates = getTodayCandidateIds();
+    const anchoredIndex = state.todayWindowAnchorId ? candidates.indexOf(state.todayWindowAnchorId) : -1;
+    if (anchoredIndex >= 0) state.todayWindowStart = anchoredIndex;
+    else if (!nextItemIdsContinuation || state.todayWindowStart < candidates.length) {
+      const lastWindow = Math.floor(Math.max(0, candidates.length - 1) / TODAY_WINDOW_SIZE) * TODAY_WINDOW_SIZE;
+      state.todayWindowStart = Math.min(Math.floor(state.todayWindowStart / TODAY_WINDOW_SIZE) * TODAY_WINDOW_SIZE, lastWindow);
+    }
+    const visible = candidates.slice(state.todayWindowStart, state.todayWindowStart + TODAY_WINDOW_SIZE);
+    state.todayWindowAnchorId = visible[0] || null;
+    return visible;
   }
 
   function hasReachedTodayBoundary() {
-    if (!isTodayView()) {
-      return false;
-    }
-
+    if (!isTodayView()) return false;
+    const state = getViewState(activeViewId);
     const bounds = client.getLocalDayBounds();
-    return itemIds.some((itemId) => {
-      const item = loadedItemsById[itemId];
-      const published = item && item.published;
-      return typeof published === 'number' && Number.isFinite(published) && published < bounds.startSeconds;
+    return itemIds.some((id) => {
+      const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
+      return state.confirmedItemIds.has(id) && typeof published === 'number' && published < bounds.startSeconds;
     });
+  }
+
+  function renderTodayWindowControls() {
+    const today = isTodayView();
+    const state = today ? getViewState(activeViewId) : null;
+    const candidates = today ? getTodayCandidateIds() : [];
+    const busy = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+    const more = today && (state.todayWindowStart + TODAY_WINDOW_SIZE < candidates.length ||
+      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation)));
+    todayWindowControls.classList.toggle('hidden', !today || (state.todayWindowStart === 0 && !more));
+    todayNewerButton.disabled = busy || !today || state.todayWindowStart === 0;
+    todayOlderButton.disabled = busy || !more;
+  }
+
+  function moveTodayWindow(direction, keyboard = false) {
+    if (!isTodayView() || inFlightContentIds.length > 0 || isLoadingItemIdsPage) return false;
+    getVisibleItemIds();
+    const state = getViewState(activeViewId);
+    const candidates = getTodayCandidateIds();
+    const start = Math.max(0, state.todayWindowStart + direction * TODAY_WINDOW_SIZE);
+    if (start === state.todayWindowStart ||
+        (direction > 0 && start >= candidates.length && (hasReachedTodayBoundary() || !nextItemIdsContinuation))) return false;
+    state.todayWindowStart = start;
+    state.todayWindowAnchorId = candidates[start] || null;
+    const visible = getVisibleItemIds();
+    selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
+    state.selectedItemId = selectedItemId;
+    restoreArticleScrollTop(0);
+    renderArticles();
+    renderReader();
+    saveActiveViewState();
+    if (!window.navigator || window.navigator.onLine !== false) void continueLoadingToday(activeViewRequestId);
+    return true;
   }
 
   function shouldShowFeedInSidebar(view) {
@@ -2535,6 +2612,10 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
+    if (isTodayView()) {
+      renderArticles();
+      renderReader();
+    }
     const selectedIndex = getSelectedItemIndex();
     if (selectedIndex === -1) {
       return false;
@@ -2543,7 +2624,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextIndex = selectedIndex + direction;
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      return false;
+      return moveTodayWindow(direction, true);
     }
 
     void selectArticle(visibleItemIds[nextIndex]);
@@ -2621,13 +2702,13 @@ export function renderBrowserAppRuntimeScript(): string {
     // A selected article cache miss remains loadable after finding yesterday.
     addId(targetItemId, true);
     const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
-    for (const itemId of itemIds) {
+    for (const itemId of (isTodayView() ? getVisibleItemIds() : itemIds)) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
       if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
         break;
       }
-      addId(itemId);
+      addId(itemId, isTodayView() && !loadedItemsById[itemId]);
       if (plannedIds.length >= client.CONTENT_CHUNK_SIZE) {
         break;
       }
@@ -2724,7 +2805,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
     row.appendChild(titleGroup);
-    row.appendChild(createNode('span', { classNames: ['feed-count'], text: formatUnreadCount(view.unreadCount) }));
+    row.appendChild(createNode('span', { classNames: ['feed-count'], text: view.kind === 'today' || view.kind === 'recent' ? '' : formatUnreadCount(view.unreadCount) }));
     button.appendChild(row);
 
     if (view.kind === 'folder') {
@@ -2873,10 +2954,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
     if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
-      selectedItemId = visibleItemIds[0] || null;
+      selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
       const state = getViewState(activeViewId, false);
       if (state) state.selectedItemId = selectedItemId;
     }
+    renderTodayWindowControls();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
@@ -2892,7 +2974,8 @@ export function renderBrowserAppRuntimeScript(): string {
           : activeView
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
-      loadMoreButton.classList.add('hidden');
+      loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+      loadMoreButton.classList.toggle('hidden', !shouldContinueLoadingToday());
       restoreArticleScrollTop(preservedScrollTop);
       return;
     }
@@ -2951,7 +3034,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const todayCanLoadMore = !isTodayView() || !hasReachedTodayBoundary();
     loadMoreButton.classList.toggle(
       'hidden',
-      pendingPlan.length === 0 && (!todayCanLoadMore || !nextItemIdsContinuation),
+      isTodayView() ? !shouldContinueLoadingToday() : pendingPlan.length === 0 && (!todayCanLoadMore || !nextItemIdsContinuation),
     );
     restoreArticleScrollTop(preservedScrollTop);
   }
@@ -3268,10 +3351,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return [];
     }
     const returnedIds = new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
-    return state.itemIds.filter((itemId) => {
-      if (returnedIds.has(itemId)) return false;
-      return view?.kind !== 'today' || client.filterItemIdsForLocalDay([itemId], loadedItemsById).length > 0;
-    });
+    return state.itemIds.filter((itemId) => !returnedIds.has(itemId));
   }
 
   function applyMembershipPayload(viewId, payload, options) {
@@ -3311,6 +3391,9 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     if (isContinuationPage && !continuation) state.itemIds = [...state.confirmedItemIds];
     state.hasMembership = true;
+    for (const id of state.publicationDates.keys()) {
+      if (!state.itemIds.includes(id)) state.publicationDates.delete(id);
+    }
     state.refreshedAt = Date.now();
     if (!state.selectedItemId || !state.itemIds.includes(state.selectedItemId)) {
       const view = views.find((candidate) => candidate.id === viewId);
@@ -3401,7 +3484,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!result || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
-      await ensureArticleContent(result.returnedIds, { generation, token });
+      await ensureArticleContent(activeView.kind === 'today' ? result.returnedIds.slice(0, TODAY_WINDOW_SIZE) : result.returnedIds, { generation, token });
       const retainedTailIds = getRetainedTailIds(activeView.id, result.payload);
       if (selectedTailId && retainedTailIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
         // A cached tail is outside the authoritative root. Its missing body must
@@ -3452,8 +3535,11 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
+    const visible = getVisibleItemIds();
+    const state = getViewState(activeViewId);
     return createPendingContentPlan(null).length > 0 ||
-      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
+      ((visible.length < TODAY_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id))) &&
+        !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
   }
 
   async function continueLoadingToday(requestId) {
@@ -3582,6 +3668,9 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       if (activeState) {
         activeState.itemIds = [...itemIds];
+        for (const id of activeState.publicationDates.keys()) {
+          if (!itemIds.includes(id)) activeState.publicationDates.delete(id);
+        }
         activeState.selectedItemId = selectedItemId;
         activeState.continuation = nextItemIdsContinuation;
         activeState.hasMembership = true;
@@ -3665,6 +3754,7 @@ export function renderBrowserAppRuntimeScript(): string {
       } catch (_error) {
         if (requestId === activeViewRequestId && session.token && state.rootRequestId === expectedRootRequestId) {
           renderArticles();
+          renderReader();
           articlesStatus.textContent = 'Could not load this view.';
         }
       }
@@ -3916,6 +4006,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
     applyTheme(nextTheme);
     setStoredTheme(nextTheme);
+    renderArticles();
     renderReader();
   });
 
@@ -3947,6 +4038,8 @@ export function renderBrowserAppRuntimeScript(): string {
   markAllAsReadButton.addEventListener('click', () => {
     void markAllAsRead();
   });
+  todayNewerButton.addEventListener('click', () => { moveTodayWindow(-1); });
+  todayOlderButton.addEventListener('click', () => { moveTodayWindow(1); });
   loadMoreButton.addEventListener('click', () => {
     if (inFlightContentIds.length > 0 || isLoadingItemIdsPage) {
       return;
