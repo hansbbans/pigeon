@@ -204,31 +204,29 @@ async function statusMutationStatements(
 ): Promise<D1PreparedStatement[]> {
 	const items = await resolveItems(env.DB, mutation.itemIds);
 	const rowids = items.map((item) => item.rowid);
-	const placeholders = rowids.map(() => '?').join(',');
+	const rowidsJSON = JSON.stringify(rowids);
 	const eventType = column === 'is_read'
 		? (value ? (mutation.scope === 'single' || mutation.kind === 'set_read' ? 'read' : 'bulk_mark_all_read') : 'unread')
 		: (value ? 'star' : 'unstar');
 	return [
-		env.DB.prepare(`UPDATE items SET ${column} = ? WHERE rowid IN (${placeholders})`)
-			.bind(value ? 1 : 0, ...rowids),
+		env.DB.prepare(`UPDATE items SET ${column} = ? WHERE rowid IN (SELECT value FROM json_each(?))`)
+			.bind(value ? 1 : 0, rowidsJSON),
 		env.DB.prepare(
 			`UPDATE item_statuses SET mutation_id = ?, updated_at = ?
-			 WHERE item_id IN (SELECT id FROM items WHERE rowid IN (${placeholders}))`,
-		).bind(mutation.id, appliedAt, ...rowids),
-		...items.map((item) =>
-			env.DB.prepare(
-				`INSERT OR IGNORE INTO engagement_events
-				 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
-				 VALUES (?, ?, ?, ?, ?, 'pigeon', ?)`,
-			).bind(
-				crypto.randomUUID(),
-				`mutation:${mutation.id}:${item.id}:${eventType}`,
-				item.id,
-				item.feed_key,
-				eventType,
-				appliedAt,
-			),
-		),
+			 WHERE item_id IN (SELECT id FROM items WHERE rowid IN (SELECT value FROM json_each(?)))`,
+		).bind(mutation.id, appliedAt, rowidsJSON),
+		env.DB.prepare(
+			`INSERT OR IGNORE INTO engagement_events
+			 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
+			 SELECT json_extract(value, '$.id'), json_extract(value, '$.eventKey'),
+			        json_extract(value, '$.itemId'), json_extract(value, '$.feedKey'), ?, 'pigeon', ?
+			 FROM json_each(?)`,
+		).bind(eventType, appliedAt, JSON.stringify(items.map((item) => ({
+			id: crypto.randomUUID(),
+			eventKey: `mutation:${mutation.id}:${item.id}:${eventType}`,
+			itemId: item.id,
+			feedKey: item.feed_key,
+		})))),
 	];
 }
 
@@ -255,16 +253,21 @@ async function feedbackMutationStatements(
 }
 
 async function resolveItems(db: D1Database, itemIDs: string[]): Promise<ItemTarget[]> {
-	const items: ItemTarget[] = [];
-	for (const itemID of itemIDs) {
-		const rowid = parseGoogleReaderItemRowid(itemID);
-		const item = rowid === null
-			? await db.prepare('SELECT rowid, id, feed_key FROM items WHERE id = ?').bind(itemID).first<ItemTarget>()
-			: await db.prepare('SELECT rowid, id, feed_key FROM items WHERE rowid = ?').bind(rowid).first<ItemTarget>();
-		if (!item) throw new Error(`Unknown item ${itemID}`);
-		items.push(item);
+	const identities = itemIDs.map((id) => ({ id, rowid: parseGoogleReaderItemRowid(id) }));
+	const { results } = await db.prepare(
+		`SELECT items.rowid, items.id, items.feed_key
+		 FROM json_each(?) AS requested
+		 LEFT JOIN items ON
+		   (json_extract(requested.value, '$.rowid') IS NOT NULL
+		    AND items.rowid = json_extract(requested.value, '$.rowid'))
+		   OR (json_extract(requested.value, '$.rowid') IS NULL
+		       AND items.id = json_extract(requested.value, '$.id'))
+		 ORDER BY CAST(requested.key AS INTEGER)`,
+	).bind(JSON.stringify(identities)).all<ItemTarget>();
+	for (let index = 0; index < results.length; index++) {
+		if (!results[index].id) throw new Error(`Unknown item ${itemIDs[index]}`);
 	}
-	return items;
+	return results;
 }
 
 async function resolveFeed(db: D1Database, feedID: string): Promise<FeedTarget> {

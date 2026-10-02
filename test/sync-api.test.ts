@@ -12,32 +12,43 @@ class SqliteStatement {
 	constructor(
 		private readonly database: DatabaseSync,
 		private readonly sql: string,
+		private readonly limits?: { maxQueries: number; queries: number },
 	) {}
 
 	bind(...values: unknown[]): this {
 		this.values = values;
+		if (values.length > 100) throw new Error('D1 maximum bound parameters exceeded');
 		return this;
 	}
 
 	async all<T>(): Promise<{ results: T[] }> {
+		this.recordQuery();
 		return { results: this.database.prepare(this.sql).all(...this.values) as T[] };
 	}
 
 	async first<T>(): Promise<T | null> {
+		this.recordQuery();
 		return (this.database.prepare(this.sql).get(...this.values) as T | undefined) ?? null;
 	}
 
 	async run(): Promise<{ meta: { changes: number } }> {
+		this.recordQuery();
 		const result = this.database.prepare(this.sql).run(...this.values);
 		return { meta: { changes: Number(result.changes) } };
+	}
+
+	private recordQuery(): void {
+		if (this.limits && ++this.limits.queries > this.limits.maxQueries) {
+			throw new Error('D1 query budget exceeded');
+		}
 	}
 }
 
 class SqliteD1 {
-	constructor(readonly database: DatabaseSync) {}
+	constructor(readonly database: DatabaseSync, readonly limits?: { maxQueries: number; queries: number }) {}
 
 	prepare(sql: string): SqliteStatement {
-		return new SqliteStatement(this.database, sql);
+		return new SqliteStatement(this.database, sql, this.limits);
 	}
 
 	async batch(statements: SqliteStatement[]): Promise<Array<{ meta: { changes: number } }>> {
@@ -296,4 +307,77 @@ test('a rejected mutation has no receipt and can succeed later with the same ide
 		1,
 	);
 	state.database.close();
+});
+
+for (const maxQueries of [50, 1000]) {
+	test(`200-item mark-read batches fit D1 bindings and the ${maxQueries}-query budget atomically`, async () => {
+		const state = fixture();
+		try {
+			insertLibrary(state.database);
+			const insert = state.database.prepare(`INSERT INTO items
+			 (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, 'design-weekly', 'Bulk article', '<p>Body</p>', ?, '2026-10-02T12:00:00.000Z')`);
+			for (let index = 0; index < 199; index++) insert.run(`bulk-${index}`, `bulk-message-${index}`);
+			const items = state.database.prepare('SELECT rowid, id FROM items ORDER BY rowid').all() as { rowid: number; id: string }[];
+			// Exercise both the native rowid format and canonical UUID/string identities.
+			const itemIds = items.map((item, index) => index % 2 === 0 ? String(item.rowid) : item.id);
+			const limits = { maxQueries, queries: 0 };
+			const env = { DB: new SqliteD1(state.database, limits) } as never;
+			const request = () => new Request('https://pigeon.example/api/v1/mutations', {
+				method: 'POST',
+				body: JSON.stringify({ mutations: [{ id: 'bulk-200', kind: 'set_read_batch', itemIds, value: true, scope: 'all' }] }),
+			});
+			const response = await handleMutationBatch(request(), env);
+			assert.equal((await response.json() as { results: { status: string }[] }).results[0].status, 'applied');
+			assert.ok(limits.queries <= 10, `used ${limits.queries} database queries`);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read = 1').get() as { count: number }).count, 200);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 200);
+			assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM item_statuses WHERE mutation_id = 'bulk-200'").get() as { count: number }).count, 200);
+			limits.queries = 0;
+			assert.equal((await (await handleMutationBatch(request(), env)).json() as { results: { status: string }[] }).results[0].status, 'already_applied');
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 200);
+		} finally {
+			state.database.close();
+		}
+	});
+}
+
+test('mixed known and unknown bulk identities leave no partial status or receipt', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		for (const itemIds of [['11', 'missing-id'], ['missing-id', '11']]) {
+			const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+				method: 'POST',
+				body: JSON.stringify({ mutations: [{ id: 'mixed-invalid', kind: 'set_read_batch', itemIds, value: true }] }),
+			}), state.env);
+			const body = await response.json() as { results: { status: string; error: string }[] };
+			assert.equal(body.results[0].status, 'failed');
+			assert.equal(body.results[0].error, 'Unknown item missing-id');
+		}
+		assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 0);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get() as { count: number }).count, 0);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('a failed bulk transaction rolls back its receipt, status, and events', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		state.database.exec(`CREATE TRIGGER reject_engagement BEFORE INSERT ON engagement_events
+		 BEGIN SELECT RAISE(ABORT, 'simulated engagement failure'); END`);
+		const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+			method: 'POST',
+			body: JSON.stringify({ mutations: [{ id: 'bulk-rollback', kind: 'set_read_batch', itemIds: ['11'], value: true }] }),
+		}), state.env);
+		assert.equal((await response.json() as { results: { status: string }[] }).results[0].status, 'failed');
+		assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 0);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get() as { count: number }).count, 0);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+	} finally {
+		state.database.close();
+	}
 });
