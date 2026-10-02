@@ -5,7 +5,7 @@ import { applyRoutingRules } from './routing-rules';
 import { getFaviconForEmail } from './favicon';
 import { extractOriginalUrlFromEmail } from './original-url';
 import { ensureDatabaseSchema } from './migrations';
-import { truncateUtf8 } from './content-size';
+import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
 
@@ -80,7 +80,7 @@ function unwrapForward(
 	// Strip "Fwd: " prefix from subject
 	const subject = (parsed.subject || '(no subject)').replace(/^Fwd:\s*/i, '');
 
-	console.log(`Forward unwrapped | forwarder=${trustedForwarder} original_sender=${originalAddress}`);
+	console.log(`Forward unwrapped | forwarder=${trustedForwarder} original_sender=${truncateUtf8(originalAddress, MAX_TEXT_METADATA_BYTES)}`);
 
 	return { fromAddress: originalAddress, fromName: originalName, subject };
 }
@@ -123,9 +123,13 @@ export async function handleIncomingEmail(
 				: new Date().toISOString();
 
 		const messageId = parsed.messageId || crypto.randomUUID();
+		// Identity fields must stay exact for routing and deduplication.
+		assertBoundedIdentifier(fromAddress, 'Sender address');
+		assertBoundedIdentifier(messageId, 'Message-ID');
 
 		// 4. Resolve feed key and display name
 		let feedKey = resolveFeedKey(parsed.headers, fromAddress, replyToAddress);
+		assertBoundedIdentifier(feedKey, 'Feed key');
 		let displayName = resolveFeedDisplayName(
 			parsed.headers,
 			fromName,
@@ -139,12 +143,17 @@ export async function handleIncomingEmail(
 			fromAddress,
 		});
 		if (routingOverride) {
-			console.log(`Routing rule matched | ${feedKey} → ${routingOverride.feedKey} subject="${subject}"`);
+			console.log(`Routing rule matched | ${feedKey} → ${routingOverride.feedKey} subject="${truncateUtf8(subject, MAX_TEXT_METADATA_BYTES)}"`);
 			feedKey = routingOverride.feedKey;
+			assertBoundedIdentifier(feedKey, 'Feed key');
 			if (routingOverride.displayName) {
 				displayName = routingOverride.displayName;
 			}
 		}
+		// Match rules against the original fields, then bound display-only metadata.
+		const storedSubject = truncateUtf8(subject, MAX_TEXT_METADATA_BYTES);
+		fromName = fromName ? truncateUtf8(fromName, MAX_TEXT_METADATA_BYTES) : undefined;
+		displayName = truncateUtf8(displayName, MAX_TEXT_METADATA_BYTES);
 
 		// 5. Content with size check
 		const originalHtmlContent = parsed.html || '';
@@ -155,7 +164,7 @@ export async function handleIncomingEmail(
 
 		if (sourceContentSize > MAX_CONTENT_SIZE) {
 			console.warn(
-				`Content too large (${sourceContentSize} bytes), limiting stored body | feed_key=${feedKey} subject="${subject}"`,
+				`Content too large (${sourceContentSize} bytes), limiting stored body | feed_key=${feedKey} subject="${storedSubject}"`,
 			);
 			if (textContent) htmlContent = '';
 		}
@@ -167,11 +176,11 @@ export async function handleIncomingEmail(
 		const storedHtml = truncateUtf8(htmlContent || textContent || '(empty)', MAX_CONTENT_SIZE);
 		textContent = truncateUtf8(textContent, MAX_CONTENT_SIZE - new Blob([storedHtml]).size);
 		const contentSize = new Blob([storedHtml, textContent]).size;
-		const originalUrl = extractOriginalUrlFromEmail({
+		const originalUrl = boundedStoredUrl(extractOriginalUrlFromEmail({
 			subject,
 			htmlContent: originalHtmlContent || storedHtml,
 			textContent: originalTextContent,
-		});
+		}));
 		const siteUrl = deriveSiteUrlFromOriginalUrl(originalUrl);
 
 		// 6. D1 batch: upsert feed + insert item
@@ -206,7 +215,7 @@ export async function handleIncomingEmail(
 				feedKey,
 				fromName || null,
 				fromAddress,
-				subject,
+				storedSubject,
 				storedHtml,
 				textContent || null,
 				originalUrl,
@@ -223,7 +232,7 @@ export async function handleIncomingEmail(
 		]);
 
 		console.log(
-			`Email stored | feed_key=${feedKey} subject="${subject}" size=${size} content_size=${contentSize} message_id=${messageId}`,
+			`Email stored | feed_key=${feedKey} subject="${storedSubject}" size=${size} content_size=${contentSize} message_id=${messageId}`,
 		);
 	} catch (error) {
 		console.error('Email processing failed', {

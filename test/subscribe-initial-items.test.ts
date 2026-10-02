@@ -335,6 +335,33 @@ test('a new RSS subscription stores only its three newest items as unread', asyn
 	}
 });
 
+test('subscription feed titles are bounded without changing feed identity or initial items', async () => {
+	installFeed(RSS_FEED.replace('Initial RSS', '😀'.repeat(550_000)));
+	const db = new SqliteD1Database();
+	try {
+		const result = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml');
+		assert.equal(new Blob([result.display_name]).size, 16_000);
+		assert.doesNotMatch(result.display_name, /\uFFFD/);
+		assert.equal(db.count('feeds'), 1);
+		assert.equal(db.count('items'), 3);
+	} finally {
+		db.close();
+	}
+});
+
+test('oversized subscription identities are rejected before network or storage work', async () => {
+	const fetchState = installFeed(RSS_FEED);
+	const db = new SqliteD1Database();
+	try {
+		await assert.rejects(subscribeToFeed(env(db) as never, 'https://example.com/' + 'a'.repeat(8_100)), /Feed URL exceeds/);
+		await assert.rejects(subscribeToFeed(env(db) as never, 'https://example.com/feed.xml', 'a'.repeat(8_100)), /Category exceeds/);
+		assert.equal(fetchState.calls.length, 0);
+		assert.equal(db.count('feeds'), 0);
+	} finally {
+		db.close();
+	}
+});
+
 test('distinct URL paths, hosts, schemes, and encoded queries never replace another subscription', async () => {
 	installFeed(ONE_ITEM_FEED);
 	for (const [firstUrl, secondUrl] of [

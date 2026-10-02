@@ -18,7 +18,7 @@ import {
 } from './refresh-policy';
 import { parseFeed, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
 import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
-import { truncateUtf8 } from './content-size';
+import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 import type { Env } from './types';
 
 export interface FeedToFetch {
@@ -124,6 +124,7 @@ export async function buildRssItemStatements(
 	fallbackReceivedAt: string,
 	options: { updateExisting?: boolean } = {},
 ): Promise<D1PreparedStatement[]> {
+	assertBoundedIdentifier(feedKey, 'Feed key');
 	const statements: D1PreparedStatement[] = [];
 	for (const item of items) {
 		const identity = await createRssItemIdentity(feedKey, item);
@@ -176,12 +177,12 @@ export async function buildRssItemStatements(
 				identity.id,
 				identity.messageId,
 				feedKey,
-				item.title,
-				item.author || null,
+				truncateUtf8(item.title, MAX_TEXT_METADATA_BYTES),
+				item.author ? truncateUtf8(item.author, MAX_TEXT_METADATA_BYTES) : null,
 				item.pubDate || fallbackReceivedAt,
 				content,
 				textContent,
-				originalUrl,
+				boundedStoredUrl(originalUrl),
 			),
 		);
 	}
@@ -324,7 +325,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 		const content: SuccessfulContent = {
 			statements,
 			format: parsed.format,
-			siteUrl: parsed.link ?? null,
+			siteUrl: boundedStoredUrl(parsed.link ?? null),
 			etag: response.headers.get('ETag'),
 			lastModified: response.headers.get('Last-Modified'),
 			contentHash,

@@ -36,11 +36,11 @@ class EmailDatabase {
 	}
 }
 
-async function deliver(db: EmailDatabase, id: string, date: string, content = 'Newsletter body', contentType = 'text/plain; charset=UTF-8') {
+async function deliver(db: EmailDatabase, id: string, date: string, content = 'Newsletter body', contentType = 'text/plain; charset=UTF-8', subject = 'Newsletter') {
 	const raw = [
 		'From: Newsletter <news@example.com>',
 		'To: pigeon@example.com',
-		'Subject: Newsletter',
+		`Subject: ${subject}`,
 		`Date: ${date}`,
 		`Message-ID: <${id}@example.com>`,
 		'MIME-Version: 1.0',
@@ -67,6 +67,49 @@ test('duplicate delivery does not inflate feed counts or reset an existing item 
 		assert.equal(items.length, 1);
 		assert.equal(items[0].is_read, 1);
 		assert.equal(items[0].is_starred, 1);
+	} finally { db.database.close(); }
+});
+
+test('large parsed subjects leave room for the body within the complete row budget', async (context) => {
+	context.mock.method(console, 'log', () => undefined);
+	context.mock.method(console, 'warn', () => undefined);
+	const db = new EmailDatabase();
+	try {
+		const subject = 'A'.repeat(1_200_000);
+		await deliver(db, 'large-subject', 'Fri, 02 Oct 2026 12:00:00 +0000', 'body'.repeat(200_000), 'text/plain; charset=UTF-8', subject);
+		const item = db.database.prepare('SELECT * FROM items').get();
+		assert.ok(item);
+		const rowBytes = new Blob(Object.values(item).filter((value): value is string => typeof value === 'string')).size;
+		assert.ok(rowBytes < 1_000_000, `Complete stored row was ${rowBytes} bytes`);
+		assert.ok(String(item.subject).length > 0);
+		assert.ok(subject.startsWith(String(item.subject)));
+		assert.equal(item.content_size, 900_000);
+	} finally { db.database.close(); }
+});
+
+test('routing rules still inspect the untruncated subject', async (context) => {
+	context.mock.method(console, 'log', () => undefined);
+	const db = new EmailDatabase();
+	try {
+		db.database.prepare(`INSERT INTO routing_rules
+		 (source_feed_key, match_field, match_type, match_pattern, target_feed_key)
+		 VALUES ('news-at-example.com', 'subject', 'ends_with', 'route suffix', 'routed-news')`).run();
+		await deliver(db, 'routed-long-subject', 'Fri, 02 Oct 2026 12:00:00 +0000', 'body', 'text/plain; charset=UTF-8', 'a'.repeat(20_000) + 'route suffix');
+		const item = db.database.prepare('SELECT feed_key, subject FROM items').get();
+		assert.equal(item?.feed_key, 'routed-news');
+		assert.equal(new Blob([String(item?.subject)]).size, 16_000);
+	} finally { db.database.close(); }
+});
+
+test('oversized message identifiers are rejected without truncation or dedupe collisions', async (context) => {
+	context.mock.method(console, 'error', () => undefined);
+	const db = new EmailDatabase();
+	try {
+		for (const suffix of ['first', 'second']) {
+			await deliver(db, 'a'.repeat(8_100) + suffix, 'Fri, 02 Oct 2026 12:00:00 +0000');
+		}
+		assert.equal(db.database.prepare('SELECT COUNT(*) AS count FROM items').get()?.count, 0);
+		assert.equal(db.database.prepare('SELECT COUNT(*) AS count FROM feeds').get()?.count, 0);
 	} finally { db.database.close(); }
 });
 

@@ -472,6 +472,25 @@ test('RSS refresh bounds the combined UTF-8 bytes of the body and text excerpt',
 	}
 });
 
+test('RSS metadata and body together remain within the complete stored row budget', async () => {
+	installFeedFetch(FEED_XML
+		.replace('First item', '😀'.repeat(300_000))
+		.replace('author@example.com', '😀'.repeat(200_000))
+		.replace('<p>Hello world</p>', `<p>${'a'.repeat(900_000)}</p>`));
+	const db = new RecordingDb();
+	const result = await fetchAndStoreRssFeed({
+		DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '25', API_PASSWORD: 'secret-password',
+	} as never, { feed_key: 'metadata-feed', source_url: 'https://example.com/feed.xml', etag: null, last_modified: null });
+	assert.equal(result.outcome, 'success');
+	const item = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
+	assert.ok(item);
+	const rowBytes = new Blob(item.values.filter((value): value is string => typeof value === 'string')).size;
+	assert.ok(rowBytes < 1_000_000, `Complete stored RSS row was ${rowBytes} bytes`);
+	assert.equal(new Blob([String(item.values[3])]).size, 16_000);
+	assert.equal(new Blob([String(item.values[4])]).size, 16_000);
+	assert.doesNotMatch(String(item.values[3]) + String(item.values[4]), /\uFFFD/);
+});
+
 test('fetchAndStoreRssFeed preserves the original item URL for imported RSS items', async () => {
 	installFeedFetch();
 	const db = new RecordingDb();

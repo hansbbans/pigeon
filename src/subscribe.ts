@@ -15,6 +15,7 @@ import {
 	type InitialImportBaseline,
 } from './rss-fetcher';
 import type { ParsedItem } from './rss-parser';
+import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 
 interface SubscribeResponse {
 	feed_key: string;
@@ -43,6 +44,8 @@ export async function subscribeToFeed(
 	feedUrl: string,
 	category?: string | null
 ): Promise<{ feed_key: string; display_name: string; rowid: number; wasCreated: boolean }> {
+	assertBoundedIdentifier(feedUrl, 'Feed URL');
+	if (category) assertBoundedIdentifier(category, 'Category');
 	let discovery: Awaited<ReturnType<typeof discoverFeeds>>;
 	try {
 		discovery = await discoverFeeds(feedUrl, { includeItems: true });
@@ -53,8 +56,9 @@ export async function subscribeToFeed(
 	const candidate = discovery.candidates[0];
 	if (!candidate) throw new Error('Failed to discover feed: no supported feed was found');
 	const canonicalUrl = new URL(candidate.url);
-	const feedTitle = candidate.title;
-	const siteUrl = candidate.site_url;
+	assertBoundedIdentifier(canonicalUrl.href, 'Feed URL');
+	const feedTitle = truncateUtf8(candidate.title, MAX_TEXT_METADATA_BYTES);
+	const siteUrl = boundedStoredUrl(candidate.site_url);
 
 	// Keep the readable URL prefix, but preserve the full URL's identity.
 	const feedKey = await generateFeedKey(canonicalUrl);
@@ -63,6 +67,7 @@ export async function subscribeToFeed(
 	const aliasUrls = [...new Set([discovery.input_url, ...candidate.aliases])].filter(
 		(url) => url !== canonicalUrl.href,
 	);
+	for (const alias of aliasUrls) assertBoundedIdentifier(alias, 'Feed URL alias');
 	const existing = await findExistingFeed(env.DB, feedKey, canonicalUrl.href, aliasUrls);
 
 	if (existing) {
