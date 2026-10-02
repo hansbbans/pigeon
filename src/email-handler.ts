@@ -8,6 +8,15 @@ import { ensureDatabaseSchema } from './migrations';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
 
+function truncateUtf8(value: string, maxBytes: number): string {
+	const encoded = new TextEncoder().encode(value);
+	if (encoded.byteLength <= maxBytes) return value;
+	let end = maxBytes;
+	// Do not keep part of a multibyte code point at the truncation boundary.
+	while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+	return new TextDecoder().decode(encoded.subarray(0, end));
+}
+
 function deriveSiteUrlFromOriginalUrl(originalUrl: string | null): string | null {
 	if (!originalUrl) {
 		return null;
@@ -148,22 +157,28 @@ export async function handleIncomingEmail(
 		// 5. Content with size check
 		const originalHtmlContent = parsed.html || '';
 		let htmlContent = originalHtmlContent;
-		const textContent = parsed.text || '';
-		const contentSize = new Blob([htmlContent || textContent]).size;
+		const originalTextContent = parsed.text || '';
+		let textContent = originalTextContent;
+		const sourceContentSize = new Blob([htmlContent, textContent]).size;
 
-		if (contentSize > MAX_CONTENT_SIZE) {
+		if (sourceContentSize > MAX_CONTENT_SIZE) {
 			console.warn(
-				`Content too large (${contentSize} bytes), falling back to text | feed_key=${feedKey} subject="${subject}"`,
+				`Content too large (${sourceContentSize} bytes), limiting stored body | feed_key=${feedKey} subject="${subject}"`,
 			);
-			htmlContent = '';
+			if (textContent) htmlContent = '';
 		}
 
 		// html_content is NOT NULL in schema — always store something
-		const storedHtml = htmlContent || textContent || '(empty)';
+		// Plain text is stored in both fields for existing reader compatibility,
+		// so give each copy half the total row-content budget.
+		if (!htmlContent) textContent = truncateUtf8(textContent, MAX_CONTENT_SIZE / 2);
+		const storedHtml = truncateUtf8(htmlContent || textContent || '(empty)', MAX_CONTENT_SIZE);
+		textContent = truncateUtf8(textContent, MAX_CONTENT_SIZE - new Blob([storedHtml]).size);
+		const contentSize = new Blob([storedHtml, textContent]).size;
 		const originalUrl = extractOriginalUrlFromEmail({
 			subject,
 			htmlContent: originalHtmlContent || storedHtml,
-			textContent,
+			textContent: originalTextContent,
 		});
 		const siteUrl = deriveSiteUrlFromOriginalUrl(originalUrl);
 
@@ -175,10 +190,8 @@ export async function handleIncomingEmail(
 		await env.DB.batch([
 				env.DB.prepare(
 					`INSERT INTO feeds (feed_key, display_name, from_email, icon_url, site_url, first_seen_at, last_item_at, item_count)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, 0)
 					 ON CONFLICT(feed_key) DO UPDATE SET
-					   last_item_at = excluded.last_item_at,
-					   item_count = item_count + 1,
 				   display_name = CASE
 				     WHEN excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%'
 				       THEN excluded.display_name
@@ -209,6 +222,12 @@ export async function handleIncomingEmail(
 				receivedAt,
 				contentSize,
 			),
+			env.DB.prepare(
+				`UPDATE feeds
+				 SET item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?),
+				     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?)
+				 WHERE feed_key = ?`,
+			).bind(feedKey, feedKey, feedKey),
 		]);
 
 		console.log(
