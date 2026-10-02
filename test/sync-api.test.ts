@@ -11,6 +11,8 @@ import { handleCronTrigger } from '../src/cron-handler';
 import { handleStaleFeeds } from '../src/stale-feeds-api';
 import { handleRecommendations } from '../src/recommendations';
 import { MONITORED_TOPICS_META_KEY } from '../src/topic-preferences';
+import { handleGreaderRequest } from '../src/greader';
+import { generateApiToken } from '../src/api-auth';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -849,6 +851,37 @@ test('For You retains forty publisher slices and topic matches within one databa
 		const plan = state.database.prepare(`EXPLAIN QUERY PLAN ${sliceSql}`).all(...sliceBindings) as { detail: string }[];
 		assert.equal(plan.filter((step) => /SEARCH i USING INDEX/.test(step.detail)).length, 40);
 		assert.ok(!plan.some((step) => /SCAN i(?:$| )/.test(step.detail)), 'publisher slices retain indexed item lookups');
+	} finally {
+		state.database.close();
+	}
+});
+
+
+test('GReader item contents preserve labels across more than one hundred publishers', async () => {
+	const state = fixture();
+	try {
+		const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES (?, ?, 'Legacy folder')");
+		const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+		 VALUES (?, ?, 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
+		const form = new URLSearchParams();
+		for (let index = 0; index < 101; index += 1) {
+			const key = `content-publisher-${index}`;
+			feedInsert.run(key, `Publisher ${index}`);
+			state.database.prepare('INSERT INTO feed_tags (feed_key, label) VALUES (?, ?)').run(key, 'Tagged folder');
+			itemInsert.run(`content-${index}`, key, `content-${index}`);
+			form.append('i', String(index + 1));
+		}
+		const limits = { maxQueries: 50, queries: 0 };
+		const password = 'test-password';
+		const env = { DB: new SqliteD1(state.database, limits), BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+		const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents', {
+			method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+		}), env);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { items: { id: string; categories: string[] }[] };
+		assert.equal(body.items.length, 101);
+		assert.ok(body.items.every((item) => item.categories.includes('user/-/label/Legacy folder') && item.categories.includes('user/-/label/Tagged folder')));
+		assert.ok(limits.queries <= 12);
 	} finally {
 		state.database.close();
 	}

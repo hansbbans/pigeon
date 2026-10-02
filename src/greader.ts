@@ -229,42 +229,45 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 		return tagsByFeedKey;
 	}
 
-	const feedKeyCondition = hasFeedKeyFilter
-		? ` AND f.feed_key IN (${filteredFeedKeys.map(() => '?').join(',')})`
-		: '';
+	const keyPages = hasFeedKeyFilter ? chunkValues(filteredFeedKeys, MAX_IN_QUERY_BIND_PARAMS) : [[]];
+	for (const feedKeyPage of keyPages) {
+		const feedKeyCondition = hasFeedKeyFilter
+			? ` AND f.feed_key IN (${feedKeyPage.map(() => '?').join(',')})`
+			: '';
 
-	try {
-		const { results } = await env.DB.prepare(
-			`SELECT f.feed_key, ft.label
-			   FROM feeds f
-			   JOIN feed_tags ft ON ft.feed_key = f.feed_key
-			  WHERE f.is_active = 1${feedKeyCondition}
-			  ORDER BY ft.label COLLATE NOCASE`,
+		try {
+			const { results } = await env.DB.prepare(
+				`SELECT f.feed_key, ft.label
+				   FROM feeds f
+				   JOIN feed_tags ft ON ft.feed_key = f.feed_key
+				  WHERE f.is_active = 1${feedKeyCondition}
+				  ORDER BY ft.label COLLATE NOCASE`,
+			)
+				.bind(...feedKeyPage)
+				.all<{ feed_key: string; label: string }>();
+			for (const row of results) {
+				addTag(row.feed_key, row.label);
+			}
+		} catch (error) {
+			if (!isMissingTableError(error, 'feed_tags')) {
+				throw error;
+			}
+		}
+
+		const categoryFeedKeyCondition = hasFeedKeyFilter
+			? ` AND feed_key IN (${feedKeyPage.map(() => '?').join(',')})`
+			: '';
+		const { results: categoryResults } = await env.DB.prepare(
+			`SELECT feed_key, category
+			   FROM feeds
+			  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
+			  ORDER BY category COLLATE NOCASE`,
 		)
-			.bind(...filteredFeedKeys)
-			.all<{ feed_key: string; label: string }>();
-		for (const row of results) {
-			addTag(row.feed_key, row.label);
+			.bind(...feedKeyPage)
+			.all<{ feed_key: string; category: string | null }>();
+		for (const row of categoryResults) {
+			addTag(row.feed_key, row.category);
 		}
-	} catch (error) {
-		if (!isMissingTableError(error, 'feed_tags')) {
-			throw error;
-		}
-	}
-
-	const categoryFeedKeyCondition = hasFeedKeyFilter
-		? ` AND feed_key IN (${filteredFeedKeys.map(() => '?').join(',')})`
-		: '';
-	const { results: categoryResults } = await env.DB.prepare(
-		`SELECT feed_key, category
-		   FROM feeds
-		  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
-		  ORDER BY category COLLATE NOCASE`,
-	)
-		.bind(...filteredFeedKeys)
-		.all<{ feed_key: string; category: string | null }>();
-	for (const row of categoryResults) {
-		addTag(row.feed_key, row.category);
 	}
 
 	return tagsByFeedKey;
