@@ -266,6 +266,10 @@ function createReaderApiEnv(
 				const rowids = new Set(values);
 				return new Set(items.filter((item) => rowids.has(item.rowid)).map((item) => item.feed_key));
 			}
+			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid IN')) {
+				const rowids = new Set(values);
+				return new Set(feeds.filter((feed) => rowids.has(feed.rowid)).map((feed) => feed.feed_key));
+			}
 			return new Set(values.map(String));
 		}
 

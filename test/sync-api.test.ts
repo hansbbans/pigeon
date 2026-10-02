@@ -1487,3 +1487,58 @@ test('fetched out-of-line Atom content retains its summary in stored and reader 
   assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, stored.html_content);
  } finally { globalThis.fetch = originalFetch; state.database.close(); }
 });
+
+
+for (const unreadPublishers of [0, 2]) {
+ test(`GReader unread-count avoids loading read-only publisher metadata with ${unreadPublishers} unread publishers`, async () => {
+  const state = fixture();
+  try {
+   const insertFeed = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category, is_active) VALUES (?, 'Publisher', 'Shared category', ?)");
+   const insertTag = state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES (?, 'Shared tag')");
+   const insertItem = state.database.prepare("INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at) VALUES (?, ?, 'Story', '<p>Body</p>', ?, '2026-10-02T12:00:00.000Z')");
+   for (let index = 0; index < 3_001; index += 1) {
+    const key = `read-library-${index}-${'a'.repeat(7_900)}`;
+    insertFeed.run(key, index === 3_000 ? 0 : 1); insertTag.run(key);
+    if (index < unreadPublishers || index === 3_000) insertItem.run(`read-library-${index}`, key, `read-library-${index}`);
+   }
+   const limits = { maxQueries: 50, queries: 0 };
+   const db = new SqliteD1(state.database, limits); const prepare = db.prepare.bind(db);
+   let metadataRows = 0; let metadataBytes = 0;
+   db.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (sql.includes('SELECT f.feed_key, ft.label') || sql.includes('SELECT feed_key, category')) {
+     const all = statement.all.bind(statement);
+     statement.all = async <T>() => { const result = await all<T>(); metadataRows += result.results.length; metadataBytes += new TextEncoder().encode(JSON.stringify(result.results)).length; return result; };
+    }
+    return statement;
+   };
+   const password = 'test-password';
+   const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/unread-count', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+   const body = await response.json() as { unreadcounts: { id: string; count: number }[] };
+   assert.equal(response.status, 200);
+   assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/state/com.google/reading-list')?.count, unreadPublishers);
+   assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/label/Shared category')?.count, unreadPublishers || undefined);
+   assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/label/Shared tag')?.count, unreadPublishers || undefined);
+   assert.equal(body.unreadcounts.filter((count) => count.id.startsWith('feed/')).length, unreadPublishers);
+   assert.equal(metadataRows, unreadPublishers * 2, 'only unread active publishers need labels and legacy categories');
+   assert.ok(metadataBytes < 40_000, `read ${metadataBytes} metadata bytes`);
+   assert.ok(limits.queries <= (unreadPublishers ? 6 : 4), `used ${limits.queries} statements`);
+  } finally { state.database.close(); }
+ });
+}
+
+
+test('unread publisher membership keeps legacy category fallback when feed tags are unavailable', async () => {
+ const state = fixture();
+ try {
+  insertLibrary(state.database);
+  state.database.prepare("UPDATE feeds SET category = 'Legacy category' WHERE feed_key = 'design-weekly'").run();
+  state.database.exec('DROP TABLE feed_tags');
+  const password = 'test-password';
+  const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/unread-count', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { unreadcounts: { id: string; count: number }[] };
+  assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/label/Legacy category')?.count, 1);
+  assert.ok(body.unreadcounts.every((count) => count.id !== 'user/-/label/Design'));
+ } finally { state.database.close(); }
+});

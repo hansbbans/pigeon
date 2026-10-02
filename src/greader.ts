@@ -227,12 +227,12 @@ function decodeContinuation(
 	}
 }
 
-type FeedMembership = { feedKeys: string[] } | { itemRowids: number[] };
+type FeedMembership = { feedKeys: string[] } | { itemRowids: number[] } | { feedRowids: number[] };
 
 function feedMembershipSql(membership: FeedMembership): string {
-	return 'itemRowids' in membership
-		? 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))'
-		: 'SELECT value FROM json_each(?)';
+	if ('itemRowids' in membership) return 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))';
+	if ('feedRowids' in membership) return 'SELECT feed_key FROM feeds WHERE rowid IN (SELECT value FROM json_each(?))';
+	return 'SELECT value FROM json_each(?)';
 }
 
 async function loadFeedTags(env: Env, membership?: FeedMembership): Promise<Map<string, string[]>> {
@@ -251,7 +251,7 @@ async function loadFeedTags(env: Env, membership?: FeedMembership): Promise<Map<
 	const hasFeedKeyFilter = membership !== undefined;
 	const values: Array<string | number> = membership === undefined
 		? []
-		: 'itemRowids' in membership ? membership.itemRowids : membership.feedKeys;
+		: 'itemRowids' in membership ? membership.itemRowids : 'feedRowids' in membership ? membership.feedRowids : membership.feedKeys;
 	if (hasFeedKeyFilter && values.length === 0) {
 		return tagsByFeedKey;
 	}
@@ -474,7 +474,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		count: number;
 		newest: string;
 	}>();
-	const tagsByFeedKey = await loadFeedTags(env);
+	const tagsByFeedKey = await loadFeedTags(env, { feedRowids: results.map((feed) => feed.rowid) });
 
 	let totalUnreadCount = 0;
 	let newestUnreadUsec = '0';
