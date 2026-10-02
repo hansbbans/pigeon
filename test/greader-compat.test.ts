@@ -1037,13 +1037,15 @@ test('subscription/edit stores repeated label additions and removals for a feed'
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(statements.filter((statement) => statement.sql.includes('INSERT OR IGNORE INTO feed_tags')).length, 2);
+	const insertedLabels = statements.filter((statement) => statement.sql.includes('INSERT OR IGNORE INTO feed_tags'));
+	assert.equal(insertedLabels.length, 1);
+	assert.deepEqual(JSON.parse(String(insertedLabels[0].values[1])), ['Favorites', 'Work']);
 	assert.ok(
 		statements.some(
 			(statement) =>
 				statement.sql.includes('DELETE FROM feed_tags') &&
 				statement.values[0] === FEED_ROW.feed_key &&
-				statement.values[1] === 'Old',
+				JSON.parse(String(statement.values[1])).includes('Old'),
 		),
 	);
 	assert.ok(

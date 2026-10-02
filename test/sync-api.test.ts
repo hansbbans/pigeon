@@ -936,3 +936,84 @@ for (const operation of ['mark-all-as-read', 'edit-tag']) {
 		}
 	});
 }
+
+for (const action of ['add', 'remove']) {
+	test(`GReader subscription editing ${action}s one hundred labels within the request budget`, async () => {
+		const state = fixture();
+		try {
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES ('many-labels', 'Many Labels', ?)").run(action === 'remove' ? 'Label 0' : null);
+			const form = new URLSearchParams({ ac: 'edit', s: 'feed/1' });
+			for (let index = 0; index < 100; index += 1) {
+				const label = `Label ${index}`;
+				if (action === 'remove') state.database.prepare('INSERT INTO feed_tags (feed_key, label) VALUES (?, ?)').run('many-labels', label);
+				form.append(action === 'add' ? 'a' : 'r', `user/-/label/${label}`);
+			}
+			const password = 'test-password';
+			const limits = { maxQueries: 50, queries: 0 };
+			const env = { DB: new SqliteD1(state.database, limits), BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/subscription/edit', {
+				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+			}), env);
+			assert.equal(response.status, 200);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM feed_tags').get() as { count: number }).count, action === 'add' ? 100 : 0);
+			assert.equal((state.database.prepare("SELECT category FROM feeds WHERE feed_key = 'many-labels'").get() as { category: string | null }).category, action === 'add' ? 'Label 0' : null);
+			assert.ok(limits.queries <= 10);
+		} finally {
+			state.database.close();
+		}
+	});
+}
+
+
+test('GReader compact label edits preserve the category fallback without the legacy tag table', async () => {
+	const state = fixture();
+	try {
+		state.database.prepare("INSERT INTO feeds (feed_key, display_name) VALUES ('legacy-labels', 'Legacy Labels')").run();
+		const password = 'test-password';
+		const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+		const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+		await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/subscription/list', { headers: { Authorization: auth } }), env);
+		state.database.exec('DROP TABLE feed_tags');
+		for (const adding of [true, false]) {
+			const form = new URLSearchParams({ ac: 'edit', s: 'feed/1', t: 'Custom Title' });
+			form.append(adding ? 'a' : 'r', 'user/-/label/Primary');
+			form.append(adding ? 'a' : 'r', 'user/-/label/Other');
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/subscription/edit', {
+				method: 'POST', headers: { Authorization: auth }, body: form,
+			}), env);
+			assert.equal(response.status, 200);
+			assert.deepEqual({ ...state.database.prepare("SELECT category, custom_title FROM feeds WHERE feed_key = 'legacy-labels'").get() }, {
+				category: adding ? 'Primary' : null, custom_title: 'Custom Title',
+			});
+		}
+	} finally {
+		state.database.close();
+	}
+});
+
+for (const action of ['add', 'remove']) {
+	test(`a failed compact GReader label ${action} preserves the entire original folder set`, async () => {
+		const state = fixture();
+		try {
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES ('atomic-labels', 'Atomic Labels', 'Original')").run();
+			state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES ('atomic-labels', 'Original')").run();
+			const form = new URLSearchParams({ ac: 'edit', s: 'feed/1' });
+			for (let index = 0; index < 100; index += 1) {
+				const label = `Label ${index}`;
+				if (action === 'remove') state.database.prepare('INSERT INTO feed_tags (feed_key, label) VALUES (?, ?)').run('atomic-labels', label);
+				form.append(action === 'add' ? 'a' : 'r', `user/-/label/${label}`);
+			}
+			state.database.exec(action === 'add'
+				? "CREATE TRIGGER reject_label BEFORE INSERT ON feed_tags WHEN NEW.label = 'Label 50' BEGIN SELECT RAISE(ABORT, 'label write failed'); END"
+				: "CREATE TRIGGER reject_label BEFORE DELETE ON feed_tags WHEN OLD.label = 'Label 50' BEGIN SELECT RAISE(ABORT, 'label write failed'); END");
+			const password = 'test-password';
+			await assert.rejects(handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/subscription/edit', {
+				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+			}), { DB: state.db, API_PASSWORD: password, BASE_URL: 'https://pigeon.example' } as never), /label write failed/);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM feed_tags').get() as { count: number }).count, action === 'add' ? 1 : 101);
+			assert.equal((state.database.prepare("SELECT category FROM feeds WHERE feed_key = 'atomic-labels'").get() as { category: string }).category, 'Original');
+		} finally {
+			state.database.close();
+		}
+	});
+}

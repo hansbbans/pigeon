@@ -901,21 +901,13 @@ async function addLabelsToFeed(env: Env, rowid: number, feedKey: string, labels:
 		return;
 	}
 
-	let feedTagsAvailable = true;
-	for (const label of uniqueLabels) {
-		if (!feedTagsAvailable) {
-			break;
-		}
-		try {
-			await env.DB.prepare('INSERT OR IGNORE INTO feed_tags (feed_key, label) VALUES (?, ?)')
-				.bind(feedKey, label)
-				.run();
-		} catch (error) {
-			if (!isMissingTableError(error, 'feed_tags')) {
-				throw error;
-			}
-			feedTagsAvailable = false;
-		}
+	try {
+		await env.DB.prepare(`INSERT OR IGNORE INTO feed_tags (feed_key, label)
+		 SELECT ?, value FROM json_each(?)`)
+			.bind(feedKey, JSON.stringify(uniqueLabels))
+			.run();
+	} catch (error) {
+		if (!isMissingTableError(error, 'feed_tags')) throw error;
 	}
 
 	await env.DB.prepare('UPDATE feeds SET category = COALESCE(category, ?) WHERE rowid = ?')
@@ -930,28 +922,19 @@ async function removeLabelsFromFeed(env: Env, rowid: number, feedKey: string, la
 		return;
 	}
 
-	let feedTagsAvailable = true;
-	for (const label of uniqueLabels) {
-		if (!feedTagsAvailable) {
-			break;
-		}
-		try {
-			await env.DB.prepare('DELETE FROM feed_tags WHERE feed_key = ? AND label = ?')
-				.bind(feedKey, label)
-				.run();
-		} catch (error) {
-			if (!isMissingTableError(error, 'feed_tags')) {
-				throw error;
-			}
-			feedTagsAvailable = false;
-		}
+	try {
+		await env.DB.prepare(`DELETE FROM feed_tags WHERE feed_key = ?
+		 AND label IN (SELECT value FROM json_each(?))`)
+			.bind(feedKey, JSON.stringify(uniqueLabels))
+			.run();
+	} catch (error) {
+		if (!isMissingTableError(error, 'feed_tags')) throw error;
 	}
 
-	for (const label of uniqueLabels) {
-		await env.DB.prepare('UPDATE feeds SET category = NULL WHERE rowid = ? AND category = ?')
-			.bind(rowid, label)
-			.run();
-	}
+	await env.DB.prepare(`UPDATE feeds SET category = NULL WHERE rowid = ?
+	 AND category IN (SELECT value FROM json_each(?))`)
+		.bind(rowid, JSON.stringify(uniqueLabels))
+		.run();
 	await syncPrimaryFeedCategory(env, rowid, feedKey);
 }
 
