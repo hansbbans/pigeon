@@ -293,33 +293,39 @@ export async function buildStateTransitionEventStatements(
 		return [];
 	}
 
-	const rows = await Promise.all(
-		chunkValues(uniqueRowids, 90).map(async (chunk) => {
-			const placeholders = chunk.map(() => '?').join(',');
-			return env.DB.prepare(
-				`SELECT rowid, id, feed_key, is_read, is_starred FROM items WHERE rowid IN (${placeholders})`,
-			)
-				.bind(...chunk)
-				.all<ItemStateRow>();
-		}),
-	);
+	const { results: rows } = await env.DB.prepare(
+		`SELECT rowid, id, feed_key, is_read, is_starred FROM items
+		 WHERE rowid IN (SELECT value FROM json_each(?))`,
+	).bind(JSON.stringify(uniqueRowids)).all<ItemStateRow>();
 
 	const now = new Date().toISOString();
-	return rows.flatMap((result) =>
-		result.results.flatMap((row) => {
-			const oldValue = options.kind === 'read' ? row.is_read === 1 : row.is_starred === 1;
-			if (oldValue === options.target) {
-				return [];
-			}
-			const eventKey = `state:${row.id}:${options.kind}:${oldValue ? 1 : 0}->${options.target ? 1 : 0}:${options.eventType}:${options.clientFamily}:${now}:${crypto.randomUUID()}`;
-			return [
-				env.DB.prepare(
-					`INSERT OR IGNORE INTO engagement_events
-					 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
-					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				)
-					.bind(crypto.randomUUID(), eventKey, row.id, row.feed_key, options.eventType, options.clientFamily, now),
-			];
-		}),
-	);
+	const statements: D1PreparedStatement[] = [];
+	const maxPayloadBytes = 900_000;
+	let encodedRows: string[] = [];
+	let payloadBytes = 2;
+	const flush = () => {
+		if (encodedRows.length === 0) return;
+		statements.push(env.DB.prepare(
+			`INSERT OR IGNORE INTO engagement_events
+			 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
+			 SELECT json_extract(value, '$.id'), json_extract(value, '$.eventKey'),
+			        json_extract(value, '$.itemId'), json_extract(value, '$.feedKey'),
+			        ?, ?, ? FROM json_each(?)`,
+		).bind(options.eventType, options.clientFamily, now, `[${encodedRows.join(',')}]`));
+		encodedRows = [];
+		payloadBytes = 2;
+	};
+	for (const row of rows) {
+		const oldValue = options.kind === 'read' ? row.is_read === 1 : row.is_starred === 1;
+		if (oldValue === options.target) continue;
+		const eventKey = `state:${row.id}:${options.kind}:${oldValue ? 1 : 0}->${options.target ? 1 : 0}:${options.eventType}:${options.clientFamily}:${now}:${crypto.randomUUID()}`;
+		const encoded = JSON.stringify({ id: crypto.randomUUID(), eventKey, itemId: row.id, feedKey: row.feed_key });
+		const encodedBytes = new TextEncoder().encode(encoded).byteLength;
+		if (encodedBytes + 2 > maxPayloadBytes) throw new Error('State transition event is too large');
+		if (payloadBytes + encodedBytes + 1 > maxPayloadBytes) flush();
+		payloadBytes += encodedBytes + (encodedRows.length > 0 ? 1 : 0);
+		encodedRows.push(encoded);
+	}
+	flush();
+	return statements;
 }

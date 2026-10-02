@@ -886,3 +886,53 @@ test('GReader item contents preserve labels across more than one hundred publish
 		state.database.close();
 	}
 });
+
+for (const operation of ['mark-all-as-read', 'edit-tag']) {
+	test(`GReader ${operation} completes five thousand state transitions within a database invocation`, async () => {
+		const state = fixture();
+		try {
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name) VALUES ('large-library', 'Large Library')").run();
+			const insert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, 'large-library', 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
+			const form = new URLSearchParams();
+			for (let index = 0; index < 5_000; index += 1) {
+				insert.run(`large-${index}`, `large-${index}`);
+				if (operation === 'edit-tag') form.append('i', String(index + 1));
+			}
+			if (operation === 'mark-all-as-read') form.set('s', 'user/-/state/com.google/reading-list');
+			else form.set('a', 'user/-/state/com.google/read');
+			const limits = { maxQueries: 50, queries: 0 };
+			const password = 'test-password';
+			const db = new SqliteD1(state.database, limits);
+			const prepare = db.prepare.bind(db);
+			let eventGroups = 0;
+			db.prepare = (sql) => {
+				const statement = prepare(sql);
+				if (sql.startsWith('INSERT OR IGNORE INTO engagement_events')) eventGroups += 1;
+				const bind = statement.bind.bind(statement);
+				statement.bind = (...values) => {
+					assert.ok(values.length <= 100);
+					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
+					return bind(...values);
+				};
+				return statement;
+			};
+			const env = { DB: db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const send = () => handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/${operation}`, {
+				method: 'POST', headers: { Authorization: auth, 'User-Agent': 'NetNewsWire' }, body: form,
+			}), env);
+			const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+			assert.equal((await send()).status, 200);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read = 1').get() as { count: number }).count, 5_000);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 5_000);
+			assert.ok(eventGroups >= 2, 'large analytics payloads split into bounded groups');
+			assert.ok(limits.queries <= 20, `used ${limits.queries} statements`);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events WHERE client_family = ? AND event_type = ?').get('netnewswire', operation === 'mark-all-as-read' ? 'bulk_mark_all_read' : 'read') as { count: number }).count, 5_000);
+			limits.queries = 0;
+			assert.equal((await send()).status, 200);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 5_000, 'replaying the same state does not add evidence');
+		} finally {
+			state.database.close();
+		}
+	});
+}

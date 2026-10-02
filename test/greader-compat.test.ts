@@ -1212,7 +1212,7 @@ test('stream/items/contents includes every label category for a tagged feed', as
 	]);
 });
 
-test('edit-tag batches large read-state updates so NetNewsWire sync writes stay within D1 limits', async () => {
+test('edit-tag compacts large read-state updates so NetNewsWire sync writes stay within D1 limits', async () => {
 	const cases = [
 		{
 			param: 'a',
@@ -1262,14 +1262,14 @@ test('edit-tag batches large read-state updates so NetNewsWire sync writes stay 
 
 		assert.equal(response.status, 200);
 		assert.equal(await response.text(), 'OK');
-		assert.equal(batches.length, 3);
+		assert.equal(batches.length, 1);
 		assert.deepEqual(
 			batches.map((batch) => batch.values.length),
-			[100, 100, 50],
+			[1],
 		);
 		assert.ok(batches.every((batch) => batch.sql.includes(testCase.expectedSql)));
 		assert.deepEqual(
-			batches.flatMap((batch) => batch.values).map((value) => Number(value)),
+			JSON.parse(String(batches[0].values[0])),
 			Array.from({ length: 250 }, (_, index) => index + 1),
 		);
 	}

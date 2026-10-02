@@ -1066,11 +1066,9 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 	const eventStmts: D1PreparedStatement[] = [];
 	const clientFamily = classifyClientFamily(request);
 
-	function addChunkedUpdate(column: 'is_read' | 'is_starred', value: 0 | 1) {
-		for (const rowidChunk of chunkValues(rowids, MAX_IN_QUERY_BIND_PARAMS)) {
-			const placeholders = rowidChunk.map(() => '?').join(',');
-			stmts.push(env.DB.prepare(`UPDATE items SET ${column} = ${value} WHERE rowid IN (${placeholders})`).bind(...rowidChunk));
-		}
+	function addBulkUpdate(column: 'is_read' | 'is_starred', value: 0 | 1) {
+		stmts.push(env.DB.prepare(`UPDATE items SET ${column} = ${value}
+		 WHERE rowid IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(rowids)));
 	}
 
 	if (addTag === 'user/-/state/com.google/read') {
@@ -1082,7 +1080,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_read', 1);
+		addBulkUpdate('is_read', 1);
 	}
 	if (removeTag === 'user/-/state/com.google/read') {
 		eventStmts.push(
@@ -1093,7 +1091,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_read', 0);
+		addBulkUpdate('is_read', 0);
 	}
 	if (addTag === 'user/-/state/com.google/starred') {
 		eventStmts.push(
@@ -1104,7 +1102,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_starred', 1);
+		addBulkUpdate('is_starred', 1);
 	}
 	if (removeTag === 'user/-/state/com.google/starred') {
 		eventStmts.push(
@@ -1115,7 +1113,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_starred', 0);
+		addBulkUpdate('is_starred', 0);
 	}
 
 	if (stmts.length > 0) {
