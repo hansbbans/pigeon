@@ -82,7 +82,8 @@ class RefreshFailure extends Error {
 
 const MAX_ITEMS_PER_FETCH = 50;
 const MAX_CONTENT_SIZE = 900_000;
-const MAX_ITEM_BATCH_PARAMETER_BYTES = 900_000;
+// Nine bound columns per item keeps each ten-row statement below D1's 100-parameter limit.
+const MAX_ITEMS_PER_INSERT = 10;
 /** Maximum stored plain-text excerpt used by topic matching. */
 export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
 /** Maximum HTML source inspected when deriving a plain-text excerpt. */
@@ -127,14 +128,14 @@ export async function buildRssItemStatements(
 ): Promise<D1PreparedStatement[]> {
 	assertBoundedIdentifier(feedKey, 'Feed key');
 	const statements: D1PreparedStatement[] = [];
-	let bufferedRows: string[] = [];
-	let bufferedBytes = 2;
+	let bufferedRows: unknown[][] = [];
 	let bufferedSql = '';
 	const flushRows = () => {
 		if (bufferedRows.length === 0) return;
-		statements.push(db.prepare(bufferedSql).bind(`[${bufferedRows.join(',')}]`));
+		const placeholders = bufferedRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+		const sql = bufferedSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', `VALUES ${placeholders}`);
+		statements.push(db.prepare(sql).bind(...bufferedRows.flat()));
 		bufferedRows = [];
-		bufferedBytes = 2;
 	};
 	for (const item of items) {
 		const identity = await createRssItemIdentity(feedKey, item);
@@ -199,21 +200,9 @@ export async function buildRssItemStatements(
 			statements.push(db.prepare(insertSql).bind(...values));
 			continue;
 		}
-		const serialized = JSON.stringify(values);
-		const rowBytes = new Blob([serialized]).size;
-		if (rowBytes + 2 > MAX_ITEM_BATCH_PARAMETER_BYTES) {
-			// JSON escaping can exceed the bound even for an otherwise valid row.
-			flushRows();
-			statements.push(db.prepare(insertSql).bind(...values));
-			continue;
-		}
-		const separatorBytes = bufferedRows.length > 0 ? 1 : 0;
-		if (bufferedBytes + separatorBytes + rowBytes > MAX_ITEM_BATCH_PARAMETER_BYTES) flushRows();
-		bufferedSql = insertSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-			`SELECT ${values.map((_, index) => `json_extract(value, '$[${index}]')`).join(', ')}
-			 FROM json_each(?) WHERE 1`);
-		bufferedBytes += rowBytes + (bufferedRows.length > 0 ? 1 : 0);
-		bufferedRows.push(serialized);
+		if (bufferedRows.length === MAX_ITEMS_PER_INSERT) flushRows();
+		bufferedSql = insertSql;
+		bufferedRows.push(values);
 	}
 	flushRows();
 	return statements;
