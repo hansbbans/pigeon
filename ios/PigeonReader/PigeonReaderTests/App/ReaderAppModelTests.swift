@@ -3035,6 +3035,55 @@ struct ReaderAppModelTests {
 		#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).contains(where: { $0.mutation.id == durable.id }))
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: ["read", "star"])
+	func oldPendingStateSnapshotCannotRevertANewerActionAfterSameAccountReconnect(field: String) async throws {
+		let original = try makeSession(token: "pending-state-reconnect")
+		let target = makeArticle(id: "pending-state-target")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused", loginToken: original.token,
+			responses: ["/api/v1/recommendations": try responseData(items: [target])],
+		)
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([target], for: collection)
+		if field == "read" { await model.setRead(target, read: true) }
+		else { await model.setStarred(target, starred: true) }
+		await store.pauseNextPendingStateSnapshot()
+		let oldLoad = Task { await model.load(collection: collection, force: true) }
+		await store.waitUntilPendingStateSnapshotIsPaused()
+
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		#expect(model.session?.storageIdentity == original.storageIdentity)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		var current = target
+		current.isRead = field == "read"
+		current.isStarred = field == "star"
+		model.setArticles([current], for: collection)
+		if field == "read" { await model.setRead(current, read: false) }
+		else { await model.setStarred(current, starred: false) }
+		let queueBefore = try await store.pendingMutations(accountID: original.storageIdentity, limit: 100)
+		let requestsBefore = await transport.requests.count
+		await store.resumePendingStateSnapshot()
+		await oldLoad.value
+
+		// This is the real reader's explicit-row action merge, after a bounded
+		// refresh has removed a row that is still presented on screen.
+		let retained = makeArticle(id: "still-presented-row")
+		model.retainPresentedArticles([retained], in: collection)
+		let restored = try #require(model.allArticles(for: collection).first { $0.id == target.id })
+		if field == "read" { #expect(restored.isRead == false) }
+		else { #expect(restored.isStarred == false) }
+		#expect(model.allArticles(for: collection).contains { $0.id == retained.id })
+		#expect(await transport.requests.count == requestsBefore)
+		let queueAfter = try await store.pendingMutations(accountID: original.storageIdentity, limit: 100)
+		#expect(queueAfter.map(\.mutation) == queueBefore.map(\.mutation))
+		#expect(queueAfter.map(\.attempts) == queueBefore.map(\.attempts))
+	}
+
 	@Test func addFeedDeepLinkStillPresentsAndConsumesThePendingRequestBeforeSignIn() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient(), offlineSynchronizationEnabled: false)
 		model.disconnect()
@@ -10249,6 +10298,23 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	private var snapshotPauseCount = 0
 	private var snapshotPauseWaiters: [CheckedContinuation<Void, Never>] = []
 	private var snapshotResumeContinuation: CheckedContinuation<Void, Never>?
+	private var shouldPauseNextPendingStateSnapshot = false
+	private var pendingStateSnapshotIsPaused = false
+	private var pendingStateSnapshotWaiters: [CheckedContinuation<Void, Never>] = []
+	private var pendingStateSnapshotResume: CheckedContinuation<Void, Never>?
+
+	func pauseNextPendingStateSnapshot() { shouldPauseNextPendingStateSnapshot = true }
+
+	func waitUntilPendingStateSnapshotIsPaused() async {
+		if pendingStateSnapshotIsPaused { return }
+		await withCheckedContinuation { pendingStateSnapshotWaiters.append($0) }
+	}
+
+	func resumePendingStateSnapshot() {
+		pendingStateSnapshotResume?.resume()
+		pendingStateSnapshotResume = nil
+	}
+
 	private var shouldFailNextPendingMutations = false
 	private var shouldFailNextArticleSaveCollectionID: String?
 
@@ -10403,7 +10469,17 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 			shouldFailNextPendingMutations = false
 			throw LaunchStoreError.pendingMutationsUnavailable
 		}
-		return try await base.pendingMutations(accountID: accountID, limit: limit)
+		let captured = try await base.pendingMutations(accountID: accountID, limit: limit)
+		if shouldPauseNextPendingStateSnapshot, limit == 10_000 {
+			shouldPauseNextPendingStateSnapshot = false
+			pendingStateSnapshotIsPaused = true
+			let waiters = pendingStateSnapshotWaiters
+			pendingStateSnapshotWaiters.removeAll()
+			for waiter in waiters { waiter.resume() }
+			await withCheckedContinuation { pendingStateSnapshotResume = $0 }
+			pendingStateSnapshotIsPaused = false
+		}
+		return captured
 	}
 
 	func markMutationApplied(id: String, accountID: String) async throws {

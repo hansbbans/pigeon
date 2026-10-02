@@ -6571,12 +6571,17 @@ final class ReaderAppModel {
 	}
 
 	private func refreshPendingArticleStates(accountID: String) async {
-		guard session?.storageIdentity == accountID else { return }
+		guard session?.storageIdentity == accountID, Task.isCancelled == false else { return }
+		let context = OperationContext(
+			accountID: accountID,
+			generation: libraryGeneration,
+			preparationID: activeOfflinePreparationID,
+		)
 		let revisionsAtStart = pendingArticleStateRevisions
 		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: 10_000) else {
 			return
 		}
-		guard session?.storageIdentity == accountID else { return }
+		guard isCurrentOperation(context), Task.isCancelled == false else { return }
 		let durableStates = pendingArticleStates(from: pendingMutations)
 		let keys = Set(pendingArticleStates.keys).union(durableStates.keys)
 		for key in keys {
