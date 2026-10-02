@@ -1017,3 +1017,26 @@ for (const action of ['add', 'remove']) {
 		}
 	});
 }
+
+for (const format of ['json', 'atom']) {
+	test(`inherited ${format} feed bylines reach stored articles and GReader responses`, async () => {
+		const state = fixture();
+		const originalFetch = globalThis.fetch;
+		try {
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('author-feed', 'Authors', 'rss', 'https://feeds.example.com/authors')").run();
+			const body = format === 'json' ? JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Authors', authors: [{ name: 'Inherited Author' }], items: [{ id: 'inherited-story', title: 'Story', content_html: '<p>Body</p>' }] })
+				: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Authors</title><author><name>Inherited Author</name></author><entry><id>inherited-story</id><title>Story</title><content>Body</content></entry></feed>';
+			globalThis.fetch = async () => new Response(body, { headers: { 'Content-Type': format === 'json' ? 'application/feed+json' : 'application/atom+xml' } });
+			assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'author-feed', source_url: 'https://feeds.example.com/authors', etag: null, last_modified: null })).outcome, 'success');
+			assert.equal((state.database.prepare('SELECT from_name FROM items').get() as { from_name: string }).from_name, 'Inherited Author');
+			const password = 'test-password';
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+				headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+			}), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+			assert.equal((await response.json() as { items: { author: string }[] }).items[0].author, 'Inherited Author');
+		} finally {
+			globalThis.fetch = originalFetch;
+			state.database.close();
+		}
+	});
+}

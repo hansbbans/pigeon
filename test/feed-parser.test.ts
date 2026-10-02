@@ -95,3 +95,28 @@ test('newsletter HTML, duplicate ids, and missing ids remain deterministic parse
 	assert.equal(parsedMissing?.guid, '');
 	assert.equal(parsedMissing?.pubDate, undefined);
 });
+
+test('JSON Feed authors inherit feed defaults while item authors and explicit empty arrays override them', () => {
+	const feed = parseFeed(JSON.stringify({
+		version: 'https://jsonfeed.org/version/1.1', title: 'Authors', authors: [{ name: 'Feed Author' }], author: { name: 'Legacy feed author' },
+		items: [
+			{ id: 'inherited', content_text: 'Body' },
+			{ id: 'override', content_text: 'Body', authors: [{ name: 'Item Author' }], author: { name: 'Legacy item author' } },
+			{ id: 'anonymous', content_text: 'Body', authors: [], author: { name: 'Incorrect legacy fallback' } },
+			{ id: 'unnamed-first', content_text: 'Body', authors: [{ url: 'https://example.com' }, { name: 'Named Author' }] },
+			{ id: 'null', content_text: 'Body', authors: null, author: null },
+		],
+	}));
+	assert.deepEqual(feed.items.map((item) => item.author), ['Feed Author', 'Item Author', undefined, 'Named Author', 'Feed Author']);
+	const legacy = parseFeed(JSON.stringify({ version: 'https://jsonfeed.org/version/1', title: 'Legacy', author: { name: 'Legacy Author' }, items: [{ id: 'one', content_text: 'Body' }] }));
+	assert.equal(legacy.items[0].author, 'Legacy Author');
+});
+
+test('Atom entries inherit feed authors and retain entry authors when several are declared', () => {
+	const feed = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom"><title>Authors</title><id>authors</id><updated>2026-10-02T12:00:00Z</updated><author><name>Feed Author</name></author>
+	 <entry><id>one</id><title>One</title><content>Body</content></entry>
+	 <entry><id>two</id><title>Two</title><author><name>Entry Author</name></author><author><name>Second Author</name></author><content>Body</content></entry>
+	 <entry><id>three</id><title>Three</title><source><author><name>Source Author</name></author></source><content>Body</content></entry>
+	 <entry><id>four</id><title>Four</title><author><name/></author><author><name>Named Author</name></author><content>Body</content></entry></feed>`);
+	assert.deepEqual(feed.items.map((item) => item.author), ['Feed Author', 'Entry Author', 'Source Author', 'Named Author']);
+});

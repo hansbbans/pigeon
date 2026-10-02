@@ -123,14 +123,9 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 		const link = resolveUrl(textValue(item.url) ?? textValue(item.external_url), baseUrl);
 		const plainText = textValue(item.content_text);
 		const content = textValue(item.content_html) ?? (plainText ? escapePlainText(plainText) : '');
-		const authors = arrayValue(item.authors);
-		const firstAuthor = authors.length > 0 ? asRecord(authors[0]) : undefined;
-		const legacyAuthor = asOptionalRecord(item.author);
-		const author = firstAuthor
-			? textValue(firstAuthor.name)
-			: legacyAuthor
-				? textValue(legacyAuthor.name)
-				: undefined;
+		const author = item.authors != null || item.author != null
+			? jsonAuthorName(item)
+			: jsonAuthorName(feed);
 
 		return {
 			guid: textValue(item.id) ?? link ?? '',
@@ -151,6 +146,21 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 	};
 }
 
+/** Preserve the existing single-name byline, choosing the first named author. */
+function firstAuthorName(value: unknown): string | undefined {
+	for (const author of arrayValue(value)) {
+		const name = textValue(findKey(asRecord(author), ['name']));
+		if (name) return name;
+	}
+	return undefined;
+}
+
+function jsonAuthorName(record: FeedRecord): string | undefined {
+	// An explicit empty authors array overrides deprecated singular authors.
+	if (record.authors != null) return firstAuthorName(record.authors);
+	return textValue(asRecord(record.author).name);
+}
+
 function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 	const feedLink = extractAtomLink(findKey(feed, ['link']), sourceUrl);
 	const baseUrl = feedLink ?? sourceUrl;
@@ -161,7 +171,10 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 		const link =
 			extractAtomLink(findKey(entry, ['link']), baseUrl) ??
 			(videoId && isYouTubeVideoId(videoId) ? `https://www.youtube.com/watch?v=${videoId}` : undefined);
-		const authorRecord = asOptionalRecord(findKey(entry, ['author']));
+		const source = asOptionalRecord(findKey(entry, ['source']));
+		const author = firstAuthorName(findKey(entry, ['author']))
+			?? firstAuthorName(source ? findKey(source, ['author']) : undefined)
+			?? firstAuthorName(findKey(feed, ['author']));
 		const mediaGroup = asOptionalRecord(findKey(entry, ['media:group', 'group']));
 		const mediaTitle = mediaGroup ? textValue(findKey(mediaGroup, ['media:title', 'title'])) : undefined;
 		const mediaDescription = mediaGroup
@@ -181,7 +194,7 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 			content:
 				textValue(findKey(entry, ['content', 'summary'])) ??
 				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
-			author: authorRecord ? textValue(findKey(authorRecord, ['name'])) : undefined,
+			author,
 			attachments: deduplicateAttachments([
 				...parseAtomAttachments(findKey(entry, ['link']), baseUrl),
 				...parseYouTubeMediaAttachments(mediaGroup, baseUrl, mediaTitle),
