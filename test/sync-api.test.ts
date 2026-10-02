@@ -7,6 +7,7 @@ import { handleMutationBatch } from '../src/mutation-api';
 import { handleEngagementIngestion } from '../src/engagement';
 import { handleIncrementalSync } from '../src/sync-api';
 import { buildRssItemStatements, fetchAndStoreRssFeed } from '../src/rss-fetcher';
+import { handleCronTrigger } from '../src/cron-handler';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -597,6 +598,114 @@ for (const scenario of ['small', 'large', 'expanded']) {
 			const originalLastBody = state.database.prepare("SELECT html_content FROM items WHERE subject = 'Story 49'").get() as { html_content: string };
 			assert.ok(scenario === 'expanded' ? originalLastBody.html_content.includes('[Content truncated]') : originalLastBody.html_content === 'Body 49');
 			assert.equal((state.database.prepare('SELECT refresh_lease_token FROM feeds WHERE feed_key = ?').get('design-weekly') as { refresh_lease_token: string }).refresh_lease_token, 'owned');
+		} finally {
+			globalThis.fetch = originalFetch;
+			state.database.close();
+		}
+	});
+}
+
+for (const scenario of ['small', 'large_redirects', 'mixed_failures', 'maintenance_completed', 'maintenance_failure', 'persistence_failure', 'claim_failure', 'lost_ownership']) {
+	test(`the complete cron stays within fifty statements with ${scenario}`, async () => {
+		const state = fixture();
+		const originalFetch = globalThis.fetch;
+		const limits = { maxQueries: 50, queries: 0 };
+		const db = new SqliteD1(state.database, limits);
+		let batchQueue = Promise.resolve();
+		const batch = db.batch.bind(db);
+		db.batch = async (statements) => {
+			const next = batchQueue.then(() => batch(statements));
+			batchQueue = next.then(() => undefined, () => undefined);
+			return next;
+		};
+		try {
+			for (let index = 0; index < 5; index += 1) {
+				state.database.prepare(`INSERT INTO feeds (feed_key, display_name, source_type, source_url)
+				 VALUES (?, ?, 'rss', ?)`)
+					.run(`cron-${index}`, `Feed ${index}`, `https://feed${index}.example.com/start`);
+			}
+			state.database.prepare("UPDATE maintenance_state SET cursor_feed_key = 'zzzz' WHERE job_name = 'daily_retention'").run();
+			if (scenario === 'maintenance_completed') state.database.prepare("UPDATE maintenance_state SET completed_day = ? WHERE job_name = 'daily_retention'").run(new Date().toISOString().slice(0, 10));
+			if (scenario === 'maintenance_failure') state.database.exec(`CREATE TRIGGER reject_maintenance BEFORE UPDATE ON maintenance_state
+			 WHEN NEW.completed_day IS NOT NULL BEGIN SELECT RAISE(ABORT, 'simulated maintenance failure'); END`);
+			if (scenario === 'claim_failure') state.database.exec(`CREATE TRIGGER reject_claim BEFORE UPDATE ON feeds
+			 WHEN NEW.feed_key = 'cron-2' AND NEW.refresh_lease_token IS NOT NULL
+			 BEGIN SELECT RAISE(ABORT, 'simulated claim failure'); END`);
+			if (scenario === 'persistence_failure') state.database.exec(`CREATE TRIGGER reject_activity BEFORE INSERT ON refresh_activity
+			 WHEN NEW.feed_key = 'cron-0' BEGIN SELECT RAISE(ABORT, 'simulated activity failure'); END`);
+			const smallXml = `<rss version="2.0"><channel><title>Small</title>${Array.from({ length: 3 }, (_, index) =>
+				`<item><guid>item-${index}</guid><title>Story ${index}</title><description>Small body</description></item>`).join('')}</channel></rss>`;
+			const largeXml = `<rss version="2.0"><channel><title>Large</title>${Array.from({ length: 50 }, (_, index) =>
+				`<item><guid>item-${index}</guid><title>Story ${index}</title><description><![CDATA[${index < 4 ? 'a'.repeat(850_000) : `Body ${index}`}]]></description></item>`).join('')}</channel></rss>`;
+			globalThis.fetch = async (input) => {
+				const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+				const index = Number(url.hostname.match(/^feed(\d)/)?.[1]);
+				if (scenario === 'mixed_failures' && index === 1) return new Response('Unavailable', { status: 503 });
+				if (scenario === 'mixed_failures' && index === 2) throw new Error('simulated network failure');
+				if (scenario === 'lost_ownership' && index === 0) {
+					state.database.prepare("UPDATE feeds SET refresh_lease_token = 'other-owner' WHERE feed_key = 'cron-0'").run();
+				}
+				const large = scenario === 'large_redirects' || (scenario === 'mixed_failures' && index === 0);
+				if (large && url.pathname !== '/final') {
+					const hop = url.pathname === '/start' ? 0 : Number(url.pathname.slice(4));
+					return new Response(null, { status: 302, headers: { Location: hop === 4 ? '/final' : `/hop${hop + 1}` } });
+				}
+				return new Response(large ? largeXml : smallXml, { headers: { 'Content-Type': 'application/rss+xml' } });
+			};
+			const env = { DB: db } as never;
+			await handleCronTrigger(env);
+			assert.ok(limits.queries <= 50, `Executed ${limits.queries} statements`);
+			const maintenance = state.database.prepare("SELECT completed_day, claim_token FROM maintenance_state WHERE job_name = 'daily_retention'").get() as { completed_day: string | null; claim_token: string | null };
+			assert.equal(maintenance.completed_day, scenario === 'maintenance_failure' ? null : new Date().toISOString().slice(0, 10));
+			assert.equal(maintenance.claim_token, null);
+			const feeds = state.database.prepare('SELECT feed_key, next_fetch_at, consecutive_failures, last_refresh_outcome, refresh_lease_token, item_count FROM feeds ORDER BY feed_key').all() as Array<{
+				feed_key: string; next_fetch_at: string | null; consecutive_failures: number; last_refresh_outcome: string | null; refresh_lease_token: string | null; item_count: number;
+			}>;
+			assert.ok(feeds.every((feed) => feed.refresh_lease_token === null || (scenario === 'lost_ownership' && feed.feed_key === 'cron-0' && feed.refresh_lease_token === 'other-owner')));
+			if (scenario === 'small' || scenario === 'maintenance_completed') assert.equal(feeds.filter((feed) => feed.last_refresh_outcome === 'success').length, 5);
+			if (scenario === 'large_redirects') {
+				assert.ok(feeds.some((feed) => feed.last_refresh_outcome === 'success'));
+				assert.ok(feeds.some((feed) => feed.last_refresh_outcome === null));
+				for (const deferred of feeds.filter((feed) => feed.last_refresh_outcome === null)) {
+					assert.equal(deferred.next_fetch_at, null);
+					assert.equal(deferred.consecutive_failures, 0);
+					assert.equal(deferred.item_count, 0);
+					assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM refresh_activity WHERE feed_key = ?').get(deferred.feed_key) as { count: number }).count, 0);
+				}
+				for (let attempt = 0; attempt < 4; attempt += 1) {
+					limits.queries = 0;
+					await handleCronTrigger(env);
+					assert.ok(limits.queries <= 50);
+				}
+				assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM feeds WHERE last_refresh_outcome = 'success'").get() as { count: number }).count, 5);
+			}
+			if (scenario === 'mixed_failures') {
+				assert.equal(feeds[1].last_refresh_outcome, 'http_error');
+				assert.equal(feeds[2].last_refresh_outcome, 'network_error');
+				assert.equal(feeds[1].consecutive_failures, 1);
+				assert.equal(feeds[2].consecutive_failures, 1);
+			}
+			if (scenario === 'maintenance_failure') {
+				state.database.exec('DROP TRIGGER reject_maintenance');
+				limits.queries = 0;
+				await handleCronTrigger(env);
+				assert.ok(limits.queries <= 50);
+				assert.equal((state.database.prepare("SELECT completed_day FROM maintenance_state WHERE job_name = 'daily_retention'").get() as { completed_day: string }).completed_day, new Date().toISOString().slice(0, 10));
+				assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM feeds WHERE last_refresh_outcome = 'success'").get() as { count: number }).count, 5);
+			}
+			if (scenario === 'persistence_failure') {
+				assert.equal(feeds[0].last_refresh_outcome, null);
+				assert.equal(feeds[0].item_count, 0);
+				state.database.exec('DROP TRIGGER reject_activity');
+				limits.queries = 0;
+				await handleCronTrigger(env);
+				assert.ok(limits.queries <= 50);
+				assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM feeds WHERE last_refresh_outcome = 'success'").get() as { count: number }).count, 5);
+			}
+			if (scenario === 'claim_failure') {
+				assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 0);
+			}
+			if (scenario === 'lost_ownership') assert.equal(feeds[0].last_refresh_outcome, null);
 		} finally {
 			globalThis.fetch = originalFetch;
 			state.database.close();

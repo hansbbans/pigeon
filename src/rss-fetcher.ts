@@ -31,11 +31,54 @@ export interface FeedToFetch {
 	content_hash?: string | null;
 	conditional_checked_at?: string | null;
 	refresh_lease_token?: string | null;
+	queryReservation?: RefreshQueryReservation;
+}
+
+/** Shared invocation allowance; reservations happen synchronously before D1 awaits. */
+export class RefreshQueryBudget {
+	constructor(private remaining: number) {}
+
+	reserve(count: number): boolean {
+		if (count > this.remaining) return false;
+		this.remaining -= count;
+		return true;
+	}
+
+	refund(count: number): void { this.remaining += count; }
+
+	reserveFeedClaim(): RefreshQueryReservation | null {
+		// Claim, baseline lookup, and a guaranteed conditional lease release.
+		return this.reserve(3) ? new RefreshQueryReservation(this) : null;
+	}
+}
+
+export class RefreshQueryReservation {
+	private releaseAvailable = true;
+	constructor(readonly budget: RefreshQueryBudget) {}
+
+	consumeRelease(): boolean {
+		if (!this.releaseAvailable) return false;
+		this.releaseAvailable = false;
+		return true;
+	}
+
+	finish(): void {
+		if (!this.releaseAvailable) return;
+		this.releaseAvailable = false;
+		this.budget.refund(1);
+	}
+
+	unclaimed(): void {
+		this.finish();
+		this.skipBaseline();
+	}
+
+	skipBaseline(): void { this.budget.refund(1); }
 }
 
 export interface RefreshResult {
 	feedKey: string;
-	outcome: RefreshOutcome;
+	outcome: RefreshOutcome | 'budget_deferred';
 	attemptedAt: string;
 	completedAt: string;
 	durationMs: number;
@@ -406,7 +449,17 @@ async function finalizeRefresh(
 	result: RefreshResult,
 	content: SuccessfulContent | null,
 ): Promise<RefreshResult> {
-	if (await persistRefresh(env, feed, result, content)) return result;
+	const persistence = await persistRefresh(env, feed, result, content);
+	if (persistence === 'saved') return result;
+	if (persistence === 'budget_deferred') {
+		return {
+			...result,
+			outcome: 'budget_deferred',
+			itemsProcessed: 0,
+			errorCode: 'query_budget_deferred',
+			errorMessage: 'Refresh deferred until the next scheduled invocation',
+		};
+	}
 
 	const completedAt = new Date().toISOString();
 	const leaseLost = makeResult({
@@ -418,7 +471,10 @@ async function finalizeRefresh(
 		errorCode: 'lease_lost',
 		errorMessage: 'Refresh ownership expired before content could be saved',
 	});
-	await activityStatement(env.DB, leaseLost).run();
+	const reservation = feed.queryReservation;
+	if (!reservation || reservation.consumeRelease() || reservation.budget.reserve(1)) {
+		await activityStatement(env.DB, leaseLost).run();
+	}
 	return leaseLost;
 }
 
@@ -533,20 +589,8 @@ async function persistRefresh(
 	feed: FeedToFetch,
 	result: RefreshResult,
 	content: SuccessfulContent | null,
-): Promise<boolean> {
-	if (feed.refresh_lease_token) {
-		const renewedUntil = new Date(
-			Date.now() + PERSISTENCE_LEASE_MINUTES * 60_000,
-		).toISOString();
-		const renewal = await env.DB.prepare(
-			`UPDATE feeds
-			 SET refresh_lease_until = ?
-			 WHERE feed_key = ? AND refresh_lease_token = ?`,
-		)
-			.bind(renewedUntil, feed.feed_key, feed.refresh_lease_token)
-			.run();
-		if (renewal.meta.changes === 0) return false;
-	}
+): Promise<'saved' | 'lease_lost' | 'budget_deferred'> {
+	if (result.outcome === 'budget_deferred') return 'budget_deferred';
 
 	const succeeded = ['success', 'not_modified', 'unchanged'].includes(result.outcome);
 	const nextFetchAt = computeNextFetchAt(new Date(result.completedAt), {
@@ -659,8 +703,32 @@ async function persistRefresh(
 
 	statements.push(activityStatement(env.DB, result));
 
-	await env.DB.batch(statements);
-	return true;
+	const reservation = feed.queryReservation;
+	const persistenceCost = statements.length + (feed.refresh_lease_token ? 1 : 0);
+	if (reservation && !reservation.budget.reserve(persistenceCost)) {
+		if (reservation.consumeRelease() || reservation.budget.reserve(1)) {
+			await env.DB.prepare(
+				`UPDATE feeds SET refresh_lease_until = NULL, refresh_lease_token = NULL
+				 WHERE feed_key = ? AND refresh_lease_token = ?`,
+			).bind(feed.feed_key, feed.refresh_lease_token).run();
+		}
+		return 'budget_deferred';
+	}
+	if (feed.refresh_lease_token) {
+		const renewedUntil = new Date(Date.now() + PERSISTENCE_LEASE_MINUTES * 60_000).toISOString();
+		const renewal = await env.DB.prepare(
+			`UPDATE feeds SET refresh_lease_until = ?
+			 WHERE feed_key = ? AND refresh_lease_token = ?`,
+		).bind(renewedUntil, feed.feed_key, feed.refresh_lease_token).run();
+		if (renewal.meta.changes === 0) {
+			reservation?.budget.refund(statements.length);
+			return 'lease_lost';
+		}
+	}
+	const results = await env.DB.batch(statements);
+	const feedUpdateResult = results?.[content?.statements.length ?? 0];
+	if (feedUpdateResult?.meta?.changes === 0 || feedUpdateResult?.meta?.changes === 1) reservation?.finish();
+	return 'saved';
 }
 
 function activityStatement(db: D1Database, result: RefreshResult): D1PreparedStatement {
