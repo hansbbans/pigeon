@@ -857,6 +857,34 @@ test('For You retains forty publisher slices and topic matches within one databa
 });
 
 
+for (const endpoint of ['stream/items/ids', 'stream/contents/reading-list']) {
+	test(`GReader ${endpoint} keeps negative and malformed page sizes bounded`, async () => {
+		const state = fixture();
+		try {
+			insertLibrary(state.database);
+			const insert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, 'design-weekly', 'Article', '<p>Body</p>', ?, '2026-08-15T12:00:00.000Z')`);
+			for (let index = 0; index < 29; index += 1) insert.run(`page-item-${index}`, `page-message-${index}`);
+			const password = 'page-bounds-password';
+			const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+			for (const [size, expectedCount] of [
+				['-2', 1], ['0', 0], ['garbage', endpoint === 'stream/items/ids' ? 30 : 20],
+				['9'.repeat(400), endpoint === 'stream/items/ids' ? 30 : 20],
+				['3', 3], ['12junk', 12], ['999999999999999999999999999', 30],
+			] as const) {
+				const response = await handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/${endpoint}?n=${size}`, {
+					headers: { Authorization: auth },
+				}), env);
+				assert.equal(response.status, 200, size);
+				const body = await response.json() as { items?: unknown[]; itemRefs?: unknown[]; continuation?: string };
+				assert.equal((body.items ?? body.itemRefs ?? []).length, expectedCount, size);
+				assert.equal(Boolean(body.continuation), expectedCount > 0 && expectedCount < 30, size);
+			}
+		} finally { state.database.close(); }
+	});
+}
+
 for (const endpoint of ['stream/items/contents', 'edit-tag']) {
 	test(`GReader ${endpoint} ignores malformed IDs instead of selecting an unrelated numeric item`, async () => {
 		const state = fixture();

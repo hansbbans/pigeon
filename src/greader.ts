@@ -92,6 +92,12 @@ const MAX_D1_BATCH_STATEMENTS = 50;
 
 const STREAM_CONTINUATION_VERSION = 1;
 
+function parsePageSize(value: string | null, fallback: number, maximum: number): number {
+	const parsed = Number.parseInt(value ?? '', 10);
+	if (parsed === 0) return 0;
+	return Math.min(Math.max(Number.isFinite(parsed) ? parsed : fallback, 1), maximum);
+}
+
 interface StreamCursor {
 	v: number;
 	streamId: string;
@@ -770,7 +776,7 @@ function createItemsEnvelope(items: Awaited<ReturnType<typeof loadResponseItems>
 async function handleStreamItemIds(request: Request, url: URL, env: Env): Promise<Response> {
 	const params = await parseRequestParams(request, url);
 	const streamId = params.get('s') || '';
-	const n = Math.min(parseInt(params.get('n') || '1000', 10), 10000);
+	const n = parsePageSize(params.get('n'), 1000, 10000);
 	const xt = params.get('xt') || '';
 	const ot = params.get('ot') || '';
 	const c = params.get('c') || '';
@@ -859,7 +865,7 @@ function resolveContentsStreamId(path: string, params: URLSearchParams): string 
 async function handleStreamContents(request: Request, url: URL, env: Env): Promise<Response> {
 	const params = await parseRequestParams(request, url);
 	const streamId = resolveContentsStreamId(url.pathname, params);
-	const n = Math.min(parseInt(params.get('n') || '20', 10), 1000);
+	const n = parsePageSize(params.get('n'), 20, 1000);
 	const xt = params.get('xt') || '';
 	const ot = params.get('ot') || '';
 	const c = params.get('c') || '';
