@@ -111,6 +111,15 @@ test('Atom namespace redeclarations stay local and foreign element names remain 
 	assert.equal(rss.link, 'https://example.com/rss');
 });
 
+test('large inherited namespace scopes keep local redeclarations and unusual prefix names independent', () => {
+	const declarations = Array.from({ length: 25_000 }, (_, index) => `xmlns:p${index}="https://example.com/extension/${index}"`).join(' ');
+	const entries = Array.from({ length: 50 }, (_, index) => `<entry xmlns:a="http://www.w3.org/2005/Atom"><id>${index}</id><a:title>Article ${index}</a:title><content>Body</content></entry>`).join('');
+	const feed = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom" xmlns:__proto__="http://www.w3.org/2005/Atom" xmlns:constructor="http://www.w3.org/2005/Atom" ${declarations}><__proto__:title>Large feed</__proto__:title><constructor:author><constructor:name>Ada</constructor:name></constructor:author>${entries}</feed>`);
+	assert.equal(feed.title, 'Large feed');
+	assert.equal(feed.items.length, 50);
+	assert.deepEqual(feed.items.map((item) => [item.title, item.author]), Array.from({ length: 50 }, (_, index) => [`Article ${index}`, 'Ada']));
+});
+
 test('relative enclosure and media URLs resolve against the feed home page', () => {
 	const expectedUrls = new Map([
 		['rss2-relative-media', ['https://example.com/images/photo.jpg', 'https://example.com/audio/episode.mp3']],

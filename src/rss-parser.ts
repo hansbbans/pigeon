@@ -53,18 +53,29 @@ const XML_OPTIONS = {
 	removeNSPrefix: false,
 };
 
-function namespaceScope(record: FeedRecord, inherited = new Map<string, string>()): Map<string, string> {
-	const namespaces = new Map(inherited);
+class NamespaceScope {
+	constructor(private readonly declarations = new Map<string, string>(), private readonly parent?: NamespaceScope) {}
+
+	get(prefix: string): string | undefined {
+		return this.declarations.has(prefix) ? this.declarations.get(prefix) : this.parent?.get(prefix);
+	}
+}
+
+const EMPTY_NAMESPACES = new NamespaceScope();
+
+function namespaceScope(record: FeedRecord, inherited = EMPTY_NAMESPACES): NamespaceScope {
+	let declarations: Map<string, string> | undefined;
 	for (const [key, value] of Object.entries(record)) {
 		if (typeof value !== 'string') continue;
-		if (key === '@_xmlns') namespaces.set('', value);
-		else if (key.startsWith('@_xmlns:')) namespaces.set(key.slice('@_xmlns:'.length), value);
+		const prefix = key === '@_xmlns' ? '' : key.startsWith('@_xmlns:') ? key.slice('@_xmlns:'.length) : undefined;
+		if (prefix === undefined) continue;
+		(declarations ??= new Map()).set(prefix, value);
 	}
-	return namespaces;
+	return declarations ? new NamespaceScope(declarations, inherited) : inherited;
 }
 
 function createFeedXmlParser(): XMLParser {
-	const scopes: Map<string, string>[] = [];
+	const scopes: NamespaceScope[] = [];
 	const elementNamespaces: Array<string | undefined> = [];
 	let atomRoot = false;
 	return new XMLParser({
