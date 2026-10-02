@@ -4679,6 +4679,50 @@ test('a stale failed login cannot log out a newer successful login', async () =>
 	assert.equal(elements.get('login-error')?.textContent, '');
 });
 
+test('a truncated login response shows an error and permits a successful retry', async () => {
+	let loginRequests = 0;
+	const { elements, storage } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input === '/accounts/ClientLogin') {
+			if (++loginRequests === 1) {
+				return new Response(new ReadableStream({ start(controller) {
+					controller.error(new TypeError('Connection terminated'));
+				} }));
+			}
+			return new Response('Auth=pigeon/retry-token');
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await elements.get('login-form')?.dispatch('submit');
+	assert.equal(elements.get('login-error')?.textContent, 'Could not reach the server.');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false);
+	assert.equal(storage.has(AUTH_STORAGE_KEY), false);
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => elements.get('reader-shell')?.classList.contains('hidden') === false);
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'retry-token');
+	assert.equal(elements.get('login-error')?.textContent, '');
+});
+
+test('an older truncated login body cannot log out a newer successful session', async () => {
+	let oldBody: ReadableStreamDefaultController<Uint8Array> | undefined;
+	let loginRequests = 0;
+	const { elements, storage } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input === '/accounts/ClientLogin') {
+			return ++loginRequests === 1
+				? new Response(new ReadableStream<Uint8Array>({ start(controller) { oldBody = controller; } }))
+				: new Response('Auth=pigeon/new-token');
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	const firstAttempt = elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	await elements.get('login-form')?.dispatch('submit');
+	oldBody?.error(new TypeError('Old connection terminated'));
+	await firstAttempt;
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'new-token');
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+	assert.equal(elements.get('login-error')?.textContent, '');
+});
+
 test('Today refresh clears an old day boundary and loads new continuation pages', async () => {
 	const now = new Date(2026, 2, 20, 12).getTime();
 	const bounds = getLocalDayBounds(new Date(now));

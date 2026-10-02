@@ -3820,7 +3820,14 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
-    const text = await response.text();
+    let text;
+    try {
+      text = await response.text();
+    } catch (_error) {
+      if (attemptId !== activeLoginAttemptId) return false;
+      setLoggedOut('Could not reach the server.');
+      return false;
+    }
     if (attemptId !== activeLoginAttemptId) return false;
     const token = client.extractAuthToken(text);
     if (!token) {
