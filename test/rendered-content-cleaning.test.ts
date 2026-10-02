@@ -121,7 +121,7 @@ class FakePreparedStatement {
 	}
 }
 
-function createEnv() {
+function createEnv(htmlContent = HTML_WITH_STYLE) {
 	const items = [
 		{
 			rowid: 1,
@@ -129,7 +129,7 @@ function createEnv() {
 			feed_key: 'sender-example-com',
 			from_name: 'Example Sender',
 			subject: 'Styled newsletter',
-			html_content: HTML_WITH_STYLE,
+			html_content: htmlContent,
 			text_content: ' Hello from a stored item. ',
 			original_url: 'https://example.com/posts/styled-newsletter',
 			received_at: '2026-03-20T12:34:56.000Z',
@@ -198,6 +198,25 @@ test('createRenderedContent unwraps email wrappers even when a tracker image is 
 
 	assert.match(rendered, /Tracker sibling should not block unwrap\./);
 	assert.doesNotMatch(rendered, /<table|open\.convertkit-mail\.com/i);
+});
+
+test('email cleaning preserves article images whose dimensions begin with one', () => {
+	const images = [
+		'<img src="https://images.example/width-100.jpg" width="100">',
+		"<img src='https://images.example/height-1200.jpg' height='1200'>",
+		'<img src="https://images.example/width-1920.jpg" width=1920>',
+		'<img src="https://images.example/width-percent.jpg" width="100%">',
+		'<img src="https://images.example/height-percent.jpg" height="1%">',
+		'<img src="https://images.example/data-width.jpg" data-width="1">',
+		'<img src="https://images.example/alt-width.jpg" alt=\'Diagram with width="1" marker\'>',
+	];
+	const rendered = createRenderedContent({ htmlContent: `<html><body><p>Article images</p>${images.join('')}
+		<img src="https://images.example/pixel-width.gif" width="1">
+		<img src="https://images.example/pixel-height.gif" height=1>
+		<img src="https://images.example/pixel-px.gif" height='1px'>
+		</body></html>` });
+	for (const image of images) assert.ok(rendered.includes(image), image);
+	assert.doesNotMatch(rendered, /pixel-width|pixel-height|pixel-px/);
 });
 
 test('createRenderedContent leaves existing html fragments unchanged', () => {
@@ -308,6 +327,28 @@ test('handleGreaderRequest returns the full cleaned article body in both summary
 	assert.equal(payload.items[0].summary.content, payload.items[0].content.content);
 	assert.match(payload.items[0].content.content, /<p>Hello from a stored item\.<\/p>/);
 	assert.doesNotMatch(payload.items[0].content.content, /<!doctype|<html|<head|<body/i);
+});
+
+test('Atom and GReader article bodies retain ordinary newsletter images while dropping tracking pixels', async () => {
+	const image = '<img src="https://images.example/article.jpg" width="1200" height="100">';
+	const html = `<html><body><p>Article with an illustration.</p>${image}<img src="https://images.example/tracker.gif" width="1" height="1"></body></html>`;
+	const xml = await generateAtomFeed(
+		{ feed_key: 'sender-example-com', display_name: 'Example Sender', from_email: 'sender@example.com', custom_title: null },
+		[{ id: '9c2772b1-1e53-4de8-89a6-77af6fb9c104', subject: 'Illustrated newsletter', html_content: html,
+			text_content: null, original_url: null, from_name: 'Example Sender', from_email: 'sender@example.com', received_at: '2026-10-01T12:00:00.000Z' }],
+		'https://pigeon.example',
+	);
+	assert.ok(xml.includes(image));
+	assert.doesNotMatch(xml, /tracker\.gif/);
+	const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+		headers: { Authorization: await generateAuthHeader('secret-password') },
+	}), createEnv(html) as never);
+	assert.equal(response.status, 200);
+	const body = await response.json() as { items: { content: { content: string }; summary: { content: string } }[] };
+	assert.equal(body.items.length, 1);
+	assert.ok(body.items[0].content.content.includes(image));
+	assert.doesNotMatch(body.items[0].content.content, /tracker\.gif/);
+	assert.equal(body.items[0].content.content, body.items[0].summary.content);
 });
 
 test('handleGreaderRequest accepts item ids passed in the query string for stream/items/contents', async () => {

@@ -61,7 +61,15 @@ function stripNonContentBlocks(html: string): string {
 function stripTrackingPixels(html: string): string {
 	return html
 		.replace(/<img\b[^>]*https?:\/\/[^"'>\s]*open\.convertkit-mail\.com[^>]*>/gi, '')
-		.replace(/<img\b[^>]*(?:width|height)\s*=\s*["']?1["']?[^>]*>/gi, '');
+		.replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (image) => {
+			const attributes = /\s+([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+			for (const attribute of image.matchAll(attributes)) {
+				if (!/^(?:width|height)$/i.test(attribute[1])) continue;
+				const value = (attribute[2] ?? attribute[3] ?? attribute[4]).trim();
+				if (/^1(?:\.0+)?(?:px)?$/i.test(value)) return '';
+			}
+			return image;
+		});
 }
 
 function normalizeWhitespaceAroundHtml(html: string): string {
