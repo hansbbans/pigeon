@@ -230,7 +230,15 @@ function decodeContinuation(
 	}
 }
 
-async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, string[]>> {
+type FeedMembership = { feedKeys: string[] } | { itemRowids: number[] };
+
+function feedMembershipSql(membership: FeedMembership): string {
+	return 'itemRowids' in membership
+		? 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))'
+		: 'SELECT value FROM json_each(?)';
+}
+
+async function loadFeedTags(env: Env, membership?: FeedMembership): Promise<Map<string, string[]>> {
 	const tagsByFeedKey = new Map<string, string[]>();
 	const addTag = (feedKey: string, label: string | null) => {
 		if (!label) {
@@ -243,16 +251,18 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 		}
 	};
 
-	const hasFeedKeyFilter = feedKeys !== undefined;
-	const filteredFeedKeys = [...new Set(feedKeys ?? [])];
-	if (hasFeedKeyFilter && filteredFeedKeys.length === 0) {
+	const hasFeedKeyFilter = membership !== undefined;
+	const values: Array<string | number> = membership === undefined
+		? []
+		: 'itemRowids' in membership ? membership.itemRowids : membership.feedKeys;
+	if (hasFeedKeyFilter && values.length === 0) {
 		return tagsByFeedKey;
 	}
 
-	const keyPages = hasFeedKeyFilter ? membershipPages(filteredFeedKeys) : [null];
+	const keyPages = hasFeedKeyFilter ? membershipPages([...new Set(values)]) : [null];
 	for (const feedKeyPage of keyPages) {
-		const feedKeyCondition = hasFeedKeyFilter
-			? ' AND f.feed_key IN (SELECT value FROM json_each(?))'
+		const feedKeyCondition = membership
+			? ` AND f.feed_key IN (${feedMembershipSql(membership)})`
 			: '';
 
 		try {
@@ -274,8 +284,8 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 			}
 		}
 
-		const categoryFeedKeyCondition = hasFeedKeyFilter
-			? ' AND feed_key IN (SELECT value FROM json_each(?))'
+		const categoryFeedKeyCondition = membership
+			? ` AND feed_key IN (${feedMembershipSql(membership)})`
 			: '';
 		const { results: categoryResults } = await env.DB.prepare(
 			`SELECT feed_key, category
@@ -442,7 +452,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		site_url: string | null;
 	}>();
 
-	const tagsByFeedKey = await loadFeedTags(env, results.map((f) => f.feed_key));
+	const tagsByFeedKey = await loadFeedTags(env, { feedKeys: results.map((f) => f.feed_key) });
 	const subscriptions = results.map((f) => ({
 		id: `feed/${f.rowid}`,
 		title: f.custom_title || f.display_name,
@@ -467,7 +477,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		count: number;
 		newest: string;
 	}>();
-	const tagsByFeedKey = await loadFeedTags(env, results.map((row) => row.feed_key));
+	const tagsByFeedKey = await loadFeedTags(env, { feedKeys: results.map((row) => row.feed_key) });
 
 	let totalUnreadCount = 0;
 	let newestUnreadUsec = '0';
@@ -696,8 +706,11 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 	);
 	const items = itemResults.flatMap((result) => result.results);
 
-	const feedKeys = [...new Set(items.map((i) => i.feed_key))];
-	const feedTagsByKey = await loadFeedTags(env, feedKeys);
+	// Publisher keys can be several KB long. Derive their membership in SQLite
+	// from the compact item rowids instead of repeating those keys in bindings.
+	const foundRowids = items.map((item) => item.rowid);
+	const membership = { itemRowids: foundRowids };
+	const feedTagsByKey = await loadFeedTags(env, membership);
 	const feedMap = new Map<
 		string,
 		{
@@ -710,13 +723,13 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		}
 	>();
 
-	if (feedKeys.length > 0) {
+	if (foundRowids.length > 0) {
 		const feedResults = await Promise.all(
-			membershipPages(feedKeys).map((feedKeyPage) => {
+			membershipPages(foundRowids).map((rowidPage) => {
 				return env.DB.prepare(
-					'SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (SELECT value FROM json_each(?))',
+					`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${feedMembershipSql(membership)})`,
 				)
-					.bind(feedKeyPage)
+					.bind(rowidPage)
 					.all<{
 						rowid: number;
 						feed_key: string;

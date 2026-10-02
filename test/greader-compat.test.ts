@@ -260,6 +260,15 @@ function createReaderApiEnv(
 			return this;
 		}
 
+		private requestedFeedKeys(): Set<string> {
+			const values = this.values.length > 0 ? JSON.parse(String(this.values[0])) as Array<string | number> : [];
+			if (this.sql.includes('SELECT feed_key FROM items WHERE rowid IN')) {
+				const rowids = new Set(values);
+				return new Set(items.filter((item) => rowids.has(item.rowid)).map((item) => item.feed_key));
+			}
+			return new Set(values.map(String));
+		}
+
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
 				return { value: '13' } as T;
@@ -378,7 +387,7 @@ function createReaderApiEnv(
 					placeholderCount <= 100,
 					`expected batched feed lookup to stay within D1 parameter limit, got ${placeholderCount}`,
 				);
-				const requestedFeedKeys = new Set((JSON.parse(String(this.values[0])) as string[]));
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds.filter((feed) => requestedFeedKeys.size === 0 || requestedFeedKeys.has(feed.feed_key)) as T[],
 				};
@@ -397,7 +406,7 @@ function createReaderApiEnv(
 			}
 
 			if (this.sql.includes('JOIN feed_tags ft')) {
-				const requestedFeedKeys = new Set(this.values.length > 0 ? JSON.parse(String(this.values[0])) as string[] : []);
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds.flatMap((feed) =>
 						(feed.tags ?? [])
@@ -408,7 +417,7 @@ function createReaderApiEnv(
 			}
 
 			if (this.sql.includes('SELECT feed_key, category')) {
-				const requestedFeedKeys = new Set(this.values.length > 0 ? JSON.parse(String(this.values[0])) as string[] : []);
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds
 						.filter((feed) => requestedFeedKeys.size === 0 || requestedFeedKeys.has(feed.feed_key))

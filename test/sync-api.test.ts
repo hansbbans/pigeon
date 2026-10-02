@@ -968,15 +968,15 @@ for (const scenario of ['one publisher', 'distinct publishers']) {
 	});
 }
 
-for (const failLaterPage of [false, true]) {
-	test(`GReader long publisher memberships ${failLaterPage ? 'reject a failed later page without returning partial contents' : 'stay within bounded JSON parameters'}`, async () => {
+for (const failMetadataRead of [false, true]) {
+	test(`GReader long publisher memberships ${failMetadataRead ? 'reject a failed metadata read without returning partial contents' : 'stay within bounded JSON parameters'}`, async () => {
 		const state = fixture();
 		try {
 			const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES (?, ?, 'Legacy folder')");
 			const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
 			 VALUES (?, ?, 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
 			const form = new URLSearchParams();
-			for (let index = 0; index < 160; index += 1) {
+			for (let index = 0; index < 1_800; index += 1) {
 				const key = `rss-long-publisher-${index}-${'a'.repeat(7_900)}`;
 				feedInsert.run(key, `Publisher ${index}`);
 				state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES (?, 'Tagged folder')").run(key);
@@ -990,14 +990,19 @@ for (const failLaterPage of [false, true]) {
 			db.prepare = (sql) => {
 				const statement = prepare(sql);
 				const bind = statement.bind.bind(statement);
-				statement.bind = (...values) => {
-					assert.ok(values.length <= 100);
-					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
-					return bind(...values);
+			statement.bind = (...values) => {
+				assert.ok(values.length <= 100);
+				for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
+				if (sql.includes('SELECT feed_key FROM items WHERE rowid IN')) {
+					const plan = state.database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...values) as { detail: string }[];
+					assert.ok(plan.some((row) => row.detail.includes('SEARCH items USING INTEGER PRIMARY KEY')));
+					assert.ok(plan.every((row) => !/\bSCAN (?:items|i)\b/.test(row.detail)));
+				}
+				return bind(...values);
 				};
 				if (sql.startsWith('SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url')) {
 					metadataPages += 1;
-					if (failLaterPage && metadataPages === 2) statement.all = async () => { throw new Error('Injected later metadata failure'); };
+					if (failMetadataRead && metadataPages === 1) statement.all = async () => { throw new Error('Injected later metadata failure'); };
 				}
 				return statement;
 			};
@@ -1006,17 +1011,17 @@ for (const failLaterPage of [false, true]) {
 			const request = new Request('https://pigeon.example/reader/api/0/stream/items/contents', {
 				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
 			});
-			if (failLaterPage) {
+			if (failMetadataRead) {
 				await assert.rejects(handleGreaderRequest(request, env), /Injected later metadata failure/);
 			} else {
 				const response = await handleGreaderRequest(request, env);
 				const body = await response.json() as { items: { categories: string[]; origin: { title: string } }[] };
 				assert.equal(response.status, 200);
-				assert.equal(body.items.length, 160);
+				assert.equal(body.items.length, 1_800);
 				assert.ok(body.items.every((item) => item.categories.includes('user/-/label/Legacy folder') && item.categories.includes('user/-/label/Tagged folder')));
-				assert.equal(body.items[159].origin.title, 'Publisher 159');
-				assert.equal(metadataPages, 2);
-				assert.ok(limits.queries <= 10, `used ${limits.queries} statements`);
+				assert.equal(body.items[1_799].origin.title, 'Publisher 1799');
+				assert.equal(metadataPages, 1);
+				assert.ok(limits.queries <= 8, `used ${limits.queries} statements`);
 			}
 		} finally { state.database.close(); }
 	});
