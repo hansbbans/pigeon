@@ -857,6 +857,52 @@ test('For You retains forty publisher slices and topic matches within one databa
 });
 
 
+for (const endpoint of ['stream/items/contents', 'edit-tag']) {
+	test(`GReader ${endpoint} ignores malformed IDs instead of selecting an unrelated numeric item`, async () => {
+		const state = fixture();
+		try {
+			insertLibrary(state.database);
+			const password = 'item-identity-password';
+			const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+			const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const request = (ids: string[]) => {
+				const form = new URLSearchParams();
+				for (const id of ids) form.append('i', id);
+				form.set('a', 'user/-/state/com.google/read');
+				return new Request(`https://pigeon.example/reader/api/0/${endpoint}`, {
+					method: 'POST', headers: { Authorization: auth }, body: form,
+				});
+			};
+			for (const id of [
+				'11-not-an-item',
+				'11abcdef-1111-4111-8111-111111111111',
+				'tag:google.com,2005:reader/item/000000000000000b-invalid',
+				'tag:google.com,2005:reader/item/b',
+				' 11', '+11', '11.5', '11e2',
+			]) {
+				const response = await handleGreaderRequest(request([id]), env);
+				assert.equal(response.status, 200);
+				if (endpoint === 'stream/items/contents') {
+					assert.deepEqual((await response.json() as { items: unknown[] }).items, [], id);
+				} else {
+					assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 0, id);
+					assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0, id);
+				}
+			}
+			for (const id of ['11', '000000000000000b', 'tag:google.com,2005:reader/item/000000000000000b']) {
+				state.database.prepare('UPDATE items SET is_read = 0 WHERE rowid = 11').run();
+				const response = await handleGreaderRequest(request(['11-invalid', id]), env);
+				assert.equal(response.status, 200);
+				if (endpoint === 'stream/items/contents') {
+					assert.deepEqual((await response.json() as { items: Array<{ id: string }> }).items.map((item) => item.id), ['tag:google.com,2005:reader/item/000000000000000b']);
+				} else {
+					assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 1, id);
+				}
+			}
+		} finally { state.database.close(); }
+	});
+}
+
 test('GReader item contents preserve labels across more than one hundred publishers', async () => {
 	const state = fixture();
 	try {

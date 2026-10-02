@@ -9,18 +9,9 @@ import {
 	type ClientFamily,
 } from './engagement';
 import { ensureDatabaseSchema } from './migrations';
+import { parseGoogleReaderItemRowid } from './item-identity';
 
 // --- ID conversion utilities ---
-
-function parseItemId(id: string): number {
-	if (id.startsWith('tag:google.com,2005:reader/item/')) {
-		return parseInt(id.slice('tag:google.com,2005:reader/item/'.length), 16);
-	}
-	if (/^[0-9a-fA-F]{16}$/.test(id)) {
-		return parseInt(id, 16);
-	}
-	return parseInt(id, 10);
-}
 
 function toGoogleItemId(rowid: number): string {
 	return 'tag:google.com,2005:reader/item/' + rowid.toString(16).padStart(16, '0');
@@ -833,8 +824,8 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 	}
 
 	const rowids = ids
-		.map(parseItemId)
-		.filter((rowid) => Number.isFinite(rowid));
+		.map(parseGoogleReaderItemRowid)
+		.filter((rowid): rowid is number => rowid !== null);
 	if (rowids.length === 0) {
 		return Response.json(createItemsEnvelope([], 'user/-/state/com.google/reading-list'));
 	}
@@ -1040,7 +1031,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 	const addTag = body.get('a') as string | null;
 	const removeTag = body.get('r') as string | null;
 
-	const rowids = [...new Set(ids.map(parseItemId).filter((rowid) => Number.isFinite(rowid)))];
+	const rowids = [...new Set(ids.map(parseGoogleReaderItemRowid).filter((rowid): rowid is number => rowid !== null))];
 	if (rowids.length === 0) {
 		return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
 	}
