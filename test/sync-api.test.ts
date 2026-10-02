@@ -8,6 +8,7 @@ import { handleEngagementIngestion } from '../src/engagement';
 import { handleIncrementalSync } from '../src/sync-api';
 import { buildRssItemStatements, fetchAndStoreRssFeed } from '../src/rss-fetcher';
 import { handleCronTrigger } from '../src/cron-handler';
+import { handleStaleFeeds } from '../src/stale-feeds-api';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -712,3 +713,26 @@ for (const scenario of ['small', 'large_redirects', 'mixed_failures', 'maintenan
 		}
 	});
 }
+
+test('a maximum stale-feed archive batch stays atomic within the database query budget', async () => {
+	const state = fixture();
+	try {
+		const feedKeys = Array.from({ length: 100 }, (_, index) => `archive-${index}`);
+		for (let index = 0; index < feedKeys.length; index += 1) {
+			state.database.prepare('INSERT INTO feeds (feed_key, display_name, is_active) VALUES (?, ?, ?)')
+				.run(feedKeys[index], `Feed ${index}`, index === 99 ? 0 : 1);
+		}
+		for (const action of ['archive', 'unarchive']) {
+			const limits = { maxQueries: 50, queries: 0 };
+			const response = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds', {
+				method: 'POST', body: JSON.stringify({ action, feedKeys }),
+			}), { DB: new SqliteD1(state.database, limits) } as never);
+			assert.equal(response.status, 200);
+			assert.deepEqual(await response.json(), { action, feedKeys });
+			assert.equal(limits.queries, 1);
+			assert.equal((state.database.prepare('SELECT SUM(stale_archived) AS count FROM feeds').get() as { count: number }).count, action === 'archive' ? 99 : 0);
+		}
+	} finally {
+		state.database.close();
+	}
+});

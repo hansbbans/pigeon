@@ -73,9 +73,11 @@ async function updateArchiveState(request: Request, env: Env): Promise<Response>
 		return Response.json({ error: `feedKeys must contain 1-${MAX_BULK_FEEDS} unique valid keys` }, { status: 400 });
 	}
 	const archived = body.action === 'archive' ? 1 : 0;
-	await env.DB.batch(feedKeys.map((feedKey) =>
-		env.DB.prepare('UPDATE feeds SET stale_archived = ? WHERE feed_key = ? AND is_active = 1').bind(archived, feedKey)
-	));
+	await env.DB.batch([
+		env.DB.prepare(`UPDATE feeds SET stale_archived = ?
+		 WHERE feed_key IN (SELECT value FROM json_each(?)) AND is_active = 1`)
+			.bind(archived, JSON.stringify(feedKeys)),
+	]);
 	return Response.json({ action: body.action, feedKeys });
 }
 
