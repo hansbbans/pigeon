@@ -7,14 +7,19 @@ function normalizeWhitespace(value: string): string {
 	return value.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function decodeHtmlEntities(value: string): string {
-	return value
-		.replace(/&nbsp;/gi, ' ')
-		.replace(/&amp;/gi, '&')
-		.replace(/&lt;/gi, '<')
-		.replace(/&gt;/gi, '>')
-		.replace(/&quot;/gi, '"')
-		.replace(/&#39;|&apos;/gi, "'");
+export function decodeHtmlTextEntities(value: string): string {
+	const named: Record<string, string> = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+	return value.replace(/&(#x[0-9a-f]+|#\d+|nbsp|amp|lt|gt|quot|apos);/gi, (entity: string, body: string) => {
+		const normalized = body.toLowerCase();
+		if (!normalized.startsWith('#')) return named[normalized];
+		const hexadecimal = normalized.startsWith('#x');
+		const codePoint = Number.parseInt(normalized.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+		if (
+			!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff ||
+			(codePoint >= 0xd800 && codePoint <= 0xdfff)
+		) return entity;
+		return String.fromCodePoint(codePoint);
+	});
 }
 
 function stripHtmlToText(html: string): string {
@@ -56,8 +61,8 @@ export function createPreviewText(input: {
 
 	const rawHtml = input.htmlContent ?? '';
 	const normalizedText = looksLikeHtml(rawHtml)
-		? normalizeWhitespace(decodeHtmlEntities(stripHtmlToText(rawHtml)))
-		: normalizeWhitespace(decodeHtmlEntities(rawHtml));
+		? normalizeWhitespace(decodeHtmlTextEntities(stripHtmlToText(rawHtml)))
+		: normalizeWhitespace(decodeHtmlTextEntities(rawHtml));
 
 	return truncatePreview(normalizedText);
 }

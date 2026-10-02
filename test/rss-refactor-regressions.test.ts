@@ -688,6 +688,10 @@ test('fetchAndStoreRssFeed refreshes parent feed metadata after successful impor
 	assert.equal(metadataUpdate.values[3], 'https://example.com/');
 });
 
+test('RSS excerpts decode HTML entities once and preserve literal entity examples', () => {
+	assert.equal(htmlToBoundedText('<p>&amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa; &#x1f4aa; &#38;amp;</p>'), '&lt;code&gt; &amp; &#x1f4aa; 💪 &amp;');
+});
+
 test('fetchAndStoreRssFeed scopes message dedupe identity to the feed key', async () => {
 	installFeedFetch();
 	const db = new RecordingDb();

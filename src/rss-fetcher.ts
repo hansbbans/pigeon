@@ -19,6 +19,7 @@ import {
 import { parseFeed, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
 import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
+import { decodeHtmlTextEntities } from './preview-text';
 import type { Env } from './types';
 
 export interface FeedToFetch {
@@ -516,7 +517,7 @@ function escapeHtmlText(value: string): string {
  */
 export function htmlToBoundedText(value: string): string | null {
 	const source = value.slice(0, MAX_RSS_TEXT_SOURCE_SIZE);
-	const text = decodeHtmlEntities(
+	const text = decodeHtmlTextEntities(
 		source
 			.replace(/<!--[\s\S]*?(?:-->|$)/g, ' ')
 			.replace(/<head\b[^>]*>[\s\S]*?(?:<\/head\s*>|$)/gi, ' ')
@@ -531,31 +532,6 @@ export function htmlToBoundedText(value: string): string | null {
 		.trim()
 		.slice(0, MAX_RSS_TEXT_CONTENT_SIZE);
 	return normalized || null;
-}
-
-function decodeHtmlEntities(value: string): string {
-	return value
-		.replace(/&nbsp;|&#160;/gi, ' ')
-		.replace(/&amp;/gi, '&')
-		.replace(/&lt;/gi, '<')
-		.replace(/&gt;/gi, '>')
-		.replace(/&quot;|&#34;/gi, '"')
-		.replace(/&#39;|&apos;/gi, "'")
-		.replace(/&#x([0-9a-f]+);/gi, (entity: string, digits: string) => decodeNumericEntity(entity, digits, 16))
-		.replace(/&#(\d+);/g, (entity: string, digits: string) => decodeNumericEntity(entity, digits, 10));
-}
-
-function decodeNumericEntity(entity: string, digits: string, radix: number): string {
-	const codePoint = Number.parseInt(digits, radix);
-	if (
-		!Number.isInteger(codePoint) ||
-		codePoint < 0 ||
-		codePoint > 0x10ffff ||
-		(codePoint >= 0xd800 && codePoint <= 0xdfff)
-	) {
-		return entity;
-	}
-	return String.fromCodePoint(codePoint);
 }
 
 function makeResult(input: {

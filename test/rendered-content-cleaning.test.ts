@@ -180,6 +180,11 @@ test('createPreviewText strips CSS text when html is the only preview source', (
 	);
 });
 
+test('article previews decode HTML entities once and preserve literal entity examples', () => {
+	assert.equal(createPreviewText({ htmlContent: '<p>&amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa; &#x1f4aa; &#38;amp;</p>' }), '&lt;code&gt; &amp; &#x1f4aa; 💪 &amp;');
+	assert.equal(createPreviewText({ htmlContent: '<p>&#x110000; &#55296; &#xzz; &unknown;</p>' }), '&#x110000; &#55296; &#xzz; &unknown;');
+});
+
 test('createRenderedContent unwraps full email documents into reader-friendly fragments', () => {
 	const rendered = createRenderedContent({
 		htmlContent: FULL_EMAIL_HTML,

@@ -13,6 +13,7 @@ import { handleRecommendations } from '../src/recommendations';
 import { MONITORED_TOPICS_META_KEY } from '../src/topic-preferences';
 import { handleGreaderRequest } from '../src/greader';
 import { generateApiToken } from '../src/api-auth';
+import { generateAtomFeed } from '../src/feed';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -1336,6 +1337,25 @@ for (const format of ['atom', 'json']) {
 	});
 
 }
+
+test('literal entity examples survive fetched JSON text, stored excerpts and Atom summaries', async () => {
+	const state = fixture();
+	const originalFetch = globalThis.fetch;
+	try {
+		const plain = 'Literal &lt;code&gt; &amp; &#x1f4aa;';
+		state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('entity-feed', 'Entities', 'rss', 'https://feeds.example.com/entities')").run();
+		globalThis.fetch = async () => new Response(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Entities', items: [{ id: 'entity-story', title: 'Story', content_text: plain }] }));
+		assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'entity-feed', source_url: 'https://feeds.example.com/entities', etag: null, last_modified: null })).outcome, 'success');
+		const stored = state.database.prepare('SELECT * FROM items').get() as Parameters<typeof generateAtomFeed>[1][number];
+		assert.equal(stored.text_content, plain);
+		const xml = await generateAtomFeed({ feed_key: 'entity-feed', display_name: 'Entities', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example');
+		assert.ok(xml.includes('<summary type="text">Literal &amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa;</summary>'));
+		assert.ok(xml.includes('<content type="html"><![CDATA[<p>Literal &amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa;</p>]]></content>'));
+	} finally {
+		globalThis.fetch = originalFetch;
+		state.database.close();
+	}
+});
 
 for (const format of ['json', 'atom', 'prefixed-atom']) {
 	test(`inherited ${format} feed bylines reach stored articles and GReader responses`, async () => {
