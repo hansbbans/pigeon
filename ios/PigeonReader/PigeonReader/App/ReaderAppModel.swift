@@ -2916,7 +2916,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func addFeed(urlText: String, folderName: String?) async -> Bool {
-		guard let apiClient else {
+		guard let apiClient, let context = accountContext(for: apiClient) else {
 			return false
 		}
 		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2927,19 +2927,29 @@ final class ReaderAppModel {
 		}
 
 		do {
+			try Task.checkCancellation()
 			let result = try await apiClient.addSubscription(url: url)
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			if let folder = normalizedFolderName(folderName) {
 				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
+				try Task.checkCancellation()
+				guard isCurrentAccountOperation(context) else { return false }
 			}
 			settingsErrorMessage = nil
 			await loadLibrary(force: true, reportError: false)
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			if hasLoadedNavigation {
 				await loadNavigation(force: true, reportError: false)
 			}
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			return true
 		} catch let error where isCancellation(error) {
 			return false
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			await loadLibrary(force: true, reportError: false)
 			return false
@@ -2947,10 +2957,19 @@ final class ReaderAppModel {
 	}
 
 	func importOPML(_ preview: OPMLImportPreview) async throws -> OPMLImportResult {
-		guard let apiClient else { throw PigeonError.authenticationFailed }
-		let result = try await OPMLImportCoordinator.importPreview(preview, service: apiClient)
+		guard let apiClient, let context = accountContext(for: apiClient) else { throw PigeonError.authenticationFailed }
+		let validateContext = {
+			guard self.isCurrentAccountOperation(context) else { throw CancellationError() }
+		}
+		let result = try await OPMLImportCoordinator.importPreview(preview, service: apiClient, validateContext: validateContext)
+		try Task.checkCancellation()
+		try validateContext()
 		await loadLibrary(force: true)
+		try Task.checkCancellation()
+		try validateContext()
 		await loadNavigation(force: true)
+		try Task.checkCancellation()
+		try validateContext()
 		return result
 	}
 

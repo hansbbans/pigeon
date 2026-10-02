@@ -3925,6 +3925,91 @@ struct ReaderAppModelTests {
 		#expect(model.errorMessage == nil)
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: ["quickadd", "quickadd-failure", "folder", "refresh", "same-account"])
+	func addFeedCompletionDoesNotContinueAfterTheAccountChanges(phase: String) async throws {
+		let oldSession = try makeSession(token: "add-feed-original")
+		let pausedPath = phase == "folder" ? "/reader/api/0/subscription/edit" : phase == "refresh" ? "/reader/api/0/subscription/list" : "/reader/api/0/subscription/quickadd"
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: pausedPath,
+			pausedStatus: phase == "quickadd-failure" ? 503 : 200,
+			loginToken: phase == "same-account" ? oldSession.token : "add-feed-current",
+		)
+		let model = try makeModel(httpClient: transport, session: oldSession, offlineSynchronizationEnabled: false)
+		let add = Task { await model.addFeed(urlText: "https://example.com/feed.xml", folderName: "Imported") }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let current = makeSubscription(id: "feed/current", key: "current", title: "Current", folder: "Current")
+		installSubscriptions([current], on: model)
+		let currentNavigation = model.navigation
+		model.settingsErrorMessage = "Current settings message"
+		model.errorMessage = "Current reader message"
+		let countBeforeResume = await transport.requests.count
+		await transport.resume()
+		let added = await add.value
+
+		#expect(added == false)
+		#expect(model.subscriptions == [current])
+		#expect(model.navigation == currentNavigation)
+		#expect(model.settingsErrorMessage == "Current settings message")
+		#expect(model.errorMessage == "Current reader message")
+		#expect(await transport.requests.count == countBeforeResume)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["quickadd", "folder", "merge", "refresh"])
+	func opmlImportStopsAndRollsBackOnlyItsOriginalAccountWhenTheSessionChanges(phase: String) async throws {
+		let oldSession = try makeSession(token: "import-original-\(phase)")
+		let pausedPath = phase == "folder" || phase == "merge" ? "/reader/api/0/subscription/edit" : phase == "refresh" ? "/reader/api/0/subscription/list" : "/reader/api/0/subscription/quickadd"
+		let transport = PausingSubscriptionHTTPClient(pausedPath: pausedPath, loginToken: "import-current-\(phase)")
+		let model = try makeModel(httpClient: transport, session: oldSession, offlineSynchronizationEnabled: false)
+		let entries = [
+			OPMLFeedEntry(title: "One", url: try #require(URL(string: "https://one.example/feed")), folders: ["Imported"]),
+			OPMLFeedEntry(title: "Two", url: try #require(URL(string: "https://two.example/feed")), folders: []),
+		]
+		let preview = OPMLImportPreview(
+			entries: entries,
+			duplicateIDs: [],
+			folderMerges: phase == "merge" ? [OPMLFolderMerge(subscriptionID: "feed/existing", addingFolders: ["Imported"])] : [],
+		)
+		let operation = Task { try await model.importOPML(preview) }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let current = makeSubscription(id: "feed/current", key: "current", title: "Current", folder: "Current")
+		installSubscriptions([current], on: model)
+		let currentNavigation = model.navigation
+		model.settingsErrorMessage = "Current settings message"
+		model.errorMessage = "Current reader message"
+		let countBeforeResume = await transport.requests.count
+		await transport.resume()
+		do {
+			_ = try await operation.value
+			Issue.record("The previous account's import must finish as cancellation")
+		} catch {
+			#expect(error is CancellationError)
+		}
+
+		#expect(model.subscriptions == [current])
+		#expect(model.navigation == currentNavigation)
+		#expect(model.settingsErrorMessage == "Current settings message")
+		#expect(model.errorMessage == "Current reader message")
+		let followups = await transport.requests.dropFirst(countBeforeResume)
+		if phase == "refresh" {
+			// The import completed before the account changed; its finished server
+			// work stays valid, but its subsequent refresh cannot touch this account.
+			#expect(followups.isEmpty)
+		} else {
+			#expect(followups.count == 1)
+			#expect(followups.allSatisfy { $0.url?.path == "/reader/api/0/subscription/edit" })
+			#expect(followups.allSatisfy { $0.value(forHTTPHeaderField: "Authorization")?.contains(oldSession.token) == true })
+			let body = String(decoding: followups.first?.httpBody ?? Data(), as: UTF8.self)
+			#expect(body.contains(phase == "merge" ? "r=" : "ac=unsubscribe"))
+			#expect(body.contains("a=") == false)
+		}
+	}
+
 	@Test func invalidAddFeedURLStaysOffTheReaderBanner() async throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 
@@ -10405,5 +10490,61 @@ private actor PostAddYouTubeFeedHTTPClient: HTTPClient {
 		return Dictionary(grouping: queryItems, by: \.name).mapValues { items in
 			items.compactMap(\.value)
 		}
+	}
+}
+
+/// Deliberately ignores cancellation of an in-flight HTTP response so account
+/// boundaries are tested even when the server has already completed the request.
+private actor PausingSubscriptionHTTPClient: HTTPClient {
+	let pausedPath: String
+	let pausedStatus: Int
+	let loginToken: String
+	private(set) var requests: [URLRequest] = []
+	private var didPause = false
+	private var pausedResponse: CheckedContinuation<Void, Never>?
+	private var waiters: [CheckedContinuation<Void, Never>] = []
+
+	init(pausedPath: String, pausedStatus: Int = 200, loginToken: String) {
+		self.pausedPath = pausedPath
+		self.pausedStatus = pausedStatus
+		self.loginToken = loginToken
+	}
+
+	func waitUntilPaused() async {
+		if didPause { return }
+		await withCheckedContinuation { waiters.append($0) }
+	}
+
+	func resume() {
+		pausedResponse?.resume()
+		pausedResponse = nil
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		requests.append(request)
+		let url = try #require(request.url)
+		let isPausedRequest = url.path == pausedPath && didPause == false
+		if isPausedRequest {
+			await withCheckedContinuation { continuation in
+				pausedResponse = continuation
+				didPause = true
+				for waiter in waiters { waiter.resume() }
+				waiters.removeAll()
+			}
+		}
+		let body: Data
+		var status = isPausedRequest ? pausedStatus : 200
+		switch url.path {
+		case "/accounts/ClientLogin": body = Data("Auth=pigeon/\(loginToken)".utf8)
+		case "/reader/api/0/subscription/quickadd":
+			body = try JSONEncoder().encode(QuickAddResponse(query: "https://example.com/feed", numResults: 1, streamId: "feed/\(requests.count)", streamName: "Imported", isNew: true))
+		case "/reader/api/0/subscription/list": body = Data(#"{"subscriptions":[]}"#.utf8)
+		case "/reader/api/0/subscription/edit": body = Data("OK".utf8)
+		default:
+			body = Data("Unexpected refresh".utf8)
+			status = 503
+		}
+		let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+		return (body, response)
 	}
 }
