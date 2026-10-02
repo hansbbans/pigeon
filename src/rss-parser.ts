@@ -192,7 +192,7 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 			link,
 			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
 			content:
-				textValue(findKey(entry, ['content', 'summary'])) ??
+				atomContentValue(findKey(entry, ['content', 'summary'])) ??
 				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
 			author,
 			attachments: deduplicateAttachments([
@@ -208,6 +208,14 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 		items,
 		format: 'atom',
 	};
+}
+
+function atomContentValue(value: unknown): string | undefined {
+	const content = textValue(value);
+	if (content === undefined) return undefined;
+	const type = attributeValue(asRecord(value), ['type'])?.toLowerCase() ?? 'text';
+	if (type === 'html' || type === 'text/html') return content;
+	return type === 'text' || type.startsWith('text/') ? `<p>${escapePlainText(content)}</p>` : content;
 }
 
 function parseRss2Feed(channel: FeedRecord, sourceUrl?: string): ParsedFeed {

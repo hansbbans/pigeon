@@ -62,6 +62,21 @@ test('valid empty Atom and JSON feeds are accepted', () => {
 	}
 });
 
+test('Atom plain text content and summaries retain literal markup characters', () => {
+	const feed = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom"><title>Text</title>
+	 <entry><id>explicit</id><content type="text">Example: &lt;code&gt; &amp; symbols</content></entry>
+	 <entry><id>default</id><content>Example: &lt;code&gt; &amp; symbols</content></entry>
+	 <entry><id>summary</id><summary type="text">Example: &lt;code&gt; &amp; symbols</summary></entry>
+	 <entry><id>html</id><content type="html">&lt;p&gt;Actual markup &amp;amp; symbols&lt;/p&gt;</content></entry>
+	 <entry><id>mime-html</id><content type="text/html">&lt;p&gt;Actual markup&lt;/p&gt;</content></entry>
+	 <entry><id>mime-text</id><content type="text/plain">Example: &lt;code&gt; &amp; symbols</content></entry>
+	 </feed>`);
+	assert.deepEqual(feed.items.map((item) => item.content), [
+		'<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>',
+		'<p>Actual markup &amp; symbols</p>', '<p>Actual markup</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>',
+	]);
+});
+
 test('relative enclosure and media URLs resolve against the feed home page', () => {
 	const expectedUrls = new Map([
 		['rss2-relative-media', ['https://example.com/images/photo.jpg', 'https://example.com/audio/episode.mp3']],
