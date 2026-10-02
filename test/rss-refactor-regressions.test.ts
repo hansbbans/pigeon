@@ -9,7 +9,7 @@ import {
 import { subscribeToFeed } from '../src/subscribe';
 import { handleGreaderRequest } from '../src/greader';
 import { generateApiToken } from '../src/api-auth';
-import { resolveRssItemUrl, unwrapFeedBlitzUrl } from '../src/rss-links';
+import { resolveRssItemUrl, unwrapFeedBlitzUrl, rewriteRssContentLinks } from '../src/rss-links';
 
 const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -813,4 +813,19 @@ test('handleGreaderRequest wires quick-add requests through to subscription crea
 	const duplicatePayload = await duplicateResponse.json();
 	assert.equal(duplicatePayload.streamId, 'feed/1');
 	assert.equal(duplicatePayload.isNew, false);
+});
+
+
+test('content link rewriting only changes real URL attributes', () => {
+ const html = `<p>Example: href=&quot;/example&quot; and src=&quot;/image.png&quot;</p><a title="Example href='/literal' > text" data-href="/custom" href="/real">Link</a><img alt="src='/example.png'" data-src="/lazy.png" src=/real.png>`;
+ assert.equal(rewriteRssContentLinks(html, 'https://example.com/feed.xml'), `<p>Example: href=&quot;/example&quot; and src=&quot;/image.png&quot;</p><a title="Example href='/literal' > text" data-href="/custom" href="https://example.com/real">Link</a><img alt="src='/example.png'" data-src="/lazy.png" src="https://example.com/real.png">`);
+});
+
+
+test('content link rewriting leaves comments and raw-text examples intact', () => {
+ const examples = '<a href="/example">text</a>';
+ const comment = `<!-- ${examples} -->`;
+ const raw = ['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes'].map((name) => `<${name}>${examples}</${name}>`).join('');
+ assert.equal(rewriteRssContentLinks(`${comment}${raw}<a href="/real">Real</a>`, 'https://example.com/'), `${comment}${raw}<a href="https://example.com/real">Real</a>`);
+ assert.equal(rewriteRssContentLinks(`<!-- unfinished ${examples}`, 'https://example.com/'), `<!-- unfinished ${examples}`);
 });

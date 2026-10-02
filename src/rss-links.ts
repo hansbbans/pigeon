@@ -1,4 +1,6 @@
-const URL_ATTRIBUTE_PATTERN = /\b(href|src)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+const CONTENT_TAG_PATTERN = /<!--[\s\S]*?(?:-->|$)|<\/?[A-Za-z][A-Za-z0-9:-]*(?:[^<>"']|"[^"]*"|'[^']*')*>/g;
+const CONTENT_ATTRIBUTE_PATTERN = /([^\t\n\f\r =/>]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*("[^"]*"|'[^']*'|[^\t\n\f\r "'=<>`]+))?/g;
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']);
 
 function decodeHtmlEntities(value: string): string {
 	return value.replace(/&(#x[0-9a-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (entity, body: string) => {
@@ -290,13 +292,26 @@ export function rewriteRssContentLinks(html: string, baseUrl: string): string {
 		return html;
 	}
 
-	return html.replace(URL_ATTRIBUTE_PATTERN, (match, attributeName: string, rawValue: string) => {
-		const quote = rawValue.startsWith('"') || rawValue.startsWith("'") ? rawValue[0] : '"';
-		const unquotedValue = rawValue.startsWith('"') || rawValue.startsWith("'") ? rawValue.slice(1, -1) : rawValue;
-		const resolved = resolveUrl(unquotedValue, baseUrl);
-		if (!resolved) {
-			return match;
+	let rawTextTag: string | undefined;
+	return html.replace(CONTENT_TAG_PATTERN, (tag) => {
+		if (tag.startsWith('<!--')) return tag;
+		const nameMatch = tag.match(/^<(\/?)([A-Za-z][A-Za-z0-9:-]*)/)!;
+		const closing = nameMatch[1] === '/';
+		const name = nameMatch[2].toLowerCase();
+		if (rawTextTag) {
+			if (closing && name === rawTextTag && rawTextTag !== 'plaintext') rawTextTag = undefined;
+			return tag;
 		}
-		return `${attributeName}=${quote}${escapeHtmlAttribute(resolved)}${quote}`;
+		if (closing) return tag;
+		if (RAW_TEXT_TAGS.has(name)) rawTextTag = name;
+		const prefix = nameMatch[0];
+		const attributes = tag.slice(prefix.length, -1).replace(CONTENT_ATTRIBUTE_PATTERN, (attribute, attributeName: string, rawValue?: string) => {
+			if (!rawValue || !/^(?:href|src)$/i.test(attributeName)) return attribute;
+			const quoted = rawValue.startsWith('"') || rawValue.startsWith("'");
+			const quote = quoted ? rawValue[0] : '"';
+			const resolved = resolveUrl(quoted ? rawValue.slice(1, -1) : rawValue, baseUrl);
+			return resolved ? `${attributeName}=${quote}${escapeHtmlAttribute(resolved)}${quote}` : attribute;
+		});
+		return `${prefix}${attributes}>`;
 	});
 }

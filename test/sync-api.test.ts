@@ -1450,3 +1450,22 @@ for (const format of ['json', 'atom', 'prefixed-atom']) {
 		}
 	});
 }
+
+
+test('fetched plaintext attribute examples stay literal through storage and reader output', async () => {
+ const state = fixture();
+ const originalFetch = globalThis.fetch;
+ try {
+  state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('literal-link-feed', 'Examples', 'rss', 'https://feeds.example.com/examples')").run();
+  const text = 'Example: href="/example" and src="/image.png"';
+  globalThis.fetch = async () => new Response(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', items: [{ id: 'example', content_text: text }] }));
+  assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'literal-link-feed', source_url: 'https://feeds.example.com/examples', etag: null, last_modified: null })).outcome, 'success');
+  const stored = state.database.prepare('SELECT * FROM items').get() as Parameters<typeof generateAtomFeed>[1][number];
+  assert.equal(stored.text_content, text);
+  assert.equal(stored.html_content, '<p>Example: href=&quot;/example&quot; and src=&quot;/image.png&quot;</p>');
+  const password = 'test-password';
+  const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+  assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, stored.html_content);
+  assert.ok((await generateAtomFeed({ feed_key: 'literal-link-feed', display_name: 'Examples', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example')).includes(`<content type="html"><![CDATA[${stored.html_content}]]></content>`));
+ } finally { globalThis.fetch = originalFetch; state.database.close(); }
+});
