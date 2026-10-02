@@ -2591,6 +2591,112 @@ struct ReaderAppModelTests {
 		#expect(model.settingsErrorMessage == "Current stale-feed message")
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: ["success", "failure", "same-account"])
+	func oldRefreshDoesNotStartNavigationRequestsForTheNextSession(response: String) async throws {
+		let original = try makeSession(token: "refresh-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/api/v1/recommendations",
+			pausedStatus: response == "failure" ? 500 : 200,
+			loginToken: response == "same-account" ? original.token : "refresh-current",
+			responses: ["/api/v1/recommendations": try responseData(items: [makeArticle(id: "old-refresh-story")])],
+		)
+		let model = try makeModel(httpClient: transport, session: original, offlineSynchronizationEnabled: false)
+		let refresh = Task { await model.refresh(collection: .smart(.forYou)) }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let current = makeSubscription(id: "feed/current", key: "current", title: "Current", folder: nil)
+		installSubscriptions([current], on: model)
+		let currentArticle = makeArticle(id: "current-refresh-story")
+		model.setArticles([currentArticle], for: .forYou)
+		model.errorMessage = "Current reader message"
+		let countBeforeResume = await transport.requests.count
+		await transport.resume()
+		await refresh.value
+
+		#expect(await transport.requests.count == countBeforeResume)
+		#expect(model.errorMessage == "Current reader message")
+		#expect(model.allArticles(for: .forYou).map(\.id) == [currentArticle.id])
+		#expect(model.subscriptions == [current])
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["success", "failure", "same-account"])
+	func oldPersonalizationExportDoesNotReturnDataOrErrorsAfterTheSessionChanges(response: String) async throws {
+		let original = try makeSession(token: "export-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/api/v1/personalization",
+			pausedStatus: response == "failure" ? 500 : 200,
+			loginToken: response == "same-account" ? original.token : "export-current",
+			responses: ["/api/v1/personalization": Data(#"{"account":"original","preferences":[]}"#.utf8)],
+		)
+		let model = try makeModel(httpClient: transport, session: original, offlineSynchronizationEnabled: false)
+		let exporting = Task { await model.exportPersonalization() }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		model.settingsErrorMessage = "Current settings message"
+		await transport.resume()
+		let exported = await exporting.value
+
+		#expect(exported == nil)
+		#expect(model.settingsErrorMessage == "Current settings message")
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["mark", "undo", "mark-same-account", "undo-same-account"])
+	func oldBulkReadCompletionDoesNotReplayTheNextSessionsQueue(action: String) async throws {
+		let original = try makeSession(token: "bulk-original")
+		let sameAccount = action.hasSuffix("same-account")
+		let undoing = action.hasPrefix("undo")
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/unused", loginToken: sameAccount ? original.token : "bulk-current")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.newest, for: collection)
+		let oldAbove = makeArticle(id: "old-above", receivedAt: 200)
+		let oldBoundary = makeArticle(id: "old-boundary", receivedAt: 100)
+		model.setArticles([oldAbove, oldBoundary], for: collection)
+		if undoing { await model.markStoriesAboveAsRead(oldBoundary, in: collection) }
+		await store.pauseNextArticleSave()
+		let operation = Task {
+			if undoing { await model.undoLastBulkRead() }
+			else { await model.markStoriesAboveAsRead(oldBoundary, in: collection) }
+		}
+		await store.waitUntilArticleSaveIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.newest, for: collection)
+		let currentAbove = makeArticle(id: "current-above", receivedAt: 400)
+		let currentBoundary = makeArticle(id: "current-boundary", receivedAt: 300)
+		model.setArticles([currentAbove, currentBoundary], for: collection)
+		model.select(article: currentBoundary)
+		await model.markStoriesAboveAsRead(currentBoundary, in: collection)
+		let currentUndo = model.bulkReadUndoTitle
+		model.errorMessage = "Current reader message"
+		let queuedBeforeResume = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		let countBeforeResume = await transport.requests.count
+		await store.resumeArticleSave()
+		await operation.value
+
+		#expect(await transport.requests.count == countBeforeResume)
+		#expect(model.errorMessage == "Current reader message")
+		#expect(model.bulkReadUndoTitle == currentUndo)
+		#expect(model.selectedArticleID == currentBoundary.id)
+		#expect(model.allArticles(for: collection).first(where: { $0.id == currentAbove.id })?.isRead == true)
+		let queuedAfterResume = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(queuedAfterResume.map(\.mutation.id) == queuedBeforeResume.map(\.mutation.id))
+		#expect(queuedAfterResume.map(\.attempts) == queuedBeforeResume.map(\.attempts))
+		if sameAccount == false {
+			#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).count == (undoing ? 2 : 1))
+			#expect(try await store.loadSnapshot(accountID: original.storageIdentity).articlesByCollection[collection.id]?.first(where: { $0.id == oldAbove.id })?.isRead == !undoing)
+		}
+	}
+
 	@Test(.timeLimit(.minutes(1))) func accountSwitchDoesNotCarryBootstrapSelectionIntoTheNextAccount() async throws {
 		let firstSession = try makeSession(token: "bootstrap-first-account")
 		let secondSession = try makeSession(token: "bootstrap-second-account")
@@ -10615,15 +10721,17 @@ private actor PausingSubscriptionHTTPClient: HTTPClient {
 	let pausedPath: String
 	let pausedStatus: Int
 	let loginToken: String
+	let responses: [String: Data]
 	private(set) var requests: [URLRequest] = []
 	private var didPause = false
 	private var pausedResponse: CheckedContinuation<Void, Never>?
 	private var waiters: [CheckedContinuation<Void, Never>] = []
 
-	init(pausedPath: String, pausedStatus: Int = 200, loginToken: String) {
+	init(pausedPath: String, pausedStatus: Int = 200, loginToken: String, responses: [String: Data] = [:]) {
 		self.pausedPath = pausedPath
 		self.pausedStatus = pausedStatus
 		self.loginToken = loginToken
+		self.responses = responses
 	}
 
 	func waitUntilPaused() async {
@@ -10650,15 +10758,19 @@ private actor PausingSubscriptionHTTPClient: HTTPClient {
 		}
 		let body: Data
 		var status = isPausedRequest ? pausedStatus : 200
-		switch url.path {
-		case "/accounts/ClientLogin": body = Data("Auth=pigeon/\(loginToken)".utf8)
-		case "/reader/api/0/subscription/quickadd":
-			body = try JSONEncoder().encode(QuickAddResponse(query: "https://example.com/feed", numResults: 1, streamId: "feed/\(requests.count)", streamName: "Imported", isNew: true))
-		case "/reader/api/0/subscription/list": body = Data(#"{"subscriptions":[]}"#.utf8)
-		case "/reader/api/0/subscription/edit": body = Data("OK".utf8)
-		default:
-			body = Data("Unexpected refresh".utf8)
-			status = 503
+		if let response = responses[url.path] {
+			body = response
+		} else {
+			switch url.path {
+			case "/accounts/ClientLogin": body = Data("Auth=pigeon/\(loginToken)".utf8)
+			case "/reader/api/0/subscription/quickadd":
+				body = try JSONEncoder().encode(QuickAddResponse(query: "https://example.com/feed", numResults: 1, streamId: "feed/\(requests.count)", streamName: "Imported", isNew: true))
+			case "/reader/api/0/subscription/list": body = Data(#"{"subscriptions":[]}"#.utf8)
+			case "/reader/api/0/subscription/edit": body = Data("OK".utf8)
+			default:
+				body = Data("Unexpected refresh".utf8)
+				status = 503
+			}
 		}
 		let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
 		return (body, response)

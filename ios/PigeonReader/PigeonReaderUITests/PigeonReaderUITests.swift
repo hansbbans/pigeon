@@ -401,6 +401,24 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testPersonalizationExportCanBeCopiedThroughTheShareSheet() throws {
+		openSettings()
+		let personalization = app.buttons["Signals, History, and Privacy"]
+		XCTAssertTrue(revealSettingsRow(personalization))
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+		let export = app.buttons["Export Personalization Data"]
+		XCTAssertTrue(revealSettingsRow(export))
+		export.tap()
+
+		let copy = app.cells["Copy"]
+		XCTAssertTrue(copy.waitForExistence(timeout: 10))
+		attachScreenshot(named: "personalization-export-share-sheet")
+		copy.tap()
+		XCTAssertTrue(copy.waitForNonExistence(timeout: 5))
+		XCTAssertTrue(app.navigationBars["Personalization"].exists)
+	}
+
 	func testPersonalizationTopicsCanBeAddedRemovedAndReset() throws {
 		openSettings()
 
