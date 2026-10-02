@@ -78,12 +78,16 @@ function createFeedXmlParser(xhtmlScopes: NamespaceScope[]): XMLParser {
 	const scopes: NamespaceScope[] = [];
 	const elementNamespaces: Array<string | undefined> = [];
 	let atomRoot = false;
+	let legacyAtomRoot = false;
 	const attributePrefixes: Array<string | undefined> = [];
 	return new XMLParser({
 		...XML_OPTIONS,
 		jPath: false,
 		// Stop XHTML before the ordinary object parser loses mixed-content order.
-		transformTagName: (name) => ['feed', 'content', 'summary'].includes(name.split(':').at(-1) ?? '') ? name.split(':').at(-1)! : name,
+		transformTagName(name) {
+			const localName = name.slice(name.lastIndexOf(':') + 1);
+			return localName === 'feed' || localName === 'content' || localName === 'summary' ? localName : name;
+		},
 		stopNodes: ['feed.*.content[type=xhtml]', 'feed.*.summary[type=xhtml]'],
 		attributeValueProcessor(name, value, path) {
 			if (typeof path !== 'string') attributePrefixes[path.getDepth()] = path.getCurrentNamespace();
@@ -92,6 +96,7 @@ function createFeedXmlParser(xhtmlScopes: NamespaceScope[]): XMLParser {
 		updateTag(tagName, path, attributes) {
 			if (typeof path === 'string') return tagName;
 			const stopped = path.getDepth() === 2 && (tagName === 'content' || tagName === 'summary') && attributes['@_type'] === 'xhtml';
+			// Public stop-node callbacks run after the matcher returns to the parent.
 			const depth = path.getDepth() + (stopped ? 1 : 0);
 			const sourcePrefix = (stopped ? attributePrefixes[depth] : path.getCurrentNamespace()) ?? '';
 			if (!tagName.includes(':') && sourcePrefix) tagName = `${sourcePrefix}:${tagName}`;
@@ -101,11 +106,15 @@ function createFeedXmlParser(xhtmlScopes: NamespaceScope[]): XMLParser {
 			const localName = separator < 0 ? tagName : tagName.slice(separator + 1);
 			const namespaces = namespaceScope(asRecord(attributes), scopes[depth - 1]);
 			const uri = namespaces.get(prefix);
-			if (depth === 1) atomRoot = localName.toLowerCase() === 'feed' && (!prefix || uri === ATOM_NAMESPACE);
-			if (!atomRoot) return tagName;
+			if (depth === 1) {
+				atomRoot = localName.toLowerCase() === 'feed' && ((!prefix && !uri) || uri === ATOM_NAMESPACE);
+				legacyAtomRoot = atomRoot && !uri;
+			}
+			if (!atomRoot) return depth === 1 && !prefix && localName.toLowerCase() === 'feed' ? `foreign:${tagName}` : tagName;
 			scopes[depth] = namespaces;
-			elementNamespaces[depth] = uri;
-			if (uri === ATOM_NAMESPACE) {
+			const atomElement = uri === ATOM_NAMESPACE || (legacyAtomRoot && !prefix && !uri);
+			elementNamespaces[depth] = atomElement ? ATOM_NAMESPACE : uri;
+			if (atomElement) {
 				if (stopped) {
 					attributes['@___pigeon_xhtml_scope'] = String(xhtmlScopes.length);
 					xhtmlScopes.push(namespaces);

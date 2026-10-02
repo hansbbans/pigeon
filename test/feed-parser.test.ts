@@ -222,3 +222,15 @@ test('XHTML inline SVG and MathML inherited prefixes serialize as HTML-recognize
  const feed = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:s="http://www.w3.org/2000/svg" xmlns:m="http://www.w3.org/1998/Math/MathML"><entry><id>one</id><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><s:svg viewBox="0 0 10 10"><s:circle cx="5" cy="5" r="3"/></s:svg><m:math><m:mi>x</m:mi></m:math></div></content></entry></feed>');
  assert.equal(feed.items[0].content, '<svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="3"></circle></svg><math><mi>x</mi></math>');
 });
+
+test('Namespace-less Atom compatibility does not let foreign default namespaces masquerade as fields', () => {
+ const feed = parseFeed('<feed xmlns:h="http://www.w3.org/1999/xhtml"><title xmlns="urn:foreign">Wrong feed</title><title>Right feed</title><entry><id>one</id><title xmlns="urn:foreign">Wrong title</title><title>Right title</title><author xmlns="urn:foreign"><name>Wrong author</name></author><content xmlns="urn:foreign" type="html">wrong</content><content type="xhtml"><h:div><h:p>Right body</h:p></h:div></content></entry></feed>');
+ assert.equal(feed.title, 'Right feed');
+ assert.equal(feed.items[0].title, 'Right title');
+ assert.equal(feed.items[0].author, undefined);
+ assert.equal(feed.items[0].content, '<p>Right body</p>');
+});
+
+test('A feed root in a foreign namespace is not detected as Atom', () => {
+ assert.throws(() => parseFeed('<feed xmlns="urn:foreign"><title>Not Atom</title><entry><id>one</id><content>Wrong</content></entry></feed>'), /Unsupported feed format/);
+});
