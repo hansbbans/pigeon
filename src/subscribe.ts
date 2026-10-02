@@ -16,11 +16,6 @@ import {
 } from './rss-fetcher';
 import type { ParsedItem } from './rss-parser';
 
-interface SubscribeRequest {
-	url: string;
-	category?: string;
-}
-
 interface SubscribeResponse {
 	feed_key: string;
 	display_name: string;
@@ -329,20 +324,27 @@ export async function handleSubscribe(request: Request, env: Env): Promise<Respo
 	if (authErr) return authErr;
 
 	// Parse request body
-	let body: SubscribeRequest;
+	let body: unknown;
 	try {
 		body = await request.json();
 	} catch {
 		return new Response('Invalid JSON', { status: 400 });
 	}
 
-	if (!body.url) {
+	if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+		return new Response('Request body must be an object', { status: 400 });
+	}
+	if (!('url' in body) || typeof body.url !== 'string' || body.url.trim() === '') {
 		return new Response('Missing url field', { status: 400 });
+	}
+	const category = 'category' in body ? body.category : undefined;
+	if (category !== undefined && category !== null && typeof category !== 'string') {
+		return new Response('category must be a string', { status: 400 });
 	}
 
 	// Subscribe to feed
 	try {
-		const result = await subscribeToFeed(env, body.url, body.category);
+		const result = await subscribeToFeed(env, body.url, category);
 
 		const response: SubscribeResponse = {
 			feed_key: result.feed_key,

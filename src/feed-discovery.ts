@@ -167,14 +167,17 @@ export async function handleFeedDiscovery(request: Request, env: Env): Promise<R
 	const authError = await requireApiAuth(request, env.API_PASSWORD);
 	if (authError) return authError;
 
-	let body: { url?: unknown };
+	let body: unknown;
 	try {
 		body = await request.json();
 	} catch {
 		return Response.json({ error: 'Invalid JSON' }, { status: 400 });
 	}
 
-	if (typeof body.url !== 'string' || body.url.trim() === '') {
+	if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+		return Response.json({ error: 'Request body must be an object' }, { status: 400 });
+	}
+	if (!('url' in body) || typeof body.url !== 'string' || body.url.trim() === '') {
 		return Response.json({ error: 'Missing url field' }, { status: 400 });
 	}
 
