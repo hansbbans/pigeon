@@ -449,7 +449,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		site_url: string | null;
 	}>();
 
-	const tagsByFeedKey = await loadFeedTags(env, { feedKeys: results.map((f) => f.feed_key) });
+	const tagsByFeedKey = await loadFeedTags(env);
 	const subscriptions = results.map((f) => ({
 		id: `feed/${f.rowid}`,
 		title: f.custom_title || f.display_name,
@@ -474,7 +474,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		count: number;
 		newest: string;
 	}>();
-	const tagsByFeedKey = await loadFeedTags(env, { feedKeys: results.map((row) => row.feed_key) });
+	const tagsByFeedKey = await loadFeedTags(env);
 
 	let totalUnreadCount = 0;
 	let newestUnreadUsec = '0';

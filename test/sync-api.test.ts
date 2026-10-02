@@ -1183,6 +1183,47 @@ test('GReader item contents preserve labels across more than one hundred publish
 	}
 });
 
+for (const endpoint of ['subscription/list', 'unread-count']) {
+	test(`GReader ${endpoint} loads a complete long-key library inside the request budget`, async () => {
+		const state = fixture();
+		try {
+			const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, category, is_active) VALUES (?, ?, 'Shared folder', ?)");
+			const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (?, ?, 'Article', '<p>Body</p>', ?, '2026-10-01T12:00:00.000Z')`);
+			for (let index = 0; index < 3_001; index += 1) {
+				const key = `rss-library-${index}-${'a'.repeat(7_900)}`;
+				feedInsert.run(key, `Publisher ${index}`, index === 3_000 ? 0 : 1);
+				itemInsert.run(`library-content-${index}`, key, `library-content-${index}`);
+			}
+			feedInsert.run('read-only-control', 'Read-only publisher', 1);
+			state.database.prepare("UPDATE feeds SET category = 'Read folder' WHERE feed_key = 'read-only-control'").run();
+			itemInsert.run('read-only-item', 'read-only-control', 'read-only-message');
+			state.database.prepare("UPDATE items SET is_read = 1 WHERE feed_key = 'read-only-control'").run();
+			const limits = { maxQueries: 50, queries: 0 };
+			const password = 'test-password';
+			const env = { DB: new SqliteD1(state.database, limits), BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const response = await handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/${endpoint}`, {
+				headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+			}), env);
+			assert.equal(response.status, 200);
+			if (endpoint === 'subscription/list') {
+				const body = await response.json() as { subscriptions: { title: string; categories: { id: string }[] }[] };
+				assert.equal(body.subscriptions.length, 3_001);
+				assert.ok(body.subscriptions.filter((feed) => feed.title !== 'Read-only publisher').every((feed) => feed.categories.some((category) => category.id === 'user/-/label/Shared folder')));
+				assert.ok(body.subscriptions.find((feed) => feed.title === 'Read-only publisher')?.categories.some((category) => category.id === 'user/-/label/Read folder'));
+				assert.ok(body.subscriptions.every((feed) => feed.title !== 'Publisher 3000'));
+			} else {
+				const body = await response.json() as { unreadcounts: { id: string; count: number }[] };
+				assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/label/Shared folder')?.count, 3_000);
+				assert.equal(body.unreadcounts.find((count) => count.id === 'user/-/state/com.google/reading-list')?.count, 3_000);
+				assert.equal(body.unreadcounts.filter((count) => count.id.startsWith('feed/')).length, 3_000);
+				assert.ok(body.unreadcounts.every((count) => count.id !== 'user/-/label/Read folder'));
+			}
+			assert.ok(limits.queries <= 6, `used ${limits.queries} statements`);
+		} finally { state.database.close(); }
+	});
+}
+
 for (const operation of ['mark-all-as-read', 'edit-tag']) {
 	test(`GReader ${operation} completes five thousand state transitions within a database invocation`, async () => {
 		const state = fixture();
