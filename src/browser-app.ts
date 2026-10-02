@@ -3425,6 +3425,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId &&
           getViewState(activeView.id, false)?.rootRequestId === expectedRootRequestId) {
         renderArticles();
+        renderReader();
         articlesStatus.textContent = getViewState(activeView.id, false)?.hasMembership
           ? 'Refresh failed · showing cached articles.'
           : 'Could not load this view.';
@@ -3513,6 +3514,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (requestId === activeViewRequestId && stateBefore?.membershipEpoch === membershipEpoch &&
           requestBelongsToCurrentSession(generation, token)) {
         renderArticles();
+        renderReader();
         articlesStatus.textContent = 'Could not load article bodies.';
       }
     } finally {
@@ -3578,6 +3580,7 @@ export function renderBrowserAppRuntimeScript(): string {
       activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
+      renderReader();
       if (session.token) {
         articlesStatus.textContent = 'Could not load more articles.';
       }

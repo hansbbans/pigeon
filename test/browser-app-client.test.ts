@@ -5383,3 +5383,74 @@ for (const oldBodyStatus of [200, 503]) {
 		assert.equal(maxActiveBodies, 2);
 	});
 }
+
+
+for (const clockChange of ['midnight', 'timezone']) {
+	for (const operation of ['root', 'page', 'body']) {
+		for (const failed of [false, true]) {
+			test(`Today reconciles the reader after a held ${operation} ${failed ? 'failure' : 'success'} across ${clockChange}`, async () => {
+				const previousTimezone = process.env.TZ;
+				process.env.TZ = 'America/New_York';
+				try {
+					let now = Date.parse('2026-10-03T03:55:00Z');
+					const oldPublished = clockChange === 'midnight' ? now / 1000 : Date.parse('2026-10-02T23:00:00Z') / 1000;
+					const newPublished = Date.parse(clockChange === 'midnight' ? '2026-10-03T04:00:01Z' : '2026-10-03T00:00:01Z') / 1000;
+					const held = createDeferred<Response>();
+					let roots = 0;
+					let requestHeld = false;
+					const harness = await createBrowserHarness({ now: () => now, fetchImpl: async (input, init) => {
+						if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+							const continuation = new URL(`https://test${input}`).searchParams.get('c');
+							if (continuation) {
+								if (operation === 'page') { requestHeld = true; return held.promise; }
+								return Response.json({ itemRefs: [{ id: '2' }] });
+							}
+							roots += 1;
+							if (operation === 'root' && roots === 3) { requestHeld = true; return held.promise; }
+							return Response.json({ itemRefs: [{ id: '1' }], ...(roots === 2 && operation !== 'root' ? { continuation: 'older' } : {}) });
+						}
+						if (input.endsWith('/contents')) {
+							const ids = (init?.body?.getAll('i') ?? []).map(String);
+							if (operation === 'body' && ids.includes('2')) { requestHeld = true; return held.promise; }
+							return Response.json({ items: ids.map((id) => browserRegressionItem(id, id === '1' ? oldPublished : newPublished)) });
+						}
+						return browserRegressionResponse(input, init);
+					} });
+					await harness.elements.get('login-form')?.dispatch('submit');
+					await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+					findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+					await waitForBrowserCondition(() => roots === 2);
+					if (operation === 'root') {
+						await flushBrowserTasks();
+						harness.dispatchDocumentEvent('visibilitychange');
+					}
+					await waitForBrowserCondition(() => requestHeld);
+					const list = harness.elements.get('articles-list-shell');
+					assert.ok(list);
+					list.scrollTop = 63;
+					if (clockChange === 'midnight') now = Date.parse('2026-10-03T04:05:00Z');
+					else process.env.TZ = 'UTC';
+					held.resolve(failed ? new Response('Unavailable', { status: 503 }) : Response.json(operation === 'body'
+						? { items: [browserRegressionItem('2', newPublished)] }
+						: { itemRefs: [{ id: '2' }] }));
+					await flushBrowserTasks();
+					if (failed) {
+						assert.equal(harness.elements.get('articles-list')?.children.length, 0);
+						assert.equal(harness.elements.get('reader-title')?.textContent, 'Select an article');
+						assert.equal(harness.elements.get('reader-frame')?.srcdoc.includes('Article 1 body'), false);
+						assert.equal(harness.elements.get('articles-status')?.textContent, operation === 'root'
+							? 'Refresh failed · showing cached articles.' : operation === 'page' ? 'Could not load more articles.' : 'Could not load article bodies.');
+					} else {
+						assert.equal(harness.elements.get('articles-list')?.children.length, 1);
+						assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+						assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
+					}
+					assert.equal(list.scrollTop, 63);
+				} finally {
+					if (previousTimezone === undefined) delete process.env.TZ;
+					else process.env.TZ = previousTimezone;
+				}
+			});
+		}
+	}
+}
