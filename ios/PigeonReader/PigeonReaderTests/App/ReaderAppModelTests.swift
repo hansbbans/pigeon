@@ -1881,11 +1881,20 @@ struct ReaderAppModelTests {
 		#expect(firstPage.request.url?.path == "/api/v1/recommendations")
 		await controlled.resolve(firstPage, data: try responseData(items: prefetchedArticles))
 
-		let replay = await controlled.nextRequest()
-		#expect(replay.request.url?.path == "/api/v1/mutations")
-		#expect(model.allArticles(for: .forYou).count == prefetchedArticles.count)
-		#expect(model.articles(for: .forYou).isEmpty)
-		await controlled.resolve(replay, data: try appliedMutationResponse(for: replay))
+		var replayedItemIDs: [String] = []
+		while replayedItemIDs.count < prefetchedArticles.count {
+			let replay = await controlled.nextRequest()
+			#expect(replay.request.url?.path == "/api/v1/mutations")
+			#expect(model.allArticles(for: .forYou).count == prefetchedArticles.count)
+			#expect(model.articles(for: .forYou).isEmpty)
+			let body = try #require(replay.request.httpBody)
+			let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: body)
+			#expect(envelope.mutations.isEmpty == false)
+			#expect(envelope.mutations.count <= 7)
+			replayedItemIDs.append(contentsOf: envelope.mutations.flatMap(\.itemIds))
+			await controlled.resolve(replay, data: try appliedMutationResponse(for: replay))
+		}
+		#expect(replayedItemIDs == prefetchedArticles.map(\.id))
 
 		let refreshedPage = await controlled.nextRequest()
 		#expect(refreshedPage.request.url?.path == "/api/v1/recommendations")

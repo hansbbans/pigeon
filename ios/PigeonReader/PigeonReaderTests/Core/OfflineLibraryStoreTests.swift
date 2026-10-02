@@ -2030,6 +2030,73 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).first?.attempts == 1)
 	}
 
+	@Test func replayDrainsOneHundredActionsWithinTheServerQueryBudget() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let mutations = (0..<100).map { index in
+			OfflineMutation(id: "budget-\(index)", kind: .setRead, itemIds: ["reader-\(index)"], value: true, scope: .single)
+		}
+		for mutation in mutations {
+			try await store.enqueue(mutation, accountID: "account-a")
+		}
+		let transport = QueryBudgetMutationHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: transport)
+
+		let applied = try await OfflineMutationReplayer(store: store).replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 100)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+		let pages = await transport.pages
+		#expect(pages.count == 15)
+		#expect(pages.allSatisfy { $0.count <= 7 })
+		#expect(pages.flatMap { $0.map(\.id) } == mutations.map(\.id))
+	}
+
+	@Test func replayStopsAfterRealFailureWithoutAttemptingUnsentPages() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let mutations = (0..<16).map { index in
+			OfflineMutation(id: "failure-\(index)", kind: .setStarred, itemIds: ["reader-\(index)"], value: true, scope: .single)
+		}
+		for mutation in mutations {
+			try await store.enqueue(mutation, accountID: "account-a")
+		}
+		let transport = QueryBudgetMutationHTTPClient(failedID: mutations[3].id)
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: transport)
+
+		let applied = try await OfflineMutationReplayer(store: store).replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 6)
+		let pending = try await store.pendingMutations(accountID: "account-a", limit: 100)
+		#expect(pending.map(\.mutation.id) == [mutations[3].id] + mutations.dropFirst(7).map(\.id))
+		#expect(pending.first?.attempts == 1)
+		#expect(pending.dropFirst().allSatisfy { $0.attempts == 0 })
+		#expect(await transport.pages.map(\.count) == [7])
+	}
+
+	@Test func replayHonorsBothActionAndItemLimitsForBulkAndSingleActions() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let bulk = OfflineMutation(id: "bulk", kind: .setReadBatch, itemIds: (0..<200).map { "reader-\($0)" }, value: true, scope: .all)
+		let singles = (0..<10).map { index in
+			OfflineMutation(id: "single-\(index)", kind: .setStarred, itemIds: ["starred-\(index)"], value: true, scope: .single)
+		}
+		for mutation in [bulk] + singles {
+			try await store.enqueue(mutation, accountID: "account-a")
+		}
+		let transport = QueryBudgetMutationHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: transport)
+
+		let applied = try await OfflineMutationReplayer(store: store).replay(accountID: "account-a", apiClient: client)
+
+		#expect(applied == 11)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+		let pages = await transport.pages
+		#expect(pages.map(\.count) == [1, 7, 3])
+		#expect(pages.allSatisfy { $0.reduce(0) { $0 + $1.itemIds.count } <= 200 })
+		#expect(pages.flatMap { $0.map(\.id) } == ([bulk] + singles).map(\.id))
+	}
+
 	@Test func clearingCachedArticlesNeverDeletesPendingActions() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		try await store.saveArticles([makeArticle()], collectionID: "feed/7", accountID: "account-a")
@@ -2336,5 +2403,35 @@ actor MutationResultHTTPClient: HTTPClient {
 			preconditionFailure("The test URL must be valid")
 		}
 		return url
+	}
+}
+
+/// Models the successful seven-action prefix allowed by the server's 40-query
+/// budget for state mutations, plus a retryable action failure when requested.
+private actor QueryBudgetMutationHTTPClient: HTTPClient {
+	private let failedID: String?
+	private(set) var pages: [[OfflineMutation]] = []
+
+	init(failedID: String? = nil) {
+		self.failedID = failedID
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		let body = try #require(request.httpBody)
+		let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: body)
+		pages.append(envelope.mutations)
+		let results = envelope.mutations.enumerated().map { index, mutation in
+			let failed = index >= 7 || mutation.id == failedID
+			return [
+				"mutationId": mutation.id,
+				"status": failed ? "failed" : "applied",
+				"appliedAt": "2026-10-02T22:00:00.000Z",
+				"error": failed ? "Retry this mutation" : "",
+			]
+		}
+		let responseBody = try JSONSerialization.data(withJSONObject: ["results": results])
+		let url = try #require(request.url)
+		let response = try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
+		return (responseBody, response)
 	}
 }
