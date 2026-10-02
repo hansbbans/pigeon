@@ -3309,7 +3309,7 @@ export function renderBrowserAppRuntimeScript(): string {
       syncLoadedItemsFromCache();
       renderArticles();
       renderReader();
-      restoreArticleScrollTop(preservedScrollTop || state.scrollTop);
+      restoreArticleScrollTop(preservedScrollTop);
     }
 
     return returnedIds;

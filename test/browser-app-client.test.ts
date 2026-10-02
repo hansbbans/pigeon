@@ -4723,6 +4723,66 @@ test('an older truncated login body cannot log out a newer successful session', 
 	assert.equal(elements.get('login-error')?.textContent, '');
 });
 
+for (const currentScrollTop of [0, 64]) {
+	test(`root refresh preserves the current scroll position ${currentScrollTop} rather than an older saved position`, async () => {
+		const refresh = createDeferred<Response>();
+		let roots = 0;
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				return ++roots === 1 ? Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] }) : refresh.promise;
+			}
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		const list = harness.elements.get('articles-list-shell');
+		assert.ok(list);
+		list.scrollTop = 123;
+		findListButtonByItemId(harness.elements.get('articles-list'), '2')?.dispatch('click');
+		await flushBrowserTasks();
+		harness.dispatchDocumentEvent('visibilitychange');
+		await waitForBrowserCondition(() => roots === 2);
+		list.scrollTop = currentScrollTop;
+		refresh.resolve(Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] }));
+		await flushBrowserTasks();
+		assert.equal(list.scrollTop, currentScrollTop);
+		assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+	});
+}
+
+test('an inactive root refresh leaves the current scroll alone and cached navigation restores its saved position', async () => {
+	const refresh = createDeferred<Response>();
+	let allRoots = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+			const stream = new URL('https://pigeon.test' + input).searchParams.get('s');
+			if (stream === 'feed/1') return Response.json({ itemRefs: [{ id: '3' }] });
+			return ++allRoots === 1 ? Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] }) : refresh.promise;
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	const list = harness.elements.get('articles-list-shell');
+	assert.ok(list);
+	list.scrollTop = 123;
+	findListButtonByItemId(harness.elements.get('articles-list'), '2')?.dispatch('click');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => allRoots === 2);
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 3');
+	list.scrollTop = 64;
+	refresh.resolve(Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] }));
+	await flushBrowserTasks();
+	assert.equal(list.scrollTop, 64);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 3');
+	findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(list.scrollTop, 123);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+});
+
 test('Today refresh clears an old day boundary and loads new continuation pages', async () => {
 	const now = new Date(2026, 2, 20, 12).getTime();
 	const bounds = getLocalDayBounds(new Date(now));
