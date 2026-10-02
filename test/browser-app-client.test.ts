@@ -770,7 +770,7 @@ async function createBrowserHarness(options?: {
 	readerGridWidth?: number | (() => number);
 	online?: boolean;
 	now?: number | (() => number);
-	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string> }) => Promise<Response>;
+	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
 }) {
 	const documentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
 	const windowHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
@@ -993,6 +993,7 @@ async function createBrowserHarness(options?: {
 			},
 		},
 		FormData,
+		AbortController,
 		Response,
 		URL,
 		URLSearchParams,
@@ -5070,4 +5071,67 @@ for (const oldStatus of [200, 503]) {
 			}
 		});
 	}
+}
+
+
+for (const ignoresAbort of [false, true]) {
+	test(`clearing a session aborts old body jobs and preserves the concurrency cap${ignoresAbort ? ' when a transport ignores cancellation' : ''}`, async () => {
+		const oldBodies = [createDeferred<Response>(), createDeferred<Response>()];
+		const signals: AbortSignal[] = [];
+		let loginCount = 0;
+		let oldBodyRequests = 0;
+		let newBodyRequests = 0;
+		let activeBodies = 0;
+		let maxActiveBodies = 0;
+		let newBodySignal: AbortSignal | undefined;
+		let roots = 0;
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/account-${++loginCount}`);
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				roots += 1;
+				const ids = loginCount === 1 ? Array.from({ length: 50 }, (_, index) => String(index + 1)) : ['100'];
+				return Response.json({ itemRefs: ids.map((id) => ({ id })) });
+			}
+			if (input.endsWith('/contents')) {
+				activeBodies += 1;
+				maxActiveBodies = Math.max(maxActiveBodies, activeBodies);
+				if (init?.headers?.Authorization?.endsWith('account-1')) {
+					const pending = oldBodies[oldBodyRequests++];
+					if (init.signal) {
+						signals.push(init.signal);
+						if (!ignoresAbort) init.signal.addEventListener('abort', () => pending.reject(new DOMException('Request aborted', 'AbortError')), { once: true });
+					}
+					return pending.promise.finally(() => { activeBodies -= 1; });
+				}
+				newBodyRequests += 1;
+				newBodySignal = init?.signal;
+				activeBodies -= 1;
+				return Response.json({ items: [browserRegressionItem('100', 1_742_460_800)] });
+			}
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => oldBodyRequests === 1);
+		harness.dispatchDocumentEvent('visibilitychange');
+		await waitForBrowserCondition(() => oldBodyRequests === 2);
+		await harness.elements.get('logout-button')?.dispatch('click');
+		assert.equal(signals.length, 2);
+		assert.ok(signals.every((signal) => signal.aborted));
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => roots === 3);
+		if (ignoresAbort) {
+			await flushBrowserTasks();
+			assert.equal(newBodyRequests, 0);
+			oldBodies[0].resolve(Response.json({ items: [browserRegressionItem('1', 1_742_460_800)] }));
+		}
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 100');
+		assert.equal(newBodyRequests, 1);
+		assert.equal(newBodySignal?.aborted, false);
+		assert.equal(maxActiveBodies, 2);
+		if (ignoresAbort) {
+			oldBodies[1].resolve(Response.json({ items: [browserRegressionItem('100', 1_742_460_800)] .map((item) => ({ ...item, title: 'Old account body' })) }));
+			await flushBrowserTasks();
+			assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 100');
+		}
+	});
 }

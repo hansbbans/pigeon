@@ -2063,9 +2063,11 @@ export function renderBrowserAppRuntimeScript(): string {
       job.resolve([]);
     }
     contentRequestQueue = [];
-    // Keep active jobs counted until their network promises settle. The old
-    // account cannot update this cache, but dropping the count here would let
-    // a new account exceed the global request limit while those requests run.
+    for (const job of activeContentRequestJobs) {
+      job.controller.abort();
+    }
+    // Keep cancelled jobs counted until their network promises settle so a
+    // new session cannot exceed the request limit if cancellation is delayed.
     articleCache.clear();
     articleMetadataCache.clear();
     viewStates.clear();
@@ -2153,6 +2155,7 @@ export function renderBrowserAppRuntimeScript(): string {
       resolve: resolveRequest,
       reject: rejectRequest,
       counted: false,
+      controller: new AbortController(),
     };
 
     for (const itemId of uniqueItemIds) {
@@ -2202,6 +2205,7 @@ export function renderBrowserAppRuntimeScript(): string {
           authenticatedJson('/reader/api/0/stream/items/contents', {
             method: 'POST',
             body: form,
+            signal: job.controller.signal,
           }),
         )
         .then((payload) => {
