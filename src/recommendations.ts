@@ -12,6 +12,7 @@ import {
 	MAX_RSS_TEXT_CONTENT_SIZE,
 } from './rss-fetcher';
 import type { Env } from './types';
+import { ARTICLE_AUTHOR_SQL } from './article-author';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
 
@@ -399,7 +400,7 @@ function candidateWhere(view: RecommendationView): string {
 
 const CANDIDATE_COLUMNS = `i.rowid, i.id, i.feed_key,
 	COALESCE(f.custom_title, f.display_name) AS source,
-	i.from_name AS author, i.subject AS title, i.original_url,
+	${ARTICLE_AUTHOR_SQL} AS author, i.subject AS title, i.original_url,
 	i.received_at, i.is_read, i.is_starred`;
 
 async function loadRecommendationCandidates(

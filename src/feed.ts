@@ -3,6 +3,7 @@ import { createRenderedContent } from './rendered-content';
 import { createCanonicalItemUuid, hasStoredItemId } from './item-identity';
 import type { FeedVariant } from './feed-urls';
 import { stripInvalidXmlCharacters } from './xml';
+import { articleAuthor } from './article-author';
 
 interface FeedMeta {
 	feed_key: string;
@@ -12,6 +13,7 @@ interface FeedMeta {
 	source_url?: string | null;
 	site_url?: string | null;
 	icon_url?: string | null;
+	source_type?: string;
 }
 
 interface FeedItem {
@@ -83,7 +85,7 @@ export async function generateAtomFeed(
     <updated>${item.received_at}</updated>
     <published>${item.received_at}</published>
     <author>
-      <name>${escapeXml(item.from_name || feed.display_name)}</name>
+      <name>${escapeXml(articleAuthor(item, feed.source_type) || feed.display_name)}</name>
     </author>
     ${summary ? `<summary type="text">${escapeXml(summary)}</summary>` : ''}
     <content type="html">${wrapCDATA(renderedContent)}</content>

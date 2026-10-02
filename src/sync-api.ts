@@ -1,4 +1,5 @@
 import type { Env } from './types';
+import { ARTICLE_AUTHOR_SQL } from './article-author';
 
 const DEFAULT_SYNC_LIMIT = 100;
 const MAX_SYNC_LIMIT = 200;
@@ -139,7 +140,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			articleIDs,
 			`SELECT i.rowid, i.id, i.feed_key,
 			        COALESCE(f.custom_title, f.display_name) AS source,
-			        i.subject AS title, i.from_name AS author, i.html_content,
+			        i.subject AS title, ${ARTICLE_AUTHOR_SQL} AS author, i.html_content,
 			        i.text_content, i.original_url, i.received_at,
 			        i.is_read, i.is_starred, i.content_pruned_at
 			 FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE i.id IN`,

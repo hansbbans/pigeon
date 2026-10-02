@@ -151,9 +151,11 @@ export async function buildRssItemStatements(
 		const insertSql = options.updateExisting
 			? `INSERT INTO items (
 					id, message_id, feed_key, subject,
-					from_email, received_at, html_content, text_content, original_url
+					from_name, received_at, html_content, text_content, original_url
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(message_id) DO UPDATE SET
+						from_name = excluded.from_name,
+						from_email = NULL,
 						html_content = excluded.html_content,
 						text_content = excluded.text_content,
 						content_pruned_at = NULL,
@@ -169,7 +171,7 @@ export async function buildRssItemStatements(
 						END`
 			: `INSERT OR IGNORE INTO items (
 					id, message_id, feed_key, subject,
-					from_email, received_at, html_content, text_content, original_url
+					from_name, received_at, html_content, text_content, original_url
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 		statements.push(

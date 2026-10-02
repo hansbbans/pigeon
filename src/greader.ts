@@ -1,3 +1,4 @@
+import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
 import { createRenderedContent } from './rendered-content';
@@ -655,8 +656,8 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 			const placeholders = rowidChunk.map(() => '?').join(',');
 			const selectRows = (originalUrlExpression: string) =>
 				env.DB.prepare(
-					`SELECT i.rowid, i.id, i.feed_key, i.from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
-					 FROM items i WHERE i.rowid IN (${placeholders})`,
+					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
+					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (${placeholders})`,
 				)
 					.bind(...rowidChunk)
 					.all<ResponseItemRow>();
