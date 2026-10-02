@@ -447,6 +447,28 @@ test('RSS text excerpts remove non-content markup, bound resources, and preserve
 	assert.equal(htmlToBoundedText('<p>Visible</p><!-- hidden home gyms'), 'Visible');
 });
 
+test('RSS refresh bounds the combined UTF-8 bytes of the body and text excerpt', async () => {
+	for (const content of ['😀'.repeat(300_000), 'a'.repeat(900_000)]) {
+		installFeedFetch(FEED_XML.replace('<p>Hello world</p>', `<p>${content}</p>`));
+		const db = new RecordingDb();
+		const result = await fetchAndStoreRssFeed({
+			DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '25', API_PASSWORD: 'secret-password',
+		} as never, {
+			feed_key: 'large-feed', source_url: 'https://example.com/feed.xml', etag: null, last_modified: null,
+		});
+		assert.equal(result.outcome, 'success');
+		const item = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
+		assert.ok(item);
+		const html = String(item.values[6]);
+		const text = String(item.values[7]);
+		const storedBytes = new Blob([html, text]).size;
+		assert.ok(storedBytes <= 900_000, `Stored RSS content was ${storedBytes} bytes`);
+		assert.ok(html.startsWith('<p>'));
+		assert.match(html, /\[Content truncated\]$/);
+		assert.doesNotMatch(html + text, /\uFFFD/);
+	}
+});
+
 test('fetchAndStoreRssFeed preserves the original item URL for imported RSS items', async () => {
 	installFeedFetch();
 	const db = new RecordingDb();

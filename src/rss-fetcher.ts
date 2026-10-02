@@ -18,6 +18,7 @@ import {
 } from './refresh-policy';
 import { parseFeed, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
 import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
+import { truncateUtf8 } from './content-size';
 import type { Env } from './types';
 
 export interface FeedToFetch {
@@ -139,10 +140,12 @@ export async function buildRssItemStatements(
 			appendFeedAttachments(item.content, item.attachments),
 			contentBaseUrl,
 		);
-		if (content.length > MAX_CONTENT_SIZE) {
-			content = `${content.slice(0, MAX_CONTENT_SIZE)}\n\n[Content truncated]`;
-		}
 		const textContent = htmlToBoundedText(content);
+		const contentBudget = MAX_CONTENT_SIZE - new Blob([textContent ?? '']).size;
+		if (new Blob([content]).size > contentBudget) {
+			const notice = '\n\n[Content truncated]';
+			content = truncateUtf8(content, contentBudget - new Blob([notice]).size) + notice;
+		}
 
 		const insertSql = options.updateExisting
 			? `INSERT INTO items (

@@ -5,17 +5,9 @@ import { applyRoutingRules } from './routing-rules';
 import { getFaviconForEmail } from './favicon';
 import { extractOriginalUrlFromEmail } from './original-url';
 import { ensureDatabaseSchema } from './migrations';
+import { truncateUtf8 } from './content-size';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
-
-function truncateUtf8(value: string, maxBytes: number): string {
-	const encoded = new TextEncoder().encode(value);
-	if (encoded.byteLength <= maxBytes) return value;
-	let end = maxBytes;
-	// Do not keep part of a multibyte code point at the truncation boundary.
-	while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
-	return new TextDecoder().decode(encoded.subarray(0, end));
-}
 
 function deriveSiteUrlFromOriginalUrl(originalUrl: string | null): string | null {
 	if (!originalUrl) {
