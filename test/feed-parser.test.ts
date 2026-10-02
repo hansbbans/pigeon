@@ -73,7 +73,7 @@ test('Atom plain text content and summaries retain literal markup characters', (
 	 </feed>`);
 	assert.deepEqual(feed.items.map((item) => item.content), [
 		'<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>',
-		'<p>Actual markup &amp; symbols</p>', '<p>Actual markup</p>', '<p>Example: &lt;code&gt; &amp; symbols</p>',
+		'<div><p>Actual markup &amp; symbols</p></div>', '<div><p>Actual markup</p></div>', '<p>Example: &lt;code&gt; &amp; symbols</p>',
 	]);
 });
 
@@ -87,8 +87,20 @@ test('JSON Feed plain text is escaped once in an HTML body while provided HTML s
 	] }));
 	assert.deepEqual(feed.items.map((item) => item.content), [
 		'<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>First line<br>Second line</p>',
-		'<p>Literal &amp;lt;code&amp;gt; &amp;amp;</p>', '<p>Provided HTML &amp; symbols</p>', '',
+		'<p>Literal &amp;lt;code&amp;gt; &amp;amp;</p>', '<div><p>Provided HTML &amp; symbols</p></div>', '',
 	]);
+});
+
+test('explicit JSON and Atom HTML remains HTML when its body is tagless or inline-only', () => {
+	for (const html of ['A &amp; B', '<span>A &amp; B</span>']) {
+		const json = parseFeed(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'HTML', items: [{ id: 'html', content_html: html, content_text: 'Wrong fallback' }] }));
+		assert.equal(json.items[0].content, `<div>${html}</div>`);
+		for (const type of ['html', 'text/html']) {
+			const atom = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>html</id><content type="${type}"><![CDATA[${html}]]></content></entry></feed>`);
+			assert.equal(atom.items[0].content, `<div>${html}</div>`);
+		}
+	}
+	assert.equal(parseFeed(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Empty', items: [{ id: 'empty', content_html: '', content_text: '' }] })).items[0].content, '');
 });
 
 test('Atom namespace prefixes preserve feed, entry, author, link and media fields', () => {
@@ -101,7 +113,7 @@ test('Atom namespace prefixes preserve feed, entry, author, link and media field
 	assert.equal(feed.title, 'Prefixed Feed');
 	assert.equal(feed.link, 'https://example.com/');
 	assert.deepEqual(feed.items[0], {
-		guid: 'story', title: 'Prefixed Article', pubDate: '2026-10-02T12:00:00.000Z', link: 'https://example.com/story', content: '<p>Body</p>', author: 'Ada',
+		guid: 'story', title: 'Prefixed Article', pubDate: '2026-10-02T12:00:00.000Z', link: 'https://example.com/story', content: '<div><p>Body</p></div>', author: 'Ada',
 		attachments: [{ url: 'https://example.com/audio.mp3', mimeType: 'audio/mpeg', title: undefined }],
 	});
 	assert.equal(feed.items[1].guid, 'yt:video:dQw4w9WgXcQ');
@@ -118,7 +130,7 @@ test('Atom namespace redeclarations stay local and foreign element names remain 
 	 <entry xmlns="https://example.com/foreign"><id>ignored-default</id><title>Extension</title></entry>
 	 </feed>`);
 	assert.deepEqual(feed.items.map((item) => [item.guid, item.title, item.content]), [
-		['first', 'Correct title', '<p>Correct body</p>'], ['second', 'Inherited prefix', '<p>Second</p>'],
+		['first', 'Correct title', '<div><p>Correct body</p></div>'], ['second', 'Inherited prefix', '<div><p>Second</p></div>'],
 	]);
 	assert.throws(() => parseFeed('<other:feed xmlns:other="https://example.com/foreign"><other:title>Foreign</other:title></other:feed>'), /Unsupported feed format/);
 	const rss = parseFeed('<rss version="2.0" xmlns:a="http://www.w3.org/2005/Atom"><channel><title>RSS</title><a:link href="https://example.com/atom"/><link>https://example.com/rss</link><item><guid>one</guid><description>RSS body</description></item></channel></rss>');
@@ -208,7 +220,7 @@ test('Atom XHTML summaries preserve repeated children and CDATA', () => {
 
 test('XHTML normalization preserves foreign content fields and ordinary RSS extension names', () => {
  const atom = parseFeed('<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:f="urn:foreign"><a:entry><a:id>one</a:id><f:content type="xhtml"><div>wrong</div></f:content><a:content type="html">&lt;p&gt;right&lt;/p&gt;</a:content></a:entry></a:feed>');
- assert.equal(atom.items[0].content, '<p>right</p>');
+ assert.equal(atom.items[0].content, '<div><p>right</p></div>');
  const rss = parseFeed('<rss xmlns:a="urn:foreign"><channel><title>Feed</title><item><guid>one</guid><a:content type="xhtml"><div>wrong</div></a:content><description>right</description></item></channel></rss>');
  assert.equal(rss.items[0].content, 'right');
 });

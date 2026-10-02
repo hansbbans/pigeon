@@ -201,7 +201,9 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 		const item = asRecord(rawItem);
 		const link = resolveUrl(textValue(item.url) ?? textValue(item.external_url), baseUrl);
 		const plainText = textValue(item.content_text);
-		const content = textValue(item.content_html) ?? (plainText ? `<p>${escapePlainText(plainText)}</p>` : '');
+		const providedHtml = textValue(item.content_html);
+		// Retain explicit HTML semantics after the body is stored without its type.
+		const content = providedHtml !== undefined ? `<div>${providedHtml}</div>` : (plainText ? `<p>${escapePlainText(plainText)}</p>` : '');
 		const author = item.authors != null || item.author != null
 			? jsonAuthorName(item)
 			: jsonAuthorName(feed);
@@ -294,7 +296,7 @@ function atomContentValue(value: unknown, xhtmlScopes: NamespaceScope[]): string
 	if (content === undefined) return undefined;
 	const type = attributeValue(asRecord(value), ['type'])?.toLowerCase() ?? 'text';
 	if (type === 'xhtml') return serializeAtomXhtml(content, xhtmlScopes[Number(asRecord(value)['@___pigeon_xhtml_scope'])] ?? EMPTY_NAMESPACES);
-	if (type === 'html' || type === 'text/html') return content;
+	if (type === 'html' || type === 'text/html') return `<div>${content}</div>`;
 	return type === 'text' || type.startsWith('text/') ? `<p>${escapePlainText(content)}</p>` : content;
 }
 

@@ -1379,6 +1379,34 @@ for (const format of ['atom', 'json']) {
 
 }
 
+for (const format of ['json', 'atom', 'atom-mime']) {
+	for (const html of ['A &amp; B', '<span>A &amp; B</span>']) {
+		test(`fetched ${format} explicit ${html.startsWith('<') ? 'inline' : 'tagless'} HTML remains formatted in GReader and Atom`, async () => {
+			const state = fixture();
+			const originalFetch = globalThis.fetch;
+			try {
+				state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('typed-html-feed', 'HTML', 'rss', 'https://feeds.example.com/typed-html')").run();
+				const body = format === 'json' ? JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'HTML', items: [{ id: 'html-story', title: 'Story', content_html: html, content_text: 'Wrong fallback' }] })
+					: `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>html-story</id><title>Story</title><content type="${format === 'atom' ? 'html' : 'text/html'}"><![CDATA[${html}]]></content></entry></feed>`;
+				globalThis.fetch = async () => new Response(body);
+				assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'typed-html-feed', source_url: 'https://feeds.example.com/typed-html', etag: null, last_modified: null })).outcome, 'success');
+				const password = 'test-password';
+				const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+					headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+				}), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+				assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, `<div>${html}</div>`);
+				const stored = state.database.prepare('SELECT * FROM items').get() as Parameters<typeof generateAtomFeed>[1][number];
+				assert.equal(stored.text_content, 'A & B');
+				const xml = await generateAtomFeed({ feed_key: 'typed-html-feed', display_name: 'HTML', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example');
+				assert.ok(xml.includes(`<content type="html"><![CDATA[<div>${html}</div>]]></content>`));
+			} finally {
+				globalThis.fetch = originalFetch;
+				state.database.close();
+			}
+		});
+	}
+}
+
 test('literal entity examples survive fetched JSON text, stored excerpts and Atom summaries', async () => {
 	const state = fixture();
 	const originalFetch = globalThis.fetch;
