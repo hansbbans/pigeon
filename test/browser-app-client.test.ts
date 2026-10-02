@@ -5686,3 +5686,126 @@ test('current Settings retry failure remains retryable and successful retry refr
 	assert.equal(statuses, 2);
 	assert.match(h.elements.get('settings-content')?.textContent ?? '', /Current status/);
 });
+
+for (const selectedTail of [false, true]) {
+	for (const failCurrentPage of [false, true]) {
+		test(`unconfirmed ${selectedTail ? 'selected' : 'unselected'} deleted tail cannot block current pagination with page failure ${failCurrentPage}`, async () => {
+			let refreshed = false, roots = 0, pages = 0, staleBodyRequests = 0;
+			const ids = Array.from({ length: 60 }, (_, index) => String(index + 1));
+			const currentIds = ids.filter((id) => id !== '41');
+			const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
+				if (input.includes('/stream/items/ids?')) {
+					const cursor = new URL(`https://test${input}`).searchParams.get('c');
+					if (cursor) {
+						pages += 1;
+						if (failCurrentPage && pages === 1) return new Response('Unavailable', { status: 503 });
+						return Response.json({ itemRefs: currentIds.slice(50).map((id) => ({ id })) });
+					}
+					roots += 1;
+					return Response.json({ itemRefs: (refreshed ? currentIds : ids).slice(0, 50).map((id) => ({ id })), continuation: refreshed ? 'current-page' : 'old-page' });
+				}
+				if (input.endsWith('/contents')) {
+					const requested = (init?.body?.getAll('i') ?? []).map(String);
+					if (requested.includes('41')) {
+						staleBodyRequests += 1;
+						if (selectedTail) return new Response('Unavailable', { status: 503 });
+					}
+					return Response.json({ items: requested.filter((id) => !refreshed || id !== '41').map((id) => browserRegressionItem(id)) });
+				}
+				return browserRegressionResponse(input, init);
+			} });
+			await h.elements.get('login-form')?.dispatch('submit');
+			await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 1');
+			assert.match(findListButtonByItemId(h.elements.get('articles-list'), '41')?.textContent ?? '', /Loading/);
+			if (selectedTail) {
+				findListButtonByItemId(h.elements.get('articles-list'), '41')?.dispatch('click');
+				await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load article bodies.');
+			}
+			refreshed = true;
+			h.dispatchDocumentEvent('visibilitychange');
+			await waitForBrowserCondition(() => roots === 2 && Boolean(findListButtonByItemId(h.elements.get('articles-list'), '51')));
+			await waitForBrowserCondition(() => !h.elements.get('load-more-button')!.disabled);
+			const staleRequestsBeforePaging = staleBodyRequests;
+			assert.ok(findListButtonByItemId(h.elements.get('articles-list'), '41'), 'partial root retains the old tail');
+			h.elements.get('load-more-button')?.dispatch('click');
+			await flushBrowserTasks();
+			assert.equal(pages, 1, 'current continuation must advance before provisional body retry');
+			if (failCurrentPage) {
+				await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load more articles.');
+				assert.ok(findListButtonByItemId(h.elements.get('articles-list'), '41'), 'failed page keeps provisional rows');
+				assert.equal(h.elements.get('load-more-button')?.disabled, false);
+				h.elements.get('load-more-button')?.dispatch('click');
+			}
+			await waitForBrowserCondition(() => h.elements.get('load-more-button')?.classList.contains('hidden') === true);
+			assert.equal(h.elements.get('articles-list')?.children.length, 59);
+			assert.equal(findListButtonByItemId(h.elements.get('articles-list'), '41'), undefined);
+			assert.match(findListButtonByItemId(h.elements.get('articles-list'), '60')?.textContent ?? '', /Article 60/);
+			assert.equal(h.elements.get('reader-title')?.textContent, 'Article 1');
+			assert.equal(staleBodyRequests, staleRequestsBeforePaging);
+		});
+	}
+}
+
+test('confirmed current body failures remain visible and retry before membership pagination', async () => {
+	let rejectBodies = true, bodyAttempts = 0, pages = 0;
+	const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.includes('/stream/items/ids?')) {
+			if (new URL(`https://test${input}`).searchParams.has('c')) pages += 1;
+			return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }], continuation: 'current-page' });
+		}
+		if (input.endsWith('/contents')) {
+			bodyAttempts += 1;
+			if (rejectBodies) return new Response('Unavailable', { status: 503 });
+			return Response.json({ items: (init?.body?.getAll('i') ?? []).map(String).map((id) => browserRegressionItem(id)) });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await h.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load article bodies.');
+	await h.elements.get('load-more-button')?.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(bodyAttempts, 2);
+	assert.equal(pages, 0);
+	assert.equal(h.elements.get('articles-status')?.textContent, 'Could not load article bodies.');
+	rejectBodies = false;
+	await h.elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 1');
+	assert.equal(bodyAttempts, 3);
+	assert.equal(pages, 0);
+});
+
+test('unhydrated selected provisional survivor loads when its current page confirms membership', async () => {
+	let refreshed = false, pages = 0;
+	const original = Array.from({ length: 60 }, (_, index) => String(index + 1));
+	const current = [...Array.from({ length: 10 }, (_, index) => String(index + 61)), ...original];
+	const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.includes('/stream/items/ids?')) {
+			if (new URL(`https://test${input}`).searchParams.has('c')) {
+				pages += 1;
+				return Response.json({ itemRefs: current.slice(50).map((id) => ({ id })) });
+			}
+			return Response.json({ itemRefs: (refreshed ? current : original).slice(0, 50).map((id) => ({ id })), continuation: 'current-page' });
+		}
+		if (input.endsWith('/contents')) {
+			const requested = (init?.body?.getAll('i') ?? []).map(String);
+			if (requested.includes('41') && pages === 0) return new Response('Unavailable', { status: 503 });
+			return Response.json({ items: requested.map((id) => browserRegressionItem(id)) });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await h.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 1');
+	findListButtonByItemId(h.elements.get('articles-list'), '41')?.dispatch('click');
+	await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load article bodies.');
+	refreshed = true;
+	h.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(h.elements.get('articles-list'), '61')));
+	await waitForBrowserCondition(() => !h.elements.get('load-more-button')!.disabled);
+	h.elements.get('load-more-button')?.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(pages, 1);
+	await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 41');
+	assert.equal(h.elements.get('articles-list')?.children.length, 70);
+	assert.match(h.elements.get('reader-frame')?.srcdoc ?? '', /Body 41/);
+	assert.equal(h.elements.get('load-more-button')?.classList.contains('hidden'), true);
+});

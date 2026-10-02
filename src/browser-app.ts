@@ -2602,12 +2602,15 @@ export function renderBrowserAppRuntimeScript(): string {
     const plannedIds = [];
     const targetItemId = preferredItemId || selectedItemId;
 
+    // A provisional cached tail must not block pagination on a deleted body.
+    // Its missing content becomes loadable once a current page confirms it.
     const addId = (itemId, force = false) => {
       if (
         !itemId ||
         loadedIds.has(itemId) ||
         (!force && knownContentIds.has(itemId)) ||
         plannedIds.includes(itemId) ||
+        (activeState?.hasMembership && !activeState.confirmedItemIds.has(itemId)) ||
         !itemIds.includes(itemId)
       ) {
         return;
