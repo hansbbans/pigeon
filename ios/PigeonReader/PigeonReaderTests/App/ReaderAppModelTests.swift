@@ -33,6 +33,122 @@ struct ReaderAppModelTests {
 		#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: ["success", "failure", "same-account"])
+	func oldExplicitOpenDoesNotMarkTheNextAccountsStoryReadOrPublishAnError(response: String) async throws {
+		let original = try makeSession(token: "explicit-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/api/v1/engagement",
+			pausedStatus: response == "failure" ? 500 : 200,
+			loginToken: response == "same-account" ? original.token : "explicit-current",
+		)
+		let store = OfflineLibraryStore.inMemory()
+		let oldPending = OfflineMutation(id: "original-action", kind: .setStarred, itemIds: ["old-star"], value: true, scope: .single)
+		try await store.enqueue(oldPending, accountID: original.storageIdentity)
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let oldArticle = makeArticle(id: "shared-open-story", feedKey: "old")
+		model.setArticles([oldArticle], for: .forYou)
+		model.readerTypography.markReadBehavior = .onOpen
+		let opening = Task { await model.recordExplicitOpen(for: oldArticle) }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		let currentArticle = makeArticle(id: oldArticle.id, feedKey: "current")
+		model.setArticles([currentArticle], for: .forYou)
+		model.select(article: currentArticle)
+		model.errorMessage = "Current reader message"
+		let countBeforeResume = await transport.requests.count
+		await transport.resume()
+		await opening.value
+
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		#expect(model.selectedArticleID == currentArticle.id)
+		#expect(model.errorMessage == "Current reader message")
+		#expect(await transport.requests.count == countBeforeResume)
+		let originalPending = try await store.pendingMutations(accountID: original.storageIdentity, limit: 100)
+		#expect(originalPending.map(\.mutation.id) == [oldPending.id])
+		if currentAccount != original.storageIdentity {
+			#expect(try await store.pendingMutations(accountID: currentAccount, limit: 100).isEmpty)
+		}
+	}
+
+	@Test(.timeLimit(.minutes(1))) func oldScrollReadFinishesItsQueuedPersistenceWithoutSendingToTheNextAccount() async throws {
+		let original = try makeSession(token: "scroll-original")
+		let store = PausingOfflineLibraryStore()
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/unused", loginToken: "scroll-current")
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let oldArticle = makeArticle(id: "shared-scroll-story", feedKey: "old")
+		model.setArticles([oldArticle], for: .forYou)
+		model.readerTypography.markReadBehavior = .onScroll
+		await model.monitorActiveReading(for: oldArticle.id, maximumIntervals: 0)
+		await store.pauseNextArticleSave()
+		let scroll = try #require(model.recordScrollDepth(itemId: oldArticle.id, depth: 0.7))
+		await store.waitUntilArticleSaveIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		let currentArticle = makeArticle(id: oldArticle.id, feedKey: "current")
+		model.setArticles([currentArticle], for: .forYou)
+		await model.setRead(currentArticle, read: true, offersUndo: true)
+		let currentUndo = model.articleUndo
+		let countBeforeResume = await transport.requests.count
+		await store.resumeArticleSave()
+		await scroll.value
+
+		#expect(await transport.requests.count == countBeforeResume)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.articleUndo?.id == currentUndo?.id)
+		#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).count == 1)
+		#expect(try await store.pendingMutations(accountID: currentAccount, limit: 100).count == 1)
+		#expect(try await store.loadSnapshot(accountID: original.storageIdentity).articlesByCollection[ReaderSection.forYou.rawValue]?.first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func currentReadingMonitorStartsWhileThePreviousAccountsResponseIsPending() async throws {
+		let original = try makeSession(token: "monitor-original")
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/api/v1/engagement", loginToken: "monitor-current")
+		let model = try makeModel(httpClient: transport, session: original, offlineSynchronizationEnabled: false)
+		let reading = Task {
+			await model.monitorActiveReading(for: "shared-reading-story", interval: .zero, minimumActiveDuration: 0, maximumIntervals: 2)
+		}
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		await model.monitorActiveReading(for: "shared-reading-story", interval: .zero, minimumActiveDuration: 0, maximumIntervals: 1)
+		let beforeResume = await transport.requests
+		#expect(beforeResume.filter { $0.url?.path == "/api/v1/engagement" }.count == 2)
+		#expect(beforeResume.last?.value(forHTTPHeaderField: "Authorization")?.contains("monitor-current") == true)
+		await transport.resume()
+		await reading.value
+		#expect(await transport.requests.count == beforeResume.count)
+	}
+
+	@Test(arguments: [false, true])
+	func scrollAnalyticsThresholdsRestartForTheNextAccount(recordsExplicitOpen: Bool) async throws {
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/unused", loginToken: "threshold-current")
+		let model = try makeModel(httpClient: transport, offlineSynchronizationEnabled: false)
+		model.readerTypography.markReadBehavior = .manually
+		await model.monitorActiveReading(for: "shared-threshold-story", maximumIntervals: 0)
+		let oldScroll = try #require(model.recordScrollDepth(itemId: "shared-threshold-story", depth: 0.8))
+		await oldScroll.value
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		if recordsExplicitOpen {
+			await model.recordExplicitOpen(for: makeArticle(id: "shared-threshold-story", isRead: true))
+		}
+		await model.monitorActiveReading(for: "shared-threshold-story", maximumIntervals: 0)
+		let firstScroll = model.recordScrollDepth(itemId: "shared-threshold-story", depth: 0.3)
+		#expect(firstScroll != nil)
+		await firstScroll?.value
+		let secondScroll = model.recordScrollDepth(itemId: "shared-threshold-story", depth: 0.6)
+		#expect(secondScroll != nil)
+		await secondScroll?.value
+		#expect(await transport.requests.filter { $0.url?.path == "/api/v1/engagement" }.count == (recordsExplicitOpen ? 4 : 3))
+	}
+
 	@Test func explicitOpenStillBannersWhenEngagementServerFails() async throws {
 		let mock = MockHTTPClient(responseData: Data("boom".utf8), statusCode: 500)
 		let model = try makeModel(httpClient: mock)

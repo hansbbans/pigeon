@@ -793,6 +793,8 @@ final class ReaderAppModel {
 			readerPreparation.reset()
 			listPositions.reset()
 			scrollReadTriggered = []
+			engagement = EngagementAggregator()
+			sentScrollThresholds = [:]
 			offlineStorageStats = .empty
 			isSynchronizingOfflineLibrary = false
 			isOffline = false
@@ -4081,8 +4083,10 @@ final class ReaderAppModel {
 	}
 
 	func recordExplicitOpen(for article: Recommendation) async {
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		sentScrollThresholds[article.id] = []
 		await send(EngagementEvent(itemId: article.id, type: .explicitOpen))
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if readerTypography.markReadBehavior == .onOpen, !article.isRead {
 			await setRead(article, read: true)
 		}
@@ -4094,10 +4098,16 @@ final class ReaderAppModel {
 		minimumActiveDuration: TimeInterval = 10,
 		maximumIntervals: Int? = nil,
 	) async {
-		guard apiClient != nil, engagement.resume(itemId: articleId, at: .now) else {
+		guard let apiClient, let context = accountContext(for: apiClient),
+			Task.isCancelled == false,
+			engagement.resume(itemId: articleId, at: .now) else {
 			return
 		}
-		defer { engagement.pause(itemId: articleId, at: .now) }
+		defer {
+			if isCurrentAccountOperation(context) {
+				engagement.pause(itemId: articleId, at: .now)
+			}
+		}
 		guard maximumIntervals != 0 else { return }
 
 		do {
@@ -4105,12 +4115,14 @@ final class ReaderAppModel {
 			while !Task.isCancelled {
 				try await Task.sleep(for: interval)
 				try Task.checkCancellation()
+				guard isCurrentAccountOperation(context) else { return }
 				if let event = engagement.activeReadingDeltaEvent(
 					itemId: articleId,
 					at: .now,
 					minimumDuration: minimumActiveDuration,
 				) {
 					_ = await send(event, reportErrors: false)
+					guard isCurrentAccountOperation(context) else { return }
 				}
 				completedIntervals += 1
 				if let maximumIntervals, completedIntervals >= maximumIntervals {
@@ -4124,6 +4136,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		guard let context = accountContext(), Task.isCancelled == false else { return nil }
 		let articleToMarkRead: Recommendation?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
@@ -4147,9 +4160,10 @@ final class ReaderAppModel {
 
 		guard articleToMarkRead != nil || event != nil else { return nil }
 		return Task { @MainActor [weak self] in
-			guard let self else { return }
+			guard let self, self.isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let articleToMarkRead {
 				await self.setRead(articleToMarkRead, read: true)
+				guard self.isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 				if self.article(withId: itemId)?.isRead == false {
 					self.forgetScrollRead(for: articleToMarkRead)
 				}
@@ -5698,6 +5712,8 @@ final class ReaderAppModel {
 		readerPreparation.reset()
 		listPositions.reset()
 		scrollReadTriggered = []
+		engagement = EngagementAggregator()
+		sentScrollThresholds = [:]
 		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
@@ -7176,17 +7192,20 @@ final class ReaderAppModel {
 
 	@discardableResult
 	private func send(_ event: EngagementEvent, reportErrors: Bool = true) async -> Bool {
-		guard let apiClient else {
+		guard let apiClient, let context = accountContext(for: apiClient) else {
 			return false
 		}
 		do {
+			try Task.checkCancellation()
 			try await apiClient.sendEngagement([event])
-			return true
+			try Task.checkCancellation()
+			return isCurrentAccountOperation(context)
 		} catch let error where isCancellation(error) {
 			return false
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			if reportErrors {
 				errorMessage = error.localizedDescription
 			}
