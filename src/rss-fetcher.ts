@@ -82,6 +82,7 @@ class RefreshFailure extends Error {
 
 const MAX_ITEMS_PER_FETCH = 50;
 const MAX_CONTENT_SIZE = 900_000;
+const MAX_ITEM_BATCH_PARAMETER_BYTES = 900_000;
 /** Maximum stored plain-text excerpt used by topic matching. */
 export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
 /** Maximum HTML source inspected when deriving a plain-text excerpt. */
@@ -122,10 +123,19 @@ export async function buildRssItemStatements(
 	parsed: Pick<ParsedFeed, 'link'> & { sourceUrl: string },
 	items: ParsedItem[],
 	fallbackReceivedAt: string,
-	options: { updateExisting?: boolean } = {},
+	options: { updateExisting?: boolean; compactWrites?: boolean } = {},
 ): Promise<D1PreparedStatement[]> {
 	assertBoundedIdentifier(feedKey, 'Feed key');
 	const statements: D1PreparedStatement[] = [];
+	let bufferedRows: string[] = [];
+	let bufferedBytes = 2;
+	let bufferedSql = '';
+	const flushRows = () => {
+		if (bufferedRows.length === 0) return;
+		statements.push(db.prepare(bufferedSql).bind(`[${bufferedRows.join(',')}]`));
+		bufferedRows = [];
+		bufferedBytes = 2;
+	};
 	for (const item of items) {
 		const identity = await createRssItemIdentity(feedKey, item);
 		const originalUrl = resolveRssItemUrl({
@@ -174,20 +184,38 @@ export async function buildRssItemStatements(
 					from_name, received_at, html_content, text_content, original_url
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-		statements.push(
-			db.prepare(insertSql).bind(
-				identity.id,
-				identity.messageId,
-				feedKey,
-				truncateUtf8(item.title, MAX_TEXT_METADATA_BYTES),
-				item.author ? truncateUtf8(item.author, MAX_TEXT_METADATA_BYTES) : null,
-				item.pubDate || fallbackReceivedAt,
-				content,
-				textContent,
-				boundedStoredUrl(originalUrl),
-			),
-		);
+		const values = [
+			identity.id,
+			identity.messageId,
+			feedKey,
+			truncateUtf8(item.title, MAX_TEXT_METADATA_BYTES),
+			item.author ? truncateUtf8(item.author, MAX_TEXT_METADATA_BYTES) : null,
+			item.pubDate || fallbackReceivedAt,
+			content,
+			textContent,
+			boundedStoredUrl(originalUrl),
+		];
+		if (!options.compactWrites || items.length === 1) {
+			statements.push(db.prepare(insertSql).bind(...values));
+			continue;
+		}
+		const serialized = JSON.stringify(values);
+		const rowBytes = new Blob([serialized]).size;
+		if (rowBytes + 2 > MAX_ITEM_BATCH_PARAMETER_BYTES) {
+			// JSON escaping can exceed the bound even for an otherwise valid row.
+			flushRows();
+			statements.push(db.prepare(insertSql).bind(...values));
+			continue;
+		}
+		const separatorBytes = bufferedRows.length > 0 ? 1 : 0;
+		if (bufferedBytes + separatorBytes + rowBytes > MAX_ITEM_BATCH_PARAMETER_BYTES) flushRows();
+		bufferedSql = insertSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+			`SELECT ${values.map((_, index) => `json_extract(value, '$[${index}]')`).join(', ')}
+			 FROM json_each(?) WHERE 1`);
+		bufferedBytes += rowBytes + (bufferedRows.length > 0 ? 1 : 0);
+		bufferedRows.push(serialized);
 	}
+	flushRows();
 	return statements;
 }
 
@@ -321,7 +349,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			{ link: parsed.link, sourceUrl: resource.finalUrl.href },
 			items,
 			attemptedAt,
-			{ updateExisting: true },
+			{ updateExisting: true, compactWrites: true },
 		);
 
 		const content: SuccessfulContent = {

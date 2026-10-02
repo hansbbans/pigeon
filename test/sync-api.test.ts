@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { handleMutationBatch } from '../src/mutation-api';
 import { handleEngagementIngestion } from '../src/engagement';
 import { handleIncrementalSync } from '../src/sync-api';
+import { fetchAndStoreRssFeed } from '../src/rss-fetcher';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -526,3 +527,74 @@ test('a maximum engagement batch is atomic and idempotent within the request que
 		state.database.close();
 	}
 });
+
+for (const largeBodies of [false, true]) {
+	test(`a maximum RSS refresh fits the database request budget and preserves atomic counters${largeBodies ? ' with large escaped bodies' : ''}`, async () => {
+		const state = fixture();
+		const originalFetch = globalThis.fetch;
+		try {
+			insertLibrary(state.database);
+			state.database.prepare("UPDATE feeds SET refresh_lease_token = 'owned', refresh_lease_until = '2026-10-03T00:00:00.000Z' WHERE feed_key = 'design-weekly'").run();
+			const xml = `<rss version="2.0"><channel><title>Design</title>${Array.from({ length: 50 }, (_, index) =>
+				`<item><guid>refresh-${index}</guid><title>Story ${index}</title><description><![CDATA[${
+					largeBodies && index < 4 ? 'a'.repeat(850_000) : largeBodies && index === 4 ? '"\n'.repeat(300_000) : `Body ${index}`
+				}]]></description></item>`).join('')}</channel></rss>`;
+			globalThis.fetch = async () => new Response(xml, { headers: { 'Content-Type': 'application/rss+xml' } });
+			const limits = { maxQueries: 50, queries: 0 };
+			const db = new SqliteD1(state.database, limits);
+			const prepare = db.prepare.bind(db);
+			let groupedInserts = 0;
+			let ordinaryInserts = 0;
+			db.prepare = (sql) => {
+				const statement = prepare(sql);
+				const bind = statement.bind.bind(statement);
+				statement.bind = (...values) => {
+					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
+					if (sql.startsWith('INSERT INTO items')) {
+						if (sql.includes('json_each')) groupedInserts += 1;
+						else ordinaryInserts += 1;
+					}
+					return bind(...values);
+				};
+				return statement;
+			};
+			const feed = {
+				feed_key: 'design-weekly', source_url: 'https://feeds.example.com/design.xml', etag: null, last_modified: null,
+				refresh_lease_token: 'owned',
+			};
+			const result = await fetchAndStoreRssFeed({ DB: db } as never, feed);
+			assert.equal(result.outcome, 'success');
+			assert.equal(result.itemsProcessed, 50);
+			assert.ok(limits.queries <= 40);
+			assert.ok(groupedInserts >= (largeBodies ? 4 : 1));
+			assert.equal(ordinaryInserts, largeBodies ? 1 : 0);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 51);
+			assert.equal((state.database.prepare('SELECT item_count FROM feeds WHERE feed_key = ?').get('design-weekly') as { item_count: number }).item_count, 51);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = ?').get('article') as { count: number }).count, 51);
+			const item = state.database.prepare("SELECT id FROM items WHERE subject = 'Story 0'").get() as { id: string };
+			state.database.prepare('UPDATE items SET is_read = 1, is_starred = 1 WHERE id = ?').run(item.id);
+			state.database.prepare("UPDATE feeds SET content_hash = NULL, refresh_lease_token = 'owned' WHERE feed_key = 'design-weekly'").run();
+			limits.queries = 0;
+			assert.equal((await fetchAndStoreRssFeed({ DB: db } as never, feed)).outcome, 'success');
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 51);
+			assert.deepEqual({ ...state.database.prepare('SELECT is_read, is_starred FROM items WHERE id = ?').get(item.id) }, { is_read: 1, is_starred: 1 });
+
+			state.database.prepare("UPDATE feeds SET content_hash = NULL, refresh_lease_token = 'reassigned' WHERE feed_key = 'design-weekly'").run();
+			limits.queries = 0;
+			assert.equal((await fetchAndStoreRssFeed({ DB: db } as never, feed)).outcome, 'lease_lost');
+			assert.equal((state.database.prepare('SELECT refresh_lease_token FROM feeds WHERE feed_key = ?').get('design-weekly') as { refresh_lease_token: string }).refresh_lease_token, 'reassigned');
+
+			state.database.prepare("UPDATE feeds SET refresh_lease_token = 'owned' WHERE feed_key = 'design-weekly'").run();
+			state.database.exec(`CREATE TRIGGER reject_refresh_activity BEFORE INSERT ON refresh_activity
+			 BEGIN SELECT RAISE(ABORT, 'simulated refresh activity failure'); END`);
+			globalThis.fetch = async () => new Response(xml.replace(/Body 49/g, 'Changed body'), { headers: { 'Content-Type': 'application/rss+xml' } });
+			limits.queries = 0;
+			await assert.rejects(fetchAndStoreRssFeed({ DB: db } as never, feed), /simulated refresh activity failure/);
+			assert.equal((state.database.prepare("SELECT html_content FROM items WHERE subject = 'Story 49'").get() as { html_content: string }).html_content, 'Body 49');
+			assert.equal((state.database.prepare('SELECT refresh_lease_token FROM feeds WHERE feed_key = ?').get('design-weekly') as { refresh_lease_token: string }).refresh_lease_token, 'owned');
+		} finally {
+			globalThis.fetch = originalFetch;
+			state.database.close();
+		}
+	});
+}
