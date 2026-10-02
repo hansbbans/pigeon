@@ -71,7 +71,7 @@ final class ReaderAppModel {
 		let preparationID: UUID?
 	}
 
-	private struct PersonalizationOperationContext: Sendable, Equatable {
+	private struct AccountOperationContext: Sendable, Equatable {
 		let accountID: String
 		let generation: UUID
 	}
@@ -1886,25 +1886,31 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func cleanupOfflineBodies() async -> Int {
-		guard let accountID = session?.storageIdentity else { return 0 }
+		guard let context = accountContext() else { return 0 }
 		do {
-			let count = try await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 200)
-			if applyCachedSnapshot(try await offlineStore.loadSnapshot(accountID: accountID)) {
+			let count = try await offlineStore.cleanupReadBodies(accountID: context.accountID, keepingNewest: 200)
+			guard isCurrentAccountOperation(context) else { return count }
+			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return count }
+			if applyCachedSnapshot(snapshot) {
 				await persistCollections([ReaderSection.today.rawValue])
 			}
+			guard isCurrentAccountOperation(context) else { return count }
 			await refreshOfflineStorageStats()
 			return count
 		} catch {
+			guard isCurrentAccountOperation(context) else { return 0 }
 			presentSettingsError(error)
 			return 0
 		}
 	}
 
 	func clearOfflineArticles() async {
-		guard let accountID = session?.storageIdentity else { return }
+		guard let context = accountContext() else { return }
 		cancelPrewarmPersistence()
 		do {
-			try await offlineStore.clearCachedArticles(accountID: accountID)
+			try await offlineStore.clearCachedArticles(accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			offlineSyncCursor = nil
 			offlineCacheIntegrity = .needsBootstrap
 			hasLoadedNavigation = false
@@ -1915,8 +1921,10 @@ final class ReaderAppModel {
 			preferredCompactColumn = .content
 			writeWidgetSnapshot()
 			await refreshOfflineStorageStats()
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			presentSettingsError(error)
 		}
 	}
@@ -2947,50 +2955,62 @@ final class ReaderAppModel {
 	}
 
 	func loadStaleFeeds(days: Int = 90) async {
-		guard let apiClient else { return }
+		guard let apiClient, let context = accountContext(for: apiClient) else { return }
 		isLoadingStaleFeeds = true
-		defer { isLoadingStaleFeeds = false }
+		defer {
+			if isCurrentAccountOperation(context) {
+				isLoadingStaleFeeds = false
+			}
+		}
 		do {
-			staleFeedSnapshot = try await apiClient.staleFeeds(days: days)
+			let snapshot = try await apiClient.staleFeeds(days: days)
+			guard isCurrentAccountOperation(context) else { return }
+			staleFeedSnapshot = snapshot
 			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			presentSettingsError(error)
 		}
 	}
 
 	func archiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
-		guard let apiClient, feeds.isEmpty == false else { return false }
+		guard let apiClient, let context = accountContext(for: apiClient), feeds.isEmpty == false else { return false }
 		let keys = feeds.map(\.feedKey)
 		do {
 			try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+			guard isCurrentAccountOperation(context) else { return false }
 			staleFeedUndo = .archive(keys)
 			staleFeedUndoTitle = keys.count == 1 ? "Undo Archive" : "Undo Archive \(keys.count) Feeds"
 			await loadStaleFeeds()
-			return true
+			return isCurrentAccountOperation(context)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			return false
 		}
 	}
 
 	func unarchiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
-		guard let apiClient, feeds.isEmpty == false else { return false }
+		guard let apiClient, let context = accountContext(for: apiClient), feeds.isEmpty == false else { return false }
 		let keys = feeds.map(\.feedKey)
 		do {
 			try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+			guard isCurrentAccountOperation(context) else { return false }
 			staleFeedUndo = .unarchive(keys)
 			staleFeedUndoTitle = keys.count == 1 ? "Undo Restore" : "Undo Restore \(keys.count) Feeds"
 			await loadStaleFeeds()
-			return true
+			return isCurrentAccountOperation(context)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			return false
 		}
 	}
 
 	func unsubscribeStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let selectedIDs = Set(feeds.map(\.streamId))
 		let selectedKeys = Set(feeds.map(\.feedKey))
 		let removed = subscriptions.filter { selectedIDs.contains($0.id) || selectedKeys.contains($0.feedKey) }
@@ -3000,26 +3020,34 @@ final class ReaderAppModel {
 		}
 		var changedCollectionIDs = Set<String>()
 		for subscription in removed {
-			changedCollectionIDs.formUnion(await removeSubscriptionLocally(subscription))
+			guard let removedCollectionIDs = await removeSubscriptionLocally(subscription) else { return false }
+			changedCollectionIDs.formUnion(removedCollectionIDs)
 		}
 		staleFeedUndo = .unsubscribe(removed)
 		staleFeedUndoTitle = removed.count == 1 ? "Undo Unsubscribe" : "Undo Unsubscribe \(removed.count) Feeds"
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(changedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		await loadNavigation(force: true)
+		guard isCurrentAccountOperation(context) else { return false }
 		await loadStaleFeeds()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	func undoStaleFeedAction() async {
-		guard let undo = staleFeedUndo else { return }
+		guard let undo = staleFeedUndo, let context = accountContext() else { return }
 		switch undo {
 		case .archive(let keys):
 			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+				guard isCurrentAccountOperation(context) else { return }
 			} catch {
+				guard isCurrentAccountOperation(context) else { return }
 				presentSettingsError(error)
 				return
 			}
@@ -3027,7 +3055,9 @@ final class ReaderAppModel {
 			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+				guard isCurrentAccountOperation(context) else { return }
 			} catch {
+				guard isCurrentAccountOperation(context) else { return }
 				presentSettingsError(error)
 				return
 			}
@@ -3037,17 +3067,21 @@ final class ReaderAppModel {
 			}
 			setSubscriptions(subscriptions + removed)
 			rebuildNavigationFromSubscriptions()
-			if let accountID = session?.storageIdentity {
-				do {
-					try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-					try await offlineStore.saveNavigation(navigation, accountID: accountID)
-				} catch {
-					errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
-				}
+			let savedSubscriptions = subscriptions
+			let savedNavigation = navigation
+			do {
+				try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+				try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			} catch {
+				guard isCurrentAccountOperation(context) else { return }
+				errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 			}
+			guard isCurrentAccountOperation(context) else { return }
 			await replayPendingMutations()
+			guard isCurrentAccountOperation(context) else { return }
 			if apiClient != nil {
 				await loadNavigation(force: true)
+				guard isCurrentAccountOperation(context) else { return }
 			}
 		}
 		staleFeedUndo = nil
@@ -3057,6 +3091,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func renameFeed(_ subscription: FeedSubscription, to newTitle: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard title.isEmpty == false, title.count <= 200 else {
 			errorMessage = "Feed names must be between 1 and 200 characters."
@@ -3068,12 +3103,15 @@ final class ReaderAppModel {
 		updateSubscription(id: subscription.id) { $0.title = title }
 		rebuildNavigationFromSubscriptions()
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func moveFeed(_ subscription: FeedSubscription, toFolderNames folderNames: [String]) async -> Bool {
+		guard let context = accountContext() else { return false }
 		guard let normalizedFolders = normalizedFolderNames(folderNames) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
@@ -3105,7 +3143,7 @@ final class ReaderAppModel {
 			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		updateSubscription(id: subscription.id) { item in
 			item.categories = normalizedFolders.map {
 				FeedCategory(id: "user/-/label/\($0)", label: $0)
@@ -3119,33 +3157,33 @@ final class ReaderAppModel {
 			previousSelectedID: previousSelectedID,
 			previousSelectedItem: previousSelectedItem,
 		)
-		if let accountID = session?.storageIdentity {
-			do {
-				try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-				try await offlineStore.saveNavigation(navigation, accountID: accountID)
-			} catch {
-				errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
-			}
-		}
+		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		if remappedCollectionIDs.isEmpty == false {
 			await persistCollections(remappedCollectionIDs)
+			guard isCurrentAccountOperation(context) else { return false }
 		}
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		let changedCollectionIDs = await removeSubscriptionLocally(subscription)
+		guard let changedCollectionIDs = await removeSubscriptionLocally(subscription) else { return false }
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(changedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
-	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String> {
+	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String>? {
 		let removedFeedItems = navigation.items
 			.filter { $0.kind == .feed && $0.streamID == subscription.id }
 		let subscriptionFolderIDs = Set(subscription.categories.map(\.id).filter { $0.isEmpty == false })
@@ -3155,7 +3193,7 @@ final class ReaderAppModel {
 			+ subscriptionFolderIDs.map { "\(subscription.id)::\($0)" }
 		)
 		let affectedFolderIDs = subscriptionFolderIDs.union(removedFeedItems.compactMap(\.parentID))
-		await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs))
+		guard await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs)) else { return nil }
 		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
 		var changedCollectionIDs = Set(removedFeedIDs)
@@ -3193,6 +3231,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func renameFolder(_ oldName: String, to newName: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		guard let name = normalizedFolderName(newName) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
@@ -3217,7 +3256,7 @@ final class ReaderAppModel {
 					]
 				}
 		)
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		for subscription in affected {
 			let folders = subscription.folderNames.map { $0 == oldName ? name : $0 }
 			guard await enqueueOfflineMutation(
@@ -3228,13 +3267,17 @@ final class ReaderAppModel {
 		let remappedCollectionIDs = remapFolderCollectionState(from: oldName, to: name)
 		rebuildNavigationFromSubscriptions()
 		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(remappedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func deleteFolder(_ name: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let folderID = folderStreamID(forName: name)
 		let wasSelectedFolder = selectedNavigationID == folderID
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
@@ -3272,7 +3315,7 @@ final class ReaderAppModel {
 				)
 			) else { return false }
 		}
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		for subscription in affected {
 			updateSubscription(id: subscription.id) { item in
 				item.categories.removeAll { $0.label == name }
@@ -3306,10 +3349,13 @@ final class ReaderAppModel {
 			}
 		}
 		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		if remappedCollectionIDs.isEmpty == false {
 			await persistCollections(remappedCollectionIDs)
+			guard isCurrentAccountOperation(context) else { return false }
 		}
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
@@ -5915,19 +5961,27 @@ final class ReaderAppModel {
 		)
 	}
 
-	private func personalizationContext(for apiClient: PigeonAPIClient) -> PersonalizationOperationContext? {
-		guard let session, session.storageIdentity == apiClient.session.storageIdentity else {
-			return nil
-		}
-		return PersonalizationOperationContext(
-			accountID: session.storageIdentity,
-			generation: sessionGeneration,
-		)
+	private func personalizationContext(for apiClient: PigeonAPIClient) -> AccountOperationContext? {
+		accountContext(for: apiClient)
 	}
 
-	private func isCurrentPersonalizationOperation(_ context: PersonalizationOperationContext) -> Bool {
+	private func accountContext(for apiClient: PigeonAPIClient) -> AccountOperationContext? {
+		guard let context = accountContext(), context.accountID == apiClient.session.storageIdentity else { return nil }
+		return context
+	}
+
+	private func accountContext() -> AccountOperationContext? {
+		guard let session else { return nil }
+		return AccountOperationContext(accountID: session.storageIdentity, generation: sessionGeneration)
+	}
+
+	private func isCurrentAccountOperation(_ context: AccountOperationContext) -> Bool {
 		session?.storageIdentity == context.accountID
 			&& sessionGeneration == context.generation
+	}
+
+	private func isCurrentPersonalizationOperation(_ context: AccountOperationContext) -> Bool {
+		isCurrentAccountOperation(context)
 	}
 
 	private func isCurrentOperation(_ context: OperationContext) -> Bool {
@@ -6484,21 +6538,20 @@ final class ReaderAppModel {
 		return String(rowID)
 	}
 
-	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async {
-		guard collectionIDs.isEmpty == false,
-			let accountID = session?.storageIdentity else {
-			return
-		}
+	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async -> Bool {
+		guard let context = accountContext() else { return false }
+		guard collectionIDs.isEmpty == false else { return true }
 		let unloadedIDs = collectionIDs.filter { articleCache[$0] == nil }
 		let unloadedPaginationIDs = collectionIDs.filter {
 			streamContinuations[$0] == nil && seenStreamContinuations[$0] == nil
 		}
 		guard unloadedIDs.isEmpty == false || unloadedPaginationIDs.isEmpty == false else {
-			return
+			return true
 		}
-		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID) else {
-			return
+		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: context.accountID) else {
+			return isCurrentAccountOperation(context)
 		}
+		guard isCurrentAccountOperation(context) else { return false }
 		for collectionID in unloadedIDs {
 			if let articles = snapshot.articlesByCollection[collectionID] {
 				articleCache[collectionID] = articles
@@ -6516,40 +6569,45 @@ final class ReaderAppModel {
 				selectedArticleIDs[collectionID] = restoration.selectedArticleIDs[collectionID]
 			}
 		}
+		return true
 	}
 
 	private func persistCollections(_ collectionIDs: Set<String>) async {
-		guard let accountID = session?.storageIdentity else { return }
+		guard let context = accountContext() else { return }
+		let savedNavigation = navigation
+		let collections = collectionIDs.map { collectionID in
+			(
+				id: collectionID,
+				articles: articleCache[collectionID],
+				continuation: streamContinuations[collectionID],
+				isRemoved: navigation.item(withID: collectionID) == nil,
+			)
+		}
 		do {
-			for collectionID in collectionIDs {
-				// A collection that still exists in navigation may have state only in
-				// SQLite. Do not turn that cache into an empty snapshot merely because
-				// this operation did not load it into memory. Removed IDs are explicit
-				// clears and must still be persisted as empty collections.
-				let isRemovedCollection = navigation.item(withID: collectionID) == nil
-				let hasLoadedArticles = articleCache[collectionID] != nil
-				if hasLoadedArticles || isRemovedCollection {
+			for collection in collections {
+				// An unloaded collection still in navigation belongs to SQLite.
+				// Removed IDs are explicit clears, even without loaded articles.
+				if collection.articles != nil || collection.isRemoved {
 					try await offlineStore.saveArticles(
-						articleCache[collectionID] ?? [],
-						collectionID: collectionID,
-						accountID: accountID,
+						collection.articles ?? [],
+						collectionID: collection.id,
+						accountID: context.accountID,
 					)
 				}
-				// A continuation can be hydrated independently of article bodies.
-				// Persist that moved token without overwriting an unloaded SQLite
-				// article collection with an empty array.
-				if hasLoadedArticles || isRemovedCollection || streamContinuations[collectionID] != nil {
+				if collection.articles != nil || collection.isRemoved || collection.continuation != nil {
 					try await offlineStore.saveCollectionContinuation(
-						streamContinuations[collectionID],
-						collectionID: collectionID,
-						accountID: accountID,
+						collection.continuation,
+						collectionID: collection.id,
+						accountID: context.accountID,
 					)
 				}
 			}
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 			writeWidgetSnapshot()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = error.localizedDescription
 		}
 	}
@@ -6607,14 +6665,16 @@ final class ReaderAppModel {
 	}
 
 	private func persistLibraryAfterSubscriptionChange() async {
-		guard let accountID = session?.storageIdentity else {
-			return
-		}
+		guard let context = accountContext() else { return }
+		let savedSubscriptions = subscriptions
+		let savedNavigation = navigation
 		do {
-			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = "Your library change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
 	}
@@ -6963,13 +7023,14 @@ final class ReaderAppModel {
 	}
 
 	private func persistLibraryAfterFolderChange() async {
-		guard let accountID = session?.storageIdentity else {
-			return
-		}
+		guard let context = accountContext() else { return }
+		let savedSubscriptions = subscriptions
+		let savedNavigation = navigation
 		do {
-			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
 	}

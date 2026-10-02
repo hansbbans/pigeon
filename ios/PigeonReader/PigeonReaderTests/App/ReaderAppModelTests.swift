@@ -2234,6 +2234,238 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: feed).map(\.id) == [article.id])
 	}
 
+	@Test(.timeLimit(.minutes(1))) func offlineBodyCleanupDoesNotRestoreThePreviousAccountAfterSwitching() async throws {
+		let firstSession = try makeSession(token: "cleanup-first-account")
+		let secondSession = try makeSession(token: "cleanup-second-account")
+		let store = PausingOfflineLibraryStore()
+		let oldArticle = makeArticle(id: "previous-account-story")
+		let newArticle = makeArticle(id: "current-account-story")
+		let firstNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)])
+		try await store.saveNavigation(firstNavigation, accountID: firstSession.storageIdentity)
+		try await store.saveArticles([oldArticle], collectionID: ReaderSection.forYou.rawValue, accountID: firstSession.storageIdentity)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: firstSession, offlineStore: store)
+		model.articles = [oldArticle]
+		await store.pauseNextSnapshot()
+
+		let cleanup = Task { await model.cleanupOfflineBodies() }
+		await store.waitUntilSnapshotIsPaused()
+		model.disconnect()
+		model.session = secondSession
+		model.articles = [newArticle]
+		model.select(article: newArticle)
+		await store.resumeSnapshot()
+		_ = await cleanup.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == [newArticle.id])
+		#expect(model.selectedArticleID == newArticle.id)
+		#expect(model.session == secondSession)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func offlineCacheClearDoesNotClearTheNextAccountsReader(reconnectSameAccount: Bool) async throws {
+		let firstSession = try makeSession(token: "clear-first-account")
+		let secondSession = try makeSession(token: reconnectSameAccount ? "clear-first-account" : "clear-second-account")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: firstSession, offlineStore: store)
+		await store.pauseNextClear()
+		let clear = Task { await model.clearOfflineArticles() }
+		await store.waitUntilClearIsPaused()
+		model.disconnect()
+		model.session = secondSession
+		let newArticle = makeArticle(id: "current-account-after-clear")
+		model.articles = [newArticle]
+		model.select(article: newArticle)
+		await store.resumeClear()
+		await clear.value
+
+		#expect(model.allArticles(for: .forYou).map(\.id) == [newArticle.id])
+		#expect(model.selectedArticleID == newArticle.id)
+		#expect(model.preferredCompactColumn == .detail)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func articlePersistenceDoesNotSaveTheNextAccountsNavigationToThePreviousAccount() async throws {
+		let firstSession = try makeSession(token: "persist-first-account")
+		let secondSession = try makeSession(token: "persist-second-account")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: firstSession, offlineStore: store)
+		let firstNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)])
+		model.setNavigation(firstNavigation)
+		try await store.saveNavigation(firstNavigation, accountID: firstSession.storageIdentity)
+		let oldArticle = makeArticle(id: "persist-old-story")
+		model.articles = [oldArticle]
+		await store.pauseNextArticleSave()
+		let mutation = Task { await model.setRead(oldArticle, read: true) }
+		await store.waitUntilArticleSaveIsPaused()
+		model.disconnect()
+		model.session = secondSession
+		let nextNavigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 9)])
+		model.setNavigation(nextNavigation)
+		model.articles = [makeArticle(id: "persist-next-story")]
+		await store.resumeArticleSave()
+		await mutation.value
+
+		let snapshot = try await store.loadSnapshot(accountID: firstSession.storageIdentity)
+		#expect(snapshot.navigation?.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 0)
+		#expect(model.navigation == nextNavigation)
+		#expect(snapshot.articlesByCollection[ReaderSection.forYou.rawValue]?.first?.isRead == true)
+		#expect(try await store.pendingMutations(accountID: firstSession.storageIdentity, limit: Int.max).count == 1)
+		#expect(try await store.pendingMutations(accountID: secondSession.storageIdentity, limit: Int.max).isEmpty)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["move", "rename", "unsubscribe", "delete"])
+	func folderHydrationDoesNotModifyTheNextAccount(action: String) async throws {
+		let firstSession = try makeSession(token: "folder-first-\(action)")
+		let secondSession = try makeSession(token: "folder-second-\(action)")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: firstSession, offlineStore: store)
+		let original = makeSubscription(id: "feed/1", key: "daily", title: "Original account", folder: "Design")
+		installSubscriptions([original], on: model)
+		let oldFolderID = "user/-/label/Design"
+		let oldArticle = makeArticle(id: "old-folder-story", feedKey: original.feedKey)
+		try await store.saveArticles([oldArticle], collectionID: oldFolderID, accountID: firstSession.storageIdentity)
+		await store.pauseNextSnapshot()
+		let change = Task {
+			switch action {
+			case "move": await model.moveFeed(original, toFolderNames: ["Moved"])
+			case "rename": await model.renameFolder("Design", to: "Renamed")
+			case "unsubscribe": await model.unsubscribe(original)
+			default: await model.deleteFolder("Design")
+			}
+		}
+		await store.waitUntilSnapshotIsPaused()
+		model.disconnect()
+		model.session = secondSession
+		let current = makeSubscription(id: "feed/1", key: "current", title: "Current account", folder: "Design")
+		installSubscriptions([current], on: model)
+		let currentFolder = try #require(model.folderNavigationItems.first)
+		await store.resumeSnapshot()
+		_ = await change.value
+
+		#expect(model.subscriptions == [current])
+		#expect(model.allArticles(for: currentFolder).isEmpty)
+		#expect(try await store.pendingMutations(accountID: secondSession.storageIdentity, limit: Int.max).isEmpty)
+		let previousPending = try await store.pendingMutations(accountID: firstSession.storageIdentity, limit: Int.max)
+		// Moves and unsubscribe are durable before hydration. Account switching must
+		// preserve those original-account actions while blocking subsequent work.
+		#expect(previousPending.count == (action == "move" || action == "unsubscribe" || action == "delete" ? 1 : 0))
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["archive-success", "archive-failure", "unarchive-success", "unarchive-failure"])
+	func staleFeedArchiveCompletionDoesNotPublishToTheNextAccount(action: String) async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let subscription = makeSubscription(id: "feed/old", key: "old", title: "Old", folder: nil)
+		let stale = makeStaleFeed(subscription)
+		let change = Task {
+			if action.hasPrefix("unarchive") { return await model.unarchiveStaleFeeds([stale]) }
+			return await model.archiveStaleFeeds([stale])
+		}
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		model.session = try makeSession(token: "archive-next-\(action)")
+		model.settingsErrorMessage = "Current account message"
+		await controlled.resolve(request, statusCode: action.hasSuffix("failure") ? 500 : 200)
+		_ = await change.value
+
+		#expect(model.staleFeedUndoTitle == nil)
+		#expect(model.settingsErrorMessage == "Current account message")
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func staleFeedUndoDoesNotDismissTheNextAccountsUndo(fails: Bool) async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let original = makeSubscription(id: "feed/old", key: "old", title: "Old", folder: nil)
+		let archive = Task { await model.archiveStaleFeeds([makeStaleFeed(original)]) }
+		await controlled.resolve(await controlled.nextRequest())
+		await controlled.resolve(await controlled.nextRequest(), data: Data(#"{"cutoff":"2026-07-01T00:00:00Z","feeds":[]}"#.utf8))
+		#expect(await archive.value)
+		let undo = Task { await model.undoStaleFeedAction() }
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		model.session = try makeSession(token: "stale-undo-next-\(fails)")
+		let current = makeSubscription(id: "feed/current", key: "current", title: "Current", folder: nil)
+		installSubscriptions([current], on: model)
+		#expect(await model.unsubscribeStaleFeeds([makeStaleFeed(current)]))
+		let currentUndo = model.staleFeedUndoTitle
+		model.settingsErrorMessage = "Current undo message"
+		await controlled.resolve(request, statusCode: fails ? 500 : 200)
+		await undo.value
+
+		#expect(model.staleFeedUndoTitle == currentUndo)
+		#expect(model.settingsErrorMessage == "Current undo message")
+	}
+
+	@Test(.timeLimit(.minutes(1))) func staleFeedRestorePersistsItsOriginalAccountSnapshotAfterSwitching() async throws {
+		let store = PausingOfflineLibraryStore()
+		let originalSession = try makeSession(token: "restore-original")
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: originalSession, offlineStore: store, offlineSynchronizationEnabled: false)
+		let original = makeSubscription(id: "feed/old", key: "old", title: "Old", folder: nil)
+		installSubscriptions([original], on: model)
+		#expect(await model.unsubscribeStaleFeeds([makeStaleFeed(original)]))
+		await store.pauseNextSubscriptionSave()
+		let restore = Task { await model.undoStaleFeedAction() }
+		await store.waitUntilSubscriptionSaveIsPaused()
+		model.disconnect()
+		model.session = try makeSession(token: "restore-next")
+		let current = makeSubscription(id: "feed/current", key: "current", title: "Current", folder: nil)
+		installSubscriptions([current], on: model)
+		#expect(await model.unsubscribeStaleFeeds([makeStaleFeed(current)]))
+		let currentUndo = model.staleFeedUndoTitle
+		await store.resumeSubscriptionSave()
+		await restore.value
+
+		let oldSnapshot = try await store.loadSnapshot(accountID: originalSession.storageIdentity)
+		#expect(oldSnapshot.subscriptions.map(\.id) == [original.id])
+		#expect(oldSnapshot.navigation?.item(withID: original.id) != nil)
+		#expect(model.staleFeedUndoTitle == currentUndo)
+		#expect(try await store.pendingMutations(accountID: originalSession.storageIdentity, limit: Int.max).map(\.mutation.kind) == [.unsubscribeFeed, .restoreFeed])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func oldFeedRenameDoesNotReplayTheNextAccountsQueuedActions() async throws {
+		let store = PausingOfflineLibraryStore()
+		let httpClient = MockHTTPClient(responseData: Data("Auth=pigeon/rename-current".utf8))
+		let originalSession = try makeSession(token: "rename-original")
+		let model = try makeModel(httpClient: httpClient, session: originalSession, offlineStore: store, offlineSynchronizationEnabled: false)
+		let original = makeSubscription(id: "feed/old", key: "old", title: "Old", folder: nil)
+		installSubscriptions([original], on: model)
+		await store.pauseNextSubscriptionSave()
+		let rename = Task { await model.renameFeed(original, to: "Renamed") }
+		await store.waitUntilSubscriptionSaveIsPaused()
+		model.disconnect()
+		model.password = "test-password"
+		await model.connect()
+		let currentAccountID = try #require(model.session).storageIdentity
+		try await store.enqueue(OfflineMutation(kind: .setRead, itemIds: ["current-story"], value: true, scope: .single), accountID: currentAccountID)
+		await store.resumeSubscriptionSave()
+		_ = await rename.value
+
+		#expect(await httpClient.requests().filter { $0.url.path == "/api/v1/mutations" }.isEmpty)
+		#expect(try await store.pendingMutations(accountID: originalSession.storageIdentity, limit: Int.max).count == 1)
+		#expect(try await store.pendingMutations(accountID: currentAccountID, limit: Int.max).count == 1)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func staleFeedLoadDoesNotPublishAfterAnAccountSwitch(fails: Bool) async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let load = Task { await model.loadStaleFeeds() }
+		let request = await controlled.nextRequest()
+		model.disconnect()
+		model.session = try makeSession(token: "stale-load-current-\(fails)")
+		model.settingsErrorMessage = "Current stale-feed message"
+		let subscription = makeSubscription(id: "feed/old", key: "old", title: "Old", folder: nil)
+		let encoder = JSONEncoder()
+		encoder.dateEncodingStrategy = .iso8601
+		let data = try encoder.encode(StaleFeedSnapshot(cutoff: Date(timeIntervalSince1970: 0), feeds: [makeStaleFeed(subscription)]))
+		await controlled.resolve(request, data: data, statusCode: fails ? 500 : 200)
+		await load.value
+
+		#expect(model.staleFeedSnapshot == nil)
+		#expect(model.settingsErrorMessage == "Current stale-feed message")
+	}
+
 	@Test(.timeLimit(.minutes(1))) func accountSwitchDoesNotCarryBootstrapSelectionIntoTheNextAccount() async throws {
 		let firstSession = try makeSession(token: "bootstrap-first-account")
 		let secondSession = try makeSession(token: "bootstrap-second-account")
@@ -8743,6 +8975,14 @@ struct ReaderAppModelTests {
 		installSubscriptions(subscriptions, on: model, unreadCount: unreadCount)
 	}
 
+	private func makeStaleFeed(_ subscription: FeedSubscription) -> StaleFeed {
+		StaleFeed(
+			feedKey: subscription.feedKey, streamId: subscription.id, title: subscription.title,
+			sourceType: "rss", sourceURL: nil, siteURL: nil, lastArticleAt: nil,
+			lastSuccessAt: nil, httpStatus: nil, archived: false,
+		)
+	}
+
 	private func makeSubscription(id: String, key: String, title: String, folder: String?) -> FeedSubscription {
 		guard let url = URL(string: "https://pigeon.test/feed/\(key)") else {
 			preconditionFailure("Invalid test URL")
@@ -9300,6 +9540,40 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	private var articleSaveIsPaused = false
 	private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
 	private var resumeContinuation: CheckedContinuation<Void, Never>?
+	private var shouldPauseNextSubscriptionSave = false
+	private var subscriptionSaveIsPaused = false
+	private var subscriptionSaveWaiters: [CheckedContinuation<Void, Never>] = []
+	private var subscriptionSaveResumeContinuation: CheckedContinuation<Void, Never>?
+
+	func pauseNextSubscriptionSave() { shouldPauseNextSubscriptionSave = true }
+
+	func waitUntilSubscriptionSaveIsPaused() async {
+		if subscriptionSaveIsPaused { return }
+		await withCheckedContinuation { subscriptionSaveWaiters.append($0) }
+	}
+
+	func resumeSubscriptionSave() {
+		subscriptionSaveResumeContinuation?.resume()
+		subscriptionSaveResumeContinuation = nil
+	}
+
+	private var shouldPauseNextClear = false
+	private var clearIsPaused = false
+	private var clearPauseWaiters: [CheckedContinuation<Void, Never>] = []
+	private var clearResumeContinuation: CheckedContinuation<Void, Never>?
+
+	func pauseNextClear() { shouldPauseNextClear = true }
+
+	func waitUntilClearIsPaused() async {
+		if clearIsPaused { return }
+		await withCheckedContinuation { clearPauseWaiters.append($0) }
+	}
+
+	func resumeClear() {
+		clearResumeContinuation?.resume()
+		clearResumeContinuation = nil
+	}
+
 	private var shouldFailNextSnapshot = false
 	private var shouldPauseNextSnapshot = false
 	private var snapshotIsPaused = false
@@ -9407,6 +9681,15 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws {
+		if shouldPauseNextSubscriptionSave {
+			shouldPauseNextSubscriptionSave = false
+			subscriptionSaveIsPaused = true
+			let waiters = subscriptionSaveWaiters
+			subscriptionSaveWaiters.removeAll()
+			for waiter in waiters { waiter.resume() }
+			await withCheckedContinuation { subscriptionSaveResumeContinuation = $0 }
+			subscriptionSaveIsPaused = false
+		}
 		try await base.saveSubscriptions(subscriptions, accountID: accountID)
 	}
 
@@ -9479,6 +9762,15 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	}
 
 	func clearCachedArticles(accountID: String) async throws {
+		if shouldPauseNextClear {
+			shouldPauseNextClear = false
+			clearIsPaused = true
+			let waiters = clearPauseWaiters
+			clearPauseWaiters.removeAll()
+			for waiter in waiters { waiter.resume() }
+			await withCheckedContinuation { clearResumeContinuation = $0 }
+			clearIsPaused = false
+		}
 		try await base.clearCachedArticles(accountID: accountID)
 	}
 
