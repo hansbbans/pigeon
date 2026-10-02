@@ -381,3 +381,110 @@ test('a failed bulk transaction rolls back its receipt, status, and events', asy
 		state.database.close();
 	}
 });
+
+test('100-action retries return ordered receipts and keep making progress inside the query budget', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const limits = { maxQueries: 50, queries: 0 };
+		const env = { DB: new SqliteD1(state.database, limits) } as never;
+		const mutations = Array.from({ length: 100 }, (_, index) => ({
+			id: `queued-${index}`, kind: 'set_read', itemIds: ['11'], value: index % 2 === 0,
+		}));
+		let completed = false;
+		let previousCount = 0;
+		for (let attempt = 0; attempt < 25; attempt++) {
+			limits.queries = 0;
+			// Replaying the entire original page also models a lost HTTP response.
+			const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+				method: 'POST', body: JSON.stringify({ mutations }),
+			}), env);
+			assert.equal(response.status, 200);
+			const body = await response.json() as { results: { mutationId: string; status: string }[] };
+			assert.deepEqual(body.results.map((result) => result.mutationId), mutations.map((mutation) => mutation.id));
+			assert.ok(limits.queries <= 40, `used ${limits.queries} queries`);
+			const count = (state.database.prepare('SELECT COUNT(*) AS count FROM mutation_receipts').get() as { count: number }).count;
+			assert.ok(count > previousCount || count === 100, `receipt count stalled at ${count}`);
+			previousCount = count;
+			if (body.results.every((result) => result.status !== 'failed')) {
+				completed = true;
+				break;
+			}
+			const firstDeferred = body.results.findIndex((result) => result.status === 'failed');
+			assert.ok(body.results.slice(firstDeferred).every((result) => result.status === 'failed'));
+		}
+		assert.equal(completed, true);
+		assert.equal(previousCount, 100);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 100);
+		assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 0);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('a large folder move keeps atomic feed updates inside the query budget', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const limits = { maxQueries: 50, queries: 0 };
+		const folders = Array.from({ length: 120 }, (_, index) => `Folder ${index}`);
+		const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+			method: 'POST', body: JSON.stringify({ mutations: [{ id: 'large-move', kind: 'move_feed', feedId: 'feed/7', folders }] }),
+		}), { DB: new SqliteD1(state.database, limits) } as never);
+		assert.equal((await response.json() as { results: { status: string }[] }).results[0].status, 'applied');
+		assert.ok(limits.queries <= 10);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM feed_tags').get() as { count: number }).count, 120);
+		assert.equal((state.database.prepare('SELECT category FROM feeds WHERE rowid = 7').get() as { category: string }).category, folders[0]);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('budget deferral preserves FIFO even when a later cheaper mutation would fit', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const mutations: unknown[] = Array.from({ length: 8 }, (_, index) => ({ id: `ordered-${index}`, kind: 'set_read', itemIds: ['11'], value: true }));
+		mutations.push({ id: 'later-feedback', kind: 'feedback', itemIds: ['11'], feedback: 'more_like_this' });
+		const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+			method: 'POST', body: JSON.stringify({ mutations }),
+		}), state.env);
+		const results = (await response.json() as { results: { status: string }[] }).results;
+		assert.deepEqual(results.map((result) => result.status), [...Array(7).fill('applied'), 'failed', 'failed']);
+		assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM engagement_events WHERE event_type = 'more_like_this'").get() as { count: number }).count, 0);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('concurrent receipts discovered after prefetch still prevent a duplicate commit', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const db = new SqliteD1(state.database);
+		const batch = db.batch.bind(db);
+		db.batch = async (statements) => {
+			state.database.prepare(`INSERT INTO mutation_receipts
+			 (account_id, mutation_id, mutation_kind, applied_at, result_json)
+			 VALUES ('default', 'raced-rename', 'rename_feed', '2026-10-02T12:00:00.000Z', ?)`)
+				.run(JSON.stringify({ appliedAt: '2026-10-02T12:00:00.000Z' }));
+			state.database.prepare("UPDATE feeds SET custom_title = 'Committed elsewhere' WHERE rowid = 7").run();
+			return batch(statements);
+		};
+		const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+			method: 'POST', body: JSON.stringify({ mutations: [{ id: 'raced-rename', kind: 'rename_feed', feedId: 'feed/7', title: 'Duplicate write' }] }),
+		}), { DB: db } as never);
+		assert.equal((await response.json() as { results: { status: string }[] }).results[0].status, 'already_applied');
+		assert.equal((state.database.prepare('SELECT custom_title FROM feeds WHERE rowid = 7').get() as { custom_title: string }).custom_title, 'Committed elsewhere');
+	} finally {
+		state.database.close();
+	}
+});
+
+test('unavailable receipt storage returns a retryable HTTP response', async () => {
+	const response = await handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+		method: 'POST', body: JSON.stringify({ mutations: [{ id: 'unavailable', kind: 'set_read', itemIds: ['11'], value: true }] }),
+	}), { DB: { prepare() { throw new Error('storage offline'); } } } as never);
+	assert.equal(response.status, 503);
+	assert.deepEqual(await response.json(), { error: 'Database unavailable' });
+});

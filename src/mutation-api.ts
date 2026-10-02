@@ -5,6 +5,8 @@ const MAX_MUTATIONS_PER_REQUEST = 100;
 const MAX_TOTAL_ITEM_IDS = 200;
 const MAX_TITLE_LENGTH = 200;
 const MAX_FOLDER_LENGTH = 80;
+// Leave room under the Free-plan D1 query cap for schema checks and recovery.
+const MAX_MUTATION_QUERIES = 40;
 
 type MutationKind =
 	| 'set_read'
@@ -58,30 +60,52 @@ export async function handleMutationBatch(request: Request, env: Env): Promise<R
 		return Response.json({ error: errorMessage(error) }, { status: 400 });
 	}
 
+	let receipts: Map<string, { appliedAt: string }>;
+	try {
+		receipts = await receiptsFor(env.DB, mutations.map((mutation) => mutation.id));
+	} catch (error) {
+		console.error('[Mutations] Receipt lookup failed', error);
+		return Response.json({ error: 'Database unavailable' }, { status: 503 });
+	}
+	let queryCount = 1;
+	let budgetReached = false;
 	const results = [];
 	for (const mutation of mutations) {
-		const existing = await receiptFor(env.DB, mutation.id);
+		const existing = receipts.get(mutation.id);
 		if (existing) {
 			results.push({ mutationId: mutation.id, status: 'already_applied', appliedAt: existing.appliedAt });
+			continue;
+		}
+		// Every action resolves one target query, commits an atomic batch, and
+		// may need one receipt lookup after a concurrent retry or failed write.
+		const worstCaseQueries = mutation.kind === 'set_read' || mutation.kind === 'set_read_batch'
+			|| mutation.kind === 'set_starred' || mutation.kind === 'move_feed' ? 6 : 4;
+		if (budgetReached || queryCount + worstCaseQueries > MAX_MUTATION_QUERIES) {
+			budgetReached = true;
+			results.push({ mutationId: mutation.id, status: 'failed', error: 'Request query budget reached; retry this mutation' });
 			continue;
 		}
 
 		try {
 			const appliedAt = new Date().toISOString();
 			const resultJSON = JSON.stringify({ mutationId: mutation.id, status: 'applied', appliedAt });
+			queryCount += 1;
+			const actionStatements = await mutationStatements(env, mutation, appliedAt);
 			const statements = [
 				env.DB.prepare(
 					`INSERT INTO mutation_receipts
 					 (account_id, mutation_id, mutation_kind, applied_at, result_json)
 					 VALUES ('default', ?, ?, ?, ?)`,
 				).bind(mutation.id, mutation.kind, appliedAt, resultJSON),
-				...(await mutationStatements(env, mutation, appliedAt)),
+				...actionStatements,
 			];
+			queryCount += statements.length;
 			await env.DB.batch(statements);
 			results.push({ mutationId: mutation.id, status: 'applied', appliedAt });
 		} catch (error) {
 			// A concurrent retry may have committed the same idempotency key first.
-			const racedReceipt = await receiptFor(env.DB, mutation.id);
+			queryCount += 1;
+			const racedReceipt = await receiptFor(env.DB, mutation.id).catch(() => null);
 			if (racedReceipt) {
 				results.push({ mutationId: mutation.id, status: 'already_applied', appliedAt: racedReceipt.appliedAt });
 			} else {
@@ -177,9 +201,8 @@ async function mutationStatements(
 		const feed = await resolveFeed(env.DB, mutation.feedId as string);
 		return [
 			env.DB.prepare('DELETE FROM feed_tags WHERE feed_key = ?').bind(feed.feed_key),
-			...(mutation.folders ?? []).map((folder) =>
-				env.DB.prepare('INSERT INTO feed_tags (feed_key, label) VALUES (?, ?)').bind(feed.feed_key, folder),
-			),
+			env.DB.prepare('INSERT INTO feed_tags (feed_key, label) SELECT ?, value FROM json_each(?)')
+				.bind(feed.feed_key, JSON.stringify(mutation.folders ?? [])),
 			env.DB.prepare('UPDATE feeds SET category = ? WHERE feed_key = ?')
 				.bind(mutation.folders?.[0] ?? null, feed.feed_key),
 		];
@@ -287,6 +310,18 @@ async function receiptFor(db: D1Database, mutationID: string): Promise<{ applied
 		.bind(mutationID)
 		.first<MutationReceiptRow>();
 	if (!receipt) return null;
+	return parseReceipt(receipt);
+}
+
+async function receiptsFor(db: D1Database, mutationIDs: string[]): Promise<Map<string, { appliedAt: string }>> {
+	const { results } = await db.prepare(
+		`SELECT mutation_id, result_json FROM mutation_receipts
+		 WHERE account_id = 'default' AND mutation_id IN (SELECT value FROM json_each(?))`,
+	).bind(JSON.stringify(mutationIDs)).all<MutationReceiptRow & { mutation_id: string }>();
+	return new Map(results.map((receipt) => [receipt.mutation_id, parseReceipt(receipt)]));
+}
+
+function parseReceipt(receipt: MutationReceiptRow): { appliedAt: string } {
 	try {
 		const parsed = JSON.parse(receipt.result_json) as { appliedAt?: unknown };
 		return { appliedAt: typeof parsed.appliedAt === 'string' ? parsed.appliedAt : '' };
