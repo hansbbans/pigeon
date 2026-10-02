@@ -33,6 +33,11 @@ interface ExistingFeed {
 	display_name: string;
 }
 
+interface ExistingFeedUrl extends ExistingFeed {
+	source_url: string | null;
+	canonical_url: string | null;
+}
+
 /**
  * Core subscription logic (exported for reuse in GReader API)
  * @returns Object with feed_key, display_name, and rowid on success
@@ -56,7 +61,7 @@ export async function subscribeToFeed(
 	const feedTitle = candidate.title;
 	const siteUrl = candidate.site_url;
 
-	// Generate feed_key from URL (normalize domain + path)
+	// Keep the readable URL prefix, but preserve the full URL's identity.
 	const feedKey = await generateFeedKey(canonicalUrl);
 
 	// Canonical URLs and their redirect aliases all resolve to one subscription.
@@ -193,13 +198,13 @@ async function findExistingFeed(
 	aliasUrls: string[],
 ): Promise<ExistingFeed | null> {
 	const canonical = await db.prepare(
-		'SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ? OR canonical_url = ? OR source_url = ? LIMIT 1',
+		'SELECT rowid, feed_key, display_name FROM feeds WHERE canonical_url = ? OR source_url = ? LIMIT 1',
 	)
-		.bind(feedKey, canonicalUrl, canonicalUrl)
+		.bind(canonicalUrl, canonicalUrl)
 		.first<ExistingFeed>();
 	if (canonical) return canonical;
 
-	for (const aliasUrl of aliasUrls) {
+	for (const aliasUrl of new Set([canonicalUrl, ...aliasUrls])) {
 		const alias = await db.prepare(
 			`SELECT f.rowid, f.feed_key, f.display_name
 			 FROM feed_url_aliases a
@@ -210,6 +215,17 @@ async function findExistingFeed(
 			.bind(aliasUrl)
 			.first<ExistingFeed>();
 		if (alias) return alias;
+	}
+
+	// Older subscriptions used a lossy slug. Reuse that key only when its
+	// stored URL really identifies the requested resource, never on slug alone.
+	for (const key of new Set([feedKey, await generateLegacyFeedKey(new URL(canonicalUrl))])) {
+		const keyed = await db.prepare(
+			'SELECT rowid, feed_key, display_name, source_url, canonical_url FROM feeds WHERE feed_key = ?',
+		).bind(key).first<ExistingFeedUrl>();
+		if (keyed && normalizedFeedUrl(keyed.canonical_url || keyed.source_url) === normalizedFeedUrl(canonicalUrl)) {
+			return keyed;
+		}
 	}
 	return null;
 }
@@ -342,10 +358,33 @@ export async function handleSubscribe(request: Request, env: Env): Promise<Respo
 }
 
 /**
- * Generate a feed key from a URL
- * Example: https://hnrss.org/newest -> "hnrss-org-newest"
+ * Generate a readable feed key with a collision-resistant full URL identity.
  */
 async function generateFeedKey(url: URL): Promise<string> {
+	const prefix = [url.hostname.replace(/^www\./, ''), url.pathname]
+		.join('/')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-|-$/g, '');
+	return `${prefix}-${await hashFeedQuery(normalizedFeedUrl(url.href)!)}`;
+}
+
+function normalizedFeedUrl(value: string | null): string | null {
+	if (!value) return null;
+	try {
+		const url = new URL(value);
+		url.hash = '';
+		// Sort different parameter names while preserving the order of repeated
+		// values, which some publishers use to distinguish feed resources.
+		url.searchParams.sort();
+		return url.href;
+	} catch {
+		return null;
+	}
+}
+
+/** Previous key format, used only to safely resolve existing subscriptions. */
+async function generateLegacyFeedKey(url: URL): Promise<string> {
 	const normalizedQuery = [...url.searchParams.entries()]
 		.sort(([leftKey, leftValue], [rightKey, rightValue]) => {
 			if (leftKey === rightKey) {

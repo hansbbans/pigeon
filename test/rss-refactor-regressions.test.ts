@@ -237,10 +237,9 @@ class FeedStoreStatement {
 			return null;
 		}
 
-		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {
-			const [feedKey, canonicalUrl, sourceUrl] = this.boundValues as string[];
+		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE canonical_url = ?')) {
+			const [canonicalUrl, sourceUrl] = this.boundValues as string[];
 			const feed =
-				this.store.feeds.get(feedKey) ??
 				[...this.store.feeds.values()].find(
 					(candidate) =>
 						candidate.canonical_url === canonicalUrl || candidate.source_url === sourceUrl,
@@ -254,6 +253,10 @@ class FeedStoreStatement {
 				feed_key: feed.feed_key,
 				display_name: feed.display_name,
 			} as T;
+		}
+
+		if (this.sql.includes('SELECT rowid, feed_key, display_name, source_url, canonical_url FROM feeds WHERE feed_key = ?')) {
+			return (this.store.feeds.get(this.boundValues[0] as string) ?? null) as T | null;
 		}
 
 		if (this.sql.includes('SELECT rowid FROM feeds WHERE feed_key = ?')) {
