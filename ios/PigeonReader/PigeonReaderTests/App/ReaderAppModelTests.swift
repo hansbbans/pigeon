@@ -2867,6 +2867,189 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: ["open", "read", "star"], [false, true])
+	func oldNotificationPreparationDoesNotApplyAnActionToTheNextSession(actionName: String, sameAccount: Bool) async throws {
+		let original = try makeSession(token: "notification-original")
+		let target = makeArticle(id: "shared-notification-story")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused", loginToken: sameAccount ? original.token : "notification-current",
+			responses: ["/api/v1/recommendations": try responseData(items: [target])],
+		)
+		let store = PausingOfflineLibraryStore()
+		let durable = OfflineMutation(id: "original-notification-read", kind: .setRead, itemIds: ["old-durable-read"], value: true, scope: .single)
+		try await store.enqueue(durable, accountID: original.storageIdentity)
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store)
+		let action: ReaderNotificationAction = actionName == "open" ? .open(articleID: target.id) : actionName == "read" ? .markRead(articleID: target.id) : .star(articleID: target.id)
+		await store.pauseNextSnapshot()
+		let notification = Task { await model.handleNotificationAction(action) }
+		await store.waitUntilSnapshotIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		let selected = makeArticle(id: "current-notification-selection")
+		model.setArticles([target, selected], for: .forYou)
+		model.select(section: .forYou)
+		model.select(article: selected)
+		model.errorMessage = "Current notification message"
+		let queuedBefore = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		let requestsBefore = await transport.requests.count
+		await store.resumeSnapshot()
+		await notification.value
+
+		#expect(await transport.requests.count == requestsBefore)
+		#expect(model.selectedArticleID == selected.id)
+		#expect(model.errorMessage == "Current notification message")
+		let unchanged = try #require(model.allArticles(for: .forYou).first(where: { $0.id == target.id }))
+		#expect(unchanged.isRead == false && unchanged.isStarred == false)
+		let queuedAfter = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(queuedAfter.map(\.mutation.id) == queuedBefore.map(\.mutation.id))
+		#expect(queuedAfter.map(\.attempts) == queuedBefore.map(\.attempts))
+		#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).contains(where: { $0.mutation.id == durable.id }))
+
+		await model.handleNotificationAction(action)
+		let updated = try #require(model.allArticles(for: .forYou).first(where: { $0.id == target.id }))
+		if actionName == "open" { #expect(model.selectedArticleID == target.id) }
+		else if actionName == "read" { #expect(updated.isRead) }
+		else { #expect(updated.isStarred) }
+		let currentQueue = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(currentQueue.count == queuedBefore.count + (actionName == "open" ? 0 : 1))
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["feed", "folder", "article"], [false, true])
+	func oldDeepLinkPreparationDoesNotNavigateTheNextSession(destination: String, sameAccount: Bool) async throws {
+		let original = try makeSession(token: "deep-link-original")
+		let target = makeArticle(id: "shared-deep-link-story", feedKey: "shared")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused", loginToken: sameAccount ? original.token : "deep-link-current",
+			responses: ["/api/v1/recommendations": try responseData(items: [target])],
+		)
+		let store = PausingOfflineLibraryStore()
+		let durable = OfflineMutation(id: "original-deep-link-read", kind: .setRead, itemIds: ["old-durable-read"], value: true, scope: .single)
+		try await store.enqueue(durable, accountID: original.storageIdentity)
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store)
+		let link: PigeonDeepLink = destination == "feed" ? .feed("feed/shared") : destination == "folder" ? .folder("Shared Folder") : .article(target.id, collection: "feed/shared")
+		await store.pauseNextSnapshot()
+		let navigation = Task { await model.handleDeepLink(link.url) }
+		await store.waitUntilSnapshotIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		installSubscriptions([makeSubscription(id: "feed/shared", key: "shared", title: "Shared", folder: "Shared Folder")], on: model)
+		let feed = try #require(model.navigation.items.first(where: { $0.kind == .feed }))
+		let folder = try #require(model.folderNavigationItems.first)
+		model.setArticles([target], for: feed)
+		model.setArticles([target], for: folder)
+		let selected = makeArticle(id: "current-deep-link-selection")
+		model.setArticles([selected], for: .forYou)
+		model.select(section: .forYou)
+		model.select(article: selected)
+		model.errorMessage = "Current deep-link message"
+		let queuedBefore = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		let requestsBefore = await transport.requests.count
+		await store.resumeSnapshot()
+		await navigation.value
+
+		#expect(await transport.requests.count == requestsBefore)
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+		#expect(model.selectedArticleID == selected.id)
+		#expect(model.errorMessage == "Current deep-link message")
+		#expect(model.isFolderExpanded(folder) == false)
+		let queuedAfter = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(queuedAfter.map(\.mutation.id) == queuedBefore.map(\.mutation.id))
+		#expect(queuedAfter.map(\.attempts) == queuedBefore.map(\.attempts))
+		#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).contains(where: { $0.mutation.id == durable.id }))
+
+		await model.handleDeepLink(link.url)
+		#expect(model.selectedNavigationID == (destination == "folder" ? folder.id : feed.id))
+		if destination == "article" { #expect(model.selectedArticleID == target.id) }
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldArticleDeepLinkDoesNotSelectAnArticleAfterItsLoadCrossesSessions(sameAccount: Bool) async throws {
+		let original = try makeSession(token: "article-link-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/reader/api/0/stream/items/ids", loginToken: sameAccount ? original.token : "article-link-current",
+			responses: ["/reader/api/0/stream/items/ids": streamIDsData(ids: [], continuation: nil)],
+		)
+		let model = try makeModel(httpClient: transport, session: original, offlineSynchronizationEnabled: false)
+		installSubscriptions([makeSubscription(id: "feed/shared", key: "shared", title: "Shared", folder: nil)], on: model)
+		let target = makeArticle(id: "old-article-deep-link", feedKey: "shared")
+		model.setArticles([target], for: .forYou)
+		let link = Task { await model.handleDeepLink(PigeonDeepLink.article(target.id, collection: "feed/shared").url) }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let current = makeArticle(id: "current-article-deep-link")
+		let currentTarget = makeArticle(id: target.id, title: "The current account’s linked story")
+		model.setArticles([current, currentTarget], for: .forYou)
+		model.select(section: .forYou)
+		model.select(article: current)
+		model.errorMessage = "Current article-link message"
+		let requestsBefore = await transport.requests.count
+		await transport.resume()
+		await link.value
+
+		#expect(await transport.requests.count == requestsBefore)
+		#expect(model.selectedNavigationID == ReaderSection.forYou.rawValue)
+		#expect(model.selectedArticleID == current.id)
+		#expect(model.errorMessage == "Current article-link message")
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldBackgroundSnapshotDoesNotRefreshOrReportSuccessForTheNextSession(sameAccount: Bool) async throws {
+		let background = BackgroundRefreshManager.shared
+		try #require(BackgroundRefreshPolicy.shouldRefresh(pathIsSatisfied: background.pathIsSatisfied, isConstrained: background.pathIsConstrained, allowsLowDataMode: true))
+		let original = try makeSession(token: "background-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused", loginToken: sameAccount ? original.token : "background-current",
+			responses: ["/api/v1/recommendations": try responseData(items: [])],
+		)
+		let store = PausingOfflineLibraryStore()
+		let durable = OfflineMutation(id: "original-background-read", kind: .setRead, itemIds: ["old-durable-read"], value: true, scope: .single)
+		try await store.enqueue(durable, accountID: original.storageIdentity)
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store)
+		model.allowsLowDataBackgroundRefresh = true
+		await store.pauseNextSnapshot()
+		let refresh = Task { await model.performBackgroundRefresh() }
+		await store.waitUntilSnapshotIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		let currentMutation = OfflineMutation(id: "current-background-read", kind: .setRead, itemIds: ["current-durable-read"], value: true, scope: .single)
+		try await store.enqueue(currentMutation, accountID: currentAccount)
+		let queuedBefore = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		let requestsBefore = await transport.requests.count
+		await store.resumeSnapshot()
+		#expect(await refresh.value == false)
+
+		#expect(await transport.requests.count == requestsBefore)
+		#expect(model.lastBackgroundRefreshAt == nil)
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let queuedAfter = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(queuedAfter.map(\.mutation.id) == queuedBefore.map(\.mutation.id))
+		#expect(queuedAfter.map(\.attempts) == queuedBefore.map(\.attempts))
+		#expect(try await store.pendingMutations(accountID: original.storageIdentity, limit: 100).contains(where: { $0.mutation.id == durable.id }))
+	}
+
+	@Test func addFeedDeepLinkStillPresentsAndConsumesThePendingRequestBeforeSignIn() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineSynchronizationEnabled: false)
+		model.disconnect()
+		let suiteName = "pigeon-unauthenticated-deep-link-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let feedURL = try #require(URL(string: "https://example.com/new-feed.xml"))
+		PendingFeedStore.save(feedURL, defaults: defaults)
+		await model.handleDeepLink(PigeonDeepLink.add(feedURL).url, pendingFeedDefaults: defaults)
+
+		#expect(model.session == nil)
+		#expect(model.pendingFeedRequest?.url == feedURL)
+		#expect(PendingFeedStore.consume(defaults: defaults) == nil)
+	}
+
 	@Test(.timeLimit(.minutes(1))) func accountSwitchDoesNotCarryBootstrapSelectionIntoTheNextAccount() async throws {
 		let firstSession = try makeSession(token: "bootstrap-first-account")
 		let secondSession = try makeSession(token: "bootstrap-second-account")

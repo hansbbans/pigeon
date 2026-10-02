@@ -1129,28 +1129,31 @@ final class ReaderAppModel {
 			pathIsSatisfied: background.pathIsSatisfied,
 			isConstrained: background.pathIsConstrained,
 			allowsLowDataMode: allowsLowDataBackgroundRefresh
-		), session != nil else { return false }
+		), let context = accountContext(), Task.isCancelled == false else { return false }
 		let cachedArticles: [Recommendation]
-		if let accountID = session?.storageIdentity,
-			let cached = try? await offlineStore.loadSnapshot(accountID: accountID) {
+		if let cached = try? await offlineStore.loadSnapshot(accountID: context.accountID) {
 			cachedArticles = cached.articlesByCollection.values.flatMap { $0 }
 		} else {
 			cachedArticles = []
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		let knownIDs = BackgroundRefreshArticlePlanner.knownIDs(
 			inMemory: articleCache.values.flatMap { $0 },
 			cached: cachedArticles,
 		)
 		await prepareOfflineLibrary()
-		guard Task.isCancelled == false, isOffline == false else { return false }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return false }
 		let newlyArrived = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: knownIDs,
 			current: articleCache.values.flatMap { $0 },
 		)
-		ReaderNotificationManager.shared.expandEnabledAliases(using: subscriptions)
+		let refreshedSubscriptions = subscriptions
+		ReaderNotificationManager.shared.expandEnabledAliases(using: refreshedSubscriptions)
 		for article in newlyArrived.prefix(20) {
-			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: subscriptions)
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
+			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: refreshedSubscriptions)
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		lastBackgroundRefreshAt = .now
 		writeWidgetSnapshot()
 		return true
@@ -1160,31 +1163,38 @@ final class ReaderAppModel {
 		_ url: URL,
 		pendingFeedDefaults: UserDefaults = PigeonSharedData.defaults,
 	) async {
-		guard let link = PigeonDeepLink(url: url) else { return }
+		guard let link = PigeonDeepLink(url: url), Task.isCancelled == false else { return }
+		let context = accountContext()
 		switch link {
 		case .add(let url):
 			PendingFeedStore.remove(matching: url, defaults: pendingFeedDefaults)
 			presentPendingFeedRequest(url)
 		case .feed(let id):
+			guard let context else { return }
 			if navigation.items.contains(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) == false {
 				await prepareOfflineLibrary()
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let item = navigation.items.first(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) {
 				select(item: item)
 				await load(collection: item)
 			}
 		case .folder(let id):
+			guard let context else { return }
 			if navigation.folderItems.contains(where: { $0.id == id || $0.title == id || $0.streamID == id }) == false {
 				await prepareOfflineLibrary()
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let item = navigation.folderItems.first(where: { $0.id == id || $0.title == id || $0.streamID == id }) {
 				navigation.expandFolder(item.id)
 				select(item: item)
 				await load(collection: item)
 			}
 		case .article(let id, let requestedCollection):
+			guard let context else { return }
 			if article(withId: id) == nil { await prepareOfflineLibrary() }
-			guard let article = article(withId: id) else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false,
+				let article = article(withId: id) else { return }
 			if let item = collectionItem(for: article, preferredID: requestedCollection) {
 				select(item: item)
 				if articleCache[item.id] != nil {
@@ -1193,6 +1203,7 @@ final class ReaderAppModel {
 					await load(collection: item)
 				}
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			select(article: article)
 		}
 	}
@@ -1209,12 +1220,14 @@ final class ReaderAppModel {
 	}
 
 	func handleNotificationAction(_ action: ReaderNotificationAction) async {
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		let articleID: String
 		switch action {
 		case .open(let id), .markRead(let id), .star(let id): articleID = id
 		}
 		if article(withId: articleID) == nil { await prepareOfflineLibrary() }
-		guard let article = article(withId: articleID) else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false,
+			let article = article(withId: articleID) else { return }
 		switch action {
 		case .open:
 			await handleDeepLink(PigeonDeepLink.article(articleID, collection: nil).url)
@@ -1223,6 +1236,7 @@ final class ReaderAppModel {
 		case .star:
 			await setStarred(article, starred: true)
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		writeWidgetSnapshot()
 	}
 

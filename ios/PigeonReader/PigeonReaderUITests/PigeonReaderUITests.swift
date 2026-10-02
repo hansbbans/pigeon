@@ -1341,3 +1341,81 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		add(attachment)
 	}
 }
+
+@MainActor
+final class PigeonDeepLinkUITests: XCTestCase {
+	private var app: XCUIApplication!
+	private let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+	private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+
+	override func setUp() async throws {
+		continueAfterFailure = false
+		if springboard.alerts.buttons["Cancel"].firstMatch.exists {
+			springboard.alerts.buttons["Cancel"].firstMatch.tap()
+		}
+		app = XCUIApplication()
+		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state"]
+		app.launch()
+		XCTAssertTrue(app.buttons["reader-sidebar-item-forYou"].waitForExistence(timeout: 15))
+	}
+
+	override func tearDown() async throws {
+		if (testRun?.failureCount ?? 0) > 0 {
+			attachScreenshot("deep-link-failure")
+			for (name, application) in [("Pigeon", app!), ("Safari", safari), ("SpringBoard", springboard)] {
+				let attachment = XCTAttachment(string: application.debugDescription)
+				attachment.name = "\(name) deep-link hierarchy"
+				attachment.lifetime = .keepAlways
+				add(attachment)
+			}
+		}
+	}
+
+	func testRealURLsOpenFeedFolderAndArticle() throws {
+		try openDeepLink("pigeon://feed/feed/1")
+		XCTAssertTrue(app.navigationBars["Dense Discovery"].waitForExistence(timeout: 10))
+		attachScreenshot("real-feed-deep-link")
+		try openDeepLink("pigeon://folder/user/-/label/Design")
+		XCTAssertTrue(app.navigationBars["Design"].waitForExistence(timeout: 10))
+		attachScreenshot("real-folder-deep-link")
+		try openDeepLink("pigeon://article/preview-1?collection=forYou")
+		XCTAssertTrue(app.descendants(matching: .any)["article-back-to-feed"].waitForExistence(timeout: 10))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].exists)
+		attachScreenshot("real-article-deep-link")
+	}
+
+	private func openDeepLink(_ text: String) throws {
+		safari.launch()
+		let pendingCancel = safari.buttons["Cancel"].firstMatch
+		if pendingCancel.exists, pendingCancel.frame.isEmpty == false {
+			tapButton(pendingCancel, in: safari)
+		}
+		let address = safari.textFields["Address"]
+		XCTAssertTrue(address.waitForExistence(timeout: 10))
+		address.tap()
+		let existing = address.value as? String ?? ""
+		address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count) + text + "\n")
+		let safariOpen = safari.buttons["Open"].firstMatch
+		if safariOpen.waitForExistence(timeout: 5) {
+			tapButton(safariOpen, in: safari)
+		} else {
+			let systemOpen = springboard.alerts.buttons["Open"].firstMatch
+			XCTAssertTrue(systemOpen.waitForExistence(timeout: 5))
+			tapButton(systemOpen, in: springboard)
+		}
+	}
+
+	private func tapButton(_ button: XCUIElement, in application: XCUIApplication) {
+		let frame = button.frame
+		XCTAssertFalse(frame.isEmpty)
+		application.coordinate(withNormalizedOffset: .zero)
+			.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+	}
+
+	private func attachScreenshot(_ name: String) {
+		let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+		attachment.name = name
+		attachment.lifetime = .keepAlways
+		add(attachment)
+	}
+}
