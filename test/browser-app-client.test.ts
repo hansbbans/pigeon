@@ -5019,3 +5019,55 @@ for (const returnToCachedToday of [false, true]) {
 		assert.equal(networkRequests, requestsBeforeForeground);
 	});
 }
+
+for (const oldStatus of [200, 503]) {
+	for (const newMutationPending of [false, true]) {
+		test(`old mark-all ${oldStatus} response cannot affect a same-token new session${newMutationPending ? ' with another mutation pending' : ''}`, async () => {
+			const oldMark = createDeferred<Response>();
+			const newMark = createDeferred<Response>();
+			let markRequests = 0;
+			let subscriptionRequests = 0;
+			const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+				if (input.endsWith('/subscription/list')) {
+					subscriptionRequests += 1;
+					return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+				}
+				if (input.endsWith('/unread-count')) return Response.json({ unreadcounts: [{ id: 'feed/1', count: 5 }] });
+				if (input.endsWith('/mark-all-as-read')) return ++markRequests === 1 ? oldMark.promise : newMark.promise;
+				if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+				return browserRegressionResponse(input, init);
+			} });
+			const signInToFeed = async () => {
+				await harness.elements.get('login-form')?.dispatch('submit');
+				await waitForBrowserCondition(() => Boolean(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')));
+				findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+				await waitForBrowserCondition(() => harness.elements.get('articles-heading')?.textContent === 'Alpha'
+					&& harness.elements.get('reader-title')?.textContent === 'Article 1');
+				await flushBrowserTasks();
+			};
+			await signInToFeed();
+			harness.elements.get('mark-all-as-read-button')?.dispatch('click');
+			await waitForBrowserCondition(() => markRequests === 1);
+			await harness.elements.get('logout-button')?.dispatch('click');
+			await signInToFeed();
+			assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, false);
+			if (newMutationPending) {
+				harness.elements.get('mark-all-as-read-button')?.dispatch('click');
+				await waitForBrowserCondition(() => markRequests === 2);
+			}
+			const subscriptionsBeforeOldResponse = subscriptionRequests;
+			oldMark.resolve(new Response(oldStatus === 200 ? 'OK' : 'Old failure', { status: oldStatus }));
+			await flushBrowserTasks();
+			assert.equal(subscriptionRequests, subscriptionsBeforeOldResponse);
+			assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, newMutationPending);
+			assert.equal(harness.elements.get('articles-status')?.textContent, newMutationPending ? 'Marking all items as read…' : '1 article');
+			assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
+			if (newMutationPending) {
+				newMark.resolve(new Response('OK'));
+				await waitForBrowserCondition(() => harness.elements.get('mark-all-as-read-button')?.disabled === false);
+				assert.equal(subscriptionRequests, subscriptionsBeforeOldResponse + 1);
+				assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
+			}
+		});
+	}
+}

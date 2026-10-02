@@ -1474,6 +1474,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightContentIds = [];
   let selectedItemId = null;
   let isMarkingAllAsRead = false;
+  let activeMarkAllRequestId = 0;
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -2049,6 +2050,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearAccountCache() {
     accountGeneration += 1;
+    activeMarkAllRequestId += 1;
+    isMarkingAllAsRead = false;
     unreadCountRequestId += 1;
     inFlightUnreadCountRequest = null;
     subscriptions = [];
@@ -3638,6 +3641,10 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const requestViewId = activeView.id;
     const requestToken = session.token;
+    const generation = accountGeneration;
+    const requestId = ++activeMarkAllRequestId;
+    const isCurrentRequest = () => requestId === activeMarkAllRequestId &&
+      requestBelongsToCurrentSession(generation, requestToken);
     isMarkingAllAsRead = true;
     renderMarkAllAsReadAction();
     articlesStatus.textContent = 'Marking all items as read…';
@@ -3653,27 +3660,28 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!response.ok) {
         throw new Error('Mark all as read request failed');
       }
+      if (!isCurrentRequest()) return;
 
       const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
       if (
         !refreshed &&
         requestViewId === getActiveView()?.id &&
-        session.token === requestToken &&
-        session.status === 'authenticated'
+        isCurrentRequest()
       ) {
         articlesStatus.textContent = 'Marked all as read, but could not refresh this view.';
       }
     } catch (_error) {
       if (
         requestViewId === getActiveView()?.id &&
-        session.token === requestToken &&
-        session.status === 'authenticated'
+        isCurrentRequest()
       ) {
         articlesStatus.textContent = 'Could not mark all as read.';
       }
     } finally {
-      isMarkingAllAsRead = false;
-      renderMarkAllAsReadAction();
+      if (isCurrentRequest()) {
+        isMarkingAllAsRead = false;
+        renderMarkAllAsReadAction();
+      }
     }
   }
 
