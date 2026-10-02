@@ -9,6 +9,8 @@ import { handleIncrementalSync } from '../src/sync-api';
 import { buildRssItemStatements, fetchAndStoreRssFeed } from '../src/rss-fetcher';
 import { handleCronTrigger } from '../src/cron-handler';
 import { handleStaleFeeds } from '../src/stale-feeds-api';
+import { handleRecommendations } from '../src/recommendations';
+import { MONITORED_TOPICS_META_KEY } from '../src/topic-preferences';
 
 class SqliteStatement {
 	private values: unknown[] = [];
@@ -795,3 +797,59 @@ for (const oldOutcome of ['success', 'not_modified', 'http_error']) {
 		}
 	});
 }
+
+
+test('For You retains forty publisher slices and topic matches within one database request budget', async () => {
+	const state = fixture();
+	try {
+		const now = Date.now();
+		const feedInsert = state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type) VALUES (?, ?, 'rss')");
+		const itemInsert = state.database.prepare(`INSERT INTO items (id, feed_key, subject, html_content, text_content, message_id, received_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`);
+		for (let feedIndex = 0; feedIndex < 40; feedIndex += 1) {
+			const feedKey = `publisher-${feedIndex}`;
+			feedInsert.run(feedKey, `Publisher ${feedIndex}`);
+			for (let itemIndex = 0; itemIndex < 30; itemIndex += 1) {
+				const id = `${feedKey}-item-${itemIndex}`;
+				const topicMatch = feedIndex === 39 && itemIndex === 0;
+				itemInsert.run(id, feedKey, `Story ${feedIndex} ${itemIndex}`, '<p>Article body</p>', topicMatch ? 'Orbital astronomy research observatories' : 'Ordinary newsletter update',
+					id, new Date(now - (feedIndex * 30 + itemIndex) * 60_000).toISOString());
+			}
+		}
+		state.database.prepare('INSERT INTO _meta (key, value) VALUES (?, ?)').run(MONITORED_TOPICS_META_KEY, JSON.stringify({ monitoredTopics: ['Orbital astronomy'] }));
+		// Account for the helper's three cold-isolate schema checks before ranking.
+		const limits = { maxQueries: 50, queries: 3 };
+		const db = new SqliteD1(state.database, limits);
+		const prepare = db.prepare.bind(db);
+		let sliceSql = '';
+		let sliceBindings: unknown[] = [];
+		db.prepare = (sql) => {
+			const statement = prepare(sql);
+			if (sql.includes(' UNION ALL ')) {
+				sliceSql = sql;
+				const bind = statement.bind.bind(statement);
+				statement.bind = (...values) => { sliceBindings = values; return bind(...values); };
+			}
+			return statement;
+		};
+		const response = await handleRecommendations(new Request('https://pigeon.example/api/v1/recommendations?view=for-you&limit=10'), { DB: db } as never);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { items: { id: string; html: string; matchedTopics: string[] }[] };
+		assert.equal(body.items.length, 10);
+		assert.ok(body.items.some((item) => item.id === 'publisher-39-item-0' && item.matchedTopics.includes('Orbital astronomy')), 'an older topic match outside the global hundred still competes');
+		assert.ok(body.items.every((item) => item.html === '<p>Article body</p>'));
+		assert.ok(limits.queries <= 21, `used ${limits.queries} statements`);
+		assert.equal(sliceBindings.length, 40);
+		assert.ok(new Blob([sliceSql]).size < 100_000);
+		const slices = state.database.prepare(sliceSql).all(...sliceBindings) as { id: string; feed_key: string }[];
+		assert.equal(slices.length, 1_000);
+		for (let feedIndex = 0; feedIndex < 40; feedIndex += 1) {
+			assert.equal(slices.filter((row) => row.feed_key === `publisher-${feedIndex}`).length, 25);
+		}
+		const plan = state.database.prepare(`EXPLAIN QUERY PLAN ${sliceSql}`).all(...sliceBindings) as { detail: string }[];
+		assert.equal(plan.filter((step) => /SEARCH i USING INDEX/.test(step.detail)).length, 40);
+		assert.ok(!plan.some((step) => /SCAN i(?:$| )/.test(step.detail)), 'publisher slices retain indexed item lookups');
+	} finally {
+		state.database.close();
+	}
+});
