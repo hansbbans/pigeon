@@ -1056,6 +1056,102 @@ test('GReader JSON memberships retain missing-column and missing-label-table fal
 	} finally { state.database.close(); }
 });
 
+for (const operation of ['stream/items/ids', 'stream/contents', 'path contents', 'mark-all-as-read']) {
+	test(`GReader ${operation} round-trips a returned folder ID containing a literal percent escape`, async () => {
+		const state = fixture();
+		try {
+			insertLibrary(state.database);
+			state.database.prepare("UPDATE feeds SET category = 'Folder%20name' WHERE feed_key = 'design-weekly'").run();
+			state.database.prepare("DELETE FROM feed_tags WHERE feed_key = 'design-weekly'").run();
+			state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES ('design-weekly', 'Folder%20name')").run();
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES ('space-folder', 'Space Folder', 'Folder name')").run();
+			state.database.prepare(`INSERT INTO items (rowid, id, feed_key, subject, html_content, message_id, received_at)
+			 VALUES (12, 'space-item', 'space-folder', 'Other folder', '<p>Body</p>', 'space-message', '2026-10-01T12:00:00.000Z')`).run();
+			const password = 'test-password';
+			const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+			const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const tags = await (await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/tag/list', { headers: { Authorization: auth } }), env)).json() as { tags: { id: string }[] };
+			const folderId = tags.tags.find((tag) => tag.id === 'user/-/label/Folder%20name')?.id;
+			assert.ok(folderId);
+			const form = new URLSearchParams({ s: folderId });
+			const route = operation === 'path contents' ? `stream/contents/${folderId.split('/').map(encodeURIComponent).join('/')}` : operation;
+			const response = await handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/${route}`, {
+				method: 'POST', headers: { Authorization: auth }, body: form,
+			}), env);
+			assert.equal(response.status, 200);
+			if (operation === 'stream/items/ids') {
+				assert.deepEqual((await response.json() as { itemRefs: { id: string }[] }).itemRefs.map((item) => item.id), ['11']);
+			} else if (operation === 'mark-all-as-read') {
+				assert.deepEqual(state.database.prepare('SELECT rowid, is_read FROM items ORDER BY rowid').all().map((row) => ({ rowid: row.rowid, is_read: row.is_read })), [{ rowid: 11, is_read: 1 }, { rowid: 12, is_read: 0 }]);
+			} else {
+				assert.deepEqual((await response.json() as { items: { id: string }[] }).items.map((item) => item.id), ['tag:google.com,2005:reader/item/000000000000000b']);
+			}
+		} finally { state.database.close(); }
+	});
+}
+
+for (const action of ['add', 'remove']) {
+	test(`GReader subscription editing ${action}s an exact literal-percent label`, async () => {
+		const state = fixture();
+		try {
+			insertLibrary(state.database);
+			const literal = '100%25 日本語 / News';
+			const decoded = '100% 日本語 / News';
+			state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES ('design-weekly', ?)").run(decoded);
+			if (action === 'remove') state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES ('design-weekly', ?)").run(literal);
+			const password = 'test-password';
+			const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+			const form = new URLSearchParams({ ac: 'edit', s: 'feed/7', [action === 'add' ? 'a' : 'r']: `user/-/label/${literal}` });
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/subscription/edit', {
+				method: 'POST', headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` }, body: form,
+			}), env);
+			assert.equal(response.status, 200);
+			const labels = state.database.prepare("SELECT label FROM feed_tags WHERE feed_key = 'design-weekly'").all().map((row) => row.label);
+			assert.equal(labels.includes(literal), action === 'add');
+			assert.ok(labels.includes(decoded), 'the different label remains unchanged');
+		} finally { state.database.close(); }
+	});
+}
+
+test('GReader folder paths decode transport once for spaces, Unicode and literal percent characters', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const password = 'test-password';
+		const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+		const auth = `GoogleLogin auth=pigeon/${await generateApiToken(password)}`;
+		for (const label of ['Daily Reads', '日本語 / News', '100% done', 'Literal%2Fslash']) {
+			state.database.prepare("UPDATE feeds SET category = ? WHERE feed_key = 'design-weekly'").run(label);
+			state.database.prepare("DELETE FROM feed_tags WHERE feed_key = 'design-weekly'").run();
+			state.database.prepare("INSERT INTO feed_tags (feed_key, label) VALUES ('design-weekly', ?)").run(label);
+			for (const route of [
+				`stream/contents/user/-/label/${encodeURIComponent(label)}`,
+				`stream/contents?s=${encodeURIComponent(`user/-/label/${label}`)}`,
+			]) {
+				const response = await handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/${route}`, { headers: { Authorization: auth } }), env);
+				assert.equal(response.status, 200);
+				assert.equal((await response.json() as { items: unknown[] }).items.length, 1, label);
+			}
+		}
+	} finally { state.database.close(); }
+});
+
+test('GReader malformed encoded stream paths return a bad request without changing article state', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const password = 'test-password';
+		const env = { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never;
+		for (const suffix of ['user/-/label/%GG', 'user/-/label/%E0%A4%A', 'feed/%']) {
+			const response = await handleGreaderRequest(new Request(`https://pigeon.example/reader/api/0/stream/contents/${suffix}`, {
+				headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+			}), env);
+			assert.equal(response.status, 400, suffix);
+		}
+		assert.equal((state.database.prepare('SELECT is_read FROM items WHERE rowid = 11').get() as { is_read: number }).is_read, 0);
+	} finally { state.database.close(); }
+});
+
 test('GReader item contents preserve labels across more than one hundred publishers', async () => {
 	const state = fixture();
 	try {

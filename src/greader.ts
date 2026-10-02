@@ -31,12 +31,9 @@ function labelFromStreamId(streamId: string | null): string | null {
 	if (!streamId || !streamId.startsWith('user/-/label/')) {
 		return null;
 	}
-	const rawLabel = streamId.slice('user/-/label/'.length);
-	try {
-		return decodeURIComponent(rawLabel);
-	} catch {
-		return rawLabel;
-	}
+	// Form/query parsing and the path resolver already decode the transport.
+	// A percent escape here is part of the label returned by tag/list.
+	return streamId.slice('user/-/label/'.length);
 }
 
 function labelsFromForm(body: FormData, key: string): string[] {
@@ -898,7 +895,12 @@ function resolveContentsStreamId(path: string, params: URLSearchParams): string 
 
 async function handleStreamContents(request: Request, url: URL, env: Env): Promise<Response> {
 	const params = await parseRequestParams(request, url);
-	const streamId = resolveContentsStreamId(url.pathname, params);
+	let streamId: string;
+	try {
+		streamId = resolveContentsStreamId(url.pathname, params);
+	} catch {
+		return new Response('Bad request: invalid stream ID', { status: 400 });
+	}
 	const n = parsePageSize(params.get('n'), 20, 1000);
 	const xt = params.get('xt') || '';
 	const ot = params.get('ot') || '';
