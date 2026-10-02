@@ -1457,6 +1457,7 @@ export function renderBrowserAppRuntimeScript(): string {
   };
   let session = client.createLoggedOutSession();
   let activeValidationId = 0;
+  let activeLoginAttemptId = 0;
   let activeViewRequestId = 0;
   let activeStatusRequestId = 0;
   let activeContentRequestId = 0;
@@ -2571,10 +2572,6 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function createPendingContentPlan(preferredItemId) {
-    if (isTodayView() && hasReachedTodayBoundary()) {
-      return [];
-    }
-
     const loadedIds = new Set(articleCache.keys());
     const activeState = getViewState(activeViewId, false);
     const knownContentIds = activeState?.contentLoadedIds || new Set();
@@ -2594,9 +2591,15 @@ export function renderBrowserAppRuntimeScript(): string {
       plannedIds.push(itemId);
     };
 
+    // A selected article cache miss remains loadable after finding yesterday.
     addId(targetItemId, true);
-
+    const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
     for (const itemId of itemIds) {
+      // Finish loading unknown articles before the first known older article.
+      const published = loadedItemsById[itemId]?.published;
+      if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
+        break;
+      }
       addId(itemId);
       if (plannedIds.length >= client.CONTENT_CHUNK_SIZE) {
         break;
@@ -2622,6 +2625,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function setLoggedOut(message) {
+    activeLoginAttemptId += 1;
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
     clearStoredToken();
@@ -2915,7 +2919,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const todayCanLoadMore = !isTodayView() || !hasReachedTodayBoundary();
     loadMoreButton.classList.toggle(
       'hidden',
-      !todayCanLoadMore || (pendingPlan.length === 0 && !nextItemIdsContinuation),
+      pendingPlan.length === 0 && (!todayCanLoadMore || !nextItemIdsContinuation),
     );
     restoreArticleScrollTop(preservedScrollTop);
   }
@@ -3237,7 +3241,16 @@ export function renderBrowserAppRuntimeScript(): string {
       state.continuation = continuation && continuation !== options.continuation ? continuation : '';
     } else if (continuation) {
       const returnedSet = new Set(returnedIds);
-      const retainedTail = state.hasMembership ? state.itemIds.filter((itemId) => !returnedSet.has(itemId)) : [];
+      const view = views.find((candidate) => candidate.id === viewId);
+      // Unread membership may disappear after another client marks items read.
+      // Today can retain known same-day articles, but not yesterday's boundary.
+      const retainTail = view?.kind !== 'unread';
+      const retainedTail = retainTail && state.hasMembership
+        ? state.itemIds.filter((itemId) => {
+            if (returnedSet.has(itemId)) return false;
+            return view?.kind !== 'today' || client.filterItemIdsForLocalDay([itemId], loadedItemsById).length > 0;
+          })
+        : [];
       state.itemIds = [...returnedIds, ...retainedTail];
       state.continuation = continuation;
     } else {
@@ -3306,6 +3319,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const generation = accountGeneration;
     const token = session.token;
+    const requestId = activeViewRequestId;
     if (window.navigator && window.navigator.onLine === false) {
       if (getViewState(activeView.id, false)?.hasMembership) {
         articlesStatus.textContent = 'Offline · showing cached articles.';
@@ -3330,27 +3344,35 @@ export function renderBrowserAppRuntimeScript(): string {
       if (requestBelongsToCurrentSession(generation, token)) {
         applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
         if (activeView.id === activeViewId) {
+          const visibleItemIds = getVisibleItemIds();
+          if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+            selectedItemId = visibleItemIds[0] || null;
+          }
           saveActiveViewState();
           renderArticles();
           renderReader();
+          if (isTodayView() && requestId === activeViewRequestId) {
+            await continueLoadingToday(requestId);
+          }
         }
       }
     } catch (_error) {
       if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId) {
-        if (getViewState(activeView.id, false)?.hasMembership) {
-          articlesStatus.textContent = 'Refresh failed · showing cached articles.';
-        }
         renderArticles();
+        articlesStatus.textContent = getViewState(activeView.id, false)?.hasMembership
+          ? 'Refresh failed · showing cached articles.'
+          : 'Could not load this view.';
       }
     }
   }
 
   function shouldContinueLoadingToday() {
-    if (!isTodayView() || hasReachedTodayBoundary()) {
+    if (!isTodayView()) {
       return false;
     }
 
-    return createPendingContentPlan(null).length > 0 || Boolean(nextItemIdsContinuation);
+    return createPendingContentPlan(null).length > 0 ||
+      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
   }
 
   async function continueLoadingToday(requestId) {
@@ -3421,8 +3443,8 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     } catch (_error) {
       if (requestId === activeViewRequestId && requestBelongsToCurrentSession(generation, token)) {
-        articlesStatus.textContent = 'Could not load article bodies.';
         renderArticles();
+        articlesStatus.textContent = 'Could not load article bodies.';
       }
     } finally {
       refreshInFlightContentIds();
@@ -3534,8 +3556,8 @@ export function renderBrowserAppRuntimeScript(): string {
         }
       } catch (_error) {
         if (requestId === activeViewRequestId && session.token) {
-          articlesStatus.textContent = 'Could not load this view.';
           renderArticles();
+          articlesStatus.textContent = 'Could not load this view.';
         }
       }
       return;
@@ -3666,6 +3688,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function login(password) {
+    const attemptId = ++activeLoginAttemptId;
     const form = new FormData();
     form.set('Passwd', password);
 
@@ -3676,16 +3699,19 @@ export function renderBrowserAppRuntimeScript(): string {
         body: form,
       });
     } catch (_error) {
+      if (attemptId !== activeLoginAttemptId) return false;
       setLoggedOut('Could not reach the server.');
       return false;
     }
 
+    if (attemptId !== activeLoginAttemptId) return false;
     if (!response.ok) {
       setLoggedOut('Incorrect password.');
       return false;
     }
 
     const text = await response.text();
+    if (attemptId !== activeLoginAttemptId) return false;
     const token = client.extractAuthToken(text);
     if (!token) {
       setLoggedOut('Could not start a session.');

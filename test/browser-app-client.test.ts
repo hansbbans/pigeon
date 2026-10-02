@@ -726,6 +726,7 @@ async function waitForBrowserCondition(check: () => boolean, attempts = 20) {
 		}
 		await flushBrowserTasks();
 	}
+	assert.ok(check(), `Browser condition was not met after ${attempts} attempts`);
 }
 
 function createFixedDateConstructor(timestamp: number) {
@@ -3035,7 +3036,10 @@ test('pagination stops when a duplicate-only page repeats its continuation token
 	});
 
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => elements.get('load-more-button')?.disabled === false);
+	await waitForBrowserCondition(() =>
+		elements.get('load-more-button')?.disabled === false &&
+		Boolean(findListButtonByItemId(elements.get('articles-list'), '1')),
+	);
 	await elements.get('load-more-button')?.dispatch('click');
 	await waitForBrowserCondition(
 		() => idRequests.length === 2 && elements.get('load-more-button')?.classList.contains('hidden') === true,
@@ -4063,13 +4067,13 @@ test('large refreshes keep content requests bounded and do not refetch evicted p
 	assert.equal(maximumConcurrentContentRequests, 2);
 	assert.equal(contentRequests, settledRequestCount);
 	assert.match(elements.get('articles-list')?.textContent ?? '', /Article 1/);
-	const olderArticleButton = findListButtonByItemId(elements.get('articles-list'), '1');
+	const olderArticleButton = findListButtonByItemId(elements.get('articles-list'), '2');
 	assert.ok(olderArticleButton);
 	await olderArticleButton?.dispatch('click');
 	await waitForBrowserCondition(
-		() => contentRequests === settledRequestCount + 1 && (elements.get('reader-frame')?.srcdoc ?? '').includes('Body 1'),
+		() => contentRequests === settledRequestCount + 1 && (elements.get('reader-frame')?.srcdoc ?? '').includes('Body 2'),
 	);
-	assert.equal(elements.get('reader-title')?.textContent, 'Article 1');
+	assert.equal(elements.get('reader-title')?.textContent, 'Article 2');
 });
 
 test('runtime Today pagination continues after the full body cache reaches its cap', async () => {
@@ -4353,7 +4357,7 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 				}
 
 				allMembershipRequests += 1;
-				return allMembershipRequests === 1
+				return allMembershipRequests <= 2
 					? Response.json({ itemRefs: allIds.map((id) => ({ id })) })
 					: Response.json({
 							itemRefs: allIds.slice(0, 50).map((id) => ({ id })),
@@ -4399,7 +4403,7 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 	const refreshStart = contentRequests.length;
 	await findListButtonByViewId(elements.get('views-list'), 'all')?.dispatch('click');
 	await waitForBrowserCondition(
-		() => allMembershipRequests === 2 && contentRequests.slice(refreshStart).some((ids) => ids.includes('60')),
+		() => allMembershipRequests === 3 && contentRequests.slice(refreshStart).some((ids) => ids.includes('60')),
 		100,
 	);
 
@@ -4528,4 +4532,192 @@ test('logout keeps old body requests counted until their network work settles', 
 
 	assert.equal(maximumNetworkRequests, 2);
 	assert.equal(elements.get('reader-title')?.textContent, 'Article 1');
+});
+
+function browserRegressionItem(id: string, published: number) {
+	return {
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title: `Article ${id}`,
+		published,
+		origin: { title: 'Alpha' },
+		content: { content: `<p>Body ${id}</p>` },
+	};
+}
+
+function browserRegressionResponse(input: string, init?: { body?: FormData }, published = 1_742_460_800): Response {
+	if (input === '/accounts/ClientLogin') return new Response('Auth=pigeon/live');
+	if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [] });
+	if (input.endsWith('/unread-count')) return Response.json({ unreadcounts: [] });
+	if (input.endsWith('/contents')) {
+		return Response.json({ items: (init?.body?.getAll('i') ?? []).map(String).map((id) => browserRegressionItem(id, published)) });
+	}
+	if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
+	throw new Error(`Unexpected fetch: ${input}`);
+}
+
+test('Today can reload an evicted selected article after reaching yesterday', async () => {
+	const now = new Date(2026, 2, 20, 12).getTime();
+	const bounds = getLocalDayBounds(new Date(now));
+	const allIds = Array.from({ length: 552 }, (_, index) => String(index + 1));
+	let rootRequests = 0;
+	const contentRequests: string[][] = [];
+	const { elements } = await createBrowserHarness({
+		now,
+		fetchImpl: async (input, init) => {
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				const continuation = new URL(`https://test${input}`).searchParams.get('c');
+				if (!continuation && ++rootRequests === 1) return Response.json({ itemRefs: [] });
+				const page = continuation ? Number(continuation) : 0;
+				return Response.json({
+					itemRefs: allIds.slice(page * 50, (page + 1) * 50).map((id) => ({ id })),
+					...(page < 11 ? { continuation: String(page + 1) } : {}),
+				});
+			}
+			if (input.endsWith('/contents')) {
+				const ids = (init?.body?.getAll('i') ?? []).map(String);
+				contentRequests.push(ids);
+				return Response.json({ items: ids.map((id) => browserRegressionItem(id, id === '552' ? bounds.startSeconds - 1 : bounds.startSeconds + 1)) });
+			}
+			return browserRegressionResponse(input, init);
+		},
+	});
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => rootRequests === 1);
+	findListButtonByViewId(elements.get('views-list'), 'today')?.dispatch('click');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '551')), 400);
+	await flushBrowserTasks();
+	const requestsBefore = contentRequests.length;
+	findListButtonByItemId(elements.get('articles-list'), '2')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '').includes('Body 2</p>'));
+	assert.equal(contentRequests.length, requestsBefore + 1);
+	assert.deepEqual(contentRequests.at(-1), ['2']);
+});
+
+test('foreground refresh selects an article when an empty Today view receives new items', async () => {
+	const now = new Date(2026, 2, 20, 12).getTime();
+	const published = getLocalDayBounds(new Date(now)).startSeconds + 1;
+	let roots = 0;
+	const harness = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: ++roots < 3 ? [] : [{ id: '1' }, { id: '2' }] });
+		return browserRegressionResponse(input, init, published);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => roots === 1);
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+	await waitForBrowserCondition(() => roots === 2);
+	await flushBrowserTasks();
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	assert.equal(harness.dispatchKeydown('j'), true);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+});
+
+test('Unread refresh discards old paginated membership after another client marks it read', async () => {
+	let unreadRoots = 0;
+	const initialIds = Array.from({ length: 50 }, (_, index) => String(index + 1));
+	const updatedIds = Array.from({ length: 50 }, (_, index) => String(index + 51));
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?') && new URL(`https://test${input}`).searchParams.has('xt')) {
+			return Response.json({ itemRefs: (++unreadRoots === 1 ? initialIds : updatedIds).map((id) => ({ id })), continuation: 'tail' });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(harness.elements.get('views-list'), 'unread')));
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '1')));
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '51')));
+	assert.equal(harness.elements.get('articles-list')?.children.length, 50);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 51');
+});
+
+test('failed initial article-body loads keep a visible error and can be retried', async () => {
+	let shouldFail = true;
+	const { elements } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+		if (input.endsWith('/contents') && shouldFail) return new Response('Error', { status: 503 });
+		return browserRegressionResponse(input, init);
+	} });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not load article bodies.');
+	assert.equal(elements.get('load-more-button')?.disabled, false);
+	shouldFail = false;
+	elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '').includes('Body 1</p>'));
+	assert.equal(elements.get('articles-status')?.textContent, '1 article');
+});
+
+test('clearing the saved session cancels a pending successful login', async () => {
+	const pending = createDeferred<Response>();
+	const { elements, storage } = await createBrowserHarness({ fetchImpl: async (input, init) => input === '/accounts/ClientLogin' ? pending.promise : browserRegressionResponse(input, init) });
+	const loginAttempt = elements.get('login-form')?.dispatch('submit');
+	elements.get('clear-session-button')?.dispatch('click');
+	pending.resolve(new Response('Auth=pigeon/old-attempt'));
+	await loginAttempt;
+	await flushBrowserTasks();
+	assert.equal(storage.has(AUTH_STORAGE_KEY), false);
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false);
+	assert.equal(elements.get('login-error')?.textContent, 'Saved session cleared. Sign in again.');
+});
+
+test('a stale failed login cannot log out a newer successful login', async () => {
+	const first = createDeferred<Response>();
+	let loginRequests = 0;
+	const { elements, storage } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input === '/accounts/ClientLogin') return ++loginRequests === 1 ? first.promise : new Response('Auth=pigeon/new-token');
+		return browserRegressionResponse(input, init);
+	} });
+	const firstAttempt = elements.get('login-form')?.dispatch('submit');
+	await elements.get('login-form')?.dispatch('submit');
+	first.resolve(new Response('Error', { status: 401 }));
+	await firstAttempt;
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'new-token');
+	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), false);
+	assert.equal(elements.get('login-error')?.textContent, '');
+});
+
+test('Today refresh clears an old day boundary and loads new continuation pages', async () => {
+	const now = new Date(2026, 2, 20, 12).getTime();
+	const bounds = getLocalDayBounds(new Date(now));
+	const todayIds = Array.from({ length: 60 }, (_, index) => String(index + 100));
+	let roots = 0;
+	let continuationRequests = 0;
+	const harness = await createBrowserHarness({
+		now,
+		fetchImpl: async (input, init) => {
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				if (new URL(`https://test${input}`).searchParams.has('c')) {
+					continuationRequests += 1;
+					return Response.json({ itemRefs: [...todayIds.slice(50), '1'].map((id) => ({ id })) });
+				}
+				roots += 1;
+				if (roots === 1) return Response.json({ itemRefs: [] });
+				if (roots === 2) return Response.json({ itemRefs: [{ id: '1' }] });
+				return Response.json({ itemRefs: todayIds.slice(0, 50).map((id) => ({ id })), continuation: 'next' });
+			}
+			if (input.endsWith('/contents')) {
+				return Response.json({
+					items: (init?.body?.getAll('i') ?? []).map(String).map((id) =>
+						browserRegressionItem(id, id === '1' ? bounds.startSeconds - 1 : bounds.startSeconds + 1),
+					),
+				});
+			}
+			return browserRegressionResponse(input, init);
+		},
+	});
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => roots === 1);
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+	await waitForBrowserCondition(() => roots === 2);
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('articles-list')?.children.length, 0);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '159')));
+	assert.equal(continuationRequests, 1);
+	assert.equal(harness.elements.get('articles-list')?.children.length, 60);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 100');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
+	assert.equal(harness.elements.get('load-more-button')?.classList.contains('hidden'), true);
 });
