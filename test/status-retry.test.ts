@@ -42,15 +42,18 @@ class RetryStatement {
 
 class RetryDb {
 	lastRetry: RetryStatement | null = null;
-	constructor(private readonly changes: number) {}
+	constructor(private readonly changes: number, private readonly failure?: 'schema' | 'queue') {}
 	prepare(sql: string): RetryStatement {
+		if (this.failure === 'schema' || (this.failure === 'queue' && sql.includes('SET next_fetch_at = ?'))) {
+			throw new Error('database unavailable');
+		}
 		const statement = new RetryStatement(sql, this.changes);
 		if (sql.includes('SET next_fetch_at = ?')) this.lastRetry = statement;
 		return statement;
 	}
 }
 
-async function request(db: RetryDb, authorization = true): Promise<Response> {
+async function request(db: RetryDb, authorization = true, body: unknown = { feed_key: 'example-feed' }): Promise<Response> {
 	const token = await generateApiToken('secret-password');
 	return handleStatusRetryRequest(
 		new Request('https://pigeon.example/app/status/retry', {
@@ -59,7 +62,7 @@ async function request(db: RetryDb, authorization = true): Promise<Response> {
 				...(authorization ? { Authorization: `GoogleLogin auth=pigeon/${token}` } : {}),
 				'Content-Type': 'application/json',
 			},
-			body: JSON.stringify({ feed_key: 'example-feed' }),
+			body: JSON.stringify(body),
 		}),
 		{
 			DB: db,
@@ -88,4 +91,20 @@ test('manual retry reports a conflict when the feed is missing, rate limited, or
 	assert.deepEqual(await response.json(), {
 		error: 'Feed not found, waiting for Retry-After, or refresh already in progress',
 	});
+});
+
+test('manual retry rejects non-object JSON without queueing a feed', async () => {
+	for (const body of [null, [], true, 12, 'example-feed']) {
+		const db = new RetryDb(1);
+		assert.equal((await request(db, true, body)).status, 400);
+		assert.equal(db.lastRetry, null);
+	}
+});
+
+test('manual retry reports database failures as unavailable responses', async () => {
+	for (const failure of ['schema', 'queue'] as const) {
+		const response = await request(new RetryDb(1, failure));
+		assert.equal(response.status, 503);
+		assert.deepEqual(await response.json(), { error: 'Database unavailable' });
+	}
 });
