@@ -165,32 +165,27 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	const requestedLimit = Number.parseInt(url.searchParams.get('limit') || defaultLimit, 10);
 	const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : fallbackLimit, 1), 100);
 
-	const { results: items } = await env.DB.prepare(
-		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
+	const { results: cacheItems } = await env.DB.prepare(
+		`SELECT i.id, i.message_id, i.subject, i.original_url, i.from_name, i.from_email, i.received_at,
+		        (SELECT MAX(c.sequence) FROM sync_changes c
+		         WHERE c.entity_type = 'article' AND c.entity_id = i.id) AS content_revision
+		 FROM items i WHERE i.feed_key = ? ORDER BY i.received_at DESC, i.id DESC LIMIT ?`,
 	)
 		.bind(feedKey, limit)
 		.all<{
 			id: string | null;
 			message_id: string | null;
 			subject: string;
-			html_content: string;
-			text_content: string | null;
 			original_url: string | null;
 			from_name: string | null;
 			from_email: string | null;
 			received_at: string;
+			content_revision: number | null;
 		}>();
 
 	const feedUrl = `${env.BASE_URL}/feed/${feedKey}${isLight ? '/light' : ''}`;
-	// The newest publication timestamp cannot detect edits, backfilled items,
-	// metadata changes, or a different feed variant/limit. Hash the actual
-	// response inputs, before rendering, so an unchanged request stays cheap.
-	// Hash one body at a time to avoid copying every large article into one
-	// additional serialized page and byte buffer on the Worker heap.
-	const cacheItems = [];
-	for (const { html_content, text_content, ...metadata } of items) {
-		cacheItems.push({ ...metadata, bodyHash: await hashFeedCacheInput({ html_content, text_content }) });
-	}
+	// Current IDs detect insertions/deletions; indexed article revisions detect
+	// body edits and pruning. Cache hits do not fetch or hash article bodies.
 	const etag = `W/"${await hashFeedCacheInput({ feed, items: cacheItems, variant, limit, feedUrl, baseUrl: env.BASE_URL })}"`;
 	const headers = {
 		'Content-Type': 'application/atom+xml; charset=utf-8',
@@ -205,6 +200,19 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	})) {
 		return new Response(null, { status: 304, headers });
 	}
+	const { results: items } = await env.DB.prepare(
+		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?',
+	).bind(feedKey, limit).all<{
+		id: string | null;
+		message_id: string | null;
+		subject: string;
+		html_content: string;
+		text_content: string | null;
+		original_url: string | null;
+		from_name: string | null;
+		from_email: string | null;
+		received_at: string;
+	}>();
 	const xml = await generateAtomFeed(feed, items, env.BASE_URL, { variant, feedUrl });
 
 	return new Response(xml, {

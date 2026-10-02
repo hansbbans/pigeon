@@ -7,7 +7,7 @@ const FEED_SQL =
 	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
 
 const ITEMS_SQL =
-	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
+	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?';
 
 const FEEDS_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC';
 const OPML_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY display_name';
@@ -50,6 +50,7 @@ class FeedVariantStatement {
 	}>;
 	private readonly tracker: {
 		lastItemsLimit: number | null;
+		contentRevision: number;
 	};
 	private boundValues: unknown[] = [];
 
@@ -109,6 +110,12 @@ class FeedVariantStatement {
 		if (this.sql === ITEMS_SQL) {
 			this.tracker.lastItemsLimit = this.boundValues[1] as number;
 			return { results: this.items.slice(0, this.tracker.lastItemsLimit) as T[] };
+		}
+		if (this.sql.includes('AS content_revision')) {
+			this.tracker.lastItemsLimit = this.boundValues[1] as number;
+			return { results: this.items.slice(0, this.tracker.lastItemsLimit).map(({ html_content, text_content, ...metadata }) => ({
+				...metadata, content_revision: this.tracker.contentRevision,
+			})) as T[] };
 		}
 
 		if (this.sql.includes(FEEDS_SQL_FRAGMENT)) {
@@ -200,7 +207,7 @@ function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 			category: 'Test',
 		},
 	];
-	const tracker = { lastItemsLimit: null as number | null };
+	const tracker = { lastItemsLimit: null as number | null, contentRevision: 1 };
 
 	return {
 		feed,
@@ -221,12 +228,13 @@ function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 }
 
 test('feed conditional requests invalidate cached metadata and article body changes', async () => {
-	const { env, feed, items } = createEnv();
+	const { env, feed, items, tracker } = createEnv();
 	const first = await app.fetch(new Request('https://pigeon.example/feed/example-feed'), env as never);
 	const etag = first.headers.get('ETag');
 	assert.ok(etag);
 	feed.custom_title = 'Renamed newsletter';
 	items[0].html_content = '<p>Updated newsletter body</p>';
+	tracker.contentRevision += 1;
 	const updated = await app.fetch(new Request('https://pigeon.example/feed/example-feed', {
 		headers: { 'If-None-Match': etag },
 	}), env as never);
