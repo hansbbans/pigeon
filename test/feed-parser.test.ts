@@ -178,3 +178,47 @@ test('Atom entries inherit feed authors and retain entry authors when several ar
 	 <entry><id>four</id><title>Four</title><author><name/></author><author><name>Named Author</name></author><content>Body</content></entry></feed>`);
 	assert.deepEqual(feed.items.map((item) => item.author), ['Feed Author', 'Entry Author', 'Source Author', 'Named Author']);
 });
+
+test('Atom XHTML bodies preserve mixed text, entities, and namespace inheritance', () => {
+ for (const prefix of ['', 'a:']) {
+  const declaration = prefix ? 'xmlns:a="http://www.w3.org/2005/Atom"' : 'xmlns="http://www.w3.org/2005/Atom"';
+  const feed = parseFeed(`<${prefix}feed ${declaration} xmlns:h="http://www.w3.org/1999/xhtml"><${prefix}title>Feed</${prefix}title><${prefix}entry><${prefix}id>one</${prefix}id><${prefix}content type="xhtml"><h:div><h:p>Before <h:b>bold</h:b> after &amp; &lt;literal&gt;.</h:p></h:div></${prefix}content></${prefix}entry></${prefix}feed>`);
+  assert.equal(feed.items[0].content, '<p>Before <b>bold</b> after &amp; &lt;literal&gt;.</p>');
+ }
+});
+
+test('Atom XHTML summaries preserve repeated children and CDATA', () => {
+ const feed = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>one</id><summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>First</p> between <p><![CDATA[A < B]]></p> end</div></summary></entry></feed>');
+ assert.equal(feed.items[0].content, '<p>First</p> between <p>A &lt; B</p> end');
+});
+
+test('XHTML normalization preserves foreign content fields and ordinary RSS extension names', () => {
+ const atom = parseFeed('<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:f="urn:foreign"><a:entry><a:id>one</a:id><f:content type="xhtml"><div>wrong</div></f:content><a:content type="html">&lt;p&gt;right&lt;/p&gt;</a:content></a:entry></a:feed>');
+ assert.equal(atom.items[0].content, '<p>right</p>');
+ const rss = parseFeed('<rss xmlns:a="urn:foreign"><channel><title>Feed</title><item><guid>one</guid><a:content type="xhtml"><div>wrong</div></a:content><description>right</description></item></channel></rss>');
+ assert.equal(rss.items[0].content, 'right');
+});
+
+test('Atom XHTML rejects oversized and excessively dense bodies before constructing a second feed tree', () => {
+ const wrap = (body: string) => `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>one</id><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">${body}</div></content></entry></feed>`;
+ assert.throws(() => parseFeed(wrap('a'.repeat(1_000_001))), /parsing limit/);
+ assert.throws(() => parseFeed(wrap('<span>x</span>'.repeat(20_001))), /element limit/);
+ assert.equal(parseFeed(wrap('a'.repeat(100_000))).items[0].content.length, 100_000);
+});
+
+test('Atom XHTML requires one correctly namespaced div and counts UTF-8 bytes', () => {
+ const wrap = (body: string) => `<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>one</id><content type="xhtml">${body}</content></entry></feed>`;
+ assert.throws(() => parseFeed(wrap('<div xmlns="urn:foreign">wrong</div>')), /XHTML div/);
+ assert.throws(() => parseFeed(wrap('<div xmlns="http://www.w3.org/1999/xhtml">one</div><div xmlns="http://www.w3.org/1999/xhtml">two</div>')), /XHTML div/);
+ assert.throws(() => parseFeed(wrap(`<div xmlns="http://www.w3.org/1999/xhtml">${'😀'.repeat(250_001)}</div>`)), /parsing limit/);
+});
+
+test('XHTML empty non-void elements close before following text while HTML void elements remain unpaired', () => {
+ const feed = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>one</id><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><span style="color:red"/>Normal<br/><img src="image.png"/><div/>After</div></content></entry></feed>');
+ assert.equal(feed.items[0].content, '<span style="color:red"></span>Normal<br><img src="image.png"><div></div>After');
+});
+
+test('XHTML inline SVG and MathML inherited prefixes serialize as HTML-recognized element names', () => {
+ const feed = parseFeed('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:s="http://www.w3.org/2000/svg" xmlns:m="http://www.w3.org/1998/Math/MathML"><entry><id>one</id><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><s:svg viewBox="0 0 10 10"><s:circle cx="5" cy="5" r="3"/></s:svg><m:math><m:mi>x</m:mi></m:math></div></content></entry></feed>');
+ assert.equal(feed.items[0].content, '<svg viewBox="0 0 10 10"><circle cx="5" cy="5" r="3"></circle></svg><math><mi>x</mi></math>');
+});
