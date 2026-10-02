@@ -40,8 +40,8 @@ export async function handleImageProxy(
 			});
 
 			if (REDIRECT_STATUSES.has(response.status)) {
+				response.body?.cancel().catch(() => undefined);
 				if (redirectCount >= MAX_IMAGE_REDIRECTS) {
-					response.body?.cancel().catch(() => undefined);
 					return new Response('Too many image redirects', { status: 502 });
 				}
 				const location = response.headers.get('Location');

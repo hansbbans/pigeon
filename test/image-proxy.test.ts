@@ -47,3 +47,36 @@ test('privacy image proxy rejects active and oversized content', async () => {
 	);
 	assert.equal(oversized.status, 413);
 });
+
+for (const redirectCase of ['follow', 'unsafe', 'missing_location', 'limit', 'cancel_error']) {
+	test(`discarded image redirect bodies are canceled for ${redirectCase}`, async () => {
+		let canceled = 0;
+		let requests = 0;
+		const response = await handleImageProxy(request('https://images.example/start'), async () => {
+			requests += 1;
+			if (redirectCase !== 'limit' && requests > 1) {
+				assert.equal(canceled, 1, 'release the discarded body before following its redirect');
+				return new Response(new Uint8Array([7, 8, 9]), { headers: { 'Content-Type': 'image/png' } });
+			}
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); },
+				cancel() {
+					canceled += 1;
+					if (redirectCase === 'cancel_error') throw new Error('upstream cancellation failed');
+				},
+			});
+			return new Response(body, { status: 302, headers: redirectCase === 'missing_location' ? {} : {
+				Location: redirectCase === 'unsafe' ? 'http://192.168.1.7/image' : '/final.png',
+			} });
+		});
+		if (redirectCase === 'follow' || redirectCase === 'cancel_error') {
+			assert.equal(response.status, 200);
+			assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [7, 8, 9]);
+			assert.equal(requests, 2);
+		} else {
+			assert.equal(response.status, redirectCase === 'unsafe' ? 400 : 502);
+			assert.equal(requests, redirectCase === 'limit' ? 6 : 1);
+		}
+		assert.equal(canceled, requests - (response.status === 200 ? 1 : 0));
+	});
+}
