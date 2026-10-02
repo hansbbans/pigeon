@@ -1462,6 +1462,10 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeStatusRequestId = 0;
   let activeContentRequestId = 0;
   let views = [];
+  let subscriptions = [];
+  let unreadCountRequestId = 0;
+  let inFlightUnreadCountRequest = null;
+  let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
   let itemIds = [];
   let nextItemIdsContinuation = '';
@@ -1898,6 +1902,9 @@ export function renderBrowserAppRuntimeScript(): string {
       scrollTop: 0,
       refreshedAt: 0,
       contentLoadedIds: new Set(),
+      membershipEpoch: 0,
+      rootRequestId: 0,
+      appliedRootRequestId: 0,
     };
   }
 
@@ -2042,6 +2049,10 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearAccountCache() {
     accountGeneration += 1;
+    unreadCountRequestId += 1;
+    inFlightUnreadCountRequest = null;
+    subscriptions = [];
+    activeItemIdsPageRequest = null;
     activeViewRequestId += 1;
     activeContentRequestId += 1;
     inFlightContentIds = [];
@@ -3223,6 +3234,19 @@ export function renderBrowserAppRuntimeScript(): string {
     return '/reader/api/0/stream/items/ids?' + params.toString();
   }
 
+  function getRetainedTailIds(viewId, payload) {
+    const state = getViewState(viewId, false);
+    const view = views.find((candidate) => candidate.id === viewId);
+    if (!payload.continuation || !state?.hasMembership || view?.kind === 'unread') {
+      return [];
+    }
+    const returnedIds = new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
+    return state.itemIds.filter((itemId) => {
+      if (returnedIds.has(itemId)) return false;
+      return view?.kind !== 'today' || client.filterItemIdsForLocalDay([itemId], loadedItemsById).length > 0;
+    });
+  }
+
   function applyMembershipPayload(viewId, payload, options) {
     if (!views.some((view) => view.id === viewId)) {
       return [];
@@ -3235,22 +3259,20 @@ export function renderBrowserAppRuntimeScript(): string {
     const returnedIds = [...new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)).filter(Boolean))];
     const continuation = payload.continuation ? String(payload.continuation) : '';
     const isContinuationPage = Boolean(options?.continuation);
+    if (!isContinuationPage) {
+      state.membershipEpoch += 1;
+      state.appliedRootRequestId = options?.rootRequestId ?? state.rootRequestId;
+      if (viewId === activeViewId) {
+        activeItemIdsPageRequest = null;
+        isLoadingItemIdsPage = false;
+      }
+    }
     if (isContinuationPage) {
       const knownIds = new Set(state.itemIds);
       state.itemIds.push(...returnedIds.filter((itemId) => !knownIds.has(itemId)));
       state.continuation = continuation && continuation !== options.continuation ? continuation : '';
     } else if (continuation) {
-      const returnedSet = new Set(returnedIds);
-      const view = views.find((candidate) => candidate.id === viewId);
-      // Unread membership may disappear after another client marks items read.
-      // Today can retain known same-day articles, but not yesterday's boundary.
-      const retainTail = view?.kind !== 'unread';
-      const retainedTail = retainTail && state.hasMembership
-        ? state.itemIds.filter((itemId) => {
-            if (returnedSet.has(itemId)) return false;
-            return view?.kind !== 'today' || client.filterItemIdsForLocalDay([itemId], loadedItemsById).length > 0;
-          })
-        : [];
+      const retainedTail = getRetainedTailIds(viewId, payload);
       state.itemIds = [...returnedIds, ...retainedTail];
       state.continuation = continuation;
     } else {
@@ -3288,6 +3310,8 @@ export function renderBrowserAppRuntimeScript(): string {
       return existingRequest;
     }
 
+    const state = getViewState(view.id);
+    const rootRequestId = continuation ? state.rootRequestId : ++state.rootRequestId;
     const requestPromise = authenticatedJson(buildStreamIdsUrl(view, continuation))
       .then((payload) => {
         if (!requestBelongsToCurrentSession(generation, token)) {
@@ -3299,7 +3323,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const returnedIds = [
           ...new Set(payload.itemRefs.map((itemRef) => String(itemRef.id)).filter(Boolean)),
         ];
-        return { payload, returnedIds, generation, token, viewId: view.id };
+        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId };
       })
       .finally(() => {
         if (inFlightMembershipRequests.get(requestKey) === requestPromise) {
@@ -3311,7 +3335,7 @@ export function renderBrowserAppRuntimeScript(): string {
     return requestPromise;
   }
 
-  async function revalidateActiveView() {
+  async function revalidateActiveView(options) {
     const activeView = getActiveView();
     if (!activeView || !session.token || session.status !== 'authenticated') {
       return;
@@ -3327,22 +3351,40 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    if (options?.refreshUnread !== false) void refreshUnreadCounts();
+    let expectedRootRequestId = null;
     try {
       const activeState = getViewState(activeView.id, false);
       const selectedTailId = activeState?.selectedItemId && activeState.itemIds.includes(activeState.selectedItemId)
         ? activeState.selectedItemId
         : null;
-      const result = await requestMembershipPage(activeView, '', { refresh: true });
+      const membershipRequest = requestMembershipPage(activeView, '', { refresh: true });
+      expectedRootRequestId = getViewState(activeView.id, false)?.rootRequestId;
+      const result = await membershipRequest;
       if (!result || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
-      const contentIds = [...result.returnedIds];
-      if (selectedTailId && !contentIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
-        contentIds.push(selectedTailId);
+      await ensureArticleContent(result.returnedIds, { generation, token });
+      const retainedTailIds = getRetainedTailIds(activeView.id, result.payload);
+      if (selectedTailId && retainedTailIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
+        // A cached tail is outside the authoritative root. Its missing body must
+        // not prevent current articles from replacing stale membership.
+        try {
+          await ensureArticleContent([selectedTailId], { generation, token });
+        } catch (error) {
+          if (error?.message === 'Incomplete article content response' &&
+              requestBelongsToCurrentSession(generation, token) &&
+              getViewState(activeView.id, false)?.rootRequestId === result.rootRequestId) {
+            const state = getViewState(activeView.id, false);
+            state.itemIds = state.itemIds.filter((itemId) => itemId !== selectedTailId);
+          }
+        }
       }
-      await ensureArticleContent(contentIds, { generation, token });
-      if (requestBelongsToCurrentSession(generation, token)) {
-        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+      const currentState = getViewState(activeView.id, false);
+      if (requestBelongsToCurrentSession(generation, token) &&
+          currentState?.rootRequestId === result.rootRequestId &&
+          currentState.appliedRootRequestId !== result.rootRequestId) {
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         if (activeView.id === activeViewId) {
           const visibleItemIds = getVisibleItemIds();
           if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
@@ -3357,7 +3399,8 @@ export function renderBrowserAppRuntimeScript(): string {
         }
       }
     } catch (_error) {
-      if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId) {
+      if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId &&
+          getViewState(activeView.id, false)?.rootRequestId === expectedRootRequestId) {
         renderArticles();
         articlesStatus.textContent = getViewState(activeView.id, false)?.hasMembership
           ? 'Refresh failed · showing cached articles.'
@@ -3409,6 +3452,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
 
     const stateBefore = getViewState(activeViewId, false);
+    const membershipEpoch = stateBefore?.membershipEpoch;
     const loadedContentCountBefore = stateBefore?.contentLoadedIds.size ?? 0;
     const itemCountBefore = itemIds.length;
     const continuationBefore = nextItemIdsContinuation;
@@ -3416,6 +3460,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const returnedItemCount = await ensureArticleContent(plan, { generation, token });
       if (
         requestId !== activeViewRequestId ||
+        stateBefore?.membershipEpoch !== membershipEpoch ||
         !requestBelongsToCurrentSession(generation, token)
       ) {
         return;
@@ -3442,7 +3487,8 @@ export function renderBrowserAppRuntimeScript(): string {
         await continueLoadingToday(requestId);
       }
     } catch (_error) {
-      if (requestId === activeViewRequestId && requestBelongsToCurrentSession(generation, token)) {
+      if (requestId === activeViewRequestId && stateBefore?.membershipEpoch === membershipEpoch &&
+          requestBelongsToCurrentSession(generation, token)) {
         renderArticles();
         articlesStatus.textContent = 'Could not load article bodies.';
       }
@@ -3459,12 +3505,15 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    const pageRequest = { viewId: activeView.id, epoch: activeState.membershipEpoch };
+    activeItemIdsPageRequest = pageRequest;
     isLoadingItemIdsPage = true;
     renderArticles();
 
     try {
       const payload = await authenticatedJson(buildStreamIdsUrl(activeView, continuation));
-      if (requestId !== activeViewRequestId) {
+      if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
+          activeState.membershipEpoch !== pageRequest.epoch) {
         return;
       }
 
@@ -3489,6 +3538,7 @@ export function renderBrowserAppRuntimeScript(): string {
         activeState.continuation = nextItemIdsContinuation;
         activeState.hasMembership = true;
       }
+      activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
 
@@ -3498,9 +3548,11 @@ export function renderBrowserAppRuntimeScript(): string {
         await continueLoadingToday(requestId);
       }
     } catch (_error) {
-      if (requestId !== activeViewRequestId) {
+      if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
+          activeState.membershipEpoch !== pageRequest.epoch) {
         return;
       }
+      activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
       if (session.token) {
@@ -3509,7 +3561,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  async function loadActiveView() {
+  async function loadActiveView(options) {
     const activeView = getActiveView();
     if (!activeView) {
       resetReaderState();
@@ -3522,6 +3574,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const state = getViewState(activeView.id);
     itemIds = [...state.itemIds];
     nextItemIdsContinuation = state.continuation;
+    activeItemIdsPageRequest = null;
     isLoadingItemIdsPage = false;
     syncLoadedItemsFromCache();
     selectedItemId = state.selectedItemId && itemIds.includes(state.selectedItemId)
@@ -3539,12 +3592,16 @@ export function renderBrowserAppRuntimeScript(): string {
     restoreArticleScrollTop(state.scrollTop);
 
     if (!state.hasMembership) {
+      let expectedRootRequestId = null;
       try {
-        const result = await requestMembershipPage(activeView, '', { initial: true });
-        if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token)) {
+        const membershipRequest = requestMembershipPage(activeView, '', { initial: true });
+        expectedRootRequestId = state.rootRequestId;
+        const result = await membershipRequest;
+        if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token) ||
+            getViewState(activeView.id, false)?.rootRequestId !== result.rootRequestId) {
           return;
         }
-        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         const currentState = getViewState(activeView.id);
         itemIds = [...currentState.itemIds];
         nextItemIdsContinuation = currentState.continuation;
@@ -3555,7 +3612,7 @@ export function renderBrowserAppRuntimeScript(): string {
           await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
         }
       } catch (_error) {
-        if (requestId === activeViewRequestId && session.token) {
+        if (requestId === activeViewRequestId && session.token && state.rootRequestId === expectedRootRequestId) {
           renderArticles();
           articlesStatus.textContent = 'Could not load this view.';
         }
@@ -3563,7 +3620,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    void revalidateActiveView();
+    void revalidateActiveView(options);
   }
 
   async function markAllAsRead() {
@@ -3590,7 +3647,7 @@ export function renderBrowserAppRuntimeScript(): string {
         throw new Error('Mark all as read request failed');
       }
 
-      const refreshed = await loadSubscriptionsAndUnreadCounts();
+      const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
       if (
         !refreshed &&
         requestViewId === getActiveView()?.id &&
@@ -3613,7 +3670,37 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  async function loadSubscriptionsAndUnreadCounts() {
+  function requestUnreadCounts(force = false) {
+    const generation = accountGeneration;
+    const token = session.token;
+    if (!force && inFlightUnreadCountRequest) return inFlightUnreadCountRequest;
+    const requestId = ++unreadCountRequestId;
+    const requestPromise = authenticatedJson('/reader/api/0/unread-count')
+      .then((payload) => ({ payload, generation, token, requestId }))
+      .finally(() => {
+        if (inFlightUnreadCountRequest === requestPromise) inFlightUnreadCountRequest = null;
+      });
+    inFlightUnreadCountRequest = requestPromise;
+    return requestPromise;
+  }
+
+  function isCurrentUnreadCountResult(result) {
+    return result.requestId === unreadCountRequestId &&
+      requestBelongsToCurrentSession(result.generation, result.token);
+  }
+
+  async function refreshUnreadCounts() {
+    try {
+      const result = await requestUnreadCounts();
+      if (!isCurrentUnreadCountResult(result)) return;
+      views = client.buildFeedViews(subscriptions, result.payload.unreadcounts || []);
+      renderFeeds();
+    } catch (_error) {
+      // Retain existing counts when their refresh fails; membership has its own error state.
+    }
+  }
+
+  async function loadSubscriptionsAndUnreadCounts(options) {
     const generation = accountGeneration;
     const token = session.token;
     if (!token || session.status !== 'authenticated') {
@@ -3622,14 +3709,15 @@ export function renderBrowserAppRuntimeScript(): string {
     feedsStatus.textContent = 'Loading feeds…';
 
     try {
-      const [subscriptionPayload, unreadPayload] = await Promise.all([
+      const [subscriptionPayload, unreadResult] = await Promise.all([
         authenticatedJson('/reader/api/0/subscription/list'),
-        authenticatedJson('/reader/api/0/unread-count'),
+        requestUnreadCounts(Boolean(options?.forceUnread)),
       ]);
-      if (!requestBelongsToCurrentSession(generation, token)) {
+      if (!requestBelongsToCurrentSession(generation, token) || !isCurrentUnreadCountResult(unreadResult)) {
         return false;
       }
-      views = client.buildFeedViews(subscriptionPayload.subscriptions || [], unreadPayload.unreadcounts || []);
+      subscriptions = subscriptionPayload.subscriptions || [];
+      views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts || []);
       const validViewIds = new Set(views.map((view) => view.id));
       viewStates = new Map([...viewStates].filter(([viewId]) => validViewIds.has(viewId)));
       pruneExpandedFolders();
@@ -3637,7 +3725,7 @@ export function renderBrowserAppRuntimeScript(): string {
         activeViewId = 'all';
       }
       renderFeeds();
-      await loadActiveView();
+      await loadActiveView({ refreshUnread: false });
       if (!requestBelongsToCurrentSession(generation, token)) {
         return false;
       }

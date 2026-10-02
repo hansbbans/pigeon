@@ -4714,10 +4714,250 @@ test('Today refresh clears an old day boundary and loads new continuation pages'
 	await flushBrowserTasks();
 	assert.equal(harness.elements.get('articles-list')?.children.length, 0);
 	harness.dispatchDocumentEvent('visibilitychange');
+	harness.dispatchWindowEvent('online');
 	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '159')));
 	assert.equal(continuationRequests, 1);
 	assert.equal(harness.elements.get('articles-list')?.children.length, 60);
 	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 100');
 	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
 	assert.equal(harness.elements.get('load-more-button')?.classList.contains('hidden'), true);
+});
+
+test('foreground refresh reconciles unread sidebar counts without changing the current view', async () => {
+	let changedElsewhere = false;
+	let countRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+		if (input.endsWith('/unread-count')) {
+			countRequests += 1;
+			const count = changedElsewhere ? 0 : 5;
+			return Response.json({ unreadcounts: [{ id: 'feed/1', count }, { id: 'user/-/state/com.google/reading-list', count }] });
+		}
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: changedElsewhere ? [] : [{ id: '1' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')?.dispatch('click');
+	await flushBrowserTasks();
+	changedElsewhere = true;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => harness.elements.get('articles-list')?.children.length === 0);
+	await flushBrowserTasks();
+	assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'unread')?.textContent, 'Unread0');
+	assert.equal(countRequests, 2);
+	assert.equal(harness.elements.get('articles-heading')?.textContent, 'Unread');
+});
+
+test('a continuation from old Unread membership cannot append after a newer root refresh', async () => {
+	const oldPage = createDeferred<Response>();
+	let changedElsewhere = false;
+	let pageRequests = 0;
+	const initialIds = Array.from({ length: 50 }, (_, index) => String(index + 1));
+	const updatedIds = Array.from({ length: 50 }, (_, index) => String(index + 101));
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+			const url = new URL(`https://test${input}`);
+			if (!url.searchParams.has('xt')) return Response.json({ itemRefs: [] });
+			if (url.searchParams.has('c')) {
+				pageRequests += 1;
+				return oldPage.promise;
+			}
+			return Response.json({
+				itemRefs: (changedElsewhere ? updatedIds : initialIds).map((id) => ({ id })),
+				continuation: changedElsewhere ? 'new-next' : 'old-next',
+			});
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	for (let chunk = 0; chunk < 2; chunk += 1) {
+		harness.elements.get('load-more-button')?.dispatch('click');
+		await flushBrowserTasks();
+	}
+	harness.elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => pageRequests === 1);
+	changedElsewhere = true;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 101');
+	oldPage.resolve(Response.json({
+		itemRefs: Array.from({ length: 50 }, (_, index) => ({ id: String(index + 51) })),
+		continuation: 'old-third',
+	}));
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('articles-list')?.children.length, 50);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '51'), undefined);
+	assert.equal(harness.elements.get('load-more-button')?.disabled, false);
+});
+
+test('a deleted evicted selection does not block an authoritative root refresh', async () => {
+	for (const continuation of ['', 'tail']) {
+		let deleted = false;
+		let feedRequests = 0;
+		const feedIds = Array.from({ length: 551 }, (_, index) => String(index + 1001));
+		const contentRequests: string[][] = [];
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				if (new URL(`https://test${input}`).searchParams.get('s') === 'feed/1') {
+					feedRequests += 1;
+					return Response.json({ itemRefs: feedIds.map((id) => ({ id })) });
+				}
+				return Response.json({ itemRefs: [{ id: deleted ? '2' : '1' }], ...(deleted && continuation ? { continuation } : {}) });
+			}
+			if (input.endsWith('/contents')) {
+				const ids = (init?.body?.getAll('i') ?? []).map(String);
+				contentRequests.push(ids);
+				return Response.json({ items: ids.filter((id) => !deleted || id !== '1').map((id) => browserRegressionItem(id, 1_742_460_800)) });
+			}
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+		await waitForBrowserCondition(() => feedRequests === 1);
+		await flushBrowserTasks();
+		harness.dispatchDocumentEvent('visibilitychange');
+		await waitForBrowserCondition(() => contentRequests.length >= 30, 200);
+		await flushBrowserTasks();
+		deleted = true;
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 2');
+		assert.deepEqual(contentRequests.at(-1), [continuation ? '1' : '2']);
+		assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
+		assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
+	}
+});
+
+
+test('an older root refresh cannot replace a newer root while its article bodies finish late', async () => {
+	const oldBody = createDeferred<Response>();
+	let roots = 0;
+	let oldBodyStarted = false;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: String(++roots) }] });
+		if (input.endsWith('/contents') && init?.body?.getAll('i').includes('2')) {
+			oldBodyStarted = true;
+			return oldBody.promise;
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => oldBodyStarted);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 3');
+	oldBody.resolve(Response.json({ items: [browserRegressionItem('2', 1_742_460_800)] }));
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 3');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '2'), undefined);
+});
+
+test('overlapping count refreshes coalesce and a late result preserves a newly selected view', async () => {
+	const counts = createDeferred<Response>();
+	let countRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+		if (input.endsWith('/unread-count')) {
+			countRequests += 1;
+			return countRequests === 1 ? Response.json({ unreadcounts: [{ id: 'feed/1', count: 5 }] }) : counts.promise;
+		}
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	harness.dispatchWindowEvent('online');
+	assert.equal(countRequests, 2);
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')?.textContent === 'Alpha');
+	counts.resolve(Response.json({ unreadcounts: [{ id: 'feed/1', count: 2 }] }));
+	await waitForBrowserCondition(() => findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.textContent === 'Alpha2');
+	assert.equal(harness.elements.get('articles-heading')?.textContent, 'Alpha');
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
+});
+
+test('a stale failed root refresh cannot overwrite the status of a newer successful root', async () => {
+	const oldBody = createDeferred<Response>();
+	let roots = 0;
+	let oldBodyStarted = false;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: String(++roots) }] });
+		if (input.endsWith('/contents') && init?.body?.getAll('i').includes('2')) {
+			oldBodyStarted = true;
+			return oldBody.promise;
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => oldBodyStarted);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 3');
+	oldBody.resolve(new Response('Temporary failure', { status: 503 }));
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 3');
+	assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
+});
+
+test('mark-all refreshes counts after its mutation and ignores an older foreground count result', async () => {
+	const oldCounts = createDeferred<Response>();
+	let countRequests = 0;
+	let markRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+		if (input.endsWith('/unread-count')) {
+			countRequests += 1;
+			if (countRequests === 2) return oldCounts.promise;
+			return Response.json({ unreadcounts: [{ id: 'feed/1', count: markRequests ? 0 : 5 }] });
+		}
+		if (input.endsWith('/mark-all-as-read')) {
+			markRequests += 1;
+			return new Response('OK');
+		}
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await flushBrowserTasks();
+	harness.dispatchDocumentEvent('visibilitychange');
+	harness.elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(() => findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.textContent === 'Alpha0');
+	oldCounts.resolve(Response.json({ unreadcounts: [{ id: 'feed/1', count: 5 }] }));
+	await flushBrowserTasks();
+	assert.equal(countRequests, 3);
+	assert.equal(markRequests, 1);
+	assert.equal(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.textContent, 'Alpha0');
+	assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, true);
+});
+
+test('a failed mark-all request can be retried successfully in the same view', async () => {
+	let markRequests = 0;
+	const { elements } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+		if (input.endsWith('/unread-count')) return Response.json({ unreadcounts: [{ id: 'feed/1', count: markRequests === 2 ? 0 : 5 }] });
+		if (input.endsWith('/mark-all-as-read')) return new Response(++markRequests === 1 ? 'Error' : 'OK', { status: markRequests === 1 ? 503 : 200 });
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => elements.get('reader-title')?.textContent === 'Article 1');
+	findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await flushBrowserTasks();
+	elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not mark all as read.');
+	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
+	elements.get('mark-all-as-read-button')?.dispatch('click');
+	await waitForBrowserCondition(() => findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent === 'Alpha0');
+	assert.equal(markRequests, 2);
+	assert.equal(elements.get('articles-heading')?.textContent, 'Alpha');
+	assert.equal(elements.get('mark-all-as-read-button')?.disabled, true);
 });
