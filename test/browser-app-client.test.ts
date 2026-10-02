@@ -5437,7 +5437,7 @@ for (const clockChange of ['midnight', 'timezone']) {
 					if (failed) {
 						assert.equal(harness.elements.get('articles-list')?.children.length, 0);
 						assert.equal(harness.elements.get('reader-title')?.textContent, 'Select an article');
-						assert.equal(harness.elements.get('reader-frame')?.srcdoc.includes('Article 1 body'), false);
+						assert.equal(harness.elements.get('reader-frame')?.srcdoc.includes('Body 1'), false);
 						assert.equal(harness.elements.get('articles-status')?.textContent, operation === 'root'
 							? 'Refresh failed · showing cached articles.' : operation === 'page' ? 'Could not load more articles.' : 'Could not load article bodies.');
 					} else {
@@ -5454,3 +5454,132 @@ for (const clockChange of ['midnight', 'timezone']) {
 		}
 	}
 }
+
+
+async function drainBrowserMembershipPages(harness: Awaited<ReturnType<typeof createBrowserHarness>>) {
+	for (let attempt = 0; attempt < 160; attempt += 1) {
+		await flushBrowserTasks();
+		const button = harness.elements.get('load-more-button');
+		assert.ok(button);
+		if (button.classList.contains('hidden')) return;
+		await waitForBrowserCondition(() => !button.disabled, 100);
+		button.dispatch('click');
+	}
+	assert.fail('Browser membership pagination did not finish');
+}
+
+for (const change of ['unsubscribe', 'delete', 'unchanged', 'replace']) {
+	test(`completed authoritative pagination reconciles a large cached tail after ${change}`, async () => {
+		const initialIds = Array.from({ length: 650 }, (_, index) => String(index + 1));
+		const currentIds = change === 'unsubscribe' ? initialIds.slice(0, 300)
+			: change === 'delete' ? initialIds.filter((id) => id !== '2' && id !== '600')
+			: change === 'replace' ? initialIds.map((id) => String(Number(id) + 650)) : initialIds;
+		let refreshed = false;
+		let duplicatePageSent = false;
+		const bodyRequests: string[][] = [];
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				const cursor = new URL(`https://test${input}`).searchParams.get('c');
+				const ids = refreshed ? currentIds : initialIds;
+				if (refreshed && cursor === '50' && !duplicatePageSent) {
+					duplicatePageSent = true;
+					return Response.json({ itemRefs: ids.slice(0, 50).map((id) => ({ id })), continuation: 'duplicate-page' });
+				}
+				const offset = cursor === 'duplicate-page' ? 50 : Number(cursor || 0);
+				return Response.json({ itemRefs: ids.slice(offset, offset + 50).map((id) => ({ id })),
+					...(offset + 50 < ids.length ? { continuation: String(offset + 50) } : {}) });
+			}
+			if (input.endsWith('/contents')) bodyRequests.push((init?.body?.getAll('i') ?? []).map(String));
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		await drainBrowserMembershipPages(harness);
+		assert.equal(harness.elements.get('articles-list')?.children.length, 650);
+		findListButtonByItemId(harness.elements.get('articles-list'), '600')?.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 600');
+		refreshed = true;
+		harness.dispatchDocumentEvent('visibilitychange');
+		await flushBrowserTasks();
+		assert.ok(findListButtonByItemId(harness.elements.get('articles-list'), '600'), 'retain the cached selection while current pagination is incomplete');
+		await drainBrowserMembershipPages(harness);
+		assert.equal(harness.elements.get('articles-list')?.children.length, currentIds.length);
+		assert.equal(duplicatePageSent, true);
+		for (const id of ['1', '2', '600', '650', '651', '1300']) {
+			assert.equal(Boolean(findListButtonByItemId(harness.elements.get('articles-list'), id)), currentIds.includes(id), id);
+		}
+		const expectedSelection = currentIds.includes('600') ? '600' : currentIds[0];
+		assert.equal(harness.elements.get('reader-title')?.textContent, `Article ${expectedSelection}`);
+		assert.ok(harness.elements.get('reader-frame')?.srcdoc.includes(`<p>Body ${expectedSelection}</p>`), 'the surviving selection has a full body, even if its cache entry was evicted');
+		if (change === 'replace') assert.ok(bodyRequests.filter((ids) => ids.includes('651')).length >= 2, 'reload the new first article after body-cache eviction');
+	});
+}
+
+
+test('a failed continuation keeps provisional cached rows and retry reconciles completed membership', async () => {
+	let refreshed = false;
+	let failed = false;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+			const continuation = new URL(`https://test${input}`).searchParams.get('c');
+			if (continuation) {
+				if (!failed) { failed = true; return new Response('Unavailable', { status: 503 }); }
+				return Response.json({ itemRefs: [{ id: '3' }] });
+			}
+			return Response.json(refreshed ? { itemRefs: [{ id: '2' }], continuation: 'tail' }
+				: { itemRefs: [{ id: '1' }, { id: '2' }, { id: '3' }] });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	refreshed = true;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	const list = harness.elements.get('articles-list-shell');
+	assert.ok(list);
+	list.scrollTop = 73;
+	harness.elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-status')?.textContent === 'Could not load more articles.');
+	assert.equal(harness.elements.get('articles-list')?.children.length, 3);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
+	assert.equal(harness.elements.get('load-more-button')?.classList.contains('hidden'), false);
+	assert.equal(harness.elements.get('load-more-button')?.disabled, false);
+	harness.elements.get('load-more-button')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('load-more-button')?.classList.contains('hidden') === true);
+	assert.equal(harness.elements.get('articles-list')?.children.length, 2);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+	assert.equal(list.scrollTop, 73);
+});
+
+test('completed Today pagination removes provisional current-day rows and keeps its date filter', async () => {
+	const now = new Date(2026, 9, 2, 12).getTime();
+	const bounds = getLocalDayBounds(new Date(now));
+	let roots = 0;
+	let refreshed = false;
+	const harness = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+			if (new URL(`https://test${input}`).searchParams.has('c')) return Response.json({ itemRefs: [{ id: '4' }, { id: '2' }] });
+			roots += 1;
+			return Response.json(roots === 1 ? { itemRefs: [] } : refreshed
+				? { itemRefs: [{ id: '3' }], continuation: 'tail' }
+				: { itemRefs: [{ id: '1' }, { id: '2' }] });
+		}
+		if (input.endsWith('/contents')) return Response.json({ items: (init?.body?.getAll('i') ?? []).map(String)
+			.map((id) => browserRegressionItem(id, id === '2' ? bounds.startSeconds - 1 : bounds.startSeconds + 1)) });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => roots === 1);
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	refreshed = true;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '4')));
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('articles-list')?.children.length, 2);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1'), undefined);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '2'), undefined);
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 3');
+});

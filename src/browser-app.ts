@@ -1904,6 +1904,7 @@ export function renderBrowserAppRuntimeScript(): string {
       scrollTop: 0,
       refreshedAt: 0,
       contentLoadedIds: new Set(),
+      confirmedItemIds: new Set(),
       membershipEpoch: 0,
       rootRequestId: 0,
       appliedRootRequestId: 0,
@@ -3285,17 +3286,21 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     }
     if (isContinuationPage) {
+      for (const itemId of returnedIds) state.confirmedItemIds.add(itemId);
       const knownIds = new Set(state.itemIds);
       state.itemIds.push(...returnedIds.filter((itemId) => !knownIds.has(itemId)));
       state.continuation = continuation && continuation !== options.continuation ? continuation : '';
     } else if (continuation) {
+      state.confirmedItemIds = new Set(returnedIds);
       const retainedTail = getRetainedTailIds(viewId, payload);
       state.itemIds = [...returnedIds, ...retainedTail];
       state.continuation = continuation;
     } else {
+      state.confirmedItemIds = new Set(returnedIds);
       state.itemIds = returnedIds;
       state.continuation = '';
     }
+    if (isContinuationPage && !continuation) state.itemIds = [...state.confirmedItemIds];
     state.hasMembership = true;
     state.refreshedAt = Date.now();
     if (!state.selectedItemId || !state.itemIds.includes(state.selectedItemId)) {
@@ -3546,6 +3551,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const appendedIds = [];
       for (const itemRef of payload.itemRefs || []) {
         const itemId = String(itemRef.id);
+        activeState.confirmedItemIds.add(itemId);
         if (!knownIds.has(itemId)) {
           knownIds.add(itemId);
           appendedIds.push(itemId);
@@ -3558,17 +3564,27 @@ export function renderBrowserAppRuntimeScript(): string {
         returnedContinuation && (appendedIds.length > 0 || returnedContinuation !== continuation)
           ? returnedContinuation
           : '';
+      // Retained cached rows are provisional until this root's complete
+      // pagination confirms membership. A repeated cursor is not completion.
+      if (!returnedContinuation) itemIds = [...activeState.confirmedItemIds];
+      const previousSelection = selectedItemId;
+      if (selectedItemId && !itemIds.includes(selectedItemId)) {
+        selectedItemId = getVisibleItemIds()[0] || null;
+      }
       if (activeState) {
         activeState.itemIds = [...itemIds];
+        activeState.selectedItemId = selectedItemId;
         activeState.continuation = nextItemIdsContinuation;
         activeState.hasMembership = true;
       }
       activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
+      renderReader();
+      const selectionChanged = previousSelection !== selectedItemId;
 
-      if (appendedIds.length > 0) {
-        await loadContentChunk(appendedIds[0], requestId);
+      if (appendedIds.length > 0 || (selectionChanged && selectedItemId && !articleCache.has(selectedItemId))) {
+        await loadContentChunk(selectionChanged && selectedItemId ? selectedItemId : appendedIds[0], requestId);
       } else if (isTodayView()) {
         await continueLoadingToday(requestId);
       }
