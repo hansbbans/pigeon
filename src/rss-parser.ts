@@ -41,7 +41,9 @@ export interface ParseFeedOptions {
 
 type FeedRecord = Record<string, unknown>;
 
-const xmlParser = new XMLParser({
+const ATOM_NAMESPACE = 'http://www.w3.org/2005/Atom';
+
+const XML_OPTIONS = {
 	ignoreAttributes: false,
 	attributeNamePrefix: '@_',
 	textNodeName: '#text',
@@ -49,7 +51,46 @@ const xmlParser = new XMLParser({
 	trimValues: true,
 	processEntities: true,
 	removeNSPrefix: false,
-});
+};
+
+function namespaceScope(record: FeedRecord, inherited = new Map<string, string>()): Map<string, string> {
+	const namespaces = new Map(inherited);
+	for (const [key, value] of Object.entries(record)) {
+		if (typeof value !== 'string') continue;
+		if (key === '@_xmlns') namespaces.set('', value);
+		else if (key.startsWith('@_xmlns:')) namespaces.set(key.slice('@_xmlns:'.length), value);
+	}
+	return namespaces;
+}
+
+function createFeedXmlParser(): XMLParser {
+	const scopes: Map<string, string>[] = [];
+	const elementNamespaces: Array<string | undefined> = [];
+	let atomRoot = false;
+	return new XMLParser({
+		...XML_OPTIONS,
+		jPath: false,
+		updateTag(tagName, path, attributes) {
+			if (typeof path === 'string') return tagName;
+			const depth = path.getDepth();
+			if (depth === 0 || (depth > 1 && !atomRoot)) return tagName;
+			const separator = tagName.indexOf(':');
+			const prefix = separator < 0 ? '' : tagName.slice(0, separator);
+			const localName = separator < 0 ? tagName : tagName.slice(separator + 1);
+			const namespaces = namespaceScope(asRecord(attributes), scopes[depth - 1]);
+			const uri = namespaces.get(prefix);
+			if (depth === 1) atomRoot = localName.toLowerCase() === 'feed' && (!prefix || uri === ATOM_NAMESPACE);
+			if (!atomRoot) return tagName;
+			scopes[depth] = namespaces;
+			elementNamespaces[depth] = uri;
+			if (uri === ATOM_NAMESPACE) return localName;
+			// Foreign default namespaces under an Atom parent must not masquerade
+			// as Atom fields; prefixed extensions already keep distinct names.
+			if (!prefix && elementNamespaces[depth - 1] === ATOM_NAMESPACE) return `foreign:${tagName}`;
+			return tagName;
+		},
+	});
+}
 
 export function parseFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
 	const text = feedText.replace(/^\uFEFF/, '').trim();
@@ -64,7 +105,7 @@ export function parseFeed(feedText: string, options: ParseFeedOptions = {}): Par
 
 	let document: FeedRecord;
 	try {
-		document = asRecord(xmlParser.parse(text));
+		document = asRecord(createFeedXmlParser().parse(text));
 	} catch (error) {
 		throw new Error(`Malformed XML feed: ${errorMessage(error)}`);
 	}

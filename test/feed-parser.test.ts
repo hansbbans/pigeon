@@ -77,6 +77,40 @@ test('Atom plain text content and summaries retain literal markup characters', (
 	]);
 });
 
+test('Atom namespace prefixes preserve feed, entry, author, link and media fields', () => {
+	const feed = parseFeed(`<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/">
+	 <a:title>Prefixed Feed</a:title><a:link href="https://example.com/"/><a:author><a:name>Ada</a:name></a:author>
+	 <a:entry><a:id>story</a:id><a:title>Prefixed Article</a:title><a:updated>2026-10-02T12:00:00Z</a:updated><a:link href="/story"/>
+	 <a:content type="html">&lt;p&gt;Body&lt;/p&gt;</a:content><a:link rel="enclosure" href="/audio.mp3" type="audio/mpeg"/></a:entry>
+	 <a:entry><yt:videoId>dQw4w9WgXcQ</yt:videoId><a:title>Video</a:title><media:group><media:description>Media description</media:description><media:thumbnail url="https://example.com/thumb.jpg"/></media:group></a:entry>
+	 </a:feed>`);
+	assert.equal(feed.title, 'Prefixed Feed');
+	assert.equal(feed.link, 'https://example.com/');
+	assert.deepEqual(feed.items[0], {
+		guid: 'story', title: 'Prefixed Article', pubDate: '2026-10-02T12:00:00.000Z', link: 'https://example.com/story', content: '<p>Body</p>', author: 'Ada',
+		attachments: [{ url: 'https://example.com/audio.mp3', mimeType: 'audio/mpeg', title: undefined }],
+	});
+	assert.equal(feed.items[1].guid, 'yt:video:dQw4w9WgXcQ');
+	assert.equal(feed.items[1].content, '<p>Media description</p>');
+	assert.equal(feed.items[1].attachments[0].url, 'https://example.com/thumb.jpg');
+});
+
+test('Atom namespace redeclarations stay local and foreign element names remain distinct', () => {
+	const feed = parseFeed(`<feed xmlns="http://www.w3.org/2005/Atom" xmlns:a="http://www.w3.org/2005/Atom" xmlns:other="https://example.com/foreign">
+	 <title>Namespaces</title>
+	 <entry xmlns:a="https://example.com/foreign" xmlns:b="http://www.w3.org/2005/Atom"><id>first</id><a:title>Foreign title</a:title><title xmlns="https://example.com/foreign">Foreign default title</title><b:title>Correct title</b:title><a:content>Foreign body</a:content><b:content type="html">&lt;p&gt;Correct body&lt;/p&gt;</b:content></entry>
+	 <a:entry><a:id>second</a:id><other:title>Foreign title</other:title><a:title>Inherited prefix</a:title><a:content type="html">&lt;p&gt;Second&lt;/p&gt;</a:content></a:entry>
+	 <other:entry><other:id>ignored</other:id><other:title>Extension</other:title></other:entry>
+	 <entry xmlns="https://example.com/foreign"><id>ignored-default</id><title>Extension</title></entry>
+	 </feed>`);
+	assert.deepEqual(feed.items.map((item) => [item.guid, item.title, item.content]), [
+		['first', 'Correct title', '<p>Correct body</p>'], ['second', 'Inherited prefix', '<p>Second</p>'],
+	]);
+	assert.throws(() => parseFeed('<other:feed xmlns:other="https://example.com/foreign"><other:title>Foreign</other:title></other:feed>'), /Unsupported feed format/);
+	const rss = parseFeed('<rss version="2.0" xmlns:a="http://www.w3.org/2005/Atom"><channel><title>RSS</title><a:link href="https://example.com/atom"/><link>https://example.com/rss</link><item><guid>one</guid><description>RSS body</description></item></channel></rss>');
+	assert.equal(rss.link, 'https://example.com/rss');
+});
+
 test('relative enclosure and media URLs resolve against the feed home page', () => {
 	const expectedUrls = new Map([
 		['rss2-relative-media', ['https://example.com/images/photo.jpg', 'https://example.com/audio/episode.mp3']],

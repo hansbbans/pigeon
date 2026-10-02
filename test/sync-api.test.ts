@@ -1112,14 +1112,16 @@ test('Atom plain text survives storage and reader rendering without becoming mar
 	}
 });
 
-for (const format of ['json', 'atom']) {
+for (const format of ['json', 'atom', 'prefixed-atom']) {
 	test(`inherited ${format} feed bylines reach stored articles and GReader responses`, async () => {
 		const state = fixture();
 		const originalFetch = globalThis.fetch;
 		try {
 			state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('author-feed', 'Authors', 'rss', 'https://feeds.example.com/authors')").run();
 			const body = format === 'json' ? JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Authors', authors: [{ name: 'Inherited Author' }], items: [{ id: 'inherited-story', title: 'Story', content_html: '<p>Body</p>' }] })
-				: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Authors</title><author><name>Inherited Author</name></author><entry><id>inherited-story</id><title>Story</title><content>Body</content></entry></feed>';
+				: format === 'prefixed-atom'
+					? '<a:feed xmlns:a="http://www.w3.org/2005/Atom"><a:title>Authors</a:title><a:author><a:name>Inherited Author</a:name></a:author><a:entry><a:id>inherited-story</a:id><a:title>Story</a:title><a:content>Body</a:content></a:entry></a:feed>'
+					: '<feed xmlns="http://www.w3.org/2005/Atom"><title>Authors</title><author><name>Inherited Author</name></author><entry><id>inherited-story</id><title>Story</title><content>Body</content></entry></feed>';
 			globalThis.fetch = async () => new Response(body, { headers: { 'Content-Type': format === 'json' ? 'application/feed+json' : 'application/atom+xml' } });
 			assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'author-feed', source_url: 'https://feeds.example.com/authors', etag: null, last_modified: null })).outcome, 'success');
 			assert.equal((state.database.prepare('SELECT from_name FROM items').get() as { from_name: string }).from_name, 'Inherited Author');
