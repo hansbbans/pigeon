@@ -5135,3 +5135,64 @@ for (const ignoresAbort of [false, true]) {
 		}
 	});
 }
+
+for (const oldBodyStatus of [200, 503]) {
+	test(`settling an inactive view body request ${oldBodyStatus} restores current pagination controls without moving its list`, async () => {
+		const oldBody = createDeferred<Response>();
+		let oldBodyStarted = false;
+		let allRoots = 0;
+		let pages = 0;
+		let activeBodies = 0;
+		let maxActiveBodies = 0;
+		const rows = (ids: string[]) => ids.map((id) => browserRegressionItem(id, 1_742_460_800));
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+				const url = new URL(`https://test${input}`);
+				if (url.searchParams.get('s') === 'feed/1') return Response.json({ itemRefs: Array.from({ length: 50 }, (_, index) => ({ id: String(index + 1001) })) });
+				if (url.searchParams.get('c')) {
+					pages += 1;
+					return Response.json({ itemRefs: [{ id: '51' }] });
+				}
+				allRoots += 1;
+				return Response.json({ itemRefs: Array.from({ length: 50 }, (_, index) => ({ id: String(index + 1) })), continuation: 'more-all' });
+			}
+			if (input.endsWith('/contents')) {
+				activeBodies += 1;
+				maxActiveBodies = Math.max(maxActiveBodies, activeBodies);
+				const ids = (init?.body?.getAll('i') ?? []).map(String);
+				if (ids.includes('1001')) {
+					oldBodyStarted = true;
+					return oldBody.promise.finally(() => { activeBodies -= 1; });
+				}
+				activeBodies -= 1;
+				return Response.json({ items: rows(ids) });
+			}
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+		await waitForBrowserCondition(() => oldBodyStarted);
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
+		await waitForBrowserCondition(() => allRoots === 2 && Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '50')));
+		await flushBrowserTasks();
+		const list = harness.elements.get('articles-list-shell');
+		if (list) list.scrollTop = 180;
+		oldBody.resolve(oldBodyStatus === 200
+			? Response.json({ items: rows(Array.from({ length: 20 }, (_, index) => String(index + 1001))) })
+			: new Response('Old view failure', { status: oldBodyStatus }));
+		await flushBrowserTasks();
+		assert.equal(harness.elements.get('load-more-button')?.disabled, false);
+		assert.equal(list?.scrollTop, 180);
+		assert.equal(harness.elements.get('articles-status')?.textContent, '50 articles');
+		assert.equal(harness.elements.get('articles-heading')?.textContent, 'All items');
+		harness.elements.get('load-more-button')?.dispatch('click');
+		await waitForBrowserCondition(() => Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '51')));
+		await flushBrowserTasks();
+		assert.equal(pages, 1);
+		assert.equal(harness.elements.get('articles-status')?.textContent, '51 articles');
+		assert.equal(harness.elements.get('load-more-button')?.disabled, false);
+		assert.equal(maxActiveBodies, 2);
+	});
+}

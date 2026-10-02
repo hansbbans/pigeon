@@ -2180,6 +2180,9 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     refreshInFlightContentIds();
     pumpContentRequests();
+    if (session.status === 'authenticated') {
+      loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+    }
   }
 
   function pumpContentRequests() {
