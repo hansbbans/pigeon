@@ -141,6 +141,30 @@ struct PlatformIntegrationTests {
 		#expect(PigeonDeepLink(url: try #require(URL(string: "pigeon://article/preview-2"))) == .article("preview-2", collection: nil))
 	}
 
+	@Test(arguments: ["Work%2FHome", "100%20Focus", "%E2%9C%93", "100%", "%", "%0", "%ZZ", "Design / Art", "日本語✓", "Work//Home", "Trailing/", "/Leading"])
+	func deepLinkPathsRoundTripWithoutDecodingTheirLiteralNamesTwice(id: String) {
+		let links: [PigeonDeepLink] = [
+			.feed(id), .folder(id), .article(id, collection: "user/-/label/Work%2FHome"),
+		]
+		for link in links {
+			#expect(PigeonDeepLink(url: link.url) == link)
+		}
+	}
+
+	@Test func manuallyEncodedDeepLinkPathsDecodeExactlyOnceAndRejectInvalidUTF8() throws {
+		let cases = [
+			("Design%20%2F%20Art", "Design / Art"),
+			("%E6%97%A5%E6%9C%AC%E8%AA%9E", "日本語"),
+			("Work%252FHome", "Work%2FHome"),
+			("%ZZ", "%ZZ"), ("%0", "%0"), ("%", "%"),
+		]
+		for (encoded, decoded) in cases {
+			let url = try #require(URL(string: "pigeon://folder/" + encoded))
+			#expect(PigeonDeepLink(url: url) == .folder(decoded))
+		}
+		#expect(PigeonDeepLink(url: try #require(URL(string: "pigeon://folder/%FF"))) == nil)
+	}
+
 	@Test @MainActor func deepLinksSelectExistingFeedFolderAndArticleDestinations() async {
 		let model = PreviewData.makeModel()
 		await model.handleDeepLink(PigeonDeepLink.feed("dense-discovery").url)

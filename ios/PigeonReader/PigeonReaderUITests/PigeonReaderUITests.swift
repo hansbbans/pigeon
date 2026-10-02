@@ -1384,6 +1384,26 @@ final class PigeonDeepLinkUITests: XCTestCase {
 		attachScreenshot("real-article-deep-link")
 	}
 
+	func testRealURLPreservesALiteralPercentEncodedFolderName() throws {
+		let folder = app.staticTexts["Design"]
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.press(forDuration: 1.2)
+		let rename = app.buttons["Rename Folder"]
+		XCTAssertTrue(rename.waitForExistence(timeout: 5))
+		rename.tap()
+		let field = app.textFields["rename-folder-name"]
+		XCTAssertTrue(field.waitForExistence(timeout: 5))
+		field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+		let existing = field.value as? String ?? ""
+		field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count) + "Design%2FHome")
+		XCTAssertEqual(field.value as? String, "Design%2FHome")
+		app.buttons["Save"].tap()
+		XCTAssertTrue(app.staticTexts["Design%2FHome"].waitForExistence(timeout: 10))
+		try openDeepLink("pigeon://folder/user/-/label/Design%252FHome")
+		XCTAssertTrue(app.navigationBars["Design%2FHome"].waitForExistence(timeout: 10))
+		attachScreenshot("real-literal-percent-folder-deep-link")
+	}
+
 	private func openDeepLink(_ text: String) throws {
 		safari.launch()
 		let pendingCancel = safari.buttons["Cancel"].firstMatch
