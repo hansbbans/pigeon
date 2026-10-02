@@ -125,7 +125,7 @@ class RefreshFailure extends Error {
 
 const MAX_ITEMS_PER_FETCH = 50;
 const MAX_CONTENT_SIZE = 900_000;
-// Nine bound columns per item keeps each ten-row statement below D1's 100-parameter limit.
+// Nine item columns plus two ownership bindings stay below D1's 100-parameter limit.
 const MAX_ITEMS_PER_INSERT = 10;
 /** Maximum stored plain-text excerpt used by topic matching. */
 export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
@@ -167,7 +167,7 @@ export async function buildRssItemStatements(
 	parsed: Pick<ParsedFeed, 'link'> & { sourceUrl: string },
 	items: ParsedItem[],
 	fallbackReceivedAt: string,
-	options: { updateExisting?: boolean; compactWrites?: boolean } = {},
+	options: { updateExisting?: boolean; compactWrites?: boolean; leaseToken?: string | null } = {},
 ): Promise<D1PreparedStatement[]> {
 	assertBoundedIdentifier(feedKey, 'Feed key');
 	const statements: D1PreparedStatement[] = [];
@@ -176,8 +176,15 @@ export async function buildRssItemStatements(
 	const flushRows = () => {
 		if (bufferedRows.length === 0) return;
 		const placeholders = bufferedRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-		const sql = bufferedSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', `VALUES ${placeholders}`);
-		statements.push(db.prepare(sql).bind(...bufferedRows.flat()));
+		const source = options.leaseToken
+			? `SELECT column1, column2, column3, column4, column5, column6, column7, column8, column9
+			   FROM (VALUES ${placeholders})
+			   WHERE EXISTS (SELECT 1 FROM feeds WHERE feed_key = ? AND refresh_lease_token = ?)`
+			: `VALUES ${placeholders}`;
+		const sql = bufferedSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', source);
+		const values = bufferedRows.flat();
+		if (options.leaseToken) values.push(feedKey, options.leaseToken);
+		statements.push(db.prepare(sql).bind(...values));
 		bufferedRows = [];
 	};
 	for (const item of items) {
@@ -239,13 +246,10 @@ export async function buildRssItemStatements(
 			textContent,
 			boundedStoredUrl(originalUrl),
 		];
-		if (!options.compactWrites || items.length === 1) {
-			statements.push(db.prepare(insertSql).bind(...values));
-			continue;
-		}
 		if (bufferedRows.length === MAX_ITEMS_PER_INSERT) flushRows();
 		bufferedSql = insertSql;
 		bufferedRows.push(values);
+		if (!options.compactWrites) flushRows();
 	}
 	flushRows();
 	return statements;
@@ -381,7 +385,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			{ link: parsed.link, sourceUrl: resource.finalUrl.href },
 			items,
 			attemptedAt,
-			{ updateExisting: true, compactWrites: true },
+			{ updateExisting: true, compactWrites: true, leaseToken: feed.refresh_lease_token },
 		);
 
 		const content: SuccessfulContent = {
@@ -603,57 +607,56 @@ async function persistRefresh(
 	});
 	const failureCount = succeeded ? 0 : (feed.consecutive_failures ?? 0) + 1;
 	const statements = [...(content?.statements ?? [])];
+	let feedUpdate: D1PreparedStatement;
 
 	if (content) {
-		statements.push(
-			env.DB.prepare(
-				`UPDATE feeds
-				 SET last_fetched_at = ?,
-				     etag = COALESCE(?, etag),
-				     last_modified = COALESCE(?, last_modified),
-				     site_url = COALESCE(?, site_url),
-				     last_attempt_at = ?,
-				     last_success_at = ?,
-				     fetch_error = NULL,
-				     consecutive_failures = 0,
-				     last_http_status = ?,
-				     retry_after_at = NULL,
-				     content_hash = COALESCE(?, content_hash),
-				     conditional_checked_at = COALESCE(?, conditional_checked_at),
-				     next_fetch_at = ?,
-				     feed_format = COALESCE(?, feed_format),
-				     source_url = COALESCE(?, source_url),
-				     canonical_url = COALESCE(canonical_url, ?),
-				     last_refresh_outcome = ?,
-				     last_fetch_duration_ms = ?,
-				     refresh_lease_until = NULL,
-				     refresh_lease_token = NULL,
-				     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
-				     item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
-				 WHERE feed_key = ?
-				   AND (? IS NULL OR refresh_lease_token = ?)`,
-			).bind(
-				result.attemptedAt,
-				content.etag,
-				content.lastModified,
-				content.siteUrl,
-				result.attemptedAt,
-				result.completedAt,
-				result.httpStatus,
-				content.contentHash,
-				content.performedFullFetch ? result.completedAt : null,
-				nextFetchAt,
-				content.format,
-				content.finalUrl,
-				content.finalUrl,
-				result.outcome,
-				result.durationMs,
-				feed.feed_key,
-				feed.feed_key,
-				feed.feed_key,
-				feed.refresh_lease_token ?? null,
-				feed.refresh_lease_token ?? null,
-			),
+		feedUpdate = env.DB.prepare(
+			`UPDATE feeds
+			 SET last_fetched_at = ?,
+			     etag = COALESCE(?, etag),
+			     last_modified = COALESCE(?, last_modified),
+			     site_url = COALESCE(?, site_url),
+			     last_attempt_at = ?,
+			     last_success_at = ?,
+			     fetch_error = NULL,
+			     consecutive_failures = 0,
+			     last_http_status = ?,
+			     retry_after_at = NULL,
+			     content_hash = COALESCE(?, content_hash),
+			     conditional_checked_at = COALESCE(?, conditional_checked_at),
+			     next_fetch_at = ?,
+			     feed_format = COALESCE(?, feed_format),
+			     source_url = COALESCE(?, source_url),
+			     canonical_url = COALESCE(canonical_url, ?),
+			     last_refresh_outcome = ?,
+			     last_fetch_duration_ms = ?,
+			     refresh_lease_until = NULL,
+			     refresh_lease_token = NULL,
+			     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
+			     item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
+			 WHERE feed_key = ?
+			   AND (? IS NULL OR refresh_lease_token = ?)`,
+		).bind(
+			result.attemptedAt,
+			content.etag,
+			content.lastModified,
+			content.siteUrl,
+			result.attemptedAt,
+			result.completedAt,
+			result.httpStatus,
+			content.contentHash,
+			content.performedFullFetch ? result.completedAt : null,
+			nextFetchAt,
+			content.format,
+			content.finalUrl,
+			content.finalUrl,
+			result.outcome,
+			result.durationMs,
+			feed.feed_key,
+			feed.feed_key,
+			feed.feed_key,
+			feed.refresh_lease_token ?? null,
+			feed.refresh_lease_token ?? null,
 		);
 
 		for (const alias of [...new Set(content.aliases)]) {
@@ -661,47 +664,48 @@ async function persistRefresh(
 			statements.push(
 				env.DB.prepare(
 					`INSERT OR IGNORE INTO feed_url_aliases (alias_url, feed_key, canonical_url)
-					 VALUES (?, ?, ?)`,
-				).bind(alias, feed.feed_key, content.finalUrl),
+					 SELECT ?, ?, ?
+					 WHERE ? IS NULL OR EXISTS (SELECT 1 FROM feeds WHERE feed_key = ? AND refresh_lease_token = ?)`,
+				).bind(alias, feed.feed_key, content.finalUrl, feed.refresh_lease_token ?? null, feed.feed_key, feed.refresh_lease_token ?? null),
 			);
 		}
 	} else {
-		statements.push(
-			env.DB.prepare(
-				`UPDATE feeds SET last_fetched_at = ?,
-				     last_attempt_at = ?,
-				     last_success_at = CASE WHEN ? = 1 THEN ? ELSE last_success_at END,
-				     fetch_error = ?,
-				     consecutive_failures = ?,
-				     last_http_status = ?,
-				     retry_after_at = ?,
-				     next_fetch_at = ?,
-				     last_refresh_outcome = ?,
-				     last_fetch_duration_ms = ?,
-				     refresh_lease_until = NULL,
-				     refresh_lease_token = NULL
-				 WHERE feed_key = ?
-				   AND (? IS NULL OR refresh_lease_token = ?)`,
-			).bind(
-				result.attemptedAt,
-				result.attemptedAt,
-				succeeded ? 1 : 0,
-				result.completedAt,
-				result.errorMessage,
-				failureCount,
-				result.httpStatus,
-				result.retryAt,
-				nextFetchAt,
-				result.outcome,
-				result.durationMs,
-				feed.feed_key,
-				feed.refresh_lease_token ?? null,
-				feed.refresh_lease_token ?? null,
-			),
+		feedUpdate = env.DB.prepare(
+			`UPDATE feeds SET last_fetched_at = ?,
+			     last_attempt_at = ?,
+			     last_success_at = CASE WHEN ? = 1 THEN ? ELSE last_success_at END,
+			     fetch_error = ?,
+			     consecutive_failures = ?,
+			     last_http_status = ?,
+			     retry_after_at = ?,
+			     next_fetch_at = ?,
+			     last_refresh_outcome = ?,
+			     last_fetch_duration_ms = ?,
+			     refresh_lease_until = NULL,
+			     refresh_lease_token = NULL
+			 WHERE feed_key = ?
+			   AND (? IS NULL OR refresh_lease_token = ?)`,
+		).bind(
+			result.attemptedAt,
+			result.attemptedAt,
+			succeeded ? 1 : 0,
+			result.completedAt,
+			result.errorMessage,
+			failureCount,
+			result.httpStatus,
+			result.retryAt,
+			nextFetchAt,
+			result.outcome,
+			result.durationMs,
+			feed.feed_key,
+			feed.refresh_lease_token ?? null,
+			feed.refresh_lease_token ?? null,
 		);
 	}
 
-	statements.push(activityStatement(env.DB, result));
+	// All guarded writes run before the final feed update releases ownership.
+	statements.push(activityStatement(env.DB, result, feed.refresh_lease_token));
+	statements.push(feedUpdate);
 
 	const reservation = feed.queryReservation;
 	const persistenceCost = statements.length + (feed.refresh_lease_token ? 1 : 0);
@@ -726,17 +730,19 @@ async function persistRefresh(
 		}
 	}
 	const results = await env.DB.batch(statements);
-	const feedUpdateResult = results?.[content?.statements.length ?? 0];
-	if (feedUpdateResult?.meta?.changes === 0 || feedUpdateResult?.meta?.changes === 1) reservation?.finish();
+	const feedUpdateResult = results?.[statements.length - 1];
+	if (feedUpdateResult?.meta?.changes === 0) return 'lease_lost';
+	if (feedUpdateResult?.meta?.changes === 1) reservation?.finish();
 	return 'saved';
 }
 
-function activityStatement(db: D1Database, result: RefreshResult): D1PreparedStatement {
+function activityStatement(db: D1Database, result: RefreshResult, leaseToken?: string | null): D1PreparedStatement {
 	return db.prepare(
 		`INSERT INTO refresh_activity (
 		  id, feed_key, attempted_at, completed_at, outcome, http_status,
 		  duration_ms, items_added, response_bytes, error_code, error_message, retry_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE ? IS NULL OR EXISTS (SELECT 1 FROM feeds WHERE feed_key = ? AND refresh_lease_token = ?)`,
 	).bind(
 		crypto.randomUUID(),
 		result.feedKey,
@@ -750,6 +756,9 @@ function activityStatement(db: D1Database, result: RefreshResult): D1PreparedSta
 		result.errorCode,
 		result.errorMessage,
 		result.retryAt,
+		leaseToken ?? null,
+		result.feedKey,
+		leaseToken ?? null,
 	);
 }
 

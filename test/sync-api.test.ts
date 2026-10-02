@@ -557,7 +557,7 @@ for (const scenario of ['small', 'large', 'expanded']) {
 				statement.bind = (...values) => {
 					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
 					if (sql.startsWith('INSERT INTO items')) {
-						assert.equal(values.length, 90);
+						assert.equal(values.length, 92);
 						groupedInserts += 1;
 					}
 					return bind(...values);
@@ -736,3 +736,62 @@ test('a maximum stale-feed archive batch stays atomic within the database query 
 		state.database.close();
 	}
 });
+
+for (const oldOutcome of ['success', 'not_modified', 'http_error']) {
+	test(`a refresh losing ownership after renewal cannot persist ${oldOutcome} writes`, async () => {
+		const state = fixture();
+		const originalFetch = globalThis.fetch;
+		const originalNow = Date.now;
+		try {
+			insertLibrary(state.database);
+			state.database.prepare("UPDATE feeds SET refresh_lease_token = 'old-owner' WHERE feed_key = 'design-weekly'").run();
+			const xml = (author: string, staleItems: number) => `<rss version="2.0"><channel><title>Design</title><item><guid>shared</guid><title>Shared</title><author>${author}</author><description>${author} body</description></item>${Array.from({ length: staleItems }, (_, index) => `<item><guid>stale-${index}</guid><title>Stale ${index}</title><description>Old body</description></item>`).join('')}</channel></rss>`;
+			let freshOwner = false;
+			globalThis.fetch = async (input) => {
+				if (freshOwner) return new Response(xml('Fresh byline', 0), { headers: { 'Content-Type': 'application/rss+xml', ETag: 'fresh-tag' } });
+				if (String(input).endsWith('/old.xml')) return new Response(null, { status: 302, headers: { Location: '/old-final.xml' } });
+				if (oldOutcome === 'not_modified') return new Response(null, { status: 304 });
+				if (oldOutcome === 'http_error') return new Response('Unavailable', { status: 503 });
+				return new Response(xml('Old byline', 49), { headers: { 'Content-Type': 'application/rss+xml', ETag: 'old-tag' } });
+			};
+			const originalBatch = state.db.batch.bind(state.db);
+			let paused = true;
+			state.db.batch = async (statements) => {
+				if (paused) {
+					paused = false;
+					const late = originalNow() + 181_000;
+					Date.now = () => late;
+					const claim = state.database.prepare(`UPDATE feeds SET refresh_lease_token = 'new-owner', refresh_lease_until = ?
+					 WHERE feed_key = 'design-weekly' AND datetime(refresh_lease_until) <= datetime(?)`)
+						.run(new Date(late + 180_000).toISOString(), new Date(late).toISOString());
+					assert.equal(Number(claim.changes), 1, 'the renewed lease genuinely expires before a new owner claims it');
+					freshOwner = true;
+					assert.equal((await fetchAndStoreRssFeed(state.env, {
+						feed_key: 'design-weekly', source_url: 'https://feeds.example.com/fresh.xml', etag: null, last_modified: null, refresh_lease_token: 'new-owner',
+					})).outcome, 'success');
+					Date.now = originalNow;
+				}
+				return originalBatch(statements);
+			};
+			const old = await fetchAndStoreRssFeed(state.env, {
+				feed_key: 'design-weekly', source_url: 'https://feeds.example.com/old.xml', etag: null, last_modified: null, refresh_lease_token: 'old-owner',
+			});
+			assert.equal(old.outcome, 'lease_lost');
+			assert.equal(old.itemsProcessed, 0);
+			assert.deepEqual({ ...state.database.prepare("SELECT from_name, html_content FROM items WHERE subject = 'Shared'").get() }, { from_name: 'Fresh byline', html_content: 'Fresh byline body' });
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 2);
+			assert.deepEqual({ ...state.database.prepare("SELECT item_count, etag, source_url, last_refresh_outcome, consecutive_failures FROM feeds WHERE feed_key = 'design-weekly'").get() }, {
+				item_count: 2, etag: 'fresh-tag', source_url: 'https://feeds.example.com/fresh.xml', last_refresh_outcome: 'success', consecutive_failures: 0,
+			});
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM feed_url_aliases').get() as { count: number }).count, 0);
+			assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = 'article'").get() as { count: number }).count, 2);
+			assert.deepEqual(state.database.prepare('SELECT outcome, items_added FROM refresh_activity ORDER BY rowid').all().map((row) => ({ ...row })), [
+				{ outcome: 'success', items_added: 1 }, { outcome: 'lease_lost', items_added: 0 },
+			]);
+		} finally {
+			globalThis.fetch = originalFetch;
+			Date.now = originalNow;
+			state.database.close();
+		}
+	});
+}
