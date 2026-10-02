@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { handleMutationBatch } from '../src/mutation-api';
+import { handleEngagementIngestion } from '../src/engagement';
 import { handleIncrementalSync } from '../src/sync-api';
 
 class SqliteStatement {
@@ -487,4 +488,41 @@ test('unavailable receipt storage returns a retryable HTTP response', async () =
 	}), { DB: { prepare() { throw new Error('storage offline'); } } } as never);
 	assert.equal(response.status, 503);
 	assert.deepEqual(await response.json(), { error: 'Database unavailable' });
+});
+
+test('a maximum engagement batch is atomic and idempotent within the request query budget', async () => {
+	const state = fixture();
+	try {
+		insertLibrary(state.database);
+		const events = Array.from({ length: 100 }, (_, index) => ({
+			id: `client-event-${index}`,
+			itemId: index % 2 === 0 ? '11111111-1111-4111-8111-111111111111' : '11',
+			type: index % 2 === 0 ? 'active_reading' : 'outbound_link',
+			durationSeconds: index % 2 === 0 ? 42 : null,
+			destinationHost: index % 2 === 0 ? null : 'News.Example.com.',
+			occurredAt: '2026-10-02T12:00:00-04:00',
+		}));
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const limits = { maxQueries: 50, queries: 0 };
+			const response = await handleEngagementIngestion(new Request('https://pigeon.example/api/v1/engagement', {
+				method: 'POST', headers: { 'X-Pigeon-Client': 'pigeon-reader/1' }, body: JSON.stringify({ events }),
+			}), { DB: new SqliteD1(state.database, limits) } as never);
+			assert.equal(response.status, 200);
+			assert.deepEqual(await response.json(), { accepted: 100, clientFamily: 'pigeon' });
+			assert.ok(limits.queries <= 5);
+			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 100);
+		}
+		assert.deepEqual({ ...state.database.prepare('SELECT item_id, duration_seconds, destination_host, occurred_at FROM engagement_events WHERE id = ?').get('client-event-0') }, {
+			item_id: '11111111-1111-4111-8111-111111111111', duration_seconds: 42, destination_host: null, occurred_at: '2026-10-02T16:00:00.000Z',
+		});
+		assert.equal((state.database.prepare('SELECT destination_host FROM engagement_events WHERE id = ?').get('client-event-1') as { destination_host: string }).destination_host, 'news.example.com');
+		state.database.exec(`CREATE TRIGGER reject_client_event BEFORE INSERT ON engagement_events
+		 WHEN NEW.id = 'failed-50' BEGIN SELECT RAISE(ABORT, 'simulated engagement failure'); END`);
+		await assert.rejects(handleEngagementIngestion(new Request('https://pigeon.example/api/v1/engagement', {
+			method: 'POST', body: JSON.stringify({ events: events.map((event, index) => ({ ...event, id: `failed-${index}` })) }),
+		}), state.env), /simulated engagement failure/);
+		assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 100);
+	} finally {
+		state.database.close();
+	}
 });

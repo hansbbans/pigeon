@@ -253,30 +253,28 @@ export async function handleEngagementIngestion(request: Request, env: Env): Pro
 	}
 
 	const clientFamily = classifyClientFamily(request);
-	const statements = events.map((event) => {
+	const storedEvents = events.map((event) => {
 		const item = itemsByID.get(event.itemId) as { id: string; feed_key: string };
-		const eventKey = `client:${clientFamily}:${event.id}`;
-		return env.DB.prepare(
-			`INSERT OR IGNORE INTO engagement_events
-			 (id, event_key, item_id, feed_key, event_type, client_family, value, duration_seconds, scroll_depth, destination_host, occurred_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		)
-			.bind(
-				event.id,
-				eventKey,
-				item.id,
-				item.feed_key,
-				event.type,
-				clientFamily,
-				event.value,
-				event.durationSeconds,
-				event.scrollDepth,
-				event.destinationHost,
-				event.occurredAt,
-			);
+		return {
+			...event,
+			eventKey: `client:${clientFamily}:${event.id}`,
+			itemId: item.id,
+			feedKey: item.feed_key,
+		};
 	});
 
-	await env.DB.batch(statements);
+	await env.DB.batch([
+		env.DB.prepare(
+			`INSERT OR IGNORE INTO engagement_events
+			 (id, event_key, item_id, feed_key, event_type, client_family, value, duration_seconds, scroll_depth, destination_host, occurred_at)
+			 SELECT json_extract(value, '$.id'), json_extract(value, '$.eventKey'),
+			        json_extract(value, '$.itemId'), json_extract(value, '$.feedKey'),
+			        json_extract(value, '$.type'), ?, json_extract(value, '$.value'),
+			        json_extract(value, '$.durationSeconds'), json_extract(value, '$.scrollDepth'),
+			        json_extract(value, '$.destinationHost'), json_extract(value, '$.occurredAt')
+			 FROM json_each(?)`,
+		).bind(clientFamily, JSON.stringify(storedEvents)),
+	]);
 	return Response.json({ accepted: events.length, clientFamily });
 }
 
