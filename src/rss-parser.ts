@@ -201,7 +201,7 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 		const item = asRecord(rawItem);
 		const link = resolveUrl(textValue(item.url) ?? textValue(item.external_url), baseUrl);
 		const plainText = textValue(item.content_text);
-		const content = textValue(item.content_html) ?? (plainText ? escapePlainText(plainText) : '');
+		const content = textValue(item.content_html) ?? (plainText ? `<p>${escapePlainText(plainText)}</p>` : '');
 		const author = item.authors != null || item.author != null
 			? jsonAuthorName(item)
 			: jsonAuthorName(feed);

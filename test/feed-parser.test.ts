@@ -77,6 +77,20 @@ test('Atom plain text content and summaries retain literal markup characters', (
 	]);
 });
 
+test('JSON Feed plain text is escaped once in an HTML body while provided HTML stays intact', () => {
+	const feed = parseFeed(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Text', items: [
+		{ id: 'text', content_text: 'Example: <code> & symbols' },
+		{ id: 'multiline', content_text: 'First line\nSecond line' },
+		{ id: 'literal-entities', content_text: 'Literal &lt;code&gt; &amp;' },
+		{ id: 'html', content_html: '<p>Provided HTML &amp; symbols</p>', content_text: 'Ignored fallback' },
+		{ id: 'empty', content_text: '' },
+	] }));
+	assert.deepEqual(feed.items.map((item) => item.content), [
+		'<p>Example: &lt;code&gt; &amp; symbols</p>', '<p>First line<br>Second line</p>',
+		'<p>Literal &amp;lt;code&amp;gt; &amp;amp;</p>', '<p>Provided HTML &amp; symbols</p>', '',
+	]);
+});
+
 test('Atom namespace prefixes preserve feed, entry, author, link and media fields', () => {
 	const feed = parseFeed(`<a:feed xmlns:a="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/">
 	 <a:title>Prefixed Feed</a:title><a:link href="https://example.com/"/><a:author><a:name>Ada</a:name></a:author>

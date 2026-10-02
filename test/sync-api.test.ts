@@ -1313,25 +1313,29 @@ for (const action of ['add', 'remove']) {
 	});
 }
 
-test('Atom plain text survives storage and reader rendering without becoming markup or literal entities', async () => {
-	const state = fixture();
-	const originalFetch = globalThis.fetch;
-	try {
-		state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('text-feed', 'Text', 'rss', 'https://feeds.example.com/text')").run();
-		globalThis.fetch = async () => new Response(`<feed xmlns="http://www.w3.org/2005/Atom"><title>Text</title>
-		 <entry><id>text-story</id><title>Story</title><content type="text">Example: &lt;code&gt; &amp; symbols</content></entry></feed>`);
-		assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'text-feed', source_url: 'https://feeds.example.com/text', etag: null, last_modified: null })).outcome, 'success');
-		assert.equal((state.database.prepare('SELECT text_content FROM items').get() as { text_content: string }).text_content, 'Example: <code> & symbols');
-		const password = 'test-password';
-		const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
-			headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
-		}), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
-		assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, '<p>Example: &lt;code&gt; &amp; symbols</p>');
-	} finally {
-		globalThis.fetch = originalFetch;
-		state.database.close();
-	}
-});
+for (const format of ['atom', 'json']) {
+	test(`${format} plain text survives storage and reader rendering without becoming markup or literal entities`, async () => {
+		const state = fixture();
+		const originalFetch = globalThis.fetch;
+		try {
+			state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('text-feed', 'Text', 'rss', 'https://feeds.example.com/text')").run();
+			const feedBody = format === 'json' ? JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', title: 'Text', items: [{ id: 'text-story', title: 'Story', content_text: 'Example: <code> & symbols' }] }) : `<feed xmlns="http://www.w3.org/2005/Atom"><title>Text</title>
+			 <entry><id>text-story</id><title>Story</title><content type="text">Example: &lt;code&gt; &amp; symbols</content></entry></feed>`;
+			globalThis.fetch = async () => new Response(feedBody);
+			assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'text-feed', source_url: 'https://feeds.example.com/text', etag: null, last_modified: null })).outcome, 'success');
+			assert.equal((state.database.prepare('SELECT text_content FROM items').get() as { text_content: string }).text_content, 'Example: <code> & symbols');
+			const password = 'test-password';
+			const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+				headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` },
+			}), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+			assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, '<p>Example: &lt;code&gt; &amp; symbols</p>');
+		} finally {
+			globalThis.fetch = originalFetch;
+			state.database.close();
+		}
+	});
+
+}
 
 for (const format of ['json', 'atom', 'prefixed-atom']) {
 	test(`inherited ${format} feed bylines reach stored articles and GReader responses`, async () => {
