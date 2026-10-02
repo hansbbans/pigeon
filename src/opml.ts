@@ -1,3 +1,5 @@
+import { stripInvalidXmlCharacters } from './xml';
+
 interface FeedInfo {
 	feed_key: string;
 	display_name: string;
@@ -8,7 +10,7 @@ interface FeedInfo {
 }
 
 function escapeXml(str: string): string {
-	return str
+	return stripInvalidXmlCharacters(str)
 		.replace(/&/g, '&amp;')
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')

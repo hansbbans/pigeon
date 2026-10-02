@@ -2,6 +2,7 @@ import { createPreviewText } from './preview-text';
 import { createRenderedContent } from './rendered-content';
 import { createCanonicalItemUuid, hasStoredItemId } from './item-identity';
 import type { FeedVariant } from './feed-urls';
+import { stripInvalidXmlCharacters } from './xml';
 
 interface FeedMeta {
 	feed_key: string;
@@ -37,12 +38,6 @@ function escapeXml(str: string): string {
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&apos;');
-}
-
-function stripInvalidXmlCharacters(value: string): string {
-	// XML 1.0 forbids these controls, BMP noncharacters, and lone surrogates.
-	// Unicode mode preserves valid supplementary characters such as emoji.
-	return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/gu, '');
 }
 
 function wrapCDATA(html: string): string {
