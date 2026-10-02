@@ -3093,7 +3093,7 @@ struct ReaderAppModelTests {
 		defer { try? FileManager.default.removeItem(at: directory) }
 		let databaseURL = directory.appendingPathComponent("library.sqlite")
 		let store = OfflineLibraryStore(databaseURL: databaseURL)
-		var target = makeArticle(id: "77", readerId: "tag:google.com,2005:reader/item/4d")
+		var target = makeArticle(id: "77", readerId: "tag:google.com,2005:reader/item/000000000000004d")
 		target.isRead = field == "read"
 		target.isStarred = field == "star"
 		let kind: OfflineMutationKind = field == "read" ? .setRead : .setStarred
