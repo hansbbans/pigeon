@@ -3134,6 +3134,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function loadStatus() {
     const requestId = startStatusRequest();
+    const requestGeneration = accountGeneration;
     const requestToken = session.token;
     settingsContent.textContent = 'Loading status…';
     try {
@@ -3208,6 +3209,9 @@ export function renderBrowserAppRuntimeScript(): string {
             });
             retryButton.disabled = !feed.canRetry;
             retryButton.addEventListener('click', async () => {
+              const ownsStatus = () => requestId === activeStatusRequestId &&
+                requestBelongsToCurrentSession(requestGeneration, requestToken);
+              if (retryButton.disabled || !ownsStatus()) return;
               retryButton.disabled = true;
               retryButton.textContent = 'Queuing…';
               try {
@@ -3216,10 +3220,12 @@ export function renderBrowserAppRuntimeScript(): string {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ feed_key: feed.feedKey }),
                 });
+                if (!ownsStatus()) return;
                 if (!response.ok) throw new Error('Retry request failed');
                 statusLoaded = false;
                 await loadStatus();
               } catch (_error) {
+                if (!ownsStatus()) return;
                 retryButton.textContent = 'Retry failed';
                 retryButton.disabled = false;
               }

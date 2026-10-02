@@ -5583,3 +5583,106 @@ test('completed Today pagination removes provisional current-day rows and keeps 
 	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '2'), undefined);
 	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 3');
 });
+
+function browserRetryStatus(title = 'Current status') {
+	return { configuredBaseUrl: title, healthUrl: 'https://pigeon.example/health',
+		feeds: { activeCount: 1, emailCount: 0, rssCount: 1, failingRssCount: 1, failing: [] },
+		items: { totalCount: 1, unreadCount: 1, starredCount: 0 }, rss: {},
+		syncHealth: { healthyCount: 0, dueCount: 1, backedOffCount: 0, feeds: [
+			{ feedKey: 'retry-source', title, state: 'due', canRetry: true },
+		] } };
+}
+
+for (const sameToken of [false, true]) {
+	for (const outcome of ['success', 'failure', 'rejection']) {
+		for (const currentRetryActive of [false, true]) {
+			test(`old Settings retry ${outcome} preserves the ${sameToken ? 'same-token' : 'new-token'} session with current retry ${currentRetryActive}`, async () => {
+				const oldRetry = createDeferred<Response>();
+				const currentRetry = createDeferred<Response>();
+				let logins = 0, statusCalls = 0, retries = 0;
+				const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
+					if (input === '/accounts/ClientLogin') {
+						logins += 1;
+						return new Response(`Auth=pigeon/${sameToken ? 'stable-token' : `session-${logins}`}`);
+					}
+					if (input === '/app/status') {
+						statusCalls += 1;
+						if (statusCalls === 2 && !currentRetryActive) return new Response('Unavailable', { status: 503 });
+						return Response.json(browserRetryStatus(`Session ${logins} status`));
+					}
+					if (input === '/app/status/retry') {
+						retries += 1;
+						return retries === 1 ? oldRetry.promise : currentRetry.promise;
+					}
+					if (input.includes('/stream/items/ids?')) return Response.json({ itemRefs: [] });
+					return browserRegressionResponse(input, init);
+				} });
+				await h.elements.get('login-form')?.dispatch('submit');
+				await flushBrowserTasks();
+				h.elements.get('settings-button')?.dispatch('click');
+				await waitForBrowserCondition(() => Boolean(findDescendantByClass(h.elements.get('settings-content'), 'secondary-button')));
+				const oldButton = findDescendantByClass(h.elements.get('settings-content'), 'secondary-button');
+				assert.ok(oldButton);
+				const oldOperation = oldButton.dispatch('click');
+				await waitForBrowserCondition(() => retries === 1);
+				h.elements.get('clear-session-button')?.dispatch('click');
+				h.elements.get('password-input')!.value = 'secret-password';
+				await h.elements.get('login-form')?.dispatch('submit');
+				await flushBrowserTasks();
+				h.elements.get('settings-button')?.dispatch('click');
+				await waitForBrowserCondition(() => statusCalls === 2);
+				await flushBrowserTasks();
+				const currentButton = findDescendantByClass(h.elements.get('settings-content'), 'secondary-button');
+				let currentOperation: unknown;
+				if (currentRetryActive) {
+					assert.ok(currentButton);
+					currentOperation = currentButton.dispatch('click');
+					await waitForBrowserCondition(() => retries === 2);
+					assert.equal(currentButton.disabled, true);
+				} else assert.equal(h.elements.get('settings-content')?.textContent, 'Could not load status.');
+				const before = h.elements.get('settings-content')?.textContent;
+				if (outcome === 'rejection') oldRetry.reject(new TypeError('Old interrupted connection'));
+				else oldRetry.resolve(new Response(outcome === 'success' ? 'OK' : 'Unavailable', { status: outcome === 'success' ? 200 : 503 }));
+				await oldOperation;
+				await flushBrowserTasks();
+				assert.equal(statusCalls, 2, 'old retry must not request the new session status');
+				assert.equal(h.elements.get('settings-content')?.textContent, before);
+				assert.equal(h.elements.get('reader-shell')?.classList.contains('hidden'), false);
+				if (currentRetryActive) {
+					assert.equal(findDescendantByClass(h.elements.get('settings-content'), 'secondary-button'), currentButton);
+					assert.equal(currentButton!.disabled, true);
+					assert.equal(currentButton!.textContent, 'Queuing…');
+					currentRetry.resolve(new Response('OK'));
+					await currentOperation;
+					await flushBrowserTasks();
+					assert.equal(statusCalls, 3, 'the current retry refreshes its own status');
+					assert.match(h.elements.get('settings-content')?.textContent ?? '', /Session 2 status/);
+				}
+			});
+		}
+	}
+}
+
+test('current Settings retry failure remains retryable and successful retry refreshes status', async () => {
+	let retries = 0, statuses = 0;
+	const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input === '/app/status') { statuses += 1; return Response.json(browserRetryStatus()); }
+		if (input === '/app/status/retry') { retries += 1; return new Response(retries === 1 ? 'Unavailable' : 'OK', { status: retries === 1 ? 503 : 200 }); }
+		if (input.includes('/stream/items/ids?')) return Response.json({ itemRefs: [] });
+		return browserRegressionResponse(input, init);
+	} });
+	await h.elements.get('login-form')?.dispatch('submit');
+	await flushBrowserTasks();
+	h.elements.get('settings-button')?.dispatch('click');
+	await waitForBrowserCondition(() => Boolean(findDescendantByClass(h.elements.get('settings-content'), 'secondary-button')));
+	const button = findDescendantByClass(h.elements.get('settings-content'), 'secondary-button');
+	assert.ok(button);
+	await button.dispatch('click');
+	assert.equal(button.textContent, 'Retry failed');
+	assert.equal(button.disabled, false);
+	await button.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(retries, 2);
+	assert.equal(statuses, 2);
+	assert.match(h.elements.get('settings-content')?.textContent ?? '', /Current status/);
+});
