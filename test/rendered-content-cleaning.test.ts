@@ -245,6 +245,14 @@ test('semantic HTML article fragments retain their heading, quotation and prefor
 	assert.match(rendered, /&lt;support@example.com&gt;/);
 });
 
+test('unknown tags with semantic-name prefixes remain literal plain text', () => {
+	for (const plain of ['<h2-not-a-tag>Literal example</h2-not-a-tag>', '<pre:syntax>Literal example</pre:syntax>', '<h2\u00a0suffix>Literal example</h2\u00a0suffix>']) {
+		const rendered = createRenderedContent({ htmlContent: plain });
+		assert.ok(rendered.includes(plain.replaceAll('<', '&lt;').replaceAll('>', '&gt;')));
+		assert.match(rendered, /data-pigeon-rendered="plain-text"/);
+	}
+});
+
 test('createRenderedContent resolves relative links against an imported item original URL', () => {
 	const rendered = createRenderedContent({
 		htmlContent:

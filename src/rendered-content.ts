@@ -1,5 +1,5 @@
 const HTML_PATTERN = /<!doctype|<\?xml|<(html|head|body|style|script|article|section|div|p|table|ul|ol|li|img|br|hr|a)\b/i;
-const SEMANTIC_HTML_TAG_PATTERN = /<(\/?)(h[1-6]|blockquote|pre|figure|figcaption|dl|dt|dd)\b/gi;
+const SEMANTIC_HTML_TAG_PATTERN = /<(\/?)(h[1-6]|blockquote|pre|figure|figcaption|dl|dt|dd)(?=[\t\n\f\r />])/gi;
 const EMAIL_CONTENT_CLASS_HINTS = [
 	'email-content',
 	'mail-message-content',
