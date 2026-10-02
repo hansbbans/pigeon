@@ -2253,7 +2253,7 @@ final class ReaderAppModel {
 	/// synchronization is still running loads independently, and later revisits
 	/// continue to refresh normally.
 	func loadForDisplay(collection: ReaderNavigationItem, now: Date = .now) async {
-		guard Task.isCancelled == false else { return }
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		let accountNeedsPreparation = offlineSynchronizationEnabled
 			&& (session.map { preparedOfflineAccountID != $0.storageIdentity } ?? false)
 		let shouldWaitForPreparation = accountNeedsPreparation
@@ -2264,17 +2264,17 @@ final class ReaderAppModel {
 			isShowingBootstrapSnapshot == false,
 			let preparationTask = offlinePreparationTask {
 			await preparationTask.value
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		}
 		if automaticDisplaySuppressionCollectionID == collection.id,
 			completedInitialLoadCollectionIDs.contains(collection.id),
 			collection.kind != .feed || cachedCollectionHasMissingBodies(collection.id) == false {
 			automaticDisplaySuppressionCollectionID = nil
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			await persistPrewarmedCollectionIfNeeded(collection)
 			return
 		}
-		guard Task.isCancelled == false else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID == session.storageIdentity,
@@ -2288,7 +2288,7 @@ final class ReaderAppModel {
 		} else {
 			await load(collection: collection, now: now)
 		}
-		guard Task.isCancelled == false else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		await persistPrewarmedCollectionIfNeeded(collection)
 	}
 
@@ -2359,6 +2359,7 @@ final class ReaderAppModel {
 		apiClientOverride: PigeonAPIClient? = nil,
 		contextOverride: OperationContext? = nil,
 	) async {
+		guard let accountContext = accountContext(), Task.isCancelled == false else { return }
 		guard retryAttempt > 0 || force || activeLoadIDs[collection.id] == nil else {
 			return
 		}
@@ -2374,11 +2375,12 @@ final class ReaderAppModel {
 				return
 			}
 			await prepareOfflineLibrary()
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
 			if didPruneToday {
 				await persistCollections([collection.id])
 			}
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				articleCache[collection.id] == nil
@@ -2406,6 +2408,7 @@ final class ReaderAppModel {
 		if force == false, articleCache[collection.id] != nil {
 			if pruneTodayIfNeeded(collection, now: now) {
 				await persistCollections([collection.id])
+				guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
 				return
 			}
@@ -4888,10 +4891,12 @@ final class ReaderAppModel {
 	/// Drops yesterday's Today rows after local midnight and refreshes if Today is open.
 	@discardableResult
 	func handleLocalDayChange(now: Date = .now) async -> Bool {
+		guard let context = accountContext(), Task.isCancelled == false else { return false }
 		if pruneStaleTodayStories(now: now) {
 			if selectedCollection.smartSection == .today {
 				await load(collection: selectedCollection, force: true, now: now)
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return true }
 			// Persist the pruned cache after the selected Today page has had a
 			// chance to render and refresh.
 			await persistCollections([ReaderSection.today.rawValue])
@@ -4965,7 +4970,8 @@ final class ReaderAppModel {
 	}
 
 	func recordPreference(_ type: EngagementEventType, for article: Recommendation) async {
-		guard type == .moreLikeThis || type == .notInterested else { return }
+		guard type == .moreLikeThis || type == .notInterested,
+			let context = accountContext(), Task.isCancelled == false else { return }
 		articleStateGeneration = UUID()
 		let mutation = OfflineMutation(
 			kind: .feedback,
@@ -4994,6 +5000,7 @@ final class ReaderAppModel {
 			}
 		}
 		await persistCollections([forYouID])
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		await replayPendingMutations()
 	}
 

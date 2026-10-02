@@ -2697,6 +2697,176 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldNotInterestedCompletionDoesNotReplayTheNextSessionsQueue(sameAccount: Bool) async throws {
+		let original = try makeSession(token: "feedback-original")
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/unused", loginToken: sameAccount ? original.token : "feedback-current")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		let oldArticle = makeArticle(id: "old-feedback")
+		model.setArticles([oldArticle], for: collection)
+		await store.pauseNextArticleSave()
+		let feedback = Task { await model.recordPreference(.notInterested, for: oldArticle) }
+		await store.waitUntilArticleSaveIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setSortOrder(.newest, for: collection)
+		let above = makeArticle(id: "current-feedback-above", receivedAt: 200)
+		let boundary = makeArticle(id: "current-feedback-boundary", receivedAt: 100)
+		model.setArticles([above, boundary], for: collection)
+		model.select(article: boundary)
+		await model.markStoriesAboveAsRead(boundary, in: collection)
+		let currentUndo = model.bulkReadUndoTitle
+		model.errorMessage = "Current feedback message"
+		let queuedBefore = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		let requestCountBefore = await transport.requests.count
+		await store.resumeArticleSave()
+		await feedback.value
+
+		#expect(await transport.requests.count == requestCountBefore)
+		#expect(model.errorMessage == "Current feedback message")
+		#expect(model.bulkReadUndoTitle == currentUndo)
+		#expect(model.selectedArticleID == boundary.id)
+		#expect(model.allArticles(for: collection).map(\.id) == [above.id, boundary.id])
+		let queuedAfter = try await store.pendingMutations(accountID: currentAccount, limit: 100)
+		#expect(queuedAfter.map(\.mutation.id) == queuedBefore.map(\.mutation.id))
+		#expect(queuedAfter.map(\.attempts) == queuedBefore.map(\.attempts))
+		if sameAccount == false {
+			let originalQueue = try await store.pendingMutations(accountID: original.storageIdentity, limit: 100)
+			#expect(originalQueue.count == 1)
+			#expect(originalQueue.first?.mutation.kind == .feedback)
+			let originalSnapshot = try await store.loadSnapshot(accountID: original.storageIdentity)
+			#expect((originalSnapshot.articlesByCollection[collection.id] ?? []).isEmpty)
+			#expect(originalSnapshot.navigation?.items.map(\.id) == [collection.id])
+		}
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldMidnightRefreshDoesNotPersistTheNextSessionsLibrary(sameAccount: Bool) async throws {
+		let original = try makeSession(token: "midnight-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/reader/api/0/stream/items/ids",
+			loginToken: sameAccount ? original.token : "midnight-current",
+			responses: ["/reader/api/0/stream/items/ids": streamIDsData(ids: [], continuation: nil)],
+		)
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [today]))
+		model.select(section: .today)
+		let day = ReaderLocalDayBounds.localDay(containing: .now)
+		model.setArticles([makeArticle(id: "old-yesterday", receivedDate: day.start.addingTimeInterval(-60))], for: today)
+		let refresh = Task { await model.handleLocalDayChange(now: day.start.addingTimeInterval(60)) }
+		await transport.waitUntilPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let currentAccount = try #require(model.session).storageIdentity
+		model.setNavigation(ReaderNavigationState(items: [today]))
+		let current = makeArticle(id: "current-midnight", receivedDate: day.start.addingTimeInterval(120))
+		model.setArticles([current], for: today)
+		model.select(section: .today)
+		model.select(article: current)
+		model.errorMessage = "Current midnight message"
+		let persisted = makeArticle(id: "persisted-current-midnight", receivedDate: day.start.addingTimeInterval(180))
+		let persistedNavigation = ReaderNavigationState(items: [.smart(.today, unreadCount: 83)])
+		try await store.saveArticles([persisted], collectionID: today.id, accountID: currentAccount)
+		try await store.saveNavigation(persistedNavigation, accountID: currentAccount)
+		let requestCountBefore = await transport.requests.count
+		await transport.resume()
+		#expect(await refresh.value)
+
+		#expect(await transport.requests.count == requestCountBefore)
+		#expect(model.errorMessage == "Current midnight message")
+		#expect(model.selectedArticleID == current.id)
+		#expect(model.allArticles(for: today).map(\.id) == [current.id])
+		let snapshot = try await store.loadSnapshot(accountID: currentAccount)
+		#expect(snapshot.articlesByCollection[today.id]?.map(\.id) == [persisted.id])
+		#expect(snapshot.navigation == persistedNavigation)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldDisplayPreparationDoesNotStartARequestInTheNextSession(sameAccount: Bool) async throws {
+		let original = try makeSession(token: "display-original")
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused",
+			loginToken: sameAccount ? original.token : "display-current",
+			responses: ["/api/v1/recommendations": try responseData(items: [makeArticle(id: "network-display-story")])],
+		)
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store)
+		await store.pauseNextSnapshot()
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await store.waitUntilSnapshotIsPaused()
+		var displayStarted = false
+		let display = Task {
+			displayStarted = true
+			await model.loadForDisplay(collection: .smart(.forYou))
+		}
+		while displayStarted == false { await Task.yield() }
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		let current = makeArticle(id: "current-display-story")
+		model.setArticles([current], for: .forYou)
+		model.errorMessage = "Current display message"
+		let requestCountBefore = await transport.requests.count
+		await store.resumeSnapshot()
+		await preparation.value
+		await display.value
+
+		#expect(await transport.requests.count == requestCountBefore)
+		#expect(model.errorMessage == "Current display message")
+		#expect(model.allArticles(for: .forYou).map(\.id) == [current.id])
+		// Only the new session's display may consume its launch-result suppression.
+		await model.loadForDisplay(collection: .smart(.forYou))
+		#expect(await transport.requests.count == requestCountBefore)
+		#expect(model.allArticles(for: .forYou).map(\.id) == [current.id])
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func oldTodayPruningDoesNotStartARecursiveLoadInTheNextSession(sameAccount: Bool) async throws {
+		let original = try makeSession(token: "today-pruning-original")
+		let transport = PausingSubscriptionHTTPClient(pausedPath: "/unused", loginToken: sameAccount ? original.token : "today-pruning-current")
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: transport, session: original, offlineStore: store, offlineSynchronizationEnabled: false)
+		let today = ReaderNavigationItem.smart(.today, unreadCount: 1)
+		model.setNavigation(ReaderNavigationState(items: [today]))
+		model.select(section: .today)
+		let day = ReaderLocalDayBounds.localDay(containing: .now)
+		model.setArticles([makeArticle(id: "old-pruned-today", receivedDate: day.start.addingTimeInterval(-60))], for: today)
+		await store.pauseNextArticleSave(for: today.id)
+		let load = Task { await model.load(collection: today, now: day.start.addingTimeInterval(60)) }
+		await store.waitUntilArticleSaveIsPaused()
+		model.disconnect()
+		model.password = "password"
+		await model.connect()
+		model.setNavigation(ReaderNavigationState(items: [today]))
+		let current = makeArticle(id: "current-pruned-today", receivedDate: day.start.addingTimeInterval(120))
+		model.setArticles([current], for: today)
+		model.select(section: .today)
+		model.select(article: current)
+		model.errorMessage = "Current pruning message"
+		let requestCountBefore = await transport.requests.count
+		await store.resumeArticleSave()
+		await load.value
+
+		#expect(await transport.requests.count == requestCountBefore)
+		#expect(model.errorMessage == "Current pruning message")
+		#expect(model.selectedArticleID == current.id)
+		#expect(model.allArticles(for: today).map(\.id) == [current.id])
+		if sameAccount == false {
+			let originalSnapshot = try await store.loadSnapshot(accountID: original.storageIdentity)
+			#expect((originalSnapshot.articlesByCollection[today.id] ?? []).isEmpty)
+			#expect(originalSnapshot.navigation?.items.map(\.id) == [today.id])
+		}
+	}
+
 	@Test(.timeLimit(.minutes(1))) func accountSwitchDoesNotCarryBootstrapSelectionIntoTheNextAccount() async throws {
 		let firstSession = try makeSession(token: "bootstrap-first-account")
 		let secondSession = try makeSession(token: "bootstrap-second-account")
