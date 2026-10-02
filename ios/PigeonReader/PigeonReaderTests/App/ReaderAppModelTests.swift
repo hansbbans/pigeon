@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import SwiftUI
 import Testing
 @testable import PigeonReader
@@ -3080,6 +3081,51 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).contains { $0.id == retained.id })
 		#expect(await transport.requests.count == requestsBefore)
 		let queueAfter = try await store.pendingMutations(accountID: original.storageIdentity, limit: 100)
+		#expect(queueAfter.map(\.mutation) == queueBefore.map(\.mutation))
+		#expect(queueAfter.map(\.attempts) == queueBefore.map(\.attempts))
+	}
+
+	@Test(.timeLimit(.minutes(2)), arguments: ["read", "star"])
+	func longOfflineQueuePreservesTheLatestActionBeyondTheFirstTenThousand(field: String) async throws {
+		let session = try makeSession(token: "long-pending-queue-\(field)")
+		let directory = FileManager.default.temporaryDirectory.appendingPathComponent("PigeonLongQueue-\(UUID().uuidString)", isDirectory: true)
+		try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let databaseURL = directory.appendingPathComponent("library.sqlite")
+		let store = OfflineLibraryStore(databaseURL: databaseURL)
+		var target = makeArticle(id: "77", readerId: "tag:google.com,2005:reader/item/4d")
+		target.isRead = field == "read"
+		target.isStarred = field == "star"
+		let kind: OfflineMutationKind = field == "read" ? .setRead : .setStarred
+		_ = try await store.pendingMutations(accountID: session.storageIdentity, limit: 1)
+		try seedLongOfflineQueue(databaseURL: databaseURL, accountID: session.storageIdentity, targetID: target.id, targetKind: kind)
+		let transport = PausingSubscriptionHTTPClient(
+			pausedPath: "/unused", loginToken: session.token,
+			responses: ["/api/v1/recommendations": try responseData(items: [target])],
+		)
+		let model = try makeModel(httpClient: transport, session: session, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([target], for: collection)
+		if field == "read" { await model.setRead(target, read: false) }
+		else { await model.setStarred(target, starred: false) }
+		let queryStartedAt = ContinuousClock.now
+		let queueBefore = try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max)
+		let queryDuration = queryStartedAt.duration(to: .now)
+		let payloadBytes = try queueBefore.reduce(0) { $0 + (try JSONEncoder().encode($1.mutation)).count }
+		print("Long queue fixture \(field): \(queueBefore.count) actions, \(payloadBytes) encoded bytes, complete FIFO read \(queryDuration).")
+		#expect(queueBefore.count == 10_001)
+		#expect(queueBefore.last?.mutation.kind == kind)
+		#expect(queueBefore.last?.mutation.value == false)
+		let beforeRefresh = try #require(model.allArticles(for: collection).first { $0.id == target.id })
+		if field == "read" { #expect(beforeRefresh.isRead == false) }
+		else { #expect(beforeRefresh.isStarred == false) }
+
+		await model.load(collection: collection, force: true)
+		let refreshed = try #require(model.allArticles(for: collection).first { $0.id == target.id })
+		if field == "read" { #expect(refreshed.isRead == false) }
+		else { #expect(refreshed.isStarred == false) }
+		let queueAfter = try await store.pendingMutations(accountID: session.storageIdentity, limit: Int.max)
 		#expect(queueAfter.map(\.mutation) == queueBefore.map(\.mutation))
 		#expect(queueAfter.map(\.attempts) == queueBefore.map(\.attempts))
 	}
@@ -9709,6 +9755,40 @@ struct ReaderAppModelTests {
 		return FeedSubscription(id: id, title: title, categories: categories, url: url, htmlUrl: nil, iconUrl: nil)
 	}
 
+	private func seedLongOfflineQueue(databaseURL: URL, accountID: String, targetID: String, targetKind: OfflineMutationKind) throws {
+		var connection: OpaquePointer?
+		try #require(sqlite3_open_v2(databaseURL.path, &connection, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+		let database = try #require(connection)
+		defer { sqlite3_close(database) }
+		try #require(sqlite3_exec(database, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK)
+		var prepared: OpaquePointer?
+		try #require(sqlite3_prepare_v2(database, "INSERT INTO pending_actions (account_id, id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)", -1, &prepared, nil) == SQLITE_OK)
+		let statement = try #require(prepared)
+		defer { sqlite3_finalize(statement) }
+		let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+		let encoder = JSONEncoder()
+		let startedAt = Date.now.timeIntervalSince1970 - 10_000
+		// Persist the same Codable payloads as enqueue, in FIFO order. Bulk
+		// setup avoids repeatedly projecting the entire prefix during fixture creation.
+		for index in 0..<10_000 {
+			let mutation = OfflineMutation(
+				id: index == 0 ? "older-target-choice" : "other-offline-read-\(index)",
+				kind: index == 0 ? targetKind : .setRead,
+				itemIds: [index == 0 ? targetID : String(index + 1_000)], value: true, scope: .single,
+			)
+			let payload = try encoder.encode(mutation)
+			try #require(accountID.withCString { sqlite3_bind_text(statement, 1, $0, -1, transient) } == SQLITE_OK)
+			try #require(mutation.id.withCString { sqlite3_bind_text(statement, 2, $0, -1, transient) } == SQLITE_OK)
+			try #require(mutation.kind.rawValue.withCString { sqlite3_bind_text(statement, 3, $0, -1, transient) } == SQLITE_OK)
+			try #require(payload.withUnsafeBytes { sqlite3_bind_blob(statement, 4, $0.baseAddress, Int32($0.count), transient) } == SQLITE_OK)
+			try #require(sqlite3_bind_double(statement, 5, startedAt + Double(index)) == SQLITE_OK)
+			try #require(sqlite3_step(statement) == SQLITE_DONE)
+			try #require(sqlite3_reset(statement) == SQLITE_OK)
+			try #require(sqlite3_clear_bindings(statement) == SQLITE_OK)
+		}
+		try #require(sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK)
+	}
+
 	private func makeArticle(
 		id: String,
 		isRead: Bool = false,
@@ -10299,11 +10379,16 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	private var snapshotPauseWaiters: [CheckedContinuation<Void, Never>] = []
 	private var snapshotResumeContinuation: CheckedContinuation<Void, Never>?
 	private var shouldPauseNextPendingStateSnapshot = false
+	private var pendingStateSnapshotReadsToSkip = 0
 	private var pendingStateSnapshotIsPaused = false
 	private var pendingStateSnapshotWaiters: [CheckedContinuation<Void, Never>] = []
 	private var pendingStateSnapshotResume: CheckedContinuation<Void, Never>?
 
-	func pauseNextPendingStateSnapshot() { shouldPauseNextPendingStateSnapshot = true }
+	func pauseNextPendingStateSnapshot() {
+		shouldPauseNextPendingStateSnapshot = true
+		// The load reads its page overlay before refreshing shared pending state.
+		pendingStateSnapshotReadsToSkip = 1
+	}
 
 	func waitUntilPendingStateSnapshotIsPaused() async {
 		if pendingStateSnapshotIsPaused { return }
@@ -10470,7 +10555,11 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 			throw LaunchStoreError.pendingMutationsUnavailable
 		}
 		let captured = try await base.pendingMutations(accountID: accountID, limit: limit)
-		if shouldPauseNextPendingStateSnapshot, limit == 10_000 {
+		if shouldPauseNextPendingStateSnapshot, limit == Int.max {
+			if pendingStateSnapshotReadsToSkip > 0 {
+				pendingStateSnapshotReadsToSkip -= 1
+				return captured
+			}
 			shouldPauseNextPendingStateSnapshot = false
 			pendingStateSnapshotIsPaused = true
 			let waiters = pendingStateSnapshotWaiters

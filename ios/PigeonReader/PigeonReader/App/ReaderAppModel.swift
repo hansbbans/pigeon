@@ -6578,7 +6578,8 @@ final class ReaderAppModel {
 			preparationID: activeOfflinePreparationID,
 		)
 		let revisionsAtStart = pendingArticleStateRevisions
-		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: 10_000) else {
+		// A newer choice can follow any FIFO prefix, so match the complete page overlay.
+		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: Int.max) else {
 			return
 		}
 		guard isCurrentOperation(context), Task.isCancelled == false else { return }
