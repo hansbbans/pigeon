@@ -834,3 +834,15 @@ test('content link rewriting leaves comments and raw-text examples intact', () =
 test('self-closing SVG style does not suppress later real content links', () => {
  assert.equal(rewriteRssContentLinks('<svg><style/><image href="/icon.svg"/></svg><a href="/story">Story</a>', 'https://example.com/feed.xml'), '<svg><style/><image href="https://example.com/icon.svg"/></svg><a href="https://example.com/story">Story</a>');
 });
+
+
+test('self-closing slashes keep ordinary HTML raw-text elements open', () => {
+ for (const name of ['script', 'style']) {
+  const html = `<${name}/><a href="/literal">example</a></${name}><a href="/real">Real</a>`;
+  assert.equal(rewriteRssContentLinks(html, 'https://example.com/'), `<${name}/><a href="/literal">example</a></${name}><a href="https://example.com/real">Real</a>`);
+  for (const container of ['foreignObject', 'desc', 'title']) {
+   const nested = `<svg><${container}>${html}</${container}><style/><image href="/icon.svg"/></svg>`;
+   assert.equal(rewriteRssContentLinks(nested, 'https://example.com/'), `<svg><${container}><${name}/><a href="/literal">example</a></${name}><a href="https://example.com/real">Real</a></${container}><style/><image href="https://example.com/icon.svg"/></svg>`);
+  }
+ }
+});
