@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { generateApiToken } from '../src/api-auth';
 import app from '../src/index';
 import { handleStaleFeeds } from '../src/stale-feeds-api';
+import { subscribeToFeed } from '../src/subscribe';
 
 class Statement {
 	private values: unknown[] = [];
@@ -76,4 +77,44 @@ test('archive and unarchive are bounded idempotent bulk operations', async () =>
 	assert.equal((await update('unarchive')).status, 200);
 	assert.equal((state.sqlite.prepare("SELECT stale_archived FROM feeds WHERE feed_key = 'quiet'").get() as { stale_archived: number }).stale_archived, 0);
 	state.sqlite.close();
+});
+
+
+test('stale archive accepts the exact key of a subscription with a long valid source path', async () => {
+	const state = fixture();
+	const originalFetch = globalThis.fetch;
+	try {
+		globalThis.fetch = async () => new Response('<rss version="2.0"><channel><title>Long source</title><item><guid>one</guid><title>Old story</title><pubDate>2020-01-01T12:00:00Z</pubDate><description>Body</description></item></channel></rss>', { headers: { 'Content-Type': 'application/rss+xml' } });
+		const subscription = await subscribeToFeed(state.env, `https://feeds.example.com/${'archive-path-'.repeat(30)}feed.xml`);
+		assert.ok(subscription.feed_key.length > 200);
+		const inventory = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds'), state.env);
+		assert.equal((await inventory.json() as { feeds: { feedKey: string }[] }).feeds[0].feedKey, subscription.feed_key);
+		for (const action of ['archive', 'unarchive']) {
+			const response = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds', {
+				method: 'POST', body: JSON.stringify({ action, feedKeys: [subscription.feed_key] }),
+			}), state.env);
+			assert.equal(response.status, 200);
+			assert.equal((state.sqlite.prepare('SELECT stale_archived FROM feeds WHERE feed_key = ?').get(subscription.feed_key) as { stale_archived: number }).stale_archived, action === 'archive' ? 1 : 0);
+		}
+	} finally {
+		globalThis.fetch = originalFetch;
+		state.sqlite.close();
+	}
+});
+
+test('stale archive applies the stored identifier UTF8 boundary without truncating keys', async () => {
+	const state = fixture();
+	try {
+		const key = 'a'.repeat(8_000);
+		state.sqlite.prepare('INSERT INTO feeds (feed_key, display_name) VALUES (?, ?)').run(key, 'Boundary');
+		for (const [feedKey, expectedStatus] of [[key, 200], ['a'.repeat(8_001), 400], ['😀'.repeat(2_001), 400]] as const) {
+			const response = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds', {
+				method: 'POST', body: JSON.stringify({ action: 'archive', feedKeys: [feedKey] }),
+			}), state.env);
+			assert.equal(response.status, expectedStatus);
+		}
+		assert.equal((state.sqlite.prepare('SELECT stale_archived FROM feeds WHERE feed_key = ?').get(key) as { stale_archived: number }).stale_archived, 1);
+	} finally {
+		state.sqlite.close();
+	}
 });
