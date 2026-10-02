@@ -4783,6 +4783,89 @@ test('an inactive root refresh leaves the current scroll alone and cached naviga
 	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
 });
 
+test('online foreground recovers a failed inventory bootstrap and coalesces repeated events', async () => {
+	const retry = createDeferred<Response>();
+	let subscriptionRequests = 0;
+	let countRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) return ++subscriptionRequests === 1
+			? new Response('Unavailable', { status: 503 }) : retry.promise;
+		if (input.endsWith('/unread-count')) { countRequests += 1; return Response.json({ unreadcounts: [] }); }
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('feeds-status')?.textContent === 'Could not load feeds.');
+	harness.setOnline(false);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	assert.equal(subscriptionRequests, 1);
+	harness.setOnline(true);
+	harness.dispatchWindowEvent('online');
+	harness.dispatchDocumentEvent('visibilitychange');
+	harness.dispatchWindowEvent('online');
+	await flushBrowserTasks();
+	assert.equal(subscriptionRequests, 2);
+	assert.equal(countRequests, 2);
+	retry.resolve(Response.json({ subscriptions: [{ id: 'feed/1', title: 'Recovered' }] }));
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	assert.ok(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1'));
+	assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
+});
+
+test('a recovery inventory response cannot restore a cleared same-token session', async () => {
+	const oldRetry = createDeferred<Response>();
+	let subscriptionRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/subscription/list')) {
+			subscriptionRequests += 1;
+			if (subscriptionRequests === 1) return new Response('Unavailable', { status: 503 });
+			if (subscriptionRequests === 2) return oldRetry.promise;
+			return Response.json({ subscriptions: [{ id: 'feed/new', title: 'Current' }] });
+		}
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '2' }] });
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('feeds-status')?.textContent === 'Could not load feeds.');
+	harness.dispatchWindowEvent('online');
+	await flushBrowserTasks();
+	assert.equal(subscriptionRequests, 2);
+	harness.elements.get('clear-session-button')?.dispatch('click');
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 2');
+	oldRetry.resolve(Response.json({ subscriptions: [{ id: 'feed/old', title: 'Old' }] }));
+	await flushBrowserTasks();
+	assert.equal(subscriptionRequests, 3);
+	assert.equal(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/old'), undefined);
+	assert.ok(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/new'));
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 2');
+});
+
+for (const malformed of ['subscriptions', 'counts']) {
+	test(`a malformed bootstrap ${malformed} response stays retryable on foreground`, async () => {
+		let valid = false;
+		let subscriptionRequests = 0;
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input.endsWith('/subscription/list')) {
+				subscriptionRequests += 1;
+				return Response.json(!valid && malformed === 'subscriptions' ? {} : { subscriptions: [] });
+			}
+			if (input.endsWith('/unread-count')) return Response.json(!valid && malformed === 'counts' ? { unreadcounts: null } : { unreadcounts: [] });
+			return browserRegressionResponse(input, init);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await flushBrowserTasks();
+		assert.equal(harness.elements.get('feeds-status')?.textContent, 'Could not load feeds.');
+		assert.equal(harness.elements.get('views-list')?.children.length, 0);
+		valid = true;
+		harness.dispatchDocumentEvent('visibilitychange');
+		await waitForBrowserCondition(() => Boolean(findListButtonByViewId(harness.elements.get('views-list'), 'all')));
+		assert.equal(subscriptionRequests, 2);
+		assert.equal(harness.elements.get('articles-status')?.textContent, 'No articles in All items.');
+	});
+}
+
 test('Today refresh clears an old day boundary and loads new continuation pages', async () => {
 	const now = new Date(2026, 2, 20, 12).getTime();
 	const bounds = getLocalDayBounds(new Date(now));

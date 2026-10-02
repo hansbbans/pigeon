@@ -1491,6 +1491,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleMetadataCache = new Map();
   let viewStates = new Map();
   let inFlightMembershipRequests = new Map();
+  let inFlightNavigationRequest = null;
   let inFlightContentRequests = new Map();
   let activeContentRequestCount = 0;
   let contentRequestQueue = [];
@@ -2055,6 +2056,7 @@ export function renderBrowserAppRuntimeScript(): string {
     unreadCountRequestId += 1;
     inFlightUnreadCountRequest = null;
     subscriptions = [];
+    inFlightNavigationRequest = null;
     activeItemIdsPageRequest = null;
     activeViewRequestId += 1;
     activeContentRequestId += 1;
@@ -3351,8 +3353,12 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function revalidateActiveView(options) {
+    if (!session.token || session.status !== 'authenticated') return;
     const activeView = getActiveView();
-    if (!activeView || !session.token || session.status !== 'authenticated') {
+    if (!activeView) {
+      if (!window.navigator || window.navigator.onLine !== false) {
+        await loadSubscriptionsAndUnreadCounts(options);
+      }
       return;
     }
 
@@ -3722,7 +3728,22 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  async function loadSubscriptionsAndUnreadCounts(options) {
+  function loadSubscriptionsAndUnreadCounts(options) {
+    const generation = accountGeneration;
+    const token = session.token;
+    if (!token || session.status !== 'authenticated') return Promise.resolve(false);
+    if (!options?.forceUnread && inFlightNavigationRequest?.generation === generation &&
+        inFlightNavigationRequest.token === token) {
+      return inFlightNavigationRequest.promise;
+    }
+    const promise = performNavigationLoad(options).finally(() => {
+      if (inFlightNavigationRequest?.promise === promise) inFlightNavigationRequest = null;
+    });
+    inFlightNavigationRequest = { generation, token, promise };
+    return promise;
+  }
+
+  async function performNavigationLoad(options) {
     const generation = accountGeneration;
     const token = session.token;
     if (!token || session.status !== 'authenticated') {
@@ -3738,8 +3759,11 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!requestBelongsToCurrentSession(generation, token) || !isCurrentUnreadCountResult(unreadResult)) {
         return false;
       }
-      subscriptions = subscriptionPayload.subscriptions || [];
-      views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts || []);
+      if (!Array.isArray(subscriptionPayload?.subscriptions) || !Array.isArray(unreadResult.payload?.unreadcounts)) {
+        throw new Error('Invalid navigation response');
+      }
+      subscriptions = subscriptionPayload.subscriptions;
+      views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts);
       const validViewIds = new Set(views.map((view) => view.id));
       viewStates = new Map([...viewStates].filter(([viewId]) => validViewIds.has(viewId)));
       pruneExpandedFolders();
