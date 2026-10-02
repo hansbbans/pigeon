@@ -1036,6 +1036,63 @@ test('personalization history is transparent, individually deletable, exportable
 	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
 });
 
+test('personalization export includes retained history beyond the screen limit', async () => {
+	const { db, database, env } = createFixture([
+		{ id: 'export-item', feedKey: 'daily-feed', title: 'Retained story', receivedAt: '2026-08-15T11:00:00.000Z' },
+	]);
+	await nativeRequest(env, '/api/v1/personalization');
+	const insert = db.prepare(`INSERT INTO engagement_events
+	 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
+	 VALUES (?, ?, 'export-item', 'daily-feed', 'star', 'pigeon', '2026-08-15T12:00:00.000Z')`);
+	for (let index = 0; index < 1001; index += 1) {
+		const id = `history-${String(index).padStart(4, '0')}`;
+		insert.run(id, `client:pigeon:${id}`);
+	}
+	const screen = await nativeRequest(env, '/api/v1/personalization');
+	assert.equal((await screen.json() as { history: unknown[] }).history.length, 500);
+	database.clearExecutedSql();
+	const exported = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.equal(exported.headers.get('Content-Disposition'), 'attachment; filename="pigeon-personalization.json"');
+	const history = (await exported.json() as { history: { id: string }[] }).history;
+	assert.equal(history.length, 1001);
+	assert.equal(history.at(-1)?.id, 'history-0000');
+	assert.equal(new Set(history.map((entry) => entry.id)).size, 1001);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 5);
+
+	database.clearExecutedSql();
+	const cancelled = await nativeRequest(env, '/api/v1/personalization?download=1');
+	await cancelled.body?.cancel();
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 1);
+
+	const failed = await nativeRequest(env, '/api/v1/personalization?download=1');
+	const prepare = database.prepare.bind(database);
+	database.prepare = (sql) => {
+		if (sql.includes('AND (e.occurred_at, e.id)')) throw new Error('history storage unavailable');
+		return prepare(sql);
+	};
+	await assert.rejects(failed.text(), /history storage unavailable/);
+	database.prepare = prepare;
+
+	db.prepare('DELETE FROM engagement_events').run();
+	const empty = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.deepEqual((await empty.json() as { history: unknown[] }).history, []);
+	for (let index = 0; index < 500; index += 1) insert.run(`exact-${index}`, `client:pigeon:exact-${index}`);
+	database.clearExecutedSql();
+	const exactPage = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.equal((await exactPage.json() as { history: unknown[] }).history.length, 500);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 3);
+
+	db.prepare('DELETE FROM engagement_events').run();
+	for (let index = 0; index < 9001; index += 1) insert.run(`scale-${index}`, `client:pigeon:scale-${index}`);
+	database.clearExecutedSql();
+	const scaled = await nativeRequest(env, '/api/v1/personalization?download=1');
+	const scaledHistory = (await scaled.json() as { history: { id: string }[] }).history;
+	assert.equal(scaledHistory.length, 9001);
+	assert.equal(new Set(scaledHistory.map((entry) => entry.id)).size, 9001);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 37);
+	assert.ok(database.executedSql.length <= 50);
+});
+
 test('recommendations match monitored topics in bounded HTML when text content is absent', async () => {
 	const { db, database, env } = createFixture([
 		{

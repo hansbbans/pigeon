@@ -49,18 +49,38 @@ export interface PersonalizationSnapshot {
 	}>;
 }
 
-async function buildSnapshot(env: Env): Promise<PersonalizationSnapshot> {
-	const [historyResult, monitoredTopics] = await Promise.all([
-		env.DB.prepare(
-			`SELECT e.id, e.item_id, e.event_type, e.feed_key, e.occurred_at,
-			        i.subject AS title, COALESCE(f.custom_title, f.display_name) AS source
-			   FROM engagement_events e
-			   LEFT JOIN items i ON i.id = e.item_id
-			   LEFT JOIN feeds f ON f.feed_key = e.feed_key
-			  WHERE e.event_type <> 'bulk_mark_all_read'
-			  ORDER BY e.occurred_at DESC, e.id DESC
-			  LIMIT 500`,
-		).all<HistoryRow>(),
+const HISTORY_SCREEN_LIMIT = 500;
+const EXPORT_PAGE_SIZE = 250;
+
+async function loadHistoryPage(env: Env, limit: number, cursor?: { occurredAt: string; id: string }): Promise<PersonalizationSnapshot['history']> {
+	const statement = env.DB.prepare(
+		`SELECT e.id, e.item_id, e.event_type, e.feed_key, e.occurred_at,
+		        i.subject AS title, COALESCE(f.custom_title, f.display_name) AS source
+		   FROM engagement_events e
+		   LEFT JOIN items i ON i.id = e.item_id
+		   LEFT JOIN feeds f ON f.feed_key = e.feed_key
+		  WHERE e.event_type <> 'bulk_mark_all_read'
+		  ${cursor ? 'AND (e.occurred_at, e.id) < (?, ?)' : ''}
+		  ORDER BY e.occurred_at DESC, e.id DESC
+		  LIMIT ?`,
+	);
+	const result = await (cursor
+		? statement.bind(cursor.occurredAt, cursor.id, limit)
+		: statement.bind(limit)).all<HistoryRow>();
+	return result.results.map((row) => ({
+		id: row.id,
+		itemId: row.item_id,
+		type: row.event_type,
+		feedKey: row.feed_key,
+		occurredAt: row.occurred_at,
+		title: row.title,
+		source: row.source,
+	}));
+}
+
+async function buildSnapshot(env: Env, historyLimit = HISTORY_SCREEN_LIMIT): Promise<PersonalizationSnapshot> {
+	const [history, monitoredTopics] = await Promise.all([
+		loadHistoryPage(env, historyLimit),
 		loadMonitoredTopics(env),
 	]);
 
@@ -68,24 +88,49 @@ async function buildSnapshot(env: Env): Promise<PersonalizationSnapshot> {
 		exportedAt: new Date().toISOString(),
 		monitoredTopics,
 		policy: POLICY,
-		history: historyResult.results.map((row) => ({
-			id: row.id,
-			itemId: row.item_id,
-			type: row.event_type,
-			feedKey: row.feed_key,
-			occurredAt: row.occurred_at,
-			title: row.title,
-			source: row.source,
-		})),
+		history,
 	};
+}
+
+function streamExport(env: Env, snapshot: PersonalizationSnapshot): ReadableStream<Uint8Array> {
+	const encoder = new TextEncoder();
+	const { history, ...metadata } = snapshot;
+	let page: PersonalizationSnapshot['history'] | null = history;
+	let cursor: { occurredAt: string; id: string } | undefined;
+	let hasEntries = false;
+	let cancelled = false;
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(encoder.encode(`${JSON.stringify(metadata).slice(0, -1)},"history":[`));
+		},
+		async pull(controller) {
+			const entries = page ?? await loadHistoryPage(env, EXPORT_PAGE_SIZE, cursor);
+			if (cancelled) return;
+			if (entries.length > 0) {
+				const serialized = JSON.stringify(entries).slice(1, -1);
+				controller.enqueue(encoder.encode(`${hasEntries ? ',' : ''}${serialized}`));
+				hasEntries = true;
+			}
+			if (entries.length < EXPORT_PAGE_SIZE) {
+				controller.enqueue(encoder.encode(']}'));
+				controller.close();
+				return;
+			}
+			const last = entries.at(-1)!;
+			cursor = { occurredAt: last.occurredAt, id: last.id };
+			page = null;
+		},
+		cancel() { cancelled = true; },
+	});
 }
 
 export async function handlePersonalization(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
 	if (request.method === 'GET') {
-		const payload = await buildSnapshot(env);
-		if (url.searchParams.get('download') === '1') {
-			return new Response(JSON.stringify(payload, null, 2), {
+		const isDownload = url.searchParams.get('download') === '1';
+		const payload = await buildSnapshot(env, isDownload ? EXPORT_PAGE_SIZE : HISTORY_SCREEN_LIMIT);
+		if (isDownload) {
+			return new Response(streamExport(env, payload), {
 				headers: {
 					'Cache-Control': 'no-store',
 					'Content-Disposition': 'attachment; filename="pigeon-personalization.json"',
