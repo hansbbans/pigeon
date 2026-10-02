@@ -729,7 +729,7 @@ async function waitForBrowserCondition(check: () => boolean, attempts = 20) {
 	assert.ok(check(), `Browser condition was not met after ${attempts} attempts`);
 }
 
-function createFixedDateConstructor(timestamp: number) {
+function createFixedDateConstructor(timestamp: number | (() => number)) {
 	return class FixedDate extends Date {
 		constructor(
 			value?: string | number,
@@ -741,7 +741,7 @@ function createFixedDateConstructor(timestamp: number) {
 			milliseconds?: number,
 		) {
 			if (month === undefined) {
-				super(value === undefined ? timestamp : value);
+				super(value === undefined ? (typeof timestamp === 'function' ? timestamp() : timestamp) : value);
 				return;
 			}
 
@@ -757,7 +757,7 @@ function createFixedDateConstructor(timestamp: number) {
 		}
 
 		static now() {
-			return timestamp;
+			return typeof timestamp === 'function' ? timestamp() : timestamp;
 		}
 	};
 }
@@ -769,7 +769,7 @@ async function createBrowserHarness(options?: {
 	storedColumnWidths?: { sidebar?: number; stream?: number };
 	readerGridWidth?: number | (() => number);
 	online?: boolean;
-	now?: number;
+	now?: number | (() => number);
 	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string> }) => Promise<Response>;
 }) {
 	const documentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
@@ -4961,3 +4961,61 @@ test('a failed mark-all request can be retried successfully in the same view', a
 	assert.equal(elements.get('articles-heading')?.textContent, 'Alpha');
 	assert.equal(elements.get('mark-all-as-read-button')?.disabled, true);
 });
+
+
+test('Today selects an already cached article and supports keyboard navigation without another body request', async () => {
+	const now = new Date(2026, 9, 2, 12).getTime();
+	let bodyRequests = 0;
+	const harness = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] });
+		if (input.endsWith('/contents')) bodyRequests += 1;
+		return browserRegressionResponse(input, init, Math.floor(now / 1000));
+	} });
+	await harness.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')?.classList.contains('is-active'), true);
+	assert.equal(harness.dispatchKeydown('j'), true);
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 2');
+	assert.equal(bodyRequests, 1);
+});
+
+for (const returnToCachedToday of [false, true]) {
+	test(`offline Today removes yesterday's rows and selection after midnight${returnToCachedToday ? ' when returning to the cached view' : ' on foreground'}`, async () => {
+		let now = new Date(2026, 9, 2, 23, 50).getTime();
+		const published = Math.floor(now / 1000);
+		let networkRequests = 0;
+		const harness = await createBrowserHarness({ now: () => now, fetchImpl: async (input, init) => {
+			networkRequests += 1;
+			if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
+			return browserRegressionResponse(input, init, published);
+		} });
+		await harness.elements.get('login-form')?.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+		await flushBrowserTasks();
+		findListButtonByItemId(harness.elements.get('articles-list'), '1')?.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		if (returnToCachedToday) {
+			findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
+			await flushBrowserTasks();
+		}
+		now = new Date(2026, 9, 3, 0, 10).getTime();
+		harness.setOnline(false);
+		const requestsBeforeForeground = networkRequests;
+		if (returnToCachedToday) findListButtonByViewId(harness.elements.get('views-list'), 'today')?.dispatch('click');
+		else harness.dispatchDocumentEvent('visibilitychange');
+		await flushBrowserTasks();
+		assert.equal(harness.elements.get('articles-list')?.children.length, 0);
+		assert.equal(harness.elements.get('reader-title')?.textContent, 'Select an article');
+		assert.equal(harness.elements.get('articles-status')?.textContent, 'Offline · showing cached articles.');
+		assert.equal(networkRequests, requestsBeforeForeground);
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
+		await flushBrowserTasks();
+		assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
+		assert.equal(harness.elements.get('articles-list')?.children.length, 1);
+		assert.equal(networkRequests, requestsBeforeForeground);
+	});
+}

@@ -2856,6 +2856,11 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderArticles() {
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
+    if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+      selectedItemId = visibleItemIds[0] || null;
+      const state = getViewState(activeViewId, false);
+      if (state) state.selectedItemId = selectedItemId;
+    }
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
@@ -3346,6 +3351,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const requestId = activeViewRequestId;
     if (window.navigator && window.navigator.onLine === false) {
       if (getViewState(activeView.id, false)?.hasMembership) {
+        renderArticles();
+        renderReader();
         articlesStatus.textContent = 'Offline · showing cached articles.';
       }
       return;
