@@ -228,6 +228,23 @@ test('createRenderedContent leaves existing html fragments unchanged', () => {
 	);
 });
 
+test('semantic HTML article fragments retain their heading, quotation and preformatted markup', () => {
+	for (const html of [
+		'<h2>Today’s notes</h2>',
+		'<blockquote>A quotation from the article.</blockquote>',
+		'<pre>line one\nline two</pre>',
+		'<figure><figcaption>An illustration caption.</figcaption></figure>',
+		'<dl><dt>Term</dt><dd>A definition.</dd></dl>',
+	]) {
+		assert.equal(createRenderedContent({ htmlContent: html }), html);
+	}
+	const plain = 'Use <code> blocks or <h2> headings and contact <support@example.com> for help.';
+	const rendered = createRenderedContent({ htmlContent: plain });
+	assert.match(rendered, /&lt;code&gt;/);
+	assert.match(rendered, /&lt;h2&gt;/);
+	assert.match(rendered, /&lt;support@example.com&gt;/);
+});
+
 test('createRenderedContent resolves relative links against an imported item original URL', () => {
 	const rendered = createRenderedContent({
 		htmlContent:
@@ -349,6 +366,25 @@ test('Atom and GReader article bodies retain ordinary newsletter images while dr
 	assert.ok(body.items[0].content.content.includes(image));
 	assert.doesNotMatch(body.items[0].content.content, /tracker\.gif/);
 	assert.equal(body.items[0].content.content, body.items[0].summary.content);
+});
+
+test('Atom and GReader preserve semantic HTML fragments as formatted article bodies', async () => {
+	for (const html of ['<h2>Article heading</h2>', '<blockquote>Quoted text.</blockquote>', '<pre>first line\nsecond line</pre>']) {
+		const xml = await generateAtomFeed(
+			{ feed_key: 'sender-example-com', display_name: 'Example Sender', from_email: null, custom_title: null },
+			[{ id: '9c2772b1-1e53-4de8-89a6-77af6fb9c104', subject: 'Formatted article', html_content: html,
+				text_content: null, original_url: null, from_name: 'Example Sender', from_email: null, received_at: '2026-10-01T12:00:00.000Z' }],
+			'https://pigeon.example',
+		);
+		assert.ok(xml.includes(`<content type="html"><![CDATA[${html}]]></content>`));
+		const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+			headers: { Authorization: await generateAuthHeader('secret-password') },
+		}), createEnv(html) as never);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { items: { content: { content: string }; summary: { content: string } }[] };
+		assert.equal(body.items[0].content.content, html);
+		assert.equal(body.items[0].summary.content, html);
+	}
 });
 
 test('handleGreaderRequest accepts item ids passed in the query string for stream/items/contents', async () => {
