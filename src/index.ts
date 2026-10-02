@@ -185,10 +185,13 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	// The newest publication timestamp cannot detect edits, backfilled items,
 	// metadata changes, or a different feed variant/limit. Hash the actual
 	// response inputs, before rendering, so an unchanged request stays cheap.
-	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(
-		JSON.stringify({ feed, items, variant, limit, feedUrl, baseUrl: env.BASE_URL }),
-	));
-	const etag = `W/"${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')}"`;
+	// Hash one body at a time to avoid copying every large article into one
+	// additional serialized page and byte buffer on the Worker heap.
+	const cacheItems = [];
+	for (const { html_content, text_content, ...metadata } of items) {
+		cacheItems.push({ ...metadata, bodyHash: await hashFeedCacheInput({ html_content, text_content }) });
+	}
+	const etag = `W/"${await hashFeedCacheInput({ feed, items: cacheItems, variant, limit, feedUrl, baseUrl: env.BASE_URL })}"`;
 	const headers = {
 		'Content-Type': 'application/atom+xml; charset=utf-8',
 		'Cache-Control': 'public, max-age=300',
@@ -207,6 +210,11 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	return new Response(xml, {
 		headers,
 	});
+}
+
+async function hashFeedCacheInput(value: unknown): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)));
+	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 async function handleFeedList(env: Env): Promise<Response> {
