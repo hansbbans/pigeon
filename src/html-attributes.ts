@@ -4,6 +4,15 @@ const SVG_HTML_INTEGRATION_TAGS = new Set(['foreignobject', 'desc', 'title']);
 const MATH_HTML_INTEGRATION_TAGS = new Set(['mi', 'mo', 'mn', 'ms', 'mtext']);
 const RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']);
 
+// Only ASCII references can participate in these two MIME names. Decode once.
+function decodeMimeReferences(value: string): string {
+	return value.replace(/&(?:#([0-9]+);?|#[xX]([0-9a-fA-F]+);?|(sol|plus);)/g, (entity, decimal: string | undefined, hexadecimal: string | undefined, named: string | undefined) => {
+		if (named) return named === 'sol' ? '/' : '+';
+		const codePoint = Number.parseInt(decimal ?? hexadecimal!, decimal === undefined ? 16 : 10);
+		return Number.isInteger(codePoint) && codePoint <= 0x7f ? String.fromCharCode(codePoint) : entity;
+	});
+}
+
 /** Rewrite explicit attribute values while preserving text and other attributes. */
 export function rewriteHtmlAttributes(
 	html: string,
@@ -41,7 +50,7 @@ export function rewriteHtmlAttributes(
 				for (const attribute of tag.slice(nameMatch[0].length, -1).matchAll(CONTENT_ATTRIBUTE_PATTERN)) {
 					if (attribute[1].toLowerCase() !== 'encoding' || attribute[2] === undefined) continue;
 					const raw = attribute[2];
-					const encoding = (/^["']/.test(raw) ? raw.slice(1, -1) : raw).toLowerCase();
+					const encoding = decodeMimeReferences(/^["']/.test(raw) ? raw.slice(1, -1) : raw).toLowerCase();
 					htmlIntegration = encoding === 'text/html' || encoding === 'application/xhtml+xml';
 					break;
 				}

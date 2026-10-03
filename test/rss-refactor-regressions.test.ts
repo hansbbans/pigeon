@@ -863,3 +863,19 @@ test('MathML self-closing elements leave later links active and HTML integration
   assert.equal(rewriteRssContentLinks(source, base), expected);
  }
 });
+
+
+test('Math annotation MIME references decode once without changing attribute bytes', () => {
+ for (const encoding of ['text/html', 'text&#47;html', 'text&#x2F;html', 't&#101;xt/html', 'text&sol;html', 'text&#47html', 'application&sol;xhtml&plus;xml', 'application&#47;xhtml&#43;xml']) {
+  const source = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script><a href="/real">Real</a></annotation-xml></math>`;
+  const expected = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script><a href="https://example.com/real">Real</a></annotation-xml></math>`;
+  assert.equal(rewriteRssContentLinks(source, 'https://example.com/'), expected, encoding);
+ }
+});
+
+test('Math annotation unknown and double-escaped MIME references remain foreign', () => {
+ for (const encoding of ['text&amp;#47;html', 'text&amp;sol;html', 'text&SOL;html', 'text&#9999999999;html', 'text&#xD800;html']) {
+  const source = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script></annotation-xml></math>`;
+  assert.equal(rewriteRssContentLinks(source, 'https://example.com/'), `<math><annotation-xml encoding="${encoding}"><script/><a href="https://example.com/literal">Example</a></script></annotation-xml></math>`, encoding);
+ }
+});
