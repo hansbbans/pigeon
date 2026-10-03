@@ -1405,7 +1405,8 @@ final class PigeonDeepLinkUITests: XCTestCase {
 	}
 
 	private func openDeepLink(_ text: String) throws {
-		safari.launch()
+		// Reuse Safari between URL handoffs instead of terminating and relaunching it.
+		safari.activate()
 		let pendingCancel = safari.buttons["Cancel"].firstMatch
 		if pendingCancel.exists, pendingCancel.frame.isEmpty == false {
 			tapButton(pendingCancel, in: safari)
