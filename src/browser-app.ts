@@ -496,6 +496,15 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         overflow: auto;
       }
 
+      #article-page-controls {
+        flex: none;
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.65rem 1rem;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+
       .list-reset {
         display: grid;
         align-content: start;
@@ -1063,6 +1072,24 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         #feeds-panel {
           overflow: auto;
         }
+
+        .reader-pane-surface {
+          height: 100%;
+          min-height: 0;
+          grid-template-rows: auto auto auto minmax(12rem, 1fr);
+          overflow: auto;
+        }
+
+        .reader-frame-shell {
+          grid-row: 4;
+          min-height: 0;
+        }
+
+        #reader-frame {
+          display: block;
+          height: 100%;
+          min-height: 0;
+        }
       }
 
       @media (max-width: 1100px) {
@@ -1353,11 +1380,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   >Mark all as read</button>
                 </div>
               </div>
+              <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
+                <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
+                <button id="article-older-button" type="button" class="secondary-button">Older</button>
+              </div>
               <div class="list-shell" id="articles-list-shell">
-                <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
-                  <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
-                  <button id="article-older-button" type="button" class="secondary-button">Older</button>
-                </div>
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
               </div>
