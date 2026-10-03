@@ -55,6 +55,7 @@ export async function fetchBoundedFeedResource(
 		});
 
 		if (REDIRECT_STATUSES.has(response.status)) {
+			response.body?.cancel().catch(() => undefined);
 			if (redirectCount >= maxRedirects) {
 				throw new Error(`Feed redirected more than ${maxRedirects} times`);
 			}

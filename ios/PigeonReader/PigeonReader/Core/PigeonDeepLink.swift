@@ -8,7 +8,8 @@ nonisolated enum PigeonDeepLink: Equatable, Sendable {
 
 	init?(url: URL) {
 		guard url.scheme?.lowercased() == "pigeon", let host = url.host?.lowercased() else { return nil }
-		let value = url.pathComponents.dropFirst().joined(separator: "/").removingPercentEncoding ?? ""
+		// Foundation decodes this path once; a second decode changes literal names such as "%2F".
+		let value = String(url.path(percentEncoded: false).dropFirst())
 		let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
 		switch host {
 		case "feed" where value.isEmpty == false: self = .feed(value)

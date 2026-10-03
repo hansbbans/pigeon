@@ -161,9 +161,23 @@ private nonisolated final class OPMLParserDelegate: NSObject, XMLParserDelegate 
 		qualifiedName qName: String?,
 		attributes attributeDict: [String: String] = [:]
 	) {
-		if elementName.caseInsensitiveCompare("opml") == .orderedSame { sawOPMLRoot = true }
+		if sawOPMLRoot == false {
+			guard elementName.caseInsensitiveCompare("opml") == .orderedSame else {
+				parser.abortParsing()
+				return
+			}
+			sawOPMLRoot = true
+		}
 		guard elementName.caseInsensitiveCompare("outline") == .orderedSame else { return }
-		let attributes = Dictionary(uniqueKeysWithValues: attributeDict.map { ($0.key.lowercased(), $0.value) })
+		var attributes: [String: String] = [:]
+		for (name, value) in attributeDict {
+			// XML attribute names are case-sensitive. Normalizing two distinct
+			// names must reject ambiguity rather than trap or pick a random value.
+			guard attributes.updateValue(value, forKey: name.lowercased()) == nil else {
+				parser.abortParsing()
+				return
+			}
+		}
 		let rawURL = attributes["xmlurl"]
 		if let rawURL, let url = URL(string: rawURL), let scheme = url.scheme?.lowercased(),
 			["http", "https"].contains(scheme), url.host != nil {
@@ -205,26 +219,37 @@ extension PigeonAPIClient: OPMLImportServicing {}
 
 @MainActor
 enum OPMLImportCoordinator {
-	static func importPreview(_ preview: OPMLImportPreview, service: any OPMLImportServicing) async throws -> OPMLImportResult {
+	static func importPreview(
+		_ preview: OPMLImportPreview,
+		service: any OPMLImportServicing,
+		validateContext: () throws -> Void = {},
+	) async throws -> OPMLImportResult {
+		func checkContext() throws {
+			try Task.checkCancellation()
+			try validateContext()
+		}
 		var addedIDs: [String] = []
 		var appliedMerges: [OPMLFolderMerge] = []
 		var duplicateCount = preview.duplicateCount
 		do {
 			for merge in preview.folderMerges {
-				try Task.checkCancellation()
+				try checkContext()
 				try await service.editSubscription(
 					id: merge.subscriptionID, title: nil, addingFolders: merge.addingFolders, removingFolders: [],
 				)
 				appliedMerges.append(merge)
+				try checkContext()
 			}
 			for entry in preview.newEntries {
-				try Task.checkCancellation()
+				try checkContext()
 				let result = try await service.addSubscription(url: entry.url)
 				if result.isNew == false {
 					duplicateCount += 1
+					try checkContext()
 					continue
 				}
 				addedIDs.append(result.streamId)
+				try checkContext()
 				if entry.folders.isEmpty == false {
 					try await service.editSubscription(
 						id: result.streamId,
@@ -232,14 +257,18 @@ enum OPMLImportCoordinator {
 						addingFolders: Array(Set(entry.folders.filter { $0.isEmpty == false })).sorted(),
 						removingFolders: [],
 					)
+					try checkContext()
 				}
 			}
+			try checkContext()
 			return OPMLImportResult(
 				importedCount: addedIDs.count,
 				updatedCount: appliedMerges.count,
 				duplicateCount: duplicateCount,
 			)
 		} catch {
+			// Finish rollback with the original service even if the current account
+			// changed. Validation only gates forward work, not undoing this attempt.
 			for id in addedIDs.reversed() { try? await service.unsubscribe(id: id) }
 			for merge in appliedMerges.reversed() {
 				try? await service.editSubscription(

@@ -121,7 +121,7 @@ class FakePreparedStatement {
 	}
 }
 
-function createEnv() {
+function createEnv(htmlContent = HTML_WITH_STYLE) {
 	const items = [
 		{
 			rowid: 1,
@@ -129,7 +129,7 @@ function createEnv() {
 			feed_key: 'sender-example-com',
 			from_name: 'Example Sender',
 			subject: 'Styled newsletter',
-			html_content: HTML_WITH_STYLE,
+			html_content: htmlContent,
 			text_content: ' Hello from a stored item. ',
 			original_url: 'https://example.com/posts/styled-newsletter',
 			received_at: '2026-03-20T12:34:56.000Z',
@@ -180,6 +180,11 @@ test('createPreviewText strips CSS text when html is the only preview source', (
 	);
 });
 
+test('article previews decode HTML entities once and preserve literal entity examples', () => {
+	assert.equal(createPreviewText({ htmlContent: '<p>&amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa; &#x1f4aa; &#38;amp;</p>' }), '&lt;code&gt; &amp; &#x1f4aa; 💪 &amp;');
+	assert.equal(createPreviewText({ htmlContent: '<p>&#x110000; &#55296; &#xzz; &unknown;</p>' }), '&#x110000; &#55296; &#xzz; &unknown;');
+});
+
 test('createRenderedContent unwraps full email documents into reader-friendly fragments', () => {
 	const rendered = createRenderedContent({
 		htmlContent: FULL_EMAIL_HTML,
@@ -200,6 +205,25 @@ test('createRenderedContent unwraps email wrappers even when a tracker image is 
 	assert.doesNotMatch(rendered, /<table|open\.convertkit-mail\.com/i);
 });
 
+test('email cleaning preserves article images whose dimensions begin with one', () => {
+	const images = [
+		'<img src="https://images.example/width-100.jpg" width="100">',
+		"<img src='https://images.example/height-1200.jpg' height='1200'>",
+		'<img src="https://images.example/width-1920.jpg" width=1920>',
+		'<img src="https://images.example/width-percent.jpg" width="100%">',
+		'<img src="https://images.example/height-percent.jpg" height="1%">',
+		'<img src="https://images.example/data-width.jpg" data-width="1">',
+		'<img src="https://images.example/alt-width.jpg" alt=\'Diagram with width="1" marker\'>',
+	];
+	const rendered = createRenderedContent({ htmlContent: `<html><body><p>Article images</p>${images.join('')}
+		<img src="https://images.example/pixel-width.gif" width="1">
+		<img src="https://images.example/pixel-height.gif" height=1>
+		<img src="https://images.example/pixel-px.gif" height='1px'>
+		</body></html>` });
+	for (const image of images) assert.ok(rendered.includes(image), image);
+	assert.doesNotMatch(rendered, /pixel-width|pixel-height|pixel-px/);
+});
+
 test('createRenderedContent leaves existing html fragments unchanged', () => {
 	assert.equal(
 		createRenderedContent({
@@ -207,6 +231,31 @@ test('createRenderedContent leaves existing html fragments unchanged', () => {
 		}),
 		HTML_FRAGMENT,
 	);
+});
+
+test('semantic HTML article fragments retain their heading, quotation and preformatted markup', () => {
+	for (const html of [
+		'<h2>Today’s notes</h2>',
+		'<blockquote>A quotation from the article.</blockquote>',
+		'<pre>line one\nline two</pre>',
+		'<figure><figcaption>An illustration caption.</figcaption></figure>',
+		'<dl><dt>Term</dt><dd>A definition.</dd></dl>',
+	]) {
+		assert.equal(createRenderedContent({ htmlContent: html }), html);
+	}
+	const plain = 'Use <code> blocks or <h2> headings and contact <support@example.com> for help.';
+	const rendered = createRenderedContent({ htmlContent: plain });
+	assert.match(rendered, /&lt;code&gt;/);
+	assert.match(rendered, /&lt;h2&gt;/);
+	assert.match(rendered, /&lt;support@example.com&gt;/);
+});
+
+test('unknown tags with semantic-name prefixes remain literal plain text', () => {
+	for (const plain of ['<h2-not-a-tag>Literal example</h2-not-a-tag>', '<pre:syntax>Literal example</pre:syntax>', '<h2\u00a0suffix>Literal example</h2\u00a0suffix>']) {
+		const rendered = createRenderedContent({ htmlContent: plain });
+		assert.ok(rendered.includes(plain.replaceAll('<', '&lt;').replaceAll('>', '&gt;')));
+		assert.match(rendered, /data-pigeon-rendered="plain-text"/);
+	}
 });
 
 test('createRenderedContent resolves relative links against an imported item original URL', () => {
@@ -310,6 +359,47 @@ test('handleGreaderRequest returns the full cleaned article body in both summary
 	assert.doesNotMatch(payload.items[0].content.content, /<!doctype|<html|<head|<body/i);
 });
 
+test('Atom and GReader article bodies retain ordinary newsletter images while dropping tracking pixels', async () => {
+	const image = '<img src="https://images.example/article.jpg" width="1200" height="100">';
+	const html = `<html><body><p>Article with an illustration.</p>${image}<img src="https://images.example/tracker.gif" width="1" height="1"></body></html>`;
+	const xml = await generateAtomFeed(
+		{ feed_key: 'sender-example-com', display_name: 'Example Sender', from_email: 'sender@example.com', custom_title: null },
+		[{ id: '9c2772b1-1e53-4de8-89a6-77af6fb9c104', subject: 'Illustrated newsletter', html_content: html,
+			text_content: null, original_url: null, from_name: 'Example Sender', from_email: 'sender@example.com', received_at: '2026-10-01T12:00:00.000Z' }],
+		'https://pigeon.example',
+	);
+	assert.ok(xml.includes(image));
+	assert.doesNotMatch(xml, /tracker\.gif/);
+	const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+		headers: { Authorization: await generateAuthHeader('secret-password') },
+	}), createEnv(html) as never);
+	assert.equal(response.status, 200);
+	const body = await response.json() as { items: { content: { content: string }; summary: { content: string } }[] };
+	assert.equal(body.items.length, 1);
+	assert.ok(body.items[0].content.content.includes(image));
+	assert.doesNotMatch(body.items[0].content.content, /tracker\.gif/);
+	assert.equal(body.items[0].content.content, body.items[0].summary.content);
+});
+
+test('Atom and GReader preserve semantic HTML fragments as formatted article bodies', async () => {
+	for (const html of ['<h2>Article heading</h2>', '<blockquote>Quoted text.</blockquote>', '<pre>first line\nsecond line</pre>']) {
+		const xml = await generateAtomFeed(
+			{ feed_key: 'sender-example-com', display_name: 'Example Sender', from_email: null, custom_title: null },
+			[{ id: '9c2772b1-1e53-4de8-89a6-77af6fb9c104', subject: 'Formatted article', html_content: html,
+				text_content: null, original_url: null, from_name: 'Example Sender', from_email: null, received_at: '2026-10-01T12:00:00.000Z' }],
+			'https://pigeon.example',
+		);
+		assert.ok(xml.includes(`<content type="html"><![CDATA[${html}]]></content>`));
+		const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
+			headers: { Authorization: await generateAuthHeader('secret-password') },
+		}), createEnv(html) as never);
+		assert.equal(response.status, 200);
+		const body = await response.json() as { items: { content: { content: string }; summary: { content: string } }[] };
+		assert.equal(body.items[0].content.content, html);
+		assert.equal(body.items[0].summary.content, html);
+	}
+});
+
 test('handleGreaderRequest accepts item ids passed in the query string for stream/items/contents', async () => {
 	const request = new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', {
 		method: 'GET',
@@ -341,4 +431,37 @@ test('handleGreaderRequest accepts raw urlencoded item ids even without a form c
 	const payload = await response.json();
 	assert.equal(payload.items.length, 1);
 	assert.match(payload.items[0].summary.content, /<p>Hello from a stored item\.<\/p>/);
+});
+
+
+test('reader URL rewriting preserves visible examples, quoted attributes and custom data', () => {
+ const html = `<p>Examples href="/example" src='/image' poster="/poster" srcset="/small.png 1x, /large.png 2x"</p><video title="Example poster='/literal' >" data-poster="/custom" poster="/real.jpg"></video><img alt='srcset="/literal.png 1x"' data-srcset="/custom.png 1x" srcset="/small.png 1x, /large.png 2x">`;
+ const expected = `<p>Examples href="/example" src='/image' poster="/poster" srcset="/small.png 1x, /large.png 2x"</p><video title="Example poster='/literal' >" data-poster="/custom" poster="https://example.com/real.jpg"></video><img alt='srcset="/literal.png 1x"' data-srcset="/custom.png 1x" srcset="https://example.com/small.png 1x, https://example.com/large.png 2x">`;
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+test('reader URL rewriting keeps existing raw-text cleaning and SVG links', () => {
+ const html = '<p>Body</p><!-- <a href="/comment"> --><script/><a href="/literal">example</a></script><svg><style/><image href="/icon.svg"/></svg><a href="/real">Real</a>';
+ const expected = '<div data-pigeon-rendered="email-fragment" style="text-align:left"><p>Body</p><svg><style/><image href="https://example.com/icon.svg"/></svg><a href="https://example.com/real">Real</a></div>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+
+test('reader URL rewriting preserves comments and textarea examples on the unmodified HTML path', () => {
+ const html = '<p>Body</p><!-- <a href="/comment"> --><textarea><a href="/literal">example</a></textarea><a href="/real">Real</a>';
+ const expected = '<p>Body</p><!-- <a href="/comment"> --><textarea><a href="/literal">example</a></textarea><a href="https://example.com/real">Real</a>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+
+test('reader URL callbacks retain quoted entity URLs, fragment links and unquoted attributes', () => {
+ const html = `<p><a href='/story?a=1&amp;b=2'>Story</a><a href="#section">Section</a><img src=/unquoted.png><img src="data:image/png;base64,AAAA"></p>`;
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), `<p><a href='https://example.com/story?a=1&amp;b=2'>Story</a><a href="#section">Section</a><img src=/unquoted.png><img src="data:image/png;base64,AAAA"></p>`);
+});
+
+
+test('reader URL rewriting resumes after self-closing MathML style and title', () => {
+ const html = '<p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="/real">Real</a>';
+ const expected = '<div data-pigeon-rendered="email-fragment" style="text-align:left"><p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="https://example.com/real">Real</a></div>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
 });

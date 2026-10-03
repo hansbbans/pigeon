@@ -1,4 +1,7 @@
+import { rewriteHtmlAttributes } from './html-attributes';
+
 const HTML_PATTERN = /<!doctype|<\?xml|<(html|head|body|style|script|article|section|div|p|table|ul|ol|li|img|br|hr|a)\b/i;
+const SEMANTIC_HTML_TAG_PATTERN = /<(\/?)(h[1-6]|blockquote|pre|figure|figcaption|dl|dt|dd)(?=[\t\n\f\r />])/gi;
 const EMAIL_CONTENT_CLASS_HINTS = [
 	'email-content',
 	'mail-message-content',
@@ -11,7 +14,17 @@ const EMPTY_BLOCK_PATTERN =
 	/<(p|div)\b[^>]*>\s*(?:&nbsp;|&#8203;|&#x200b;|&#xfeff;|\u00a0|\u200b|\ufeff|\s)*<\/\1>/gi;
 
 function looksLikeHtml(value: string): boolean {
-	return HTML_PATTERN.test(value);
+	if (HTML_PATTERN.test(value)) return true;
+	const openTags = new Set<string>();
+	for (const tag of value.matchAll(SEMANTIC_HTML_TAG_PATTERN)) {
+		const name = tag[2].toLowerCase();
+		if (tag[1] === '/') {
+			if (openTags.has(name)) return true;
+		} else {
+			openTags.add(name);
+		}
+	}
+	return false;
 }
 
 function escapeHtml(value: string): string {
@@ -61,7 +74,15 @@ function stripNonContentBlocks(html: string): string {
 function stripTrackingPixels(html: string): string {
 	return html
 		.replace(/<img\b[^>]*https?:\/\/[^"'>\s]*open\.convertkit-mail\.com[^>]*>/gi, '')
-		.replace(/<img\b[^>]*(?:width|height)\s*=\s*["']?1["']?[^>]*>/gi, '');
+		.replace(/<img\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (image) => {
+			const attributes = /\s+([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+			for (const attribute of image.matchAll(attributes)) {
+				if (!/^(?:width|height)$/i.test(attribute[1])) continue;
+				const value = (attribute[2] ?? attribute[3] ?? attribute[4]).trim();
+				if (/^1(?:\.0+)?(?:px)?$/i.test(value)) return '';
+			}
+			return image;
+		});
 }
 
 function normalizeWhitespaceAroundHtml(html: string): string {
@@ -116,28 +137,16 @@ function absolutizeSrcset(srcset: string, baseUrl: string): string {
 }
 
 function absolutizeRelativeUrlsInHtml(html: string, baseUrl: string): string {
-	let result = html.replace(
-		/\b(href|src|poster)\s*=\s*(["'])(.*?)\2/gi,
-		(match, attribute: string, quote: string, value: string) => {
-			const resolvedUrl = absolutizeRelativeUrl(value, baseUrl);
-			if (!resolvedUrl) {
-				return match;
-			}
-
-			return `${attribute}=${quote}${resolvedUrl}${quote}`;
-		},
-	);
-
-	result = result.replace(/\bsrcset\s*=\s*(["'])(.*?)\1/gi, (match, quote: string, value: string) => {
-		const resolvedSrcset = absolutizeSrcset(value, baseUrl);
-		if (resolvedSrcset === value) {
-			return match;
+	return rewriteHtmlAttributes(html, (attribute, value, quoted) => {
+		// Keep the renderer's existing handling of quoted URL attributes.
+		if (!quoted) return undefined;
+		if (/^(?:href|src|poster)$/i.test(attribute)) return absolutizeRelativeUrl(value, baseUrl) ?? undefined;
+		if (/^srcset$/i.test(attribute)) {
+			const resolved = absolutizeSrcset(value, baseUrl);
+			return resolved === value ? undefined : resolved;
 		}
-
-		return `srcset=${quote}${resolvedSrcset}${quote}`;
+		return undefined;
 	});
-
-	return result;
 }
 
 function escapeRegex(value: string): string {

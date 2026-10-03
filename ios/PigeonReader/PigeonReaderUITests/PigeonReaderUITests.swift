@@ -401,6 +401,24 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "platform-delivery-settings")
 	}
 
+	func testPersonalizationExportCanBeCopiedThroughTheShareSheet() throws {
+		openSettings()
+		let personalization = app.buttons["Signals, History, and Privacy"]
+		XCTAssertTrue(revealSettingsRow(personalization))
+		personalization.tap()
+		XCTAssertTrue(app.navigationBars["Personalization"].waitForExistence(timeout: 5))
+		let export = app.buttons["Export Personalization Data"]
+		XCTAssertTrue(revealSettingsRow(export))
+		export.tap()
+
+		let copy = app.cells["Copy"]
+		XCTAssertTrue(copy.waitForExistence(timeout: 10))
+		attachScreenshot(named: "personalization-export-share-sheet")
+		copy.tap()
+		XCTAssertTrue(copy.waitForNonExistence(timeout: 5))
+		XCTAssertTrue(app.navigationBars["Personalization"].exists)
+	}
+
 	func testPersonalizationTopicsCanBeAddedRemovedAndReset() throws {
 		openSettings()
 
@@ -1317,6 +1335,150 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 	}
 
 	private func attachScreenshot(named name: String) {
+		let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+		attachment.name = name
+		attachment.lifetime = .keepAlways
+		add(attachment)
+	}
+}
+
+@MainActor
+final class PigeonDeepLinkUITests: XCTestCase {
+	private var app: XCUIApplication!
+	private let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+	private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+
+	override func setUp() async throws {
+		continueAfterFailure = false
+		if springboard.alerts.buttons["Cancel"].firstMatch.exists {
+			springboard.alerts.buttons["Cancel"].firstMatch.tap()
+		}
+		app = XCUIApplication()
+		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state"]
+		app.launch()
+		XCTAssertTrue(app.buttons["reader-sidebar-item-forYou"].waitForExistence(timeout: 15))
+	}
+
+	override func tearDown() async throws {
+		if (testRun?.failureCount ?? 0) > 0 {
+			attachScreenshot("deep-link-failure")
+			for (name, application) in [("Pigeon", app!), ("Safari", safari), ("SpringBoard", springboard)] {
+				let attachment = XCTAttachment(string: application.debugDescription)
+				attachment.name = "\(name) deep-link hierarchy"
+				attachment.lifetime = .keepAlways
+				add(attachment)
+			}
+		}
+	}
+
+	func testRealURLsOpenFeedFolderAndArticle() throws {
+		try openDeepLink("pigeon://feed/feed/1")
+		XCTAssertTrue(app.navigationBars["Dense Discovery"].waitForExistence(timeout: 10))
+		attachScreenshot("real-feed-deep-link")
+		try openDeepLink("pigeon://folder/user/-/label/Design")
+		XCTAssertTrue(app.navigationBars["Design"].waitForExistence(timeout: 10))
+		attachScreenshot("real-folder-deep-link")
+		try openDeepLink("pigeon://article/preview-1?collection=forYou")
+		XCTAssertTrue(app.descendants(matching: .any)["article-back-to-feed"].waitForExistence(timeout: 10))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].exists)
+		attachScreenshot("real-article-deep-link")
+	}
+
+	func testRealURLPreservesALiteralPercentEncodedFolderName() throws {
+		let folder = app.staticTexts["Design"]
+		XCTAssertTrue(folder.waitForExistence(timeout: 5))
+		folder.press(forDuration: 1.2)
+		let rename = app.buttons["Rename Folder"]
+		XCTAssertTrue(rename.waitForExistence(timeout: 5))
+		rename.tap()
+		let field = app.textFields["rename-folder-name"]
+		XCTAssertTrue(field.waitForExistence(timeout: 5))
+		field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+		let existing = field.value as? String ?? ""
+		field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count) + "Design%2FHome")
+		XCTAssertEqual(field.value as? String, "Design%2FHome")
+		app.buttons["Save"].tap()
+		XCTAssertTrue(app.staticTexts["Design%2FHome"].waitForExistence(timeout: 10))
+		try openDeepLink("pigeon://folder/user/-/label/Design%252FHome")
+		XCTAssertTrue(app.navigationBars["Design%2FHome"].waitForExistence(timeout: 10))
+		attachScreenshot("real-literal-percent-folder-deep-link")
+	}
+
+	private func openDeepLink(_ text: String) throws {
+		// Reuse Safari between URL handoffs instead of terminating and relaunching it.
+		safari.activate()
+		let pendingCancel = safari.buttons["Cancel"].firstMatch
+		if pendingCancel.exists, pendingCancel.frame.isEmpty == false {
+			tapButton(pendingCancel, in: safari)
+		}
+		let address = safari.textFields["Address"]
+		XCTAssertTrue(address.waitForExistence(timeout: 10))
+		address.tap()
+		let existing = address.value as? String ?? ""
+		address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count) + text + "\n")
+		let safariDialog = safari.descendants(matching: .any)["SFDialogView"].firstMatch
+		let dialog: XCUIElement
+		if safariDialog.waitForExistence(timeout: 5) {
+			dialog = safariDialog
+		} else {
+			dialog = springboard.alerts.firstMatch
+			guard dialog.waitForExistence(timeout: 5) else {
+				XCTFail("Expected the system confirmation to open Pigeon")
+				return
+			}
+		}
+		let pigeonMessage = dialog.descendants(matching: .any).matching(
+			NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Open", "Pigeon")
+		).firstMatch
+		guard pigeonMessage.exists else {
+			XCTFail("Expected the confirmation to open Pigeon")
+			return
+		}
+		// Safari's first-use menu tip can cover the URL confirmation on a fresh simulator.
+		let menuTip = safari.descendants(matching: .any)["TipView"].firstMatch
+		if menuTip.exists,
+		   menuTip.staticTexts["View Bookmarks, Share Menu, and Open Tabs"].exists {
+			let closeTip = menuTip.buttons["Close"]
+			guard closeTip.waitForExistence(timeout: 5) else {
+				XCTFail("Expected the Safari menu tutorial's close button")
+				return
+			}
+			closeTip.tap()
+			guard menuTip.waitForNonExistence(timeout: 5) else {
+				XCTFail("The Safari menu tutorial should stop covering the confirmation")
+				return
+			}
+		}
+		let open = dialog.buttons["Open"]
+		let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: open)
+		guard XCTWaiter.wait(for: [hittable], timeout: 5) == .completed else {
+			XCTFail("Expected a tappable Pigeon confirmation button")
+			return
+		}
+		open.tap()
+		// Safari can retain its confirmation after an early automation tap.
+		// Retry once only while that same Pigeon prompt remains; never activate
+		// the app directly, which would hide an undelivered URL.
+		if app.wait(for: .runningForeground, timeout: 3) == false, dialog.exists {
+			guard pigeonMessage.exists, open.isHittable else {
+				XCTFail("The remaining confirmation should still open Pigeon")
+				return
+			}
+			open.tap()
+		}
+		XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "Pigeon should receive the Safari URL handoff")
+		// Once the OS foregrounds Pigeon, Safari may suspend its accessibility service.
+		// Destination assertions in the caller verify the URL without querying that background app.
+	}
+
+	private func tapButton(_ button: XCUIElement, in application: XCUIApplication) {
+		let frame = button.frame
+		XCTAssertFalse(frame.isEmpty)
+		application.coordinate(withNormalizedOffset: .zero)
+			.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+	}
+
+	private func attachScreenshot(_ name: String) {
 		let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
 		attachment.name = name
 		attachment.lifetime = .keepAlways

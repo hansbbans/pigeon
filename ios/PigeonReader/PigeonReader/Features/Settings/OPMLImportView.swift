@@ -69,6 +69,8 @@ struct OPMLImportView: View {
 				let result = try await model.importOPML(preview)
 				screen.message = "Imported \(result.importedCount) feed\(result.importedCount == 1 ? "" : "s"), updated folders on \(result.updatedCount), and found \(result.duplicateCount) existing subscription\(result.duplicateCount == 1 ? "" : "s")."
 				screen.preview = nil
+			} catch is CancellationError {
+				// Account changes and leaving the import are quiet cancellations.
 			} catch {
 				screen.message = error.localizedDescription
 			}

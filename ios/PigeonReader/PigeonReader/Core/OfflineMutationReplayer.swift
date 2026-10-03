@@ -1,6 +1,11 @@
 import Foundation
 
 actor OfflineMutationReplayer {
+	// The server accepts 100 actions but reserves its 40-query D1 budget per
+	// action. Seven fits its successful worst-cost prefix; larger requests can
+	// return budget failures that intentionally stop replay until the next sync.
+	private static let maxActionsPerRequest = 7
+	private static let maxItemIDsPerRequest = 200
 	private let store: any OfflineLibraryStoring
 
 	init(store: any OfflineLibraryStoring) {
@@ -36,7 +41,8 @@ actor OfflineMutationReplayer {
 			var itemIDCount = 0
 			for action in pending {
 				let nextCount = itemIDCount + action.mutation.itemIds.count
-				if page.isEmpty == false, nextCount > 200 { break }
+				if page.count >= Self.maxActionsPerRequest { break }
+				if page.isEmpty == false, nextCount > Self.maxItemIDsPerRequest { break }
 				page.append(action)
 				itemIDCount = nextCount
 			}

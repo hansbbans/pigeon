@@ -7,6 +7,8 @@ import { handleGreaderRequest } from '../src/greader';
 import { ensureDatabaseSchema } from '../src/migrations';
 import { handleNativeApiRequest } from '../src/native-api';
 import { handleRecommendations } from '../src/recommendations';
+import { buildRssItemStatements } from '../src/rss-fetcher';
+import app from '../src/index';
 
 const PASSWORD = 'secret-password';
 const BASE_URL = 'https://pigeon.example';
@@ -232,6 +234,62 @@ async function greaderRequest(
 		env,
 	);
 }
+
+test('RSS imports store bylines in the author field consumed by reader APIs', async () => {
+	const state = createFixture([{ id: 'seed-author', feedKey: 'author-feed', title: 'Seed', receivedAt: '2026-10-02T12:00:00.000Z' }]);
+	try {
+		await ensureDatabaseSchema(state.env);
+		state.db.prepare("UPDATE feeds SET source_type = 'rss' WHERE feed_key = 'author-feed'").run();
+		const statements = await buildRssItemStatements(state.database as never, 'author-feed',
+			{ sourceUrl: 'https://example.com/feed.xml' },
+			[{ guid: 'new-author-item', title: 'Bylined story', author: 'Alice Writer', content: '<p>Body</p>', attachments: [] }],
+			'2026-10-02T12:00:00.000Z');
+		await state.database.batch(statements as unknown as SqliteD1Statement[]);
+		assert.equal((state.db.prepare("SELECT from_name FROM items WHERE subject = 'Bylined story'").get() as { from_name: string | null }).from_name, 'Alice Writer');
+		state.db.prepare("UPDATE items SET from_email = 'Old author', is_read = 1, is_starred = 1 WHERE subject = 'Bylined story'").run();
+		const refreshStatements = await buildRssItemStatements(state.database as never, 'author-feed',
+			{ sourceUrl: 'https://example.com/feed.xml' },
+			[{ guid: 'new-author-item', title: 'Bylined story', content: '<p>Revised body</p>', attachments: [] }],
+			'2026-10-02T12:00:00.000Z', { updateExisting: true });
+		await state.database.batch(refreshStatements as unknown as SqliteD1Statement[]);
+		const updated = state.db.prepare("SELECT from_name, from_email, is_read, is_starred FROM items WHERE subject = 'Bylined story'").get();
+		assert.deepEqual({ ...updated }, { from_name: null, from_email: null, is_read: 1, is_starred: 1 });
+	} finally { state.db.close(); }
+});
+
+test('legacy RSS bylines remain visible across Atom, GReader, recommendations, and sync without using email sender addresses', async () => {
+	const state = createFixture([
+		{ id: 'legacy-author', feedKey: 'rss-author', title: 'RSS byline', receivedAt: '2026-10-02T12:00:00.000Z' },
+		{ id: 'email-no-author', feedKey: 'email-author', title: 'Email without name', receivedAt: '2026-10-02T12:00:00.000Z' },
+	]);
+	try {
+		state.db.prepare("UPDATE feeds SET source_type = 'rss' WHERE feed_key = 'rss-author'").run();
+		state.db.prepare("UPDATE items SET from_email = 'Alice Writer' WHERE id = 'legacy-author'").run();
+		state.db.prepare("UPDATE items SET from_email = 'news@example.com' WHERE id = 'email-no-author'").run();
+		await ensureDatabaseSchema(state.env);
+		const recommendations = await nativeRequest(state.env, '/api/v1/recommendations?view=unread');
+		const recommendationItems = (await recommendations.json() as { items: { id: string; author: string | null }[] }).items;
+		const contents = await greaderRequest(state.env, '/reader/api/0/stream/items/contents', new URLSearchParams([['i', '1'], ['i', '2']]), 'pigeon');
+		const readerItems = (await contents.json() as { items: { author: string }[] }).items;
+		const synced = await nativeRequest(state.env, '/api/v1/sync?limit=200');
+		const articleChanges = (await synced.json() as { changes: { entityType: string; entityId: string; payload: { author?: string | null } }[] }).changes
+			.filter((change) => change.entityType === 'article');
+		const atom = await app.fetch(new Request(`${BASE_URL}/feed/rss-author`), state.env);
+		assert.deepEqual({
+			recommendationRss: recommendationItems.find((item) => item.id === 'legacy-author')?.author,
+			recommendationEmail: recommendationItems.find((item) => item.id === 'email-no-author')?.author,
+			readerRss: readerItems[0].author,
+			readerEmail: readerItems[1].author,
+			syncRss: articleChanges.find((change) => change.entityId === 'legacy-author')?.payload.author,
+			syncEmail: articleChanges.find((change) => change.entityId === 'email-no-author')?.payload.author,
+			atomByline: (await atom.text()).includes('<name>Alice Writer</name>'),
+		}, {
+			recommendationRss: 'Alice Writer', recommendationEmail: null,
+			readerRss: 'Alice Writer', readerEmail: '',
+			syncRss: 'Alice Writer', syncEmail: null, atomByline: true,
+		});
+	} finally { state.db.close(); }
+});
 
 test('recommendations authenticate before the Durable Object proxy and preserve the original query', async () => {
 	const { env, recommendationLog } = createFixture([
@@ -976,6 +1034,63 @@ test('personalization history is transparent, individually deletable, exportable
 	const reset = await nativeRequest(env, '/api/v1/personalization?all=1', { method: 'DELETE' });
 	assert.equal(reset.status, 200);
 	assert.equal((db.prepare('SELECT COUNT(*) AS count FROM engagement_events').get() as { count: number }).count, 0);
+});
+
+test('personalization export includes retained history beyond the screen limit', async () => {
+	const { db, database, env } = createFixture([
+		{ id: 'export-item', feedKey: 'daily-feed', title: 'Retained story', receivedAt: '2026-08-15T11:00:00.000Z' },
+	]);
+	await nativeRequest(env, '/api/v1/personalization');
+	const insert = db.prepare(`INSERT INTO engagement_events
+	 (id, event_key, item_id, feed_key, event_type, client_family, occurred_at)
+	 VALUES (?, ?, 'export-item', 'daily-feed', 'star', 'pigeon', '2026-08-15T12:00:00.000Z')`);
+	for (let index = 0; index < 1001; index += 1) {
+		const id = `history-${String(index).padStart(4, '0')}`;
+		insert.run(id, `client:pigeon:${id}`);
+	}
+	const screen = await nativeRequest(env, '/api/v1/personalization');
+	assert.equal((await screen.json() as { history: unknown[] }).history.length, 500);
+	database.clearExecutedSql();
+	const exported = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.equal(exported.headers.get('Content-Disposition'), 'attachment; filename="pigeon-personalization.json"');
+	const history = (await exported.json() as { history: { id: string }[] }).history;
+	assert.equal(history.length, 1001);
+	assert.equal(history.at(-1)?.id, 'history-0000');
+	assert.equal(new Set(history.map((entry) => entry.id)).size, 1001);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 5);
+
+	database.clearExecutedSql();
+	const cancelled = await nativeRequest(env, '/api/v1/personalization?download=1');
+	await cancelled.body?.cancel();
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 1);
+
+	const failed = await nativeRequest(env, '/api/v1/personalization?download=1');
+	const prepare = database.prepare.bind(database);
+	database.prepare = (sql) => {
+		if (sql.includes('AND (e.occurred_at, e.id)')) throw new Error('history storage unavailable');
+		return prepare(sql);
+	};
+	await assert.rejects(failed.text(), /history storage unavailable/);
+	database.prepare = prepare;
+
+	db.prepare('DELETE FROM engagement_events').run();
+	const empty = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.deepEqual((await empty.json() as { history: unknown[] }).history, []);
+	for (let index = 0; index < 500; index += 1) insert.run(`exact-${index}`, `client:pigeon:exact-${index}`);
+	database.clearExecutedSql();
+	const exactPage = await nativeRequest(env, '/api/v1/personalization?download=1');
+	assert.equal((await exactPage.json() as { history: unknown[] }).history.length, 500);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 3);
+
+	db.prepare('DELETE FROM engagement_events').run();
+	for (let index = 0; index < 9001; index += 1) insert.run(`scale-${index}`, `client:pigeon:scale-${index}`);
+	database.clearExecutedSql();
+	const scaled = await nativeRequest(env, '/api/v1/personalization?download=1');
+	const scaledHistory = (await scaled.json() as { history: { id: string }[] }).history;
+	assert.equal(scaledHistory.length, 9001);
+	assert.equal(new Set(scaledHistory.map((entry) => entry.id)).size, 9001);
+	assert.equal(database.executedSql.filter((entry) => entry.sql.includes('FROM engagement_events e')).length, 37);
+	assert.ok(database.executedSql.length <= 50);
 });
 
 test('recommendations match monitored topics in bounded HTML when text content is absent', async () => {

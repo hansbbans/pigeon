@@ -1,4 +1,5 @@
 import type { Env } from './types';
+import { MAX_IDENTIFIER_BYTES } from './content-size';
 
 const MAX_BULK_FEEDS = 100;
 
@@ -67,15 +68,17 @@ async function updateArchiveState(request: Request, env: Env): Promise<Response>
 		return Response.json({ error: 'action and feedKeys are required' }, { status: 400 });
 	}
 	const feedKeys = [...new Set(body.feedKeys)].filter((value): value is string =>
-		typeof value === 'string' && value.length > 0 && value.length <= 200
+		typeof value === 'string' && value.length > 0 && new Blob([value]).size <= MAX_IDENTIFIER_BYTES
 	);
 	if (feedKeys.length === 0 || feedKeys.length > MAX_BULK_FEEDS || feedKeys.length !== body.feedKeys.length) {
 		return Response.json({ error: `feedKeys must contain 1-${MAX_BULK_FEEDS} unique valid keys` }, { status: 400 });
 	}
 	const archived = body.action === 'archive' ? 1 : 0;
-	await env.DB.batch(feedKeys.map((feedKey) =>
-		env.DB.prepare('UPDATE feeds SET stale_archived = ? WHERE feed_key = ? AND is_active = 1').bind(archived, feedKey)
-	));
+	await env.DB.batch([
+		env.DB.prepare(`UPDATE feeds SET stale_archived = ?
+		 WHERE feed_key IN (SELECT value FROM json_each(?)) AND is_active = 1`)
+			.bind(archived, JSON.stringify(feedKeys)),
+	]);
 	return Response.json({ action: body.action, feedKeys });
 }
 

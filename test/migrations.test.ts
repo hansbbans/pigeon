@@ -15,10 +15,10 @@ import {
 } from './schema-test-helpers';
 
 const FEED_SQL =
-	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
+	'SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
 
 const ITEMS_SQL =
-	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
+	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?';
 
 const RAW_EMAIL = [
 	'From: "Example Sender" <sender@example.com>',
@@ -334,6 +334,10 @@ class LegacySchemaStatement {
 		const schema = maybeHandleSchemaAll<T>(this.sql, this.state);
 		if (schema.handled) {
 			return { results: schema.results };
+		}
+		if (this.mode === 'feed' && this.sql.includes('AS content_revision')) {
+			if (!this.state.hasSyncChangesTable) throw new Error('no such table: sync_changes');
+			return { results: [{ id: 'item-1', content_revision: 1 }] as T[] };
 		}
 
 		if (this.mode === 'feed' && this.sql === ITEMS_SQL) {

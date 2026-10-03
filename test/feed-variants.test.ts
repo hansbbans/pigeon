@@ -4,10 +4,10 @@ import { test } from 'node:test';
 import app from '../src/index';
 
 const FEED_SQL =
-	'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
+	'SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
 
 const ITEMS_SQL =
-	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?';
+	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?';
 
 const FEEDS_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC';
 const OPML_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY display_name';
@@ -50,6 +50,7 @@ class FeedVariantStatement {
 	}>;
 	private readonly tracker: {
 		lastItemsLimit: number | null;
+		contentRevision: number;
 	};
 	private boundValues: unknown[] = [];
 
@@ -108,7 +109,13 @@ class FeedVariantStatement {
 
 		if (this.sql === ITEMS_SQL) {
 			this.tracker.lastItemsLimit = this.boundValues[1] as number;
-			return { results: this.items as T[] };
+			return { results: this.items.slice(0, this.tracker.lastItemsLimit) as T[] };
+		}
+		if (this.sql.includes('AS content_revision')) {
+			this.tracker.lastItemsLimit = this.boundValues[1] as number;
+			return { results: this.items.slice(0, this.tracker.lastItemsLimit).map(({ html_content, text_content, ...metadata }) => ({
+				...metadata, content_revision: this.tracker.contentRevision,
+			})) as T[] };
 		}
 
 		if (this.sql.includes(FEEDS_SQL_FRAGMENT)) {
@@ -165,7 +172,7 @@ function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 		feed_key: 'example-feed',
 		display_name: 'Example Feed',
 		from_email: 'feed@example.com',
-		custom_title: null,
+		custom_title: null as string | null,
 		source_url: 'https://example.com/feed.xml',
 		site_url: 'https://example.com/',
 		icon_url: iconURL,
@@ -200,9 +207,11 @@ function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 			category: 'Test',
 		},
 	];
-	const tracker = { lastItemsLimit: null as number | null };
+	const tracker = { lastItemsLimit: null as number | null, contentRevision: 1 };
 
 	return {
+		feed,
+		items,
 		tracker,
 		env: {
 			API_PASSWORD: 'secret-password',
@@ -217,6 +226,71 @@ function createEnv(iconURL: string | null = 'https://example.com/favicon.ico') {
 		},
 	};
 }
+
+test('feed conditional requests invalidate cached metadata and article body changes', async () => {
+	const { env, feed, items, tracker } = createEnv();
+	const first = await app.fetch(new Request('https://pigeon.example/feed/example-feed'), env as never);
+	const etag = first.headers.get('ETag');
+	assert.ok(etag);
+	feed.custom_title = 'Renamed newsletter';
+	items[0].html_content = '<p>Updated newsletter body</p>';
+	tracker.contentRevision += 1;
+	const updated = await app.fetch(new Request('https://pigeon.example/feed/example-feed', {
+		headers: { 'If-None-Match': etag },
+	}), env as never);
+	assert.equal(updated.status, 200);
+	assert.notEqual(updated.headers.get('ETag'), etag);
+	assert.match(await updated.text(), /Renamed newsletter/);
+});
+
+test('adding an older item invalidates the feed cache even when its newest timestamp is unchanged', async () => {
+	const { env, items } = createEnv();
+	const first = await app.fetch(new Request('https://pigeon.example/feed/example-feed'), env as never);
+	const etag = first.headers.get('ETag')!;
+	items.push({ ...items[0], id: 'a84665c6-e061-4711-a3bb-633702c05579', subject: 'Older newsletter', received_at: '2026-03-26T12:34:56.000Z' });
+	const updated = await app.fetch(new Request('https://pigeon.example/feed/example-feed', {
+		headers: { 'If-None-Match': etag },
+	}), env as never);
+	assert.equal(updated.status, 200);
+	assert.match(await updated.text(), /Older newsletter/);
+});
+
+test('different feed variants and item limits have separate cache validators', async () => {
+	const { env, items } = createEnv();
+	items.push({ ...items[0], id: 'a84665c6-e061-4711-a3bb-633702c05579', subject: 'Older newsletter' });
+	const paths = ['/feed/example-feed', '/feed/example-feed/light', '/feed/example-feed?limit=1'];
+	const tags = await Promise.all(paths.map(async (path) => {
+		const response = await app.fetch(new Request(`https://pigeon.example${path}`), env as never);
+		assert.equal(response.status, 200);
+		return response.headers.get('ETag');
+	}));
+	assert.equal(new Set(tags).size, paths.length);
+});
+
+test('feed cache revalidation supports weak and listed validators and preserves response headers', async () => {
+	const { env } = createEnv();
+	const first = await app.fetch(new Request('https://pigeon.example/feed/example-feed'), env as never);
+	const etag = first.headers.get('ETag')!;
+	const strongTag = etag.replace(/^W\//, '');
+	for (const validator of [etag, strongTag, `"other-version", ${etag}`, '*']) {
+		const cached = await app.fetch(new Request('https://pigeon.example/feed/example-feed', {
+			headers: { 'If-None-Match': validator },
+		}), env as never);
+		assert.equal(cached.status, 304);
+		assert.equal(cached.headers.get('ETag'), etag);
+		assert.equal(cached.headers.get('Access-Control-Allow-Origin'), '*');
+		assert.equal(cached.headers.get('Cache-Control'), first.headers.get('Cache-Control'));
+	}
+});
+
+test('feed limits remain finite and bounded for invalid, negative, and oversized inputs', async () => {
+	for (const [input, expected] of [['invalid', 25], ['-1', 1], ['0', 1], ['200', 100]]) {
+		const { env, tracker } = createEnv();
+		const response = await app.fetch(new Request(`https://pigeon.example/feed/example-feed?limit=${input}`), env as never);
+		assert.equal(response.status, 200);
+		assert.equal(tracker.lastItemsLimit, expected);
+	}
+});
 
 test('GET /feed/:feed_key/light returns the lightweight feed variant with a smaller default limit', async () => {
 	const { env, tracker } = createEnv();

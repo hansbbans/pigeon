@@ -6,7 +6,7 @@
  * first and treats dates as optional instead of inventing a current timestamp.
  */
 
-import { XMLParser } from 'fast-xml-parser';
+import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { isYouTubeVideoId } from './youtube';
 
 export type FeedFormat = 'rss2' | 'rss1' | 'atom' | 'json';
@@ -41,7 +41,9 @@ export interface ParseFeedOptions {
 
 type FeedRecord = Record<string, unknown>;
 
-const xmlParser = new XMLParser({
+const ATOM_NAMESPACE = 'http://www.w3.org/2005/Atom';
+
+const XML_OPTIONS = {
 	ignoreAttributes: false,
 	attributeNamePrefix: '@_',
 	textNodeName: '#text',
@@ -49,7 +51,83 @@ const xmlParser = new XMLParser({
 	trimValues: true,
 	processEntities: true,
 	removeNSPrefix: false,
-});
+};
+
+class NamespaceScope {
+	constructor(private readonly declarations = new Map<string, string>(), private readonly parent?: NamespaceScope) {}
+
+	get(prefix: string): string | undefined {
+		return this.declarations.has(prefix) ? this.declarations.get(prefix) : this.parent?.get(prefix);
+	}
+}
+
+const EMPTY_NAMESPACES = new NamespaceScope();
+
+function namespaceScope(record: FeedRecord, inherited = EMPTY_NAMESPACES): NamespaceScope {
+	let declarations: Map<string, string> | undefined;
+	for (const [key, value] of Object.entries(record)) {
+		if (typeof value !== 'string') continue;
+		const prefix = key === '@_xmlns' ? '' : key.startsWith('@_xmlns:') ? key.slice('@_xmlns:'.length) : undefined;
+		if (prefix === undefined) continue;
+		(declarations ??= new Map()).set(prefix, value);
+	}
+	return declarations ? new NamespaceScope(declarations, inherited) : inherited;
+}
+
+function createFeedXmlParser(xhtmlScopes: NamespaceScope[]): XMLParser {
+	const scopes: NamespaceScope[] = [];
+	const elementNamespaces: Array<string | undefined> = [];
+	let atomRoot = false;
+	let legacyAtomRoot = false;
+	const attributePrefixes: Array<string | undefined> = [];
+	return new XMLParser({
+		...XML_OPTIONS,
+		jPath: false,
+		// Stop XHTML before the ordinary object parser loses mixed-content order.
+		transformTagName(name) {
+			const localName = name.slice(name.lastIndexOf(':') + 1);
+			return localName === 'feed' || localName === 'content' || localName === 'summary' ? localName : name;
+		},
+		stopNodes: ['feed.*.content[type=xhtml]', 'feed.*.summary[type=xhtml]'],
+		attributeValueProcessor(name, value, path) {
+			if (typeof path !== 'string') attributePrefixes[path.getDepth()] = path.getCurrentNamespace();
+			return value;
+		},
+		updateTag(tagName, path, attributes) {
+			if (typeof path === 'string') return tagName;
+			const stopped = path.getDepth() === 2 && (tagName === 'content' || tagName === 'summary') && attributes['@_type'] === 'xhtml';
+			// Public stop-node callbacks run after the matcher returns to the parent.
+			const depth = path.getDepth() + (stopped ? 1 : 0);
+			const sourcePrefix = (stopped ? attributePrefixes[depth] : path.getCurrentNamespace()) ?? '';
+			if (!tagName.includes(':') && sourcePrefix) tagName = `${sourcePrefix}:${tagName}`;
+			if (depth === 0 || (depth > 1 && !atomRoot)) return tagName;
+			const separator = tagName.indexOf(':');
+			const prefix = separator < 0 ? '' : tagName.slice(0, separator);
+			const localName = separator < 0 ? tagName : tagName.slice(separator + 1);
+			const namespaces = namespaceScope(asRecord(attributes), scopes[depth - 1]);
+			const uri = namespaces.get(prefix);
+			if (depth === 1) {
+				atomRoot = localName.toLowerCase() === 'feed' && ((!prefix && !uri) || uri === ATOM_NAMESPACE);
+				legacyAtomRoot = atomRoot && !uri;
+			}
+			if (!atomRoot) return depth === 1 && !prefix && localName.toLowerCase() === 'feed' ? `foreign:${tagName}` : tagName;
+			scopes[depth] = namespaces;
+			const atomElement = uri === ATOM_NAMESPACE || (legacyAtomRoot && !prefix && !uri);
+			elementNamespaces[depth] = atomElement ? ATOM_NAMESPACE : uri;
+			if (atomElement) {
+				if (stopped) {
+					attributes['@___pigeon_xhtml_scope'] = String(xhtmlScopes.length);
+					xhtmlScopes.push(namespaces);
+				}
+				return localName;
+			}
+			// Foreign default namespaces under an Atom parent must not masquerade
+			// as Atom fields; prefixed extensions already keep distinct names.
+			if (!prefix && elementNamespaces[depth - 1] === ATOM_NAMESPACE) return `foreign:${tagName}`;
+			return tagName;
+		},
+	});
+}
 
 export function parseFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
 	const text = feedText.replace(/^\uFEFF/, '').trim();
@@ -62,16 +140,17 @@ export function parseFeed(feedText: string, options: ParseFeedOptions = {}): Par
 		return parseJsonFeed(text, options.sourceUrl);
 	}
 
+	const xhtmlScopes: NamespaceScope[] = [];
 	let document: FeedRecord;
 	try {
-		document = asRecord(xmlParser.parse(text));
+		document = asRecord(createFeedXmlParser(xhtmlScopes).parse(text));
 	} catch (error) {
 		throw new Error(`Malformed XML feed: ${errorMessage(error)}`);
 	}
 
 	const atom = asOptionalRecord(findKey(document, ['feed']));
 	if (atom) {
-		return parseAtomFeed(atom, options.sourceUrl);
+		return parseAtomFeed(atom, options.sourceUrl, xhtmlScopes);
 	}
 
 	const rss = asOptionalRecord(findKey(document, ['rss']));
@@ -122,15 +201,12 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 		const item = asRecord(rawItem);
 		const link = resolveUrl(textValue(item.url) ?? textValue(item.external_url), baseUrl);
 		const plainText = textValue(item.content_text);
-		const content = textValue(item.content_html) ?? (plainText ? escapePlainText(plainText) : '');
-		const authors = arrayValue(item.authors);
-		const firstAuthor = authors.length > 0 ? asRecord(authors[0]) : undefined;
-		const legacyAuthor = asOptionalRecord(item.author);
-		const author = firstAuthor
-			? textValue(firstAuthor.name)
-			: legacyAuthor
-				? textValue(legacyAuthor.name)
-				: undefined;
+		const providedHtml = textValue(item.content_html);
+		// Retain explicit HTML semantics after the body is stored without its type.
+		const content = providedHtml !== undefined ? `<div>${providedHtml}</div>` : (plainText ? `<p>${escapePlainText(plainText)}</p>` : '');
+		const author = item.authors != null || item.author != null
+			? jsonAuthorName(item)
+			: jsonAuthorName(feed);
 
 		return {
 			guid: textValue(item.id) ?? link ?? '',
@@ -151,7 +227,22 @@ function parseJsonFeed(text: string, sourceUrl?: string): ParsedFeed {
 	};
 }
 
-function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
+/** Preserve the existing single-name byline, choosing the first named author. */
+function firstAuthorName(value: unknown): string | undefined {
+	for (const author of arrayValue(value)) {
+		const name = textValue(findKey(asRecord(author), ['name']));
+		if (name) return name;
+	}
+	return undefined;
+}
+
+function jsonAuthorName(record: FeedRecord): string | undefined {
+	// An explicit empty authors array overrides deprecated singular authors.
+	if (record.authors != null) return firstAuthorName(record.authors);
+	return textValue(asRecord(record.author).name);
+}
+
+function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: NamespaceScope[] = []): ParsedFeed {
 	const feedLink = extractAtomLink(findKey(feed, ['link']), sourceUrl);
 	const baseUrl = feedLink ?? sourceUrl;
 	const entries = arrayValue(findKey(feed, ['entry']));
@@ -161,7 +252,10 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 		const link =
 			extractAtomLink(findKey(entry, ['link']), baseUrl) ??
 			(videoId && isYouTubeVideoId(videoId) ? `https://www.youtube.com/watch?v=${videoId}` : undefined);
-		const authorRecord = asOptionalRecord(findKey(entry, ['author']));
+		const source = asOptionalRecord(findKey(entry, ['source']));
+		const author = firstAuthorName(findKey(entry, ['author']))
+			?? firstAuthorName(source ? findKey(source, ['author']) : undefined)
+			?? firstAuthorName(findKey(feed, ['author']));
 		const mediaGroup = asOptionalRecord(findKey(entry, ['media:group', 'group']));
 		const mediaTitle = mediaGroup ? textValue(findKey(mediaGroup, ['media:title', 'title'])) : undefined;
 		const mediaDescription = mediaGroup
@@ -179,9 +273,10 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 			link,
 			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
 			content:
-				textValue(findKey(entry, ['content', 'summary'])) ??
+				atomContentValue(findKey(entry, ['content']), xhtmlScopes) ??
+				atomContentValue(findKey(entry, ['summary']), xhtmlScopes) ??
 				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
-			author: authorRecord ? textValue(findKey(authorRecord, ['name'])) : undefined,
+			author,
 			attachments: deduplicateAttachments([
 				...parseAtomAttachments(findKey(entry, ['link']), baseUrl),
 				...parseYouTubeMediaAttachments(mediaGroup, baseUrl, mediaTitle),
@@ -195,6 +290,44 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string): ParsedFeed {
 		items,
 		format: 'atom',
 	};
+}
+
+function atomContentValue(value: unknown, xhtmlScopes: NamespaceScope[]): string | undefined {
+	const content = textValue(value);
+	if (content === undefined) return undefined;
+	const type = attributeValue(asRecord(value), ['type'])?.toLowerCase() ?? 'text';
+	if (type === 'xhtml') return serializeAtomXhtml(content, xhtmlScopes[Number(asRecord(value)['@___pigeon_xhtml_scope'])] ?? EMPTY_NAMESPACES);
+	if (type === 'html' || type === 'text/html') return `<div>${content}</div>`;
+	return type === 'text' || type.startsWith('text/') ? `<p>${escapePlainText(content)}</p>` : content;
+}
+
+function serializeAtomXhtml(content: string, inherited: NamespaceScope): string {
+	// Parse just one bounded body at a time, never a second full feed tree.
+	if (content.length > 1_000_000 || new TextEncoder().encode(content).byteLength > 1_000_000) throw new Error('Atom XHTML body exceeds parsing limit');
+	const scopes: NamespaceScope[] = [inherited];
+	let nodes = 0;
+	const parser = new XMLParser({
+		...XML_OPTIONS, preserveOrder: true, trimValues: false, parseTagValue: false,
+		jPath: false,
+		updateTag(name, path, attributes) {
+			if (++nodes > 20_000) throw new Error('Atom XHTML body exceeds element limit');
+			if (typeof path === 'string') return name;
+			const depth = path.getDepth();
+			const scope = namespaceScope(asRecord(attributes), scopes[depth - 1]);
+			scopes[depth] = scope;
+			const separator = name.indexOf(':');
+			const prefix = separator < 0 ? '' : name.slice(0, separator);
+			if (depth === 1 && (scope.get(prefix) !== 'http://www.w3.org/1999/xhtml' || (separator < 0 ? name : name.slice(separator + 1)) !== 'div')) throw new Error('Atom XHTML body must contain an XHTML div');
+			if (['http://www.w3.org/1999/xhtml', 'http://www.w3.org/2000/svg', 'http://www.w3.org/1998/Math/MathML'].includes(scope.get(prefix) ?? '')) return separator < 0 ? name : name.slice(separator + 1);
+			return name;
+		},
+	});
+	const roots = parser.parse(content) as FeedRecord[];
+	const root = roots.find((node) => Object.hasOwn(node, 'div'));
+	if (!root || roots.filter((node) => Object.hasOwn(node, 'div')).length !== 1 || roots.some((node) => !Object.hasOwn(node, 'div') && !Object.hasOwn(node, '#text'))) throw new Error('Atom XHTML body must contain an XHTML div');
+	return new XMLBuilder({ ...XML_OPTIONS, preserveOrder: true, suppressEmptyNode: false,
+		unpairedTags: ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'],
+		suppressUnpairedNode: true }).build(root.div);
 }
 
 function parseRss2Feed(channel: FeedRecord, sourceUrl?: string): ParsedFeed {

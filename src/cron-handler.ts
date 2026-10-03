@@ -1,13 +1,11 @@
 /** Durable, fair, bounded scheduler for external feed refreshes. */
 
-import { fetchAndStoreRssFeed, type FeedToFetch } from './rss-fetcher';
+import { fetchAndStoreRssFeed, RefreshQueryBudget, type FeedToFetch } from './rss-fetcher';
 import { safeHost, selectFeedsFairly } from './refresh-policy';
 import type { Env } from './types';
 
 const CANDIDATE_LIMIT = 200;
-// Each leased feed uses up to three D1 calls (claim, renewal, persistence).
-// Five leaves headroom under the Workers Free 50-subrequest invocation cap,
-// including a first-run migration and daily maintenance coordination.
+// Five is a selection ceiling; the shared D1 statement budget may defer costly writes.
 const REFRESH_LIMIT = 5;
 const MAX_GLOBAL_CONCURRENCY = 8;
 const MAX_HOST_CONCURRENCY = 2;
@@ -99,7 +97,18 @@ interface RefreshCandidate extends FeedToFetch {
 
 export async function handleCronTrigger(env: Env): Promise<void> {
 	const now = new Date();
+	// Reserve the three latest-schema checks performed by a cold Worker isolate.
+	const budget = new RefreshQueryBudget(47);
+	const leased: RefreshCandidate[] = [];
 	try {
+		if (await runDailyRetention(env.DB, now, budget)) {
+			console.log(`[Cron] Completed daily retention for ${utcDay(now)}`);
+		}
+	} catch (error) {
+		console.error('[Cron] Daily retention failed', error instanceof Error ? error.message : String(error));
+	}
+	try {
+		if (!budget.reserve(1)) return;
 		const { results } = await env.DB.prepare(
 			`SELECT feed_key, source_url, etag, last_modified, fetch_interval_minutes,
 			        consecutive_failures, content_hash, conditional_checked_at, next_fetch_at
@@ -127,45 +136,68 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 			.all<RefreshCandidate>();
 
 		const fairCandidates = selectFeedsFairly(results, REFRESH_LIMIT);
-		const leased: RefreshCandidate[] = [];
 		for (const candidate of fairCandidates) {
+			const reservation = budget.reserveFeedClaim();
+			if (!reservation) break;
 			const token = crypto.randomUUID();
 			const leaseUntil = new Date(now.getTime() + LEASE_MINUTES * 60_000).toISOString();
-			const leaseResult = await env.DB.prepare(
-				`UPDATE feeds
-				 SET refresh_lease_until = ?, refresh_lease_token = ?
-				 WHERE feed_key = ?
-				   AND is_active = 1
-				   AND (refresh_lease_until IS NULL OR datetime(refresh_lease_until) <= datetime(?))
-				   AND (
-				     (next_fetch_at IS NOT NULL AND datetime(next_fetch_at) <= datetime(?))
-				     OR next_fetch_at IS NULL
-				   )`,
-			)
-				.bind(leaseUntil, token, candidate.feed_key, now.toISOString(), now.toISOString())
-				.run();
-			if (leaseResult?.meta?.changes === 0) continue;
-			leased.push({ ...candidate, refresh_lease_token: token });
+			let leaseResult: D1Result;
+			try {
+				leaseResult = await env.DB.prepare(
+					`UPDATE feeds
+					 SET refresh_lease_until = ?, refresh_lease_token = ?
+					 WHERE feed_key = ?
+					   AND is_active = 1
+					   AND (refresh_lease_until IS NULL OR datetime(refresh_lease_until) <= datetime(?))
+					   AND (
+					     (next_fetch_at IS NOT NULL AND datetime(next_fetch_at) <= datetime(?))
+					     OR next_fetch_at IS NULL
+					   )`,
+				)
+					.bind(leaseUntil, token, candidate.feed_key, now.toISOString(), now.toISOString())
+					.run();
+			} catch (error) {
+				reservation.skipBaseline();
+				leased.push({ ...candidate, refresh_lease_token: token, queryReservation: reservation });
+				throw error;
+			}
+			if (leaseResult?.meta?.changes === 0) {
+				reservation.unclaimed();
+				continue;
+			}
+			leased.push({ ...candidate, refresh_lease_token: token, queryReservation: reservation });
 		}
 
 		if (leased.length > 0) {
 			console.log(`[Cron] Refreshing ${leased.length} feeds with bounded host concurrency`);
-			await runWithRefreshLimits(leased, (feed) => fetchAndStoreRssFeed(env, feed));
+			await runWithRefreshLimits(leased, async (feed) => {
+				try {
+					const result = await fetchAndStoreRssFeed(env, feed);
+					if (result.outcome === 'budget_deferred') console.log(`[Cron] Deferred ${feed.feed_key} to preserve the query budget`);
+					return result;
+				} finally {
+					await releaseReservedRefreshLease(env, feed);
+				}
+			});
 		} else {
 			console.log('[Cron] No feeds due for refresh');
 		}
 	} catch (error) {
 		console.error('[Cron] Refresh cycle failed', error instanceof Error ? error.message : String(error));
-	}
-
-	try {
-		const retentionNow = new Date();
-		if (await runDailyRetention(env.DB, retentionNow)) {
-			console.log(`[Cron] Completed daily retention for ${utcDay(retentionNow)}`);
+	} finally {
+		for (const feed of leased) {
+			try { await releaseReservedRefreshLease(env, feed); }
+			catch (error) { console.error(`[Cron] Could not release ${feed.feed_key}`, error instanceof Error ? error.message : String(error)); }
 		}
-	} catch (error) {
-		console.error('[Cron] Daily retention failed', error instanceof Error ? error.message : String(error));
 	}
+}
+
+async function releaseReservedRefreshLease(env: Env, feed: FeedToFetch): Promise<void> {
+	if (!feed.queryReservation?.consumeRelease()) return;
+	await env.DB.prepare(
+		`UPDATE feeds SET refresh_lease_until = NULL, refresh_lease_token = NULL
+		 WHERE feed_key = ? AND refresh_lease_token = ?`,
+	).bind(feed.feed_key, feed.refresh_lease_token).run();
 }
 
 /**
@@ -174,10 +206,11 @@ export async function handleCronTrigger(env: Env): Promise<void> {
  * Completion and release both include the claim token to avoid touching a
  * lease that has since expired and been reassigned.
  */
-export async function runDailyRetention(db: D1Database, now = new Date()): Promise<boolean> {
+export async function runDailyRetention(db: D1Database, now = new Date(), budget?: RefreshQueryBudget): Promise<boolean> {
 	const day = utcDay(now);
 	const token = crypto.randomUUID();
 	const leaseUntil = new Date(now.getTime() + DAILY_RETENTION_LEASE_MINUTES * 60_000).toISOString();
+	reserveMaintenanceStatements(budget, 1);
 	const claimResult = await db
 		.prepare(
 			`UPDATE maintenance_state
@@ -199,6 +232,7 @@ export async function runDailyRetention(db: D1Database, now = new Date()): Promi
 	}
 
 	try {
+		reserveMaintenanceStatements(budget, 1);
 		const claim = await db
 			.prepare(
 				`SELECT cursor_feed_key
@@ -211,7 +245,7 @@ export async function runDailyRetention(db: D1Database, now = new Date()): Promi
 			return false;
 		}
 
-		const feeds = await selectMaintenanceFeeds(db, claim.cursor_feed_key);
+		const feeds = await selectMaintenanceFeeds(db, claim.cursor_feed_key, budget);
 		const selectedFeeds = feeds.slice(0, MAINTENANCE_FEED_BATCH_SIZE);
 		const nextCursor = feeds.length > MAINTENANCE_FEED_BATCH_SIZE
 			? selectedFeeds.at(-1)?.feed_key ?? null
@@ -231,6 +265,7 @@ export async function runDailyRetention(db: D1Database, now = new Date()): Promi
 				.bind(day, nextCursor, DAILY_RETENTION_JOB, day, token),
 		);
 
+		reserveMaintenanceStatements(budget, statements.length);
 		const results = await db.batch(statements);
 		const completionResult = results.at(-1);
 		if (Number(completionResult?.meta?.changes ?? 0) !== 1) {
@@ -240,6 +275,7 @@ export async function runDailyRetention(db: D1Database, now = new Date()): Promi
 		return true;
 	} catch (error) {
 		try {
+			reserveMaintenanceStatements(budget, 1);
 			await db
 				.prepare(
 					`UPDATE maintenance_state
@@ -258,13 +294,18 @@ export async function runDailyRetention(db: D1Database, now = new Date()): Promi
 	}
 }
 
+function reserveMaintenanceStatements(budget: RefreshQueryBudget | undefined, count: number): void {
+	if (budget && !budget.reserve(count)) throw new Error('Daily maintenance query budget exhausted');
+}
+
 function utcDay(now: Date): string {
 	return now.toISOString().slice(0, 10);
 }
 
-async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | null): Promise<MaintenanceFeedRow[]> {
+async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | null, budget?: RefreshQueryBudget): Promise<MaintenanceFeedRow[]> {
 	const limit = MAINTENANCE_FEED_BATCH_SIZE + 1;
 	if (cursorFeedKey !== null) {
+		reserveMaintenanceStatements(budget, 1);
 		const { results } = await db
 			.prepare('SELECT feed_key FROM feeds WHERE feed_key > ? ORDER BY feed_key LIMIT ?')
 			.bind(cursorFeedKey, limit)
@@ -274,6 +315,7 @@ async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | nu
 		}
 	}
 
+	reserveMaintenanceStatements(budget, 1);
 	const { results } = await db
 		.prepare('SELECT feed_key FROM feeds ORDER BY feed_key LIMIT ?')
 		.bind(limit)

@@ -9,7 +9,7 @@ import {
 import { subscribeToFeed } from '../src/subscribe';
 import { handleGreaderRequest } from '../src/greader';
 import { generateApiToken } from '../src/api-auth';
-import { resolveRssItemUrl, unwrapFeedBlitzUrl } from '../src/rss-links';
+import { resolveRssItemUrl, unwrapFeedBlitzUrl, rewriteRssContentLinks } from '../src/rss-links';
 
 const FEED_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
@@ -237,10 +237,9 @@ class FeedStoreStatement {
 			return null;
 		}
 
-		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')) {
-			const [feedKey, canonicalUrl, sourceUrl] = this.boundValues as string[];
+		if (this.sql.includes('SELECT rowid, feed_key, display_name FROM feeds WHERE canonical_url = ?')) {
+			const [canonicalUrl, sourceUrl] = this.boundValues as string[];
 			const feed =
-				this.store.feeds.get(feedKey) ??
 				[...this.store.feeds.values()].find(
 					(candidate) =>
 						candidate.canonical_url === canonicalUrl || candidate.source_url === sourceUrl,
@@ -254,6 +253,10 @@ class FeedStoreStatement {
 				feed_key: feed.feed_key,
 				display_name: feed.display_name,
 			} as T;
+		}
+
+		if (this.sql.includes('SELECT rowid, feed_key, display_name, source_url, canonical_url FROM feeds WHERE feed_key = ?')) {
+			return (this.store.feeds.get(this.boundValues[0] as string) ?? null) as T | null;
 		}
 
 		if (this.sql.includes('SELECT rowid FROM feeds WHERE feed_key = ?')) {
@@ -445,6 +448,47 @@ test('RSS text excerpts remove non-content markup, bound resources, and preserve
 	assert.ok(excerpt.length <= MAX_RSS_TEXT_CONTENT_SIZE);
 	assert.equal(htmlToBoundedText('<p>Visible</p><script>hidden home gyms'), 'Visible');
 	assert.equal(htmlToBoundedText('<p>Visible</p><!-- hidden home gyms'), 'Visible');
+});
+
+test('RSS refresh bounds the combined UTF-8 bytes of the body and text excerpt', async () => {
+	for (const content of ['😀'.repeat(300_000), 'a'.repeat(900_000)]) {
+		installFeedFetch(FEED_XML.replace('<p>Hello world</p>', `<p>${content}</p>`));
+		const db = new RecordingDb();
+		const result = await fetchAndStoreRssFeed({
+			DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '25', API_PASSWORD: 'secret-password',
+		} as never, {
+			feed_key: 'large-feed', source_url: 'https://example.com/feed.xml', etag: null, last_modified: null,
+		});
+		assert.equal(result.outcome, 'success');
+		const item = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
+		assert.ok(item);
+		const html = String(item.values[6]);
+		const text = String(item.values[7]);
+		const storedBytes = new Blob([html, text]).size;
+		assert.ok(storedBytes <= 900_000, `Stored RSS content was ${storedBytes} bytes`);
+		assert.ok(html.startsWith('<p>'));
+		assert.match(html, /\[Content truncated\]$/);
+		assert.doesNotMatch(html + text, /\uFFFD/);
+	}
+});
+
+test('RSS metadata and body together remain within the complete stored row budget', async () => {
+	installFeedFetch(FEED_XML
+		.replace('First item', '😀'.repeat(300_000))
+		.replace('author@example.com', '😀'.repeat(200_000))
+		.replace('<p>Hello world</p>', `<p>${'a'.repeat(900_000)}</p>`));
+	const db = new RecordingDb();
+	const result = await fetchAndStoreRssFeed({
+		DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '25', API_PASSWORD: 'secret-password',
+	} as never, { feed_key: 'metadata-feed', source_url: 'https://example.com/feed.xml', etag: null, last_modified: null });
+	assert.equal(result.outcome, 'success');
+	const item = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
+	assert.ok(item);
+	const rowBytes = new Blob(item.values.filter((value): value is string => typeof value === 'string')).size;
+	assert.ok(rowBytes < 1_000_000, `Complete stored RSS row was ${rowBytes} bytes`);
+	assert.equal(new Blob([String(item.values[3])]).size, 16_000);
+	assert.equal(new Blob([String(item.values[4])]).size, 16_000);
+	assert.doesNotMatch(String(item.values[3]) + String(item.values[4]), /\uFFFD/);
 });
 
 test('fetchAndStoreRssFeed preserves the original item URL for imported RSS items', async () => {
@@ -644,6 +688,10 @@ test('fetchAndStoreRssFeed refreshes parent feed metadata after successful impor
 	assert.equal(metadataUpdate.values[3], 'https://example.com/');
 });
 
+test('RSS excerpts decode HTML entities once and preserve literal entity examples', () => {
+	assert.equal(htmlToBoundedText('<p>&amp;lt;code&amp;gt; &amp;amp; &amp;#x1f4aa; &#x1f4aa; &#38;amp;</p>'), '&lt;code&gt; &amp; &#x1f4aa; 💪 &amp;');
+});
+
 test('fetchAndStoreRssFeed scopes message dedupe identity to the feed key', async () => {
 	installFeedFetch();
 	const db = new RecordingDb();
@@ -765,4 +813,69 @@ test('handleGreaderRequest wires quick-add requests through to subscription crea
 	const duplicatePayload = await duplicateResponse.json();
 	assert.equal(duplicatePayload.streamId, 'feed/1');
 	assert.equal(duplicatePayload.isNew, false);
+});
+
+
+test('content link rewriting only changes real URL attributes', () => {
+ const html = `<p>Example: href=&quot;/example&quot; and src=&quot;/image.png&quot;</p><a title="Example href='/literal' > text" data-href="/custom" href="/real">Link</a><img alt="src='/example.png'" data-src="/lazy.png" src=/real.png>`;
+ assert.equal(rewriteRssContentLinks(html, 'https://example.com/feed.xml'), `<p>Example: href=&quot;/example&quot; and src=&quot;/image.png&quot;</p><a title="Example href='/literal' > text" data-href="/custom" href="https://example.com/real">Link</a><img alt="src='/example.png'" data-src="/lazy.png" src="https://example.com/real.png">`);
+});
+
+
+test('content link rewriting leaves comments and raw-text examples intact', () => {
+ const examples = '<a href="/example">text</a>';
+ const comment = `<!-- ${examples} -->`;
+ const raw = ['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes'].map((name) => `<${name}>${examples}</${name}>`).join('');
+ assert.equal(rewriteRssContentLinks(`${comment}${raw}<a href="/real">Real</a>`, 'https://example.com/'), `${comment}${raw}<a href="https://example.com/real">Real</a>`);
+ assert.equal(rewriteRssContentLinks(`<!-- unfinished ${examples}`, 'https://example.com/'), `<!-- unfinished ${examples}`);
+});
+
+
+test('self-closing SVG style does not suppress later real content links', () => {
+ assert.equal(rewriteRssContentLinks('<svg><style/><image href="/icon.svg"/></svg><a href="/story">Story</a>', 'https://example.com/feed.xml'), '<svg><style/><image href="https://example.com/icon.svg"/></svg><a href="https://example.com/story">Story</a>');
+});
+
+
+test('self-closing slashes keep ordinary HTML raw-text elements open', () => {
+ for (const name of ['script', 'style']) {
+  const html = `<${name}/><a href="/literal">example</a></${name}><a href="/real">Real</a>`;
+  assert.equal(rewriteRssContentLinks(html, 'https://example.com/'), `<${name}/><a href="/literal">example</a></${name}><a href="https://example.com/real">Real</a>`);
+  for (const container of ['foreignObject', 'desc', 'title']) {
+   const nested = `<svg><${container}>${html}</${container}><style/><image href="/icon.svg"/></svg>`;
+   assert.equal(rewriteRssContentLinks(nested, 'https://example.com/'), `<svg><${container}><${name}/><a href="/literal">example</a></${name}><a href="https://example.com/real">Real</a></${container}><style/><image href="https://example.com/icon.svg"/></svg>`);
+  }
+ }
+});
+
+
+test('RSS URL callbacks keep entity decoding and attribute escaping intact', () => {
+ assert.equal(rewriteRssContentLinks(`<p><a href='/story?a=1&amp;b=2'>Story</a><img src="/image?name=A&#38;format=svg"></p>`, 'https://example.com/feed.xml'), `<p><a href='https://example.com/story?a=1&amp;b=2'>Story</a><img src="https://example.com/image?name=A&amp;format=svg"></p>`);
+});
+
+
+test('MathML self-closing elements leave later links active and HTML integration text stays literal', () => {
+ const base = 'https://example.com/';
+ assert.equal(rewriteRssContentLinks('<math><style/><title/><mtext>Math</mtext></math><a href="/real">Real</a>', base), '<math><style/><title/><mtext>Math</mtext></math><a href="https://example.com/real">Real</a>');
+ for (const container of ['mi', 'mo', 'mn', 'ms', 'mtext', 'annotation-xml encoding="text/html"', "annotation-xml encoding='application/xhtml+xml'"]) {
+  const name = container.split(' ')[0];
+  const source = `<math><${container}><script/><a href="/literal">Example</a></script><a href="/real">Real</a></${name}></math><a href="/outside">Outside</a>`;
+  const expected = `<math><${container}><script/><a href="/literal">Example</a></script><a href="https://example.com/real">Real</a></${name}></math><a href="https://example.com/outside">Outside</a>`;
+  assert.equal(rewriteRssContentLinks(source, base), expected);
+ }
+});
+
+
+test('Math annotation MIME references decode once without changing attribute bytes', () => {
+ for (const encoding of ['text/html', 'text&#47;html', 'text&#x2F;html', 't&#101;xt/html', 'text&sol;html', 'text&#47html', 'application&sol;xhtml&plus;xml', 'application&#47;xhtml&#43;xml']) {
+  const source = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script><a href="/real">Real</a></annotation-xml></math>`;
+  const expected = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script><a href="https://example.com/real">Real</a></annotation-xml></math>`;
+  assert.equal(rewriteRssContentLinks(source, 'https://example.com/'), expected, encoding);
+ }
+});
+
+test('Math annotation unknown and double-escaped MIME references remain foreign', () => {
+ for (const encoding of ['text&amp;#47;html', 'text&amp;sol;html', 'text&SOL;html', 'text&#9999999999;html', 'text&#xD800;html']) {
+  const source = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script></annotation-xml></math>`;
+  assert.equal(rewriteRssContentLinks(source, 'https://example.com/'), `<math><annotation-xml encoding="${encoding}"><script/><a href="https://example.com/literal">Example</a></script></annotation-xml></math>`, encoding);
+ }
 });

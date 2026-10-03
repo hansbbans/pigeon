@@ -140,7 +140,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 	// Get feed metadata
 	const feed = await env.DB.prepare(
-		'SELECT feed_key, display_name, from_email, custom_title, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
+		'SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1',
 	)
 		.bind(feedKey)
 		.first<{
@@ -148,6 +148,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 			display_name: string;
 			from_email: string | null;
 			custom_title: string | null;
+			source_type: string;
 			source_url: string | null;
 			site_url: string | null;
 			icon_url: string | null;
@@ -158,44 +159,71 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 		return new Response('Feed not found', { status: 404 });
 	}
 
-	// ETag / conditional GET
-	const etag = `"${feed.last_item_at || 'empty'}"`;
-	const ifNoneMatch = request.headers.get('If-None-Match');
-	if (ifNoneMatch === etag) {
-		return new Response(null, { status: 304 });
-	}
-
 	// Get items
 	const defaultLimit = isLight ? (env.LIGHT_ITEMS_PER_FEED || '12') : (env.ITEMS_PER_FEED || '50');
-	const limit = Math.min(parseInt(url.searchParams.get('limit') || defaultLimit), 100);
+	const configuredLimit = Number.parseInt(defaultLimit, 10);
+	const fallbackLimit = Number.isFinite(configuredLimit) ? configuredLimit : (isLight ? 12 : 50);
+	const requestedLimit = Number.parseInt(url.searchParams.get('limit') || defaultLimit, 10);
+	const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : fallbackLimit, 1), 100);
 
-	const { results: items } = await env.DB.prepare(
-		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC LIMIT ?',
+	const { results: cacheItems } = await env.DB.prepare(
+		`SELECT i.id, i.message_id, i.subject, i.original_url, i.from_name, i.from_email, i.received_at,
+		        (SELECT MAX(c.sequence) FROM sync_changes c
+		         WHERE c.entity_type = 'article' AND c.entity_id = i.id) AS content_revision
+		 FROM items i WHERE i.feed_key = ? ORDER BY i.received_at DESC, i.id DESC LIMIT ?`,
 	)
 		.bind(feedKey, limit)
 		.all<{
 			id: string | null;
 			message_id: string | null;
 			subject: string;
-			html_content: string;
-			text_content: string | null;
 			original_url: string | null;
 			from_name: string | null;
 			from_email: string | null;
 			received_at: string;
+			content_revision: number | null;
 		}>();
 
 	const feedUrl = `${env.BASE_URL}/feed/${feedKey}${isLight ? '/light' : ''}`;
+	// Current IDs detect insertions/deletions; indexed article revisions detect
+	// body edits and pruning. Cache hits do not fetch or hash article bodies.
+	const etag = `W/"${await hashFeedCacheInput({ feed, items: cacheItems, variant, limit, feedUrl, baseUrl: env.BASE_URL })}"`;
+	const headers = {
+		'Content-Type': 'application/atom+xml; charset=utf-8',
+		'Cache-Control': 'public, max-age=300',
+		'ETag': etag,
+		'Access-Control-Allow-Origin': '*',
+	};
+	const ifNoneMatch = request.headers.get('If-None-Match');
+	if (ifNoneMatch?.split(',').some((value) => {
+		const candidate = value.trim();
+		return candidate === '*' || candidate.replace(/^W\//, '') === etag.replace(/^W\//, '');
+	})) {
+		return new Response(null, { status: 304, headers });
+	}
+	const { results: items } = await env.DB.prepare(
+		'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?',
+	).bind(feedKey, limit).all<{
+		id: string | null;
+		message_id: string | null;
+		subject: string;
+		html_content: string;
+		text_content: string | null;
+		original_url: string | null;
+		from_name: string | null;
+		from_email: string | null;
+		received_at: string;
+	}>();
 	const xml = await generateAtomFeed(feed, items, env.BASE_URL, { variant, feedUrl });
 
 	return new Response(xml, {
-		headers: {
-			'Content-Type': 'application/atom+xml; charset=utf-8',
-			'Cache-Control': 'public, max-age=300',
-			'ETag': etag,
-			'Access-Control-Allow-Origin': '*',
-		},
+		headers,
 	});
+}
+
+async function hashFeedCacheInput(value: unknown): Promise<string> {
+	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)));
+	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 async function handleFeedList(env: Env): Promise<Response> {

@@ -195,7 +195,7 @@ class SqliteD1Database {
 			async first<T>() {
 				if (
 					owner.coordinateCanonicalReads &&
-					sql.startsWith('SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ?')
+					sql.startsWith('SELECT rowid, feed_key, display_name FROM feeds WHERE canonical_url = ?')
 				) {
 					owner.canonicalReads += 1;
 					if (owner.canonicalReads === 2) owner.releaseCanonicalReadGate?.();
@@ -294,11 +294,11 @@ class SqliteD1Database {
 		this.database.prepare('UPDATE items SET is_read = 1').run();
 	}
 
-	insertLegacyFeed(feedKey = 'legacy-feed'): void {
+	insertLegacyFeed(feedKey = 'legacy-feed', sourceUrl = 'https://legacy.example/feed.xml'): void {
 		this.database.prepare(
 			`INSERT INTO feeds (feed_key, display_name, source_type, source_url, canonical_url, first_seen_at)
-			 VALUES (?, 'Legacy feed', 'rss', 'https://legacy.example/feed.xml', 'https://legacy.example/feed.xml', ?)`,
-		).run(feedKey, new Date().toISOString());
+			 VALUES (?, 'Legacy feed', 'rss', ?, ?, ?)`,
+		).run(feedKey, sourceUrl, sourceUrl, new Date().toISOString());
 	}
 
 	setArchived(feedKey: string): void {
@@ -333,6 +333,130 @@ test('a new RSS subscription stores only its three newest items as unread', asyn
 	} finally {
 		db.close();
 	}
+});
+
+test('subscription feed titles are bounded without changing feed identity or initial items', async () => {
+	installFeed(RSS_FEED.replace('Initial RSS', '😀'.repeat(550_000)));
+	const db = new SqliteD1Database();
+	try {
+		const result = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml');
+		assert.equal(new Blob([result.display_name]).size, 16_000);
+		assert.doesNotMatch(result.display_name, /\uFFFD/);
+		assert.equal(db.count('feeds'), 1);
+		assert.equal(db.count('items'), 3);
+	} finally {
+		db.close();
+	}
+});
+
+test('oversized subscription identities are rejected before network or storage work', async () => {
+	const fetchState = installFeed(RSS_FEED);
+	const db = new SqliteD1Database();
+	try {
+		await assert.rejects(subscribeToFeed(env(db) as never, 'https://example.com/' + 'a'.repeat(8_100)), /Feed URL exceeds/);
+		await assert.rejects(subscribeToFeed(env(db) as never, 'https://example.com/feed.xml', 'a'.repeat(8_100)), /Category exceeds/);
+		assert.equal(fetchState.calls.length, 0);
+		assert.equal(db.count('feeds'), 0);
+	} finally {
+		db.close();
+	}
+});
+
+test('distinct URL paths, hosts, schemes, and encoded queries never replace another subscription', async () => {
+	installFeed(ONE_ITEM_FEED);
+	for (const [firstUrl, secondUrl] of [
+		['https://example.com/feed_one.xml', 'https://example.com/feed-one.xml'],
+		['https://example.com/Feed.xml', 'https://example.com/feed.xml'],
+		['https://www.example.com/feed.xml', 'https://example.com/feed.xml'],
+		['http://example.com/feed.xml', 'https://example.com/feed.xml'],
+		['https://example.com/feed.xml?a=x%26b%3Dy', 'https://example.com/feed.xml?a=x&b=y'],
+	]) {
+		const db = new SqliteD1Database();
+		try {
+			const first = await subscribeToFeed(env(db) as never, firstUrl);
+			const second = await subscribeToFeed(env(db) as never, secondUrl);
+			assert.equal(second.wasCreated, true, `Expected a distinct subscription for ${secondUrl}`);
+			assert.notEqual(first.feed_key, second.feed_key);
+			assert.equal(db.count('feeds'), 2);
+			assert.equal(db.count('items'), 2);
+			assert.equal(db.feed(first.feed_key).source_url, firstUrl);
+			assert.equal(db.feed(second.feed_key).source_url, secondUrl);
+			assert.equal((await subscribeToFeed(env(db) as never, firstUrl)).feed_key, first.feed_key);
+		} finally { db.close(); }
+	}
+});
+
+test('query parameter order remains an idempotent subscription identity', async () => {
+	installFeed(ONE_ITEM_FEED);
+	const db = new SqliteD1Database();
+	try {
+		const first = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml?a=x&b=y');
+		const second = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml?b=y&a=x');
+		assert.equal(first.feed_key, second.feed_key);
+		assert.equal(second.wasCreated, false);
+		assert.equal(db.count('feeds'), 1);
+	} finally { db.close(); }
+});
+
+test('legacy keys are reused only for matching URLs and preserve existing article status', async () => {
+	installFeed(ONE_ITEM_FEED);
+	const db = new SqliteD1Database();
+	try {
+		const legacyKey = 'example-com-feed-one-xml';
+		db.insertLegacyFeed(legacyKey, 'https://example.com/feed_one.xml');
+		await db.prepare(`INSERT INTO items (id, message_id, feed_key, subject, html_content, received_at, is_read, is_starred)
+			VALUES ('existing-item', 'existing-message', ?, 'Existing article', 'Existing body', '2026-01-01T00:00:00.000Z', 1, 1)`)
+			.bind(legacyKey).run();
+		const existing = await subscribeToFeed(env(db) as never, 'https://example.com/feed_one.xml');
+		assert.equal(existing.feed_key, legacyKey);
+		assert.equal(existing.wasCreated, false);
+		const distinct = await subscribeToFeed(env(db) as never, 'https://example.com/feed-one.xml');
+		assert.equal(distinct.wasCreated, true);
+		assert.notEqual(distinct.feed_key, legacyKey);
+		assert.equal(db.feed(legacyKey).source_url, 'https://example.com/feed_one.xml');
+		const status = await db.prepare('SELECT is_read, is_starred FROM items WHERE id = ?').bind('existing-item')
+			.first<{ is_read: number; is_starred: number }>();
+		assert.equal(status?.is_read, 1);
+		assert.equal(status?.is_starred, 1);
+	} finally { db.close(); }
+});
+
+test('reordered repeated query values remain distinct subscriptions', async () => {
+	installFeed(ONE_ITEM_FEED);
+	const db = new SqliteD1Database();
+	try {
+		const first = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml?tag=alpha&tag=beta');
+		const second = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml?tag=beta&tag=alpha');
+		assert.notEqual(first.feed_key, second.feed_key);
+		assert.equal(second.wasCreated, true);
+	} finally { db.close(); }
+});
+
+test('legacy query keys survive reordered parameter names without creating a duplicate feed', async () => {
+	installFeed(ONE_ITEM_FEED);
+	const db = new SqliteD1Database();
+	try {
+		const legacyKey = 'example-com-feed-xml-query-72f8258675b97ff728ed6dad';
+		db.insertLegacyFeed(legacyKey, 'https://example.com/feed.xml?a=x&b=y');
+		const result = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml?b=y&a=x');
+		assert.equal(result.feed_key, legacyKey);
+		assert.equal(result.wasCreated, false);
+		assert.equal(db.count('feeds'), 1);
+	} finally { db.close(); }
+});
+
+test('a known redirect alias stays attached when the alias starts serving a feed directly', async () => {
+	installFeed(ONE_ITEM_FEED);
+	const db = new SqliteD1Database();
+	try {
+		db.insertLegacyFeed('existing-feed', 'https://example.com/current.xml');
+		await db.prepare('INSERT INTO feed_url_aliases (alias_url, feed_key, canonical_url) VALUES (?, ?, ?)')
+			.bind('https://example.com/old.xml', 'existing-feed', 'https://example.com/current.xml').run();
+		const result = await subscribeToFeed(env(db) as never, 'https://example.com/old.xml');
+		assert.equal(result.feed_key, 'existing-feed');
+		assert.equal(result.wasCreated, false);
+		assert.equal(db.count('feeds'), 1);
+	} finally { db.close(); }
 });
 
 test('concurrent new subscriptions converge on one initial import', async () => {

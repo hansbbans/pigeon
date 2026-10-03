@@ -270,37 +270,42 @@ export async function handleStatusRequest(
 export async function handleStatusRetryRequest(request: Request, env: Env): Promise<Response> {
 	const authError = await requireApiAuth(request, env.API_PASSWORD);
 	if (authError) return authError;
-	await ensureDatabaseSchema(env);
-
-	let body: { feed_key?: unknown };
+	let body: unknown;
 	try {
 		body = await request.json();
 	} catch {
 		return Response.json({ error: 'Invalid JSON' }, { status: 400 });
 	}
-	if (typeof body.feed_key !== 'string' || body.feed_key.trim() === '') {
+	if (!body || typeof body !== 'object' || Array.isArray(body)
+		|| !('feed_key' in body) || typeof body.feed_key !== 'string' || body.feed_key.trim() === '') {
 		return Response.json({ error: 'Missing feed_key field' }, { status: 400 });
 	}
 
-	const now = new Date().toISOString();
-	const result = await env.DB.prepare(
-		`UPDATE feeds
-		 SET next_fetch_at = ?, retry_after_at = NULL
-		 WHERE feed_key = ?
-		   AND source_type = 'rss'
-		   AND is_active = 1
-		   AND (retry_after_at IS NULL OR datetime(retry_after_at) <= datetime(?))
-		   AND (refresh_lease_until IS NULL OR datetime(refresh_lease_until) <= datetime(?))`,
-	)
-		.bind(now, body.feed_key, now, now)
-		.run();
-	if (result.meta.changes === 0) {
-		return Response.json(
-			{ error: 'Feed not found, waiting for Retry-After, or refresh already in progress' },
-			{ status: 409 },
-		);
+	try {
+		await ensureDatabaseSchema(env);
+		const now = new Date().toISOString();
+		const result = await env.DB.prepare(
+			`UPDATE feeds
+			 SET next_fetch_at = ?, retry_after_at = NULL
+			 WHERE feed_key = ?
+			   AND source_type = 'rss'
+			   AND is_active = 1
+			   AND (retry_after_at IS NULL OR datetime(retry_after_at) <= datetime(?))
+			   AND (refresh_lease_until IS NULL OR datetime(refresh_lease_until) <= datetime(?))`,
+		)
+			.bind(now, body.feed_key, now, now)
+			.run();
+		if (result.meta.changes === 0) {
+			return Response.json(
+				{ error: 'Feed not found, waiting for Retry-After, or refresh already in progress' },
+				{ status: 409 },
+			);
+		}
+		return Response.json({ feed_key: body.feed_key, queued_at: now });
+	} catch (error) {
+		console.error('Status retry database error:', error);
+		return Response.json({ error: 'Database unavailable' }, { status: 503 });
 	}
-	return Response.json({ feed_key: body.feed_key, queued_at: now });
 }
 
 function redactedHost(sourceUrl: string): string {

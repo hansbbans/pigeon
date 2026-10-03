@@ -147,3 +147,36 @@ test('recognizes feed bodies independently of a generic content type', () => {
 	);
 	assert.equal(isProbablyFeedContent('text/html', '<html><body>not a feed</body></html>'), false);
 });
+
+for (const redirectCase of ['follow', 'unsafe', 'missing_location', 'limit', 'cancel_error']) {
+	test(`discarded feed redirect bodies are canceled for ${redirectCase}`, async () => {
+		let canceled = 0;
+		let requests = 0;
+		const redirectBody = new ReadableStream<Uint8Array>({
+			start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); },
+			cancel() {
+				canceled += 1;
+				if (redirectCase === 'cancel_error') throw new Error('upstream cancellation failed');
+			},
+		});
+		globalThis.fetch = async () => {
+			requests += 1;
+			if (requests > 1) {
+				assert.equal(canceled, 1, 'release the discarded body before following its redirect');
+				return new Response('<rss>Final body</rss>', { headers: { 'Content-Type': 'application/rss+xml' } });
+			}
+			return new Response(redirectBody, { status: 302, headers: redirectCase === 'missing_location' ? {} : {
+				Location: redirectCase === 'unsafe' ? 'http://127.0.0.1/feed' : '/final.xml',
+			} });
+		};
+		const loading = fetchBoundedFeedResource('https://feeds.example.com/start', { maxRedirects: redirectCase === 'limit' ? 0 : 5 });
+		if (redirectCase === 'follow' || redirectCase === 'cancel_error') {
+			assert.equal((await loading).text, '<rss>Final body</rss>');
+			assert.equal(requests, 2);
+		} else {
+			await assert.rejects(loading, redirectCase === 'unsafe' ? /private or internal/i : redirectCase === 'limit' ? /redirected more than 0/i : /without a Location/i);
+			assert.equal(requests, 1);
+		}
+		assert.equal(canceled, 1);
+	});
+}

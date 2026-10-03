@@ -6,6 +6,8 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 
 	override func setUp() async throws {
 		continueAfterFailure = false
+		// XCTest can abort a rotating case before its Swift defer executes.
+		XCUIDevice.shared.orientation = .portrait
 		app = XCUIApplication()
 		launchFixture()
 	}
@@ -120,14 +122,27 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 	}
 
 	func testSwitchingFeedsKeepsTheRegularSidebarStationary() throws {
-		folderToggle(1).tap()
-		feed(1, 1).tap()
-		guard folderToggle(1).isHittable else { throw XCTSkip("Requires a regular-width iPad sidebar") }
-		let originalY = folderToggle(1).frame.minY
-		feed(1, 3).tap()
+		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "Requires a regular-width iPad sidebar")
+		XCUIDevice.shared.orientation = .landscapeLeft
+		defer { XCUIDevice.shared.orientation = .portrait }
+		// Home covers a mounted split sidebar. Its controls share identifiers,
+		// so require exactly one active match rather than selecting a hidden row.
+		let toggleIdentifier = "reader-sidebar-folder-toggle-navigation-folder-1"
+		try hittableSidebarControl(toggleIdentifier).tap()
+		try hittableSidebarControl("reader-sidebar-item-feed/navigation-1-1").tap()
+		guard app.buttons.matching(identifier: toggleIdentifier).allElementsBoundByIndex.contains(where: \.isHittable)
+		else { throw XCTSkip("Requires a regular-width iPad sidebar") }
+		let originalY = try hittableSidebarControl(toggleIdentifier).frame.minY
+		try hittableSidebarControl("reader-sidebar-item-feed/navigation-1-3").tap()
 		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 5))
-		XCTAssertEqual(folderToggle(1).frame.minY, originalY, accuracy: 4)
+		XCTAssertEqual(try hittableSidebarControl(toggleIdentifier).frame.minY, originalY, accuracy: 4)
 		XCTAssertFalse(app.descendants(matching: .any)["collection-loading-placeholder"].exists)
+	}
+
+	private func hittableSidebarControl(_ identifier: String) throws -> XCUIElement {
+		let matches = app.buttons.matching(identifier: identifier).allElementsBoundByIndex.filter(\.isHittable)
+		XCTAssertEqual(matches.count, 1, "Expected exactly one active sidebar control: \(identifier)")
+		return try XCTUnwrap(matches.count == 1 ? matches.first : nil)
 	}
 
 	func testFeedPreviewDoesNotNavigateUntilOpenFeedIsChosen() {

@@ -233,6 +233,7 @@ class SqliteD1Database {
 			);
 			CREATE TABLE items (
 				id TEXT PRIMARY KEY,
+				from_name TEXT,
 				message_id TEXT UNIQUE,
 				feed_key TEXT NOT NULL,
 				subject TEXT NOT NULL,

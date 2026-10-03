@@ -1,3 +1,4 @@
+import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
 import { createRenderedContent } from './rendered-content';
@@ -8,18 +9,9 @@ import {
 	type ClientFamily,
 } from './engagement';
 import { ensureDatabaseSchema } from './migrations';
+import { parseGoogleReaderItemRowid } from './item-identity';
 
 // --- ID conversion utilities ---
-
-function parseItemId(id: string): number {
-	if (id.startsWith('tag:google.com,2005:reader/item/')) {
-		return parseInt(id.slice('tag:google.com,2005:reader/item/'.length), 16);
-	}
-	if (/^[0-9a-fA-F]{16}$/.test(id)) {
-		return parseInt(id, 16);
-	}
-	return parseInt(id, 10);
-}
 
 function toGoogleItemId(rowid: number): string {
 	return 'tag:google.com,2005:reader/item/' + rowid.toString(16).padStart(16, '0');
@@ -39,12 +31,9 @@ function labelFromStreamId(streamId: string | null): string | null {
 	if (!streamId || !streamId.startsWith('user/-/label/')) {
 		return null;
 	}
-	const rawLabel = streamId.slice('user/-/label/'.length);
-	try {
-		return decodeURIComponent(rawLabel);
-	} catch {
-		return rawLabel;
-	}
+	// Form/query parsing and the path resolver already decode the transport.
+	// A percent escape here is part of the label returned by tag/list.
+	return streamId.slice('user/-/label/'.length);
 }
 
 function labelsFromForm(body: FormData, key: string): string[] {
@@ -95,10 +84,16 @@ function parseMarkAllTimestamp(raw: string | null): MarkAllTimestampCutoff {
 	return { kind: 'invalid' };
 }
 
-const MAX_IN_QUERY_BIND_PARAMS = 100;
+const MAX_MEMBERSHIP_PAYLOAD_BYTES = 900_000;
 const MAX_D1_BATCH_STATEMENTS = 50;
 
 const STREAM_CONTINUATION_VERSION = 1;
+
+function parsePageSize(value: string | null, fallback: number, maximum: number): number {
+	const parsed = Number.parseInt(value ?? '', 10);
+	if (parsed === 0) return 0;
+	return Math.min(Math.max(Number.isFinite(parsed) ? parsed : fallback, 1), maximum);
+}
 
 interface StreamCursor {
 	v: number;
@@ -120,6 +115,29 @@ function chunkValues<T>(values: T[], size: number): T[][] {
 		chunks.push(values.slice(i, i + size));
 	}
 	return chunks;
+}
+
+// JSON membership uses one binding instead of one per ID, while bounded groups
+// keep unusually long stored feed keys below the database's parameter limit.
+function membershipPages(values: Array<string | number>): string[] {
+	const pages: string[] = [];
+	const encoder = new TextEncoder();
+	let entries: string[] = [];
+	let bytes = 2;
+	for (const value of values) {
+		const entry = JSON.stringify(value);
+		const entryBytes = encoder.encode(entry).byteLength;
+		if (entryBytes + 2 > MAX_MEMBERSHIP_PAYLOAD_BYTES) throw new Error('Feed identifier exceeds database parameter limit');
+		if (entries.length > 0 && bytes + 1 + entryBytes > MAX_MEMBERSHIP_PAYLOAD_BYTES) {
+			pages.push(`[${entries.join(',')}]`);
+			entries = [];
+			bytes = 2;
+		}
+		bytes += entryBytes + (entries.length > 0 ? 1 : 0);
+		entries.push(entry);
+	}
+	if (entries.length > 0) pages.push(`[${entries.join(',')}]`);
+	return pages;
 }
 
 async function runStatementChunks(env: Env, statements: D1PreparedStatement[]): Promise<void> {
@@ -209,7 +227,15 @@ function decodeContinuation(
 	}
 }
 
-async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, string[]>> {
+type FeedMembership = { feedKeys: string[] } | { itemRowids: number[] } | { feedRowids: number[] };
+
+function feedMembershipSql(membership: FeedMembership): string {
+	if ('itemRowids' in membership) return 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))';
+	if ('feedRowids' in membership) return 'SELECT feed_key FROM feeds WHERE rowid IN (SELECT value FROM json_each(?))';
+	return 'SELECT value FROM json_each(?)';
+}
+
+async function loadFeedTags(env: Env, membership?: FeedMembership): Promise<Map<string, string[]>> {
 	const tagsByFeedKey = new Map<string, string[]>();
 	const addTag = (feedKey: string, label: string | null) => {
 		if (!label) {
@@ -222,48 +248,53 @@ async function loadFeedTags(env: Env, feedKeys?: string[]): Promise<Map<string, 
 		}
 	};
 
-	const hasFeedKeyFilter = feedKeys !== undefined;
-	const filteredFeedKeys = [...new Set(feedKeys ?? [])];
-	if (hasFeedKeyFilter && filteredFeedKeys.length === 0) {
+	const hasFeedKeyFilter = membership !== undefined;
+	const values: Array<string | number> = membership === undefined
+		? []
+		: 'itemRowids' in membership ? membership.itemRowids : 'feedRowids' in membership ? membership.feedRowids : membership.feedKeys;
+	if (hasFeedKeyFilter && values.length === 0) {
 		return tagsByFeedKey;
 	}
 
-	const feedKeyCondition = hasFeedKeyFilter
-		? ` AND f.feed_key IN (${filteredFeedKeys.map(() => '?').join(',')})`
-		: '';
+	const keyPages = hasFeedKeyFilter ? membershipPages([...new Set(values)]) : [null];
+	for (const feedKeyPage of keyPages) {
+		const feedKeyCondition = membership
+			? ` AND f.feed_key IN (${feedMembershipSql(membership)})`
+			: '';
 
-	try {
-		const { results } = await env.DB.prepare(
-			`SELECT f.feed_key, ft.label
-			   FROM feeds f
-			   JOIN feed_tags ft ON ft.feed_key = f.feed_key
-			  WHERE f.is_active = 1${feedKeyCondition}
-			  ORDER BY ft.label COLLATE NOCASE`,
+		try {
+			const { results } = await env.DB.prepare(
+				`SELECT f.feed_key, ft.label
+				   FROM feeds f
+				   JOIN feed_tags ft ON ft.feed_key = f.feed_key
+				  WHERE f.is_active = 1${feedKeyCondition}
+				  ORDER BY ft.label COLLATE NOCASE`,
+			)
+				.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
+				.all<{ feed_key: string; label: string }>();
+			for (const row of results) {
+				addTag(row.feed_key, row.label);
+			}
+		} catch (error) {
+			if (!isMissingTableError(error, 'feed_tags')) {
+				throw error;
+			}
+		}
+
+		const categoryFeedKeyCondition = membership
+			? ` AND feed_key IN (${feedMembershipSql(membership)})`
+			: '';
+		const { results: categoryResults } = await env.DB.prepare(
+			`SELECT feed_key, category
+			   FROM feeds
+			  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
+			  ORDER BY category COLLATE NOCASE`,
 		)
-			.bind(...filteredFeedKeys)
-			.all<{ feed_key: string; label: string }>();
-		for (const row of results) {
-			addTag(row.feed_key, row.label);
+			.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
+			.all<{ feed_key: string; category: string | null }>();
+		for (const row of categoryResults) {
+			addTag(row.feed_key, row.category);
 		}
-	} catch (error) {
-		if (!isMissingTableError(error, 'feed_tags')) {
-			throw error;
-		}
-	}
-
-	const categoryFeedKeyCondition = hasFeedKeyFilter
-		? ` AND feed_key IN (${filteredFeedKeys.map(() => '?').join(',')})`
-		: '';
-	const { results: categoryResults } = await env.DB.prepare(
-		`SELECT feed_key, category
-		   FROM feeds
-		  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
-		  ORDER BY category COLLATE NOCASE`,
-	)
-		.bind(...filteredFeedKeys)
-		.all<{ feed_key: string; category: string | null }>();
-	for (const row of categoryResults) {
-		addTag(row.feed_key, row.category);
 	}
 
 	return tagsByFeedKey;
@@ -418,7 +449,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		site_url: string | null;
 	}>();
 
-	const tagsByFeedKey = await loadFeedTags(env, results.map((f) => f.feed_key));
+	const tagsByFeedKey = await loadFeedTags(env);
 	const subscriptions = results.map((f) => ({
 		id: `feed/${f.rowid}`,
 		title: f.custom_title || f.display_name,
@@ -432,6 +463,12 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 	return Response.json({ subscriptions });
 }
 
+function newestTimestampUsec(current: string | undefined, candidate: string): string | undefined {
+	const numericCandidate = Number(candidate);
+	if (!Number.isFinite(numericCandidate)) return current;
+	return current === undefined || numericCandidate > Number(current) ? candidate : current;
+}
+
 async function handleUnreadCount(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
 		`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
@@ -443,31 +480,27 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		count: number;
 		newest: string;
 	}>();
-	const tagsByFeedKey = await loadFeedTags(env, results.map((row) => row.feed_key));
+	const tagsByFeedKey = await loadFeedTags(env, { feedRowids: results.map((feed) => feed.rowid) });
 
 	let totalUnreadCount = 0;
-	let newestUnreadUsec = '0';
+	let newestUnreadUsec: string | undefined;
 	const unreadcounts = results.map((r) => ({
 		id: `feed/${r.rowid}`,
 		count: r.count,
 		newestItemTimestampUsec: (isoToUnix(r.newest) * 1_000_000).toString(),
 	}));
-	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string }>();
+	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string | undefined }>();
 	for (const unread of unreadcounts) {
 		totalUnreadCount += unread.count;
-		if (unread.newestItemTimestampUsec > newestUnreadUsec) {
-			newestUnreadUsec = unread.newestItemTimestampUsec;
-		}
+		newestUnreadUsec = newestTimestampUsec(newestUnreadUsec, unread.newestItemTimestampUsec);
 	}
 	for (const row of results) {
 		const newestItemTimestampUsec = (isoToUnix(row.newest) * 1_000_000).toString();
 		for (const label of tagsByFeedKey.get(row.feed_key) ?? []) {
 			const streamId = `user/-/label/${label}`;
-			const existing = labelCounts.get(streamId) ?? { count: 0, newestItemTimestampUsec: '0' };
+			const existing = labelCounts.get(streamId) ?? { count: 0, newestItemTimestampUsec: undefined };
 			existing.count += row.count;
-			if (newestItemTimestampUsec > existing.newestItemTimestampUsec) {
-				existing.newestItemTimestampUsec = newestItemTimestampUsec;
-			}
+			existing.newestItemTimestampUsec = newestTimestampUsec(existing.newestItemTimestampUsec, newestItemTimestampUsec);
 			labelCounts.set(streamId, existing);
 		}
 	}
@@ -477,13 +510,13 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		unreadcounts.push({
 			id,
 			count: value.count,
-			newestItemTimestampUsec: value.newestItemTimestampUsec,
+			newestItemTimestampUsec: value.newestItemTimestampUsec ?? '0',
 		});
 	}
 	unreadcounts.push({
 		id: 'user/-/state/com.google/reading-list',
 		count: totalUnreadCount,
-		newestItemTimestampUsec: newestUnreadUsec,
+		newestItemTimestampUsec: newestUnreadUsec ?? '0',
 	});
 
 	return Response.json({ max: 1000, unreadcounts });
@@ -651,14 +684,13 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		is_starred: number;
 	};
 	const itemResults = await Promise.all(
-		chunkValues(rowids, MAX_IN_QUERY_BIND_PARAMS).map(async (rowidChunk) => {
-			const placeholders = rowidChunk.map(() => '?').join(',');
+		membershipPages(rowids).map(async (rowidPage) => {
 			const selectRows = (originalUrlExpression: string) =>
 				env.DB.prepare(
-					`SELECT i.rowid, i.id, i.feed_key, i.from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
-					 FROM items i WHERE i.rowid IN (${placeholders})`,
+					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
+					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 				)
-					.bind(...rowidChunk)
+					.bind(rowidPage)
 					.all<ResponseItemRow>();
 
 			try {
@@ -673,8 +705,11 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 	);
 	const items = itemResults.flatMap((result) => result.results);
 
-	const feedKeys = [...new Set(items.map((i) => i.feed_key))];
-	const feedTagsByKey = await loadFeedTags(env, feedKeys);
+	// Publisher keys can be several KB long. Derive their membership in SQLite
+	// from the compact item rowids instead of repeating those keys in bindings.
+	const foundRowids = items.map((item) => item.rowid);
+	const membership = { itemRowids: foundRowids };
+	const feedTagsByKey = await loadFeedTags(env, membership);
 	const feedMap = new Map<
 		string,
 		{
@@ -687,14 +722,13 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		}
 	>();
 
-	if (feedKeys.length > 0) {
+	if (foundRowids.length > 0) {
 		const feedResults = await Promise.all(
-			chunkValues(feedKeys, MAX_IN_QUERY_BIND_PARAMS).map((feedKeyChunk) => {
-				const feedPlaceholders = feedKeyChunk.map(() => '?').join(',');
+			membershipPages(foundRowids).map((rowidPage) => {
 				return env.DB.prepare(
-					`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${feedPlaceholders})`,
+					`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${feedMembershipSql(membership)})`,
 				)
-					.bind(...feedKeyChunk)
+					.bind(rowidPage)
 					.all<{
 						rowid: number;
 						feed_key: string;
@@ -775,7 +809,7 @@ function createItemsEnvelope(items: Awaited<ReturnType<typeof loadResponseItems>
 async function handleStreamItemIds(request: Request, url: URL, env: Env): Promise<Response> {
 	const params = await parseRequestParams(request, url);
 	const streamId = params.get('s') || '';
-	const n = Math.min(parseInt(params.get('n') || '1000', 10), 10000);
+	const n = parsePageSize(params.get('n'), 1000, 10000);
 	const xt = params.get('xt') || '';
 	const ot = params.get('ot') || '';
 	const c = params.get('c') || '';
@@ -829,8 +863,8 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 	}
 
 	const rowids = ids
-		.map(parseItemId)
-		.filter((rowid) => Number.isFinite(rowid));
+		.map(parseGoogleReaderItemRowid)
+		.filter((rowid): rowid is number => rowid !== null);
 	if (rowids.length === 0) {
 		return Response.json(createItemsEnvelope([], 'user/-/state/com.google/reading-list'));
 	}
@@ -863,8 +897,13 @@ function resolveContentsStreamId(path: string, params: URLSearchParams): string 
 
 async function handleStreamContents(request: Request, url: URL, env: Env): Promise<Response> {
 	const params = await parseRequestParams(request, url);
-	const streamId = resolveContentsStreamId(url.pathname, params);
-	const n = Math.min(parseInt(params.get('n') || '20', 10), 1000);
+	let streamId: string;
+	try {
+		streamId = resolveContentsStreamId(url.pathname, params);
+	} catch {
+		return new Response('Bad request: invalid stream ID', { status: 400 });
+	}
+	const n = parsePageSize(params.get('n'), 20, 1000);
 	const xt = params.get('xt') || '';
 	const ot = params.get('ot') || '';
 	const c = params.get('c') || '';
@@ -897,21 +936,13 @@ async function addLabelsToFeed(env: Env, rowid: number, feedKey: string, labels:
 		return;
 	}
 
-	let feedTagsAvailable = true;
-	for (const label of uniqueLabels) {
-		if (!feedTagsAvailable) {
-			break;
-		}
-		try {
-			await env.DB.prepare('INSERT OR IGNORE INTO feed_tags (feed_key, label) VALUES (?, ?)')
-				.bind(feedKey, label)
-				.run();
-		} catch (error) {
-			if (!isMissingTableError(error, 'feed_tags')) {
-				throw error;
-			}
-			feedTagsAvailable = false;
-		}
+	try {
+		await env.DB.prepare(`INSERT OR IGNORE INTO feed_tags (feed_key, label)
+		 SELECT ?, value FROM json_each(?)`)
+			.bind(feedKey, JSON.stringify(uniqueLabels))
+			.run();
+	} catch (error) {
+		if (!isMissingTableError(error, 'feed_tags')) throw error;
 	}
 
 	await env.DB.prepare('UPDATE feeds SET category = COALESCE(category, ?) WHERE rowid = ?')
@@ -926,28 +957,19 @@ async function removeLabelsFromFeed(env: Env, rowid: number, feedKey: string, la
 		return;
 	}
 
-	let feedTagsAvailable = true;
-	for (const label of uniqueLabels) {
-		if (!feedTagsAvailable) {
-			break;
-		}
-		try {
-			await env.DB.prepare('DELETE FROM feed_tags WHERE feed_key = ? AND label = ?')
-				.bind(feedKey, label)
-				.run();
-		} catch (error) {
-			if (!isMissingTableError(error, 'feed_tags')) {
-				throw error;
-			}
-			feedTagsAvailable = false;
-		}
+	try {
+		await env.DB.prepare(`DELETE FROM feed_tags WHERE feed_key = ?
+		 AND label IN (SELECT value FROM json_each(?))`)
+			.bind(feedKey, JSON.stringify(uniqueLabels))
+			.run();
+	} catch (error) {
+		if (!isMissingTableError(error, 'feed_tags')) throw error;
 	}
 
-	for (const label of uniqueLabels) {
-		await env.DB.prepare('UPDATE feeds SET category = NULL WHERE rowid = ? AND category = ?')
-			.bind(rowid, label)
-			.run();
-	}
+	await env.DB.prepare(`UPDATE feeds SET category = NULL WHERE rowid = ?
+	 AND category IN (SELECT value FROM json_each(?))`)
+		.bind(rowid, JSON.stringify(uniqueLabels))
+		.run();
 	await syncPrimaryFeedCategory(env, rowid, feedKey);
 }
 
@@ -1053,7 +1075,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 	const addTag = body.get('a') as string | null;
 	const removeTag = body.get('r') as string | null;
 
-	const rowids = [...new Set(ids.map(parseItemId).filter((rowid) => Number.isFinite(rowid)))];
+	const rowids = [...new Set(ids.map(parseGoogleReaderItemRowid).filter((rowid): rowid is number => rowid !== null))];
 	if (rowids.length === 0) {
 		return new Response('OK', { headers: { 'Content-Type': 'text/plain' } });
 	}
@@ -1062,11 +1084,9 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 	const eventStmts: D1PreparedStatement[] = [];
 	const clientFamily = classifyClientFamily(request);
 
-	function addChunkedUpdate(column: 'is_read' | 'is_starred', value: 0 | 1) {
-		for (const rowidChunk of chunkValues(rowids, MAX_IN_QUERY_BIND_PARAMS)) {
-			const placeholders = rowidChunk.map(() => '?').join(',');
-			stmts.push(env.DB.prepare(`UPDATE items SET ${column} = ${value} WHERE rowid IN (${placeholders})`).bind(...rowidChunk));
-		}
+	function addBulkUpdate(column: 'is_read' | 'is_starred', value: 0 | 1) {
+		stmts.push(env.DB.prepare(`UPDATE items SET ${column} = ${value}
+		 WHERE rowid IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(rowids)));
 	}
 
 	if (addTag === 'user/-/state/com.google/read') {
@@ -1078,7 +1098,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_read', 1);
+		addBulkUpdate('is_read', 1);
 	}
 	if (removeTag === 'user/-/state/com.google/read') {
 		eventStmts.push(
@@ -1089,7 +1109,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_read', 0);
+		addBulkUpdate('is_read', 0);
 	}
 	if (addTag === 'user/-/state/com.google/starred') {
 		eventStmts.push(
@@ -1100,7 +1120,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_starred', 1);
+		addBulkUpdate('is_starred', 1);
 	}
 	if (removeTag === 'user/-/state/com.google/starred') {
 		eventStmts.push(
@@ -1111,7 +1131,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 				clientFamily,
 			})),
 		);
-		addChunkedUpdate('is_starred', 0);
+		addBulkUpdate('is_starred', 0);
 	}
 
 	if (stmts.length > 0) {

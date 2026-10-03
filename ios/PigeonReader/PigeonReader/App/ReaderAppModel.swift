@@ -71,7 +71,7 @@ final class ReaderAppModel {
 		let preparationID: UUID?
 	}
 
-	private struct PersonalizationOperationContext: Sendable, Equatable {
+	private struct AccountOperationContext: Sendable, Equatable {
 		let accountID: String
 		let generation: UUID
 	}
@@ -705,6 +705,7 @@ final class ReaderAppModel {
 		do {
 			let newSession = try await PigeonAPIClient.authenticate(baseURL: url, password: password, httpClient: httpClient)
 			try sessionStore.save(newSession)
+			sessionGeneration = UUID()
 			resetInMemoryLibraryForAccountChange()
 			session = newSession
 			serverURLText = newSession.baseURL.absoluteString
@@ -793,6 +794,8 @@ final class ReaderAppModel {
 			readerPreparation.reset()
 			listPositions.reset()
 			scrollReadTriggered = []
+			engagement = EngagementAggregator()
+			sentScrollThresholds = [:]
 			offlineStorageStats = .empty
 			isSynchronizingOfflineLibrary = false
 			isOffline = false
@@ -1126,28 +1129,31 @@ final class ReaderAppModel {
 			pathIsSatisfied: background.pathIsSatisfied,
 			isConstrained: background.pathIsConstrained,
 			allowsLowDataMode: allowsLowDataBackgroundRefresh
-		), session != nil else { return false }
+		), let context = accountContext(), Task.isCancelled == false else { return false }
 		let cachedArticles: [Recommendation]
-		if let accountID = session?.storageIdentity,
-			let cached = try? await offlineStore.loadSnapshot(accountID: accountID) {
+		if let cached = try? await offlineStore.loadSnapshot(accountID: context.accountID) {
 			cachedArticles = cached.articlesByCollection.values.flatMap { $0 }
 		} else {
 			cachedArticles = []
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		let knownIDs = BackgroundRefreshArticlePlanner.knownIDs(
 			inMemory: articleCache.values.flatMap { $0 },
 			cached: cachedArticles,
 		)
 		await prepareOfflineLibrary()
-		guard Task.isCancelled == false, isOffline == false else { return false }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return false }
 		let newlyArrived = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: knownIDs,
 			current: articleCache.values.flatMap { $0 },
 		)
-		ReaderNotificationManager.shared.expandEnabledAliases(using: subscriptions)
+		let refreshedSubscriptions = subscriptions
+		ReaderNotificationManager.shared.expandEnabledAliases(using: refreshedSubscriptions)
 		for article in newlyArrived.prefix(20) {
-			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: subscriptions)
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
+			await ReaderNotificationManager.shared.postNewArticle(article, subscriptions: refreshedSubscriptions)
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		lastBackgroundRefreshAt = .now
 		writeWidgetSnapshot()
 		return true
@@ -1157,31 +1163,38 @@ final class ReaderAppModel {
 		_ url: URL,
 		pendingFeedDefaults: UserDefaults = PigeonSharedData.defaults,
 	) async {
-		guard let link = PigeonDeepLink(url: url) else { return }
+		guard let link = PigeonDeepLink(url: url), Task.isCancelled == false else { return }
+		let context = accountContext()
 		switch link {
 		case .add(let url):
 			PendingFeedStore.remove(matching: url, defaults: pendingFeedDefaults)
 			presentPendingFeedRequest(url)
 		case .feed(let id):
+			guard let context else { return }
 			if navigation.items.contains(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) == false {
 				await prepareOfflineLibrary()
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let item = navigation.items.first(where: { $0.kind == .feed && ($0.id == id || $0.streamID == id || $0.feedKey == id) }) {
 				select(item: item)
 				await load(collection: item)
 			}
 		case .folder(let id):
+			guard let context else { return }
 			if navigation.folderItems.contains(where: { $0.id == id || $0.title == id || $0.streamID == id }) == false {
 				await prepareOfflineLibrary()
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let item = navigation.folderItems.first(where: { $0.id == id || $0.title == id || $0.streamID == id }) {
 				navigation.expandFolder(item.id)
 				select(item: item)
 				await load(collection: item)
 			}
 		case .article(let id, let requestedCollection):
+			guard let context else { return }
 			if article(withId: id) == nil { await prepareOfflineLibrary() }
-			guard let article = article(withId: id) else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false,
+				let article = article(withId: id) else { return }
 			if let item = collectionItem(for: article, preferredID: requestedCollection) {
 				select(item: item)
 				if articleCache[item.id] != nil {
@@ -1190,6 +1203,7 @@ final class ReaderAppModel {
 					await load(collection: item)
 				}
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			select(article: article)
 		}
 	}
@@ -1206,12 +1220,14 @@ final class ReaderAppModel {
 	}
 
 	func handleNotificationAction(_ action: ReaderNotificationAction) async {
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		let articleID: String
 		switch action {
 		case .open(let id), .markRead(let id), .star(let id): articleID = id
 		}
 		if article(withId: articleID) == nil { await prepareOfflineLibrary() }
-		guard let article = article(withId: articleID) else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false,
+			let article = article(withId: articleID) else { return }
 		switch action {
 		case .open:
 			await handleDeepLink(PigeonDeepLink.article(articleID, collection: nil).url)
@@ -1220,6 +1236,7 @@ final class ReaderAppModel {
 		case .star:
 			await setStarred(article, starred: true)
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		writeWidgetSnapshot()
 	}
 
@@ -1300,10 +1317,17 @@ final class ReaderAppModel {
 	}
 
 	func exportPersonalization() async -> String? {
-		guard let apiClient else { return nil }
+		guard let apiClient, let context = accountContext(for: apiClient) else { return nil }
 		do {
-			return try await apiClient.exportPersonalization()
+			try Task.checkCancellation()
+			let exported = try await apiClient.exportPersonalization()
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return nil }
+			return exported
+		} catch let error where isCancellation(error) {
+			return nil
 		} catch {
+			guard isCurrentAccountOperation(context) else { return nil }
 			presentSettingsError(error)
 			return nil
 		}
@@ -1886,25 +1910,31 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func cleanupOfflineBodies() async -> Int {
-		guard let accountID = session?.storageIdentity else { return 0 }
+		guard let context = accountContext() else { return 0 }
 		do {
-			let count = try await offlineStore.cleanupReadBodies(accountID: accountID, keepingNewest: 200)
-			if applyCachedSnapshot(try await offlineStore.loadSnapshot(accountID: accountID)) {
+			let count = try await offlineStore.cleanupReadBodies(accountID: context.accountID, keepingNewest: 200)
+			guard isCurrentAccountOperation(context) else { return count }
+			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return count }
+			if applyCachedSnapshot(snapshot) {
 				await persistCollections([ReaderSection.today.rawValue])
 			}
+			guard isCurrentAccountOperation(context) else { return count }
 			await refreshOfflineStorageStats()
 			return count
 		} catch {
+			guard isCurrentAccountOperation(context) else { return 0 }
 			presentSettingsError(error)
 			return 0
 		}
 	}
 
 	func clearOfflineArticles() async {
-		guard let accountID = session?.storageIdentity else { return }
+		guard let context = accountContext() else { return }
 		cancelPrewarmPersistence()
 		do {
-			try await offlineStore.clearCachedArticles(accountID: accountID)
+			try await offlineStore.clearCachedArticles(accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			offlineSyncCursor = nil
 			offlineCacheIntegrity = .needsBootstrap
 			hasLoadedNavigation = false
@@ -1915,8 +1945,10 @@ final class ReaderAppModel {
 			preferredCompactColumn = .content
 			writeWidgetSnapshot()
 			await refreshOfflineStorageStats()
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			presentSettingsError(error)
 		}
 	}
@@ -2190,6 +2222,7 @@ final class ReaderAppModel {
 	}
 
 	func refresh(collection: ReaderNavigationItem) async {
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		if selectedNavigationID == collection.id {
 			errorMessage = nil
 		}
@@ -2198,7 +2231,7 @@ final class ReaderAppModel {
 			session != nil,
 			apiClient != nil {
 			await prepareOfflineLibrary(force: true)
-			guard Task.isCancelled == false, isOffline == false else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return }
 		}
 		let loadedDuringPreparation = collectionFreshness[collection.id].map {
 			$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
@@ -2214,6 +2247,7 @@ final class ReaderAppModel {
 		if loadedDuringPreparation == false, syncBackedCompleteFeed == false {
 			await loadCollectionFromNetwork(collection: collection, force: true, now: .now)
 		}
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if hasLoadedNavigation {
 			await loadNavigation(force: true)
 		}
@@ -2233,7 +2267,7 @@ final class ReaderAppModel {
 	/// synchronization is still running loads independently, and later revisits
 	/// continue to refresh normally.
 	func loadForDisplay(collection: ReaderNavigationItem, now: Date = .now) async {
-		guard Task.isCancelled == false else { return }
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		let accountNeedsPreparation = offlineSynchronizationEnabled
 			&& (session.map { preparedOfflineAccountID != $0.storageIdentity } ?? false)
 		let shouldWaitForPreparation = accountNeedsPreparation
@@ -2244,17 +2278,17 @@ final class ReaderAppModel {
 			isShowingBootstrapSnapshot == false,
 			let preparationTask = offlinePreparationTask {
 			await preparationTask.value
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		}
 		if automaticDisplaySuppressionCollectionID == collection.id,
 			completedInitialLoadCollectionIDs.contains(collection.id),
 			collection.kind != .feed || cachedCollectionHasMissingBodies(collection.id) == false {
 			automaticDisplaySuppressionCollectionID = nil
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			await persistPrewarmedCollectionIfNeeded(collection)
 			return
 		}
-		guard Task.isCancelled == false else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if offlineSynchronizationEnabled,
 			let session,
 			preparedOfflineAccountID == session.storageIdentity,
@@ -2268,7 +2302,7 @@ final class ReaderAppModel {
 		} else {
 			await load(collection: collection, now: now)
 		}
-		guard Task.isCancelled == false else { return }
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		await persistPrewarmedCollectionIfNeeded(collection)
 	}
 
@@ -2277,7 +2311,7 @@ final class ReaderAppModel {
 		force: Bool,
 		now: Date,
 	) async {
-		guard let apiClient else {
+		guard let apiClient, let accountContext = accountContext(for: apiClient) else {
 			return
 		}
 		var freshnessBeforePreparation: Date?
@@ -2294,7 +2328,7 @@ final class ReaderAppModel {
 					&& collection.kind != .smart) {
 			freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
 			await prepareOfflineLibrary()
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 			let loadedDuringPreparation = collectionFreshness[collection.id].map {
 				$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
 			} ?? false
@@ -2305,7 +2339,7 @@ final class ReaderAppModel {
 		guard var context = operationContext(for: apiClient) else {
 			return
 		}
-		while Task.isCancelled == false {
+		while Task.isCancelled == false, isCurrentAccountOperation(accountContext) {
 			let key = ReaderCollectionLoadKey(
 				accountID: context.accountID,
 				collectionID: collection.id,
@@ -2323,6 +2357,7 @@ final class ReaderAppModel {
 					contextOverride: context,
 				)
 			}
+			guard isCurrentAccountOperation(accountContext) else { return }
 			guard let currentContext = operationContext(for: apiClient), currentContext != context else {
 				return
 			}
@@ -2338,6 +2373,7 @@ final class ReaderAppModel {
 		apiClientOverride: PigeonAPIClient? = nil,
 		contextOverride: OperationContext? = nil,
 	) async {
+		guard let accountContext = accountContext(), Task.isCancelled == false else { return }
 		guard retryAttempt > 0 || force || activeLoadIDs[collection.id] == nil else {
 			return
 		}
@@ -2353,11 +2389,12 @@ final class ReaderAppModel {
 				return
 			}
 			await prepareOfflineLibrary()
-			guard Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
 			if didPruneToday {
 				await persistCollections([collection.id])
 			}
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 			let defersPaginationResolution = consumeDeferredInitialFeedPagination(for: collection)
 			if defersPaginationResolution == false,
 				articleCache[collection.id] == nil
@@ -2385,6 +2422,7 @@ final class ReaderAppModel {
 		if force == false, articleCache[collection.id] != nil {
 			if pruneTodayIfNeeded(collection, now: now) {
 				await persistCollections([collection.id])
+				guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
 				return
 			}
@@ -2908,7 +2946,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func addFeed(urlText: String, folderName: String?) async -> Bool {
-		guard let apiClient else {
+		guard let apiClient, let context = accountContext(for: apiClient) else {
 			return false
 		}
 		let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2919,19 +2957,29 @@ final class ReaderAppModel {
 		}
 
 		do {
+			try Task.checkCancellation()
 			let result = try await apiClient.addSubscription(url: url)
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			if let folder = normalizedFolderName(folderName) {
 				try await apiClient.editSubscription(id: result.streamId, addingFolders: [folder])
+				try Task.checkCancellation()
+				guard isCurrentAccountOperation(context) else { return false }
 			}
 			settingsErrorMessage = nil
 			await loadLibrary(force: true, reportError: false)
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			if hasLoadedNavigation {
 				await loadNavigation(force: true, reportError: false)
 			}
+			try Task.checkCancellation()
+			guard isCurrentAccountOperation(context) else { return false }
 			return true
 		} catch let error where isCancellation(error) {
 			return false
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			await loadLibrary(force: true, reportError: false)
 			return false
@@ -2939,58 +2987,79 @@ final class ReaderAppModel {
 	}
 
 	func importOPML(_ preview: OPMLImportPreview) async throws -> OPMLImportResult {
-		guard let apiClient else { throw PigeonError.authenticationFailed }
-		let result = try await OPMLImportCoordinator.importPreview(preview, service: apiClient)
+		guard let apiClient, let context = accountContext(for: apiClient) else { throw PigeonError.authenticationFailed }
+		let validateContext = {
+			guard self.isCurrentAccountOperation(context) else { throw CancellationError() }
+		}
+		let result = try await OPMLImportCoordinator.importPreview(preview, service: apiClient, validateContext: validateContext)
+		try Task.checkCancellation()
+		try validateContext()
 		await loadLibrary(force: true)
+		try Task.checkCancellation()
+		try validateContext()
 		await loadNavigation(force: true)
+		try Task.checkCancellation()
+		try validateContext()
 		return result
 	}
 
 	func loadStaleFeeds(days: Int = 90) async {
-		guard let apiClient else { return }
+		guard let apiClient, let context = accountContext(for: apiClient) else { return }
 		isLoadingStaleFeeds = true
-		defer { isLoadingStaleFeeds = false }
+		defer {
+			if isCurrentAccountOperation(context) {
+				isLoadingStaleFeeds = false
+			}
+		}
 		do {
-			staleFeedSnapshot = try await apiClient.staleFeeds(days: days)
+			let snapshot = try await apiClient.staleFeeds(days: days)
+			guard isCurrentAccountOperation(context) else { return }
+			staleFeedSnapshot = snapshot
 			settingsErrorMessage = nil
 		} catch let error where isCancellation(error) {
 			return
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			presentSettingsError(error)
 		}
 	}
 
 	func archiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
-		guard let apiClient, feeds.isEmpty == false else { return false }
+		guard let apiClient, let context = accountContext(for: apiClient), feeds.isEmpty == false else { return false }
 		let keys = feeds.map(\.feedKey)
 		do {
 			try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+			guard isCurrentAccountOperation(context) else { return false }
 			staleFeedUndo = .archive(keys)
 			staleFeedUndoTitle = keys.count == 1 ? "Undo Archive" : "Undo Archive \(keys.count) Feeds"
 			await loadStaleFeeds()
-			return true
+			return isCurrentAccountOperation(context)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			return false
 		}
 	}
 
 	func unarchiveStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
-		guard let apiClient, feeds.isEmpty == false else { return false }
+		guard let apiClient, let context = accountContext(for: apiClient), feeds.isEmpty == false else { return false }
 		let keys = feeds.map(\.feedKey)
 		do {
 			try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+			guard isCurrentAccountOperation(context) else { return false }
 			staleFeedUndo = .unarchive(keys)
 			staleFeedUndoTitle = keys.count == 1 ? "Undo Restore" : "Undo Restore \(keys.count) Feeds"
 			await loadStaleFeeds()
-			return true
+			return isCurrentAccountOperation(context)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			presentSettingsError(error)
 			return false
 		}
 	}
 
 	func unsubscribeStaleFeeds(_ feeds: [StaleFeed]) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let selectedIDs = Set(feeds.map(\.streamId))
 		let selectedKeys = Set(feeds.map(\.feedKey))
 		let removed = subscriptions.filter { selectedIDs.contains($0.id) || selectedKeys.contains($0.feedKey) }
@@ -3000,26 +3069,34 @@ final class ReaderAppModel {
 		}
 		var changedCollectionIDs = Set<String>()
 		for subscription in removed {
-			changedCollectionIDs.formUnion(await removeSubscriptionLocally(subscription))
+			guard let removedCollectionIDs = await removeSubscriptionLocally(subscription) else { return false }
+			changedCollectionIDs.formUnion(removedCollectionIDs)
 		}
 		staleFeedUndo = .unsubscribe(removed)
 		staleFeedUndoTitle = removed.count == 1 ? "Undo Unsubscribe" : "Undo Unsubscribe \(removed.count) Feeds"
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(changedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		await loadNavigation(force: true)
+		guard isCurrentAccountOperation(context) else { return false }
 		await loadStaleFeeds()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	func undoStaleFeedAction() async {
-		guard let undo = staleFeedUndo else { return }
+		guard let undo = staleFeedUndo, let context = accountContext() else { return }
 		switch undo {
 		case .archive(let keys):
 			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .unarchive)
+				guard isCurrentAccountOperation(context) else { return }
 			} catch {
+				guard isCurrentAccountOperation(context) else { return }
 				presentSettingsError(error)
 				return
 			}
@@ -3027,7 +3104,9 @@ final class ReaderAppModel {
 			guard let apiClient else { return }
 			do {
 				try await apiClient.setStaleFeedsArchived(keys, action: .archive)
+				guard isCurrentAccountOperation(context) else { return }
 			} catch {
+				guard isCurrentAccountOperation(context) else { return }
 				presentSettingsError(error)
 				return
 			}
@@ -3037,17 +3116,21 @@ final class ReaderAppModel {
 			}
 			setSubscriptions(subscriptions + removed)
 			rebuildNavigationFromSubscriptions()
-			if let accountID = session?.storageIdentity {
-				do {
-					try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-					try await offlineStore.saveNavigation(navigation, accountID: accountID)
-				} catch {
-					errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
-				}
+			let savedSubscriptions = subscriptions
+			let savedNavigation = navigation
+			do {
+				try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+				try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			} catch {
+				guard isCurrentAccountOperation(context) else { return }
+				errorMessage = "Your feed restore is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 			}
+			guard isCurrentAccountOperation(context) else { return }
 			await replayPendingMutations()
+			guard isCurrentAccountOperation(context) else { return }
 			if apiClient != nil {
 				await loadNavigation(force: true)
+				guard isCurrentAccountOperation(context) else { return }
 			}
 		}
 		staleFeedUndo = nil
@@ -3057,6 +3140,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func renameFeed(_ subscription: FeedSubscription, to newTitle: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard title.isEmpty == false, title.count <= 200 else {
 			errorMessage = "Feed names must be between 1 and 200 characters."
@@ -3068,12 +3152,15 @@ final class ReaderAppModel {
 		updateSubscription(id: subscription.id) { $0.title = title }
 		rebuildNavigationFromSubscriptions()
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func moveFeed(_ subscription: FeedSubscription, toFolderNames folderNames: [String]) async -> Bool {
+		guard let context = accountContext() else { return false }
 		guard let normalizedFolders = normalizedFolderNames(folderNames) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
@@ -3105,7 +3192,7 @@ final class ReaderAppModel {
 			folders: normalizedFolders,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		updateSubscription(id: subscription.id) { item in
 			item.categories = normalizedFolders.map {
 				FeedCategory(id: "user/-/label/\($0)", label: $0)
@@ -3119,33 +3206,33 @@ final class ReaderAppModel {
 			previousSelectedID: previousSelectedID,
 			previousSelectedItem: previousSelectedItem,
 		)
-		if let accountID = session?.storageIdentity {
-			do {
-				try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-				try await offlineStore.saveNavigation(navigation, accountID: accountID)
-			} catch {
-				errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
-			}
-		}
+		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		if remappedCollectionIDs.isEmpty == false {
 			await persistCollections(remappedCollectionIDs)
+			guard isCurrentAccountOperation(context) else { return false }
 		}
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func unsubscribe(_ subscription: FeedSubscription) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let mutation = OfflineMutation(kind: .unsubscribeFeed, feedId: subscription.id)
 		guard await enqueueOfflineMutation(mutation) else { return false }
-		let changedCollectionIDs = await removeSubscriptionLocally(subscription)
+		guard let changedCollectionIDs = await removeSubscriptionLocally(subscription) else { return false }
 		await persistLibraryAfterSubscriptionChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(changedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
-	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String> {
+	private func removeSubscriptionLocally(_ subscription: FeedSubscription) async -> Set<String>? {
 		let removedFeedItems = navigation.items
 			.filter { $0.kind == .feed && $0.streamID == subscription.id }
 		let subscriptionFolderIDs = Set(subscription.categories.map(\.id).filter { $0.isEmpty == false })
@@ -3155,7 +3242,7 @@ final class ReaderAppModel {
 			+ subscriptionFolderIDs.map { "\(subscription.id)::\($0)" }
 		)
 		let affectedFolderIDs = subscriptionFolderIDs.union(removedFeedItems.compactMap(\.parentID))
-		await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs))
+		guard await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs)) else { return nil }
 		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
 		var changedCollectionIDs = Set(removedFeedIDs)
@@ -3193,6 +3280,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func renameFolder(_ oldName: String, to newName: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		guard let name = normalizedFolderName(newName) else {
 			errorMessage = "Folder names must be between 1 and 80 characters."
 			return false
@@ -3217,7 +3305,7 @@ final class ReaderAppModel {
 					]
 				}
 		)
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		for subscription in affected {
 			let folders = subscription.folderNames.map { $0 == oldName ? name : $0 }
 			guard await enqueueOfflineMutation(
@@ -3228,13 +3316,17 @@ final class ReaderAppModel {
 		let remappedCollectionIDs = remapFolderCollectionState(from: oldName, to: name)
 		rebuildNavigationFromSubscriptions()
 		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		await persistCollections(remappedCollectionIDs)
+		guard isCurrentAccountOperation(context) else { return false }
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
 	@discardableResult
 	func deleteFolder(_ name: String) async -> Bool {
+		guard let context = accountContext() else { return false }
 		let folderID = folderStreamID(forName: name)
 		let wasSelectedFolder = selectedNavigationID == folderID
 		let affected = subscriptions.filter { $0.folderNames.contains(name) }
@@ -3272,7 +3364,7 @@ final class ReaderAppModel {
 				)
 			) else { return false }
 		}
-		await hydrateCachedCollections(cacheIDsToHydrate)
+		guard await hydrateCachedCollections(cacheIDsToHydrate) else { return false }
 		for subscription in affected {
 			updateSubscription(id: subscription.id) { item in
 				item.categories.removeAll { $0.label == name }
@@ -3306,10 +3398,13 @@ final class ReaderAppModel {
 			}
 		}
 		await persistLibraryAfterFolderChange()
+		guard isCurrentAccountOperation(context) else { return false }
 		if remappedCollectionIDs.isEmpty == false {
 			await persistCollections(remappedCollectionIDs)
+			guard isCurrentAccountOperation(context) else { return false }
 		}
 		await replayPendingMutations()
+		guard isCurrentAccountOperation(context) else { return false }
 		return true
 	}
 
@@ -4016,8 +4111,10 @@ final class ReaderAppModel {
 	}
 
 	func recordExplicitOpen(for article: Recommendation) async {
+		guard let context = accountContext(), Task.isCancelled == false else { return }
 		sentScrollThresholds[article.id] = []
 		await send(EngagementEvent(itemId: article.id, type: .explicitOpen))
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if readerTypography.markReadBehavior == .onOpen, !article.isRead {
 			await setRead(article, read: true)
 		}
@@ -4029,10 +4126,16 @@ final class ReaderAppModel {
 		minimumActiveDuration: TimeInterval = 10,
 		maximumIntervals: Int? = nil,
 	) async {
-		guard apiClient != nil, engagement.resume(itemId: articleId, at: .now) else {
+		guard let apiClient, let context = accountContext(for: apiClient),
+			Task.isCancelled == false,
+			engagement.resume(itemId: articleId, at: .now) else {
 			return
 		}
-		defer { engagement.pause(itemId: articleId, at: .now) }
+		defer {
+			if isCurrentAccountOperation(context) {
+				engagement.pause(itemId: articleId, at: .now)
+			}
+		}
 		guard maximumIntervals != 0 else { return }
 
 		do {
@@ -4040,12 +4143,14 @@ final class ReaderAppModel {
 			while !Task.isCancelled {
 				try await Task.sleep(for: interval)
 				try Task.checkCancellation()
+				guard isCurrentAccountOperation(context) else { return }
 				if let event = engagement.activeReadingDeltaEvent(
 					itemId: articleId,
 					at: .now,
 					minimumDuration: minimumActiveDuration,
 				) {
 					_ = await send(event, reportErrors: false)
+					guard isCurrentAccountOperation(context) else { return }
 				}
 				completedIntervals += 1
 				if let maximumIntervals, completedIntervals >= maximumIntervals {
@@ -4059,6 +4164,7 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+		guard let context = accountContext(), Task.isCancelled == false else { return nil }
 		let articleToMarkRead: Recommendation?
 		if readerTypography.markReadBehavior == .onScroll,
 			depth >= 0.6,
@@ -4082,9 +4188,10 @@ final class ReaderAppModel {
 
 		guard articleToMarkRead != nil || event != nil else { return nil }
 		return Task { @MainActor [weak self] in
-			guard let self else { return }
+			guard let self, self.isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 			if let articleToMarkRead {
 				await self.setRead(articleToMarkRead, read: true)
+				guard self.isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 				if self.article(withId: itemId)?.isRead == false {
 					self.forgetScrollRead(for: articleToMarkRead)
 				}
@@ -4798,10 +4905,12 @@ final class ReaderAppModel {
 	/// Drops yesterday's Today rows after local midnight and refreshes if Today is open.
 	@discardableResult
 	func handleLocalDayChange(now: Date = .now) async -> Bool {
+		guard let context = accountContext(), Task.isCancelled == false else { return false }
 		if pruneStaleTodayStories(now: now) {
 			if selectedCollection.smartSection == .today {
 				await load(collection: selectedCollection, force: true, now: now)
 			}
+			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return true }
 			// Persist the pruned cache after the selected Today page has had a
 			// chance to render and refresh.
 			await persistCollections([ReaderSection.today.rawValue])
@@ -4875,7 +4984,8 @@ final class ReaderAppModel {
 	}
 
 	func recordPreference(_ type: EngagementEventType, for article: Recommendation) async {
-		guard type == .moreLikeThis || type == .notInterested else { return }
+		guard type == .moreLikeThis || type == .notInterested,
+			let context = accountContext(), Task.isCancelled == false else { return }
 		articleStateGeneration = UUID()
 		let mutation = OfflineMutation(
 			kind: .feedback,
@@ -4904,6 +5014,7 @@ final class ReaderAppModel {
 			}
 		}
 		await persistCollections([forYouID])
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		await replayPendingMutations()
 	}
 
@@ -5586,7 +5697,6 @@ final class ReaderAppModel {
 		articleMutationTask?.cancel()
 		articleMutationTask = nil
 		invalidateCollectionLoads()
-		sessionGeneration = UUID()
 		libraryGeneration = UUID()
 		isInitialLibraryLoading = offlineSynchronizationEnabled && session != nil
 		isShowingBootstrapSnapshot = false
@@ -5633,6 +5743,8 @@ final class ReaderAppModel {
 		readerPreparation.reset()
 		listPositions.reset()
 		scrollReadTriggered = []
+		engagement = EngagementAggregator()
+		sentScrollThresholds = [:]
 		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
@@ -5915,19 +6027,27 @@ final class ReaderAppModel {
 		)
 	}
 
-	private func personalizationContext(for apiClient: PigeonAPIClient) -> PersonalizationOperationContext? {
-		guard let session, session.storageIdentity == apiClient.session.storageIdentity else {
-			return nil
-		}
-		return PersonalizationOperationContext(
-			accountID: session.storageIdentity,
-			generation: sessionGeneration,
-		)
+	private func personalizationContext(for apiClient: PigeonAPIClient) -> AccountOperationContext? {
+		accountContext(for: apiClient)
 	}
 
-	private func isCurrentPersonalizationOperation(_ context: PersonalizationOperationContext) -> Bool {
+	private func accountContext(for apiClient: PigeonAPIClient) -> AccountOperationContext? {
+		guard let context = accountContext(), context.accountID == apiClient.session.storageIdentity else { return nil }
+		return context
+	}
+
+	private func accountContext() -> AccountOperationContext? {
+		guard let session else { return nil }
+		return AccountOperationContext(accountID: session.storageIdentity, generation: sessionGeneration)
+	}
+
+	private func isCurrentAccountOperation(_ context: AccountOperationContext) -> Bool {
 		session?.storageIdentity == context.accountID
 			&& sessionGeneration == context.generation
+	}
+
+	private func isCurrentPersonalizationOperation(_ context: AccountOperationContext) -> Bool {
+		isCurrentAccountOperation(context)
 	}
 
 	private func isCurrentOperation(_ context: OperationContext) -> Bool {
@@ -6451,12 +6571,18 @@ final class ReaderAppModel {
 	}
 
 	private func refreshPendingArticleStates(accountID: String) async {
-		guard session?.storageIdentity == accountID else { return }
+		guard session?.storageIdentity == accountID, Task.isCancelled == false else { return }
+		let context = OperationContext(
+			accountID: accountID,
+			generation: libraryGeneration,
+			preparationID: activeOfflinePreparationID,
+		)
 		let revisionsAtStart = pendingArticleStateRevisions
-		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: 10_000) else {
+		// A newer choice can follow any FIFO prefix, so match the complete page overlay.
+		guard let pendingMutations = try? await offlineStore.pendingMutations(accountID: accountID, limit: Int.max) else {
 			return
 		}
-		guard session?.storageIdentity == accountID else { return }
+		guard isCurrentOperation(context), Task.isCancelled == false else { return }
 		let durableStates = pendingArticleStates(from: pendingMutations)
 		let keys = Set(pendingArticleStates.keys).union(durableStates.keys)
 		for key in keys {
@@ -6484,21 +6610,20 @@ final class ReaderAppModel {
 		return String(rowID)
 	}
 
-	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async {
-		guard collectionIDs.isEmpty == false,
-			let accountID = session?.storageIdentity else {
-			return
-		}
+	private func hydrateCachedCollections(_ collectionIDs: Set<String>) async -> Bool {
+		guard let context = accountContext() else { return false }
+		guard collectionIDs.isEmpty == false else { return true }
 		let unloadedIDs = collectionIDs.filter { articleCache[$0] == nil }
 		let unloadedPaginationIDs = collectionIDs.filter {
 			streamContinuations[$0] == nil && seenStreamContinuations[$0] == nil
 		}
 		guard unloadedIDs.isEmpty == false || unloadedPaginationIDs.isEmpty == false else {
-			return
+			return true
 		}
-		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID) else {
-			return
+		guard let snapshot = try? await offlineStore.loadSnapshot(accountID: context.accountID) else {
+			return isCurrentAccountOperation(context)
 		}
+		guard isCurrentAccountOperation(context) else { return false }
 		for collectionID in unloadedIDs {
 			if let articles = snapshot.articlesByCollection[collectionID] {
 				articleCache[collectionID] = articles
@@ -6516,40 +6641,45 @@ final class ReaderAppModel {
 				selectedArticleIDs[collectionID] = restoration.selectedArticleIDs[collectionID]
 			}
 		}
+		return true
 	}
 
 	private func persistCollections(_ collectionIDs: Set<String>) async {
-		guard let accountID = session?.storageIdentity else { return }
+		guard let context = accountContext() else { return }
+		let savedNavigation = navigation
+		let collections = collectionIDs.map { collectionID in
+			(
+				id: collectionID,
+				articles: articleCache[collectionID],
+				continuation: streamContinuations[collectionID],
+				isRemoved: navigation.item(withID: collectionID) == nil,
+			)
+		}
 		do {
-			for collectionID in collectionIDs {
-				// A collection that still exists in navigation may have state only in
-				// SQLite. Do not turn that cache into an empty snapshot merely because
-				// this operation did not load it into memory. Removed IDs are explicit
-				// clears and must still be persisted as empty collections.
-				let isRemovedCollection = navigation.item(withID: collectionID) == nil
-				let hasLoadedArticles = articleCache[collectionID] != nil
-				if hasLoadedArticles || isRemovedCollection {
+			for collection in collections {
+				// An unloaded collection still in navigation belongs to SQLite.
+				// Removed IDs are explicit clears, even without loaded articles.
+				if collection.articles != nil || collection.isRemoved {
 					try await offlineStore.saveArticles(
-						articleCache[collectionID] ?? [],
-						collectionID: collectionID,
-						accountID: accountID,
+						collection.articles ?? [],
+						collectionID: collection.id,
+						accountID: context.accountID,
 					)
 				}
-				// A continuation can be hydrated independently of article bodies.
-				// Persist that moved token without overwriting an unloaded SQLite
-				// article collection with an empty array.
-				if hasLoadedArticles || isRemovedCollection || streamContinuations[collectionID] != nil {
+				if collection.articles != nil || collection.isRemoved || collection.continuation != nil {
 					try await offlineStore.saveCollectionContinuation(
-						streamContinuations[collectionID],
-						collectionID: collectionID,
-						accountID: accountID,
+						collection.continuation,
+						collectionID: collection.id,
+						accountID: context.accountID,
 					)
 				}
 			}
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 			writeWidgetSnapshot()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = error.localizedDescription
 		}
 	}
@@ -6607,14 +6737,16 @@ final class ReaderAppModel {
 	}
 
 	private func persistLibraryAfterSubscriptionChange() async {
-		guard let accountID = session?.storageIdentity else {
-			return
-		}
+		guard let context = accountContext() else { return }
+		let savedSubscriptions = subscriptions
+		let savedNavigation = navigation
 		do {
-			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
+			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = "Your library change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
 	}
@@ -6963,13 +7095,14 @@ final class ReaderAppModel {
 	}
 
 	private func persistLibraryAfterFolderChange() async {
-		guard let accountID = session?.storageIdentity else {
-			return
-		}
+		guard let context = accountContext() else { return }
+		let savedSubscriptions = subscriptions
+		let savedNavigation = navigation
 		do {
-			try await offlineStore.saveSubscriptions(subscriptions, accountID: accountID)
-			try await offlineStore.saveNavigation(navigation, accountID: accountID)
+			try await offlineStore.saveSubscriptions(savedSubscriptions, accountID: context.accountID)
+			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
 		} catch {
+			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = "Your folder change is queued, but Pigeon could not update its saved library. \(error.localizedDescription)"
 		}
 	}
@@ -7046,7 +7179,7 @@ final class ReaderAppModel {
 		read: Bool,
 		scope: OfflineMutationScope,
 	) async {
-		guard targets.isEmpty == false else { return }
+		guard targets.isEmpty == false, let context = accountContext(), Task.isCancelled == false else { return }
 		articleStateGeneration = UUID()
 		let targetIDs = targets.map(\.readerId)
 		for start in stride(from: 0, to: targetIDs.count, by: 200) {
@@ -7091,22 +7224,26 @@ final class ReaderAppModel {
 		}
 		reconcileCurrentArticleSelection()
 		await persistCollections(changedCollections)
+		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		await replayPendingMutations()
 	}
 
 	@discardableResult
 	private func send(_ event: EngagementEvent, reportErrors: Bool = true) async -> Bool {
-		guard let apiClient else {
+		guard let apiClient, let context = accountContext(for: apiClient) else {
 			return false
 		}
 		do {
+			try Task.checkCancellation()
 			try await apiClient.sendEngagement([event])
-			return true
+			try Task.checkCancellation()
+			return isCurrentAccountOperation(context)
 		} catch let error where isCancellation(error) {
 			return false
 		} catch let error as PigeonError where error.isNonFatalEngagementFailure {
 			return false
 		} catch {
+			guard isCurrentAccountOperation(context) else { return false }
 			if reportErrors {
 				errorMessage = error.localizedDescription
 			}

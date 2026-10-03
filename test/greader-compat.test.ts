@@ -260,6 +260,19 @@ function createReaderApiEnv(
 			return this;
 		}
 
+		private requestedFeedKeys(): Set<string> {
+			const values = this.values.length > 0 ? JSON.parse(String(this.values[0])) as Array<string | number> : [];
+			if (this.sql.includes('SELECT feed_key FROM items WHERE rowid IN')) {
+				const rowids = new Set(values);
+				return new Set(items.filter((item) => rowids.has(item.rowid)).map((item) => item.feed_key));
+			}
+			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid IN')) {
+				const rowids = new Set(values);
+				return new Set(feeds.filter((feed) => rowids.has(feed.rowid)).map((feed) => feed.feed_key));
+			}
+			return new Set(values.map(String));
+		}
+
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
 				return { value: '13' } as T;
@@ -366,7 +379,7 @@ function createReaderApiEnv(
 					placeholderCount <= 100,
 					`expected batched item lookup to stay within D1 parameter limit, got ${placeholderCount}`,
 				);
-				const requestedRowIds = new Set(this.values.map((value) => Number(value)));
+				const requestedRowIds = new Set((JSON.parse(String(this.values[0])) as number[]));
 				return {
 					results: items.filter((item) => requestedRowIds.has(item.rowid)) as T[],
 				};
@@ -378,7 +391,7 @@ function createReaderApiEnv(
 					placeholderCount <= 100,
 					`expected batched feed lookup to stay within D1 parameter limit, got ${placeholderCount}`,
 				);
-				const requestedFeedKeys = new Set(this.values.map((value) => String(value)));
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds.filter((feed) => requestedFeedKeys.size === 0 || requestedFeedKeys.has(feed.feed_key)) as T[],
 				};
@@ -397,7 +410,7 @@ function createReaderApiEnv(
 			}
 
 			if (this.sql.includes('JOIN feed_tags ft')) {
-				const requestedFeedKeys = new Set(this.values.map((value) => String(value)));
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds.flatMap((feed) =>
 						(feed.tags ?? [])
@@ -408,7 +421,7 @@ function createReaderApiEnv(
 			}
 
 			if (this.sql.includes('SELECT feed_key, category')) {
-				const requestedFeedKeys = new Set(this.values.map((value) => String(value)));
+				const requestedFeedKeys = this.requestedFeedKeys();
 				return {
 					results: feeds
 						.filter((feed) => requestedFeedKeys.size === 0 || requestedFeedKeys.has(feed.feed_key))
@@ -1037,13 +1050,15 @@ test('subscription/edit stores repeated label additions and removals for a feed'
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(statements.filter((statement) => statement.sql.includes('INSERT OR IGNORE INTO feed_tags')).length, 2);
+	const insertedLabels = statements.filter((statement) => statement.sql.includes('INSERT OR IGNORE INTO feed_tags'));
+	assert.equal(insertedLabels.length, 1);
+	assert.deepEqual(JSON.parse(String(insertedLabels[0].values[1])), ['Favorites', 'Work']);
 	assert.ok(
 		statements.some(
 			(statement) =>
 				statement.sql.includes('DELETE FROM feed_tags') &&
 				statement.values[0] === FEED_ROW.feed_key &&
-				statement.values[1] === 'Old',
+				JSON.parse(String(statement.values[1])).includes('Old'),
 		),
 	);
 	assert.ok(
@@ -1212,7 +1227,7 @@ test('stream/items/contents includes every label category for a tagged feed', as
 	]);
 });
 
-test('edit-tag batches large read-state updates so NetNewsWire sync writes stay within D1 limits', async () => {
+test('edit-tag compacts large read-state updates so NetNewsWire sync writes stay within D1 limits', async () => {
 	const cases = [
 		{
 			param: 'a',
@@ -1262,14 +1277,14 @@ test('edit-tag batches large read-state updates so NetNewsWire sync writes stay 
 
 		assert.equal(response.status, 200);
 		assert.equal(await response.text(), 'OK');
-		assert.equal(batches.length, 3);
+		assert.equal(batches.length, 1);
 		assert.deepEqual(
 			batches.map((batch) => batch.values.length),
-			[100, 100, 50],
+			[1],
 		);
 		assert.ok(batches.every((batch) => batch.sql.includes(testCase.expectedSql)));
 		assert.deepEqual(
-			batches.flatMap((batch) => batch.values).map((value) => Number(value)),
+			JSON.parse(String(batches[0].values[0])),
 			Array.from({ length: 250 }, (_, index) => index + 1),
 		);
 	}

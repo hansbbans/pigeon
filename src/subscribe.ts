@@ -15,11 +15,7 @@ import {
 	type InitialImportBaseline,
 } from './rss-fetcher';
 import type { ParsedItem } from './rss-parser';
-
-interface SubscribeRequest {
-	url: string;
-	category?: string;
-}
+import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 
 interface SubscribeResponse {
 	feed_key: string;
@@ -33,6 +29,11 @@ interface ExistingFeed {
 	display_name: string;
 }
 
+interface ExistingFeedUrl extends ExistingFeed {
+	source_url: string | null;
+	canonical_url: string | null;
+}
+
 /**
  * Core subscription logic (exported for reuse in GReader API)
  * @returns Object with feed_key, display_name, and rowid on success
@@ -43,6 +44,8 @@ export async function subscribeToFeed(
 	feedUrl: string,
 	category?: string | null
 ): Promise<{ feed_key: string; display_name: string; rowid: number; wasCreated: boolean }> {
+	assertBoundedIdentifier(feedUrl, 'Feed URL');
+	if (category) assertBoundedIdentifier(category, 'Category');
 	let discovery: Awaited<ReturnType<typeof discoverFeeds>>;
 	try {
 		discovery = await discoverFeeds(feedUrl, { includeItems: true });
@@ -53,16 +56,18 @@ export async function subscribeToFeed(
 	const candidate = discovery.candidates[0];
 	if (!candidate) throw new Error('Failed to discover feed: no supported feed was found');
 	const canonicalUrl = new URL(candidate.url);
-	const feedTitle = candidate.title;
-	const siteUrl = candidate.site_url;
+	assertBoundedIdentifier(canonicalUrl.href, 'Feed URL');
+	const feedTitle = truncateUtf8(candidate.title, MAX_TEXT_METADATA_BYTES);
+	const siteUrl = boundedStoredUrl(candidate.site_url);
 
-	// Generate feed_key from URL (normalize domain + path)
+	// Keep the readable URL prefix, but preserve the full URL's identity.
 	const feedKey = await generateFeedKey(canonicalUrl);
 
 	// Canonical URLs and their redirect aliases all resolve to one subscription.
 	const aliasUrls = [...new Set([discovery.input_url, ...candidate.aliases])].filter(
 		(url) => url !== canonicalUrl.href,
 	);
+	for (const alias of aliasUrls) assertBoundedIdentifier(alias, 'Feed URL alias');
 	const existing = await findExistingFeed(env.DB, feedKey, canonicalUrl.href, aliasUrls);
 
 	if (existing) {
@@ -193,13 +198,13 @@ async function findExistingFeed(
 	aliasUrls: string[],
 ): Promise<ExistingFeed | null> {
 	const canonical = await db.prepare(
-		'SELECT rowid, feed_key, display_name FROM feeds WHERE feed_key = ? OR canonical_url = ? OR source_url = ? LIMIT 1',
+		'SELECT rowid, feed_key, display_name FROM feeds WHERE canonical_url = ? OR source_url = ? LIMIT 1',
 	)
-		.bind(feedKey, canonicalUrl, canonicalUrl)
+		.bind(canonicalUrl, canonicalUrl)
 		.first<ExistingFeed>();
 	if (canonical) return canonical;
 
-	for (const aliasUrl of aliasUrls) {
+	for (const aliasUrl of new Set([canonicalUrl, ...aliasUrls])) {
 		const alias = await db.prepare(
 			`SELECT f.rowid, f.feed_key, f.display_name
 			 FROM feed_url_aliases a
@@ -210,6 +215,17 @@ async function findExistingFeed(
 			.bind(aliasUrl)
 			.first<ExistingFeed>();
 		if (alias) return alias;
+	}
+
+	// Older subscriptions used a lossy slug. Reuse that key only when its
+	// stored URL really identifies the requested resource, never on slug alone.
+	for (const key of new Set([feedKey, await generateLegacyFeedKey(new URL(canonicalUrl))])) {
+		const keyed = await db.prepare(
+			'SELECT rowid, feed_key, display_name, source_url, canonical_url FROM feeds WHERE feed_key = ?',
+		).bind(key).first<ExistingFeedUrl>();
+		if (keyed && normalizedFeedUrl(keyed.canonical_url || keyed.source_url) === normalizedFeedUrl(canonicalUrl)) {
+			return keyed;
+		}
 	}
 	return null;
 }
@@ -313,20 +329,27 @@ export async function handleSubscribe(request: Request, env: Env): Promise<Respo
 	if (authErr) return authErr;
 
 	// Parse request body
-	let body: SubscribeRequest;
+	let body: unknown;
 	try {
 		body = await request.json();
 	} catch {
 		return new Response('Invalid JSON', { status: 400 });
 	}
 
-	if (!body.url) {
+	if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+		return new Response('Request body must be an object', { status: 400 });
+	}
+	if (!('url' in body) || typeof body.url !== 'string' || body.url.trim() === '') {
 		return new Response('Missing url field', { status: 400 });
+	}
+	const category = 'category' in body ? body.category : undefined;
+	if (category !== undefined && category !== null && typeof category !== 'string') {
+		return new Response('category must be a string', { status: 400 });
 	}
 
 	// Subscribe to feed
 	try {
-		const result = await subscribeToFeed(env, body.url, body.category);
+		const result = await subscribeToFeed(env, body.url, category);
 
 		const response: SubscribeResponse = {
 			feed_key: result.feed_key,
@@ -342,10 +365,33 @@ export async function handleSubscribe(request: Request, env: Env): Promise<Respo
 }
 
 /**
- * Generate a feed key from a URL
- * Example: https://hnrss.org/newest -> "hnrss-org-newest"
+ * Generate a readable feed key with a collision-resistant full URL identity.
  */
 async function generateFeedKey(url: URL): Promise<string> {
+	const prefix = [url.hostname.replace(/^www\./, ''), url.pathname]
+		.join('/')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-|-$/g, '');
+	return `${prefix}-${await hashFeedQuery(normalizedFeedUrl(url.href)!)}`;
+}
+
+function normalizedFeedUrl(value: string | null): string | null {
+	if (!value) return null;
+	try {
+		const url = new URL(value);
+		url.hash = '';
+		// Sort different parameter names while preserving the order of repeated
+		// values, which some publishers use to distinguish feed resources.
+		url.searchParams.sort();
+		return url.href;
+	} catch {
+		return null;
+	}
+}
+
+/** Previous key format, used only to safely resolve existing subscriptions. */
+async function generateLegacyFeedKey(url: URL): Promise<string> {
 	const normalizedQuery = [...url.searchParams.entries()]
 		.sort(([leftKey, leftValue], [rightKey, rightValue]) => {
 			if (leftKey === rightKey) {

@@ -5,6 +5,7 @@ import { applyRoutingRules } from './routing-rules';
 import { getFaviconForEmail } from './favicon';
 import { extractOriginalUrlFromEmail } from './original-url';
 import { ensureDatabaseSchema } from './migrations';
+import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 
 const MAX_CONTENT_SIZE = 900_000; // 900KB — stay under D1's 1MB row limit
 
@@ -79,7 +80,7 @@ function unwrapForward(
 	// Strip "Fwd: " prefix from subject
 	const subject = (parsed.subject || '(no subject)').replace(/^Fwd:\s*/i, '');
 
-	console.log(`Forward unwrapped | forwarder=${trustedForwarder} original_sender=${originalAddress}`);
+	console.log(`Forward unwrapped | forwarder=${trustedForwarder} original_sender=${truncateUtf8(originalAddress, MAX_TEXT_METADATA_BYTES)}`);
 
 	return { fromAddress: originalAddress, fromName: originalName, subject };
 }
@@ -122,9 +123,13 @@ export async function handleIncomingEmail(
 				: new Date().toISOString();
 
 		const messageId = parsed.messageId || crypto.randomUUID();
+		// Identity fields must stay exact for routing and deduplication.
+		assertBoundedIdentifier(fromAddress, 'Sender address');
+		assertBoundedIdentifier(messageId, 'Message-ID');
 
 		// 4. Resolve feed key and display name
 		let feedKey = resolveFeedKey(parsed.headers, fromAddress, replyToAddress);
+		assertBoundedIdentifier(feedKey, 'Feed key');
 		let displayName = resolveFeedDisplayName(
 			parsed.headers,
 			fromName,
@@ -138,33 +143,44 @@ export async function handleIncomingEmail(
 			fromAddress,
 		});
 		if (routingOverride) {
-			console.log(`Routing rule matched | ${feedKey} → ${routingOverride.feedKey} subject="${subject}"`);
+			console.log(`Routing rule matched | ${feedKey} → ${routingOverride.feedKey} subject="${truncateUtf8(subject, MAX_TEXT_METADATA_BYTES)}"`);
 			feedKey = routingOverride.feedKey;
+			assertBoundedIdentifier(feedKey, 'Feed key');
 			if (routingOverride.displayName) {
 				displayName = routingOverride.displayName;
 			}
 		}
+		// Match rules against the original fields, then bound display-only metadata.
+		const storedSubject = truncateUtf8(subject, MAX_TEXT_METADATA_BYTES);
+		fromName = fromName ? truncateUtf8(fromName, MAX_TEXT_METADATA_BYTES) : undefined;
+		displayName = truncateUtf8(displayName, MAX_TEXT_METADATA_BYTES);
 
 		// 5. Content with size check
 		const originalHtmlContent = parsed.html || '';
 		let htmlContent = originalHtmlContent;
-		const textContent = parsed.text || '';
-		const contentSize = new Blob([htmlContent || textContent]).size;
+		const originalTextContent = parsed.text || '';
+		let textContent = originalTextContent;
+		const sourceContentSize = new Blob([htmlContent, textContent]).size;
 
-		if (contentSize > MAX_CONTENT_SIZE) {
+		if (sourceContentSize > MAX_CONTENT_SIZE) {
 			console.warn(
-				`Content too large (${contentSize} bytes), falling back to text | feed_key=${feedKey} subject="${subject}"`,
+				`Content too large (${sourceContentSize} bytes), limiting stored body | feed_key=${feedKey} subject="${storedSubject}"`,
 			);
-			htmlContent = '';
+			if (textContent) htmlContent = '';
 		}
 
 		// html_content is NOT NULL in schema — always store something
-		const storedHtml = htmlContent || textContent || '(empty)';
-		const originalUrl = extractOriginalUrlFromEmail({
+		// Plain text is stored in both fields for existing reader compatibility,
+		// so give each copy half the total row-content budget.
+		if (!htmlContent) textContent = truncateUtf8(textContent, MAX_CONTENT_SIZE / 2);
+		const storedHtml = truncateUtf8(htmlContent || textContent || '(empty)', MAX_CONTENT_SIZE);
+		textContent = truncateUtf8(textContent, MAX_CONTENT_SIZE - new Blob([storedHtml]).size);
+		const contentSize = new Blob([storedHtml, textContent]).size;
+		const originalUrl = boundedStoredUrl(extractOriginalUrlFromEmail({
 			subject,
 			htmlContent: originalHtmlContent || storedHtml,
-			textContent,
-		});
+			textContent: originalTextContent,
+		}));
 		const siteUrl = deriveSiteUrlFromOriginalUrl(originalUrl);
 
 		// 6. D1 batch: upsert feed + insert item
@@ -175,10 +191,8 @@ export async function handleIncomingEmail(
 		await env.DB.batch([
 				env.DB.prepare(
 					`INSERT INTO feeds (feed_key, display_name, from_email, icon_url, site_url, first_seen_at, last_item_at, item_count)
-					 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, 0)
 					 ON CONFLICT(feed_key) DO UPDATE SET
-					   last_item_at = excluded.last_item_at,
-					   item_count = item_count + 1,
 				   display_name = CASE
 				     WHEN excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%'
 				       THEN excluded.display_name
@@ -201,7 +215,7 @@ export async function handleIncomingEmail(
 				feedKey,
 				fromName || null,
 				fromAddress,
-				subject,
+				storedSubject,
 				storedHtml,
 				textContent || null,
 				originalUrl,
@@ -209,10 +223,16 @@ export async function handleIncomingEmail(
 				receivedAt,
 				contentSize,
 			),
+			env.DB.prepare(
+				`UPDATE feeds
+				 SET item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?),
+				     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?)
+				 WHERE feed_key = ?`,
+			).bind(feedKey, feedKey, feedKey),
 		]);
 
 		console.log(
-			`Email stored | feed_key=${feedKey} subject="${subject}" size=${size} content_size=${contentSize} message_id=${messageId}`,
+			`Email stored | feed_key=${feedKey} subject="${storedSubject}" size=${size} content_size=${contentSize} message_id=${messageId}`,
 		);
 	} catch (error) {
 		console.error('Email processing failed', {

@@ -12,6 +12,7 @@ import {
 	MAX_RSS_TEXT_CONTENT_SIZE,
 } from './rss-fetcher';
 import type { Env } from './types';
+import { ARTICLE_AUTHOR_SQL } from './article-author';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
 
@@ -399,7 +400,7 @@ function candidateWhere(view: RecommendationView): string {
 
 const CANDIDATE_COLUMNS = `i.rowid, i.id, i.feed_key,
 	COALESCE(f.custom_title, f.display_name) AS source,
-	i.from_name AS author, i.subject AS title, i.original_url,
+	${ARTICLE_AUTHOR_SQL} AS author, i.subject AS title, i.original_url,
 	i.received_at, i.is_read, i.is_starred`;
 
 async function loadRecommendationCandidates(
@@ -433,24 +434,26 @@ async function loadRecommendationCandidates(
 	)
 		.bind(MAX_FEED_SLICES)
 		.all<{ feed_key: string }>();
-	const feedCandidates = await Promise.all(feedRows.results.map(({ feed_key }) =>
-		env.DB.prepare(
-			`SELECT ${CANDIDATE_COLUMNS}
+	if (feedRows.results.length === 0) return initial.results;
+	// Keep each publisher's indexed, bounded slice while paying for one D1
+	// statement. Separate statements exhaust the Free request budget once topic
+	// excerpts are loaded for the full candidate pool.
+	const feedCandidates = await env.DB.prepare(feedRows.results.map(() =>
+		`SELECT * FROM (
+			SELECT ${CANDIDATE_COLUMNS}
 			   FROM items i
 			   JOIN feeds f ON f.feed_key = i.feed_key
 			  WHERE f.is_active = 1 AND i.feed_key = ? ${where}
 			  ORDER BY i.received_at DESC, i.rowid DESC
-			  LIMIT ${PER_FEED_CANDIDATE_LIMIT}`,
-		)
-			.bind(feed_key)
-			.all<RecommendationCandidate>(),
-	));
+			  LIMIT ${PER_FEED_CANDIDATE_LIMIT}
+		)`,
+	).join(' UNION ALL '))
+		.bind(...feedRows.results.map(({ feed_key }) => feed_key))
+		.all<RecommendationCandidate>();
 
 	const unique = new Map<string, RecommendationCandidate>();
 	for (const candidate of initial.results) unique.set(candidate.id, candidate);
-	for (const page of feedCandidates) {
-		for (const candidate of page.results) unique.set(candidate.id, candidate);
-	}
+	for (const candidate of feedCandidates.results) unique.set(candidate.id, candidate);
 	return [...unique.values()];
 }
 

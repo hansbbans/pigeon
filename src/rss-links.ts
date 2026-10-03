@@ -1,4 +1,4 @@
-const URL_ATTRIBUTE_PATTERN = /\b(href|src)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+import { rewriteHtmlAttributes } from './html-attributes';
 
 function decodeHtmlEntities(value: string): string {
 	return value.replace(/&(#x[0-9a-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (entity, body: string) => {
@@ -290,13 +290,9 @@ export function rewriteRssContentLinks(html: string, baseUrl: string): string {
 		return html;
 	}
 
-	return html.replace(URL_ATTRIBUTE_PATTERN, (match, attributeName: string, rawValue: string) => {
-		const quote = rawValue.startsWith('"') || rawValue.startsWith("'") ? rawValue[0] : '"';
-		const unquotedValue = rawValue.startsWith('"') || rawValue.startsWith("'") ? rawValue.slice(1, -1) : rawValue;
-		const resolved = resolveUrl(unquotedValue, baseUrl);
-		if (!resolved) {
-			return match;
-		}
-		return `${attributeName}=${quote}${escapeHtmlAttribute(resolved)}${quote}`;
+	return rewriteHtmlAttributes(html, (attributeName, value) => {
+		if (!/^(?:href|src)$/i.test(attributeName)) return undefined;
+		const resolved = resolveUrl(value, baseUrl);
+		return resolved ? escapeHtmlAttribute(resolved) : undefined;
 	});
 }

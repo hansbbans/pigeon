@@ -492,11 +492,22 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       .list-shell {
         flex: 1;
         display: grid;
+        align-content: start;
         overflow: auto;
+      }
+
+      #article-page-controls {
+        flex: none;
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.65rem 1rem;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
       }
 
       .list-reset {
         display: grid;
+        align-content: start;
         gap: 0;
         padding: 0;
         margin: 0;
@@ -1047,6 +1058,40 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         border-radius: 0;
       }
 
+      @media (min-width: 901px) {
+        .reader-grid {
+          height: calc(100dvh - 8.1rem);
+          min-height: 0;
+        }
+
+        .panel,
+        .list-shell {
+          min-height: 0;
+        }
+
+        #feeds-panel {
+          overflow: auto;
+        }
+
+        .reader-pane-surface {
+          height: 100%;
+          min-height: 0;
+          grid-template-rows: auto auto auto minmax(12rem, 1fr);
+          overflow: auto;
+        }
+
+        .reader-frame-shell {
+          grid-row: 4;
+          min-height: 0;
+        }
+
+        #reader-frame {
+          display: block;
+          height: 100%;
+          min-height: 0;
+        }
+      }
+
       @media (max-width: 1100px) {
         #app {
           padding: 0.9rem;
@@ -1335,6 +1380,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   >Mark all as read</button>
                 </div>
               </div>
+              <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
+                <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
+                <button id="article-older-button" type="button" class="secondary-button">Older</button>
+              </div>
               <div class="list-shell" id="articles-list-shell">
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
@@ -1435,6 +1484,9 @@ export function renderBrowserAppRuntimeScript(): string {
   const articlesHeading = document.getElementById('articles-heading');
   const articlesStatus = document.getElementById('articles-status');
   const articlesListShell = document.getElementById('articles-list-shell');
+  const articleWindowControls = document.getElementById('article-page-controls');
+  const articleNewerButton = document.getElementById('article-newer-button');
+  const articleOlderButton = document.getElementById('article-older-button');
   const articlesList = document.getElementById('articles-list');
   const loadMoreButton = document.getElementById('load-more-button');
   const markAllAsReadButton = document.getElementById('mark-all-as-read-button');
@@ -1457,10 +1509,15 @@ export function renderBrowserAppRuntimeScript(): string {
   };
   let session = client.createLoggedOutSession();
   let activeValidationId = 0;
+  let activeLoginAttemptId = 0;
   let activeViewRequestId = 0;
   let activeStatusRequestId = 0;
   let activeContentRequestId = 0;
   let views = [];
+  let subscriptions = [];
+  let unreadCountRequestId = 0;
+  let inFlightUnreadCountRequest = null;
+  let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
   let itemIds = [];
   let nextItemIdsContinuation = '';
@@ -1469,6 +1526,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightContentIds = [];
   let selectedItemId = null;
   let isMarkingAllAsRead = false;
+  let activeMarkAllRequestId = 0;
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -1477,6 +1535,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeColumnResize = null;
   let appliedColumnWidths = { ...DEFAULT_COLUMN_WIDTHS };
   let activeYouTubeVideoId = null;
+  let keyboardRevealSelection = null;
+  const ARTICLE_WINDOW_SIZE = 200;
   const MAX_CACHED_ARTICLES = 500;
   const MAX_CACHED_ARTICLE_METADATA = 2000;
   const CONTENT_REQUEST_CONCURRENCY = 2;
@@ -1485,6 +1545,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleMetadataCache = new Map();
   let viewStates = new Map();
   let inFlightMembershipRequests = new Map();
+  let inFlightNavigationRequest = null;
   let inFlightContentRequests = new Map();
   let activeContentRequestCount = 0;
   let contentRequestQueue = [];
@@ -1864,6 +1925,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleListMode = normalizeArticleListMode(nextMode);
     renderArticleListModeToggle();
     renderArticles();
+    renderReader();
   }
 
   function startValidation() {
@@ -1897,6 +1959,15 @@ export function renderBrowserAppRuntimeScript(): string {
       scrollTop: 0,
       refreshedAt: 0,
       contentLoadedIds: new Set(),
+      publicationDates: new Map(),
+      todayDay: '',
+      windowStart: 0,
+      windowNavigation: false,
+      windowAnchorId: null,
+      confirmedItemIds: new Set(),
+      membershipEpoch: 0,
+      rootRequestId: 0,
+      appliedRootRequestId: 0,
     };
   }
 
@@ -1969,7 +2040,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set();
+    const protectedIds = new Set(getVisibleItemIds());
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -1992,7 +2063,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set();
+    const protectedIds = new Set(getVisibleItemIds());
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -2031,6 +2102,9 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const state of viewStates.values()) {
       if (state.itemIds.includes(itemId)) {
         state.contentLoadedIds.add(itemId);
+        if (state === getViewState('today', false) && typeof item.published === 'number' && Number.isFinite(item.published)) {
+          state.publicationDates.set(itemId, item.published);
+        }
       }
     }
     trimArticleMetadataCache();
@@ -2041,6 +2115,14 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearAccountCache() {
     accountGeneration += 1;
+    keyboardRevealSelection = null;
+    activeMarkAllRequestId += 1;
+    isMarkingAllAsRead = false;
+    unreadCountRequestId += 1;
+    inFlightUnreadCountRequest = null;
+    subscriptions = [];
+    inFlightNavigationRequest = null;
+    activeItemIdsPageRequest = null;
     activeViewRequestId += 1;
     activeContentRequestId += 1;
     inFlightContentIds = [];
@@ -2048,9 +2130,11 @@ export function renderBrowserAppRuntimeScript(): string {
       job.resolve([]);
     }
     contentRequestQueue = [];
-    // Keep active jobs counted until their network promises settle. The old
-    // account cannot update this cache, but dropping the count here would let
-    // a new account exceed the global request limit while those requests run.
+    for (const job of activeContentRequestJobs) {
+      job.controller.abort();
+    }
+    // Keep cancelled jobs counted until their network promises settle so a
+    // new session cannot exceed the request limit if cancellation is delayed.
     articleCache.clear();
     articleMetadataCache.clear();
     viewStates.clear();
@@ -2138,6 +2222,7 @@ export function renderBrowserAppRuntimeScript(): string {
       resolve: resolveRequest,
       reject: rejectRequest,
       counted: false,
+      controller: new AbortController(),
     };
 
     for (const itemId of uniqueItemIds) {
@@ -2162,6 +2247,11 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     refreshInFlightContentIds();
     pumpContentRequests();
+    if (session.status === 'authenticated') {
+      loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+      renderArticleWindowControls();
+      if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage) keyboardRevealSelection = null;
+    }
   }
 
   function pumpContentRequests() {
@@ -2187,6 +2277,7 @@ export function renderBrowserAppRuntimeScript(): string {
           authenticatedJson('/reader/api/0/stream/items/contents', {
             method: 'POST',
             body: form,
+            signal: job.controller.signal,
           }),
         )
         .then((payload) => {
@@ -2378,23 +2469,107 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'today';
   }
 
+  function getTodayCandidateIds() {
+    const state = getViewState(activeViewId);
+    const bounds = client.getLocalDayBounds();
+    const day = bounds.startSeconds + ':' + bounds.endSeconds;
+    if (state.todayDay !== day) {
+      state.todayDay = day;
+      state.windowStart = 0;
+      state.windowAnchorId = null;
+    }
+    // Only a number is retained per membership ID. Evictable titles and bodies
+    // must not decide whether a previously verified story still belongs today.
+    return itemIds.filter((id) => {
+      const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
+      if (typeof published !== 'number' || !Number.isFinite(published)) return true;
+      state.publicationDates.set(id, published);
+      return published >= bounds.startSeconds && published < bounds.endSeconds;
+    });
+  }
+
+  function getWindowCandidateIds() {
+    return isTodayView() ? getTodayCandidateIds() : itemIds;
+  }
+
+  function reconcileTodayMembershipBoundary() {
+    if (!isTodayView() || isLoadingItemIdsPage || !hasReachedTodayBoundary()) return;
+    const state = getViewState(activeViewId);
+    if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id))) return;
+    // The ordered current root has reached yesterday, so all of today's IDs
+    // are confirmed even when the server still has older pages. Cached tails
+    // must no longer retain removed stories or their previous ordering.
+    itemIds = [...state.confirmedItemIds];
+    state.itemIds = [...itemIds];
+    state.continuation = '';
+    nextItemIdsContinuation = '';
+    const membership = new Set(itemIds);
+    for (const id of state.publicationDates.keys()) {
+      if (!membership.has(id)) state.publicationDates.delete(id);
+    }
+    if (selectedItemId && !membership.has(selectedItemId)) selectedItemId = null;
+    state.selectedItemId = selectedItemId;
+  }
+
   function getVisibleItemIds() {
-    return isTodayView()
-      ? client.filterItemIdsForLocalDay(itemIds, loadedItemsById)
-      : itemIds;
+    reconcileTodayMembershipBoundary();
+    const state = getViewState(activeViewId);
+    const candidates = getWindowCandidateIds();
+    const anchoredIndex = state.windowAnchorId ? candidates.indexOf(state.windowAnchorId) : -1;
+    if (anchoredIndex >= 0 && state.windowStart > 0) state.windowStart = anchoredIndex;
+    else if (!nextItemIdsContinuation || state.windowStart < candidates.length) {
+      const lastWindow = Math.floor(Math.max(0, candidates.length - 1) / ARTICLE_WINDOW_SIZE) * ARTICLE_WINDOW_SIZE;
+      state.windowStart = Math.min(Math.floor(state.windowStart / ARTICLE_WINDOW_SIZE) * ARTICLE_WINDOW_SIZE, lastWindow);
+    }
+    const visible = candidates.slice(state.windowStart, state.windowStart + ARTICLE_WINDOW_SIZE);
+    state.windowAnchorId = visible[0] || null;
+    return visible;
   }
 
   function hasReachedTodayBoundary() {
-    if (!isTodayView()) {
-      return false;
-    }
-
+    if (!isTodayView()) return false;
+    const state = getViewState(activeViewId);
     const bounds = client.getLocalDayBounds();
-    return itemIds.some((itemId) => {
-      const item = loadedItemsById[itemId];
-      const published = item && item.published;
-      return typeof published === 'number' && Number.isFinite(published) && published < bounds.startSeconds;
+    return itemIds.some((id) => {
+      const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
+      return state.confirmedItemIds.has(id) && typeof published === 'number' && published < bounds.startSeconds;
     });
+  }
+
+  function renderArticleWindowControls() {
+    const active = Boolean(getActiveView());
+    const state = active ? getViewState(activeViewId) : null;
+    const candidates = active ? getWindowCandidateIds() : [];
+    const busy = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+    const more = active && (state.windowStart + ARTICLE_WINDOW_SIZE < candidates.length ||
+      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation)));
+    articleWindowControls.classList.toggle('hidden', !active || (state.windowStart === 0 && !more));
+    articleNewerButton.disabled = busy || !active || state.windowStart === 0;
+    articleOlderButton.disabled = busy || !more;
+  }
+
+  function moveArticleWindow(direction, keyboard = false) {
+    if (!getActiveView() || inFlightContentIds.length > 0 || isLoadingItemIdsPage) return false;
+    getVisibleItemIds();
+    const state = getViewState(activeViewId);
+    const candidates = getWindowCandidateIds();
+    const start = Math.max(0, state.windowStart + direction * ARTICLE_WINDOW_SIZE);
+    if (start === state.windowStart ||
+        (direction > 0 && start >= candidates.length && (hasReachedTodayBoundary() || !nextItemIdsContinuation))) return false;
+    state.windowNavigation = true;
+    state.windowStart = start;
+    state.windowAnchorId = candidates[start] || null;
+    const visible = getVisibleItemIds();
+    selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
+    state.selectedItemId = selectedItemId;
+    keyboardRevealSelection = keyboard && selectedItemId ? { itemId: selectedItemId, viewId: activeViewId, generation: accountGeneration } : null;
+    restoreArticleScrollTop(0);
+    renderArticles();
+    renderReader();
+    saveActiveViewState();
+    if (!window.navigator || window.navigator.onLine !== false) void continueLoadingWindow(activeViewRequestId);
+    if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage && !shouldContinueLoadingWindow()) keyboardRevealSelection = null;
+    return true;
   }
 
   function shouldShowFeedInSidebar(view) {
@@ -2459,7 +2634,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    readerShell.focus();
+    readerShell.focus({ preventScroll: true });
   }
 
   function getNavigationDirectionFromKeyEvent(event) {
@@ -2505,11 +2680,30 @@ export function renderBrowserAppRuntimeScript(): string {
     return selectedItemId ? visibleItemIds.indexOf(selectedItemId) : -1;
   }
 
+  async function loadAdjacentKeyboardArticle() {
+    const owner = { generation: accountGeneration, token: session.token, requestId: activeViewRequestId,
+      viewId: activeViewId, itemId: selectedItemId, epoch: getViewState(activeViewId).membershipEpoch };
+    await loadNextItemIdsPage(owner.requestId);
+    if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.requestId !== activeViewRequestId ||
+        owner.viewId !== activeViewId || owner.itemId !== selectedItemId ||
+        owner.epoch !== getViewState(activeViewId).membershipEpoch) return;
+    const visible = getVisibleItemIds();
+    const index = visible.indexOf(owner.itemId);
+    const adjacentId = index >= 0 ? visible[index + 1] : null;
+    // A failed page/body remains explicitly retryable without immediately
+    // issuing a second request or moving away from the current reader.
+    if (adjacentId && articleCache.has(adjacentId)) await selectArticle(adjacentId, { keyboard: true });
+  }
+
   function moveArticleSelection(direction) {
     if (!isReaderVisible()) {
       return false;
     }
 
+    if (isTodayView()) {
+      renderArticles();
+      renderReader();
+    }
     const selectedIndex = getSelectedItemIndex();
     if (selectedIndex === -1) {
       return false;
@@ -2518,10 +2712,15 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextIndex = selectedIndex + direction;
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      return false;
+      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedTodayBoundary()) {
+        if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || window.navigator?.onLine === false) return false;
+        void loadAdjacentKeyboardArticle();
+        return true;
+      }
+      return moveArticleWindow(direction, true);
     }
 
-    void selectArticle(visibleItemIds[nextIndex]);
+    void selectArticle(visibleItemIds[nextIndex], { keyboard: true });
     return true;
   }
 
@@ -2571,22 +2770,21 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function createPendingContentPlan(preferredItemId) {
-    if (isTodayView() && hasReachedTodayBoundary()) {
-      return [];
-    }
-
     const loadedIds = new Set(articleCache.keys());
     const activeState = getViewState(activeViewId, false);
     const knownContentIds = activeState?.contentLoadedIds || new Set();
     const plannedIds = [];
     const targetItemId = preferredItemId || selectedItemId;
 
+    // A provisional cached tail must not block pagination on a deleted body.
+    // Its missing content becomes loadable once a current page confirms it.
     const addId = (itemId, force = false) => {
       if (
         !itemId ||
         loadedIds.has(itemId) ||
         (!force && knownContentIds.has(itemId)) ||
         plannedIds.includes(itemId) ||
+        (activeState?.hasMembership && !activeState.confirmedItemIds.has(itemId)) ||
         !itemIds.includes(itemId)
       ) {
         return;
@@ -2594,10 +2792,16 @@ export function renderBrowserAppRuntimeScript(): string {
       plannedIds.push(itemId);
     };
 
+    // A selected article cache miss remains loadable after finding yesterday.
     addId(targetItemId, true);
-
-    for (const itemId of itemIds) {
-      addId(itemId);
+    const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
+    for (const itemId of getVisibleItemIds()) {
+      // Finish loading unknown articles before the first known older article.
+      const published = loadedItemsById[itemId]?.published;
+      if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
+        break;
+      }
+      addId(itemId, !loadedItemsById[itemId]);
       if (plannedIds.length >= client.CONTENT_CHUNK_SIZE) {
         break;
       }
@@ -2622,6 +2826,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function setLoggedOut(message) {
+    activeLoginAttemptId += 1;
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
     clearStoredToken();
@@ -2693,7 +2898,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
     row.appendChild(titleGroup);
-    row.appendChild(createNode('span', { classNames: ['feed-count'], text: formatUnreadCount(view.unreadCount) }));
+    row.appendChild(createNode('span', { classNames: ['feed-count'], text: view.kind === 'today' || view.kind === 'recent' ? '' : formatUnreadCount(view.unreadCount) }));
     button.appendChild(row);
 
     if (view.kind === 'folder') {
@@ -2838,9 +3043,30 @@ export function renderBrowserAppRuntimeScript(): string {
       uncategorizedFeedViews.length > 0 ? 'Uncategorized feeds' : unreadOnly ? 'No uncategorized feeds with unread items.' : 'No uncategorized feeds.';
   }
 
+  function revealKeyboardSelectedRow() {
+    const reveal = keyboardRevealSelection;
+    if (!reveal || reveal.itemId !== selectedItemId || reveal.viewId !== activeViewId || reveal.generation !== accountGeneration) {
+      keyboardRevealSelection = null;
+      return;
+    }
+    for (const row of articlesList.children) {
+      const button = row.children[0];
+      if (button?.getAttribute('data-item-id') === selectedItemId && typeof button.scrollIntoView === 'function') {
+        button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+    }
+  }
+
   function renderArticles() {
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
+    if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
+      selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
+      const state = getViewState(activeViewId, false);
+      if (state) state.selectedItemId = selectedItemId;
+    }
+    renderArticleWindowControls();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
@@ -2856,7 +3082,8 @@ export function renderBrowserAppRuntimeScript(): string {
           : activeView
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
-      loadMoreButton.classList.add('hidden');
+      loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
+      loadMoreButton.classList.toggle('hidden', !shouldContinueLoadingWindow());
       restoreArticleScrollTop(preservedScrollTop);
       return;
     }
@@ -2910,14 +3137,13 @@ export function renderBrowserAppRuntimeScript(): string {
       articlesList.appendChild(listItem);
     }
 
-    const pendingPlan = createPendingContentPlan(selectedItemId);
     loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-    const todayCanLoadMore = !isTodayView() || !hasReachedTodayBoundary();
     loadMoreButton.classList.toggle(
       'hidden',
-      !todayCanLoadMore || (pendingPlan.length === 0 && !nextItemIdsContinuation),
+      !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
+    revealKeyboardSelectedRow();
   }
 
   function clearYouTubePlayer() {
@@ -3101,6 +3327,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function loadStatus() {
     const requestId = startStatusRequest();
+    const requestGeneration = accountGeneration;
     const requestToken = session.token;
     settingsContent.textContent = 'Loading status…';
     try {
@@ -3175,6 +3402,9 @@ export function renderBrowserAppRuntimeScript(): string {
             });
             retryButton.disabled = !feed.canRetry;
             retryButton.addEventListener('click', async () => {
+              const ownsStatus = () => requestId === activeStatusRequestId &&
+                requestBelongsToCurrentSession(requestGeneration, requestToken);
+              if (retryButton.disabled || !ownsStatus()) return;
               retryButton.disabled = true;
               retryButton.textContent = 'Queuing…';
               try {
@@ -3183,10 +3413,12 @@ export function renderBrowserAppRuntimeScript(): string {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ feed_key: feed.feedKey }),
                 });
+                if (!ownsStatus()) return;
                 if (!response.ok) throw new Error('Retry request failed');
                 statusLoaded = false;
                 await loadStatus();
               } catch (_error) {
+                if (!ownsStatus()) return;
                 retryButton.textContent = 'Retry failed';
                 retryButton.disabled = false;
               }
@@ -3219,6 +3451,16 @@ export function renderBrowserAppRuntimeScript(): string {
     return '/reader/api/0/stream/items/ids?' + params.toString();
   }
 
+  function getRetainedTailIds(viewId, payload) {
+    const state = getViewState(viewId, false);
+    const view = views.find((candidate) => candidate.id === viewId);
+    if (!payload.continuation || !state?.hasMembership || view?.kind === 'unread') {
+      return [];
+    }
+    const returnedIds = new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
+    return state.itemIds.filter((itemId) => !returnedIds.has(itemId));
+  }
+
   function applyMembershipPayload(viewId, payload, options) {
     if (!views.some((view) => view.id === viewId)) {
       return [];
@@ -3231,20 +3473,34 @@ export function renderBrowserAppRuntimeScript(): string {
     const returnedIds = [...new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)).filter(Boolean))];
     const continuation = payload.continuation ? String(payload.continuation) : '';
     const isContinuationPage = Boolean(options?.continuation);
+    if (!isContinuationPage) {
+      state.membershipEpoch += 1;
+      state.appliedRootRequestId = options?.rootRequestId ?? state.rootRequestId;
+      if (viewId === activeViewId) {
+        activeItemIdsPageRequest = null;
+        isLoadingItemIdsPage = false;
+      }
+    }
     if (isContinuationPage) {
+      for (const itemId of returnedIds) state.confirmedItemIds.add(itemId);
       const knownIds = new Set(state.itemIds);
       state.itemIds.push(...returnedIds.filter((itemId) => !knownIds.has(itemId)));
       state.continuation = continuation && continuation !== options.continuation ? continuation : '';
     } else if (continuation) {
-      const returnedSet = new Set(returnedIds);
-      const retainedTail = state.hasMembership ? state.itemIds.filter((itemId) => !returnedSet.has(itemId)) : [];
+      state.confirmedItemIds = new Set(returnedIds);
+      const retainedTail = getRetainedTailIds(viewId, payload);
       state.itemIds = [...returnedIds, ...retainedTail];
       state.continuation = continuation;
     } else {
+      state.confirmedItemIds = new Set(returnedIds);
       state.itemIds = returnedIds;
       state.continuation = '';
     }
+    if (isContinuationPage && !continuation) state.itemIds = [...state.confirmedItemIds];
     state.hasMembership = true;
+    for (const id of state.publicationDates.keys()) {
+      if (!state.itemIds.includes(id)) state.publicationDates.delete(id);
+    }
     state.refreshedAt = Date.now();
     if (!state.selectedItemId || !state.itemIds.includes(state.selectedItemId)) {
       const view = views.find((candidate) => candidate.id === viewId);
@@ -3259,7 +3515,7 @@ export function renderBrowserAppRuntimeScript(): string {
       syncLoadedItemsFromCache();
       renderArticles();
       renderReader();
-      restoreArticleScrollTop(preservedScrollTop || state.scrollTop);
+      restoreArticleScrollTop(preservedScrollTop);
     }
 
     return returnedIds;
@@ -3275,6 +3531,8 @@ export function renderBrowserAppRuntimeScript(): string {
       return existingRequest;
     }
 
+    const state = getViewState(view.id);
+    const rootRequestId = continuation ? state.rootRequestId : ++state.rootRequestId;
     const requestPromise = authenticatedJson(buildStreamIdsUrl(view, continuation))
       .then((payload) => {
         if (!requestBelongsToCurrentSession(generation, token)) {
@@ -3286,7 +3544,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const returnedIds = [
           ...new Set(payload.itemRefs.map((itemRef) => String(itemRef.id)).filter(Boolean)),
         ];
-        return { payload, returnedIds, generation, token, viewId: view.id };
+        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId };
       })
       .finally(() => {
         if (inFlightMembershipRequests.get(requestKey) === requestPromise) {
@@ -3298,63 +3556,105 @@ export function renderBrowserAppRuntimeScript(): string {
     return requestPromise;
   }
 
-  async function revalidateActiveView() {
+  async function revalidateActiveView(options) {
+    if (!session.token || session.status !== 'authenticated') return;
     const activeView = getActiveView();
-    if (!activeView || !session.token || session.status !== 'authenticated') {
+    if (!activeView) {
+      if (!window.navigator || window.navigator.onLine !== false) {
+        await loadSubscriptionsAndUnreadCounts(options);
+      }
       return;
     }
 
     const generation = accountGeneration;
     const token = session.token;
+    const requestId = activeViewRequestId;
     if (window.navigator && window.navigator.onLine === false) {
       if (getViewState(activeView.id, false)?.hasMembership) {
+        renderArticles();
+        renderReader();
         articlesStatus.textContent = 'Offline · showing cached articles.';
       }
       return;
     }
 
+    if (options?.refreshUnread !== false) void refreshUnreadCounts();
+    let expectedRootRequestId = null;
     try {
       const activeState = getViewState(activeView.id, false);
       const selectedTailId = activeState?.selectedItemId && activeState.itemIds.includes(activeState.selectedItemId)
         ? activeState.selectedItemId
         : null;
-      const result = await requestMembershipPage(activeView, '', { refresh: true });
+      const membershipRequest = requestMembershipPage(activeView, '', { refresh: true });
+      expectedRootRequestId = getViewState(activeView.id, false)?.rootRequestId;
+      const result = await membershipRequest;
       if (!result || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
-      const contentIds = [...result.returnedIds];
-      if (selectedTailId && !contentIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
-        contentIds.push(selectedTailId);
+      await ensureArticleContent(result.returnedIds.slice(0, ARTICLE_WINDOW_SIZE), { generation, token });
+      const retainedTailIds = getRetainedTailIds(activeView.id, result.payload);
+      if (selectedTailId && retainedTailIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
+        // A cached tail is outside the authoritative root. Its missing body must
+        // not prevent current articles from replacing stale membership.
+        try {
+          await ensureArticleContent([selectedTailId], { generation, token });
+        } catch (error) {
+          if (error?.message === 'Incomplete article content response' &&
+              requestBelongsToCurrentSession(generation, token) &&
+              getViewState(activeView.id, false)?.rootRequestId === result.rootRequestId) {
+            const state = getViewState(activeView.id, false);
+            state.itemIds = state.itemIds.filter((itemId) => itemId !== selectedTailId);
+          }
+        }
       }
-      await ensureArticleContent(contentIds, { generation, token });
-      if (requestBelongsToCurrentSession(generation, token)) {
-        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+      const currentState = getViewState(activeView.id, false);
+      if (requestBelongsToCurrentSession(generation, token) &&
+          currentState?.rootRequestId === result.rootRequestId &&
+          currentState.appliedRootRequestId !== result.rootRequestId) {
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         if (activeView.id === activeViewId) {
+          const visibleItemIds = getVisibleItemIds();
+          if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
+            selectedItemId = visibleItemIds[0] || null;
+          }
           saveActiveViewState();
           renderArticles();
           renderReader();
+          if (shouldAutoLoadWindow() && requestId === activeViewRequestId) {
+            await continueLoadingWindow(requestId);
+          }
         }
       }
     } catch (_error) {
-      if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId) {
-        if (getViewState(activeView.id, false)?.hasMembership) {
-          articlesStatus.textContent = 'Refresh failed · showing cached articles.';
-        }
+      if (requestBelongsToCurrentSession(generation, token) && activeView.id === activeViewId &&
+          getViewState(activeView.id, false)?.rootRequestId === expectedRootRequestId) {
         renderArticles();
+        renderReader();
+        articlesStatus.textContent = getViewState(activeView.id, false)?.hasMembership
+          ? 'Refresh failed · showing cached articles.'
+          : 'Could not load this view.';
       }
     }
   }
 
-  function shouldContinueLoadingToday() {
-    if (!isTodayView() || hasReachedTodayBoundary()) {
+  function shouldContinueLoadingWindow() {
+    if (!getActiveView()) {
       return false;
     }
 
-    return createPendingContentPlan(null).length > 0 || Boolean(nextItemIdsContinuation);
+    const visible = getVisibleItemIds();
+    const state = getViewState(activeViewId);
+    return createPendingContentPlan(null).length > 0 ||
+      ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id))) &&
+        !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
   }
 
-  async function continueLoadingToday(requestId) {
-    if (requestId !== activeViewRequestId || !shouldContinueLoadingToday()) {
+  function shouldAutoLoadWindow() {
+    return isTodayView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
+  }
+
+  async function continueLoadingWindow(requestId) {
+    if (requestId !== activeViewRequestId || !shouldContinueLoadingWindow()) {
       return;
     }
 
@@ -3375,8 +3675,8 @@ export function renderBrowserAppRuntimeScript(): string {
     if (plan.length === 0) {
       renderArticles();
       renderReader();
-      if (isTodayView() && shouldContinueLoadingToday()) {
-        await continueLoadingToday(requestId);
+      if (shouldAutoLoadWindow() && shouldContinueLoadingWindow()) {
+        await continueLoadingWindow(requestId);
       }
       return;
     }
@@ -3387,6 +3687,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
 
     const stateBefore = getViewState(activeViewId, false);
+    const membershipEpoch = stateBefore?.membershipEpoch;
     const loadedContentCountBefore = stateBefore?.contentLoadedIds.size ?? 0;
     const itemCountBefore = itemIds.length;
     const continuationBefore = nextItemIdsContinuation;
@@ -3394,13 +3695,14 @@ export function renderBrowserAppRuntimeScript(): string {
       const returnedItemCount = await ensureArticleContent(plan, { generation, token });
       if (
         requestId !== activeViewRequestId ||
+        stateBefore?.membershipEpoch !== membershipEpoch ||
         !requestBelongsToCurrentSession(generation, token)
       ) {
         return;
       }
 
       const visibleItemIds = getVisibleItemIds();
-      if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+      if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
         selectedItemId = visibleItemIds[0] || null;
       }
       saveActiveViewState();
@@ -3413,16 +3715,17 @@ export function renderBrowserAppRuntimeScript(): string {
         itemIds.length > itemCountBefore ||
         nextItemIdsContinuation !== continuationBefore;
       if (
-        isTodayView() &&
-        madeProgress &&
-        shouldContinueLoadingToday()
+        shouldAutoLoadWindow() && madeProgress &&
+        shouldContinueLoadingWindow()
       ) {
-        await continueLoadingToday(requestId);
+        await continueLoadingWindow(requestId);
       }
     } catch (_error) {
-      if (requestId === activeViewRequestId && requestBelongsToCurrentSession(generation, token)) {
-        articlesStatus.textContent = 'Could not load article bodies.';
+      if (requestId === activeViewRequestId && stateBefore?.membershipEpoch === membershipEpoch &&
+          requestBelongsToCurrentSession(generation, token)) {
         renderArticles();
+        renderReader();
+        articlesStatus.textContent = 'Could not load article bodies.';
       }
     } finally {
       refreshInFlightContentIds();
@@ -3437,12 +3740,15 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    const pageRequest = { viewId: activeView.id, epoch: activeState.membershipEpoch };
+    activeItemIdsPageRequest = pageRequest;
     isLoadingItemIdsPage = true;
     renderArticles();
 
     try {
       const payload = await authenticatedJson(buildStreamIdsUrl(activeView, continuation));
-      if (requestId !== activeViewRequestId) {
+      if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
+          activeState.membershipEpoch !== pageRequest.epoch) {
         return;
       }
 
@@ -3450,6 +3756,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const appendedIds = [];
       for (const itemRef of payload.itemRefs || []) {
         const itemId = String(itemRef.id);
+        activeState.confirmedItemIds.add(itemId);
         if (!knownIds.has(itemId)) {
           knownIds.add(itemId);
           appendedIds.push(itemId);
@@ -3462,32 +3769,49 @@ export function renderBrowserAppRuntimeScript(): string {
         returnedContinuation && (appendedIds.length > 0 || returnedContinuation !== continuation)
           ? returnedContinuation
           : '';
+      // Retained cached rows are provisional until this root's complete
+      // pagination confirms membership. A repeated cursor is not completion.
+      if (!returnedContinuation) itemIds = [...activeState.confirmedItemIds];
+      const previousSelection = selectedItemId;
+      if (selectedItemId && !itemIds.includes(selectedItemId)) {
+        selectedItemId = getVisibleItemIds()[0] || null;
+      }
       if (activeState) {
         activeState.itemIds = [...itemIds];
+        for (const id of activeState.publicationDates.keys()) {
+          if (!itemIds.includes(id)) activeState.publicationDates.delete(id);
+        }
+        activeState.selectedItemId = selectedItemId;
         activeState.continuation = nextItemIdsContinuation;
         activeState.hasMembership = true;
       }
+      activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
+      renderReader();
+      const selectionChanged = previousSelection !== selectedItemId;
 
-      if (appendedIds.length > 0) {
-        await loadContentChunk(appendedIds[0], requestId);
-      } else if (isTodayView()) {
-        await continueLoadingToday(requestId);
+      if (appendedIds.length > 0 || (selectionChanged && selectedItemId && !articleCache.has(selectedItemId))) {
+        await loadContentChunk(selectionChanged && selectedItemId ? selectedItemId : appendedIds[0], requestId);
+      } else if (shouldAutoLoadWindow()) {
+        await continueLoadingWindow(requestId);
       }
     } catch (_error) {
-      if (requestId !== activeViewRequestId) {
+      if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
+          activeState.membershipEpoch !== pageRequest.epoch) {
         return;
       }
+      activeItemIdsPageRequest = null;
       isLoadingItemIdsPage = false;
       renderArticles();
+      renderReader();
       if (session.token) {
         articlesStatus.textContent = 'Could not load more articles.';
       }
     }
   }
 
-  async function loadActiveView() {
+  async function loadActiveView(options) {
     const activeView = getActiveView();
     if (!activeView) {
       resetReaderState();
@@ -3500,6 +3824,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const state = getViewState(activeView.id);
     itemIds = [...state.itemIds];
     nextItemIdsContinuation = state.continuation;
+    activeItemIdsPageRequest = null;
     isLoadingItemIdsPage = false;
     syncLoadedItemsFromCache();
     selectedItemId = state.selectedItemId && itemIds.includes(state.selectedItemId)
@@ -3517,12 +3842,16 @@ export function renderBrowserAppRuntimeScript(): string {
     restoreArticleScrollTop(state.scrollTop);
 
     if (!state.hasMembership) {
+      let expectedRootRequestId = null;
       try {
-        const result = await requestMembershipPage(activeView, '', { initial: true });
-        if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token)) {
+        const membershipRequest = requestMembershipPage(activeView, '', { initial: true });
+        expectedRootRequestId = state.rootRequestId;
+        const result = await membershipRequest;
+        if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token) ||
+            getViewState(activeView.id, false)?.rootRequestId !== result.rootRequestId) {
           return;
         }
-        applyMembershipPayload(activeView.id, result.payload, { continuation: '' });
+        applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         const currentState = getViewState(activeView.id);
         itemIds = [...currentState.itemIds];
         nextItemIdsContinuation = currentState.continuation;
@@ -3533,15 +3862,16 @@ export function renderBrowserAppRuntimeScript(): string {
           await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
         }
       } catch (_error) {
-        if (requestId === activeViewRequestId && session.token) {
-          articlesStatus.textContent = 'Could not load this view.';
+        if (requestId === activeViewRequestId && session.token && state.rootRequestId === expectedRootRequestId) {
           renderArticles();
+          renderReader();
+          articlesStatus.textContent = 'Could not load this view.';
         }
       }
       return;
     }
 
-    void revalidateActiveView();
+    void revalidateActiveView(options);
   }
 
   async function markAllAsRead() {
@@ -3552,6 +3882,10 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const requestViewId = activeView.id;
     const requestToken = session.token;
+    const generation = accountGeneration;
+    const requestId = ++activeMarkAllRequestId;
+    const isCurrentRequest = () => requestId === activeMarkAllRequestId &&
+      requestBelongsToCurrentSession(generation, requestToken);
     isMarkingAllAsRead = true;
     renderMarkAllAsReadAction();
     articlesStatus.textContent = 'Marking all items as read…';
@@ -3567,31 +3901,77 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!response.ok) {
         throw new Error('Mark all as read request failed');
       }
+      if (!isCurrentRequest()) return;
 
-      const refreshed = await loadSubscriptionsAndUnreadCounts();
+      const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
       if (
         !refreshed &&
         requestViewId === getActiveView()?.id &&
-        session.token === requestToken &&
-        session.status === 'authenticated'
+        isCurrentRequest()
       ) {
         articlesStatus.textContent = 'Marked all as read, but could not refresh this view.';
       }
     } catch (_error) {
       if (
         requestViewId === getActiveView()?.id &&
-        session.token === requestToken &&
-        session.status === 'authenticated'
+        isCurrentRequest()
       ) {
         articlesStatus.textContent = 'Could not mark all as read.';
       }
     } finally {
-      isMarkingAllAsRead = false;
-      renderMarkAllAsReadAction();
+      if (isCurrentRequest()) {
+        isMarkingAllAsRead = false;
+        renderMarkAllAsReadAction();
+      }
     }
   }
 
-  async function loadSubscriptionsAndUnreadCounts() {
+  function requestUnreadCounts(force = false) {
+    const generation = accountGeneration;
+    const token = session.token;
+    if (!force && inFlightUnreadCountRequest) return inFlightUnreadCountRequest;
+    const requestId = ++unreadCountRequestId;
+    const requestPromise = authenticatedJson('/reader/api/0/unread-count')
+      .then((payload) => ({ payload, generation, token, requestId }))
+      .finally(() => {
+        if (inFlightUnreadCountRequest === requestPromise) inFlightUnreadCountRequest = null;
+      });
+    inFlightUnreadCountRequest = requestPromise;
+    return requestPromise;
+  }
+
+  function isCurrentUnreadCountResult(result) {
+    return result.requestId === unreadCountRequestId &&
+      requestBelongsToCurrentSession(result.generation, result.token);
+  }
+
+  async function refreshUnreadCounts() {
+    try {
+      const result = await requestUnreadCounts();
+      if (!isCurrentUnreadCountResult(result)) return;
+      views = client.buildFeedViews(subscriptions, result.payload.unreadcounts || []);
+      renderFeeds();
+    } catch (_error) {
+      // Retain existing counts when their refresh fails; membership has its own error state.
+    }
+  }
+
+  function loadSubscriptionsAndUnreadCounts(options) {
+    const generation = accountGeneration;
+    const token = session.token;
+    if (!token || session.status !== 'authenticated') return Promise.resolve(false);
+    if (!options?.forceUnread && inFlightNavigationRequest?.generation === generation &&
+        inFlightNavigationRequest.token === token) {
+      return inFlightNavigationRequest.promise;
+    }
+    const promise = performNavigationLoad(options).finally(() => {
+      if (inFlightNavigationRequest?.promise === promise) inFlightNavigationRequest = null;
+    });
+    inFlightNavigationRequest = { generation, token, promise };
+    return promise;
+  }
+
+  async function performNavigationLoad(options) {
     const generation = accountGeneration;
     const token = session.token;
     if (!token || session.status !== 'authenticated') {
@@ -3600,14 +3980,18 @@ export function renderBrowserAppRuntimeScript(): string {
     feedsStatus.textContent = 'Loading feeds…';
 
     try {
-      const [subscriptionPayload, unreadPayload] = await Promise.all([
+      const [subscriptionPayload, unreadResult] = await Promise.all([
         authenticatedJson('/reader/api/0/subscription/list'),
-        authenticatedJson('/reader/api/0/unread-count'),
+        requestUnreadCounts(Boolean(options?.forceUnread)),
       ]);
-      if (!requestBelongsToCurrentSession(generation, token)) {
+      if (!requestBelongsToCurrentSession(generation, token) || !isCurrentUnreadCountResult(unreadResult)) {
         return false;
       }
-      views = client.buildFeedViews(subscriptionPayload.subscriptions || [], unreadPayload.unreadcounts || []);
+      if (!Array.isArray(subscriptionPayload?.subscriptions) || !Array.isArray(unreadResult.payload?.unreadcounts)) {
+        throw new Error('Invalid navigation response');
+      }
+      subscriptions = subscriptionPayload.subscriptions;
+      views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts);
       const validViewIds = new Set(views.map((view) => view.id));
       viewStates = new Map([...viewStates].filter(([viewId]) => validViewIds.has(viewId)));
       pruneExpandedFolders();
@@ -3615,7 +3999,7 @@ export function renderBrowserAppRuntimeScript(): string {
         activeViewId = 'all';
       }
       renderFeeds();
-      await loadActiveView();
+      await loadActiveView({ refreshUnread: false });
       if (!requestBelongsToCurrentSession(generation, token)) {
         return false;
       }
@@ -3644,17 +4028,21 @@ export function renderBrowserAppRuntimeScript(): string {
     await loadActiveView();
   }
 
-  async function selectArticle(itemId) {
+  async function selectArticle(itemId, options) {
     if (!getVisibleItemIds().includes(itemId)) {
       return;
     }
 
     selectedItemId = itemId;
+    keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
     renderArticles();
     renderReader();
+    saveActiveViewState();
     if (!articleCache.has(itemId)) {
       await loadContentChunk(itemId, activeViewRequestId);
+    } else if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage) {
+      keyboardRevealSelection = null;
     }
   }
 
@@ -3666,6 +4054,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function login(password) {
+    const attemptId = ++activeLoginAttemptId;
     const form = new FormData();
     form.set('Passwd', password);
 
@@ -3676,16 +4065,26 @@ export function renderBrowserAppRuntimeScript(): string {
         body: form,
       });
     } catch (_error) {
+      if (attemptId !== activeLoginAttemptId) return false;
       setLoggedOut('Could not reach the server.');
       return false;
     }
 
+    if (attemptId !== activeLoginAttemptId) return false;
     if (!response.ok) {
       setLoggedOut('Incorrect password.');
       return false;
     }
 
-    const text = await response.text();
+    let text;
+    try {
+      text = await response.text();
+    } catch (_error) {
+      if (attemptId !== activeLoginAttemptId) return false;
+      setLoggedOut('Could not reach the server.');
+      return false;
+    }
+    if (attemptId !== activeLoginAttemptId) return false;
     const token = client.extractAuthToken(text);
     if (!token) {
       setLoggedOut('Could not start a session.');
@@ -3721,6 +4120,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
     applyTheme(nextTheme);
     setStoredTheme(nextTheme);
+    renderArticles();
     renderReader();
   });
 
@@ -3752,6 +4152,8 @@ export function renderBrowserAppRuntimeScript(): string {
   markAllAsReadButton.addEventListener('click', () => {
     void markAllAsRead();
   });
+  articleNewerButton.addEventListener('click', () => { moveArticleWindow(-1); });
+  articleOlderButton.addEventListener('click', () => { moveArticleWindow(1); });
   loadMoreButton.addEventListener('click', () => {
     if (inFlightContentIds.length > 0 || isLoadingItemIdsPage) {
       return;

@@ -2,6 +2,8 @@ import { createPreviewText } from './preview-text';
 import { createRenderedContent } from './rendered-content';
 import { createCanonicalItemUuid, hasStoredItemId } from './item-identity';
 import type { FeedVariant } from './feed-urls';
+import { stripInvalidXmlCharacters } from './xml';
+import { articleAuthor } from './article-author';
 
 interface FeedMeta {
 	feed_key: string;
@@ -11,6 +13,7 @@ interface FeedMeta {
 	source_url?: string | null;
 	site_url?: string | null;
 	icon_url?: string | null;
+	source_type?: string;
 }
 
 interface FeedItem {
@@ -31,7 +34,7 @@ interface PreparedFeedItem extends FeedItem {
 }
 
 function escapeXml(str: string): string {
-	return str
+	return stripInvalidXmlCharacters(str)
 		.replace(/&/g, '&amp;')
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')
@@ -40,7 +43,7 @@ function escapeXml(str: string): string {
 }
 
 function wrapCDATA(html: string): string {
-	const safe = html.replace(/]]>/g, ']]]]><![CDATA[>');
+	const safe = stripInvalidXmlCharacters(html).replace(/]]>/g, ']]]]><![CDATA[>');
 	return `<![CDATA[${safe}]]>`;
 }
 
@@ -82,7 +85,7 @@ export async function generateAtomFeed(
     <updated>${item.received_at}</updated>
     <published>${item.received_at}</published>
     <author>
-      <name>${escapeXml(item.from_name || feed.display_name)}</name>
+      <name>${escapeXml(articleAuthor(item, feed.source_type) || feed.display_name)}</name>
     </author>
     ${summary ? `<summary type="text">${escapeXml(summary)}</summary>` : ''}
     <content type="html">${wrapCDATA(renderedContent)}</content>
