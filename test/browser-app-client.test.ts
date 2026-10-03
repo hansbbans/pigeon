@@ -966,7 +966,7 @@ async function createBrowserHarness(options?: {
 				},
 			},
 			__PIGEON_BROWSER_CLIENT__: undefined as unknown,
-			__readCacheSizes: undefined as (() => { bodies: number; metadata: number; active: number; queued: number; pending: number; paging: boolean }) | undefined,
+			__readCacheSizes: undefined as (() => { bodies: number; metadata: number; active: number; queued: number; pending: number; paging: boolean; membership: number }) | undefined,
 			open() {},
 			addEventListener(type: string, handler: (event: Record<string, unknown>) => unknown) {
 				windowHandlers.set(type, handler);
@@ -1019,7 +1019,7 @@ async function createBrowserHarness(options?: {
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
-    active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage });
+    active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
 })();`);
 	vm.runInNewContext(runtime, context);
 	await flushBrowserTasks();
@@ -5918,7 +5918,7 @@ function createLargeTodaySqliteLibrary(now: number, count = 2_105) {
 async function waitForTodayWindow(harness: Awaited<ReturnType<typeof createBrowserHarness>>) {
 	await waitForBrowserCondition(() => {
 		const cache = harness.getCacheSizes();
-		return cache.active === 0 && cache.queued === 0 && cache.pending === 0 && !cache.paging &&
+		return cache.active === 0 && cache.queued === 0 && cache.pending === 0 && !cache.paging && cache.membership === 0 &&
 			!harness.elements.get('articles-list')?.textContent.includes('Loading');
 	}, 1_000);
 	assert.ok(harness.getCacheSizes().bodies <= 500);
@@ -6186,6 +6186,77 @@ for (const change of ['unsubscribe', 'delete']) {
    assert.ok(renderedArticleIds(h).includes(selected));
    assert.ok(Number(selected) < 80);
    assert.ok(h.elements.get('reader-frame')!.srcdoc.includes(`Body ${selected}</p>`));
+  } finally { state.database.close(); }
+ });
+}
+
+for (const scenario of ['adjacent', 'page failure', 'body failure', 'selection switch', 'view switch', 'same-token account', 'changed-token account']) {
+ test(`keyboard next extends a short real-service window safely through ${scenario}`, async () => {
+  const now = new Date(2026, 9, 2, 12).getTime();
+  const state = createLargeTodaySqliteLibrary(now, 230);
+  try {
+   let password = 'today-test-password';
+   let holdPage = scenario.includes('switch') || scenario.includes('account');
+   let failPage = scenario === 'page failure';
+   let failBody = false;
+   let pageRequested = false;
+   let activeBodies = 0;
+   let maxBodies = 0;
+   const held = createDeferred<Response>();
+   const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+    if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${await generateApiToken(password)}`);
+    const isPage = input.includes('/stream/items/ids?') && new URL(`https://pigeon.example${input}`).searchParams.has('c');
+    if (isPage) {
+     pageRequested = true;
+     if (failPage) { failPage = false; return new Response('Unavailable', { status: 503 }); }
+     if (holdPage) { holdPage = false; return held.promise; }
+    }
+    if (input.endsWith('/contents')) {
+     activeBodies += 1; maxBodies = Math.max(maxBodies, activeBodies);
+     try { if (failBody) { failBody = false; return new Response('Unavailable', { status: 503 }); }
+      return await handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+     } finally { activeBodies -= 1; }
+    }
+    return handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+   } });
+   await h.elements.get('login-form')!.dispatch('submit');
+   await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 231');
+   assert.equal(renderedArticleIds(h).at(-1), '182');
+   findListButtonByItemId(h.elements.get('articles-list'), '182')!.dispatch('click');
+   await waitForBrowserCondition(() => h.elements.get('reader-frame')!.srcdoc.includes('Body 182</p>'));
+   await waitForBrowserCondition(() => h.getCacheSizes().active === 0 && h.getCacheSizes().queued === 0 && h.getCacheSizes().pending === 0);
+   failBody = scenario === 'body failure';
+   h.dispatchKeydown('j');
+   await waitForBrowserCondition(() => pageRequested);
+   if (scenario === 'page failure' || scenario === 'body failure') {
+    await waitForBrowserCondition(() => h.elements.get('articles-status')!.textContent === (scenario === 'page failure' ? 'Could not load more articles.' : 'Could not load article bodies.'));
+    assert.equal(h.elements.get('reader-title')!.textContent, 'Story 182');
+    assert.equal(h.elements.get('load-more-button')!.disabled, false);
+    if (scenario === 'body failure') { h.elements.get('load-more-button')!.dispatch('click'); await waitForBrowserCondition(() => Boolean(findListButtonByItemId(h.elements.get('articles-list'), '181')?.textContent.includes('Story 181')) && h.getCacheSizes().active === 0 && h.getCacheSizes().pending === 0); }
+    h.dispatchKeydown('j');
+   } else if (scenario === 'selection switch') {
+    findListButtonByItemId(h.elements.get('articles-list'), '230')!.dispatch('click');
+    await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 230');
+   } else if (scenario === 'view switch') {
+    findListButtonByViewId(h.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+    await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 231');
+   } else if (scenario.includes('account')) {
+    h.elements.get('clear-session-button')!.dispatch('click');
+    if (scenario === 'changed-token account') { password = 'changed-test-password'; (state.env as { API_PASSWORD: string }).API_PASSWORD = password; }
+    h.elements.get('password-input')!.value = password;
+    await h.elements.get('login-form')!.dispatch('submit');
+    await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 231');
+   }
+   if (scenario.includes('switch') || scenario.includes('account')) {
+    held.resolve(Response.json({ itemRefs: Array.from({ length: 50 }, (_, i) => ({ id: String(181 - i) })), continuation: 'stale-next' }));
+    await flushBrowserTasks(); await flushBrowserTasks();
+   }
+   const expected = scenario === 'selection switch' ? '230' : scenario === 'view switch' || scenario.includes('account') ? '231' : '181';
+   await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === `Story ${expected}`);
+   assert.ok(renderedArticleIds(h).includes(expected));
+   assert.ok(h.elements.get('reader-frame')!.srcdoc.includes(`Body ${expected}</p>`));
+   assert.ok(maxBodies <= 2, 'actual body concurrency remains bounded');
+   if (expected === '181') { h.dispatchKeydown('k'); await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 182'); }
   } finally { state.database.close(); }
  });
 }

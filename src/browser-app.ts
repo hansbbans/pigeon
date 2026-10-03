@@ -2653,6 +2653,21 @@ export function renderBrowserAppRuntimeScript(): string {
     return selectedItemId ? visibleItemIds.indexOf(selectedItemId) : -1;
   }
 
+  async function loadAdjacentKeyboardArticle() {
+    const owner = { generation: accountGeneration, token: session.token, requestId: activeViewRequestId,
+      viewId: activeViewId, itemId: selectedItemId, epoch: getViewState(activeViewId).membershipEpoch };
+    await loadNextItemIdsPage(owner.requestId);
+    if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.requestId !== activeViewRequestId ||
+        owner.viewId !== activeViewId || owner.itemId !== selectedItemId ||
+        owner.epoch !== getViewState(activeViewId).membershipEpoch) return;
+    const visible = getVisibleItemIds();
+    const index = visible.indexOf(owner.itemId);
+    const adjacentId = index >= 0 ? visible[index + 1] : null;
+    // A failed page/body remains explicitly retryable without immediately
+    // issuing a second request or moving away from the current reader.
+    if (adjacentId && articleCache.has(adjacentId)) await selectArticle(adjacentId, { keyboard: true });
+  }
+
   function moveArticleSelection(direction) {
     if (!isReaderVisible()) {
       return false;
@@ -2670,6 +2685,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextIndex = selectedIndex + direction;
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
+      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedTodayBoundary()) {
+        if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || window.navigator?.onLine === false) return false;
+        void loadAdjacentKeyboardArticle();
+        return true;
+      }
       return moveArticleWindow(direction, true);
     }
 
