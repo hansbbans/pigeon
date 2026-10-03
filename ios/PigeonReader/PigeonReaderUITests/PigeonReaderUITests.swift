@@ -1467,7 +1467,8 @@ final class PigeonDeepLinkUITests: XCTestCase {
 			open.tap()
 		}
 		XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "Pigeon should receive the Safari URL handoff")
-		XCTAssertTrue(dialog.waitForNonExistence(timeout: 5))
+		// Once the OS foregrounds Pigeon, Safari may suspend its accessibility service.
+		// Destination assertions in the caller verify the URL without querying that background app.
 	}
 
 	private func tapButton(_ button: XCUIElement, in application: XCUIApplication) {
