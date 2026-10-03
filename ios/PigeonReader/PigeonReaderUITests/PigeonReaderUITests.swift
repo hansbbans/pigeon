@@ -1415,14 +1415,43 @@ final class PigeonDeepLinkUITests: XCTestCase {
 		address.tap()
 		let existing = address.value as? String ?? ""
 		address.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count) + text + "\n")
-		let safariOpen = safari.buttons["Open"].firstMatch
-		if safariOpen.waitForExistence(timeout: 5) {
-			tapButton(safariOpen, in: safari)
+		let safariDialog = safari.descendants(matching: .any)["SFDialogView"].firstMatch
+		let dialog: XCUIElement
+		if safariDialog.waitForExistence(timeout: 5) {
+			dialog = safariDialog
 		} else {
-			let systemOpen = springboard.alerts.buttons["Open"].firstMatch
-			XCTAssertTrue(systemOpen.waitForExistence(timeout: 5))
-			tapButton(systemOpen, in: springboard)
+			dialog = springboard.alerts.firstMatch
+			guard dialog.waitForExistence(timeout: 5) else {
+				XCTFail("Expected the system confirmation to open Pigeon")
+				return
+			}
 		}
+		let pigeonMessage = dialog.descendants(matching: .any).matching(
+			NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS %@", "Open", "Pigeon")
+		).firstMatch
+		guard pigeonMessage.exists else {
+			XCTFail("Expected the confirmation to open Pigeon")
+			return
+		}
+		let open = dialog.buttons["Open"]
+		let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: open)
+		guard XCTWaiter.wait(for: [hittable], timeout: 5) == .completed else {
+			XCTFail("Expected a tappable Pigeon confirmation button")
+			return
+		}
+		open.tap()
+		// Safari can retain its confirmation after an early automation tap.
+		// Retry once only while that same Pigeon prompt remains; never activate
+		// the app directly, which would hide an undelivered URL.
+		if app.wait(for: .runningForeground, timeout: 3) == false, dialog.exists {
+			guard pigeonMessage.exists, open.isHittable else {
+				XCTFail("The remaining confirmation should still open Pigeon")
+				return
+			}
+			open.tap()
+		}
+		XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "Pigeon should receive the Safari URL handoff")
+		XCTAssertTrue(dialog.waitForNonExistence(timeout: 5))
 	}
 
 	private func tapButton(_ button: XCUIElement, in application: XCUIApplication) {
