@@ -6,6 +6,8 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 
 	override func setUp() async throws {
 		continueAfterFailure = false
+		// XCTest can abort a rotating case before its Swift defer executes.
+		XCUIDevice.shared.orientation = .portrait
 		app = XCUIApplication()
 		launchFixture()
 	}
@@ -120,6 +122,7 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 	}
 
 	func testSwitchingFeedsKeepsTheRegularSidebarStationary() throws {
+		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "Requires a regular-width iPad sidebar")
 		XCUIDevice.shared.orientation = .landscapeLeft
 		defer { XCUIDevice.shared.orientation = .portrait }
 		// Home covers a mounted split sidebar. Its controls share identifiers,
