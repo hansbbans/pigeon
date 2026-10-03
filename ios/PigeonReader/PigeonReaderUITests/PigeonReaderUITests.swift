@@ -1434,6 +1434,21 @@ final class PigeonDeepLinkUITests: XCTestCase {
 			XCTFail("Expected the confirmation to open Pigeon")
 			return
 		}
+		// Safari's first-use menu tip can cover the URL confirmation on a fresh simulator.
+		let menuTip = safari.descendants(matching: .any)["TipView"].firstMatch
+		if menuTip.exists,
+		   menuTip.staticTexts["View Bookmarks, Share Menu, and Open Tabs"].exists {
+			let closeTip = menuTip.buttons["Close"]
+			guard closeTip.waitForExistence(timeout: 5) else {
+				XCTFail("Expected the Safari menu tutorial's close button")
+				return
+			}
+			closeTip.tap()
+			guard menuTip.waitForNonExistence(timeout: 5) else {
+				XCTFail("The Safari menu tutorial should stop covering the confirmation")
+				return
+			}
+		}
 		let open = dialog.buttons["Open"]
 		let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: open)
 		guard XCTWaiter.wait(for: [hittable], timeout: 5) == .completed else {
