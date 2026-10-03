@@ -846,3 +846,20 @@ test('self-closing slashes keep ordinary HTML raw-text elements open', () => {
   }
  }
 });
+
+
+test('RSS URL callbacks keep entity decoding and attribute escaping intact', () => {
+ assert.equal(rewriteRssContentLinks(`<p><a href='/story?a=1&amp;b=2'>Story</a><img src="/image?name=A&#38;format=svg"></p>`, 'https://example.com/feed.xml'), `<p><a href='https://example.com/story?a=1&amp;b=2'>Story</a><img src="https://example.com/image?name=A&amp;format=svg"></p>`);
+});
+
+
+test('MathML self-closing elements leave later links active and HTML integration text stays literal', () => {
+ const base = 'https://example.com/';
+ assert.equal(rewriteRssContentLinks('<math><style/><title/><mtext>Math</mtext></math><a href="/real">Real</a>', base), '<math><style/><title/><mtext>Math</mtext></math><a href="https://example.com/real">Real</a>');
+ for (const container of ['mi', 'mo', 'mn', 'ms', 'mtext', 'annotation-xml encoding="text/html"', "annotation-xml encoding='application/xhtml+xml'"]) {
+  const name = container.split(' ')[0];
+  const source = `<math><${container}><script/><a href="/literal">Example</a></script><a href="/real">Real</a></${name}></math><a href="/outside">Outside</a>`;
+  const expected = `<math><${container}><script/><a href="/literal">Example</a></script><a href="https://example.com/real">Real</a></${name}></math><a href="https://example.com/outside">Outside</a>`;
+  assert.equal(rewriteRssContentLinks(source, base), expected);
+ }
+});

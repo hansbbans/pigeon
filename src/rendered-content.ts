@@ -1,3 +1,5 @@
+import { rewriteHtmlAttributes } from './html-attributes';
+
 const HTML_PATTERN = /<!doctype|<\?xml|<(html|head|body|style|script|article|section|div|p|table|ul|ol|li|img|br|hr|a)\b/i;
 const SEMANTIC_HTML_TAG_PATTERN = /<(\/?)(h[1-6]|blockquote|pre|figure|figcaption|dl|dt|dd)(?=[\t\n\f\r />])/gi;
 const EMAIL_CONTENT_CLASS_HINTS = [
@@ -135,28 +137,16 @@ function absolutizeSrcset(srcset: string, baseUrl: string): string {
 }
 
 function absolutizeRelativeUrlsInHtml(html: string, baseUrl: string): string {
-	let result = html.replace(
-		/\b(href|src|poster)\s*=\s*(["'])(.*?)\2/gi,
-		(match, attribute: string, quote: string, value: string) => {
-			const resolvedUrl = absolutizeRelativeUrl(value, baseUrl);
-			if (!resolvedUrl) {
-				return match;
-			}
-
-			return `${attribute}=${quote}${resolvedUrl}${quote}`;
-		},
-	);
-
-	result = result.replace(/\bsrcset\s*=\s*(["'])(.*?)\1/gi, (match, quote: string, value: string) => {
-		const resolvedSrcset = absolutizeSrcset(value, baseUrl);
-		if (resolvedSrcset === value) {
-			return match;
+	return rewriteHtmlAttributes(html, (attribute, value, quoted) => {
+		// Keep the renderer's existing handling of quoted URL attributes.
+		if (!quoted) return undefined;
+		if (/^(?:href|src|poster)$/i.test(attribute)) return absolutizeRelativeUrl(value, baseUrl) ?? undefined;
+		if (/^srcset$/i.test(attribute)) {
+			const resolved = absolutizeSrcset(value, baseUrl);
+			return resolved === value ? undefined : resolved;
 		}
-
-		return `srcset=${quote}${resolvedSrcset}${quote}`;
+		return undefined;
 	});
-
-	return result;
 }
 
 function escapeRegex(value: string): string {

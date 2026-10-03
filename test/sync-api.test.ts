@@ -1571,3 +1571,21 @@ for (const dates of [
 });
 
 }
+
+
+test('fetched typed HTML with an article URL preserves attribute examples in reader output', async () => {
+ const state = fixture(); const originalFetch = globalThis.fetch;
+ try {
+  state.database.prepare("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('reader-link-feed', 'Examples', 'rss', 'https://feeds.example.com/reader-links')").run();
+  const html = `<p>Example href="/example"</p><a title="Example href='/literal' >" href="/real">Real</a>`;
+  globalThis.fetch = async () => new Response(JSON.stringify({ version: 'https://jsonfeed.org/version/1.1', items: [{ id: 'example', url: 'https://example.com/article', content_html: html }] }));
+  assert.equal((await fetchAndStoreRssFeed(state.env, { feed_key: 'reader-link-feed', source_url: 'https://feeds.example.com/reader-links', etag: null, last_modified: null })).outcome, 'success');
+  const stored = state.database.prepare('SELECT * FROM items').get() as Parameters<typeof generateAtomFeed>[1][number];
+  const expected = `<div><p>Example href="/example"</p><a title="Example href='/literal' >" href="https://example.com/real">Real</a></div>`;
+  assert.equal(stored.html_content, expected); assert.equal(stored.original_url, 'https://example.com/article');
+  const password = 'test-password';
+  const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/contents?i=1', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+  assert.equal((await response.json() as { items: { content: { content: string } }[] }).items[0].content.content, expected);
+  assert.ok((await generateAtomFeed({ feed_key: 'reader-link-feed', display_name: 'Examples', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example')).includes(`<content type="html"><![CDATA[${expected}]]></content>`));
+ } finally { globalThis.fetch = originalFetch; state.database.close(); }
+});

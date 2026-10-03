@@ -1,7 +1,4 @@
-const CONTENT_TAG_PATTERN = /<!--[\s\S]*?(?:-->|$)|<\/?[A-Za-z][A-Za-z0-9:-]*(?:[^<>"']|"[^"]*"|'[^']*')*>/g;
-const CONTENT_ATTRIBUTE_PATTERN = /([^\t\n\f\r =/>]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*("[^"]*"|'[^']*'|[^\t\n\f\r "'=<>`]+))?/g;
-const SVG_HTML_INTEGRATION_TAGS = new Set(['foreignobject', 'desc', 'title']);
-const RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']);
+import { rewriteHtmlAttributes } from './html-attributes';
 
 function decodeHtmlEntities(value: string): string {
 	return value.replace(/&(#x[0-9a-f]+|#\d+|amp|quot|apos|lt|gt);/gi, (entity, body: string) => {
@@ -293,38 +290,9 @@ export function rewriteRssContentLinks(html: string, baseUrl: string): string {
 		return html;
 	}
 
-	let rawTextTag: string | undefined;
-	const foreignScopes: Array<{ name: string; foreign: boolean }> = [];
-	return html.replace(CONTENT_TAG_PATTERN, (tag) => {
-		if (tag.startsWith('<!--')) return tag;
-		const nameMatch = tag.match(/^<(\/?)([A-Za-z][A-Za-z0-9:-]*)/)!;
-		const closing = nameMatch[1] === '/';
-		const name = nameMatch[2].toLowerCase();
-		if (rawTextTag) {
-			if (closing && name === rawTextTag && rawTextTag !== 'plaintext') rawTextTag = undefined;
-			return tag;
-		}
-		const selfClosing = tag.endsWith('/>');
-		if (closing) {
-			if (name === 'svg' || (SVG_HTML_INTEGRATION_TAGS.has(name) && foreignScopes.at(-1)?.name === name)) {
-				while (foreignScopes.length && foreignScopes.pop()!.name !== name) { /* Exit enclosing foreign scopes. */ }
-			}
-			return tag;
-		}
-		const inheritedForeign = foreignScopes.at(-1)?.foreign ?? false;
-		if (!selfClosing && (name === 'svg' || (SVG_HTML_INTEGRATION_TAGS.has(name) && inheritedForeign))) {
-			foreignScopes.push({ name, foreign: name === 'svg' });
-		}
-		// A slash closes SVG elements; HTML script/style remain raw text.
-		if (RAW_TEXT_TAGS.has(name) && !(inheritedForeign && (selfClosing || SVG_HTML_INTEGRATION_TAGS.has(name)))) rawTextTag = name;
-		const prefix = nameMatch[0];
-		const attributes = tag.slice(prefix.length, -1).replace(CONTENT_ATTRIBUTE_PATTERN, (attribute, attributeName: string, rawValue?: string) => {
-			if (!rawValue || !/^(?:href|src)$/i.test(attributeName)) return attribute;
-			const quoted = rawValue.startsWith('"') || rawValue.startsWith("'");
-			const quote = quoted ? rawValue[0] : '"';
-			const resolved = resolveUrl(quoted ? rawValue.slice(1, -1) : rawValue, baseUrl);
-			return resolved ? `${attributeName}=${quote}${escapeHtmlAttribute(resolved)}${quote}` : attribute;
-		});
-		return `${prefix}${attributes}>`;
+	return rewriteHtmlAttributes(html, (attributeName, value) => {
+		if (!/^(?:href|src)$/i.test(attributeName)) return undefined;
+		const resolved = resolveUrl(value, baseUrl);
+		return resolved ? escapeHtmlAttribute(resolved) : undefined;
 	});
 }

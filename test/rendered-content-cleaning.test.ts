@@ -432,3 +432,36 @@ test('handleGreaderRequest accepts raw urlencoded item ids even without a form c
 	assert.equal(payload.items.length, 1);
 	assert.match(payload.items[0].summary.content, /<p>Hello from a stored item\.<\/p>/);
 });
+
+
+test('reader URL rewriting preserves visible examples, quoted attributes and custom data', () => {
+ const html = `<p>Examples href="/example" src='/image' poster="/poster" srcset="/small.png 1x, /large.png 2x"</p><video title="Example poster='/literal' >" data-poster="/custom" poster="/real.jpg"></video><img alt='srcset="/literal.png 1x"' data-srcset="/custom.png 1x" srcset="/small.png 1x, /large.png 2x">`;
+ const expected = `<p>Examples href="/example" src='/image' poster="/poster" srcset="/small.png 1x, /large.png 2x"</p><video title="Example poster='/literal' >" data-poster="/custom" poster="https://example.com/real.jpg"></video><img alt='srcset="/literal.png 1x"' data-srcset="/custom.png 1x" srcset="https://example.com/small.png 1x, https://example.com/large.png 2x">`;
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+test('reader URL rewriting keeps existing raw-text cleaning and SVG links', () => {
+ const html = '<p>Body</p><!-- <a href="/comment"> --><script/><a href="/literal">example</a></script><svg><style/><image href="/icon.svg"/></svg><a href="/real">Real</a>';
+ const expected = '<div data-pigeon-rendered="email-fragment" style="text-align:left"><p>Body</p><svg><style/><image href="https://example.com/icon.svg"/></svg><a href="https://example.com/real">Real</a></div>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+
+test('reader URL rewriting preserves comments and textarea examples on the unmodified HTML path', () => {
+ const html = '<p>Body</p><!-- <a href="/comment"> --><textarea><a href="/literal">example</a></textarea><a href="/real">Real</a>';
+ const expected = '<p>Body</p><!-- <a href="/comment"> --><textarea><a href="/literal">example</a></textarea><a href="https://example.com/real">Real</a>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+
+test('reader URL callbacks retain quoted entity URLs, fragment links and unquoted attributes', () => {
+ const html = `<p><a href='/story?a=1&amp;b=2'>Story</a><a href="#section">Section</a><img src=/unquoted.png><img src="data:image/png;base64,AAAA"></p>`;
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), `<p><a href='https://example.com/story?a=1&amp;b=2'>Story</a><a href="#section">Section</a><img src=/unquoted.png><img src="data:image/png;base64,AAAA"></p>`);
+});
+
+
+test('reader URL rewriting resumes after self-closing MathML style and title', () => {
+ const html = '<p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="/real">Real</a>';
+ const expected = '<div data-pigeon-rendered="email-fragment" style="text-align:left"><p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="https://example.com/real">Real</a></div>';
+ assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
