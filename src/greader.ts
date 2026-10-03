@@ -463,6 +463,12 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 	return Response.json({ subscriptions });
 }
 
+function newestTimestampUsec(current: string | undefined, candidate: string): string | undefined {
+	const numericCandidate = Number(candidate);
+	if (!Number.isFinite(numericCandidate)) return current;
+	return current === undefined || numericCandidate > Number(current) ? candidate : current;
+}
+
 async function handleUnreadCount(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
 		`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
@@ -477,28 +483,24 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 	const tagsByFeedKey = await loadFeedTags(env, { feedRowids: results.map((feed) => feed.rowid) });
 
 	let totalUnreadCount = 0;
-	let newestUnreadUsec = '0';
+	let newestUnreadUsec: string | undefined;
 	const unreadcounts = results.map((r) => ({
 		id: `feed/${r.rowid}`,
 		count: r.count,
 		newestItemTimestampUsec: (isoToUnix(r.newest) * 1_000_000).toString(),
 	}));
-	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string }>();
+	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string | undefined }>();
 	for (const unread of unreadcounts) {
 		totalUnreadCount += unread.count;
-		if (unread.newestItemTimestampUsec > newestUnreadUsec) {
-			newestUnreadUsec = unread.newestItemTimestampUsec;
-		}
+		newestUnreadUsec = newestTimestampUsec(newestUnreadUsec, unread.newestItemTimestampUsec);
 	}
 	for (const row of results) {
 		const newestItemTimestampUsec = (isoToUnix(row.newest) * 1_000_000).toString();
 		for (const label of tagsByFeedKey.get(row.feed_key) ?? []) {
 			const streamId = `user/-/label/${label}`;
-			const existing = labelCounts.get(streamId) ?? { count: 0, newestItemTimestampUsec: '0' };
+			const existing = labelCounts.get(streamId) ?? { count: 0, newestItemTimestampUsec: undefined };
 			existing.count += row.count;
-			if (newestItemTimestampUsec > existing.newestItemTimestampUsec) {
-				existing.newestItemTimestampUsec = newestItemTimestampUsec;
-			}
+			existing.newestItemTimestampUsec = newestTimestampUsec(existing.newestItemTimestampUsec, newestItemTimestampUsec);
 			labelCounts.set(streamId, existing);
 		}
 	}
@@ -508,13 +510,13 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		unreadcounts.push({
 			id,
 			count: value.count,
-			newestItemTimestampUsec: value.newestItemTimestampUsec,
+			newestItemTimestampUsec: value.newestItemTimestampUsec ?? '0',
 		});
 	}
 	unreadcounts.push({
 		id: 'user/-/state/com.google/reading-list',
 		count: totalUnreadCount,
-		newestItemTimestampUsec: newestUnreadUsec,
+		newestItemTimestampUsec: newestUnreadUsec ?? '0',
 	});
 
 	return Response.json({ max: 1000, unreadcounts });

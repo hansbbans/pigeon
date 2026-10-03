@@ -1542,3 +1542,32 @@ test('unread publisher membership keeps legacy category fallback when feed tags 
   assert.ok(body.unreadcounts.every((count) => count.id !== 'user/-/label/Design'));
  } finally { state.database.close(); }
 });
+
+
+for (const dates of [
+ ['2000-01-01T12:00:00.000Z', '2026-10-02T12:00:00.000Z'],
+ ['1968-01-01T12:00:00.000Z', '1969-10-02T12:00:00.000Z'],
+ ['1969-01-01T12:00:00.000Z', '2026-10-02T12:00:00.000Z'],
+ ['not-a-date', '2026-10-02T12:00:00.000Z'],
+]) {
+ test(`unread totals choose the newest timestamp numerically from ${dates[0]} and ${dates[1]}`, async () => {
+ const state = fixture();
+ try {
+  for (const [index, receivedAt] of dates.entries()) {
+   const key = `timestamp-${index}`;
+   state.database.prepare("INSERT INTO feeds (feed_key, display_name, category) VALUES (?, 'Publisher', 'Shared')").run(key);
+   state.database.prepare("INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at) VALUES (?, ?, 'Story', '<p>Body</p>', ?, ?)").run(key, key, key, receivedAt);
+  }
+  const password = 'test-password';
+  const response = await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/unread-count', { headers: { Authorization: `GoogleLogin auth=pigeon/${await generateApiToken(password)}` } }), { DB: state.db, BASE_URL: 'https://pigeon.example', API_PASSWORD: password } as never);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { unreadcounts: { id: string; count: number; newestItemTimestampUsec: string }[] };
+  const latest = String(Date.parse(dates[1]) * 1_000);
+  const totals = ['user/-/state/com.google/reading-list', 'user/-/label/Shared'].map((id) => body.unreadcounts.find((count) => count.id === id));
+  assert.deepEqual(totals.map((count) => count?.newestItemTimestampUsec), [latest, latest]);
+  assert.deepEqual(totals.map((count) => count?.count), [2, 2]);
+  assert.equal(body.unreadcounts.find((count) => count.id === 'feed/1')?.newestItemTimestampUsec, String(Date.parse(dates[0]) * 1_000));
+ } finally { state.database.close(); }
+});
+
+}
