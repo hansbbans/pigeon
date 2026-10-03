@@ -6149,3 +6149,43 @@ for (const view of ['unread', 'recent', 'folder']) {
 		} finally { state.database.close(); }
 	});
 }
+
+for (const change of ['unsubscribe', 'delete']) {
+ test(`Today cached membership reconciles ${change} when authoritative pagination reaches yesterday with a remaining cursor`, async () => {
+  const now = new Date(2026, 9, 2, 12).getTime();
+  const state = createLargeTodaySqliteLibrary(now, 90);
+  try {
+   state.database.exec("INSERT INTO feeds (feed_key, display_name) VALUES ('removed-source', 'Removed source'); UPDATE items SET feed_key = 'removed-source' WHERE rowid BETWEEN 80 AND 90");
+   const insert = state.database.prepare("INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at) VALUES (?, 'today-source', ?, ?, ?, ?)");
+   const start = getLocalDayBounds(new Date(now)).startSeconds;
+   for (let i = 0; i < 100; i += 1) insert.run(`old-${i}`, `Older ${i}`, `<p>Older body ${i}</p>`, `older-message-${i}`, new Date((start - 100 - i) * 1000).toISOString());
+   const token = await generateApiToken('today-test-password');
+   const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => input === '/accounts/ClientLogin'
+    ? new Response(`Auth=pigeon/${token}`)
+    : handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env) });
+   await h.elements.get('login-form')!.dispatch('submit');
+   await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 91');
+   findListButtonByViewId(h.elements.get('views-list'), 'today')!.dispatch('click');
+   await flushBrowserTasks();
+   await waitForTodayWindow(h);
+   assert.deepEqual(renderedArticleIds(h), Array.from({ length: 90 }, (_, i) => String(90 - i)));
+   findListButtonByItemId(h.elements.get('articles-list'), '80')!.dispatch('click');
+   await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === 'Story 80');
+   findListButtonByViewId(h.elements.get('views-list'), 'all')!.dispatch('click');
+   await flushBrowserTasks();
+   await waitForTodayWindow(h);
+   if (change === 'unsubscribe') state.database.exec("UPDATE feeds SET is_active = 0 WHERE feed_key = 'removed-source'");
+   else state.database.exec("DELETE FROM items WHERE feed_key = 'removed-source'");
+   findListButtonByViewId(h.elements.get('views-list'), 'today')!.dispatch('click');
+   await flushBrowserTasks();
+   await waitForTodayWindow(h);
+   assert.deepEqual(await collectBrowserWindowIds(h), Array.from({ length: 79 }, (_, i) => String(79 - i)));
+   assert.equal(h.elements.get('load-more-button')!.classList.contains('hidden'), true);
+   assert.equal(h.elements.get('article-older-button')!.disabled, true);
+   const selected = h.elements.get('reader-title')!.textContent.replace('Story ', '');
+   assert.ok(renderedArticleIds(h).includes(selected));
+   assert.ok(Number(selected) < 80);
+   assert.ok(h.elements.get('reader-frame')!.srcdoc.includes(`Body ${selected}</p>`));
+  } finally { state.database.close(); }
+ });
+}

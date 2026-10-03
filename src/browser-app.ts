@@ -2465,7 +2465,27 @@ export function renderBrowserAppRuntimeScript(): string {
     return isTodayView() ? getTodayCandidateIds() : itemIds;
   }
 
+  function reconcileTodayMembershipBoundary() {
+    if (!isTodayView() || isLoadingItemIdsPage || !hasReachedTodayBoundary()) return;
+    const state = getViewState(activeViewId);
+    if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id))) return;
+    // The ordered current root has reached yesterday, so all of today's IDs
+    // are confirmed even when the server still has older pages. Cached tails
+    // must no longer retain removed stories or their previous ordering.
+    itemIds = [...state.confirmedItemIds];
+    state.itemIds = [...itemIds];
+    state.continuation = '';
+    nextItemIdsContinuation = '';
+    const membership = new Set(itemIds);
+    for (const id of state.publicationDates.keys()) {
+      if (!membership.has(id)) state.publicationDates.delete(id);
+    }
+    if (selectedItemId && !membership.has(selectedItemId)) selectedItemId = null;
+    state.selectedItemId = selectedItemId;
+  }
+
   function getVisibleItemIds() {
+    reconcileTodayMembershipBoundary();
     const state = getViewState(activeViewId);
     const candidates = getWindowCandidateIds();
     const anchoredIndex = state.windowAnchorId ? candidates.indexOf(state.windowAnchorId) : -1;
