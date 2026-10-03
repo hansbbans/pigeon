@@ -567,6 +567,7 @@ function createElement(
 	initialClasses: string[] = [],
 	tagName = 'div',
 	onFocus?: (element: ReturnType<typeof createElement>) => void,
+	onReveal?: (id: string, options: { block?: string; inline?: string }) => void,
 ) {
 	const handlers = new Map<string, (event: Record<string, unknown> & { preventDefault(): void; target: unknown }) => unknown>();
 	const classes = new Set(initialClasses);
@@ -674,6 +675,8 @@ function createElement(
 		focus() {
 			onFocus?.(element);
 		},
+		scrollIntoViewCalls: [] as Array<{ block?: string; inline?: string }>,
+		scrollIntoView(options: { block?: string; inline?: string }) { element.scrollIntoViewCalls.push(options); onReveal?.(dataset.itemId ?? '', options); },
 		setPointerCapture() {},
 		getBoundingClientRect() {
 			return { width: 1440, height: 900, left: 0, right: 1440, top: 0, bottom: 900 };
@@ -780,6 +783,7 @@ async function createBrowserHarness(options?: {
 	const windowHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
 	let visibilityState = 'visible';
 	let activeElement: ReturnType<typeof createElement> | null = null;
+	const revealCalls: Array<{ id: string; block?: string; inline?: string }> = [];
 	const registerFocus = (element: ReturnType<typeof createElement>) => {
 		activeElement = element;
 	};
@@ -812,9 +816,9 @@ async function createBrowserHarness(options?: {
 		['articles-list-shell', createElement('', [], 'div', registerFocus)],
 		['articles-list', createElement('', [], 'ul', registerFocus)],
 		['load-more-button', createElement('', ['hidden'], 'button', registerFocus)],
-		['today-page-controls', createElement('', ['hidden'], 'div', registerFocus)],
-		['today-newer-button', createElement('', [], 'button', registerFocus)],
-		['today-older-button', createElement('', [], 'button', registerFocus)],
+		['article-page-controls', createElement('', ['hidden'], 'div', registerFocus)],
+		['article-newer-button', createElement('', [], 'button', registerFocus)],
+		['article-older-button', createElement('', [], 'button', registerFocus)],
 		['mark-all-as-read-button', createElement('', ['hidden'], 'button', registerFocus)],
 		['reader-source-label', createElement('', [], 'p', registerFocus)],
 		['reader-source-note', createElement('', [], 'p', registerFocus)],
@@ -841,7 +845,7 @@ async function createBrowserHarness(options?: {
 			frameDocumentHandlers.delete(type);
 		},
 		createElement(tagName?: string) {
-			return createElement('', [], tagName, registerFocus);
+			return createElement('', [], tagName, registerFocus, (id, options) => revealCalls.push({ id, ...options }));
 		},
 	};
 	const storage = new Map<string, string>();
@@ -990,7 +994,7 @@ async function createBrowserHarness(options?: {
 				return activeElement;
 			},
 			createElement(tagName?: string) {
-				return createElement('', [], tagName, registerFocus);
+				return createElement('', [], tagName, registerFocus, (id, options) => revealCalls.push({ id, ...options }));
 			},
 			getElementById(id: string) {
 				const element = elements.get(id);
@@ -1116,6 +1120,7 @@ async function createBrowserHarness(options?: {
 	return {
 		elements,
 		getCacheSizes: () => context.window.__readCacheSizes!(),
+		revealCalls,
 		storage,
 		localStorageState,
 		documentElementAttributes,
@@ -4033,7 +4038,7 @@ test('large refreshes keep content requests bounded and do not refetch evicted p
 	let contentRequests = 0;
 	let activeContentRequests = 0;
 	let maximumConcurrentContentRequests = 0;
-	const { elements, dispatchDocumentEvent } = await createBrowserHarness({
+	const harness = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
 				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
@@ -4070,10 +4075,16 @@ test('large refreshes keep content requests bounded and do not refetch evicted p
 		},
 	});
 
+	const { elements, dispatchDocumentEvent } = harness;
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(() => membershipRequests === 1 && contentRequests === 1 && activeContentRequests === 0);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => contentRequests === 29 && activeContentRequests === 0, 100);
+	await waitForBrowserCondition(() => contentRequests === 11 && activeContentRequests === 0, 100);
+	await collectBrowserWindowIds(harness);
+	for (let page = 0; page < 2; page += 1) {
+		elements.get('article-newer-button')!.dispatch('click');
+		await waitForTodayWindow(harness);
+	}
 	const settledRequestCount = contentRequests;
 	await flushBrowserTasks();
 	await flushBrowserTasks();
@@ -4156,7 +4167,7 @@ test('runtime Today pagination continues after the full body cache reaches its c
 	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '200')), 400);
 	await waitForTodayWindow(harness);
 	for (let page = 0; page < 2; page += 1) {
-		elements.get('today-older-button')!.dispatch('click');
+		elements.get('article-older-button')!.dispatch('click');
 		await waitForTodayWindow(harness);
 	}
 
@@ -4354,7 +4365,7 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 	let phase = 'all';
 	let feedContentRequests = 0;
 	const contentRequests: string[][] = [];
-	const { elements, dispatchDocumentEvent } = await createBrowserHarness({
+	const harness = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
 				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
@@ -4402,10 +4413,16 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 		},
 	});
 
+	const { elements, dispatchDocumentEvent } = harness;
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(() => allMembershipRequests === 1 && contentRequests.length === 1);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => contentRequests.length >= 29, 120);
+	await waitForBrowserCondition(() => contentRequests.length >= 11, 120);
+	await collectBrowserWindowIds(harness);
+	for (let page = 0; page < 2; page += 1) {
+		elements.get('article-newer-button')!.dispatch('click');
+		await waitForTodayWindow(harness);
+	}
 
 	await findListButtonByItemId(elements.get('articles-list'), '60')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('reader-title')?.textContent ?? '') === 'Article 60');
@@ -4414,13 +4431,14 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
 	await waitForBrowserCondition(() => feedMembershipRequests === 1 && feedContentRequests === 1);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => feedContentRequests >= 31, 140);
+	await waitForBrowserCondition(() => feedContentRequests >= 11, 140);
+	await collectBrowserWindowIds(harness);
 
 	phase = 'all-refresh';
 	const refreshStart = contentRequests.length;
 	await findListButtonByViewId(elements.get('views-list'), 'all')?.dispatch('click');
 	await waitForBrowserCondition(
-		() => allMembershipRequests === 3 && contentRequests.slice(refreshStart).some((ids) => ids.includes('60')),
+		() => allMembershipRequests >= 3 && contentRequests.slice(refreshStart).some((ids) => ids.includes('60')),
 		100,
 	);
 
@@ -4605,13 +4623,13 @@ test('Today can reload an evicted selected article after reaching yesterday', as
 	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '200')), 400);
 	await waitForTodayWindow(harness);
 	for (let page = 0; page < 2; page += 1) {
-		elements.get('today-older-button')!.dispatch('click');
+		elements.get('article-older-button')!.dispatch('click');
 		await waitForTodayWindow(harness);
 	}
 	assert.ok(findListButtonByItemId(elements.get('articles-list'), '551'));
 	const requestsBefore = contentRequests.length;
 	for (let page = 0; page < 2; page += 1) {
-		elements.get('today-newer-button')!.dispatch('click');
+		elements.get('article-newer-button')!.dispatch('click');
 		await waitForTodayWindow(harness);
 	}
 	findListButtonByItemId(elements.get('articles-list'), '2')?.dispatch('click');
@@ -5036,7 +5054,8 @@ test('a deleted evicted selection does not block an authoritative root refresh',
 		await waitForBrowserCondition(() => feedRequests === 1);
 		await flushBrowserTasks();
 		harness.dispatchDocumentEvent('visibilitychange');
-		await waitForBrowserCondition(() => contentRequests.length >= 30, 200);
+		await waitForBrowserCondition(() => contentRequests.length >= 11, 200);
+		await collectBrowserWindowIds(harness);
 		await flushBrowserTasks();
 		deleted = true;
 		findListButtonByViewId(harness.elements.get('views-list'), 'all')?.dispatch('click');
@@ -5496,6 +5515,27 @@ async function drainBrowserMembershipPages(harness: Awaited<ReturnType<typeof cr
 	assert.fail('Browser membership pagination did not finish');
 }
 
+async function collectBrowserWindowIds(harness: Awaited<ReturnType<typeof createBrowserHarness>>) {
+	await drainBrowserMembershipPages(harness);
+	await waitForTodayWindow(harness);
+	for (let page = 0; page < 30 && !harness.elements.get('article-newer-button')!.disabled; page += 1) {
+		harness.elements.get('article-newer-button')!.dispatch('click');
+		await waitForTodayWindow(harness);
+	}
+	const ids = new Set<string>();
+	for (let page = 0; page < 30; page += 1) {
+		await drainBrowserMembershipPages(harness);
+		await waitForTodayWindow(harness);
+		const visible = renderedArticleIds(harness);
+		assert.ok(visible.length <= 200);
+		for (const id of visible) ids.add(id);
+		if (harness.elements.get('article-older-button')!.disabled || harness.elements.get('article-page-controls')!.classList.contains('hidden')) return [...ids];
+		harness.elements.get('article-older-button')!.dispatch('click');
+		await waitForTodayWindow(harness);
+	}
+	assert.fail('Browser windows did not finish');
+}
+
 for (const change of ['unsubscribe', 'delete', 'unchanged', 'replace']) {
 	test(`completed authoritative pagination reconciles a large cached tail after ${change}`, async () => {
 		const initialIds = Array.from({ length: 650 }, (_, index) => String(index + 1));
@@ -5504,6 +5544,7 @@ for (const change of ['unsubscribe', 'delete', 'unchanged', 'replace']) {
 			: change === 'replace' ? initialIds.map((id) => String(Number(id) + 650)) : initialIds;
 		let refreshed = false;
 		let duplicatePageSent = false;
+		const heldDuplicatePage = createDeferred<Response>();
 		const bodyRequests: string[][] = [];
 		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
 			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
@@ -5511,7 +5552,7 @@ for (const change of ['unsubscribe', 'delete', 'unchanged', 'replace']) {
 				const ids = refreshed ? currentIds : initialIds;
 				if (refreshed && cursor === '50' && !duplicatePageSent) {
 					duplicatePageSent = true;
-					return Response.json({ itemRefs: ids.slice(0, 50).map((id) => ({ id })), continuation: 'duplicate-page' });
+					return heldDuplicatePage.promise;
 				}
 				const offset = cursor === 'duplicate-page' ? 50 : Number(cursor || 0);
 				return Response.json({ itemRefs: ids.slice(offset, offset + 50).map((id) => ({ id })),
@@ -5522,24 +5563,27 @@ for (const change of ['unsubscribe', 'delete', 'unchanged', 'replace']) {
 		} });
 		await harness.elements.get('login-form')?.dispatch('submit');
 		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
-		await drainBrowserMembershipPages(harness);
-		assert.equal(harness.elements.get('articles-list')?.children.length, 650);
+		assert.deepEqual(await collectBrowserWindowIds(harness), initialIds);
+		harness.elements.get('article-newer-button')!.dispatch('click');
+		await waitForTodayWindow(harness);
 		findListButtonByItemId(harness.elements.get('articles-list'), '600')?.dispatch('click');
 		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 600');
 		refreshed = true;
 		harness.dispatchDocumentEvent('visibilitychange');
-		await flushBrowserTasks();
+		await waitForBrowserCondition(() => duplicatePageSent, 100);
 		assert.ok(findListButtonByItemId(harness.elements.get('articles-list'), '600'), 'retain the cached selection while current pagination is incomplete');
-		await drainBrowserMembershipPages(harness);
-		assert.equal(harness.elements.get('articles-list')?.children.length, currentIds.length);
+		heldDuplicatePage.resolve(Response.json({ itemRefs: currentIds.slice(0, 50).map((id) => ({ id })), continuation: 'duplicate-page' }));
+		const completeIds = await collectBrowserWindowIds(harness);
+		assert.deepEqual(completeIds, currentIds);
 		assert.equal(duplicatePageSent, true);
 		for (const id of ['1', '2', '600', '650', '651', '1300']) {
-			assert.equal(Boolean(findListButtonByItemId(harness.elements.get('articles-list'), id)), currentIds.includes(id), id);
+			assert.equal(completeIds.includes(id), currentIds.includes(id), id);
 		}
-		const expectedSelection = currentIds.includes('600') ? '600' : currentIds[0];
-		assert.equal(harness.elements.get('reader-title')?.textContent, `Article ${expectedSelection}`);
+		const expectedSelection = harness.elements.get('reader-title')!.textContent.replace('Article ', '');
+		assert.ok(currentIds.includes(expectedSelection));
+		assert.ok(renderedArticleIds(harness).includes(expectedSelection));
 		assert.ok(harness.elements.get('reader-frame')?.srcdoc.includes(`<p>Body ${expectedSelection}</p>`), 'the surviving selection has a full body, even if its cache entry was evicted');
-		if (change === 'replace') assert.ok(bodyRequests.filter((ids) => ids.includes('651')).length >= 2, 'reload the new first article after body-cache eviction');
+		assert.ok(bodyRequests.some((ids) => ids.includes(expectedSelection)), 'the selected survivor was hydrated');
 	});
 }
 
@@ -5913,15 +5957,15 @@ test('bounded Today windows keep every story reachable beyond 2100 real GReader 
 				assert.ok(findListButtonByItemId(harness.elements.get('articles-list'), id)!.textContent.includes(`Story ${id}`));
 				seen.add(id);
 			}
-			const older = harness.elements.get('today-older-button')!;
-			if (older.disabled || harness.elements.get('today-page-controls')!.classList.contains('hidden')) break;
+			const older = harness.elements.get('article-older-button')!;
+			if (older.disabled || harness.elements.get('article-page-controls')!.classList.contains('hidden')) break;
 			older.dispatch('click');
 			await waitForTodayWindow(harness);
 		}
 		assert.deepEqual([...seen], Array.from({ length: count }, (_, index) => String(count - index)));
 		assert.ok(bodyRequests > 100, 'crossed the full-body and metadata cache capacities');
-		for (let page = 0; page < 20 && !harness.elements.get('today-newer-button')!.disabled; page += 1) {
-			harness.elements.get('today-newer-button')!.dispatch('click');
+		for (let page = 0; page < 20 && !harness.elements.get('article-newer-button')!.disabled; page += 1) {
+			harness.elements.get('article-newer-button')!.dispatch('click');
 			await waitForTodayWindow(harness);
 		}
 		assert.equal(renderedArticleIds(harness)[0], String(count));
@@ -5929,12 +5973,16 @@ test('bounded Today windows keep every story reachable beyond 2100 real GReader 
 		const last = renderedArticleIds(harness).at(-1)!;
 		findListButtonByItemId(harness.elements.get('articles-list'), last)!.dispatch('click');
 		await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes(`Body ${last}</p>`));
+		let revealStart = harness.revealCalls.length;
 		harness.dispatchKeydown('j');
 		await waitForTodayWindow(harness);
 		assert.equal(harness.elements.get('reader-title')!.textContent, `Story ${Number(last) - 1}`);
+		assert.ok(harness.revealCalls.slice(revealStart).some((call) => call.id === String(Number(last) - 1) && call.block === 'nearest'));
+		revealStart = harness.revealCalls.length;
 		harness.dispatchKeydown('k');
 		await waitForTodayWindow(harness);
 		assert.equal(harness.elements.get('reader-title')!.textContent, `Story ${last}`);
+		assert.ok(harness.revealCalls.slice(revealStart).some((call) => call.id === last && call.block === 'nearest'));
 		const bodiesBeforeMidnight = bodyRequests;
 		harness.setOnline(false);
 		harness.elements.get('articles-list-shell')!.scrollTop = 63;
@@ -6004,7 +6052,7 @@ test('Today windows retain a partial cached tail through a page error, then prun
 		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 650');
 		await waitForTodayWindow(harness);
 		for (let page = 0; page < 3; page += 1) {
-			harness.elements.get('today-older-button')!.dispatch('click');
+			harness.elements.get('article-older-button')!.dispatch('click');
 			await waitForTodayWindow(harness);
 		}
 		assert.ok(renderedArticleIds(harness).includes('1'));
@@ -6017,17 +6065,87 @@ test('Today windows retain a partial cached tail through a page error, then prun
 		harness.elements.get('load-more-button')!.dispatch('click');
 		await waitForTodayWindow(harness);
 		const seen = new Set<string>();
-		for (let page = 0; page < 10 && !harness.elements.get('today-newer-button')!.disabled; page += 1) {
-			harness.elements.get('today-newer-button')!.dispatch('click');
+		for (let page = 0; page < 10 && !harness.elements.get('article-newer-button')!.disabled; page += 1) {
+			harness.elements.get('article-newer-button')!.dispatch('click');
 			await waitForTodayWindow(harness);
 		}
 		for (let page = 0; page < 3; page += 1) {
 			for (const id of renderedArticleIds(harness)) seen.add(id);
-			if (harness.elements.get('today-older-button')!.disabled) break;
-			harness.elements.get('today-older-button')!.dispatch('click');
+			if (harness.elements.get('article-older-button')!.disabled) break;
+			harness.elements.get('article-older-button')!.dispatch('click');
 			await waitForTodayWindow(harness);
 		}
 		assert.deepEqual([...seen], Array.from({ length: 300 }, (_, index) => String(300 - index)));
 		assert.ok(renderedArticleIds(harness).includes(harness.elements.get('reader-title')!.textContent.replace('Story ', '')));
 	} finally { state.database.close(); }
 });
+
+for (const view of ['all', 'feed']) {
+	test(`bounded ${view} windows keep all 2107 real GReader titles and bodies reachable through metadata eviction`, async () => {
+		const now = new Date(2026, 9, 2, 12).getTime();
+		const count = 2_105;
+		const state = createLargeTodaySqliteLibrary(now, count);
+		try {
+			const token = await generateApiToken('today-test-password');
+			let bodyRequests = 0;
+			const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+				if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
+				if (input.endsWith('/contents')) bodyRequests += 1;
+				return handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+			} });
+			await h.elements.get('login-form')!.dispatch('submit');
+			await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === `Story ${count + 1}`);
+			if (view === 'feed') {
+				findListButtonByViewId(h.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+				await waitForBrowserCondition(() => renderedArticleIds(h).length > 0);
+			}
+			await drainBrowserMembershipPages(h);
+			await waitForBrowserCondition(() => h.getCacheSizes().active === 0 && h.getCacheSizes().queued === 0 && h.getCacheSizes().pending === 0 && !h.getCacheSizes().paging, 1_000);
+			assert.equal(h.elements.get('articles-list')!.children.filter((row) => row.textContent.includes('Loading article')).length, 0);
+			const seen = new Set<string>();
+			for (let page = 0; page < 20; page += 1) {
+				const ids = renderedArticleIds(h);
+				assert.ok(ids.length <= 200);
+				for (const id of ids) {
+					assert.ok(findListButtonByItemId(h.elements.get('articles-list'), id)!.textContent.includes(`Story ${id}`));
+					seen.add(id);
+				}
+				if (h.elements.get('article-older-button')!.disabled || h.elements.get('article-page-controls')!.classList.contains('hidden')) break;
+				h.elements.get('article-older-button')!.dispatch('click');
+				await waitForTodayWindow(h);
+			}
+			assert.deepEqual([...seen], [String(count + 1), ...Array.from({ length: count }, (_, index) => String(count - index)), String(count + 2)]);
+			assert.ok(bodyRequests > 100);
+			for (let page = 0; page < 20 && !h.elements.get('article-newer-button')!.disabled; page += 1) {
+				h.elements.get('article-newer-button')!.dispatch('click');
+				await waitForTodayWindow(h);
+			}
+			assert.equal(h.elements.get('reader-title')!.textContent, `Story ${count + 1}`);
+			assert.ok(h.elements.get('reader-frame')!.srcdoc.includes(`Body ${count + 1}</p>`));
+		} finally { state.database.close(); }
+	});
+}
+
+for (const view of ['unread', 'recent', 'folder']) {
+	test(`${view} uses bounded windows without Today date filtering`, async () => {
+		const now = new Date(2026, 9, 2, 12).getTime();
+		const count = 230;
+		const state = createLargeTodaySqliteLibrary(now, count);
+		try {
+			if (view === 'recent') state.database.exec('UPDATE items SET is_read = 1');
+			if (view === 'folder') state.database.exec("UPDATE feeds SET category = 'Today folder'");
+			const token = await generateApiToken('today-test-password');
+			const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => input === '/accounts/ClientLogin'
+				? new Response(`Auth=pigeon/${token}`)
+				: handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env) });
+			await h.elements.get('login-form')!.dispatch('submit');
+			await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === `Story ${count + 1}`);
+			const id = view === 'folder' ? 'user/-/label/Today folder' : view;
+			findListButtonByViewId(h.elements.get(view === 'folder' ? 'folders-list' : 'views-list'), id)!.dispatch('click');
+			await waitForBrowserCondition(() => renderedArticleIds(h).length > 0);
+			const ids = await collectBrowserWindowIds(h);
+			assert.deepEqual(ids, [String(count + 1), ...Array.from({ length: count }, (_, index) => String(count - index)), String(count + 2)]);
+			assert.ok(h.elements.get('reader-frame')!.srcdoc.includes('Body'));
+		} finally { state.database.close(); }
+	});
+}

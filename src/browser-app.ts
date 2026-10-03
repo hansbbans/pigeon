@@ -1049,6 +1049,22 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         border-radius: 0;
       }
 
+      @media (min-width: 901px) {
+        .reader-grid {
+          height: calc(100dvh - 8.1rem);
+          min-height: 0;
+        }
+
+        .panel,
+        .list-shell {
+          min-height: 0;
+        }
+
+        #feeds-panel {
+          overflow: auto;
+        }
+      }
+
       @media (max-width: 1100px) {
         #app {
           padding: 0.9rem;
@@ -1338,9 +1354,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                 </div>
               </div>
               <div class="list-shell" id="articles-list-shell">
-                <div id="today-page-controls" class="hidden" role="group" aria-label="Today article pages">
-                  <button id="today-newer-button" type="button" class="secondary-button">Newer</button>
-                  <button id="today-older-button" type="button" class="secondary-button">Older</button>
+                <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
+                  <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
+                  <button id="article-older-button" type="button" class="secondary-button">Older</button>
                 </div>
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
@@ -1441,9 +1457,9 @@ export function renderBrowserAppRuntimeScript(): string {
   const articlesHeading = document.getElementById('articles-heading');
   const articlesStatus = document.getElementById('articles-status');
   const articlesListShell = document.getElementById('articles-list-shell');
-  const todayWindowControls = document.getElementById('today-page-controls');
-  const todayNewerButton = document.getElementById('today-newer-button');
-  const todayOlderButton = document.getElementById('today-older-button');
+  const articleWindowControls = document.getElementById('article-page-controls');
+  const articleNewerButton = document.getElementById('article-newer-button');
+  const articleOlderButton = document.getElementById('article-older-button');
   const articlesList = document.getElementById('articles-list');
   const loadMoreButton = document.getElementById('load-more-button');
   const markAllAsReadButton = document.getElementById('mark-all-as-read-button');
@@ -1492,7 +1508,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let activeColumnResize = null;
   let appliedColumnWidths = { ...DEFAULT_COLUMN_WIDTHS };
   let activeYouTubeVideoId = null;
-  const TODAY_WINDOW_SIZE = 200;
+  let keyboardRevealSelection = null;
+  const ARTICLE_WINDOW_SIZE = 200;
   const MAX_CACHED_ARTICLES = 500;
   const MAX_CACHED_ARTICLE_METADATA = 2000;
   const CONTENT_REQUEST_CONCURRENCY = 2;
@@ -1917,8 +1934,9 @@ export function renderBrowserAppRuntimeScript(): string {
       contentLoadedIds: new Set(),
       publicationDates: new Map(),
       todayDay: '',
-      todayWindowStart: 0,
-      todayWindowAnchorId: null,
+      windowStart: 0,
+      windowNavigation: false,
+      windowAnchorId: null,
       confirmedItemIds: new Set(),
       membershipEpoch: 0,
       rootRequestId: 0,
@@ -1995,7 +2013,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set(isTodayView() ? getVisibleItemIds() : []);
+    const protectedIds = new Set(getVisibleItemIds());
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -2018,7 +2036,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const protectedIds = new Set(isTodayView() ? getVisibleItemIds() : []);
+    const protectedIds = new Set(getVisibleItemIds());
     if (selectedItemId) {
       protectedIds.add(selectedItemId);
     }
@@ -2070,6 +2088,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearAccountCache() {
     accountGeneration += 1;
+    keyboardRevealSelection = null;
     activeMarkAllRequestId += 1;
     isMarkingAllAsRead = false;
     unreadCountRequestId += 1;
@@ -2203,7 +2222,8 @@ export function renderBrowserAppRuntimeScript(): string {
     pumpContentRequests();
     if (session.status === 'authenticated') {
       loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-      renderTodayWindowControls();
+      renderArticleWindowControls();
+      if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage) keyboardRevealSelection = null;
     }
   }
 
@@ -2428,8 +2448,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const day = bounds.startSeconds + ':' + bounds.endSeconds;
     if (state.todayDay !== day) {
       state.todayDay = day;
-      state.todayWindowStart = 0;
-      state.todayWindowAnchorId = null;
+      state.windowStart = 0;
+      state.windowAnchorId = null;
     }
     // Only a number is retained per membership ID. Evictable titles and bodies
     // must not decide whether a previously verified story still belongs today.
@@ -2441,18 +2461,21 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
 
+  function getWindowCandidateIds() {
+    return isTodayView() ? getTodayCandidateIds() : itemIds;
+  }
+
   function getVisibleItemIds() {
-    if (!isTodayView()) return itemIds;
     const state = getViewState(activeViewId);
-    const candidates = getTodayCandidateIds();
-    const anchoredIndex = state.todayWindowAnchorId ? candidates.indexOf(state.todayWindowAnchorId) : -1;
-    if (anchoredIndex >= 0) state.todayWindowStart = anchoredIndex;
-    else if (!nextItemIdsContinuation || state.todayWindowStart < candidates.length) {
-      const lastWindow = Math.floor(Math.max(0, candidates.length - 1) / TODAY_WINDOW_SIZE) * TODAY_WINDOW_SIZE;
-      state.todayWindowStart = Math.min(Math.floor(state.todayWindowStart / TODAY_WINDOW_SIZE) * TODAY_WINDOW_SIZE, lastWindow);
+    const candidates = getWindowCandidateIds();
+    const anchoredIndex = state.windowAnchorId ? candidates.indexOf(state.windowAnchorId) : -1;
+    if (anchoredIndex >= 0 && state.windowStart > 0) state.windowStart = anchoredIndex;
+    else if (!nextItemIdsContinuation || state.windowStart < candidates.length) {
+      const lastWindow = Math.floor(Math.max(0, candidates.length - 1) / ARTICLE_WINDOW_SIZE) * ARTICLE_WINDOW_SIZE;
+      state.windowStart = Math.min(Math.floor(state.windowStart / ARTICLE_WINDOW_SIZE) * ARTICLE_WINDOW_SIZE, lastWindow);
     }
-    const visible = candidates.slice(state.todayWindowStart, state.todayWindowStart + TODAY_WINDOW_SIZE);
-    state.todayWindowAnchorId = visible[0] || null;
+    const visible = candidates.slice(state.windowStart, state.windowStart + ARTICLE_WINDOW_SIZE);
+    state.windowAnchorId = visible[0] || null;
     return visible;
   }
 
@@ -2466,36 +2489,39 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
 
-  function renderTodayWindowControls() {
-    const today = isTodayView();
-    const state = today ? getViewState(activeViewId) : null;
-    const candidates = today ? getTodayCandidateIds() : [];
+  function renderArticleWindowControls() {
+    const active = Boolean(getActiveView());
+    const state = active ? getViewState(activeViewId) : null;
+    const candidates = active ? getWindowCandidateIds() : [];
     const busy = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-    const more = today && (state.todayWindowStart + TODAY_WINDOW_SIZE < candidates.length ||
+    const more = active && (state.windowStart + ARTICLE_WINDOW_SIZE < candidates.length ||
       (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation)));
-    todayWindowControls.classList.toggle('hidden', !today || (state.todayWindowStart === 0 && !more));
-    todayNewerButton.disabled = busy || !today || state.todayWindowStart === 0;
-    todayOlderButton.disabled = busy || !more;
+    articleWindowControls.classList.toggle('hidden', !active || (state.windowStart === 0 && !more));
+    articleNewerButton.disabled = busy || !active || state.windowStart === 0;
+    articleOlderButton.disabled = busy || !more;
   }
 
-  function moveTodayWindow(direction, keyboard = false) {
-    if (!isTodayView() || inFlightContentIds.length > 0 || isLoadingItemIdsPage) return false;
+  function moveArticleWindow(direction, keyboard = false) {
+    if (!getActiveView() || inFlightContentIds.length > 0 || isLoadingItemIdsPage) return false;
     getVisibleItemIds();
     const state = getViewState(activeViewId);
-    const candidates = getTodayCandidateIds();
-    const start = Math.max(0, state.todayWindowStart + direction * TODAY_WINDOW_SIZE);
-    if (start === state.todayWindowStart ||
+    const candidates = getWindowCandidateIds();
+    const start = Math.max(0, state.windowStart + direction * ARTICLE_WINDOW_SIZE);
+    if (start === state.windowStart ||
         (direction > 0 && start >= candidates.length && (hasReachedTodayBoundary() || !nextItemIdsContinuation))) return false;
-    state.todayWindowStart = start;
-    state.todayWindowAnchorId = candidates[start] || null;
+    state.windowNavigation = true;
+    state.windowStart = start;
+    state.windowAnchorId = candidates[start] || null;
     const visible = getVisibleItemIds();
     selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
     state.selectedItemId = selectedItemId;
+    keyboardRevealSelection = keyboard && selectedItemId ? { itemId: selectedItemId, viewId: activeViewId, generation: accountGeneration } : null;
     restoreArticleScrollTop(0);
     renderArticles();
     renderReader();
     saveActiveViewState();
-    if (!window.navigator || window.navigator.onLine !== false) void continueLoadingToday(activeViewRequestId);
+    if (!window.navigator || window.navigator.onLine !== false) void continueLoadingWindow(activeViewRequestId);
+    if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage && !shouldContinueLoadingWindow()) keyboardRevealSelection = null;
     return true;
   }
 
@@ -2561,7 +2587,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    readerShell.focus();
+    readerShell.focus({ preventScroll: true });
   }
 
   function getNavigationDirectionFromKeyEvent(event) {
@@ -2624,10 +2650,10 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextIndex = selectedIndex + direction;
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      return moveTodayWindow(direction, true);
+      return moveArticleWindow(direction, true);
     }
 
-    void selectArticle(visibleItemIds[nextIndex]);
+    void selectArticle(visibleItemIds[nextIndex], { keyboard: true });
     return true;
   }
 
@@ -2702,13 +2728,13 @@ export function renderBrowserAppRuntimeScript(): string {
     // A selected article cache miss remains loadable after finding yesterday.
     addId(targetItemId, true);
     const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
-    for (const itemId of (isTodayView() ? getVisibleItemIds() : itemIds)) {
+    for (const itemId of getVisibleItemIds()) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
       if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
         break;
       }
-      addId(itemId, isTodayView() && !loadedItemsById[itemId]);
+      addId(itemId, !loadedItemsById[itemId]);
       if (plannedIds.length >= client.CONTENT_CHUNK_SIZE) {
         break;
       }
@@ -2950,15 +2976,30 @@ export function renderBrowserAppRuntimeScript(): string {
       uncategorizedFeedViews.length > 0 ? 'Uncategorized feeds' : unreadOnly ? 'No uncategorized feeds with unread items.' : 'No uncategorized feeds.';
   }
 
+  function revealKeyboardSelectedRow() {
+    const reveal = keyboardRevealSelection;
+    if (!reveal || reveal.itemId !== selectedItemId || reveal.viewId !== activeViewId || reveal.generation !== accountGeneration) {
+      keyboardRevealSelection = null;
+      return;
+    }
+    for (const row of articlesList.children) {
+      const button = row.children[0];
+      if (button?.getAttribute('data-item-id') === selectedItemId && typeof button.scrollIntoView === 'function') {
+        button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+    }
+  }
+
   function renderArticles() {
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
-    if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+    if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
       selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
       const state = getViewState(activeViewId, false);
       if (state) state.selectedItemId = selectedItemId;
     }
-    renderTodayWindowControls();
+    renderArticleWindowControls();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
@@ -2975,7 +3016,7 @@ export function renderBrowserAppRuntimeScript(): string {
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
       loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-      loadMoreButton.classList.toggle('hidden', !shouldContinueLoadingToday());
+      loadMoreButton.classList.toggle('hidden', !shouldContinueLoadingWindow());
       restoreArticleScrollTop(preservedScrollTop);
       return;
     }
@@ -3029,14 +3070,13 @@ export function renderBrowserAppRuntimeScript(): string {
       articlesList.appendChild(listItem);
     }
 
-    const pendingPlan = createPendingContentPlan(selectedItemId);
     loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
-    const todayCanLoadMore = !isTodayView() || !hasReachedTodayBoundary();
     loadMoreButton.classList.toggle(
       'hidden',
-      isTodayView() ? !shouldContinueLoadingToday() : pendingPlan.length === 0 && (!todayCanLoadMore || !nextItemIdsContinuation),
+      !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
+    revealKeyboardSelectedRow();
   }
 
   function clearYouTubePlayer() {
@@ -3484,7 +3524,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!result || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
-      await ensureArticleContent(activeView.kind === 'today' ? result.returnedIds.slice(0, TODAY_WINDOW_SIZE) : result.returnedIds, { generation, token });
+      await ensureArticleContent(result.returnedIds.slice(0, ARTICLE_WINDOW_SIZE), { generation, token });
       const retainedTailIds = getRetainedTailIds(activeView.id, result.payload);
       if (selectedTailId && retainedTailIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
         // A cached tail is outside the authoritative root. Its missing body must
@@ -3507,14 +3547,14 @@ export function renderBrowserAppRuntimeScript(): string {
         applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         if (activeView.id === activeViewId) {
           const visibleItemIds = getVisibleItemIds();
-          if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+          if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
             selectedItemId = visibleItemIds[0] || null;
           }
           saveActiveViewState();
           renderArticles();
           renderReader();
-          if (isTodayView() && requestId === activeViewRequestId) {
-            await continueLoadingToday(requestId);
+          if (shouldAutoLoadWindow() && requestId === activeViewRequestId) {
+            await continueLoadingWindow(requestId);
           }
         }
       }
@@ -3530,20 +3570,24 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  function shouldContinueLoadingToday() {
-    if (!isTodayView()) {
+  function shouldContinueLoadingWindow() {
+    if (!getActiveView()) {
       return false;
     }
 
     const visible = getVisibleItemIds();
     const state = getViewState(activeViewId);
     return createPendingContentPlan(null).length > 0 ||
-      ((visible.length < TODAY_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id))) &&
+      ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id))) &&
         !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
   }
 
-  async function continueLoadingToday(requestId) {
-    if (requestId !== activeViewRequestId || !shouldContinueLoadingToday()) {
+  function shouldAutoLoadWindow() {
+    return isTodayView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
+  }
+
+  async function continueLoadingWindow(requestId) {
+    if (requestId !== activeViewRequestId || !shouldContinueLoadingWindow()) {
       return;
     }
 
@@ -3564,8 +3608,8 @@ export function renderBrowserAppRuntimeScript(): string {
     if (plan.length === 0) {
       renderArticles();
       renderReader();
-      if (isTodayView() && shouldContinueLoadingToday()) {
-        await continueLoadingToday(requestId);
+      if (shouldAutoLoadWindow() && shouldContinueLoadingWindow()) {
+        await continueLoadingWindow(requestId);
       }
       return;
     }
@@ -3591,7 +3635,7 @@ export function renderBrowserAppRuntimeScript(): string {
       }
 
       const visibleItemIds = getVisibleItemIds();
-      if (isTodayView() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
+      if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
         selectedItemId = visibleItemIds[0] || null;
       }
       saveActiveViewState();
@@ -3604,11 +3648,10 @@ export function renderBrowserAppRuntimeScript(): string {
         itemIds.length > itemCountBefore ||
         nextItemIdsContinuation !== continuationBefore;
       if (
-        isTodayView() &&
-        madeProgress &&
-        shouldContinueLoadingToday()
+        shouldAutoLoadWindow() && madeProgress &&
+        shouldContinueLoadingWindow()
       ) {
-        await continueLoadingToday(requestId);
+        await continueLoadingWindow(requestId);
       }
     } catch (_error) {
       if (requestId === activeViewRequestId && stateBefore?.membershipEpoch === membershipEpoch &&
@@ -3683,8 +3726,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
       if (appendedIds.length > 0 || (selectionChanged && selectedItemId && !articleCache.has(selectedItemId))) {
         await loadContentChunk(selectionChanged && selectedItemId ? selectedItemId : appendedIds[0], requestId);
-      } else if (isTodayView()) {
-        await continueLoadingToday(requestId);
+      } else if (shouldAutoLoadWindow()) {
+        await continueLoadingWindow(requestId);
       }
     } catch (_error) {
       if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
@@ -3918,17 +3961,21 @@ export function renderBrowserAppRuntimeScript(): string {
     await loadActiveView();
   }
 
-  async function selectArticle(itemId) {
+  async function selectArticle(itemId, options) {
     if (!getVisibleItemIds().includes(itemId)) {
       return;
     }
 
     selectedItemId = itemId;
+    keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
     renderArticles();
     renderReader();
+    saveActiveViewState();
     if (!articleCache.has(itemId)) {
       await loadContentChunk(itemId, activeViewRequestId);
+    } else if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage) {
+      keyboardRevealSelection = null;
     }
   }
 
@@ -4038,8 +4085,8 @@ export function renderBrowserAppRuntimeScript(): string {
   markAllAsReadButton.addEventListener('click', () => {
     void markAllAsRead();
   });
-  todayNewerButton.addEventListener('click', () => { moveTodayWindow(-1); });
-  todayOlderButton.addEventListener('click', () => { moveTodayWindow(1); });
+  articleNewerButton.addEventListener('click', () => { moveArticleWindow(-1); });
+  articleOlderButton.addEventListener('click', () => { moveArticleWindow(1); });
   loadMoreButton.addEventListener('click', () => {
     if (inFlightContentIds.length > 0 || isLoadingItemIdsPage) {
       return;
