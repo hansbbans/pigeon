@@ -70,7 +70,7 @@ export default {
 ### Recommendation CPU isolation
 
 The authenticated `/api/v1/recommendations` request has a separate execution
-path because topic extraction and diversity selection can exceed the Workers
+path because topic extraction and scoring can exceed the Workers
 Free HTTP CPU budget. The public `pigeon` Worker authenticates the request,
 then forwards the original `GET` request through its `RECOMMENDATIONS` binding.
 It does not parse the request or response, run a schema check, or retain a
@@ -80,11 +80,18 @@ requests return `503`.
 The `pigeon-recommendations` helper Worker exposes no public route. Its
 `RecommendationEngine` SQLite-backed Durable Object accepts only the exact
 `GET /api/v1/recommendations` path, runs the existing recommendation handler,
-and binds to the same D1 database. The object does not cache recommendation
-results, so current engagement events, monitored topics, and preferences are
-read on every request. The current single-account deployment uses the stable
-object name `default`; a future multi-account deployment must use an
-account-scoped object name.
+and binds to the same D1 database. Each fresh For You load reads current
+engagement events, monitored topics, and preferences, then returns every
+candidate scoring above 50 in pages of at most 50 complete bodies. A bounded
+snapshot preserves membership, scores, and order across pages; each page
+rechecks current read state, negative feedback, active feeds, and deletions.
+Snapshot metadata persists in the object's SQLite storage so idle restarts do
+not interrupt paging. It contains no article bodies and is limited to eight
+snapshots, 8 MB of serialized metadata in aggregate, and five minutes from
+creation. Expired or evicted continuations return `410`; the native client
+restarts once and retains its previous readable cache if loading fails. The
+current single-account deployment uses the stable object name `default`; a
+future multi-account deployment must use an account-scoped object name.
 
 This adds one Durable Object namespace migration in
 `wrangler.recommendations.toml`. It does not change the D1 schema and needs no
@@ -92,10 +99,11 @@ data migration or backfill. Deploy the helper Worker before the public Worker
 so the external binding always has a live class. The helper must be deployed
 with `wrangler deploy`; version uploads and gradual deployments cannot create
 the pending Durable Object migration. Public Worker rollback can leave the
-helper deployed because the helper has no independent public route and stores
-no recommendation state. If helper code itself must be rolled back, deploy the
-matching helper version as well; keep the `RecommendationEngine` namespace
-and migration in place.
+helper deployed because the helper has no independent public route. If helper
+code itself must be rolled back, deploy the matching helper version as well;
+keep the `RecommendationEngine` namespace and migration in place. Snapshot
+storage has a versioned manifest; incompatible snapshots are discarded and
+clients recover through the expired-continuation response.
 
 Validate the split in two places: unit tests must prove authentication happens
 before the binding, the original query survives forwarding, invalid helper
