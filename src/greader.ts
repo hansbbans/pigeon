@@ -662,6 +662,7 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		author: string;
 		summary: { direction: string; content: string };
 		content: { direction: string; content: string };
+		isBodyPruned: boolean;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -678,6 +679,7 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		subject: string;
 		html_content: string;
 		text_content: string | null;
+		content_pruned_at: string | null;
 		original_url: string | null;
 		received_at: string;
 		is_read: number;
@@ -687,7 +689,7 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		membershipPages(rowids).map(async (rowidPage) => {
 			const selectRows = (originalUrlExpression: string) =>
 				env.DB.prepare(
-					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
+					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
 					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 				)
 					.bind(rowidPage)
@@ -776,6 +778,7 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 					author: item.from_name || '',
 					summary: { direction: 'ltr', content: renderedContent },
 					content: { direction: 'ltr', content: renderedContent },
+					isBodyPruned: item.content_pruned_at != null,
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],

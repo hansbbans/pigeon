@@ -11,6 +11,7 @@ const MAX_TOPIC_FEATURES_PER_ARTICLE = 240;
 const MAX_TOPIC_PROFILE_ENTRIES = 1_200;
 
 const TOKEN_PATTERN = /[\p{L}\p{N}]+/gu;
+const EMAIL_TOKEN_PATTERN = /(?:"[^"\r\n]+"|[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\p{L}\p{N}.-]+/gu;
 const IRREGULAR_PLURAL_TOKENS = new Set(['alias', 'analysis', 'business', 'news', 'series', 'status']);
 
 // These words are common in newsletter wrappers and article labels. They add
@@ -108,7 +109,6 @@ export interface TopicScore {
 
 function canonicalToken(token: string): string {
 	let normalized = token.normalize('NFKC').toLowerCase();
-	if (normalized === 'a.i') normalized = 'ai';
 	if (normalized.length >= 4 && normalized.endsWith('ies')) {
 		normalized = `${normalized.slice(0, -3)}y`;
 	} else if (
@@ -121,7 +121,12 @@ function canonicalToken(token: string): string {
 }
 
 function rawTokens(value: string): string[] {
-	return value.normalize('NFKC').toLowerCase().match(TOKEN_PATTERN) ?? [];
+	// Preserve this dotted acronym before tokenization would split it into
+	// unrelated initials. Keep spaced sentence initials and hostnames separate.
+	return value.normalize('NFKC').toLowerCase()
+		.replace(EMAIL_TOKEN_PATTERN, (email) => email.replace(/a\.i\.?/g, 'a i'))
+		.replace(/(?<![\p{L}\p{N}.@])a\.i\.?(?![\p{L}\p{N}@]|\.[\p{L}\p{N}@])/gu, 'ai')
+		.match(TOKEN_PATTERN) ?? [];
 }
 
 function canonicalTokens(value: string): string[] {

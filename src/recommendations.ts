@@ -33,6 +33,7 @@ interface RecommendationContentRow {
 	id: string;
 	html_content: string;
 	text_content: string | null;
+	content_pruned_at: string | null;
 }
 
 interface SignalRow {
@@ -64,6 +65,7 @@ const CANDIDATE_POOL_SIZE = 100;
 export const FOR_YOU_SCORE_THRESHOLD = 50;
 const PER_FEED_CANDIDATE_LIMIT = 25;
 const MAX_FEED_SLICES = 40;
+const MAX_D1_COMPOUND_SELECT_TERMS = 5;
 const MAX_SIGNAL_HISTORY_ROWS = 2_000;
 const MAX_TOPIC_HISTORY_ROWS = 600;
 // Topic matching only consumes the first MAX_TOPIC_EXCERPT_CHARS of text. Keep
@@ -193,17 +195,229 @@ function parseLimit(raw: string | null, defaultLimit = 30): number {
 	return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 50) : defaultLimit;
 }
 
-function parseContinuation(raw: string | null): { offset: number; now: string } | null {
+const MAX_RECOMMENDATION_CANDIDATES = CANDIDATE_POOL_SIZE + PER_FEED_CANDIDATE_LIMIT * MAX_FEED_SLICES;
+
+interface RecommendationSnapshotEntry {
+	id: string;
+	score: number;
+	confidence: number;
+	sampleCount: number;
+	explanation: string;
+	learningState: string;
+	matchedTopics: string[];
+	topicStrength: number;
+}
+
+interface RecommendationSnapshot {
+	now: string;
+	entries: RecommendationSnapshotEntry[];
+	expiresAt: number;
+	bytes: number;
+}
+
+const MAX_SESSION_BYTES = 8_000_000;
+const MAX_SESSIONS = 8;
+const SESSION_TTL_MS = 5 * 60_000;
+const SESSION_STORAGE_PREFIX = 'recommendations:snapshots:';
+const SESSION_INDEX_KEY = `${SESSION_STORAGE_PREFIX}index`;
+// Even non-ASCII JSON remains below the SQLite DO's 2 MB value limit.
+const SESSION_CHUNK_CHARS = 200_000;
+const MAX_SESSION_CHUNKS = Math.ceil(MAX_SESSION_BYTES / SESSION_CHUNK_CHARS);
+const SNAPSHOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+type SessionStorage = Pick<DurableObjectStorage, 'kv' | 'transactionSync'>;
+interface StoredSession {
+	id: string;
+	expiresAt: number;
+	bytes: number;
+	parts: number;
+}
+
+function snapshotPayload(snapshot: Pick<RecommendationSnapshot, 'now' | 'entries'>): string {
+	return JSON.stringify({ now: snapshot.now, entries: snapshot.entries });
+}
+
+function validSnapshotEntry(value: unknown): value is RecommendationSnapshotEntry {
+	if (!value || typeof value !== 'object') return false;
+	const entry = value as RecommendationSnapshotEntry;
+	return typeof entry.id === 'string' && typeof entry.explanation === 'string'
+		&& typeof entry.learningState === 'string'
+		&& [entry.score, entry.confidence, entry.sampleCount, entry.topicStrength]
+			.every((number) => typeof number === 'number' && Number.isFinite(number))
+		&& Array.isArray(entry.matchedTopics) && entry.matchedTopics.every((topic) => typeof topic === 'string')
+		&& Object.keys(entry).length === 8;
+}
+
+/** Per-object, bounded metadata only. Article bodies never enter this store. */
+export class RecommendationSessions {
+	private snapshots = new Map<string, RecommendationSnapshot>();
+	private persisted = new Map<string, StoredSession>();
+	private bytes = 0;
+
+	constructor(private readonly options: {
+		clock?: () => number;
+		ttlMs?: number;
+		maxSessions?: number;
+		maxBytes?: number;
+		storage?: SessionStorage;
+	} = {}) {
+		if (options.storage) this.restore();
+	}
+
+	private get now(): number { return (this.options.clock ?? Date.now)(); }
+	private get maxBytes(): number { return this.options.maxBytes ?? MAX_SESSION_BYTES; }
+	private get maxSessions(): number { return this.options.maxSessions ?? MAX_SESSIONS; }
+	private get ttlMs(): number { return this.options.ttlMs ?? SESSION_TTL_MS; }
+
+	private chunkKey(id: string, part: number): string {
+		return `${SESSION_STORAGE_PREFIX}${id}:${part}`;
+	}
+
+	private restore(): void {
+		const storage = this.options.storage!;
+		const index = storage.kv.get<{ version: number; sessions: StoredSession[] }>(SESSION_INDEX_KEY);
+		if (index === undefined) return;
+		if (!index || index.version !== 1 || !Array.isArray(index.sessions)
+			|| index.sessions.length > this.maxSessions
+			|| index.sessions.some((record) => !record || !SNAPSHOT_ID_PATTERN.test(record.id)
+				|| !Number.isSafeInteger(record.expiresAt) || !Number.isSafeInteger(record.bytes)
+				|| record.bytes <= 0 || record.bytes > this.maxBytes
+				|| !Number.isSafeInteger(record.parts) || record.parts < 1 || record.parts > MAX_SESSION_CHUNKS)
+			|| new Set(index.sessions.map((record) => record.id)).size !== index.sessions.length
+			|| index.sessions.reduce((sum, record) => sum + record.bytes, 0) > this.maxBytes) {
+			// Invalid/version-incompatible metadata cannot be used as a cursor.
+			// This namespace has at most 8 * 40 chunks and one manifest.
+			storage.transactionSync(() => {
+				for (const [key] of storage.kv.list({ prefix: SESSION_STORAGE_PREFIX, limit: MAX_SESSIONS * MAX_SESSION_CHUNKS + 1 })) {
+					storage.kv.delete(key);
+				}
+				storage.kv.put(SESSION_INDEX_KEY, { version: 1, sessions: [] });
+			});
+			return;
+		}
+		this.persisted = new Map(index.sessions.map((record) => [record.id, record]));
+		for (const record of index.sessions) {
+			if (record.expiresAt <= this.now || record.expiresAt > this.now + this.ttlMs) continue;
+			const chunks: string[] = [];
+			let chars = 0;
+			for (let part = 0; part < record.parts; part += 1) {
+				const chunk = storage.kv.get<unknown>(this.chunkKey(record.id, part));
+				if (typeof chunk !== 'string' || chunk.length > SESSION_CHUNK_CHARS) break;
+				chars += chunk.length;
+				if (chars > record.bytes) break;
+				chunks.push(chunk);
+			}
+			if (chunks.length !== record.parts) continue;
+			const payload = chunks.join('');
+			if (new TextEncoder().encode(payload).byteLength !== record.bytes) continue;
+			try {
+				const snapshot = JSON.parse(payload) as RecommendationSnapshot;
+				if (typeof snapshot.now !== 'string' || !Number.isFinite(Date.parse(snapshot.now))
+					|| !Array.isArray(snapshot.entries) || snapshot.entries.length > MAX_RECOMMENDATION_CANDIDATES
+					|| !snapshot.entries.every(validSnapshotEntry)
+					|| snapshotPayload(snapshot) !== payload) continue;
+				this.snapshots.set(record.id, { ...snapshot, bytes: record.bytes, expiresAt: record.expiresAt });
+				this.bytes += record.bytes;
+			} catch { /* Corrupt snapshots expire through the normal 410 recovery. */ }
+		}
+		this.persist(this.snapshots);
+	}
+
+	private persist(next: Map<string, RecommendationSnapshot>): void {
+		const storage = this.options.storage;
+		if (!storage) return;
+		const removed = [...this.persisted.values()].filter((record) => !next.has(record.id));
+		const added = [...next].filter(([id]) => !this.persisted.has(id));
+		if (!removed.length && !added.length) return;
+		const records = new Map(this.persisted);
+		storage.transactionSync(() => {
+			for (const record of removed) {
+				for (let part = 0; part < record.parts; part += 1) storage.kv.delete(this.chunkKey(record.id, part));
+				records.delete(record.id);
+			}
+			for (const [id, snapshot] of added) {
+				const payload = snapshotPayload(snapshot);
+				const parts = Math.ceil(payload.length / SESSION_CHUNK_CHARS);
+				for (let part = 0; part < parts; part += 1) {
+					storage.kv.put(this.chunkKey(id, part), payload.slice(part * SESSION_CHUNK_CHARS, (part + 1) * SESSION_CHUNK_CHARS));
+				}
+				records.set(id, { id, parts, bytes: snapshot.bytes, expiresAt: snapshot.expiresAt });
+			}
+			storage.kv.put(SESSION_INDEX_KEY, { version: 1, sessions: [...records.values()] });
+		});
+		this.persisted = records;
+	}
+
+	private prune(): void {
+		const next = new Map([...this.snapshots].filter(([, snapshot]) => snapshot.expiresAt > this.now));
+		if (next.size === this.snapshots.size) return;
+		this.persist(next);
+		this.snapshots = next;
+		this.bytes = [...next.values()].reduce((sum, snapshot) => sum + snapshot.bytes, 0);
+	}
+
+	create(now: string, ranked: RecommendationSnapshotEntry[]): string | null {
+		this.prune();
+		if (ranked.length > MAX_RECOMMENDATION_CANDIDATES) return null;
+		const entries = ranked.map(({ id, score, confidence, sampleCount, explanation, learningState, matchedTopics, topicStrength }) =>
+			({ id, score, confidence, sampleCount, explanation, learningState, matchedTopics, topicStrength }));
+		const bytes = new TextEncoder().encode(snapshotPayload({ now, entries })).byteLength;
+		if (bytes > this.maxBytes || this.maxSessions < 1) return null;
+		const next = new Map(this.snapshots);
+		let nextBytes = this.bytes;
+		while (next.size >= this.maxSessions || nextBytes + bytes > this.maxBytes) {
+			const oldest = next.keys().next().value as string | undefined;
+			if (!oldest) return null;
+			nextBytes -= next.get(oldest)!.bytes;
+			next.delete(oldest);
+		}
+		const id = crypto.randomUUID();
+		next.set(id, { now, entries, bytes, expiresAt: this.now + this.ttlMs });
+		// Commit new metadata and evictions before exposing the cursor. Failed
+		// transactions leave both memory and existing persisted sessions intact.
+		this.persist(next);
+		this.snapshots = next;
+		this.bytes = nextBytes + bytes;
+		return id;
+	}
+
+	get(id: string): RecommendationSnapshot | undefined {
+		this.prune();
+		return this.snapshots.get(id);
+	}
+}
+
+// Direct/local callers reuse sessions for the same environment. Production
+// passes the Durable Object's own store, keeping account/object state separate.
+const defaultSessions = new WeakMap<object, RecommendationSessions>();
+function sessionsForEnvironment(env: Env): RecommendationSessions {
+	let sessions = defaultSessions.get(env);
+	if (!sessions) {
+		sessions = new RecommendationSessions();
+		defaultSessions.set(env, sessions);
+	}
+	return sessions;
+}
+
+function parseContinuation(raw: string | null): { id: string; offset: number } | 'legacy' | null {
 	if (raw === null) return null;
-	const match = /^v1:(\d+):(.+)$/.exec(raw);
-	const offset = Number(match?.[1]);
-	const now = match?.[2] ?? '';
-	if (!match || !Number.isSafeInteger(offset) || offset < 1
-		|| offset > CANDIDATE_POOL_SIZE + PER_FEED_CANDIDATE_LIMIT * MAX_FEED_SLICES
-		|| !Number.isFinite(Date.parse(now))) {
+	const legacy = /^v1:([1-9]\d*):(.+)$/.exec(raw);
+	if (legacy && Number(legacy[1]) <= MAX_RECOMMENDATION_CANDIDATES
+		&& /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(legacy[2])
+		&& Number.isFinite(Date.parse(legacy[2]))
+		&& new Date(legacy[2]).toISOString().replace('.000Z', 'Z') === legacy[2].replace('.000Z', 'Z')) return 'legacy';
+	const match = /^v2:([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([1-9]\d*)$/.exec(raw);
+	const offset = Number(match?.[2]);
+	if (!match || !Number.isSafeInteger(offset) || offset >= MAX_RECOMMENDATION_CANDIDATES) {
 		throw new Error('Invalid recommendation continuation');
 	}
-	return { offset, now: new Date(now).toISOString() };
+	return { id: match[1], offset };
+}
+
+function expiredContinuation(): Response {
+	return Response.json({
+		error: 'Recommendation continuation expired; reload recommendations',
+		code: 'recommendation_continuation_expired',
+	}, { status: 410 });
 }
 
 function toGoogleItemId(rowid: number): string {
@@ -450,33 +664,35 @@ async function loadRecommendationCandidates(
 		.bind(MAX_FEED_SLICES)
 		.all<{ feed_key: string }>();
 	if (feedRows.results.length === 0) return initial.results;
-	// Keep each publisher's indexed, bounded slice while paying for one D1
-	// statement. Separate statements exhaust the Free request budget once topic
-	// excerpts are loaded for the full candidate pool.
-	const feedCandidates = await env.DB.prepare(feedRows.results.map(() =>
-		`SELECT * FROM (
-			SELECT ${CANDIDATE_COLUMNS}
-			   FROM items i
-			   JOIN feeds f ON f.feed_key = i.feed_key
-			  WHERE f.is_active = 1 AND i.feed_key = ? ${where}
-			  ORDER BY i.received_at DESC, i.rowid DESC
-			  LIMIT ${PER_FEED_CANDIDATE_LIMIT}
-		)`,
-	).join(' UNION ALL '))
-		.bind(...feedRows.results.map(({ feed_key }) => feed_key))
-		.all<RecommendationCandidate>();
-
+	// D1 allows at most five compound SELECT terms. Eight bounded statements
+	// retain all forty indexed publisher slices within the request query budget.
+	const feedCandidatePages = await Promise.all(
+		chunkValues(feedRows.results, MAX_D1_COMPOUND_SELECT_TERMS).map((feeds) =>
+			env.DB.prepare(feeds.map(() =>
+				`SELECT * FROM (
+					SELECT ${CANDIDATE_COLUMNS}
+					   FROM items i
+					   JOIN feeds f ON f.feed_key = i.feed_key
+					  WHERE f.is_active = 1 AND i.feed_key = ? ${where}
+					  ORDER BY i.received_at DESC, i.rowid DESC
+					  LIMIT ${PER_FEED_CANDIDATE_LIMIT}
+				)`,
+			).join(' UNION ALL '))
+				.bind(...feeds.map(({ feed_key }) => feed_key))
+				.all<RecommendationCandidate>(),
+		),
+	);
 	const unique = new Map<string, RecommendationCandidate>();
 	for (const candidate of initial.results) unique.set(candidate.id, candidate);
-	for (const candidate of feedCandidates.results) unique.set(candidate.id, candidate);
+	for (const candidate of feedCandidatePages.flatMap((page) => page.results)) unique.set(candidate.id, candidate);
 	return [...unique.values()];
 }
 
 async function loadRecommendationContent(
 	env: Env,
 	itemIds: string[],
-): Promise<Map<string, { html: string; text: string | null }>> {
-	const content = new Map<string, { html: string; text: string | null }>();
+): Promise<Map<string, { html: string; text: string | null; isBodyPruned: boolean }>> {
+	const content = new Map<string, { html: string; text: string | null; isBodyPruned: boolean }>();
 	if (itemIds.length === 0) {
 		return content;
 	}
@@ -486,7 +702,7 @@ async function loadRecommendationContent(
 		chunkValues(uniqueItemIds, MAX_IN_QUERY_BIND_PARAMS).map((itemIdChunk) => {
 			const placeholders = itemIdChunk.map(() => '?').join(',');
 			return env.DB.prepare(
-				`SELECT id, html_content, text_content
+				`SELECT id, html_content, text_content, content_pruned_at
 				   FROM items
 				  WHERE id IN (${placeholders})`,
 			)
@@ -496,12 +712,112 @@ async function loadRecommendationContent(
 	);
 
 	for (const row of pages.flatMap((page) => page.results)) {
-		content.set(row.id, { html: row.html_content, text: row.text_content });
+		content.set(row.id, { html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null });
 	}
 	return content;
 }
 
-export async function handleRecommendations(request: Request, env: Env): Promise<Response> {
+interface RecommendationPageRow extends RecommendationCandidate, RecommendationContentRow {
+	ordinal: number;
+	eligible_count: number;
+}
+
+function snapshotMembershipPages(entries: RecommendationSnapshotEntry[], offset: number): Array<{ offset: number; length: number; membership: string }> {
+	const pages: Array<{ offset: number; length: number; membership: string }> = [];
+	const encoder = new TextEncoder();
+	const maxBytes = 900_000;
+	let start = offset;
+	let values: string[] = [];
+	let bytes = 2;
+	for (let index = offset; index < entries.length; index += 1) {
+		const value = JSON.stringify(entries[index].id);
+		const valueBytes = encoder.encode(value).byteLength;
+		if (valueBytes + 2 > maxBytes) throw new Error('Recommendation identifier exceeds database parameter limit');
+		if (values.length > 0 && bytes + 1 + valueBytes > maxBytes) {
+			pages.push({ offset: start, length: values.length, membership: `[${values.join(',')}]` });
+			start = index;
+			values = [];
+			bytes = 2;
+		}
+		bytes += valueBytes + (values.length > 0 ? 1 : 0);
+		values.push(value);
+	}
+	if (values.length > 0) pages.push({ offset: start, length: values.length, membership: `[${values.join(',')}]` });
+	return pages;
+}
+
+async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], offset: number, limit: number) {
+	const items: Array<RecommendationSnapshotEntry & {
+		readerId: string; feedKey: string; source: string; author: string | null; title: string;
+		originalURL: string | null; receivedAt: string; isRead: boolean; isStarred: boolean;
+		html: string; text: string | null; isBodyPruned: boolean;
+	}> = [];
+	let nextOffset = offset;
+	let hasMore = false;
+	const membershipPages = snapshotMembershipPages(entries, offset);
+	for (let pageIndex = 0; pageIndex < membershipPages.length; pageIndex += 1) {
+		const page = membershipPages[pageIndex];
+		const capacity = limit - items.length;
+		// One row read owns eligibility, metadata, and body. A deletion between
+		// earlier ranking/count reads and this statement cannot create a phantom
+		// story with an empty body. JSON ordinals preserve the snapshot's order.
+		const { results } = await env.DB.prepare(
+			`WITH eligible_ids AS (
+				SELECT CAST(snapshot_item.key AS INTEGER) AS ordinal, i.id
+				FROM json_each(?) snapshot_item
+				JOIN items i ON i.id = snapshot_item.value
+				JOIN feeds f ON f.feed_key = i.feed_key
+				WHERE f.is_active = 1 ${candidateWhere('for-you')}
+			 )
+			 SELECT eligible_ids.ordinal, ${CANDIDATE_COLUMNS}, i.html_content, i.text_content, i.content_pruned_at,
+			        (SELECT COUNT(*) FROM eligible_ids) AS eligible_count
+			 FROM eligible_ids
+			 JOIN items i ON i.id = eligible_ids.id
+			 JOIN feeds f ON f.feed_key = i.feed_key
+			 ORDER BY eligible_ids.ordinal
+			 LIMIT ?`,
+		).bind(page.membership, capacity).all<RecommendationPageRow>();
+		for (const row of results) {
+			const entry = entries[page.offset + row.ordinal];
+			items.push({ ...entry, readerId: toGoogleItemId(row.rowid), feedKey: row.feed_key, source: row.source,
+				author: row.author, title: row.title, originalURL: row.original_url, receivedAt: row.received_at,
+				isRead: row.is_read === 1, isStarred: row.is_starred === 1,
+				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null });
+		}
+		if (results.length === capacity) {
+			nextOffset = page.offset + results.at(-1)!.ordinal + 1;
+			// Tail membership uses the same SQL snapshot, so undoing a read
+			// between the earlier count and this page cannot hide unseen stories.
+			hasMore = results[0].eligible_count > capacity || pageIndex + 1 < membershipPages.length;
+			break;
+		}
+		nextOffset = page.offset + page.length;
+	}
+	return { items, nextOffset, hasMore };
+}
+
+async function continueRecommendations(env: Env, sessions: RecommendationSessions, cursor: { id: string; offset: number }, limit: number): Promise<Response> {
+	const snapshot = sessions.get(cursor.id);
+	if (!snapshot) return expiredContinuation();
+	if (cursor.offset >= snapshot.entries.length) {
+		return Response.json({ error: 'Invalid recommendation continuation', code: 'invalid_recommendation_continuation' }, { status: 400 });
+	}
+	// The total is advisory across concurrent changes. Actual page membership
+	// and its continuation come from the same atomic row read below.
+	const eligiblePages = await Promise.all(chunkValues(snapshot.entries.map((entry) => entry.id), MAX_IN_QUERY_BIND_PARAMS).map((ids) =>
+		env.DB.prepare(`SELECT i.id FROM items i JOIN feeds f ON f.feed_key = i.feed_key
+		 WHERE f.is_active = 1 ${candidateWhere('for-you')} AND i.id IN (${ids.map(() => '?').join(',')})`)
+			.bind(...ids).all<{ id: string }>()));
+	const eligible = new Set(eligiblePages.flatMap((page) => page.results.map((row) => row.id)));
+	const page = await loadForYouPage(env, snapshot.entries, cursor.offset, limit);
+	return Response.json({
+		generatedAt: snapshot.now, view: 'for-you', totalCount: eligible.size,
+		continuation: page.hasMore ? `v2:${cursor.id}:${page.nextOffset}` : null,
+		items: page.items,
+	});
+}
+
+export async function handleRecommendations(request: Request, env: Env, sessions = sessionsForEnvironment(env)): Promise<Response> {
 	const url = new URL(request.url);
 	const view = parseView(url.searchParams.get('view'));
 	const limit = parseLimit(url.searchParams.get('limit'), view === 'for-you' ? 50 : 30);
@@ -509,9 +825,11 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	try {
 		if (view === 'for-you') cursor = parseContinuation(url.searchParams.get('continuation'));
 	} catch {
-		return Response.json({ error: 'Invalid recommendation continuation' }, { status: 400 });
+		return Response.json({ error: 'Invalid recommendation continuation', code: 'invalid_recommendation_continuation' }, { status: 400 });
 	}
-	const now = cursor?.now ?? new Date().toISOString();
+	if (cursor === 'legacy') return expiredContinuation();
+	if (cursor) return continueRecommendations(env, sessions, cursor, limit);
+	const now = new Date().toISOString();
 	const candidates = await loadRecommendationCandidates(env, view, limit);
 
 	if (candidates.length === 0) {
@@ -584,17 +902,20 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	});
 
 	// Qualify before paging; never fill a page with weak exploration picks.
-	// The candidate pool remains bounded. Pages share a scoring timestamp, but
-	// concurrent reads/feedback can change membership, so clients deduplicate IDs.
-	const qualified = view === 'for-you'
-		? ranked.filter((item) => item.score > FOR_YOU_SCORE_THRESHOLD)
-		: ranked;
-	const offset = cursor?.offset ?? 0;
-	const selected = qualified.slice(offset, offset + limit);
-	const nextOffset = offset + selected.length;
-	const continuation = view === 'for-you' && nextOffset < qualified.length
-		? `v1:${nextOffset}:${now}`
-		: null;
+	if (view === 'for-you') {
+		const qualified = ranked.filter((item) => item.score > FOR_YOU_SCORE_THRESHOLD);
+		const page = await loadForYouPage(env, qualified, 0, limit);
+		let continuation: string | null = null;
+		if (page.hasMore) {
+			const sessionId = sessions.create(now, qualified);
+			if (!sessionId) {
+				return Response.json({ error: 'Recommendation snapshot is too large', code: 'recommendation_snapshot_too_large' }, { status: 503 });
+			}
+			continuation = `v2:${sessionId}:${page.nextOffset}`;
+		}
+		return Response.json({ generatedAt: now, view, continuation, totalCount: qualified.length, items: page.items });
+	}
+	const selected = ranked.slice(0, limit);
 	const contentById = await loadRecommendationContent(
 		env,
 		selected.map((item) => item.id),
@@ -603,13 +924,13 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	return Response.json({
 		generatedAt: now,
 		view,
-		...(view === 'for-you' ? { continuation, totalCount: qualified.length } : {}),
 		items: selected.map((item) => {
 			const content = contentById.get(item.id);
 			return {
 				...item,
 				html: content?.html ?? '',
 				text: content?.text ?? null,
+				isBodyPruned: content?.isBodyPruned ?? false,
 			};
 		}),
 	});

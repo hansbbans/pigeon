@@ -27,6 +27,21 @@ test('monitored topics use token boundaries, aliases, and phrases beyond the hea
 	);
 });
 
+test('dotted A.I. aliases match symmetrically without joining sentence initials or hostnames', () => {
+	for (const title of ['A.I. reshapes healthcare', 'A.I reshapes healthcare', 'Applied a.i. research', 'Applied Ａ．Ｉ． research', 'A.I.-powered robotics']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['AI']), [{ key: 'ai', label: 'AI' }], title);
+	}
+	for (const title of ['AI reshapes healthcare', 'Artificial intelligence reshapes healthcare']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['A.I.']), [{ key: 'ai', label: 'A.I.' }], title);
+	}
+	for (const title of ['A. I. Smith discusses healthcare', 'A sentence ends with a. I begin another.', 'A.Ignite healthcare', 'Visit a.i.example.com', 'Contact a.i.user@example.com', 'Contact a.i@example.com', 'Contact a.i.@example.com', 'Visit user@a.i', 'Contact a.i+garden@example.com', 'Contact a.i-garden@example.com', 'Contact \"a.i\"@example.com', 'Paid newsletter operations']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['AI']), [], title);
+	}
+	const profile = buildTopicProfile([{ itemId: 'dotted-ai', eventType: 'star', occurredAt: NOW,
+		title: 'A.I. research advances', text: null }], NOW);
+	assert.ok(scoreTopics({ title: 'Artificial intelligence research' }, [], profile).learnedMatches.includes('AI'));
+});
+
 test('an empty topic profile returns without scanning candidate text', () => {
 	const article = {
 		get title(): string {

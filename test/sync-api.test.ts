@@ -824,14 +824,15 @@ test('For You retains forty publisher slices and topic matches within one databa
 		const limits = { maxQueries: 50, queries: 3 };
 		const db = new SqliteD1(state.database, limits);
 		const prepare = db.prepare.bind(db);
-		let sliceSql = '';
-		let sliceBindings: unknown[] = [];
+		const sliceQueries: Array<{ sql: string; bindings: unknown[] }> = [];
 		db.prepare = (sql) => {
 			const statement = prepare(sql);
 			if (sql.includes(' UNION ALL ')) {
-				sliceSql = sql;
+				if (sql.split(' UNION ALL ').length > 5) throw new Error('D1 maximum compound SELECT terms exceeded');
+				const query = { sql, bindings: [] as unknown[] };
+				sliceQueries.push(query);
 				const bind = statement.bind.bind(statement);
-				statement.bind = (...values) => { sliceBindings = values; return bind(...values); };
+				statement.bind = (...values) => { query.bindings = values; return bind(...values); };
 			}
 			return statement;
 		};
@@ -841,17 +842,43 @@ test('For You retains forty publisher slices and topic matches within one databa
 		assert.equal(body.items.length, 1, 'only the relevant topic match clears the score threshold');
 		assert.ok(body.items.some((item) => item.id === 'publisher-39-item-0' && item.matchedTopics.includes('Orbital astronomy')), 'an older topic match outside the global hundred still competes');
 		assert.ok(body.items.every((item) => item.html === '<p>Article body</p>'));
-		assert.ok(limits.queries <= 21, `used ${limits.queries} statements`);
-		assert.equal(sliceBindings.length, 40);
-		assert.ok(new Blob([sliceSql]).size < 100_000);
-		const slices = state.database.prepare(sliceSql).all(...sliceBindings) as { id: string; feed_key: string }[];
+		assert.ok(limits.queries <= 29, `used ${limits.queries} statements`);
+		assert.equal(sliceQueries.flatMap((query) => query.bindings).length, 40);
+		assert.ok(sliceQueries.every((query) => query.bindings.length <= 5 && new Blob([query.sql]).size < 100_000));
+		const slices = sliceQueries.flatMap((query) => state.database.prepare(query.sql).all(...query.bindings)) as { id: string; feed_key: string }[];
 		assert.equal(slices.length, 1_000);
 		for (let feedIndex = 0; feedIndex < 40; feedIndex += 1) {
 			assert.equal(slices.filter((row) => row.feed_key === `publisher-${feedIndex}`).length, 25);
 		}
-		const plan = state.database.prepare(`EXPLAIN QUERY PLAN ${sliceSql}`).all(...sliceBindings) as { detail: string }[];
+		const plan = sliceQueries.flatMap((query) => state.database.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).all(...query.bindings)) as { detail: string }[];
 		assert.equal(plan.filter((step) => /SEARCH i USING INDEX/.test(step.detail)).length, 40);
 		assert.ok(!plan.some((step) => /SCAN i(?:$| )/.test(step.detail)), 'publisher slices retain indexed item lookups');
+
+		// Exercise the full qualifying pool, including continuation requests, under
+		// the same binding/query/compound limits that D1 applies.
+		state.database.prepare("UPDATE items SET text_content = 'Orbital astronomy research observatories'").run();
+		const pageEnv = { DB: db } as never;
+		const seen = new Set<string>();
+		let continuation: string | null = null;
+		let pageCount = 0;
+		do {
+			limits.queries = 3;
+			const params = new URLSearchParams({ view: 'for-you', limit: '50' });
+			if (continuation) params.set('continuation', continuation);
+			const pageResponse = await handleRecommendations(new Request(`https://pigeon.example/api/v1/recommendations?${params}`), pageEnv);
+			assert.equal(pageResponse.status, 200);
+			const page = await pageResponse.json() as { items: { id: string; html: string }[]; continuation: string | null; totalCount: number };
+			assert.equal(page.totalCount, 1_015);
+			assert.ok(page.items.length <= 50);
+			assert.ok(page.items.every((item) => item.html === '<p>Article body</p>' && !seen.has(item.id)));
+			for (const item of page.items) seen.add(item.id);
+			assert.ok(limits.queries <= 29, `page ${pageCount} used ${limits.queries} statements`);
+			continuation = page.continuation;
+			pageCount += 1;
+		} while (continuation);
+		assert.equal(seen.size, 1_015);
+		assert.equal(pageCount, 21);
+		assert.ok(seen.has('publisher-39-item-24'), 'continuations retain the oldest publisher slice');
 	} finally {
 		state.database.close();
 	}
