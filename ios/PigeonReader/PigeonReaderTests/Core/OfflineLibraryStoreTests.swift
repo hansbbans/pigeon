@@ -1370,6 +1370,24 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.storageStats(accountID: accountID).articleCount == 1)
 	}
 
+	@Test func prunedLivePagePreservesTheCompleteStoredBodyWithoutAnInMemoryCache() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let complete = makeArticle(isRead: false)
+		try await store.saveArticles([complete], collectionID: ReaderSection.forYou.rawValue, accountID: "account-a")
+		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true)
+		pruned.isRead = true
+		pruned.isStarred = true
+		try await store.saveArticles([pruned], collectionID: "feed/daily", accountID: "account-a")
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		for collectionID in [ReaderSection.forYou.rawValue, "feed/daily"] {
+			let stored = try #require(snapshot.articlesByCollection[collectionID]?.first)
+			#expect(stored.html == complete.html)
+			#expect(stored.text == complete.text)
+			#expect(stored.isRead && stored.isStarred)
+			#expect(stored.isBodyPruned != true)
+		}
+	}
+
 	@Test func prunedServerPlaceholderIsStoredAsMissingBodyForRecovery() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let page = try decodePage(

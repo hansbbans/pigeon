@@ -77,6 +77,25 @@ struct PigeonAPIClient: Sendable {
 	}
 
 	func recommendations(for section: ReaderSection, limit: Int = 30) async throws -> [Recommendation] {
+		do {
+			return try await loadRecommendations(for: section, limit: limit)
+		} catch let PigeonError.server(statusCode, message)
+			where section == .forYou && statusCode == 410 && Self.isExpiredRecommendationContinuation(message) {
+			// The server's bounded snapshot can expire while reading its pages.
+			// Restart once with an empty buffer; a second failure reaches the model
+			// so it retains the previous readable cache instead of publishing a subset.
+			try Task.checkCancellation()
+			return try await loadRecommendations(for: section, limit: limit)
+		}
+	}
+
+	private static func isExpiredRecommendationContinuation(_ message: String) -> Bool {
+		guard let data = message.data(using: .utf8),
+			let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+		return payload["code"] as? String == "recommendation_continuation_expired"
+	}
+
+	private func loadRecommendations(for section: ReaderSection, limit: Int) async throws -> [Recommendation] {
 		var articles: [Recommendation] = []
 		var seenIDs = Set<String>()
 		var seenContinuations = Set<String>()
@@ -540,6 +559,7 @@ struct PigeonAPIClient: Sendable {
 			sampleCount: 0,
 			explanation: "From \(source)",
 			learningState: "Reader subscription",
+			isBodyPruned: item.isBodyPruned,
 		)
 	}
 

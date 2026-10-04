@@ -113,7 +113,8 @@ struct ReaderNavigationTests {
 		#expect(model.articles(for: .forYou).count == 2)
 		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .forYou })?.unreadCount == 2)
 		let request = try #require(await client.lastRequest())
-		#expect(request.url.query?.contains("limit=30") == true)
+		#expect(request.url.query?.contains("view=for-you") == true)
+		#expect(request.url.query?.contains("limit=") == false)
 	}
 
 	@Test func localTodayUsesInclusiveStartAndExclusiveNextMidnight() throws {

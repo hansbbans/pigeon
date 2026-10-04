@@ -18,6 +18,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	let sampleCount: Int
 	let explanation: String
 	let learningState: String
+	var isBodyPruned: Bool? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -51,6 +52,10 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	}
 
 	func replacingHTML(_ html: String) -> Recommendation {
+		replacingBody(html: html, text: text, isBodyPruned: isBodyPruned)
+	}
+
+	func replacingBody(html: String, text: String?, isBodyPruned: Bool?) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId,
@@ -69,6 +74,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			sampleCount: sampleCount,
 			explanation: explanation,
 			learningState: learningState,
+			isBodyPruned: isBodyPruned,
 		)
 	}
 }
