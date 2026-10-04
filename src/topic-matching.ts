@@ -11,7 +11,9 @@ const MAX_TOPIC_FEATURES_PER_ARTICLE = 240;
 const MAX_TOPIC_PROFILE_ENTRIES = 1_200;
 
 const TOKEN_PATTERN = /[\p{L}\p{N}]+/gu;
-const EMAIL_TOKEN_PATTERN = /(?:"[^"\r\n]+"|[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\p{L}\p{N}.-]+/gu;
+// Start unquoted local parts at a boundary so a failed email match does not
+// retry at every character of a long token without an @domain (quadratic work).
+const EMAIL_TOKEN_PATTERN = /(?:"[^"\r\n]+"|(?<![\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-])[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\p{L}\p{N}.-]+/gu;
 const IRREGULAR_PLURAL_TOKENS = new Set(['alias', 'analysis', 'business', 'news', 'series', 'status']);
 
 // These words are common in newsletter wrappers and article labels. They add
@@ -155,8 +157,20 @@ function topicFeaturesFromTokens(tokens: string[]): Set<string> {
 }
 
 function stripMarkup(value: string): string {
-	return value
-		.replace(/<[^>]*>/g, ' ')
+	const parts: string[] = [];
+	let start = 0;
+	while (start < value.length) {
+		const opening = value.indexOf('<', start);
+		if (opening < 0) break;
+		const closing = value.indexOf('>', opening + 1);
+		if (closing < 0) break;
+		// Preserve the previous first-< through next-> behavior, including
+		// nested opening markers, without retrying every unmatched <.
+		parts.push(value.slice(start, opening), ' ');
+		start = closing + 1;
+	}
+	parts.push(value.slice(start));
+	return parts.join('')
 		.replace(/&nbsp;|&#160;/gi, ' ')
 		.replace(/&amp;/gi, '&')
 		.replace(/&quot;|&#34;/gi, '"')
