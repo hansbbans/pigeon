@@ -1021,6 +1021,14 @@ final class PigeonReaderUITests: XCTestCase {
 		let image = app.images["A notebook beside a cup of coffee"]
 		guard waitForHittableReaderTarget(image, description: "the linked fixture image") else { return }
 		image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+		let readyActions = ["View image", "Open link"].map { title in
+			XCTNSPredicateExpectation(
+				predicate: NSPredicate(format: "exists == true AND hittable == true"),
+				object: app.buttons[title],
+			)
+		}
+		XCTAssertEqual(XCTWaiter.wait(for: readyActions, timeout: 5), .completed,
+			"The linked-image menu actions must be ready before choosing an action.")
 	}
 
 	private func launchFeedList(additionalArguments: [String] = []) throws {
@@ -1129,16 +1137,20 @@ final class PigeonReaderUITests: XCTestCase {
 					return true
 				}
 				if webViewFrame.height > readerFrame.height, targetFrame.isEmpty == false {
-					if targetFrame.maxY > usableReaderFrame.maxY {
-						if lastScrolledTargetFrame != targetFrame {
-							reader.swipeUp()
-							lastScrolledTargetFrame = targetFrame
-						}
-					} else if targetFrame.minY < usableReaderFrame.minY {
-						if lastScrolledTargetFrame != targetFrame {
-							reader.swipeDown()
-							lastScrolledTargetFrame = targetFrame
-						}
+					if (tapPoint.y < usableReaderFrame.minY || tapPoint.y > usableReaderFrame.maxY),
+						lastScrolledTargetFrame != targetFrame {
+						// A full swipe can move the center from below the controls to
+						// above the navigation bar, then repeat in the other direction.
+						// Move toward the visible center without release momentum.
+						let maximumDrag = usableReaderFrame.height * 0.35
+						let displacement = min(maximumDrag, max(-maximumDrag, usableReaderFrame.midY - tapPoint.y))
+						let start = reader.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+							dx: usableReaderFrame.midX - readerFrame.minX,
+							dy: usableReaderFrame.midY - readerFrame.minY,
+						))
+						let end = start.withOffset(CGVector(dx: 0, dy: displacement))
+						start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.15)
+						lastScrolledTargetFrame = targetFrame
 					}
 				}
 			}
@@ -1260,25 +1272,25 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		attachScreenshot(named: "real-startup-for-you-from-home")
 	}
 
-	func testCachedStartupShowsSavedHomeBeforeFullHydration() throws {
+	func testCachedStartupShowsSavedHomeAndRestoresStories() throws {
 		XCUIDevice.shared.orientation = .portrait
-		assertCachedStartupShowsSavedHomeBeforeFullHydration()
+		assertCachedStartupShowsSavedHomeAndRestoresStories()
 	}
 
-	func testIPadLandscapeStartupShowsSavedHomeBeforeFullHydration() throws {
+	func testIPadLandscapeStartupShowsSavedHomeAndRestoresStories() throws {
 		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "iPad landscape startup coverage")
 		XCUIDevice.shared.orientation = .landscapeLeft
 		defer { XCUIDevice.shared.orientation = .portrait }
-		assertCachedStartupShowsSavedHomeBeforeFullHydration()
+		assertCachedStartupShowsSavedHomeAndRestoresStories()
 	}
 
-	private func assertCachedStartupShowsSavedHomeBeforeFullHydration(file: StaticString = #filePath, line: UInt = #line) {
+	private func assertCachedStartupShowsSavedHomeAndRestoresStories(file: StaticString = #filePath, line: UInt = #line) {
 		app.launchArguments = [
 			"-reader-real-startup", "-reader-real-startup-cached-selected-list",
 			"-reader-delay-initial-snapshot", "-reader-reset-reader-state",
 		]
 		app.launch()
-		attachScreenshot(named: "cached-startup-before-disk-restore")
+		attachScreenshot(named: "cached-startup-saved-home")
 
 		let loading = app.descendants(matching: .any)["library-startup-loading"].firstMatch
 		let homes = app.buttons.matching(identifier: "For You")
@@ -1303,13 +1315,17 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		XCTAssertTrue(app.buttons.matching(identifier: "For You").allElementsBoundByIndex.contains(where: { $0.isHittable }), file: file, line: line)
 		attachScreenshot(named: "cached-startup-home-with-saved-feeds")
 		feed.tap()
-		XCTAssertTrue(app.staticTexts["Loading stories"].waitForExistence(timeout: 2), file: file, line: line)
+		let firstSavedStory = app.staticTexts["Saved story remains visible during slow updates"]
+		let selectedFeedReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+			self.app.staticTexts["Loading stories"].exists || firstSavedStory.exists
+		}, object: nil)
+		XCTAssertEqual(XCTWaiter.wait(for: [selectedFeedReady], timeout: 2), .completed, file: file, line: line)
 		XCTAssertTrue(
-			app.staticTexts["Saved story remains visible during slow updates"].waitForExistence(timeout: 20),
+			firstSavedStory.waitForExistence(timeout: 20),
 			file: file, line: line,
 		)
 		XCTAssertTrue(app.staticTexts["A second saved story proves the list is real"].exists, file: file, line: line)
-		attachScreenshot(named: "cached-startup-saved-stories-before-network-sync")
+		attachScreenshot(named: "cached-startup-restored-stories")
 	}
 
 	private func assertHomeIsVisible(file: StaticString = #filePath, line: UInt = #line) {
