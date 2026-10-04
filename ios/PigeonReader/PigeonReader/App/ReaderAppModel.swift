@@ -993,7 +993,12 @@ final class ReaderAppModel {
 
 		do {
 			try Task.checkCancellation()
-			try await apiClient.resetPersonalization()
+			try await mutationReplayer.resetPersonalization(accountID: context.accountID, apiClient: apiClient)
+			await refreshOfflineStorageStats()
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
 			let snapshot = try await apiClient.personalization()
 			try Task.checkCancellation()
 			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {

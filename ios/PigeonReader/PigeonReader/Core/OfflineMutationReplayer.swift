@@ -7,19 +7,86 @@ actor OfflineMutationReplayer {
 	private static let maxActionsPerRequest = 7
 	private static let maxItemIDsPerRequest = 200
 	private let store: any OfflineLibraryStoring
+	private var operationTails: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+	private var pendingResetCounts: [String: Int] = [:]
 
 	init(store: any OfflineLibraryStoring) {
 		self.store = store
+	}
+
+	/// Reset takes precedence over earlier local feedback. Capture its cutoff
+	/// before waiting for an already-sent batch; later feedback remains durable.
+	func resetPersonalization(accountID: String, apiClient: PigeonAPIClient) async throws {
+		let startedAt = Date.now
+		let previous = operationTails[accountID]?.task
+		pendingResetCounts[accountID, default: 0] += 1
+		let task = Task {
+			defer {
+				let remaining = (pendingResetCounts[accountID] ?? 1) - 1
+				if remaining == 0 { pendingResetCounts.removeValue(forKey: accountID) }
+				else { pendingResetCounts[accountID] = remaining }
+			}
+			let captured: Result<[String], any Error>
+			do {
+				captured = .success(try await store.pendingMutations(accountID: accountID, limit: Int.max)
+					.filter { $0.mutation.kind == .feedback && $0.createdAt <= startedAt }
+					.map(\.mutation.id))
+			} catch { captured = .failure(error) }
+			// Even a cancelled/failed waiter must not let later operations bypass
+			// a predecessor whose HTTP request may still be applying on the server.
+			await previous?.value
+			try Task.checkCancellation()
+			let feedbackIDs = try captured.get()
+			try await apiClient.resetPersonalization()
+			// Once DELETE succeeds, finish local cleanup even if the caller was
+			// cancelled while the response arrived. Do not restore old feedback.
+			for id in feedbackIDs { try await store.markMutationApplied(id: id, accountID: accountID) }
+		}
+		let operationID = track(task, accountID: accountID)
+		try await waitForOperation(task, accountID: accountID, operationID: operationID)
+	}
+
+	private func track<T: Sendable>(_ task: Task<T, any Error>, accountID: String) -> UUID {
+		let id = UUID()
+		let completion = Task { _ = try? await task.value }
+		operationTails[accountID] = (id, completion)
+		return id
+	}
+
+	private func waitForOperation<T: Sendable>(
+		_ task: Task<T, any Error>, accountID: String, operationID: UUID,
+	) async throws -> T {
+		defer {
+			if operationTails[accountID]?.id == operationID { operationTails.removeValue(forKey: accountID) }
+		}
+		return try await withTaskCancellationHandler {
+			try await task.value
+		} onCancel: {
+			// Cancellation belongs only to this operation, never its predecessor.
+			task.cancel()
+		}
 	}
 
 	/// Replays in FIFO pages. Applied and already-applied receipts are both terminal,
 	/// which makes a lost HTTP response safe to retry without repeating the mutation.
 	@discardableResult
 	func replay(accountID: String, apiClient: PigeonAPIClient) async throws -> Int {
+		let previous = operationTails[accountID]?.task
+		let task = Task {
+			await previous?.value
+			return try await replayInTurn(accountID: accountID, apiClient: apiClient)
+		}
+		let operationID = track(task, accountID: accountID)
+		return try await waitForOperation(task, accountID: accountID, operationID: operationID)
+	}
+
+	private func replayInTurn(accountID: String, apiClient: PigeonAPIClient) async throws -> Int {
 		var appliedCount = 0
 		while true {
 			try Task.checkCancellation()
+			if pendingResetCounts[accountID, default: 0] > 0 { return appliedCount }
 			let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+			if pendingResetCounts[accountID, default: 0] > 0 { return appliedCount }
 			guard pending.isEmpty == false else { return appliedCount }
 			var droppedInvalidMutation = false
 			for action in pending {
@@ -47,6 +114,10 @@ actor OfflineMutationReplayer {
 				itemIDCount = nextCount
 			}
 
+			// A reset may enter while validation awaited the store. Let an existing
+			// sent batch settle, but never begin another page ahead of that reset.
+			if pendingResetCounts[accountID, default: 0] > 0 { return appliedCount }
+			try Task.checkCancellation()
 			let response: OfflineMutationBatchResponse
 			do {
 				response = try await apiClient.sendMutations(page.map(\.mutation))

@@ -7342,6 +7342,38 @@ struct ReaderAppModelTests {
 		#expect(snapshot.articlesByCollection[feed.id]?.first?.html == article.html)
 	}
 
+	@Test(.timeLimit(.minutes(1))) func resetPersonalizationDropsQueuedFeedbackAndRefreshesPendingChangeCount() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let article = makeArticle(id: "queued-before-reset", score: 80)
+		model.setArticles([article], for: .forYou)
+		let accountID = try #require(model.session?.storageIdentity)
+		for type in [EngagementEventType.notInterested, .moreLikeThis] {
+			let feedback = Task { await model.recordPreference(type, for: article) }
+			let request = await controlled.nextRequest()
+			await controlled.resolve(request, statusCode: 500)
+			await feedback.value
+		}
+		let retained = OfflineMutation(id: "retain-star", kind: .setStarred, itemIds: [article.readerId], value: true)
+		try await store.enqueue(retained, accountID: accountID)
+		await model.refreshOfflineStorageStats()
+		#expect(model.offlineStorageStats.pendingMutationCount == 3)
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let resetting = Task { await model.resetPersonalization() }
+		let reset = await controlled.nextRequest()
+		await controlled.resolve(reset)
+		let snapshot = await controlled.nextRequest()
+		await controlled.resolve(snapshot, data: try personalizationData(topics: []))
+		let recommendations = await controlled.nextRequest()
+		await controlled.resolve(recommendations, data: try responseData(items: [article]))
+		#expect(await resetting.value)
+		#expect(model.allArticles(for: .forYou).map(\.id) == [article.id])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).map(\.mutation.id) == [retained.id])
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+	}
+
 	@Test(.timeLimit(.minutes(1))) func acknowledgedRejectionCanReturnAfterPersonalizationReset() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
