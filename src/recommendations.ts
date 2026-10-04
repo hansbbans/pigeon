@@ -60,6 +60,8 @@ const SCORING_EVENT_TYPES: readonly ScoringEventType[] = [
 ];
 
 const CANDIDATE_POOL_SIZE = 100;
+// Freshness alone tops out at 50. For You requires evidence of relevance.
+export const FOR_YOU_SCORE_THRESHOLD = 50;
 const PER_FEED_CANDIDATE_LIMIT = 25;
 const MAX_FEED_SLICES = 40;
 const MAX_SIGNAL_HISTORY_ROWS = 2_000;
@@ -186,9 +188,22 @@ function parseView(raw: string | null): RecommendationView {
 	return VALID_VIEWS.includes(raw as RecommendationView) ? (raw as RecommendationView) : 'for-you';
 }
 
-function parseLimit(raw: string | null): number {
-	const parsed = Number.parseInt(raw ?? '30', 10);
-	return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 50) : 30;
+function parseLimit(raw: string | null, defaultLimit = 30): number {
+	const parsed = Number.parseInt(raw ?? String(defaultLimit), 10);
+	return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 50) : defaultLimit;
+}
+
+function parseContinuation(raw: string | null): { offset: number; now: string } | null {
+	if (raw === null) return null;
+	const match = /^v1:(\d+):(.+)$/.exec(raw);
+	const offset = Number(match?.[1]);
+	const now = match?.[2] ?? '';
+	if (!match || !Number.isSafeInteger(offset) || offset < 1
+		|| offset > CANDIDATE_POOL_SIZE + PER_FEED_CANDIDATE_LIMIT * MAX_FEED_SLICES
+		|| !Number.isFinite(Date.parse(now))) {
+		throw new Error('Invalid recommendation continuation');
+	}
+	return { offset, now: new Date(now).toISOString() };
 }
 
 function toGoogleItemId(rowid: number): string {
@@ -489,12 +504,18 @@ async function loadRecommendationContent(
 export async function handleRecommendations(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
 	const view = parseView(url.searchParams.get('view'));
-	const limit = parseLimit(url.searchParams.get('limit'));
-	const now = new Date().toISOString();
+	const limit = parseLimit(url.searchParams.get('limit'), view === 'for-you' ? 50 : 30);
+	let cursor: ReturnType<typeof parseContinuation> = null;
+	try {
+		if (view === 'for-you') cursor = parseContinuation(url.searchParams.get('continuation'));
+	} catch {
+		return Response.json({ error: 'Invalid recommendation continuation' }, { status: 400 });
+	}
+	const now = cursor?.now ?? new Date().toISOString();
 	const candidates = await loadRecommendationCandidates(env, view, limit);
 
 	if (candidates.length === 0) {
-		return Response.json({ generatedAt: now, view, items: [] });
+		return Response.json({ generatedAt: now, view, ...(view === 'for-you' ? { continuation: null, totalCount: 0 } : {}), items: [] });
 	}
 
 	const [signalSummary, topicProfile, monitoredTopics] = await Promise.all([
@@ -562,9 +583,18 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 		return compareRankedRecency(left, right);
 	});
 
-	const selected = view === 'for-you'
-		? selectDiverseRecommendations(ranked, limit)
-		: ranked.slice(0, limit);
+	// Qualify before paging; never fill a page with weak exploration picks.
+	// The candidate pool remains bounded. Pages share a scoring timestamp, but
+	// concurrent reads/feedback can change membership, so clients deduplicate IDs.
+	const qualified = view === 'for-you'
+		? ranked.filter((item) => item.score > FOR_YOU_SCORE_THRESHOLD)
+		: ranked;
+	const offset = cursor?.offset ?? 0;
+	const selected = qualified.slice(offset, offset + limit);
+	const nextOffset = offset + selected.length;
+	const continuation = view === 'for-you' && nextOffset < qualified.length
+		? `v1:${nextOffset}:${now}`
+		: null;
 	const contentById = await loadRecommendationContent(
 		env,
 		selected.map((item) => item.id),
@@ -573,6 +603,7 @@ export async function handleRecommendations(request: Request, env: Env): Promise
 	return Response.json({
 		generatedAt: now,
 		view,
+		...(view === 'for-you' ? { continuation, totalCount: qualified.length } : {}),
 		items: selected.map((item) => {
 			const content = contentById.get(item.id);
 			return {

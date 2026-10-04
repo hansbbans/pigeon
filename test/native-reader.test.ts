@@ -13,6 +13,10 @@ import app from '../src/index';
 const PASSWORD = 'secret-password';
 const BASE_URL = 'https://pigeon.example';
 
+function minutesAgo(minutes: number): string {
+	return new Date(Date.now() - minutes * 60_000).toISOString();
+}
+
 interface FixtureItem {
 	id: string;
 	feedKey: string;
@@ -566,8 +570,7 @@ test('topic preference transfers across publishers and beats a favorite source w
 	assert.match(payload.items[0].explanation, /AI|engaged/i);
 	assert.ok(payload.items[0].score > (payload.items.find((item) => item.id === 'favorite-irrelevant')?.score ?? 0));
 	const unrelated = payload.items.find((item) => item.id === 'unrelated-unseen');
-	assert.equal(unrelated?.sampleCount, 0);
-	assert.equal(unrelated?.learningState, 'Starting with recency');
+	assert.equal(unrelated, undefined, 'weak unseen stories are not exploration filler');
 });
 
 test('saving a monitored phrase immediately changes ranking across sources and clearing it removes the boost', async () => {
@@ -576,17 +579,17 @@ test('saving a monitored phrase immediately changes ranking across sources and c
 			id: 'fresh-unrelated',
 			feedKey: 'favorite-source',
 			title: 'Paid newsletter operations',
-			receivedAt: '2026-09-15T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'older-monitored',
 			feedKey: 'quiet-source',
 			title: 'A guide to choosing a home gym',
-			receivedAt: '2026-09-15T10:00:00.000Z',
+			receivedAt: minutesAgo(60),
 		},
 	]);
 	const before = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
-	assert.equal((await before.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+	assert.deepEqual((await before.json() as { items: Array<{ id: string }> }).items, []);
 
 	const save = await nativeRequest(env, '/api/v1/personalization', {
 		method: 'PUT',
@@ -607,7 +610,7 @@ test('saving a monitored phrase immediately changes ranking across sources and c
 	});
 	assert.equal(clear.status, 200);
 	const afterClear = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
-	assert.equal((await afterClear.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+	assert.deepEqual((await afterClear.json() as { items: Array<{ id: string }> }).items, []);
 });
 
 test('balanced candidate slices keep an older relevant feed from behind one prolific source', async () => {
@@ -820,19 +823,19 @@ test('recommendations expose deterministic scores and plain-English feedback exp
 			id: 'item-good',
 			feedKey: 'saved-feed',
 			title: 'A source you like',
-			receivedAt: '2026-08-09T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'item-bad',
 			feedKey: 'noisy-feed',
 			title: 'A source you skipped',
-			receivedAt: '2026-08-09T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'item-related',
 			feedKey: 'noisy-feed',
 			title: 'Another story from that source',
-			receivedAt: '2026-08-09T10:30:00.000Z',
+			receivedAt: minutesAgo(35),
 		},
 	]);
 
@@ -866,13 +869,91 @@ test('recommendations expose deterministic scores and plain-English feedback exp
 	assert.equal(payload.items[0].sampleCount, 1);
 	assert.match(payload.items[0].explanation, /starred/i);
 	assert.equal(payload.items.some((item) => item.id === 'item-bad'), false);
-	assert.match(payload.items.find((item) => item.id === 'item-related')?.explanation ?? '', /other stories from this source/i);
+	assert.equal(payload.items.some((item) => item.id === 'item-related'), false, 'weak source feedback must not fill the list');
 
 	const unreadResponse = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=3');
 	const unreadPayload = (await unreadResponse.json()) as typeof payload;
 	const rejectedStory = unreadPayload.items.find((item) => item.id === 'item-bad');
 	assert.ok(rejectedStory);
 	assert.match(rejectedStory.explanation, /this story/i);
+});
+
+test('For You uses a strict score cutoff with no cold-start, exploration, or page filler', async () => {
+	for (const qualifyingCount of [0, 4]) {
+		const receivedAt = new Date(Date.now() + 60_000).toISOString();
+		const { env, database } = createFixture([
+			...Array.from({ length: qualifyingCount }, (_, index) => ({
+				id: `strong-${index}`, feedKey: 'strong', title: `Saved story ${index}`, receivedAt, isStarred: 1,
+			})),
+			...Array.from({ length: 35 }, (_, index) => ({
+				id: `weak-${index}`, feedKey: 'unseen', title: `Exploration ${index}`, receivedAt,
+			})),
+			{ id: 'already-read', feedKey: 'strong', title: 'Read saved story', receivedAt, isStarred: 1, isRead: 1 },
+		]);
+		const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you');
+		const body = await response.json() as { items: { id: string; score: number }[]; totalCount: number; continuation: string | null };
+		assert.equal(body.items.length, qualifyingCount);
+		assert.equal(body.totalCount, qualifyingCount);
+		assert.equal(body.continuation, null);
+		assert.ok(body.items.every((item) => item.score > 50 && item.id.startsWith('strong-')));
+		if (qualifyingCount === 0) {
+			assert.equal(database.executedSql.some((query) => /SELECT id, html_content, text_content/.test(query.sql)), false);
+		}
+		const unread = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=50');
+		const unreadItems = (await unread.json() as typeof body).items;
+		assert.equal(unreadItems.filter((item) => item.score === 50).length, 35, 'score 50 is excluded only from For You');
+		const starred = await nativeRequest(env, '/api/v1/recommendations?view=starred');
+		assert.equal((await starred.json() as typeof body).items.length, qualifyingCount + 1, 'starred retains read stories');
+	}
+});
+
+test('For You includes a score of 51 and excludes an exact score of 50', async () => {
+	const receivedAt = new Date(Date.now() + 60_000).toISOString();
+	const { env } = createFixture([
+		{ id: 'score-51', feedKey: 'source', title: 'Opened story', receivedAt },
+		{ id: 'score-50', feedKey: 'source', title: 'Fresh story', receivedAt },
+	]);
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST', headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'open-boundary', itemId: 'score-51', type: 'explicit_open' }] }),
+	});
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you');
+	const body = await response.json() as { items: { id: string; score: number }[] };
+	assert.deepEqual(body.items.map(({ id, score }) => ({ id, score })), [{ id: 'score-51', score: 51 }]);
+});
+
+test('For You returns every qualifying story across bounded full-body pages, including past 30 and 50', async () => {
+	const { env, database } = createFixture(Array.from({ length: 73 }, (_, index) => ({
+		id: `strong-${String(index).padStart(3, '0')}`, feedKey: 'saved', title: `Saved story ${index}`,
+		receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	for (const pageLimit of [undefined, 30]) {
+		const ids: string[] = [];
+		let continuation: string | null = null;
+		let generatedAt: string | undefined;
+		do {
+			const params = new URLSearchParams({ view: 'for-you' });
+			if (pageLimit) params.set('limit', String(pageLimit));
+			if (continuation) params.set('continuation', continuation);
+			const response = await nativeRequest(env, `/api/v1/recommendations?${params}`);
+			const page = await response.json() as { generatedAt: string; items: { id: string; score: number; html: string }[]; totalCount: number; continuation: string | null };
+			assert.equal(page.totalCount, 73);
+			assert.ok(page.items.length <= (pageLimit ?? 50));
+			assert.ok(page.items.every((item) => item.score > 50 && item.html === '<p>Article body</p>'));
+			generatedAt ??= page.generatedAt;
+			assert.equal(page.generatedAt, generatedAt, 'all pages share the scoring timestamp');
+			ids.push(...page.items.map((item) => item.id));
+			continuation = page.continuation;
+		} while (continuation);
+		assert.equal(ids.length, 73);
+		assert.equal(new Set(ids).size, 73);
+	}
+	const bodyQueries = database.executedSql.filter((query) => /SELECT id, html_content, text_content/.test(query.sql));
+	assert.ok(bodyQueries.every((query) => query.values.length <= 50));
+	for (const cursor of ['bad', 'v1:0:2026-10-04T12:00:00Z', 'v1:1101:2026-10-04T12:00:00Z', 'v1:1:no-date']) {
+		const response = await nativeRequest(env, `/api/v1/recommendations?continuation=${encodeURIComponent(cursor)}`);
+		assert.equal(response.status, 400);
+	}
 });
 
 test('active-reading heartbeats aggregate as capped duration and one confidence sample per item', async () => {
@@ -915,7 +996,8 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 		id: `item-${String(index).padStart(2, '0')}`,
 		feedKey: index % 2 === 0 ? 'saved-feed' : 'other-feed',
 		title: `Story ${index}`,
-		receivedAt: new Date(Date.parse('2026-08-09T11:00:00.000Z') - index * 60_000).toISOString(),
+		receivedAt: minutesAgo(index),
+		isStarred: 1,
 	}));
 	const { database, env } = createFixture(items);
 

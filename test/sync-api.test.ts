@@ -838,7 +838,7 @@ test('For You retains forty publisher slices and topic matches within one databa
 		const response = await handleRecommendations(new Request('https://pigeon.example/api/v1/recommendations?view=for-you&limit=10'), { DB: db } as never);
 		assert.equal(response.status, 200);
 		const body = await response.json() as { items: { id: string; html: string; matchedTopics: string[] }[] };
-		assert.equal(body.items.length, 10);
+		assert.equal(body.items.length, 1, 'only the relevant topic match clears the score threshold');
 		assert.ok(body.items.some((item) => item.id === 'publisher-39-item-0' && item.matchedTopics.includes('Orbital astronomy')), 'an older topic match outside the global hundred still competes');
 		assert.ok(body.items.every((item) => item.html === '<p>Article body</p>'));
 		assert.ok(limits.queries <= 21, `used ${limits.queries} statements`);

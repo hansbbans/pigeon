@@ -4373,6 +4373,24 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test func forYouSidebarCountUsesTheCompleteRecommendationSet() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 0)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		let articles = (0..<73).map { makeArticle(id: "qualified-\($0)") }
+		let loading = Task { await model.load(collection: collection, force: true) }
+		let first = await controlled.nextRequest()
+		#expect(first.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(first, data: try responseData(items: Array(articles.prefix(50)), continuation: "page-two"))
+		let second = await controlled.nextRequest()
+		#expect(second.request.url?.query?.contains("continuation=page-two") == true)
+		await controlled.resolve(second, data: try responseData(items: Array(articles.dropFirst(50))))
+		await loading.value
+		#expect(model.articles(for: .forYou).count == 73)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 73)
+	}
+
 	@Test func emptyAccountKeepsSmartNavigationWhenForYouLoads() async throws {
 		let client = StartupHTTPClient(
 			subscriptionsData: try subscriptionsData([]),
@@ -9830,11 +9848,12 @@ struct ReaderAppModelTests {
 			.flatMap { $0.mutations.flatMap(\.itemIds) }
 	}
 
-	private func responseData(items: [Recommendation]) throws -> Data {
+	private func responseData(items: [Recommendation], continuation: String? = nil) throws -> Data {
 		let response = RecommendationsResponse(
 			generatedAt: Date(timeIntervalSince1970: 1_786_272_000),
 			view: "for-you",
-			items: items
+			items: items,
+			continuation: continuation
 		)
 		let encoder = JSONEncoder()
 		encoder.dateEncodingStrategy = .iso8601

@@ -43,7 +43,60 @@ struct PigeonAPIClientTests {
 		let request = try #require(await mock.lastRequest())
 		#expect(request.url.path == "/api/v1/recommendations")
 		#expect(request.url.query?.contains("view=for-you") == true)
+		#expect(request.url.query?.contains("limit=") == false)
 		#expect(request.authorization == "GoogleLogin auth=pigeon/server-token")
+	}
+
+	@Test func forYouLoadsAllQualifyingPagesAndDeduplicatesChangingPools() async throws {
+		let mock = RecommendationPagesHTTPClient(pages: [
+			try recommendationPage(ids: Array(0..<50), continuation: "page-two"),
+			try recommendationPage(ids: Array(49..<73), continuation: nil),
+		])
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token"), httpClient: mock)
+		let items = try await client.recommendations(for: .forYou)
+		#expect(items.count == 73)
+		#expect(items.map(\.id) == (0..<73).map { "story-\($0)" })
+		#expect(items.allSatisfy { $0.html == "<p>Full body</p>" })
+		let requests = await mock.requests()
+		#expect(requests.count == 2)
+		#expect(requests.allSatisfy { $0.query?.contains("limit=") == false })
+		#expect(requests[1].query?.contains("continuation=page-two") == true)
+	}
+
+	@Test func forYouRejectsRepeatedEmptyOversizedAndStalledContinuations() async throws {
+		for cursor in ["page-two", "", String(repeating: "x", count: 201)] {
+			let mock = RecommendationPagesHTTPClient(pages: [
+				try recommendationPage(ids: [0], continuation: "page-two"),
+				try recommendationPage(ids: [1], continuation: cursor),
+			])
+			let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token"), httpClient: mock)
+			await #expect(throws: PigeonError.self) { try await client.recommendations(for: .forYou) }
+			#expect(await mock.requests().count == 2)
+		}
+		let mock = RecommendationPagesHTTPClient(pages: [
+			try recommendationPage(ids: [0], continuation: "page-two"),
+			try recommendationPage(ids: [0], continuation: "page-three"),
+		])
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token"), httpClient: mock)
+		await #expect(throws: PigeonError.self) { try await client.recommendations(for: .forYou) }
+		#expect(await mock.requests().count == 2)
+	}
+
+	@Test func unreadRecommendationsKeepRequestedLimitAndDoNotFollowForYouPagination() async throws {
+		let mock = RecommendationPagesHTTPClient(pages: [try recommendationPage(ids: [0], continuation: "page-two")])
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token"), httpClient: mock)
+		#expect(try await client.recommendations(for: .unread, limit: 7).count == 1)
+		let requests = await mock.requests()
+		#expect(requests.count == 1)
+		#expect(requests[0].query?.contains("limit=7") == true)
+	}
+
+	@Test func forYouCancellationStopsBeforeLoadingTheNextPage() async throws {
+		let mock = RecommendationPagesHTTPClient(pages: [try recommendationPage(ids: [0], continuation: "page-two")], cancelsAfterResponse: true)
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token"), httpClient: mock)
+		let load = Task { try await client.recommendations(for: .forYou) }
+		await #expect(throws: CancellationError.self) { try await load.value }
+		#expect(await mock.requests().count == 1)
 	}
 
 	@Test func personalizationTopicsNormalizeBeforeSendingAndDecodeTheUpdatedSnapshot() async throws {
@@ -687,4 +740,41 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 		}
 		return response
 	}
+}
+
+private func recommendationPage(ids: [Int], continuation: String?) throws -> Data {
+	let items = ids.map { index in
+		Recommendation(
+			id: "story-\(index)", readerId: "reader-\(index)", feedKey: "saved", source: "Saved",
+			title: "Story \(index)", html: "<p>Full body</p>", text: "Full body", originalURL: nil,
+			receivedAt: Date(timeIntervalSince1970: 1_800_000_000), isRead: false, isStarred: true,
+			score: 65, confidence: 0, sampleCount: 0, explanation: "Saved story", learningState: "Learning"
+		)
+	}
+	let encoder = JSONEncoder()
+	encoder.dateEncodingStrategy = .iso8601
+	return try encoder.encode(RecommendationsResponse(generatedAt: Date(), view: "for-you", items: items, continuation: continuation))
+}
+
+private actor RecommendationPagesHTTPClient: HTTPClient {
+	private var pages: [Data]
+	private var urls: [URL] = []
+	private let cancelsAfterResponse: Bool
+
+	init(pages: [Data], cancelsAfterResponse: Bool = false) {
+		self.pages = pages
+		self.cancelsAfterResponse = cancelsAfterResponse
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		guard let url = request.url, pages.isEmpty == false,
+			let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+			throw PigeonError.invalidResponse
+		}
+		urls.append(url)
+		if cancelsAfterResponse { withUnsafeCurrentTask { $0?.cancel() } }
+		return (pages.removeFirst(), response)
+	}
+
+	func requests() -> [URL] { urls }
 }
