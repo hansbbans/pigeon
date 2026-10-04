@@ -5929,6 +5929,19 @@ final class ReaderAppModel {
 				) else {
 					return false
 				}
+				// Shared prewarm updates may have changed the For You count. Save
+				// that navigation alongside the page before considering it persisted.
+				try await self.offlineStore.saveNavigation(self.navigation, accountID: accountID)
+				try Task.checkCancellation()
+				guard self.isCurrentPrewarmPersistence(
+					accountID: accountID,
+					collectionID: collection.id,
+					libraryGeneration: libraryGeneration,
+					collectionActivityGeneration: collectionActivityGeneration,
+					articleStateGeneration: articleStateGeneration,
+				) else {
+					return false
+				}
 				try await self.offlineStore.saveCollectionContinuation(
 					continuation,
 					collectionID: collection.id,
@@ -6007,9 +6020,14 @@ final class ReaderAppModel {
 		guard isCurrentPrewarmOperation(context, feed: feed, requestID: requestID) else {
 			throw CancellationError()
 		}
-		let loadedArticles = sortOrder(for: feed.id).sorted(mutationIntentResult.articles)
 		guard articleCache[feed.id] == nil else { return }
+		// Prewarming can encounter a server-pruned notice for a story whose
+		// complete body is already cached in another collection. Use the same
+		// shared-body merge as foreground loads, retaining fresh server status.
+		let canonicalized = canonicalizedArticles(mutationIntentResult.articles, for: feed.id)
+		let loadedArticles = sortOrder(for: feed.id).sorted(canonicalized)
 		articleCache[feed.id] = loadedArticles
+		propagateSharedArticleUpdates(from: canonicalized, excluding: feed.id)
 		unpersistedPrewarmCollectionIDs.insert(feed.id)
 		collectionFreshness[feed.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 		resetStreamPagination(for: feed.id)
