@@ -576,6 +576,44 @@ struct ReaderAppModelTests {
 		#expect(model.selectedCollection.id == forYou.id)
 	}
 
+	@Test(.timeLimit(.minutes(1))) func openBodyRestoredFromPrunedSnapshotRemainsCompleteOnNextRefresh() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let feed = ReaderNavigationItem(id: "feed/7", title: "Alpha", streamID: "feed/7", kind: .feed, unreadCount: 1, parentID: nil, feedKey: "feed/7", iconURL: nil, smartSection: nil)
+		let article = makeArticle(id: "open-complete", score: 80, feedKey: feed.id, readerId: "tag:google.com,2005:reader/item/0000000000000001", html: "<p>The complete newsletter already open.</p>")
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
+		// Mimic the committed full-sync snapshot losing a feed-only body, while
+		// its complete live copy is still open. The SQL column and Codable flag are true.
+		try await store.saveArticles([article.replacingBody(html: "", text: "Unavailable body", isBodyPruned: true)], collectionID: feed.id, accountID: accountID)
+		model.setNavigation(ReaderNavigationState(items: [feed]))
+		model.setArticles([article], for: feed)
+		model.select(item: feed)
+		model.select(article: article)
+		_ = await model.cleanupOfflineBodies()
+		let reopened = try #require(model.selectedArticle)
+		#expect(reopened.html == article.html)
+		#expect(reopened.text == article.text)
+		#expect(reopened.isBodyPruned != true)
+
+		let loading = Task { await model.load(collection: feed, force: true) }
+		let ids = await controlled.nextRequest()
+		await controlled.resolve(ids, data: streamIDsData(ids: ["1"], continuation: nil))
+		let contents = await controlled.nextRequest()
+		let response: [String: Any] = ["id": feed.id, "updated": 0, "items": [[
+			"id": article.readerId, "title": "Updated title", "published": 1_786_272_100,
+			"categories": [], "content": ["content": "<p>This older article is unavailable.</p>"],
+			"isBodyPruned": true, "origin": ["streamId": feed.id, "title": "Alpha"],
+		]]]
+		await controlled.resolve(contents, data: try JSONSerialization.data(withJSONObject: response))
+		await loading.value
+		#expect(model.selectedArticle?.html == article.html)
+		#expect(model.allArticles(for: feed).first?.html == article.html)
+		#expect(model.allArticles(for: feed).first?.text == article.text)
+		#expect(model.allArticles(for: feed).first?.isBodyPruned != true)
+	}
+
 	@Test func cleanupKeepsTheOpenArticleBodyWhenTheCachedCopyIsPruned() async throws {
 		let session = try makeSession(token: "keep-open-body")
 		let store = OfflineLibraryStore.inMemory()
@@ -4373,6 +4411,66 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test func forYouSidebarCountUsesTheCompleteRecommendationSet() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 0)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		let articles = (0..<73).map { makeArticle(id: "qualified-\($0)") }
+		let loading = Task { await model.load(collection: collection, force: true) }
+		let first = await controlled.nextRequest()
+		#expect(first.request.url?.path == "/api/v1/recommendations")
+		await controlled.resolve(first, data: try responseData(items: Array(articles.prefix(50)), continuation: "page-two"))
+		let second = await controlled.nextRequest()
+		#expect(second.request.url?.query?.contains("continuation=page-two") == true)
+		await controlled.resolve(second, data: try responseData(items: Array(articles.dropFirst(50))))
+		await loading.value
+		#expect(model.articles(for: .forYou).count == 73)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 73)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true]) func notInterestedDuringForYouPaginationStaysRemoved(feedbackApplied: Bool) async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let rejected = makeArticle(id: "rejected", score: 80)
+		let retained = makeArticle(id: "retained", score: 75)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([rejected], for: collection)
+		model.setArticles([rejected], for: .unread)
+
+		let loading = Task { await model.load(collection: collection, force: true) }
+		let first = await controlled.nextRequest()
+		await controlled.resolve(first, data: try responseData(items: [rejected, retained], continuation: "next"))
+		let second = await controlled.nextRequest()
+		let feedback = Task { await model.recordPreference(.notInterested, for: rejected) }
+		let mutation = await controlled.nextRequest()
+		#expect(mutation.request.url?.path == "/api/v1/mutations")
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		if feedbackApplied {
+			await controlled.resolve(mutation, data: try appliedMutationResponse(for: mutation))
+		} else {
+			await controlled.resolve(mutation, statusCode: 500)
+		}
+		await feedback.value
+		await controlled.resolve(second, data: try responseData(items: []))
+		await loading.value
+		#expect(model.allArticles(for: .forYou).map(\.id) == [retained.id])
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		#expect(model.allArticles(for: .unread).map(\.id) == [rejected.id])
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session?.storageIdentity))
+		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == [retained.id])
+
+		if feedbackApplied == false {
+			let refreshing = Task { await model.load(collection: collection, force: true) }
+			let request = await controlled.nextRequest()
+			await controlled.resolve(request, data: try responseData(items: [rejected, retained]))
+			await refreshing.value
+			#expect(model.allArticles(for: .forYou).map(\.id) == [retained.id])
+		}
+	}
+
 	@Test func emptyAccountKeepsSmartNavigationWhenForYouLoads() async throws {
 		let client = StartupHTTPClient(
 			subscriptionsData: try subscriptionsData([]),
@@ -5069,6 +5167,42 @@ struct ReaderAppModelTests {
 		await second.value
 		#expect(await controlled.requestCount() == 1)
 		#expect(model.articles(for: .forYou).map(\.id) == ["fresh"])
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["topics", "reset", "history"])
+	func personalizationChangesReplaceAnInFlightForYouSnapshot(operation: String) async throws {
+		let controlled = ControlledHTTPClient()
+		let fresh = makeArticle(id: "fresh-after-change", score: 80)
+		let stale = makeArticle(id: "stale-before-change", score: 80)
+		let client = PersonalizationRaceHTTPClient(controlled: controlled, freshData: try responseData(items: [fresh]))
+		let model = try makeModel(httpClient: client, offlineSynchronizationEnabled: false)
+		let oldLoad = Task { await model.load(section: .forYou, force: true) }
+		let first = await controlled.nextRequest()
+		await controlled.resolve(first, data: try responseData(items: [stale], continuation: "old-next"))
+		let second = await controlled.nextRequest()
+		let mutation = Task {
+			switch operation {
+			case "topics": await model.saveMonitoredTopics(["Swift"])
+			case "reset": await model.resetPersonalization()
+			default: await model.deletePersonalizationHistory(id: "feedback-id")
+			}
+		}
+		let change = await controlled.nextRequest()
+		if operation == "topics" {
+			await controlled.resolve(change, data: try personalizationData(topics: ["Swift"]))
+		} else {
+			await controlled.resolve(change)
+			let snapshot = await controlled.nextRequest()
+			await controlled.resolve(snapshot, data: try personalizationData(topics: []))
+		}
+		// This assignment and the subsequent refresh run on the same actor.
+		// Observing it means the mutation has entered its awaited refresh.
+		while model.personalization == nil { await Task.yield() }
+		await controlled.resolve(second, data: try responseData(items: []))
+		#expect(await mutation.value)
+		await oldLoad.value
+		#expect(await client.recommendationRequests() == 3)
+		#expect(model.allArticles(for: .forYou).map(\.id) == [fresh.id])
 	}
 
 	@Test func savingTopicsRefreshesForYouWithoutChangingTheCurrentSelection() async throws {
@@ -7081,8 +7215,9 @@ struct ReaderAppModelTests {
 
 	@Test func canonicalBodyAndStatusUpdatesReachEveryViewWithoutChangingForYouRanking() async throws {
 		let controlled = ControlledHTTPClient()
-		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
-		let forYou = ReaderNavigationItem.smart(.forYou)
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
 		let feed = ReaderNavigationItem(
 			id: "feed/7",
 			title: "Alpha",
@@ -7095,6 +7230,7 @@ struct ReaderAppModelTests {
 			smartSection: nil,
 		)
 		let readerID = "tag:google.com,2005:reader/item/0000000000000001"
+		model.setNavigation(ReaderNavigationState(items: [forYou, feed]))
 		let forYouArticle = makeArticle(
 			id: "folder-item-1",
 			score: 91,
@@ -7138,11 +7274,202 @@ struct ReaderAppModelTests {
 		let refreshedFeed = try #require(model.allArticles(for: feed).first(where: { $0.readerId == readerID }))
 		#expect(refreshedForYou.html == "<p>Revised body</p>")
 		#expect(refreshedForYou.isRead)
+		#expect(model.articles(for: forYou).isEmpty)
+		#expect(model.navigation.item(withID: forYou.id)?.unreadCount == 0)
 		#expect(refreshedForYou.isStarred)
 		#expect(refreshedForYou.score == 91)
 		#expect(refreshedFeed.html == "<p>Revised body</p>")
 		#expect(refreshedFeed.isRead)
 		#expect(refreshedFeed.isStarred)
+		let accountID = try #require(model.session?.storageIdentity)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.navigation?.item(withID: forYou.id)?.unreadCount == 0)
+		let restored = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store)
+		await restored.prepareOfflineLibrary()
+		#expect(restored.navigation.item(withID: forYou.id)?.unreadCount == 0)
+		#expect(restored.navigation.item(withID: feed.id)?.title == feed.title)
+		#expect(restored.allArticles(for: feed).first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["for-you", "feed"]) func prunedLiveResponsesPreserveCompleteCachedBodies(collectionKind: String) async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let feed = ReaderNavigationItem(id: "feed/7", title: "Alpha", streamID: "feed/7", kind: .feed, unreadCount: 1, parentID: nil, feedKey: "feed/7", iconURL: nil, smartSection: nil)
+		let article = makeArticle(id: "cached-complete", score: 80, feedKey: feed.id, readerId: "tag:google.com,2005:reader/item/0000000000000001", html: "<p>The complete saved newsletter.</p>")
+		model.setNavigation(ReaderNavigationState(items: [forYou, feed]))
+		model.setArticles([article], for: forYou)
+		model.setArticles([article], for: feed)
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveArticles([article], collectionID: forYou.id, accountID: accountID)
+		try await store.saveArticles([article], collectionID: feed.id, accountID: accountID)
+		let collection = collectionKind == "for-you" ? forYou : feed
+		let loading = Task { await model.load(collection: collection, force: true) }
+		let first = await controlled.nextRequest()
+		let placeholder = "<p>This older read article is no longer stored offline.</p>"
+		if collectionKind == "for-you" {
+			let incoming = makeArticle(id: article.id, isRead: true, isStarred: true, score: 82, feedKey: feed.id, readerId: article.readerId, html: placeholder, title: "Updated title")
+			var response = try #require(JSONSerialization.jsonObject(with: responseData(items: [incoming])) as? [String: Any])
+			var items = try #require(response["items"] as? [[String: Any]])
+			items[0]["isBodyPruned"] = true
+			items[0]["text"] = "Unavailable body"
+			response["items"] = items
+			await controlled.resolve(first, data: try JSONSerialization.data(withJSONObject: response))
+		} else {
+			await controlled.resolve(first, data: streamIDsData(ids: ["1"], continuation: nil))
+			let contents = await controlled.nextRequest()
+			let response: [String: Any] = ["id": feed.id, "updated": 0, "items": [[
+				"id": article.readerId, "title": "Updated title", "published": 1_786_272_100,
+				"categories": ["user/-/state/com.google/read", "user/-/state/com.google/starred"],
+				"content": ["content": placeholder], "isBodyPruned": true,
+				"origin": ["streamId": feed.id, "title": "Alpha"],
+			]]]
+			await controlled.resolve(contents, data: try JSONSerialization.data(withJSONObject: response))
+		}
+		await loading.value
+		for collection in [forYou, feed] {
+			let updated = try #require(model.allArticles(for: collection).first)
+			#expect(updated.html == article.html)
+			#expect(updated.text == article.text)
+			#expect(updated.title == "Updated title")
+			#expect(updated.isRead && updated.isStarred)
+			#expect(updated.isBodyPruned != true)
+		}
+		#expect(model.allArticles(for: forYou).first?.score == (collectionKind == "for-you" ? 82 : 80))
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[forYou.id]?.first?.html == article.html)
+		#expect(snapshot.articlesByCollection[feed.id]?.first?.html == article.html)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func resetPersonalizationDropsQueuedFeedbackAndRefreshesPendingChangeCount() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let article = makeArticle(id: "queued-before-reset", score: 80)
+		model.setArticles([article], for: .forYou)
+		let accountID = try #require(model.session?.storageIdentity)
+		for type in [EngagementEventType.notInterested, .moreLikeThis] {
+			let feedback = Task { await model.recordPreference(type, for: article) }
+			let request = await controlled.nextRequest()
+			await controlled.resolve(request, statusCode: 500)
+			await feedback.value
+		}
+		let retained = OfflineMutation(id: "retain-star", kind: .setStarred, itemIds: [article.readerId], value: true)
+		try await store.enqueue(retained, accountID: accountID)
+		await model.refreshOfflineStorageStats()
+		#expect(model.offlineStorageStats.pendingMutationCount == 3)
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let resetting = Task { await model.resetPersonalization() }
+		let reset = await controlled.nextRequest()
+		await controlled.resolve(reset)
+		let snapshot = await controlled.nextRequest()
+		await controlled.resolve(snapshot, data: try personalizationData(topics: []))
+		let recommendations = await controlled.nextRequest()
+		await controlled.resolve(recommendations, data: try responseData(items: [article]))
+		#expect(await resetting.value)
+		#expect(model.allArticles(for: .forYou).map(\.id) == [article.id])
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).map(\.mutation.id) == [retained.id])
+		#expect(model.offlineStorageStats.pendingMutationCount == 1)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func acknowledgedRejectionCanReturnAfterPersonalizationReset() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
+		let article = makeArticle(id: "previously-rejected", score: 80)
+		model.setArticles([article], for: .forYou)
+		let feedback = Task { await model.recordPreference(.notInterested, for: article) }
+		let mutation = await controlled.nextRequest()
+		await controlled.resolve(mutation, data: try appliedMutationResponse(for: mutation))
+		await feedback.value
+		#expect(model.allArticles(for: .forYou).isEmpty)
+		let resetting = Task { await model.resetPersonalization() }
+		let reset = await controlled.nextRequest()
+		await controlled.resolve(reset)
+		let snapshot = await controlled.nextRequest()
+		await controlled.resolve(snapshot, data: try personalizationData(topics: []))
+		let recommendations = await controlled.nextRequest()
+		await controlled.resolve(recommendations, data: try responseData(items: [article]))
+		#expect(await resetting.value)
+		#expect(model.allArticles(for: .forYou).map(\.id) == [article.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func failedOutboxReadRetainsTheForYouPageAfterQueuedRejection() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = PausingOfflineLibraryStore()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let rejected = makeArticle(id: "queued-rejected", score: 80)
+		let retained = makeArticle(id: "retained-cache", score: 75)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([rejected, retained], for: collection)
+		let feedback = Task { await model.recordPreference(.notInterested, for: rejected) }
+		let mutation = await controlled.nextRequest()
+		await controlled.resolve(mutation, statusCode: 500)
+		await feedback.value
+		await store.failNextPendingMutations()
+		let loading = Task { await model.load(collection: collection, force: true) }
+		let page = await controlled.nextRequest()
+		await controlled.resolve(page, data: try responseData(items: [rejected, retained]))
+		await loading.value
+		#expect(model.allArticles(for: collection).map(\.id) == [retained.id])
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		#expect(model.errorMessage == "Pending story changes are unavailable.")
+		let snapshot = try await store.loadSnapshot(accountID: try #require(model.session?.storageIdentity))
+		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == [retained.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func oversizedForYouSnapshotFailsWithoutReplacingTheCompleteCache() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let cached = makeArticle(id: "complete-existing-cache", score: 80)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([cached], for: collection)
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveArticles([cached], collectionID: collection.id, accountID: accountID)
+		let loading = Task { await model.load(collection: collection, force: true) }
+		// A continuation after page 22 advertises an invalid 1101st candidate.
+		for page in 0..<22 {
+			let request = await controlled.nextRequest()
+			let articles = (0..<50).map { makeArticle(id: "page-\(page)-story-\($0)", score: 80) }
+			await controlled.resolve(request, data: try responseData(items: articles, continuation: "page-\(page + 1)"))
+		}
+		await loading.value
+		#expect(await controlled.requestCount() == 22)
+		#expect(model.allArticles(for: collection).map(\.id) == [cached.id])
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		#expect(model.errorMessage != nil)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == [cached.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func repeatedForYouSnapshotExpiryPreservesTheVisibleAndDurableCache() async throws {
+		let controlled = ControlledHTTPClient()
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: controlled, offlineStore: store, offlineSynchronizationEnabled: false)
+		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
+		let cached = makeArticle(id: "previous-complete-cache", score: 80)
+		model.setNavigation(ReaderNavigationState(items: [collection]))
+		model.setArticles([cached], for: collection)
+		let accountID = try #require(model.session?.storageIdentity)
+		try await store.saveArticles([cached], collectionID: collection.id, accountID: accountID)
+		let loading = Task { await model.load(collection: collection, force: true) }
+		for attempt in 0..<2 {
+			let first = await controlled.nextRequest()
+			await controlled.resolve(first, data: try responseData(items: [makeArticle(id: "partial-\(attempt)")], continuation: "next-\(attempt)"))
+			let second = await controlled.nextRequest()
+			await controlled.resolve(second, data: Data(#"{"code":"recommendation_continuation_expired"}"#.utf8), statusCode: 410)
+		}
+		await loading.value
+		#expect(await controlled.requestCount() == 4)
+		#expect(model.allArticles(for: collection).map(\.id) == [cached.id])
+		#expect(model.navigation.item(withID: collection.id)?.unreadCount == 1)
+		#expect(model.errorMessage != nil)
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[collection.id]?.map(\.id) == [cached.id])
 	}
 
 	@Test func forYouCanonicalOrderSurvivesCrossCollectionRefreshWithStableArticleIDs() async throws {
@@ -9830,11 +10157,12 @@ struct ReaderAppModelTests {
 			.flatMap { $0.mutations.flatMap(\.itemIds) }
 	}
 
-	private func responseData(items: [Recommendation]) throws -> Data {
+	private func responseData(items: [Recommendation], continuation: String? = nil) throws -> Data {
 		let response = RecommendationsResponse(
 			generatedAt: Date(timeIntervalSince1970: 1_786_272_000),
 			view: "for-you",
-			items: items
+			items: items,
+			continuation: continuation
 		)
 		let encoder = JSONEncoder()
 		encoder.dateEncodingStrategy = .iso8601
@@ -9896,6 +10224,32 @@ struct ReaderAppModelTests {
 		}.joined(separator: ",")
 		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
 	}
+}
+
+private actor PersonalizationRaceHTTPClient: HTTPClient {
+	let controlled: ControlledHTTPClient
+	let freshData: Data
+	private var recommendationCount = 0
+
+	init(controlled: ControlledHTTPClient, freshData: Data) {
+		self.controlled = controlled
+		self.freshData = freshData
+	}
+
+	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		if let url = request.url, url.path == "/api/v1/recommendations" {
+			recommendationCount += 1
+			if recommendationCount > 2 {
+				guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+					throw PigeonError.invalidResponse
+				}
+				return (freshData, response)
+			}
+		}
+		return try await controlled.data(for: request)
+	}
+
+	func recommendationRequests() -> Int { recommendationCount }
 }
 
 private actor TopicMutationHTTPClient: HTTPClient {

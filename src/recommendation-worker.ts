@@ -1,19 +1,25 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { ensureDatabaseSchema } from './migrations';
-import { handleRecommendations } from './recommendations';
+import { handleRecommendations, RecommendationSessions } from './recommendations';
 import type { Env } from './types';
 
 /**
  * Runs the existing recommendation implementation behind a Durable Object so
- * CPU-heavy topic extraction and diversity selection do not consume the
+ * CPU-heavy topic extraction and ranking do not consume the
  * public Worker's 10 ms Free-plan HTTP budget.
  *
- * The object deliberately keeps no recommendation cache. Every request reads
- * the current D1 state, so engagement and monitored-topic changes remain
- * visible immediately and the public API keeps its existing semantics.
+ * Each fresh load reads current D1 state. Bounded, short-lived metadata
+ * snapshots preserve page order; continuations still recheck eligibility.
  */
 export class RecommendationEngine extends DurableObject<Env> {
+	private readonly recommendationSessions: RecommendationSessions;
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		this.recommendationSessions = new RecommendationSessions({ storage: ctx.storage });
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
 		if (request.method !== 'GET' || url.pathname !== '/api/v1/recommendations') {
@@ -22,7 +28,7 @@ export class RecommendationEngine extends DurableObject<Env> {
 
 		try {
 			await ensureDatabaseSchema(this.env);
-			return await handleRecommendations(request, this.env);
+			return await handleRecommendations(request, this.env, this.recommendationSessions);
 		} catch (error) {
 			console.error(
 				'[Recommendations] Durable Object handler failed',

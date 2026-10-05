@@ -6,12 +6,16 @@ import { generateApiToken } from '../src/api-auth';
 import { handleGreaderRequest } from '../src/greader';
 import { ensureDatabaseSchema } from '../src/migrations';
 import { handleNativeApiRequest } from '../src/native-api';
-import { handleRecommendations } from '../src/recommendations';
+import { handleRecommendations, RecommendationSessions } from '../src/recommendations';
 import { buildRssItemStatements } from '../src/rss-fetcher';
 import app from '../src/index';
 
 const PASSWORD = 'secret-password';
 const BASE_URL = 'https://pigeon.example';
+
+function minutesAgo(minutes: number): string {
+	return new Date(Date.now() - minutes * 60_000).toISOString();
+}
 
 interface FixtureItem {
 	id: string;
@@ -566,8 +570,7 @@ test('topic preference transfers across publishers and beats a favorite source w
 	assert.match(payload.items[0].explanation, /AI|engaged/i);
 	assert.ok(payload.items[0].score > (payload.items.find((item) => item.id === 'favorite-irrelevant')?.score ?? 0));
 	const unrelated = payload.items.find((item) => item.id === 'unrelated-unseen');
-	assert.equal(unrelated?.sampleCount, 0);
-	assert.equal(unrelated?.learningState, 'Starting with recency');
+	assert.equal(unrelated, undefined, 'weak unseen stories are not exploration filler');
 });
 
 test('saving a monitored phrase immediately changes ranking across sources and clearing it removes the boost', async () => {
@@ -576,17 +579,17 @@ test('saving a monitored phrase immediately changes ranking across sources and c
 			id: 'fresh-unrelated',
 			feedKey: 'favorite-source',
 			title: 'Paid newsletter operations',
-			receivedAt: '2026-09-15T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'older-monitored',
 			feedKey: 'quiet-source',
 			title: 'A guide to choosing a home gym',
-			receivedAt: '2026-09-15T10:00:00.000Z',
+			receivedAt: minutesAgo(60),
 		},
 	]);
 	const before = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
-	assert.equal((await before.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+	assert.deepEqual((await before.json() as { items: Array<{ id: string }> }).items, []);
 
 	const save = await nativeRequest(env, '/api/v1/personalization', {
 		method: 'PUT',
@@ -607,7 +610,7 @@ test('saving a monitored phrase immediately changes ranking across sources and c
 	});
 	assert.equal(clear.status, 200);
 	const afterClear = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
-	assert.equal((await afterClear.json() as { items: Array<{ id: string }> }).items[0].id, 'fresh-unrelated');
+	assert.deepEqual((await afterClear.json() as { items: Array<{ id: string }> }).items, []);
 });
 
 test('balanced candidate slices keep an older relevant feed from behind one prolific source', async () => {
@@ -820,19 +823,19 @@ test('recommendations expose deterministic scores and plain-English feedback exp
 			id: 'item-good',
 			feedKey: 'saved-feed',
 			title: 'A source you like',
-			receivedAt: '2026-08-09T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'item-bad',
 			feedKey: 'noisy-feed',
 			title: 'A source you skipped',
-			receivedAt: '2026-08-09T11:00:00.000Z',
+			receivedAt: minutesAgo(5),
 		},
 		{
 			id: 'item-related',
 			feedKey: 'noisy-feed',
 			title: 'Another story from that source',
-			receivedAt: '2026-08-09T10:30:00.000Z',
+			receivedAt: minutesAgo(35),
 		},
 	]);
 
@@ -866,13 +869,385 @@ test('recommendations expose deterministic scores and plain-English feedback exp
 	assert.equal(payload.items[0].sampleCount, 1);
 	assert.match(payload.items[0].explanation, /starred/i);
 	assert.equal(payload.items.some((item) => item.id === 'item-bad'), false);
-	assert.match(payload.items.find((item) => item.id === 'item-related')?.explanation ?? '', /other stories from this source/i);
+	assert.equal(payload.items.some((item) => item.id === 'item-related'), false, 'weak source feedback must not fill the list');
 
 	const unreadResponse = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=3');
 	const unreadPayload = (await unreadResponse.json()) as typeof payload;
 	const rejectedStory = unreadPayload.items.find((item) => item.id === 'item-bad');
 	assert.ok(rejectedStory);
 	assert.match(rejectedStory.explanation, /this story/i);
+});
+
+test('For You uses a strict score cutoff with no cold-start, exploration, or page filler', async () => {
+	for (const qualifyingCount of [0, 4]) {
+		const receivedAt = new Date(Date.now() + 60_000).toISOString();
+		const { env, database } = createFixture([
+			...Array.from({ length: qualifyingCount }, (_, index) => ({
+				id: `strong-${index}`, feedKey: 'strong', title: `Saved story ${index}`, receivedAt, isStarred: 1,
+			})),
+			...Array.from({ length: 35 }, (_, index) => ({
+				id: `weak-${index}`, feedKey: 'unseen', title: `Exploration ${index}`, receivedAt,
+			})),
+			{ id: 'already-read', feedKey: 'strong', title: 'Read saved story', receivedAt, isStarred: 1, isRead: 1 },
+		]);
+		const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you');
+		const body = await response.json() as { items: { id: string; score: number }[]; totalCount: number; continuation: string | null };
+		assert.equal(body.items.length, qualifyingCount);
+		assert.equal(body.totalCount, qualifyingCount);
+		assert.equal(body.continuation, null);
+		assert.ok(body.items.every((item) => item.score > 50 && item.id.startsWith('strong-')));
+		if (qualifyingCount === 0) {
+			assert.equal(database.executedSql.some((query) => /SELECT id, html_content, text_content|i\.html_content, i\.text_content/.test(query.sql)), false);
+		}
+		const unread = await nativeRequest(env, '/api/v1/recommendations?view=unread&limit=50');
+		const unreadItems = (await unread.json() as typeof body).items;
+		assert.equal(unreadItems.filter((item) => item.score === 50).length, 35, 'score 50 is excluded only from For You');
+		const starred = await nativeRequest(env, '/api/v1/recommendations?view=starred');
+		assert.equal((await starred.json() as typeof body).items.length, qualifyingCount + 1, 'starred retains read stories');
+	}
+});
+
+test('For You includes a score of 51 and excludes an exact score of 50', async () => {
+	const receivedAt = new Date(Date.now() + 60_000).toISOString();
+	const { env } = createFixture([
+		{ id: 'score-51', feedKey: 'source', title: 'Opened story', receivedAt },
+		{ id: 'score-50', feedKey: 'source', title: 'Fresh story', receivedAt },
+	]);
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST', headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'open-boundary', itemId: 'score-51', type: 'explicit_open' }] }),
+	});
+	const response = await nativeRequest(env, '/api/v1/recommendations?view=for-you');
+	const body = await response.json() as { items: { id: string; score: number }[] };
+	assert.deepEqual(body.items.map(({ id, score }) => ({ id, score })), [{ id: 'score-51', score: 51 }]);
+});
+
+test('For You returns every qualifying story across bounded full-body pages, including past 30 and 50', async () => {
+	const { env, database } = createFixture(Array.from({ length: 73 }, (_, index) => ({
+		id: `strong-${String(index).padStart(3, '0')}`, feedKey: 'saved', title: `Saved story ${index}`,
+		receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	for (const pageLimit of [undefined, 30]) {
+		const ids: string[] = [];
+		let continuation: string | null = null;
+		let generatedAt: string | undefined;
+		do {
+			const params = new URLSearchParams({ view: 'for-you' });
+			if (pageLimit) params.set('limit', String(pageLimit));
+			if (continuation) params.set('continuation', continuation);
+			const response = await nativeRequest(env, `/api/v1/recommendations?${params}`);
+			const page = await response.json() as { generatedAt: string; items: { id: string; score: number; html: string }[]; totalCount: number; continuation: string | null };
+			assert.equal(page.totalCount, 73);
+			assert.ok(page.items.length <= (pageLimit ?? 50));
+			assert.ok(page.items.every((item) => item.score > 50 && item.html === '<p>Article body</p>'));
+			generatedAt ??= page.generatedAt;
+			assert.equal(page.generatedAt, generatedAt, 'all pages share the scoring timestamp');
+			ids.push(...page.items.map((item) => item.id));
+			continuation = page.continuation;
+		} while (continuation);
+		assert.equal(ids.length, 73);
+		assert.equal(new Set(ids).size, 73);
+	}
+	const bodyQueries = database.executedSql.filter((query) => /SELECT id, html_content, text_content|i\.html_content, i\.text_content/.test(query.sql));
+	assert.ok(bodyQueries.length > 0);
+	assert.ok(bodyQueries.every((query) => query.sql.includes('FROM json_each(?) snapshot_item')
+		? Number(query.values[1]) <= 50 && query.sql.includes('LIMIT ?')
+		: query.values.length <= 50));
+	for (const cursor of ['bad', 'v1:0:2026-10-04T12:00:00Z', 'v1:1101:2026-10-04T12:00:00Z', 'v1:1:no-date']) {
+		const response = await nativeRequest(env, `/api/v1/recommendations?continuation=${encodeURIComponent(cursor)}`);
+		assert.equal(response.status, 400);
+	}
+});
+
+test('For You qualifies dotted AI headlines and preferences while excluding ordinary initials', async () => {
+	const { env } = createFixture([
+		{ id: 'dotted-ai', feedKey: 'dotted', title: 'A.I. reshapes healthcare', receivedAt: minutesAgo(1) },
+		{ id: 'plain-ai', feedKey: 'plain', title: 'Artificial intelligence reshapes healthcare', receivedAt: minutesAgo(1) },
+		{ id: 'initials', feedKey: 'initials', title: 'A. I. Smith discusses healthcare', receivedAt: minutesAgo(1) },
+		{ id: 'email-plus', feedKey: 'email-plus', title: 'Contact a.i+garden@example.com about plumbing', receivedAt: minutesAgo(1) },
+		{ id: 'email-hyphen', feedKey: 'email-hyphen', title: 'Contact a.i-garden@example.com about plumbing', receivedAt: minutesAgo(1) },
+	]);
+	for (const topic of ['AI', 'A.I.']) {
+		const save = await nativeRequest(env, '/api/v1/personalization', {
+			method: 'PUT', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ monitoredTopics: [topic] }),
+		});
+		assert.equal(save.status, 200);
+		const response = await nativeRequest(env, '/api/v1/recommendations');
+		const page = await response.json() as { items: { id: string; score: number; matchedTopics: string[] }[] };
+		assert.deepEqual(page.items.map((item) => item.id).sort(), ['dotted-ai', 'plain-ai']);
+		assert.ok(page.items.every((item) => item.score > 50 && item.matchedTopics.includes(topic)));
+	}
+});
+
+test('For You continuation does not skip unseen stories when an earlier result becomes read', async () => {
+	const { env, db } = createFixture(Array.from({ length: 6 }, (_, index) => ({
+		id: `stable-${index}`, feedKey: 'saved', title: `Saved story ${index}`,
+		receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	const first = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=2');
+	const page = await first.json() as { items: { id: string }[]; continuation: string };
+	assert.deepEqual(page.items.map((item) => item.id), ['stable-0', 'stable-1']);
+	db.prepare('UPDATE items SET is_read = 1 WHERE id = ?').run('stable-0');
+	const second = await nativeRequest(env, `/api/v1/recommendations?view=for-you&limit=2&continuation=${encodeURIComponent(page.continuation)}`);
+	const next = await second.json() as { items: { id: string }[] };
+	assert.deepEqual(next.items.map((item) => item.id), ['stable-2', 'stable-3']);
+});
+
+test('For You snapshots keep unseen story order through additions, score changes, and removals', async () => {
+	const { env, db } = createFixture(Array.from({ length: 10 }, (_, index) => ({
+		id: `snapshot-${index}`, feedKey: `publisher-${index}`, title: `Saved story ${index}`,
+		receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=2');
+	const page = await first.json() as { items: { id: string; score: number }[]; continuation: string };
+	assert.deepEqual(page.items.map((item) => item.id), ['snapshot-0', 'snapshot-1']);
+	const originalScore = page.items[0].score;
+	db.prepare("INSERT INTO items (id, feed_key, subject, html_content, received_at, is_starred) VALUES ('new-arrival', 'publisher-0', 'Fresh story', '<p>New</p>', ?, 1)").run(new Date(Date.now() + 60_000).toISOString());
+	db.prepare("UPDATE items SET is_starred = 0 WHERE id = 'snapshot-2'").run();
+	db.prepare("UPDATE items SET is_read = 1 WHERE id = 'snapshot-3'").run();
+	db.prepare("DELETE FROM items WHERE id = 'snapshot-4'").run();
+	db.prepare("UPDATE feeds SET is_active = 0 WHERE feed_key = 'publisher-5'").run();
+	await nativeRequest(env, '/api/v1/engagement', {
+		method: 'POST', headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ events: [{ id: 'exclude-snapshot', itemId: 'snapshot-6', type: 'not_interested' }, { id: 'promote-snapshot', itemId: 'snapshot-9', type: 'more_like_this' }] }),
+	});
+	const nextResponse = await nativeRequest(env, `/api/v1/recommendations?limit=2&continuation=${encodeURIComponent(page.continuation)}`);
+	const next = await nextResponse.json() as { items: { id: string; isStarred: boolean; score: number }[]; continuation: string };
+	assert.deepEqual(next.items.map((item) => item.id), ['snapshot-2', 'snapshot-7']);
+	assert.equal(next.items[0].isStarred, false, 'metadata follows current star state');
+	assert.ok(next.items.every((item) => item.score === originalScore), 'scores retain the original snapshot');
+	const lastResponse = await nativeRequest(env, `/api/v1/recommendations?limit=2&continuation=${encodeURIComponent(next.continuation)}`);
+	const last = await lastResponse.json() as { items: { id: string }[]; continuation: string | null };
+	assert.deepEqual(last.items.map((item) => item.id), ['snapshot-8', 'snapshot-9']);
+	assert.equal(last.continuation, null);
+	const refreshedResponse = await nativeRequest(env, '/api/v1/recommendations?limit=50');
+	const refreshed = await refreshedResponse.json() as { items: { id: string }[] };
+	assert.equal(refreshed.items[0].id, 'snapshot-9', 'fresh requests apply new feedback');
+	assert.ok(refreshed.items.some((item) => item.id === 'new-arrival'), 'new arrivals participate in fresh loads');
+	assert.ok(!refreshed.items.some((item) => item.id === 'snapshot-2'), 'fresh requests apply lost relevance');
+});
+
+test('For You continuation terminates cleanly when every remaining story becomes ineligible', async () => {
+	const { env, db } = createFixture(Array.from({ length: 4 }, (_, index) => ({
+		id: `removed-${index}`, feedKey: 'saved', title: `Saved ${index}`, receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=2');
+	const page = await first.json() as { continuation: string };
+	db.prepare("UPDATE items SET is_read = 1").run();
+	const response = await nativeRequest(env, `/api/v1/recommendations?continuation=${encodeURIComponent(page.continuation)}`);
+	assert.equal(response.status, 200);
+	const next = await response.json() as { items: unknown[]; continuation: string | null; totalCount: number };
+	assert.deepEqual(next.items, []);
+	assert.equal(next.continuation, null);
+	assert.equal(next.totalCount, 0);
+});
+
+test('For You fills the continuation when page candidates become ineligible between database reads', async () => {
+	const { env, db, database } = createFixture(Array.from({ length: 105 }, (_, index) => ({
+		id: `race-${String(index).padStart(3, '0')}`, feedKey: `source-${index}`, title: `Saved ${index}`,
+		receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=2');
+	const page = await first.json() as { continuation: string };
+	const prepare = database.prepare.bind(database);
+	let changed = false;
+	database.prepare = (sql) => {
+		const statement = prepare(sql);
+		if (sql.startsWith('SELECT i.id FROM items')) {
+			const all = statement.all.bind(statement);
+			statement.all = async <T>() => {
+				const result = await all<T>();
+				if (!changed) {
+					changed = true;
+					db.prepare("UPDATE items SET is_read = 1 WHERE id >= 'race-002' AND id <= 'race-101'").run();
+				}
+				return result;
+			};
+		}
+		return statement;
+	};
+	const second = await nativeRequest(env, `/api/v1/recommendations?limit=2&continuation=${encodeURIComponent(page.continuation)}`);
+	const next = await second.json() as { items: { id: string; isRead: boolean }[]; continuation: string | null };
+	assert.deepEqual(next.items.map((item) => item.id), ['race-102', 'race-103']);
+	assert.ok(next.items.every((item) => !item.isRead));
+	assert.ok(next.continuation);
+});
+
+test('For You reads current bodies and eligibility atomically when stories are deleted before the body read', async () => {
+	for (const continuationRequest of [false, true]) {
+		const { env, db, database } = createFixture(Array.from({ length: 6 }, (_, index) => ({
+			id: `atomic-${index}`, feedKey: 'saved', title: `Saved ${index}`, receivedAt: minutesAgo(index), isStarred: 1,
+		})));
+		await ensureDatabaseSchema(env);
+		let continuation: string | undefined;
+		if (continuationRequest) {
+			const first = await nativeRequest(env, '/api/v1/recommendations?limit=2');
+			continuation = (await first.json() as { continuation: string }).continuation;
+		}
+		const prepare = database.prepare.bind(database);
+		let deleted = false;
+		database.prepare = (sql) => {
+			const statement = prepare(sql);
+			if (sql.startsWith('SELECT id, html_content, text_content') || sql.includes('FROM json_each(?) snapshot_item')) {
+				const all = statement.all.bind(statement);
+				statement.all = async <T>() => {
+					if (!deleted) {
+						deleted = true;
+						const start = continuationRequest ? 2 : 0;
+						db.prepare('DELETE FROM items WHERE id IN (?, ?)').run(`atomic-${start}`, `atomic-${start + 1}`);
+					}
+					return all<T>();
+				};
+			}
+			return statement;
+		};
+		const params = new URLSearchParams({ limit: '2' });
+		if (continuation) params.set('continuation', continuation);
+		const response = await nativeRequest(env, `/api/v1/recommendations?${params}`);
+		const page = await response.json() as { items: { id: string; html: string }[]; continuation: string | null };
+		assert.deepEqual(page.items.map((item) => item.id), continuationRequest ? ['atomic-4', 'atomic-5'] : ['atomic-2', 'atomic-3']);
+		assert.ok(page.items.every((item) => item.html === '<p>Article body</p>'));
+		assert.equal(page.continuation === null, continuationRequest);
+	}
+});
+
+test('For You continuation sees unread undo performed between its count and atomic page read', async () => {
+	const { env, db, database } = createFixture(Array.from({ length: 6 }, (_, index) => ({
+		id: `undo-${index}`, feedKey: 'saved', title: `Saved ${index}`, receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=2');
+	const firstPage = await first.json() as { continuation: string };
+	db.prepare("UPDATE items SET is_read = 1 WHERE id IN ('undo-4', 'undo-5')").run();
+	const prepare = database.prepare.bind(database);
+	let undone = false;
+	database.prepare = (sql) => {
+		const statement = prepare(sql);
+		if (sql.includes('FROM json_each(?) snapshot_item')) {
+			const all = statement.all.bind(statement);
+			statement.all = async <T>() => {
+				if (!undone) { undone = true; db.prepare("UPDATE items SET is_read = 0 WHERE id IN ('undo-4', 'undo-5')").run(); }
+				return all<T>();
+			};
+		}
+		return statement;
+	};
+	const second = await nativeRequest(env, `/api/v1/recommendations?limit=2&continuation=${encodeURIComponent(firstPage.continuation)}`);
+	const secondPage = await second.json() as { items: { id: string }[]; continuation: string };
+	assert.deepEqual(secondPage.items.map((item) => item.id), ['undo-2', 'undo-3']);
+	assert.ok(secondPage.continuation, 'newly unread tail membership participates in the atomic continuation decision');
+	const last = await nativeRequest(env, `/api/v1/recommendations?limit=2&continuation=${encodeURIComponent(secondPage.continuation)}`);
+	const lastPage = await last.json() as { items: { id: string }[]; continuation: string | null };
+	assert.deepEqual(lastPage.items.map((item) => item.id), ['undo-4', 'undo-5']);
+	assert.equal(lastPage.continuation, null);
+});
+
+test('recommendation and GReader bodies expose true and false server-pruned metadata without removing the notice', async () => {
+	const { env, db } = createFixture([
+		{ id: 'pruned-ai', feedKey: 'pruned', title: 'AI research', receivedAt: '2025-01-01T12:00:00.000Z', isStarred: 1 },
+		{ id: 'full-ai', feedKey: 'complete', title: 'AI healthcare', receivedAt: minutesAgo(1), isStarred: 1 },
+	]);
+	await nativeRequest(env, '/api/v1/personalization', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ monitoredTopics: ['AI'] }) });
+	const notice = '<p>This older read article is no longer stored offline.</p>';
+	db.prepare("UPDATE items SET html_content = ?, text_content = NULL, content_pruned_at = '2026-10-04T12:00:00.000Z' WHERE id = 'pruned-ai'").run(notice);
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=1');
+	const page = await first.json() as { items: { id: string; readerId: string; isBodyPruned: boolean }[]; continuation: string };
+	assert.equal(page.items[0].id, 'full-ai');
+	assert.equal(page.items[0].isBodyPruned, false);
+	const second = await nativeRequest(env, `/api/v1/recommendations?limit=1&continuation=${encodeURIComponent(page.continuation)}`);
+	const prunedPage = await second.json() as { items: { id: string; readerId: string; isBodyPruned: boolean; html: string }[] };
+	assert.equal(prunedPage.items[0].id, 'pruned-ai');
+	assert.equal(prunedPage.items[0].isBodyPruned, true);
+	assert.equal(prunedPage.items[0].html, notice);
+	for (const view of ['for-you', 'unread', 'starred']) {
+		const response = await nativeRequest(env, `/api/v1/recommendations?view=${view}`);
+		const body = await response.json() as typeof prunedPage;
+		assert.equal(body.items.find((item) => item.id === 'pruned-ai')?.isBodyPruned, true, view);
+		assert.equal(body.items.find((item) => item.id === 'full-ai')?.isBodyPruned, false, view);
+	}
+	const bodyRequest = new URLSearchParams();
+	for (const item of [...page.items, ...prunedPage.items]) bodyRequest.append('i', item.readerId);
+	const reader = await greaderRequest(env, '/reader/api/0/stream/items/contents', bodyRequest, 'Pigeon');
+	const items = (await reader.json() as { items: { id: string; isBodyPruned: boolean; content: { content: string } }[] }).items;
+	assert.equal(items.find((item) => item.id === page.items[0].readerId)?.isBodyPruned, false);
+	assert.equal(items.find((item) => item.id === prunedPage.items[0].readerId)?.isBodyPruned, true);
+	assert.equal(items.find((item) => item.id === prunedPage.items[0].readerId)?.content.content, notice);
+});
+
+test('For You bounds JSON membership and total body rows while refilling after adversarial removals', async () => {
+	const items = Array.from({ length: 140 }, (_, index) => ({
+		id: `long-${String(index).padStart(3, '0')}-${'x'.repeat(7_991)}`,
+		feedKey: `${index < 100 ? 'b-recent' : 'a-quiet'}-${String(index).padStart(3, '0')}`,
+		title: `Saved ${index}`, receivedAt: minutesAgo(index), isStarred: 1,
+	}));
+	const { env, db, database } = createFixture(items);
+	await ensureDatabaseSchema(env);
+	database.clearExecutedSql();
+	const prepare = database.prepare.bind(database);
+	const bodyRows: number[] = [];
+	const bodyParameterBytes: number[] = [];
+	let removed = false;
+	database.prepare = (sql) => {
+		const statement = prepare(sql);
+		if (sql.includes('FROM json_each(?) snapshot_item')) {
+			const bind = statement.bind.bind(statement);
+			statement.bind = (...values) => {
+				bodyParameterBytes.push(new TextEncoder().encode(values[0] as string).byteLength);
+				return bind(...values);
+			};
+			const all = statement.all.bind(statement);
+			statement.all = async <T>() => {
+				if (!removed) {
+					removed = true;
+					const markRead = db.prepare('UPDATE items SET is_read = 1 WHERE id = ?');
+					for (const item of items.slice(49, 112)) markRead.run(item.id);
+				}
+				const result = await all<T>();
+				bodyRows.push(result.results.length);
+				return result;
+			};
+		}
+		return statement;
+	};
+	const first = await nativeRequest(env, '/api/v1/recommendations?limit=50');
+	const firstPage = await first.json() as { items: { id: string; html: string }[]; continuation: string };
+	assert.equal(first.status, 200);
+	assert.deepEqual(firstPage.items.map((item) => item.id), [...items.slice(0, 49), items[112]].map((item) => item.id));
+	assert.deepEqual(bodyRows, [49, 1], 'the whole request reads fifty full bodies, even across membership chunks');
+	assert.ok(bodyParameterBytes.every((bytes) => bytes <= 900_000));
+	assert.ok(database.executedSql.length <= 50);
+	bodyRows.length = 0;
+	database.clearExecutedSql();
+	const last = await nativeRequest(env, `/api/v1/recommendations?limit=50&continuation=${encodeURIComponent(firstPage.continuation)}`);
+	const lastPage = await last.json() as { items: { id: string; html: string }[]; continuation: string | null };
+	assert.deepEqual(lastPage.items.map((item) => item.id), items.slice(113).map((item) => item.id));
+	assert.ok(lastPage.items.every((item) => item.html === '<p>Article body</p>'));
+	assert.equal(lastPage.continuation, null);
+	assert.equal(bodyRows.reduce((sum, count) => sum + count, 0), 27);
+	assert.ok(database.executedSql.length <= 50);
+});
+
+test('For You snapshot expiry, restart, and legacy cursors report a recoverable 410', async () => {
+	const { env } = createFixture(Array.from({ length: 4 }, (_, index) => ({
+		id: `expired-${index}`, feedKey: 'saved', title: `Saved ${index}`, receivedAt: minutesAgo(index), isStarred: 1,
+	})));
+	await ensureDatabaseSchema(env);
+	let clock = Date.now();
+	const sessions = new RecommendationSessions({ clock: () => clock, ttlMs: 100 });
+	const first = await handleRecommendations(new Request(`${BASE_URL}/api/v1/recommendations?limit=2`), env, sessions);
+	const page = await first.json() as { continuation: string };
+	for (const store of [new RecommendationSessions(), sessions]) {
+		clock += 100;
+		const response = await handleRecommendations(new Request(`${BASE_URL}/api/v1/recommendations?continuation=${encodeURIComponent(page.continuation)}`), env, store);
+		assert.equal(response.status, 410);
+		assert.equal((await response.json() as { code: string }).code, 'recommendation_continuation_expired');
+	}
+	const legacy = await handleRecommendations(new Request(`${BASE_URL}/api/v1/recommendations?continuation=v1:2:2026-10-04T12:00:00.000Z`), env, sessions);
+	assert.equal(legacy.status, 410);
+	for (const malformed of ['v1:2:2026-02-30T12:00:00Z', 'v1:2:10', 'v2:bad:2', 'v2:00000000-0000-4000-8000-000000000000:1100']) {
+		const response = await handleRecommendations(new Request(`${BASE_URL}/api/v1/recommendations?continuation=${encodeURIComponent(malformed)}`), env, sessions);
+		assert.equal(response.status, 400, malformed);
+	}
 });
 
 test('active-reading heartbeats aggregate as capped duration and one confidence sample per item', async () => {
@@ -915,9 +1290,10 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 		id: `item-${String(index).padStart(2, '0')}`,
 		feedKey: index % 2 === 0 ? 'saved-feed' : 'other-feed',
 		title: `Story ${index}`,
-		receivedAt: new Date(Date.parse('2026-08-09T11:00:00.000Z') - index * 60_000).toISOString(),
+		receivedAt: minutesAgo(index),
+		isStarred: 1,
 	}));
-	const { database, env } = createFixture(items);
+	const { database, env, db } = createFixture(items);
 
 	const warmup = await nativeRequest(env, '/api/v1/recommendations?view=for-you&limit=1');
 	assert.equal(warmup.status, 200);
@@ -931,7 +1307,7 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	assert.ok(payload.items.every((item) => item.text === 'Article body'));
 
 	const itemSelects = database.executedSql.filter(
-		(entry) => /\bFROM items\b/i.test(entry.sql) && /\bSELECT\b/i.test(entry.sql),
+		(entry) => /\b(?:FROM|JOIN) items\b/i.test(entry.sql) && /\bSELECT\b/i.test(entry.sql),
 	);
 	const candidateSelect = itemSelects.find((entry) => /LIMIT \?/i.test(entry.sql) && entry.sql.includes('i.subject AS title'));
 	assert.ok(candidateSelect, 'expected a metadata-only ranking query');
@@ -942,12 +1318,16 @@ test('recommendations rank a candidate pool without loading ranking-pool article
 	const bodySelects = itemSelects.filter(
 		(entry) =>
 			entry.sql.includes('html_content') &&
-			/WHERE id IN/i.test(entry.sql) &&
+			entry.sql.includes('FROM json_each(?) snapshot_item') &&
 			!entry.sql.includes('substr('),
 	);
 	assert.equal(bodySelects.length, 1);
-	assert.equal(bodySelects[0].values.length, 3);
-	assert.deepEqual(bodySelects[0].values, payload.items.map((item) => item.id));
+	assert.equal(bodySelects[0].values.length, 2);
+	assert.equal(bodySelects[0].values[1], 3, 'only three full-body rows are read');
+	assert.ok((JSON.parse(bodySelects[0].values[0] as string) as string[]).length > 3, 'the query filters the ranked membership before limiting full bodies');
+	const plan = db.prepare(`EXPLAIN QUERY PLAN ${bodySelects[0].sql}`).all(...bodySelects[0].values) as { detail: string }[];
+	assert.ok(plan.some((step) => /SEARCH i USING INDEX/.test(step.detail)), 'snapshot item IDs retain indexed lookups');
+	assert.ok(!plan.some((step) => /SCAN i(?:$| )/.test(step.detail)));
 	const boundedExcerptSelects = itemSelects.filter(
 		(entry) => entry.sql.includes('substr(') && /WHERE id IN/i.test(entry.sql),
 	);

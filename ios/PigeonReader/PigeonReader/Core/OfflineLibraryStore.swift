@@ -1528,6 +1528,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			sampleCount: article.sampleCount,
 			explanation: article.explanation,
 			learningState: article.learningState,
+			isBodyPruned: article.isBodyPruned,
 		)
 	}
 
@@ -1740,14 +1741,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			existing: existing,
 		)
 		var storedArticle = articleWithID(article, id: storageID)
-		var storedBodyPruned = bodyPruned
+		var storedBodyPruned = bodyPruned || article.isBodyPruned == true
 		if let existingWithBody = existing.first(where: { $0.article.hasReadableHTML }),
 			storedArticle.hasReadableHTML == false {
-			storedArticle = storedArticle.replacingHTML(existingWithBody.article.html)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned)
 			storedBodyPruned = existingWithBody.bodyPruned
-		} else if bodyPruned == true,
+		} else if storedBodyPruned,
 			let existingWithBody = existing.first(where: { $0.bodyPruned == false && $0.article.hasReadableHTML }) {
-			storedArticle = storedArticle.replacingHTML(existingWithBody.article.html)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil)
 			storedBodyPruned = false
 		}
 
@@ -1779,6 +1780,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
+		var storedArticle = article
+		storedArticle.isBodyPruned = bodyPruned ? true : nil
 		try execute(
 			"""
 			INSERT INTO cached_articles
@@ -1794,7 +1797,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				.text(accountID), .text(article.id), .text(article.readerId), .text(article.feedKey),
 				.double(article.receivedAt.timeIntervalSince1970), .int64(article.isRead ? 1 : 0),
 				.int64(article.isStarred ? 1 : 0), .int64(bodyPruned ? 1 : 0),
-				.blob(try encoder.encode(article)),
+				.blob(try encoder.encode(storedArticle)),
 			],
 			database: database,
 		)
@@ -1828,6 +1831,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			sampleCount: article.sampleCount,
 			explanation: article.explanation,
 			learningState: article.learningState,
+			isBodyPruned: article.isBodyPruned,
 		)
 	}
 

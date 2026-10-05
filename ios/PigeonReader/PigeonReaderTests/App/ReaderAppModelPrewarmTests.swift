@@ -4,6 +4,70 @@ import Testing
 
 @MainActor
 struct ReaderAppModelPrewarmTests {
+	@Test(.timeLimit(.minutes(1))) func prewarmingPrunedFeedPreservesTheCompleteForYouBodyWhenOpeningADeepLink() async throws {
+		let storyID = "feed/1-1"
+		let (model, folder, feeds, _) = try makeFixture(prunedItemIDs: [storyID])
+		let complete = Self.article(id: storyID)
+		model.setArticles([complete], for: .forYou)
+		let originalSelection = model.selectedNavigationID
+
+		await model.prewarmFeeds(in: folder)
+
+		let prewarmed = try #require(model.allArticles(for: feeds[0]).first { $0.readerId == storyID })
+		#expect(prewarmed.html == complete.html)
+		#expect(prewarmed.text == complete.text)
+		#expect(prewarmed.isBodyPruned != true)
+		#expect(prewarmed.isRead)
+		#expect(prewarmed.isStarred)
+		#expect(prewarmed.title == "Updated story")
+		#expect(model.selectedNavigationID == originalSelection)
+		#expect(model.errorMessage == nil)
+
+		await model.handleDeepLink(PigeonDeepLink.article(storyID, collection: feeds[0].id).url)
+
+		#expect(model.selectedNavigationID == feeds[0].id)
+		#expect(model.selectedArticle?.html == complete.html)
+		#expect(model.selectedArticle?.text == complete.text)
+		#expect(model.selectedArticle?.isBodyPruned != true)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.selectedArticle?.isStarred == true)
+		#expect(model.allArticles(for: .forYou).first?.html == complete.html)
+		#expect(model.allArticles(for: .forYou).first?.text == complete.text)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func openingAPrewarmedFeedPersistsTheUpdatedForYouCount() async throws {
+		let storyID = "feed/1-1"
+		let store = OfflineLibraryStore.inMemory()
+		let (model, folder, feeds, _) = try makeFixture(prunedItemIDs: [storyID], offlineStore: store)
+		let session = try #require(model.session)
+		let forYou = ReaderNavigationItem.smart(.forYou)
+		let complete = Self.article(id: storyID)
+		let navigation = model.navigation.replacingCount(for: forYou.id, with: 1)
+		try await store.saveNavigation(navigation, accountID: session.storageIdentity)
+		try await store.saveArticles([complete], collectionID: forYou.id, accountID: session.storageIdentity)
+		model.setNavigation(navigation)
+		model.setArticles([complete], for: .forYou)
+
+		await model.prewarmFeeds(in: folder)
+		#expect(model.navigation.item(withID: forYou.id)?.unreadCount == 0)
+		model.select(item: feeds[0])
+		await model.loadForDisplay(collection: feeds[0])
+
+		let saved = try await store.loadSnapshot(accountID: session.storageIdentity)
+		#expect(saved.articlesByCollection[forYou.id]?.first?.isRead == true)
+		#expect(saved.navigation?.item(withID: forYou.id)?.unreadCount == 0)
+		let restored = ReaderAppModel(
+			sessionStore: PrewarmSessionStore(session: session),
+			httpClient: MockHTTPClient(shouldFail: true),
+			offlineStore: store,
+		)
+		await restored.prepareOfflineLibrary()
+		#expect(restored.navigation.item(withID: forYou.id)?.unreadCount == 0)
+		#expect(restored.allArticles(for: .forYou).first?.isRead == true)
+	}
+
 	@Test func prewarmFetchesOnlyTwoVisibleUncachedFeedsAndPreservesContinuation() async throws {
 		let (model, folder, feeds, client) = try makeFixture()
 		let initialSelection = model.selectedNavigationID
@@ -150,6 +214,8 @@ struct ReaderAppModelPrewarmTests {
 
 	private func makeFixture(
 		blockedStreamIDs: Set<String> = [],
+		prunedItemIDs: Set<String> = [],
+		offlineStore: OfflineLibraryStore = .inMemory(),
 	) throws -> (
 		model: ReaderAppModel,
 		folder: ReaderNavigationItem,
@@ -193,12 +259,13 @@ struct ReaderAppModelPrewarmTests {
 				)
 			}),
 			blockedStreamIDs: blockedStreamIDs,
+			prunedItemIDs: prunedItemIDs,
 		)
 		let session = PigeonSession(baseURL: URL(string: "https://pigeon.test")!, token: "prewarm-token")
 		let model = ReaderAppModel(
 			sessionStore: PrewarmSessionStore(session: session),
 			httpClient: client,
-			offlineStore: OfflineLibraryStore.inMemory(),
+			offlineStore: offlineStore,
 			offlineSynchronizationEnabled: false,
 		)
 		model.setNavigation(
@@ -304,15 +371,18 @@ private actor PrewarmHTTPClient: HTTPClient {
 	private let streams: [String: StreamPages]
 	private let itemStreamIDs: [String: String]
 	private let blockedStreamIDs: Set<String>
+	private let prunedItemIDs: Set<String>
 	private var gateWaiters: [String: [(UUID, CheckedContinuation<Void, Error>)]] = [:]
 	private var capturedRequests: [Request] = []
 
 	init(
 		streams: [String: StreamPages],
 		blockedStreamIDs: Set<String> = [],
+		prunedItemIDs: Set<String> = [],
 	) {
 		self.streams = streams
 		self.blockedStreamIDs = blockedStreamIDs
+		self.prunedItemIDs = prunedItemIDs
 		self.itemStreamIDs = streams.reduce(into: [String: String]()) { result, pair in
 			for itemID in pair.value.firstIDs + pair.value.nextIDs {
 				result[itemID] = pair.key
@@ -347,7 +417,10 @@ private actor PrewarmHTTPClient: HTTPClient {
 		case "/reader/api/0/stream/items/contents":
 			let streamID = bodyItemIDs.compactMap { itemStreamIDs[$0] }.first ?? "feed/unknown"
 			let items = bodyItemIDs.map { itemID in
-				"{\"id\":\"\(itemID)\",\"categories\":[],\"title\":\"Story \(itemID)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"\(streamID)\",\"htmlUrl\":\"https://example.com\"}}"
+				if prunedItemIDs.contains(itemID) {
+					return "{\"id\":\"\(itemID)\",\"categories\":[\"user/-/state/com.google/read\",\"user/-/state/com.google/starred\"],\"title\":\"Updated story\",\"published\":1786272000,\"content\":{\"content\":\"<p>This older read article is no longer stored offline.</p>\"},\"isBodyPruned\":true,\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"\(streamID)\"}}"
+				}
+				return "{\"id\":\"\(itemID)\",\"categories\":[],\"title\":\"Story \(itemID)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"\(streamID)\",\"htmlUrl\":\"https://example.com\"}}"
 			}.joined(separator: ",")
 			data = Data("{\"id\":\"\(streamID)\",\"items\":[\(items)]}".utf8)
 		case "/api/v1/mutations":

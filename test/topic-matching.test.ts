@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
 	buildTopicProfile,
+	extractTopicFeatures,
 	scoreTopics,
 	matchMonitoredTopics,
 } from '../src/topic-matching';
@@ -25,6 +26,64 @@ test('monitored topics use token boundaries, aliases, and phrases beyond the hea
 		matchMonitoredTopics({ title: 'Paid newsletter operations', text: null }, ['AI']),
 		[],
 	);
+});
+
+test('dotted A.I. aliases match symmetrically without joining sentence initials or hostnames', () => {
+	for (const title of ['A.I. reshapes healthcare', 'A.I reshapes healthcare', 'Applied a.i. research', 'Applied Ａ．Ｉ． research', 'A.I.-powered robotics']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['AI']), [{ key: 'ai', label: 'AI' }], title);
+	}
+	for (const title of ['AI reshapes healthcare', 'Artificial intelligence reshapes healthcare']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['A.I.']), [{ key: 'ai', label: 'A.I.' }], title);
+	}
+	for (const title of ['A. I. Smith discusses healthcare', 'A sentence ends with a. I begin another.', 'A.Ignite healthcare', 'Visit a.i.example.com', 'Contact a.i.user@example.com', 'Contact a.i@example.com', 'Contact a.i.@example.com', 'Visit user@a.i', 'Contact a.i+garden@example.com', 'Contact a.i-garden@example.com', 'Contact \"a.i\"@example.com', 'Paid newsletter operations']) {
+		assert.deepEqual(matchMonitoredTopics({ title }, ['AI']), [], title);
+	}
+	const profile = buildTopicProfile([{ itemId: 'dotted-ai', eventType: 'star', occurredAt: NOW,
+		title: 'A.I. research advances', text: null }], NOW);
+	assert.ok(scoreTopics({ title: 'Artificial intelligence research' }, [], profile).learnedMatches.includes('AI'));
+});
+
+test('long unbroken topic tokens retain bounded features and neighboring dotted acronyms', () => {
+	const token = 'q'.repeat(2_000);
+	assert.deepEqual([...extractTopicFeatures({ title: null, text: token })], [token]);
+	assert.deepEqual([...extractTopicFeatures({ title: null, text: token + 'A.I. research' })], [token],
+		'text past the bounded excerpt does not become a topic');
+	for (const prefix of [
+		'q'.repeat(1_700),
+		'https://example.com/' + 'abcdef0123456789'.repeat(100),
+		'q'.repeat(1_700) + '@',
+	]) {
+		assert.deepEqual(matchMonitoredTopics({ title: null, text: `${prefix}; A.I.-powered robotics` }, ['AI']),
+			[{ key: 'ai', label: 'AI' }], 'an adjacent long token does not swallow the acronym');
+	}
+});
+
+test('email token boundaries preserve quoted and punctuated addresses without hiding a separate acronym', () => {
+	for (const address of [
+		'a.i+garden@example.com', 'a.i-garden@example.com', '"a.i"@example.com',
+		'"a.i garden"@example.com', '"a.i@example.com"',
+		'q'.repeat(1_600) + '.a.i+garden@example.com',
+	]) {
+		assert.deepEqual(matchMonitoredTopics({ title: null, text: `Contact (${address}), about gardening.` }, ['AI']), [], address);
+		assert.deepEqual(matchMonitoredTopics({ title: null, text: `Contact (${address}); A.I.-powered robotics.` }, ['AI']),
+			[{ key: 'ai', label: 'AI' }], address);
+	}
+	for (const wrapper of ["'", '+', '-', 'café', '東京']) {
+		assert.deepEqual(matchMonitoredTopics({ title: null, text: `Contact ${wrapper}"a.i"@example.com${wrapper} about gardens.` }, ['AI']), [],
+			'quoted local parts do not inherit an unquoted local-part boundary');
+	}
+});
+
+test('topic markup stripping preserves first-opening through next-closing semantics and unmatched text', () => {
+	for (const text of ['<A.I.<broken> Gardens', '<A.I.\n<broken> Gardens', '<A.I.> Gardens', '<A.I.<>', '<A.I.>']) {
+		assert.deepEqual(matchMonitoredTopics({ title: null, text }, ['AI']), [], text);
+	}
+	for (const text of ['<A.I.<broken> A.I. research', '<unclosed A.I. research', 'A.I.> research', '<>A.I. research', '<<>A.I. research']) {
+		assert.deepEqual(matchMonitoredTopics({ title: null, text }, ['AI']), [{ key: 'ai', label: 'AI' }], text);
+	}
+	assert.deepEqual([...extractTopicFeatures({ title: null, text: '<'.repeat(2_000) })], []);
+	assert.deepEqual(matchMonitoredTopics({ title: null, text: '<'.repeat(1_700) + ' A.I. research' }, ['AI']),
+		[{ key: 'ai', label: 'AI' }], 'an unmatched opening-marker run preserves the remaining excerpt');
 });
 
 test('an empty topic profile returns without scanning candidate text', () => {

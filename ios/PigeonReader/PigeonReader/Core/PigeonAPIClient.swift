@@ -4,6 +4,14 @@ struct RecommendationsResponse: Codable, Sendable {
 	let generatedAt: Date
 	let view: String
 	let items: [Recommendation]
+	let continuation: String?
+
+	init(generatedAt: Date, view: String, items: [Recommendation], continuation: String? = nil) {
+		self.generatedAt = generatedAt
+		self.view = view
+		self.items = items
+		self.continuation = continuation
+	}
 }
 
 struct ReaderRecommendationsPage: Sendable {
@@ -21,6 +29,8 @@ struct ReaderRecommendationsPage: Sendable {
 struct PigeonAPIClient: Sendable {
 	private static let streamItemIDPageLimit = 50
 	private static let streamItemContentChunkSize = 10
+	// The server ranks at most 1,100 candidates and sends 50 complete bodies per page.
+	private static let maximumRecommendationPages = 22
 
 	let session: PigeonSession
 	private let httpClient: any HTTPClient
@@ -67,16 +77,56 @@ struct PigeonAPIClient: Sendable {
 	}
 
 	func recommendations(for section: ReaderSection, limit: Int = 30) async throws -> [Recommendation] {
-		var components = try endpointComponents(path: "api/v1/recommendations")
-		components.queryItems = [
-			URLQueryItem(name: "view", value: section.apiValue),
-			URLQueryItem(name: "limit", value: String(limit)),
-		]
-		var request = makeAuthorizedRequest(url: try endpointURL(components: components))
-		request.httpMethod = "GET"
-		let (data, response) = try await httpClient.data(for: request)
-		try Self.validate(response: response, data: data)
-		return try decoder.decode(RecommendationsResponse.self, from: data).items
+		do {
+			return try await loadRecommendations(for: section, limit: limit)
+		} catch let PigeonError.server(statusCode, message)
+			where section == .forYou && statusCode == 410 && Self.isExpiredRecommendationContinuation(message) {
+			// The server's bounded snapshot can expire while reading its pages.
+			// Restart once with an empty buffer; a second failure reaches the model
+			// so it retains the previous readable cache instead of publishing a subset.
+			try Task.checkCancellation()
+			return try await loadRecommendations(for: section, limit: limit)
+		}
+	}
+
+	private static func isExpiredRecommendationContinuation(_ message: String) -> Bool {
+		guard let data = message.data(using: .utf8),
+			let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+		return payload["code"] as? String == "recommendation_continuation_expired"
+	}
+
+	private func loadRecommendations(for section: ReaderSection, limit: Int) async throws -> [Recommendation] {
+		var articles: [Recommendation] = []
+		var seenIDs = Set<String>()
+		var seenContinuations = Set<String>()
+		var continuation: String?
+		repeat {
+			try Task.checkCancellation()
+			var components = try endpointComponents(path: "api/v1/recommendations")
+			components.queryItems = [URLQueryItem(name: "view", value: section.apiValue)]
+			if section != .forYou {
+				components.queryItems?.append(URLQueryItem(name: "limit", value: String(limit)))
+			}
+			if let continuation {
+				components.queryItems?.append(URLQueryItem(name: "continuation", value: continuation))
+			}
+			let (data, _) = try await requestJSON(components: components)
+			try Task.checkCancellation()
+			let page = try decoder.decode(RecommendationsResponse.self, from: data)
+			let newArticles = page.items.filter { seenIDs.insert($0.id).inserted }
+			articles.append(contentsOf: newArticles)
+			continuation = section == .forYou ? page.continuation : nil
+			if let continuation {
+				// A changing pool may repeat stories. A stalled/malformed cursor must
+				// fail the load, preserving the app's previous readable cache.
+				guard continuation.isEmpty == false, continuation.utf8.count <= 200,
+					seenContinuations.insert(continuation).inserted,
+					newArticles.isEmpty == false, seenContinuations.count < Self.maximumRecommendationPages else {
+					throw PigeonError.invalidResponse
+				}
+			}
+		} while continuation != nil
+		return articles
 	}
 
 	func syncHealth() async throws -> SyncHealthSnapshot {
@@ -509,6 +559,7 @@ struct PigeonAPIClient: Sendable {
 			sampleCount: 0,
 			explanation: "From \(source)",
 			learningState: "Reader subscription",
+			isBodyPruned: item.isBodyPruned,
 		)
 	}
 

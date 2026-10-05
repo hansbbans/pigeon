@@ -73,6 +73,15 @@ final class ReaderCollectionLoadCoordinator {
 		await task.value
 	}
 
+	func remove(collectionID: String) {
+		// Personalization changes require a new recommendation snapshot. Existing
+		// waiters can finish, but the model invalidates their commit ownership.
+		for key in tasks.keys where key.collectionID == collectionID {
+			tasks[key] = nil
+			generations[key] = nil
+		}
+	}
+
 	func removeAll() {
 		// Requests remain alive; account/generation guards prevent stale commits.
 		tasks.removeAll()

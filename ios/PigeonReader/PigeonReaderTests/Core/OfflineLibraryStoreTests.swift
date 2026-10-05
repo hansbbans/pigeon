@@ -1370,6 +1370,24 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.storageStats(accountID: accountID).articleCount == 1)
 	}
 
+	@Test func prunedLivePagePreservesTheCompleteStoredBodyWithoutAnInMemoryCache() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let complete = makeArticle(isRead: false)
+		try await store.saveArticles([complete], collectionID: ReaderSection.forYou.rawValue, accountID: "account-a")
+		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true)
+		pruned.isRead = true
+		pruned.isStarred = true
+		try await store.saveArticles([pruned], collectionID: "feed/daily", accountID: "account-a")
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		for collectionID in [ReaderSection.forYou.rawValue, "feed/daily"] {
+			let stored = try #require(snapshot.articlesByCollection[collectionID]?.first)
+			#expect(stored.html == complete.html)
+			#expect(stored.text == complete.text)
+			#expect(stored.isRead && stored.isStarred)
+			#expect(stored.isBodyPruned != true)
+		}
+	}
+
 	@Test func prunedServerPlaceholderIsStoredAsMissingBodyForRecovery() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let page = try decodePage(
@@ -1883,6 +1901,200 @@ struct OfflineLibraryStoreTests {
 		#expect(snapshot.articlesByCollection["folder/one"]?.map(\.id) == ["shared-0", "shared-1", "shared-2"])
 		#expect(snapshot.articlesByCollection["folder/two"]?.map(\.id) == ["shared-2", "shared-1", "shared-0"])
 		#expect(snapshot.articlesByCollection["folder/three"]?.map(\.id) == ["shared-1", "shared-2", "shared-0"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func resetSupersedesOldFeedbackButPreservesOtherActionsAndNewFeedback() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let oldFeedback = [
+			OfflineMutation(id: "old-reject", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested"),
+			OfflineMutation(id: "old-like", kind: .feedback, itemIds: ["reader-2"], feedback: "more_like_this"),
+		]
+		let unrelated = [
+			OfflineMutation(id: "keep-read", kind: .setRead, itemIds: ["reader-3"], value: true),
+			OfflineMutation(id: "keep-star", kind: .setStarred, itemIds: ["reader-4"], value: true),
+			OfflineMutation(id: "keep-feed", kind: .renameFeed, feedId: "feed-1", title: "Garden"),
+		]
+		for mutation in oldFeedback + unrelated { try await store.enqueue(mutation, accountID: "account-a") }
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		let reset = await controlled.nextRequest()
+		#expect(reset.request.httpMethod == "DELETE")
+		#expect(reset.request.url?.query == "all=1")
+		let newFeedback = OfflineMutation(id: "new-like", kind: .feedback, itemIds: ["reader-5"], feedback: "more_like_this")
+		try await store.enqueue(newFeedback, accountID: "account-a")
+		await controlled.resolve(reset)
+		try await resetting.value
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == (unrelated + [newFeedback]).map(\.id))
+	}
+
+	@Test(.timeLimit(.minutes(1))) func failedResetRetainsQueuedFeedbackForLaterReplay() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = OfflineMutation(id: "retain-on-failure", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested")
+		try await store.enqueue(feedback, accountID: "account-a")
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		let reset = await controlled.nextRequest()
+		await controlled.resolve(reset, statusCode: 503)
+		await #expect(throws: (any Error).self) { try await resetting.value }
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [feedback.id])
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let replay = await controlled.nextRequest()
+		#expect(replay.request.url?.path == "/api/v1/mutations")
+		await controlled.resolve(replay, data: try mutationResponse(for: replay))
+		#expect(try await replaying.value == 1)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func resetWaitsForSentReplayAndPreservesFeedbackQueuedWhileCapturing() async throws {
+		let store = ResetCaptureStore()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = (0..<8).map { OfflineMutation(id: "before-reset-\($0)", kind: .feedback, itemIds: ["reader-\($0)"], feedback: "not_interested") }
+		let read = OfflineMutation(id: "unrelated-read", kind: .setRead, itemIds: ["reader-read"], value: true)
+		for mutation in feedback + [read] { try await store.enqueue(mutation, accountID: "account-a") }
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let sent = await controlled.nextRequest()
+		#expect(sent.request.url?.path == "/api/v1/mutations")
+		await store.pauseNextCapture()
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		await store.waitForCapture()
+		let newFeedback = OfflineMutation(id: "after-reset-began", kind: .feedback, itemIds: ["reader-new"], feedback: "more_like_this")
+		try await store.enqueue(newFeedback, accountID: "account-a")
+		await store.releaseCapture()
+		#expect(await controlled.requestCount() == 1, "reset must wait for the already-sent batch")
+		await controlled.resolve(sent, data: try mutationResponse(for: sent))
+		#expect(try await replaying.value == 7, "a pending reset stops replay before another page")
+		let reset = await controlled.nextRequest()
+		#expect(reset.request.httpMethod == "DELETE")
+		await controlled.resolve(reset)
+		try await resetting.value
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [read.id, newFeedback.id])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func resetCaptureFailureReleasesTheAccountForReplay() async throws {
+		let store = ResetCaptureStore()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = OfflineMutation(id: "capture-failed", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested")
+		try await store.enqueue(feedback, accountID: "account-a")
+		await store.failNextCapture()
+		await #expect(throws: (any Error).self) { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		#expect(await controlled.requestCount() == 0)
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: try mutationResponse(for: request))
+		#expect(try await replaying.value == 1)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledResetWaiterDoesNotCancelThePredecessorOrLoseUnsentFeedback() async throws {
+		let store = ResetCaptureStore()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = (0..<8).map { OfflineMutation(id: "cancel-wait-\($0)", kind: .feedback, itemIds: ["reader-\($0)"], feedback: "not_interested") }
+		for mutation in feedback { try await store.enqueue(mutation, accountID: "account-a") }
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let sent = await controlled.nextRequest()
+		await store.pauseNextCapture()
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		await store.waitForCapture()
+		resetting.cancel()
+		await store.releaseCapture()
+		await controlled.resolve(sent, data: try mutationResponse(for: sent))
+		#expect(try await replaying.value == 7)
+		await #expect(throws: CancellationError.self) { try await resetting.value }
+		#expect(await controlled.requestCount() == 1)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [feedback[7].id])
+		let retrying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let retried = await controlled.nextRequest()
+		await controlled.resolve(retried, data: try mutationResponse(for: retried))
+		#expect(try await retrying.value == 1)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func activeResetCancellationRetainsFeedbackAndDoesNotBlockAnotherAccount() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = OfflineMutation(id: "active-cancel", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested")
+		let otherRead = OfflineMutation(id: "other-account-read", kind: .setRead, itemIds: ["reader-2"], value: true)
+		try await store.enqueue(feedback, accountID: "account-a")
+		try await store.enqueue(otherRead, accountID: "account-b")
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		let reset = await controlled.nextRequest()
+		let otherReplay = Task { try await replayer.replay(accountID: "account-b", apiClient: client) }
+		let otherRequest = await controlled.nextRequest()
+		#expect(otherRequest.request.url?.path == "/api/v1/mutations")
+		await controlled.resolve(otherRequest, data: try mutationResponse(for: otherRequest))
+		#expect(try await otherReplay.value == 1)
+		resetting.cancel()
+		await controlled.fail(reset, with: CancellationError())
+		await #expect(throws: CancellationError.self) { try await resetting.value }
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [feedback.id])
+		let retrying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let retry = await controlled.nextRequest()
+		await controlled.resolve(retry, data: try mutationResponse(for: retry))
+		#expect(try await retrying.value == 1)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancelledReplayWaiterDoesNotCancelAnActiveReset() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = OfflineMutation(id: "reset-predecessor", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested")
+		try await store.enqueue(feedback, accountID: "account-a")
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		let reset = await controlled.nextRequest()
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		replaying.cancel()
+		await controlled.resolve(reset)
+		try await resetting.value
+		await #expect(throws: CancellationError.self) { _ = try await replaying.value }
+		#expect(await controlled.requestCount() == 1)
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func cancellingActiveReplayRetainsItsDurableActionAndReleasesTheGate() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let controlled = ControlledHTTPClient()
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
+		let client = PigeonAPIClient(session: session, httpClient: controlled)
+		let replayer = OfflineMutationReplayer(store: store)
+		let feedback = OfflineMutation(id: "replay-active-cancel", kind: .feedback, itemIds: ["reader-1"], feedback: "not_interested")
+		try await store.enqueue(feedback, accountID: "account-a")
+		let replaying = Task { try await replayer.replay(accountID: "account-a", apiClient: client) }
+		let sent = await controlled.nextRequest()
+		replaying.cancel()
+		await controlled.fail(sent, with: CancellationError())
+		await #expect(throws: CancellationError.self) { _ = try await replaying.value }
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).map(\.mutation.id) == [feedback.id])
+		let resetting = Task { try await replayer.resetPersonalization(accountID: "account-a", apiClient: client) }
+		let reset = await controlled.nextRequest()
+		await controlled.resolve(reset)
+		try await resetting.value
+		#expect(try await store.pendingMutations(accountID: "account-a", limit: 100).isEmpty)
+	}
+
+	private func mutationResponse(for request: ControlledHTTPClient.PendingRequest) throws -> Data {
+		let body = try #require(request.request.httpBody)
+		let envelope = try JSONDecoder().decode(OfflineMutationEnvelope.self, from: body)
+		return try JSONSerialization.data(withJSONObject: ["results": envelope.mutations.map {
+			["mutationId": $0.id, "status": "applied", "appliedAt": "2026-10-04T18:00:00.000Z"]
+		}])
 	}
 
 	@Test func lostMutationResponseCanReplayAsAlreadyAppliedExactlyOnce() async throws {
@@ -2435,3 +2647,49 @@ private actor QueryBudgetMutationHTTPClient: HTTPClient {
 		return (responseBody, response)
 	}
 }
+
+/// Delays the reset's initial queue read while keeping normal replay reads live.
+private actor ResetCaptureStore: OfflineLibraryStoring {
+	private let base = OfflineLibraryStore.inMemory()
+	private var pauseCapture = false
+	private var capturePaused = false
+	private var failCapture = false
+	private var captureWaiters: [CheckedContinuation<Void, Never>] = []
+	private var captureResume: CheckedContinuation<Void, Never>?
+	func pauseNextCapture() { pauseCapture = true }
+	func failNextCapture() { failCapture = true }
+	func waitForCapture() async {
+		if capturePaused { return }
+		await withCheckedContinuation { captureWaiters.append($0) }
+	}
+	func releaseCapture() { captureResume?.resume(); captureResume = nil }
+	func pendingMutations(accountID: String, limit: Int) async throws -> [PendingOfflineMutation] {
+		if limit == Int.max {
+			if pauseCapture {
+				pauseCapture = false
+				capturePaused = true
+				let waiters = captureWaiters; captureWaiters.removeAll()
+				for waiter in waiters { waiter.resume() }
+				await withCheckedContinuation { captureResume = $0 }
+				capturePaused = false
+			}
+			if failCapture { failCapture = false; throw ResetCaptureError.unavailable }
+		}
+		return try await base.pendingMutations(accountID: accountID, limit: limit)
+	}
+	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws { try await base.enqueue(mutation, accountID: accountID) }
+	func markMutationApplied(id: String, accountID: String) async throws { try await base.markMutationApplied(id: id, accountID: accountID) }
+	func recordMutationFailure(id: String, message: String, accountID: String) async throws { try await base.recordMutationFailure(id: id, message: message, accountID: accountID) }
+	func loadSnapshot(accountID: String) async throws -> CachedLibrarySnapshot { try await base.loadSnapshot(accountID: accountID) }
+	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws { try await base.saveNavigation(navigation, accountID: accountID) }
+	func saveSubscriptions(_ subscriptions: [FeedSubscription], accountID: String) async throws { try await base.saveSubscriptions(subscriptions, accountID: accountID) }
+	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) async throws { try await base.saveArticles(articles, collectionID: collectionID, accountID: accountID) }
+	func saveCollectionContinuation(_ continuation: String?, collectionID: String, accountID: String) async throws { try await base.saveCollectionContinuation(continuation, collectionID: collectionID, accountID: accountID) }
+	func saveRestoration(_ restoration: ReaderRestorationState, accountID: String) async throws { try await base.saveRestoration(restoration, accountID: accountID) }
+	func apply(_ page: IncrementalSyncPage, accountID: String) async throws { try await base.apply(page, accountID: accountID) }
+	func storageStats(accountID: String) async throws -> OfflineStorageStats { try await base.storageStats(accountID: accountID) }
+	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int { try await base.cleanupReadBodies(accountID: accountID, keepingNewest: count) }
+	func clearCachedArticles(accountID: String) async throws { try await base.clearCachedArticles(accountID: accountID) }
+	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation] { try await base.searchArticles(query: query, collectionID: collectionID, accountID: accountID, limit: limit) }
+}
+private enum ResetCaptureError: Error { case unavailable }

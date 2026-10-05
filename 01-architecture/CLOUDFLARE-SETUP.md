@@ -76,7 +76,10 @@ Recommendation ranking runs in a separate Worker and SQLite-backed Durable
 Object so the public Worker stays within the Free-plan HTTP CPU budget. Keep
 the external binding in `wrangler.toml` and the helper's class migration in
 `wrangler.recommendations.toml`. The helper has the same D1 database binding,
-no public route, and no recommendation cache.
+no public route, and bounded ranking snapshots for recommendation paging.
+Snapshots contain ranking metadata rather than article bodies, expire five
+minutes after creation, and are limited to eight sessions and 8 MB of serialized
+metadata in aggregate. Each page rechecks current article eligibility in D1.
 
 Deploy in this order whenever either Worker changes:
 
@@ -87,7 +90,10 @@ npm run deploy:main
 
 `npm run deploy` runs both commands in this order. Keep the helper deployed
 when rolling back the public Worker; the public binding still points at the
-same `RecommendationEngine` namespace, and the helper stores no ranking data.
+same `RecommendationEngine` namespace. If rolling back helper code too, deploy
+the matching helper version while preserving the namespace and migration.
+Incompatible snapshot metadata is discarded; native clients restart an expired
+load once and preserve their readable cache if loading fails.
 Use a full `wrangler deploy` for the helper because its SQLite Durable Object
 migration cannot be introduced through a versions upload or gradual deploy.
 

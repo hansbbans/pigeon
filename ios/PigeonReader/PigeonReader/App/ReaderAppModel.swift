@@ -218,6 +218,7 @@ final class ReaderAppModel {
 	// Keep the latest local value after a queued mutation is acknowledged. An
 	// in-flight collection request may still carry an older server value.
 	private var localArticleStates: [String: PendingArticleState] = [:]
+	private var localRecommendationRejectionRevisions: [String: Int] = [:]
 	private var localArticleStateRevisions: [String: PendingArticleStateRevision] = [:]
 	private var nextPendingArticleStateRevision = 0
 	private var sortOrders: [String: ArticleSortOrder] = [:]
@@ -749,6 +750,7 @@ final class ReaderAppModel {
 			pendingArticleStates = [:]
 			pendingArticleStateRevisions = [:]
 			localArticleStates = [:]
+			localRecommendationRejectionRevisions = [:]
 			localArticleStateRevisions = [:]
 			nextPendingArticleStateRevision = 0
 			failedInitialLoadCollectionIDs.removeAll()
@@ -903,6 +905,7 @@ final class ReaderAppModel {
 			}
 			personalization = snapshot
 			settingsErrorMessage = nil
+			invalidateForYouRecommendationLoad()
 			await load(section: .forYou, force: true)
 			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
 				return false
@@ -950,6 +953,7 @@ final class ReaderAppModel {
 			}
 			personalization = snapshot
 			settingsErrorMessage = nil
+			invalidateForYouRecommendationLoad()
 			await load(section: .forYou, force: true)
 			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
 				return false
@@ -989,7 +993,12 @@ final class ReaderAppModel {
 
 		do {
 			try Task.checkCancellation()
-			try await apiClient.resetPersonalization()
+			try await mutationReplayer.resetPersonalization(accountID: context.accountID, apiClient: apiClient)
+			await refreshOfflineStorageStats()
+			try Task.checkCancellation()
+			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
+				return false
+			}
 			let snapshot = try await apiClient.personalization()
 			try Task.checkCancellation()
 			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
@@ -997,6 +1006,7 @@ final class ReaderAppModel {
 			}
 			personalization = snapshot
 			settingsErrorMessage = nil
+			invalidateForYouRecommendationLoad()
 			await load(section: .forYou, force: true)
 			guard isCurrentPersonalizationOperation(context), activePersonalizationMutationID == mutationID else {
 				return false
@@ -2448,6 +2458,7 @@ final class ReaderAppModel {
 			errorMessage = nil
 		}
 		let articleStateRevisionsAtStart = localArticleStateRevisions
+		let recommendationRejectionRevisionAtStart = nextPendingArticleStateRevision
 
 		defer {
 			if activeLoadIDs[collection.id] == loadID {
@@ -2494,6 +2505,7 @@ final class ReaderAppModel {
 			let mutationIntentResult = try await applyingQueuedMutationIntentOrFallback(
 				to: page.items,
 				accountID: context.accountID,
+				excludingNotInterested: collection.smartSection == .forYou,
 			)
 			if mutationIntentResult.errorMessage == nil {
 				await refreshPendingArticleStates(accountID: context.accountID)
@@ -2501,10 +2513,22 @@ final class ReaderAppModel {
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
 			}
+			if collection.smartSection == .forYou,
+				let cacheErrorMessage = mutationIntentResult.errorMessage,
+				articleCache[collection.id] != nil,
+				localRecommendationRejectionRevisions.isEmpty == false {
+				// Membership cannot be trusted while queued feedback is unavailable.
+				// Keep the existing page instead of restoring a locally rejected story.
+				errorMessage = cacheErrorMessage
+				return
+			}
 			let incomingArticles = preserveArticleStatesChangedSince(
 				applyPendingArticleStates(mutationIntentResult.articles),
 				since: articleStateRevisionsAtStart,
 			)
+			let eligibleArticles = collection.smartSection == .forYou
+				? excludingRecommendationsRejected(since: recommendationRejectionRevisionAtStart, from: incomingArticles)
+				: incomingArticles
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeLoadIDs[collection.id] == loadID else {
 				return
@@ -2512,11 +2536,10 @@ final class ReaderAppModel {
 			isOffline = false
 			let existingArticles = articleCache[collection.id] ?? []
 			let loadedArticles = mergedHeadArticles(
-				incomingArticles,
+				eligibleArticles,
 				existing: existingArticles,
 				for: collection,
 			)
-			let nextNavigation = navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil)
 			let reusesUnchangedPersistedPage = collection.smartSection?.usesRecommendationEndpoint != true
 				&& page.fetchedContentCount == 0
 				&& existingArticles.count == loadedArticles.count
@@ -2564,7 +2587,7 @@ final class ReaderAppModel {
 			guard await persistCollectionState(
 				loadedArticles,
 				collectionID: collection.id,
-				navigation: nextNavigation,
+				navigation: navigationAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil),
 				continuation: preserveLoadedTail && hasExistingPaginationState
 					? streamContinuations[collection.id]
 					: page.continuation,
@@ -2814,7 +2837,6 @@ final class ReaderAppModel {
 				nextSeenContinuations = seenStreamContinuations[collection.id, default: []]
 				nextStreamContinuation = nil
 			}
-			let nextNavigation = navigationAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil)
 			setArticles(combinedArticles, for: collection.id)
 			if isSynchronizingOfflineLibrary {
 				livePagesDuringOfflineSynchronization[collection.id] = combinedArticles
@@ -2837,7 +2859,7 @@ final class ReaderAppModel {
 			guard await persistCollectionState(
 				combinedArticles,
 				collectionID: collection.id,
-				navigation: nextNavigation,
+				navigation: navigationAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
 				continuation: nextStreamContinuation,
 				context: context,
 				operationID: loadID,
@@ -3577,6 +3599,13 @@ final class ReaderAppModel {
 				}
 				return sharedFields(from: incoming, preserving: existing)
 			}
+			if otherCollectionID == ReaderSection.forYou.rawValue {
+				let unreadDelta = (articleCache[otherCollectionID]?.count(where: { $0.isRead == false }) ?? 0)
+					- existingArticles.count(where: { $0.isRead == false })
+				if unreadDelta != 0 {
+					applyNavigationCountDeltas([otherCollectionID: unreadDelta])
+				}
+			}
 			reconcileSelection(for: otherCollectionID)
 		}
 	}
@@ -3587,6 +3616,7 @@ final class ReaderAppModel {
 		preservingRanking: Bool = false,
 	) -> Recommendation {
 		guard let existing else { return incoming }
+		let preserveBody = incoming.isBodyPruned == true && existing.isBodyPruned != true && existing.hasReadableHTML
 		return Recommendation(
 			id: incoming.id.isEmpty ? existing.id : incoming.id,
 			readerId: incoming.readerId.isEmpty ? existing.readerId : incoming.readerId,
@@ -3594,8 +3624,8 @@ final class ReaderAppModel {
 			source: incoming.source.isEmpty ? existing.source : incoming.source,
 			author: incoming.author ?? existing.author,
 			title: incoming.title.isEmpty ? existing.title : incoming.title,
-			html: incoming.html.isEmpty ? existing.html : incoming.html,
-			text: incoming.text ?? existing.text,
+			html: preserveBody || incoming.html.isEmpty ? existing.html : incoming.html,
+			text: preserveBody ? existing.text : incoming.text ?? existing.text,
 			originalURL: incoming.originalURL ?? existing.originalURL,
 			receivedAt: incoming.receivedAt,
 			isRead: incoming.isRead,
@@ -3609,6 +3639,7 @@ final class ReaderAppModel {
 			learningState: preservingRanking
 				? existing.learningState
 				: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
+			isBodyPruned: preserveBody ? existing.isBodyPruned : incoming.isBodyPruned,
 		)
 	}
 
@@ -3636,6 +3667,7 @@ final class ReaderAppModel {
 			sampleCount: incoming.sampleCount,
 			explanation: incoming.explanation.isEmpty ? existing.explanation : incoming.explanation,
 			learningState: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
+			isBodyPruned: incoming.isBodyPruned,
 		)
 	}
 
@@ -3659,6 +3691,7 @@ final class ReaderAppModel {
 			sampleCount: merged.sampleCount,
 			explanation: merged.explanation,
 			learningState: merged.learningState,
+			isBodyPruned: merged.isBodyPruned,
 		)
 	}
 
@@ -4993,6 +5026,12 @@ final class ReaderAppModel {
 			feedback: type.rawValue,
 		)
 		guard await enqueueOfflineMutation(mutation) else { return }
+		if type == .notInterested {
+			nextPendingArticleStateRevision += 1
+			for alias in ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId) {
+				localRecommendationRejectionRevisions[alias] = nextPendingArticleStateRevision
+			}
+		}
 		guard type == .notInterested, articleCache[ReaderSection.forYou.rawValue] != nil else {
 			await replayPendingMutations()
 			return
@@ -5274,13 +5313,13 @@ final class ReaderAppModel {
 	}
 
 	/// Snapshot reloads can replace the open row with a body-pruned cache copy.
-	/// Keep the HTML the user is currently reading, and take snapshot flags from cache.
+	/// Keep the complete body the user is currently reading, and take status flags from cache.
 	private func articleWithPreservedBody(_ article: Recommendation) -> Recommendation {
 		guard let existing = articleCache.values.lazy.flatMap({ $0 }).first(where: { articlesMatch($0, article) }) else {
 			return article
 		}
 		if existing.hasReadableHTML == false, article.hasReadableHTML {
-			return existing.replacingHTML(article.html)
+			return existing.replacingBody(html: article.html, text: article.text, isBodyPruned: article.isBodyPruned)
 		}
 		return existing
 	}
@@ -5712,6 +5751,7 @@ final class ReaderAppModel {
 		pendingArticleStates = [:]
 		pendingArticleStateRevisions = [:]
 		localArticleStates = [:]
+		localRecommendationRejectionRevisions = [:]
 		localArticleStateRevisions = [:]
 		nextPendingArticleStateRevision = 0
 		failedInitialLoadCollectionIDs.removeAll()
@@ -5894,6 +5934,19 @@ final class ReaderAppModel {
 				) else {
 					return false
 				}
+				// Shared prewarm updates may have changed the For You count. Save
+				// that navigation alongside the page before considering it persisted.
+				try await self.offlineStore.saveNavigation(self.navigation, accountID: accountID)
+				try Task.checkCancellation()
+				guard self.isCurrentPrewarmPersistence(
+					accountID: accountID,
+					collectionID: collection.id,
+					libraryGeneration: libraryGeneration,
+					collectionActivityGeneration: collectionActivityGeneration,
+					articleStateGeneration: articleStateGeneration,
+				) else {
+					return false
+				}
 				try await self.offlineStore.saveCollectionContinuation(
 					continuation,
 					collectionID: collection.id,
@@ -5972,9 +6025,14 @@ final class ReaderAppModel {
 		guard isCurrentPrewarmOperation(context, feed: feed, requestID: requestID) else {
 			throw CancellationError()
 		}
-		let loadedArticles = sortOrder(for: feed.id).sorted(mutationIntentResult.articles)
 		guard articleCache[feed.id] == nil else { return }
+		// Prewarming can encounter a server-pruned notice for a story whose
+		// complete body is already cached in another collection. Use the same
+		// shared-body merge as foreground loads, retaining fresh server status.
+		let canonicalized = canonicalizedArticles(mutationIntentResult.articles, for: feed.id)
+		let loadedArticles = sortOrder(for: feed.id).sorted(canonicalized)
 		articleCache[feed.id] = loadedArticles
+		propagateSharedArticleUpdates(from: canonicalized, excluding: feed.id)
 		unpersistedPrewarmCollectionIDs.insert(feed.id)
 		collectionFreshness[feed.id] = CollectionFreshness(updatedAt: .now, isCached: false)
 		resetStreamPagination(for: feed.id)
@@ -6006,6 +6064,13 @@ final class ReaderAppModel {
 	) -> Bool {
 		isCurrentPrewarmContext(context, feed: feed)
 			&& activePrewarmFeedIDs[feed.id] == requestID
+	}
+
+	private func invalidateForYouRecommendationLoad() {
+		let collectionID = ReaderSection.forYou.rawValue
+		activeLoadIDs[collectionID] = nil
+		loadingCollections.remove(collectionID)
+		collectionLoadCoordinator.remove(collectionID: collectionID)
 	}
 
 	private func invalidateCollectionLoads() {
@@ -6366,9 +6431,21 @@ final class ReaderAppModel {
 		await refreshOfflineStorageStats()
 	}
 
+	/// Acknowledged feedback may already be absent from the outbox while an
+	/// older page is buffered. Preserve only rejections made during this load;
+	/// future loads can legitimately include the story after a history reset.
+	private func excludingRecommendationsRejected(since revision: Int, from articles: [Recommendation]) -> [Recommendation] {
+		articles.filter { article in
+			ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId).allSatisfy { alias in
+				(localRecommendationRejectionRevisions[alias] ?? 0) <= revision
+			}
+		}
+	}
+
 	private func applyingQueuedMutationIntent(
 		to articles: [Recommendation],
 		accountID: String,
+		excludingNotInterested: Bool = false,
 	) async throws -> [Recommendation] {
 		let pending = try await offlineStore.pendingMutations(accountID: accountID, limit: Int.max)
 		guard pending.isEmpty == false else {
@@ -6378,6 +6455,14 @@ final class ReaderAppModel {
 		var adjusted = articles
 		for action in pending {
 			let mutation = action.mutation
+			if excludingNotInterested, mutation.kind == .feedback, mutation.feedback == EngagementEventType.notInterested.rawValue {
+				let rejectedIDs = Set(mutation.itemIds.map(Self.normalizedQueuedMutationItemID))
+				adjusted.removeAll { article in
+					rejectedIDs.contains(Self.normalizedQueuedMutationItemID(article.id))
+						|| rejectedIDs.contains(Self.normalizedQueuedMutationItemID(article.readerId))
+				}
+				continue
+			}
 			guard let value = mutation.value else { continue }
 			switch mutation.kind {
 			case .setRead, .setReadBatch:
@@ -6404,10 +6489,11 @@ final class ReaderAppModel {
 	private func applyingQueuedMutationIntentOrFallback(
 		to articles: [Recommendation],
 		accountID: String,
+		excludingNotInterested: Bool = false,
 	) async throws -> (articles: [Recommendation], errorMessage: String?) {
 		do {
 			return (
-				articles: try await applyingQueuedMutationIntent(to: articles, accountID: accountID),
+				articles: try await applyingQueuedMutationIntent(to: articles, accountID: accountID, excludingNotInterested: excludingNotInterested),
 				errorMessage: nil,
 			)
 		} catch {
