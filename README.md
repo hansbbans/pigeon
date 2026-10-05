@@ -111,7 +111,7 @@ The native client stores the optional Readwise access token in the iOS Keychain.
 
 The browser client and native client both use the authenticated `/reader/api/0/*` endpoints; the browser Mark All Read action uses `/reader/api/0/mark-all-as-read`.
 
-The native reader's For You recommendations prioritize freshness and topic relevance across publishers. Stars and More Like This help learn interests; Not Interested excludes the story and reduces related topic matches. Source history is a small tie-breaker. Settings supports up to 20 monitored topics, stored through `PUT /api/v1/personalization` with a body such as `{"monitoredTopics":["AI","home gyms"]}`. Matching uses bounded token and phrase overlap with aliases, rather than embeddings. The Recommended sort preserves the server's ranking; explicit reader-selected sorts remain available. Resetting personalization clears monitored topics and ranking history without changing read or starred states.
+The native reader's For You recommendations prioritize freshness and topic relevance across publishers. It shows every story scoring above 50 out of 100 within the bounded candidate pool, automatically collecting qualifying pages without a fixed count or low-scoring filler. Stars and More Like This help learn interests; Not Interested excludes the story and reduces related topic matches. Source history is a small tie-breaker. Settings supports up to 20 monitored topics, stored through `PUT /api/v1/personalization` with a body such as `{"monitoredTopics":["AI","home gyms"]}`. Matching uses bounded token and phrase overlap with aliases, rather than embeddings. The Recommended sort preserves the server's ranking; explicit reader-selected sorts remain available. Resetting personalization clears monitored topics and ranking history without changing read or starred states, and supersedes older queued feedback while preserving feedback added after the reset began.
 
 Native local checks, from `ios/PigeonReader`, are:
 
@@ -210,13 +210,13 @@ npx wrangler d1 execute pigeon-db --remote --file=./04-storage/SCHEMA-V5.sql
 
 Do not run `SCHEMA.sql` on top of an older live database unless you are initializing a brand-new database.
 
-### 5. Deploy the Worker
+### 5. Deploy both Workers
 
 ```bash
-npx wrangler deploy
+npm run deploy
 ```
 
-That updates the existing `pigeon` Worker.
+That updates the private recommendation helper first, then the public `pigeon` Worker. See [the recommendation architecture](01-architecture/ARCHITECTURE.md) for snapshot storage, expiration, and rollback details.
 
 For the first deploy that attaches `pigeon.hanscho.com`, keep these Cloudflare-side checks in mind:
 

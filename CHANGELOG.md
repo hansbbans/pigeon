@@ -2,6 +2,24 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.6.0] - 2026-10-05
+
+### Changed
+
+- For You shows every qualifying story scoring above 50, instead of filling a fixed list of 30.
+
+### Fixed
+
+- Recommendation pages stay complete and consistently ordered through read changes and service restarts; failed refreshes preserve the previous readable list.
+- Sidebar counts survive refreshes and reopening the app, rejected stories stay removed, and saved article text remains available when the server has removed its copy.
+- Resetting preferences clears older queued feedback while preserving newer feedback and unrelated reading actions.
+- Topic matching recognizes dotted A.I. without matching email addresses and avoids severe slowdowns on long text and malformed markup.
+
+### For contributors
+
+- Reader image and cached-startup interface checks handle scrolling and already-completed loading reliably.
+- Deployment documentation covers the recommendation helper's bounded persistent snapshots and deployment order.
+
 ## [0.1.5.0] - 2026-09-27
 
 ### Added
