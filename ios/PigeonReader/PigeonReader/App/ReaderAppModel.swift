@@ -3566,10 +3566,11 @@ final class ReaderAppModel {
 		for collectionID: String,
 	) -> [Recommendation] {
 		let previousArticles = articleCache[collectionID] ?? []
+		let previousLookup = ReaderArticleLookup(previousArticles)
 		return incomingArticles.map { incoming in
 			let aliases = ReaderArticleIdentity.aliases(id: incoming.id, readerID: incoming.readerId)
 			let previousCanonical = aliases.lazy.compactMap { self.canonicalArticleRecords[$0] }.first
-			let previousInCollection = previousArticles.first(where: { articlesMatch($0, incoming) })
+			let previousInCollection = previousLookup.firstIndex(matching: incoming).map { previousArticles[$0] }
 			let isForYou = ReaderSection(rawValue: collectionID) == .forYou
 			let merged = mergedArticle(
 				incoming,
@@ -3591,13 +3592,14 @@ final class ReaderAppModel {
 		excluding collectionID: String,
 	) {
 		guard incomingArticles.isEmpty == false else { return }
+		let incomingLookup = ReaderArticleLookup(incomingArticles)
 		for otherCollectionID in articleCache.keys where otherCollectionID != collectionID {
 			guard let existingArticles = articleCache[otherCollectionID] else { continue }
 			articleCache[otherCollectionID] = existingArticles.map { existing in
-				guard let incoming = incomingArticles.first(where: { articlesMatch($0, existing) }) else {
+				guard let index = incomingLookup.firstIndex(matching: existing) else {
 					return existing
 				}
-				return sharedFields(from: incoming, preserving: existing)
+				return sharedFields(from: incomingArticles[index], preserving: existing)
 			}
 			if otherCollectionID == ReaderSection.forYou.rawValue {
 				let unreadDelta = (articleCache[otherCollectionID]?.count(where: { $0.isRead == false }) ?? 0)
@@ -3967,11 +3969,14 @@ final class ReaderAppModel {
 	}
 
 	private func deduplicatedArticles(_ articles: [Recommendation]) -> [Recommendation] {
-		articles.reduce(into: [Recommendation]()) { result, article in
-			guard result.contains(where: { articlesMatch($0, article) }) == false else {
+		var seenAliases = Set<String>()
+		return articles.reduce(into: [Recommendation]()) { result, article in
+			let aliases = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+			guard seenAliases.isDisjoint(with: aliases) else {
 				return
 			}
 			result.append(article)
+			seenAliases.formUnion(aliases)
 		}
 	}
 
@@ -6205,8 +6210,12 @@ final class ReaderAppModel {
 			return incoming
 		}
 		var merged = incoming
-		for oldArticle in existing where merged.contains(where: { articlesMatch($0, oldArticle) }) == false {
+		var seenAliases = Set(incoming.flatMap { ReaderArticleIdentity.aliases(id: $0.id, readerID: $0.readerId) })
+		for oldArticle in existing {
+			let aliases = ReaderArticleIdentity.aliases(id: oldArticle.id, readerID: oldArticle.readerId)
+			guard seenAliases.isDisjoint(with: aliases) else { continue }
 			merged.append(oldArticle)
+			seenAliases.formUnion(aliases)
 		}
 		return sortOrder(for: collection.id).sorted(merged)
 	}

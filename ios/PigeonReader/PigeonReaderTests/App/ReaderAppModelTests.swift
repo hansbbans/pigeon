@@ -14,6 +14,79 @@ private struct TestBootstrapProvider: OfflineLibraryBootstrapProviding {
 
 @MainActor
 struct ReaderAppModelTests {
+	@Test(.serialized, .timeLimit(.minutes(2)), arguments: [ReaderNavigationKind.feed, .folder, .smart])
+	func largeCachedCollectionDisplayPublishesWithoutQuadraticIdentityWork(kind: ReaderNavigationKind) async throws {
+		let transport = ControlledHTTPClient()
+		let model = try makeModel(httpClient: transport, offlineSynchronizationEnabled: false)
+		let collection = kind == .smart ? ReaderNavigationItem.smart(.today, unreadCount: 600) : ReaderNavigationItem(
+			id: kind == .feed ? "feed/7" : "user/-/label/Large", title: "Large", streamID: kind == .feed ? "feed/7" : "user/-/label/Large",
+			kind: kind, unreadCount: 600, parentID: nil, feedKey: "daily", iconURL: nil, smartSection: nil,
+		)
+		model.setNavigation(ReaderNavigationState(items: [collection, .smart(.unread, unreadCount: 600), .smart(.forYou, unreadCount: 600)]))
+		let now = Date.now
+		let cached = (0..<600).map { makeArticle(id: "large-\($0)", readerId: "large-\($0)", receivedDate: now) }
+		model.setArticles(cached, for: collection)
+		await Task.yield()
+		model.setArticles(cached, for: .unread)
+		await Task.yield()
+		model.setArticles(cached, for: .forYou)
+		await Task.yield()
+		model.select(item: collection)
+		#expect(model.allArticles(for: collection).count == cached.count)
+		let load = Task { await model.loadForDisplay(collection: collection, now: now) }
+		let ids = await transport.nextRequest()
+		#expect(ids.request.url?.path == "/reader/api/0/stream/items/ids")
+		let firstPageIDs = Array(cached.prefix(10).map(\.readerId))
+		await transport.resolve(ids, data: streamIDsData(ids: firstPageIDs, continuation: "large-next"))
+		let contents = await transport.nextRequest()
+		#expect(contents.request.url?.path == "/reader/api/0/stream/items/contents")
+		let clock = ContinuousClock()
+		let start = clock.now
+		await transport.resolve(contents, data: streamContentsData(ids: firstPageIDs))
+		await load.value
+		let elapsed = clock.now - start
+		print("Large cached \(kind) display publication: \(elapsed)")
+		#expect(elapsed < .seconds(2))
+		#expect(model.errorMessage == nil)
+		#expect(model.allArticles(for: collection).count == (kind == .smart ? 10 : cached.count))
+		#expect(model.canLoadMore(collection: collection))
+		if kind == .smart { #expect(model.navigation.item(withID: collection.id)?.unreadCount == 600) }
+		#expect(model.allArticles(for: .forYou).count == cached.count)
+	}
+
+	@Test func articleLookupPreservesFirstPairwiseAliasMatch() {
+		let rows = [
+			makeArticle(id: " FIRST ", readerId: "shared"),
+			makeArticle(id: "second", readerId: "other"),
+			makeArticle(id: "shared", readerId: "other"),
+			makeArticle(id: "decimal", readerId: "tag:google.com,2005:reader/item/000000000000002a"),
+			makeArticle(id: "", readerId: ""),
+		]
+		let lookup = ReaderArticleLookup(rows)
+		for query in [
+			makeArticle(id: "other", readerId: "shared"),
+			makeArticle(id: "first", readerId: "missing"),
+			makeArticle(id: "42", readerId: "missing"),
+			makeArticle(id: "missing", readerId: "missing"),
+			makeArticle(id: "", readerId: ""),
+		] {
+			#expect(lookup.firstIndex(matching: query) == rows.firstIndex { ReaderArticleIdentity.matches($0, query) })
+		}
+	}
+
+	@Test func widgetDeduplicationDoesNotBridgeAliasesThroughDiscardedRows() throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false)
+		let rows = [
+			makeArticle(id: "a", receivedAt: 3, readerId: "b"),
+			makeArticle(id: "b", receivedAt: 2, readerId: "c"),
+			makeArticle(id: "c", receivedAt: 1, readerId: "d"),
+		]
+		model.setArticles(rows, for: .forYou)
+		let snapshot = model.makeWidgetSnapshot()
+		#expect(snapshot.forYou.map(\.id) == ["a", "c"])
+		#expect(snapshot.recent.map(\.id) == ["a", "c"])
+	}
+
 	@Test func explicitOpenDoesNotBannerWhenEngagementItemIsUnknown() async throws {
 		let mock = MockHTTPClient(
 			responseData: Data(#"{"error":"Unknown item tag:google.com,2005:reader/item/0000000000000001"}"#.utf8),
