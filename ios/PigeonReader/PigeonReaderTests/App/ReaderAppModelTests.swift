@@ -14,6 +14,115 @@ private struct TestBootstrapProvider: OfflineLibraryBootstrapProviding {
 
 @MainActor
 struct ReaderAppModelTests {
+	@Test func navigatingFromAReadStoryInALargeUnreadListDoesNotRescanVisibleRowsForEveryEarlierStory() throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false)
+		let cached = (0..<1_200).map { makeArticle(id: "navigation-\($0)", isRead: $0.isMultiple(of: 2), readerId: "navigation-\($0)") }
+		model.setArticles(cached, for: .forYou)
+		model.select(article: cached[1_198])
+		let clock = ContinuousClock()
+		let start = clock.now
+		let previous = model.articleTarget(for: .previous, from: cached[1_198])
+		let elapsed = clock.now - start
+		print("Large filtered previous-story navigation: \(elapsed)")
+		#expect(elapsed < .milliseconds(250))
+		#expect(previous?.id == "navigation-1197")
+		#expect(model.selectedArticleID == "navigation-1198")
+	}
+
+	@Test(.timeLimit(.minutes(2))) func largeBulkReadAndUndoKeepTheListResponsiveAndCountsComplete() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineStore: store, offlineSynchronizationEnabled: false)
+		let folder = ReaderNavigationItem(id: "user/-/label/Large", title: "Large", streamID: "user/-/label/Large", kind: .folder, unreadCount: 600, parentID: nil, feedKey: nil, iconURL: nil, smartSection: nil)
+		let feed = ReaderNavigationItem(id: "feed/7", title: "Large Feed", streamID: "feed/7", kind: .feed, unreadCount: 600, parentID: folder.id, feedKey: "daily", iconURL: nil, smartSection: nil)
+		model.setNavigation(ReaderNavigationState(items: [folder, feed, .smart(.forYou, unreadCount: 600), .smart(.unread, unreadCount: 600), .smart(.today, unreadCount: 600)]))
+		let now = ReaderLocalDayBounds.localDay(containing: .now).start.addingTimeInterval(43_200)
+		let cached = (0..<600).map { makeArticle(id: "bulk-\($0)", readerId: "bulk-\($0)", receivedDate: now.addingTimeInterval(-Double($0))) }
+		model.setArticles(cached, for: feed)
+		model.setArticles(cached, for: .unread)
+		model.setArticles(cached, for: .forYou)
+		model.select(item: feed)
+		let clock = ContinuousClock()
+		let start = clock.now
+		await model.markStoriesAboveAsRead(cached[300], in: feed)
+		let elapsed = clock.now - start
+		print("Large bulk read: \(elapsed)")
+		#expect(elapsed < .seconds(2))
+		#expect(model.allArticles(for: feed).count(where: \.isRead) == 300)
+		#expect(model.allArticles(for: .unread).count == 300)
+		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 300 })
+		let undoStart = clock.now
+		await model.undoLastBulkRead()
+		let undoElapsed = clock.now - undoStart
+		print("Large bulk undo: \(undoElapsed)")
+		#expect(undoElapsed < .seconds(2))
+		#expect(model.allArticles(for: feed).allSatisfy { $0.isRead == false })
+		#expect(model.allArticles(for: .unread).count == 600)
+		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 600 })
+		let pending = try await store.pendingMutations(accountID: try #require(model.session).storageIdentity, limit: 100)
+		#expect(pending.count == 4)
+		#expect(pending.filter { $0.mutation.value == true }.flatMap { $0.mutation.itemIds }.count == 300)
+		#expect(pending.filter { $0.mutation.value == false }.flatMap { $0.mutation.itemIds }.count == 300)
+	}
+
+	@Test func bulkReadKeepsAnOpenUnreadStoryAndAliasCopiesConsistentThroughUndo() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 4)
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 4)
+		let first = makeArticle(id: "first", receivedAt: 400, readerId: "reader-first")
+		let selected = makeArticle(id: "selected", receivedAt: 300, readerId: "reader-selected")
+		let boundary = makeArticle(id: "boundary", receivedAt: 200)
+		let last = makeArticle(id: "last", receivedAt: 100)
+		let alias = makeArticle(id: "alias-copy", receivedAt: 300, readerId: selected.id)
+		model.setNavigation(ReaderNavigationState(items: [unread, forYou]))
+		model.setArticles([first, selected, boundary, last], for: unread)
+		model.setArticles([first, alias, boundary, last], for: forYou)
+		model.select(item: unread)
+		model.select(article: selected)
+
+		await model.markStoriesAboveAsRead(boundary, in: unread)
+
+		#expect(model.allArticles(for: unread).map(\.id) == [boundary.id, last.id])
+		#expect(model.selectedArticle?.id == selected.id)
+		#expect(model.selectedArticle?.isRead == true)
+		#expect(model.articleTarget(for: .previous, from: selected) == nil)
+		#expect(model.articleTarget(for: .next, from: selected)?.id == boundary.id)
+		#expect(model.allArticles(for: forYou).first { $0.id == alias.id }?.isRead == true)
+		#expect(model.navigation.item(withID: forYou.id)?.unreadCount == 2)
+
+		await model.undoLastBulkRead()
+
+		let restored = model.allArticles(for: unread)
+		#expect(restored.count == 4)
+		#expect(zip(restored, [first, selected, boundary, last]).allSatisfy { ReaderArticleIdentity.matches($0.0, $0.1) })
+		#expect(model.selectedArticle.map { ReaderArticleIdentity.matches($0, selected) } == true)
+		#expect(model.selectedArticle?.isRead == false)
+		#expect(model.articleTarget(for: .previous, from: selected)?.id == first.id)
+		#expect(model.articleTarget(for: .next, from: selected)?.id == boundary.id)
+		#expect(model.allArticles(for: forYou).allSatisfy { $0.isRead == false })
+		#expect(model.navigation.item(withID: forYou.id)?.unreadCount == 4)
+	}
+
+	@Test func bulkUndoDoesNotLetSkippedUnreadAliasesBridgeUnrelatedRows() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false)
+		let forYou = ReaderNavigationItem.smart(.forYou, unreadCount: 2)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 0)
+		let first = makeArticle(id: "restore-first", receivedAt: 500, readerId: "restore-reader-first")
+		let second = makeArticle(id: "restore-second", receivedAt: 400, readerId: "restore-reader-second")
+		model.setNavigation(ReaderNavigationState(items: [forYou, unread]))
+		model.setArticles([first, second], for: forYou)
+		model.setArticles([], for: unread)
+		await model.markAllStoriesAsRead(in: forYou)
+		let accepted = makeArticle(id: "accepted", receivedAt: 300, readerId: "shared")
+		let skipped = makeArticle(id: "bridge", receivedAt: 200, readerId: "shared")
+		let unrelated = makeArticle(id: "unrelated", receivedAt: 100, readerId: "bridge")
+		model.setArticles([accepted, skipped, unrelated], for: unread)
+
+		await model.undoLastBulkRead()
+
+		#expect(model.allArticles(for: unread).map(\.id) == [first.id, second.id, accepted.id, unrelated.id])
+		#expect(model.allArticles(for: unread).allSatisfy { $0.isRead == false })
+	}
+
 	@Test(.serialized, .timeLimit(.minutes(2)), arguments: [ReaderNavigationKind.feed, .folder, .smart])
 	func largeCachedCollectionDisplayPublishesWithoutQuadraticIdentityWork(kind: ReaderNavigationKind) async throws {
 		let transport = ControlledHTTPClient()

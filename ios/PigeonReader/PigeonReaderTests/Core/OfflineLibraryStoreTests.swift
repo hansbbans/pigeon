@@ -4,6 +4,54 @@ import Testing
 @testable import PigeonReader
 
 struct OfflineLibraryStoreTests {
+	@Test func commonSearchStopsDecodingWhenItsMatchingResultLimitIsFilled() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<1_000).map {
+			makeArticle(id: "search-\($0)", html: "<p>café <b>match</b></p>" + String(repeating: "<p>Newsletter text</p>", count: 200), receivedAt: Double(2_000 - $0))
+		}
+		try await store.saveArticles(articles, collectionID: "feed/daily", accountID: "search-account")
+		for collectionID in [nil, "feed/daily"] {
+			let clock = ContinuousClock()
+			let start = clock.now
+			let results = try await store.searchArticles(query: "cafe match", collectionID: collectionID, accountID: "search-account", limit: 20)
+			print("Common cached search scoped=\(collectionID != nil): \(clock.now - start), decoded=\(await store.searchArticleDecodeCountForTesting())")
+			#expect(results.map(\.id) == articles.prefix(20).map(\.id))
+			#expect(await store.searchArticleDecodeCountForTesting() == 20)
+		}
+	}
+
+	@Test func searchLimitCountsMatchesAfterSkippingNewerNonmatchingStories() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<40).map {
+			makeArticle(id: "candidate-\($0)", html: $0 >= 30 ? "<p>rare match</p>" : "<p>ordinary newsletter</p>", receivedAt: Double(100 - $0))
+		}
+		try await store.saveArticles(articles, collectionID: "feed/daily", accountID: "search-account")
+		for collectionID in [nil, "feed/daily"] {
+			let results = try await store.searchArticles(query: "rare match", collectionID: collectionID, accountID: "search-account", limit: 3)
+			#expect(results.map(\.id) == ["candidate-30", "candidate-31", "candidate-32"])
+			#expect(await store.searchArticleDecodeCountForTesting() == 33)
+			let missing = try await store.searchArticles(query: "missing", collectionID: collectionID, accountID: "search-account", limit: 3)
+			#expect(missing.isEmpty)
+			#expect(await store.searchArticleDecodeCountForTesting() == 40)
+		}
+	}
+
+	@Test func cancelledSearchDoesNotDecodeCachedStories() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveArticles([makeArticle(id: "story", html: "<p>match</p>")], collectionID: "feed/daily", accountID: "search-account")
+		let search = Task {
+			withUnsafeCurrentTask { $0?.cancel() }
+			do {
+				_ = try await store.searchArticles(query: "match", collectionID: nil, accountID: "search-account")
+				return false
+			} catch is CancellationError {
+				return true
+			}
+		}
+		#expect(try await search.value)
+		#expect(await store.searchArticleDecodeCountForTesting() == 0)
+	}
+
 	@Test func restorationRoundTripsCanonicalServerArticleOrder() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let restoration = ReaderRestorationState(
