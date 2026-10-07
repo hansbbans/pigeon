@@ -834,6 +834,42 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
 	}
 
+	func testImageRichThumbnailPermissionStaysOnTheListAndResetsAfterDisplayChanges() throws {
+		try launchFeedList(additionalArguments: [
+			"-pigeon.reader.timeline-density", "image-rich",
+			"-pigeon.reader.remote-images", "blocked",
+		])
+		let loadImage = app.buttons["image-rich-ask-before-loading"].firstMatch
+		XCTAssertTrue(loadImage.waitForExistence(timeout: 10), "Background image discovery must expose the permission button.")
+		XCTAssertTrue(loadImage.isHittable)
+		XCTAssertTrue(articleList.exists)
+		XCTAssertFalse(app.scrollViews["article-reader-scroll-view"].exists)
+		attachScreenshot(named: "image-rich-thumbnail-awaiting-permission")
+
+		loadImage.tap()
+		XCTAssertTrue(loadImage.waitForNonExistence(timeout: 5), "Revealing an image must consume its permission button.")
+		// This proves the row action without depending on the publisher response.
+		XCTAssertTrue(articleList.exists)
+		XCTAssertTrue(app.navigationBars["For You"].exists)
+		XCTAssertFalse(app.scrollViews["article-reader-scroll-view"].exists)
+
+		app.buttons["article-list-more"].tap()
+		app.buttons["article-list-density"].tap()
+		let comfortable = app.buttons["Comfortable"]
+		XCTAssertTrue(comfortable.waitForExistence(timeout: 5))
+		comfortable.tap()
+		XCTAssertTrue(loadImage.waitForNonExistence(timeout: 5))
+		app.buttons["article-list-more"].tap()
+		app.buttons["article-list-density"].tap()
+		let imageRich = app.buttons["Image Rich"]
+		XCTAssertTrue(imageRich.waitForExistence(timeout: 5))
+		imageRich.tap()
+		XCTAssertTrue(loadImage.waitForExistence(timeout: 10), "Returning to image-rich rows must ask again after permission was revoked.")
+		XCTAssertTrue(articleList.exists)
+		XCTAssertFalse(app.scrollViews["article-reader-scroll-view"].exists)
+		attachScreenshot(named: "image-rich-thumbnail-permission-restored")
+	}
+
 	func testInlineSuccessfulSaveDoesNotInterruptReading() throws {
 		app.terminate()
 		app.launchArguments += ["-reader-save-success"]

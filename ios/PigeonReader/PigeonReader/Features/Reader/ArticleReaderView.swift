@@ -451,13 +451,8 @@ struct ArticleReaderView: View {
 						theme: model.readerTypography.theme,
 						remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 						imageProxySession: model.session,
-						preparedBody: PreparedReaderBody(
-							sanitizedHTML: readerDocument.contentHTML,
-							imageURLs: StructuredHTMLSanitizer.imageURLs(
-								in: readerDocument.contentHTML,
-								baseURL: article.safeOriginalURL,
-							),
-						),
+						// ArticleBodyView prepares once off the main actor, keyed by
+						// exact HTML and source URL. Scroll updates reuse that body.
 						openedDestination: openInlineDestination,
 						saveToReader: saveInlineDestination,
 						onHTMLLayout: { layout in
