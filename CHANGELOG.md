@@ -2,6 +2,19 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## [0.1.7.0] - 2026-10-07
+
+### Fixed
+
+- Large cached folders, feeds, and Today open promptly while preserving pagination, saved article text, and unread counts.
+- Searching saved stories stops processing article bodies when enough matches are found, and moving between stories stays responsive in filtered lists.
+- Marking many stories read and undoing the action avoid repeated list updates while keeping reading position and saved changes consistent.
+- Image-rich stories avoid repeated image discovery during scrolling, and list image permissions reset correctly when display settings change.
+
+### For contributors
+
+- Local Worker image processing uses the patched Sharp library that resolves the librsvg security advisory.
+
 ## [0.1.6.0] - 2026-10-05
 
 ### Changed
