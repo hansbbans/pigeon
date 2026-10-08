@@ -48,6 +48,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	]
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
+	private var searchArticleDecodeCount = 0
 	#endif
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
@@ -636,6 +637,10 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	func snapshotArticleDecodeCountForTesting() -> Int {
 		snapshotArticleDecodeCount
 	}
+
+	func searchArticleDecodeCountForTesting() -> Int {
+		searchArticleDecodeCount
+	}
 	#endif
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) throws {
@@ -1059,45 +1064,42 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		accountID: String,
 		limit: Int = 200,
 	) throws -> [Recommendation] {
+		#if DEBUG
+		searchArticleDecodeCount = 0
+		#endif
 		let terms = rawQuery
-			.split(whereSeparator: { $0.isWhitespace })
+			.split(whereSeparator: \.isWhitespace)
 			.map(String.init)
 			.filter { $0.isEmpty == false }
 		guard terms.isEmpty == false else { return [] }
+		try Task.checkCancellation()
 		let database = try openDatabase()
 		try reconcileArticleIdentities(accountID: accountID, database: database)
-		var candidates: [Recommendation] = []
 		let boundedLimit = max(1, min(limit, 500))
+		let sql: String
+		let bindings: [SQLiteBinding]
 		if let collectionID {
-			try query(
-				"""
-				SELECT a.payload FROM cached_collection_articles ca
-				JOIN cached_articles a ON a.account_id = ca.account_id AND a.id = ca.article_id
-				WHERE ca.account_id = ? AND ca.collection_id = ?
-				ORDER BY a.received_at DESC
-				""",
-				bindings: [.text(accountID), .text(collectionID)],
-				database: database,
-			) { statement in
-				if let payload = data(at: 0, statement: statement),
-					let article = try? decoder.decode(Recommendation.self, from: payload) {
-					candidates.append(article)
-				}
-			}
+			sql = """
+			SELECT a.payload FROM cached_collection_articles ca
+			JOIN cached_articles a ON a.account_id = ca.account_id AND a.id = ca.article_id
+			WHERE ca.account_id = ? AND ca.collection_id = ?
+			ORDER BY a.received_at DESC
+			"""
+			bindings = [.text(accountID), .text(collectionID)]
 		} else {
-			try query(
-				"SELECT payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC",
-				bindings: [.text(accountID)],
-				database: database,
-			) { statement in
-				if let payload = data(at: 0, statement: statement),
-					let article = try? decoder.decode(Recommendation.self, from: payload) {
-					candidates.append(article)
-				}
-			}
+			sql = "SELECT payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC"
+			bindings = [.text(accountID)]
 		}
-
-		return candidates.filter { article in
+		var matches: [Recommendation] = []
+		try query(sql, bindings: bindings, database: database, shouldContinue: { matches.count < boundedLimit }) { statement in
+			try Task.checkCancellation()
+			guard let payload = data(at: 0, statement: statement),
+				let article = try? decoder.decode(Recommendation.self, from: payload) else {
+				return
+			}
+			#if DEBUG
+			searchArticleDecodeCount += 1
+			#endif
 			let searchable = [
 				article.title,
 				article.author ?? "",
@@ -1105,10 +1107,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				article.text ?? "",
 				article.html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression),
 			].joined(separator: "\n")
-			return terms.allSatisfy { term in
+			if terms.allSatisfy({ term in
 				searchable.range(of: term, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+			}) {
+				matches.append(article)
 			}
-		}.prefix(boundedLimit).map { $0 }
+		}
+		return matches
 	}
 
 	private func apply(
@@ -3243,6 +3248,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		_ sql: String,
 		bindings: [SQLiteBinding] = [],
 		database: OpaquePointer,
+		shouldContinue: () -> Bool = { true },
 		row: (OpaquePointer) throws -> Void,
 	) throws {
 		var statement: OpaquePointer?
@@ -3251,7 +3257,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		}
 		defer { sqlite3_finalize(statement) }
 		try bind(bindings, to: statement, database: database)
-		while true {
+		while shouldContinue() {
 			switch sqlite3_step(statement) {
 			case SQLITE_ROW: try row(statement)
 			case SQLITE_DONE: return

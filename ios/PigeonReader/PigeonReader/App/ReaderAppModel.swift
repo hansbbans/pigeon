@@ -3566,10 +3566,11 @@ final class ReaderAppModel {
 		for collectionID: String,
 	) -> [Recommendation] {
 		let previousArticles = articleCache[collectionID] ?? []
+		let previousLookup = ReaderArticleLookup(previousArticles)
 		return incomingArticles.map { incoming in
 			let aliases = ReaderArticleIdentity.aliases(id: incoming.id, readerID: incoming.readerId)
 			let previousCanonical = aliases.lazy.compactMap { self.canonicalArticleRecords[$0] }.first
-			let previousInCollection = previousArticles.first(where: { articlesMatch($0, incoming) })
+			let previousInCollection = previousLookup.firstIndex(matching: incoming).map { previousArticles[$0] }
 			let isForYou = ReaderSection(rawValue: collectionID) == .forYou
 			let merged = mergedArticle(
 				incoming,
@@ -3591,13 +3592,14 @@ final class ReaderAppModel {
 		excluding collectionID: String,
 	) {
 		guard incomingArticles.isEmpty == false else { return }
+		let incomingLookup = ReaderArticleLookup(incomingArticles)
 		for otherCollectionID in articleCache.keys where otherCollectionID != collectionID {
 			guard let existingArticles = articleCache[otherCollectionID] else { continue }
 			articleCache[otherCollectionID] = existingArticles.map { existing in
-				guard let incoming = incomingArticles.first(where: { articlesMatch($0, existing) }) else {
+				guard let index = incomingLookup.firstIndex(matching: existing) else {
 					return existing
 				}
-				return sharedFields(from: incoming, preserving: existing)
+				return sharedFields(from: incomingArticles[index], preserving: existing)
 			}
 			if otherCollectionID == ReaderSection.forYou.rawValue {
 				let unreadDelta = (articleCache[otherCollectionID]?.count(where: { $0.isRead == false }) ?? 0)
@@ -3847,13 +3849,28 @@ final class ReaderAppModel {
 		navigation = navigation.replacingCount(for: itemID, with: count)
 	}
 
-	private func navigationCountDeltas(for article: Recommendation, fromRead: Bool, toRead: Bool) -> [String: Int] {
+	private func navigationCountDeltas(
+		for article: Recommendation,
+		fromRead: Bool,
+		toRead: Bool,
+		cachedLookups: [String: ReaderArticleLookup]? = nil,
+		folderChildren: [String: [ReaderNavigationItem]]? = nil,
+	) -> [String: Int] {
 		guard fromRead != toRead else {
 			return [:]
 		}
 		let delta = toRead ? -1 : 1
 		let todayBounds = ReaderLocalDayBounds.localDay(containing: .now)
 		var deltas: [String: Int] = [:]
+		func cachedContains(_ collectionID: String) -> Bool {
+			if let cachedLookups {
+				return cachedLookups[collectionID]?.firstIndex(matching: article) != nil
+			}
+			return articleCache[collectionID]?.contains(where: { articlesMatch($0, article) }) == true
+		}
+		func feedContains(_ item: ReaderNavigationItem) -> Bool {
+			item.feedKey == article.feedKey || item.streamID == article.feedKey || cachedContains(item.id)
+		}
 
 		for item in navigation.items {
 			let shouldAdjust: Bool
@@ -3861,7 +3878,7 @@ final class ReaderAppModel {
 			case .smart:
 				switch item.smartSection {
 				case .forYou:
-					shouldAdjust = articleCache[item.id]?.contains(where: { articlesMatch($0, article) }) == true
+					shouldAdjust = cachedContains(item.id)
 				case .today:
 					shouldAdjust = todayBounds.contains(article.receivedAt)
 				case .unread:
@@ -3872,9 +3889,9 @@ final class ReaderAppModel {
 					shouldAdjust = false
 				}
 			case .feed:
-				shouldAdjust = feedItemContains(item, article: article)
+				shouldAdjust = feedContains(item)
 			case .folder:
-				shouldAdjust = navigation.children(of: item.id).contains { feedItemContains($0, article: article) }
+				shouldAdjust = (folderChildren?[item.id] ?? navigation.children(of: item.id)).contains { feedContains($0) }
 			}
 
 			if shouldAdjust {
@@ -3967,11 +3984,14 @@ final class ReaderAppModel {
 	}
 
 	private func deduplicatedArticles(_ articles: [Recommendation]) -> [Recommendation] {
-		articles.reduce(into: [Recommendation]()) { result, article in
-			guard result.contains(where: { articlesMatch($0, article) }) == false else {
+		var seenAliases = Set<String>()
+		return articles.reduce(into: [Recommendation]()) { result, article in
+			let aliases = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+			guard seenAliases.isDisjoint(with: aliases) else {
 				return
 			}
 			result.append(article)
+			seenAliases.formUnion(aliases)
 		}
 	}
 
@@ -4025,8 +4045,9 @@ final class ReaderAppModel {
 			return visible + [current]
 		}
 
+		let visibleLookup = ReaderArticleLookup(visible)
 		let insertionIndex = ordering.prefix(orderingIndex).reduce(0) { count, candidate in
-			count + (visible.contains(where: { articlesMatch($0, candidate) }) ? 1 : 0)
+			count + (visibleLookup.firstIndex(matching: candidate) != nil ? 1 : 0)
 		}
 		var ordered = visible
 		ordered.insert(current, at: min(insertionIndex, ordered.count))
@@ -6205,8 +6226,12 @@ final class ReaderAppModel {
 			return incoming
 		}
 		var merged = incoming
-		for oldArticle in existing where merged.contains(where: { articlesMatch($0, oldArticle) }) == false {
+		var seenAliases = Set(incoming.flatMap { ReaderArticleIdentity.aliases(id: $0.id, readerID: $0.readerId) })
+		for oldArticle in existing {
+			let aliases = ReaderArticleIdentity.aliases(id: oldArticle.id, readerID: oldArticle.readerId)
+			guard seenAliases.isDisjoint(with: aliases) else { continue }
 			merged.append(oldArticle)
+			seenAliases.formUnion(aliases)
 		}
 		return sortOrder(for: collection.id).sorted(merged)
 	}
@@ -7280,34 +7305,66 @@ final class ReaderAppModel {
 				rememberPendingArticleStates(mutation)
 			}
 
+		let unreadID = ReaderSection.unread.rawValue
+		let targetLookup = ReaderArticleLookup(targets)
+		let cachedLookups = articleCache.mapValues(ReaderArticleLookup.init)
+		let folderChildren = Dictionary(grouping: navigation.items.filter { $0.kind == .feed }, by: { $0.parentID ?? "" })
 		var changedCollections = Set<String>()
+		for collectionID in Array(articleCache.keys) where collectionID != unreadID {
+			guard var cachedArticles = articleCache[collectionID] else { continue }
+			var changed = false
+			for index in cachedArticles.indices where targetLookup.firstIndex(matching: cachedArticles[index]) != nil {
+				cachedArticles[index].isRead = read
+				changed = true
+			}
+			if changed {
+				articleCache[collectionID] = cachedArticles
+				changedCollections.insert(collectionID)
+			}
+		}
+		var updatedSearchResults = searchResults
+		var searchChanged = false
+		for index in updatedSearchResults.indices where targetLookup.firstIndex(matching: updatedSearchResults[index]) != nil {
+			updatedSearchResults[index].isRead = read
+			searchChanged = true
+		}
+		if searchChanged {
+			searchResults = updatedSearchResults
+		}
+
+		if read == false {
+			restoreUnreadMembership(for: targets, cachedLookups: cachedLookups)
+		}
+		var countDeltas: [String: Int] = [:]
 		for target in targets {
 			if read == false {
 				forgetScrollRead(for: target)
 			}
-			for collectionID in Array(articleCache.keys) {
-				guard var cachedArticles = articleCache[collectionID] else {
-					continue
+			// Keep Unread updates in target order so an open removed story retains
+			// the same neighboring stories for reader navigation and Undo.
+			if read {
+				if var unreadArticles = articleCache[unreadID] {
+					for index in unreadArticles.indices where articlesMatch(unreadArticles[index], target) {
+						unreadArticles[index].isRead = true
+					}
+					articleCache[unreadID] = unreadArticles
 				}
-				let matchingIndices = cachedArticles.indices.filter { articlesMatch(cachedArticles[$0], target) }
-				guard matchingIndices.isEmpty == false else {
-					continue
-				}
-				for index in matchingIndices {
-					cachedArticles[index].isRead = read
-				}
-				articleCache[collectionID] = cachedArticles
-				changedCollections.insert(collectionID)
+				syncUnreadMembership(for: target, read: true)
 			}
-			updateSearchResults(matching: target) { result in
-				result.isRead = read
+			if articleCache[unreadID] != nil {
+				changedCollections.insert(unreadID)
 			}
-			syncUnreadMembership(for: target, read: read)
-			if articleCache[ReaderSection.unread.rawValue] != nil {
-				changedCollections.insert(ReaderSection.unread.rawValue)
+			for (collectionID, delta) in navigationCountDeltas(
+				for: target,
+				fromRead: !read,
+				toRead: read,
+				cachedLookups: cachedLookups,
+				folderChildren: folderChildren,
+			) {
+				countDeltas[collectionID, default: 0] += delta
 			}
-			applyNavigationCountDeltas(navigationCountDeltas(for: target, fromRead: !read, toRead: read))
 		}
+		applyNavigationCountDeltas(countDeltas)
 		reconcileCurrentArticleSelection()
 		await persistCollections(changedCollections)
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
@@ -7480,6 +7537,52 @@ final class ReaderAppModel {
 			}
 		}
 	}
+	private func restoreUnreadMembership(
+		for targets: [Recommendation],
+		cachedLookups: [String: ReaderArticleLookup],
+	) {
+		let unreadID = ReaderSection.unread.rawValue
+		guard let first = targets.first, articleCache[unreadID] != nil else { return }
+		// Normalize the existing rows with the original first-target behavior before
+		// indexing accepted aliases. Skipped duplicate rows must not become bridges.
+		syncUnreadMembership(for: first, read: false)
+		guard var unreadArticles = articleCache[unreadID] else { return }
+		var indicesByAlias: [String: Int] = [:]
+		for (index, article) in unreadArticles.enumerated() {
+			for alias in ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId) {
+				indicesByAlias[alias] = index
+			}
+		}
+		let otherCollectionIDs = articleCache.keys.filter { $0 != unreadID }
+		for target in targets.dropFirst() {
+			let aliases = ReaderArticleIdentity.aliases(id: target.id, readerID: target.readerId)
+			let matchingIndices = Set(aliases.compactMap { indicesByAlias[$0] })
+			if matchingIndices.isEmpty == false {
+				for index in matchingIndices {
+					unreadArticles[index].isRead = false
+				}
+			} else {
+				let cached = otherCollectionIDs.lazy.compactMap { collectionID -> Recommendation? in
+					guard let index = cachedLookups[collectionID]?.firstIndex(matching: target) else { return nil }
+					return self.articleCache[collectionID]?[index]
+				}.first
+				var copy = cached ?? target
+				copy.isRead = false
+				let copyAliases = ReaderArticleIdentity.aliases(id: copy.id, readerID: copy.readerId)
+				if copyAliases.allSatisfy({ indicesByAlias[$0] == nil }) {
+					for alias in copyAliases {
+						indicesByAlias[alias] = unreadArticles.count
+					}
+					unreadArticles.append(copy)
+				}
+			}
+			if let detachedSelectedArticle, articlesMatch(detachedSelectedArticle, target) {
+				clearDetachedSelectedArticle()
+			}
+		}
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(unreadArticles)
+	}
+
 	private func syncUnreadMembership(for article: Recommendation, read: Bool) {
 		let unreadID = ReaderSection.unread.rawValue
 		guard var unreadArticles = articleCache[unreadID] else {
