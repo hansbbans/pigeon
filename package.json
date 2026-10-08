@@ -27,5 +27,8 @@
   "dependencies": {
     "fast-xml-parser": "^5.10.1",
     "postal-mime": "^2.7.3"
+  },
+  "overrides": {
+    "sharp": "0.35.5"
   }
 }
