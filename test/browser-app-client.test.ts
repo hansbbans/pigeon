@@ -823,6 +823,8 @@ async function createBrowserHarness(options?: {
 		['reader-source-label', createElement('', [], 'p', registerFocus)],
 		['reader-source-note', createElement('', [], 'p', registerFocus)],
 		['open-original-button', createElement('', [], 'button', registerFocus)],
+		['mark-unread-button', createElement('', [], 'button', registerFocus)],
+		['reader-action-status', createElement('', [], 'p', registerFocus)],
 		['reader-title', createElement('', [], 'strong', registerFocus)],
 		['reader-meta', createElement('', [], 'p', registerFocus)],
 		['reader-player-shell', createElement('', ['hidden'], 'section', registerFocus)],
@@ -966,6 +968,7 @@ async function createBrowserHarness(options?: {
 				},
 			},
 			__PIGEON_BROWSER_CLIENT__: undefined as unknown,
+			__readArticleState: undefined as ((id: string) => { body: string[]; metadata: string[] }) | undefined,
 			__readCacheSizes: undefined as (() => { bodies: number; metadata: number; active: number; queued: number; pending: number; paging: boolean; membership: number }) | undefined,
 			open() {},
 			addEventListener(type: string, handler: (event: Record<string, unknown>) => unknown) {
@@ -1020,6 +1023,7 @@ async function createBrowserHarness(options?: {
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
     active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
+  window.__readArticleState = (id) => ({ body: articleCache.get(id)?.categories || [], metadata: articleMetadataCache.get(id)?.categories || [] });
 })();`);
 	vm.runInNewContext(runtime, context);
 	await flushBrowserTasks();
@@ -1120,6 +1124,7 @@ async function createBrowserHarness(options?: {
 	return {
 		elements,
 		getCacheSizes: () => context.window.__readCacheSizes!(),
+		getCachedArticleState: (id: string) => JSON.parse(JSON.stringify(context.window.__readArticleState!(id))) as { body: string[]; metadata: string[] },
 		revealCalls,
 		storage,
 		localStorageState,
@@ -4589,6 +4594,237 @@ function browserRegressionResponse(input: string, init?: { body?: FormData }, pu
 	if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
 	throw new Error(`Unexpected fetch: ${input}`);
 }
+
+function markUnreadFixtureResponse(input: string, init?: { body?: FormData }, unreadItemIds: string[] = []) {
+	if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+		return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] });
+	}
+	if (input.endsWith('/contents')) {
+		return Response.json({ items: (init?.body?.getAll('i') ?? []).map(String).map((id) => ({
+			...browserRegressionItem(id, 1_742_460_800),
+			categories: [...(unreadItemIds.includes(id) ? [] : ['user/-/state/com.google/read']), 'user/-/state/com.google/starred'],
+		})) });
+	}
+	return browserRegressionResponse(input, init);
+}
+
+test('mark unread persists through the real authenticated API while preserving the selected article and scroll', async () => {
+	const state = createLargeTodaySqliteLibrary(new Date(2026, 9, 12, 12).getTime(), 2);
+	state.database.exec('UPDATE items SET is_read = 1');
+	try {
+		const token = await generateApiToken('today-test-password');
+		let bodyRequests = 0;
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
+			if (input.endsWith('/contents')) bodyRequests += 1;
+			return handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+		} });
+		assert.equal(harness.elements.get('mark-unread-button')!.disabled, true);
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+		await flushBrowserTasks();
+		const originalFrame = harness.elements.get('reader-frame')!.srcdoc;
+		const originalBodyRequests = bodyRequests;
+		harness.dispatchReaderFrameScroll(280);
+		harness.elements.get('mark-unread-button')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+		assert.equal(state.database.prepare("SELECT is_read FROM items WHERE id = 'today-3'").get()!.is_read, 0);
+		assert.equal(state.database.prepare("SELECT is_read FROM items WHERE id = 'today-2'").get()!.is_read, 1);
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread.');
+		assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.textContent, 'Unread1');
+		assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+		assert.equal(harness.elements.get('reader-frame')!.srcdoc, originalFrame);
+		assert.equal(harness.getReaderFrameScrollTop(), 280);
+		assert.equal(bodyRequests, originalBodyRequests);
+		assert.equal(harness.getCachedArticleState('3').body.includes('user/-/state/com.google/read'), false);
+		assert.equal(harness.getCachedArticleState('3').metadata.includes('user/-/state/com.google/read'), false);
+	} finally { state.database.close(); }
+});
+
+test('mark unread sends one selected item, prevents duplicate clicks and ignores stale counts', async () => {
+	const mutation = createDeferred<Response>();
+	const oldCounts = createDeferred<Response>();
+	let countRequests = 0;
+	let mutations = 0;
+	let saved = false;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/edit-tag')) {
+			mutations += 1;
+			assert.deepEqual(init?.body?.getAll('i'), ['1']);
+			assert.equal(init?.body?.get('r'), 'user/-/state/com.google/read');
+			assert.equal(init?.body?.get('a'), null);
+			assert.equal(init?.headers?.Authorization, 'GoogleLogin auth=pigeon/live');
+			assert.equal(init?.method, 'POST');
+			return mutation.promise.then((response) => { saved = response.ok; return response; });
+		}
+		if (input.endsWith('/unread-count')) {
+			if (++countRequests === 2) return oldCounts.promise;
+			return Response.json({ unreadcounts: [{ id: 'user/-/state/com.google/reading-list', count: mutations ? 1 : 0 }] });
+		}
+		return markUnreadFixtureResponse(input, init, saved ? ['1'] : []);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	const button = harness.elements.get('mark-unread-button')!;
+	harness.dispatchDocumentEvent('visibilitychange');
+	button.dispatch('click');
+	button.dispatch('click');
+	assert.equal(button.disabled, true);
+	assert.equal(button.getAttribute('aria-busy'), 'true');
+	assert.equal(mutations, 1);
+	mutation.resolve(new Response('OK'));
+	await waitForBrowserCondition(() => button.disabled === false);
+	oldCounts.resolve(Response.json({ unreadcounts: [{ id: 'user/-/state/com.google/reading-list', count: 0 }] }));
+	await flushBrowserTasks();
+	assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.textContent, 'Unread1');
+	assert.deepEqual(harness.getCachedArticleState('1'), {
+		body: ['user/-/state/com.google/starred'], metadata: ['user/-/state/com.google/starred'],
+	});
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread.');
+	assert.equal(button.getAttribute('aria-busy'), 'false');
+});
+
+test('a cached Unread view refreshes membership after marking an article unread in its feed', async () => {
+	const state = createLargeTodaySqliteLibrary(new Date(2026, 9, 12, 12).getTime(), 2);
+	state.database.exec('UPDATE items SET is_read = 1');
+	try {
+		const token = await generateApiToken('today-test-password');
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => input === '/accounts/ClientLogin'
+			? new Response(`Auth=pigeon/${token}`)
+			: handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env) });
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+		findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('articles-status')!.textContent === 'No articles in Unread.');
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+		findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Today source' &&
+			harness.elements.get('mark-unread-button')!.disabled === false);
+		harness.elements.get('mark-unread-button')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread.');
+		findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+		assert.deepEqual(renderedArticleIds(harness), ['3']);
+		assert.equal(harness.elements.get('articles-heading')!.textContent, 'Unread');
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, '');
+	} finally { state.database.close(); }
+});
+
+test('failed mark unread leaves cache intact and can be retried', async () => {
+	let mutations = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/edit-tag')) return new Response(++mutations === 1 ? 'Error' : 'OK', { status: mutations === 1 ? 503 : 200 });
+		return markUnreadFixtureResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	const button = harness.elements.get('mark-unread-button')!;
+	button.dispatch('click');
+	await waitForBrowserCondition(() => button.disabled === false);
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Could not mark unread. Try again.');
+	assert.ok(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'));
+	button.dispatch('click');
+	await waitForBrowserCondition(() => button.disabled === false);
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread.');
+	assert.equal(mutations, 2);
+});
+
+test('mark unread reports saved state when count refresh fails', async () => {
+	let mutated = false;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/edit-tag')) { mutated = true; return new Response('OK'); }
+		if (input.endsWith('/unread-count') && mutated) return new Response('Error', { status: 503 });
+		return markUnreadFixtureResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	harness.elements.get('mark-unread-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread, but could not refresh unread counts.');
+	assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'), false);
+});
+
+for (const failed of [false, true]) {
+	test(`mark unread ${failed ? 'failure' : 'success'} after navigation does not replace the selected article or its feedback`, async () => {
+		const mutation = createDeferred<Response>();
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => input.endsWith('/edit-tag') ? mutation.promise : markUnreadFixtureResponse(input, init) });
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+		harness.elements.get('mark-unread-button')!.dispatch('click');
+		harness.dispatchKeydown('j');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 2');
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, '');
+		mutation.resolve(new Response(failed ? 'Error' : 'OK', { status: failed ? 503 : 200 }));
+		await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+		assert.equal(harness.elements.get('reader-title')!.textContent, 'Article 2');
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, '');
+		assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'), failed);
+		assert.equal(harness.getCachedArticleState('2').body.includes('user/-/state/com.google/read'), true);
+	});
+}
+
+for (const status of [200, 503, 401]) {
+	test(`an old mark unread ${status} response cannot alter a new login or its pending action`, async () => {
+		const oldMutation = createDeferred<Response>();
+		const newMutation = createDeferred<Response>();
+		let mutations = 0;
+		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => input.endsWith('/edit-tag')
+			? (++mutations === 1 ? oldMutation.promise : newMutation.promise) : markUnreadFixtureResponse(input, init) });
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+		harness.elements.get('mark-unread-button')!.dispatch('click');
+		harness.elements.get('logout-button')!.dispatch('click');
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+		harness.elements.get('mark-unread-button')!.dispatch('click');
+		oldMutation.resolve(new Response('Old response', { status }));
+		await flushBrowserTasks();
+		assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'), false);
+		assert.equal(harness.elements.get('mark-unread-button')!.disabled, true);
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marking article unread…');
+		assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'), true);
+		newMutation.resolve(new Response('OK'));
+		await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+		assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marked unread.');
+	});
+}
+
+test('a current unauthorized mark unread logs out and clears action feedback', async () => {
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => input.endsWith('/edit-tag')
+		? new Response('Unauthorized', { status: 401 }) : markUnreadFixtureResponse(input, init) });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	harness.elements.get('mark-unread-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-shell')!.classList.contains('hidden'));
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, '');
+	assert.equal(harness.elements.get('mark-unread-button')!.disabled, true);
+	assert.equal(harness.elements.get('login-error')!.textContent, 'Session expired.');
+});
+
+test('a pre-mutation article refresh cannot restore cached read state after marking unread', async () => {
+	const oldBody = createDeferred<Response>();
+	let bodyRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.endsWith('/edit-tag')) return new Response('OK');
+		if (input.endsWith('/contents') && ++bodyRequests === 2) return oldBody.promise;
+		return markUnreadFixtureResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => bodyRequests === 2);
+	harness.elements.get('mark-unread-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false);
+	oldBody.resolve(markUnreadFixtureResponse('/reader/api/0/stream/items/contents', { body: (() => {
+		const form = new FormData(); form.append('i', '1'); form.append('i', '2'); return form;
+	})() }));
+	await flushBrowserTasks();
+	assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'), false);
+	assert.equal(harness.getCachedArticleState('1').metadata.includes('user/-/state/com.google/read'), false);
+	assert.equal(harness.getCachedArticleState('2').body.includes('user/-/state/com.google/read'), true);
+});
 
 test('Today can reload an evicted selected article after reaching yesterday', async () => {
 	const now = new Date(2026, 2, 20, 12).getTime();

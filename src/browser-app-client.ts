@@ -44,6 +44,7 @@ export interface BrowserLoadedItem {
 	id: string;
 	title: string;
 	published: number;
+	categories?: string[];
 	origin?: {
 		title?: string;
 	};

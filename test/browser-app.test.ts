@@ -292,6 +292,8 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="sidebar-column-resizer"[\s\S]*?aria-controls="feeds-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="224"[\s\S]*?aria-valuemax="520"[\s\S]*?aria-valuenow="416"/);
 	assert.match(html, /id="stream-column-resizer"[\s\S]*?aria-controls="articles-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="288"[\s\S]*?aria-valuemax="640"[\s\S]*?aria-valuenow="524"/);
 	assert.match(html, /id="reader-pane-toolbar"/);
+	assert.match(html, /id="mark-unread-button"[^>]+type="button"[^>]+aria-label="Mark selected article as unread"[^>]+disabled>Mark unread<\/button>/);
+	assert.match(html, /id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"/);
 	assert.match(html, /id="real-views-section"/);
 	assert.match(html, /id="folder-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);

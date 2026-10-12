@@ -712,6 +712,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         line-height: 1.4;
       }
 
+      #reader-action-status:empty {
+        display: none;
+      }
+
       .reader-copy {
         display: grid;
         gap: 0.55rem;
@@ -1153,7 +1157,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         .reader-pane-actions {
           width: 100%;
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 0.5rem;
         }
 
@@ -1410,8 +1414,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   <div class="reader-pane-toolbar-copy">
                     <p class="reader-pane-label" id="reader-source-label">Source</p>
                     <p class="reader-pane-note" id="reader-source-note">A plain article view with preserved links.</p>
+                    <p class="reader-pane-note" id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
                   </div>
-                  <div class="reader-pane-actions" aria-label="Reader future actions">
+                  <div class="reader-pane-actions" aria-label="Article actions">
+                    <button class="toolbar-pill" id="mark-unread-button" type="button" aria-label="Mark selected article as unread" data-control-tone="subtle" disabled>Mark unread</button>
                     <button class="toolbar-pill" id="open-original-button" type="button" data-control-tone="subtle" disabled>Open original</button>
                   </div>
                 </div>
@@ -1493,6 +1499,8 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerSourceLabel = document.getElementById('reader-source-label');
   const readerSourceNote = document.getElementById('reader-source-note');
   const openOriginalButton = document.getElementById('open-original-button');
+  const markUnreadButton = document.getElementById('mark-unread-button');
+  const readerActionStatus = document.getElementById('reader-action-status');
   const readerTitle = document.getElementById('reader-title');
   const readerMeta = document.getElementById('reader-meta');
   const readerFrame = document.getElementById('reader-frame');
@@ -1527,6 +1535,12 @@ export function renderBrowserAppRuntimeScript(): string {
   let selectedItemId = null;
   let isMarkingAllAsRead = false;
   let activeMarkAllRequestId = 0;
+  let pendingMarkUnread = null;
+  let readerActionTarget = '';
+  let readerActionSelectionId = 0;
+  let readerActionMessage = '';
+  let articleReadMutationId = 0;
+  const articleUnreadMutationVersions = new Map();
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -2029,6 +2043,7 @@ export function renderBrowserAppRuntimeScript(): string {
       id: item.id,
       title: item.title || 'Untitled article',
       published: item.published,
+      categories: item.categories,
       origin: item.origin && item.origin.title ? { title: item.origin.title } : undefined,
       alternate: alternateHref ? [{ href: alternateHref }] : undefined,
       summary: summaryContent ? { content: summaryContent.slice(0, 4000) } : undefined,
@@ -2054,6 +2069,7 @@ export function renderBrowserAppRuntimeScript(): string {
       articleMetadataCache.delete(itemId);
       if (!articleCache.has(itemId)) {
         delete loadedItemsById[itemId];
+        articleUnreadMutationVersions.delete(itemId);
       }
     }
   }
@@ -2080,11 +2096,12 @@ export function renderBrowserAppRuntimeScript(): string {
         loadedItemsById[itemId] = metadata;
       } else {
         delete loadedItemsById[itemId];
+        articleUnreadMutationVersions.delete(itemId);
       }
     }
   }
 
-  function mergeArticleIntoCache(item, generation = accountGeneration) {
+  function mergeArticleIntoCache(item, generation = accountGeneration, readMutationId = articleReadMutationId) {
     if (generation !== accountGeneration || !item || !item.id) {
       return null;
     }
@@ -2092,6 +2109,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const itemId = client.normalizeBrowserItemId(String(item.id));
     if (!itemId) {
       return null;
+    }
+
+    // A body response started before this mutation must not restore the read tag.
+    if ((articleUnreadMutationVersions.get(itemId) || 0) > readMutationId) {
+      item = { ...item, categories: (item.categories || []).filter((tag) => tag !== 'user/-/state/com.google/read') };
     }
 
     articleMetadataCache.delete(itemId);
@@ -2118,6 +2140,11 @@ export function renderBrowserAppRuntimeScript(): string {
     keyboardRevealSelection = null;
     activeMarkAllRequestId += 1;
     isMarkingAllAsRead = false;
+    pendingMarkUnread = null;
+    readerActionTarget = '';
+    readerActionSelectionId += 1;
+    readerActionMessage = '';
+    articleUnreadMutationVersions.clear();
     unreadCountRequestId += 1;
     inFlightUnreadCountRequest = null;
     subscriptions = [];
@@ -2218,6 +2245,7 @@ export function renderBrowserAppRuntimeScript(): string {
       itemIds: uniqueItemIds,
       generation,
       token,
+      readMutationId: articleReadMutationId,
       promise: requestPromise,
       resolve: resolveRequest,
       reject: rejectRequest,
@@ -2301,7 +2329,7 @@ export function renderBrowserAppRuntimeScript(): string {
             throw new Error('Incomplete article content response');
           }
           for (const item of returnedItems) {
-            mergeArticleIntoCache(item, job.generation);
+            mergeArticleIntoCache(item, job.generation, job.readMutationId);
           }
           if (activeViewRequestId > 0 && requestBelongsToCurrentSession(job.generation, job.token)) {
             renderArticles();
@@ -2617,7 +2645,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const hasUnreadItems = activeView.unreadCount > 0;
-    const isDisabled = isMarkingAllAsRead || !hasUnreadItems;
+    const isDisabled = isMarkingAllAsRead || Boolean(pendingMarkUnread) || !hasUnreadItems;
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
     markAllAsReadButton.disabled = isDisabled;
@@ -3260,6 +3288,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderReader() {
+    renderMarkUnreadAction();
     if (!selectedItemId) {
       readerSourceLabel.textContent = 'Source';
       readerSourceNote.textContent = 'A plain article view with preserved links.';
@@ -3876,7 +3905,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function markAllAsRead() {
     const activeView = getActiveView();
-    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead) {
+    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead || pendingMarkUnread) {
       return;
     }
 
@@ -3888,6 +3917,7 @@ export function renderBrowserAppRuntimeScript(): string {
       requestBelongsToCurrentSession(generation, requestToken);
     isMarkingAllAsRead = true;
     renderMarkAllAsReadAction();
+    renderMarkUnreadAction();
     articlesStatus.textContent = 'Marking all items as read…';
 
     const form = new FormData();
@@ -3921,6 +3951,83 @@ export function renderBrowserAppRuntimeScript(): string {
     } finally {
       if (isCurrentRequest()) {
         isMarkingAllAsRead = false;
+        renderMarkAllAsReadAction();
+        renderMarkUnreadAction();
+      }
+    }
+  }
+
+  function renderMarkUnreadAction() {
+    const target = JSON.stringify([activeViewId, selectedItemId]);
+    if (readerActionTarget !== target) {
+      readerActionTarget = target;
+      readerActionSelectionId += 1;
+      readerActionMessage = '';
+    }
+    const isPending = Boolean(pendingMarkUnread && pendingMarkUnread.selectionId === readerActionSelectionId);
+    markUnreadButton.disabled = session.status !== 'authenticated' || !selectedItemId ||
+      !articleCache.has(selectedItemId) || Boolean(pendingMarkUnread) || isMarkingAllAsRead;
+    markUnreadButton.setAttribute('aria-disabled', markUnreadButton.disabled ? 'true' : 'false');
+    markUnreadButton.setAttribute('aria-busy', isPending ? 'true' : 'false');
+    markUnreadButton.textContent = isPending ? 'Marking unread…' : 'Mark unread';
+    readerActionStatus.textContent = readerActionMessage;
+  }
+
+  async function markSelectedArticleUnread() {
+    if (session.status !== 'authenticated' || !selectedItemId || !articleCache.has(selectedItemId) ||
+        pendingMarkUnread || isMarkingAllAsRead) return;
+    const request = {
+      itemId: selectedItemId,
+      generation: accountGeneration,
+      token: session.token,
+      selectionId: readerActionSelectionId,
+    };
+    const isCurrentRequest = () => pendingMarkUnread === request &&
+      requestBelongsToCurrentSession(request.generation, request.token);
+    const showMessage = (message) => {
+      if (isCurrentRequest() && request.selectionId === readerActionSelectionId) {
+        readerActionMessage = message;
+        renderMarkUnreadAction();
+      }
+    };
+    pendingMarkUnread = request;
+    showMessage('Marking article unread…');
+    renderMarkUnreadAction();
+    renderMarkAllAsReadAction();
+    const form = new FormData();
+    form.set('i', request.itemId);
+    form.set('r', 'user/-/state/com.google/read');
+    try {
+      const response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form });
+      if (!response.ok) throw new Error('Mark unread request failed');
+      if (!isCurrentRequest()) return;
+      articleUnreadMutationVersions.set(request.itemId, ++articleReadMutationId);
+      for (const cache of [articleCache, articleMetadataCache]) {
+        const item = cache.get(request.itemId);
+        if (item) cache.set(request.itemId, {
+          ...item, categories: (item.categories || []).filter((tag) => tag !== 'user/-/state/com.google/read'),
+        });
+      }
+      syncLoadedItemsFromCache();
+      showMessage('Marked unread.');
+      try {
+        const result = await requestUnreadCounts(true);
+        if (!isCurrentRequest()) return;
+        if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) {
+          throw new Error('Could not refresh unread counts');
+        }
+        views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
+        renderFeeds();
+        renderMarkAllAsReadAction();
+      } catch (_error) {
+        showMessage('Marked unread, but could not refresh unread counts.');
+      }
+    } catch (_error) {
+      showMessage('Could not mark unread. Try again.');
+    } finally {
+      if (isCurrentRequest()) {
+        pendingMarkUnread = null;
+        renderMarkUnreadAction();
         renderMarkAllAsReadAction();
       }
     }
@@ -4151,6 +4258,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
   markAllAsReadButton.addEventListener('click', () => {
     void markAllAsRead();
+  });
+  markUnreadButton.addEventListener('click', () => {
+    void markSelectedArticleUnread();
   });
   articleNewerButton.addEventListener('click', () => { moveArticleWindow(-1); });
   articleOlderButton.addEventListener('click', () => { moveArticleWindow(1); });
