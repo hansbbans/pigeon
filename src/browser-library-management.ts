@@ -165,7 +165,10 @@ export async function libraryRunImport(adapter: LibraryOperationAdapter, entries
 }
 
 /** mount({container,authenticatedFetch,authenticatedJson,getSubscriptions,
- * refreshLibrary,getSessionIdentity}) -> {refresh,destroy}. Identity must be a
+ * refreshLibrary,getSessionIdentity,onFolderRenamed?}) -> {refresh,destroy}.
+ * onFolderRenamed(oldName,newName) runs after all rename receipts are confirmed,
+ * before refreshLibrary, including the reverse callback for a confirmed Undo.
+ * Identity must be a
  * stable primitive including account generation; refreshLibrary returns Promise.
  * No operation continues or rolls back into a replacement account. */
 function installLibraryManagement(root: any): void {
@@ -178,6 +181,7 @@ function installLibraryManagement(root: any): void {
 		let preview: LibraryImportEntry[] = [];
 		let retry: LibraryMutation[] = [];
 		let retryInverse: LibraryMutation[] = [];
+		let retryRename: { from: string; to: string } | undefined;
 		const current = () => alive && !cancelled && identity === adapter.getSessionIdentity();
 		const service = { authenticatedJson: adapter.authenticatedJson, isCurrent: current };
 		function element(tag: string, text = ''): any { const node = document.createElement(tag); node.textContent = text; return node; }
@@ -195,7 +199,7 @@ function installLibraryManagement(root: any): void {
 		const cancel = button('Stop after current request', () => { cancelled = true; status.textContent = 'Stopping after the current request. Completed changes remain; reopen or refresh to inspect them.'; });
 		cancel.hidden = true;
 		const undoButton = button('Undo last change', () => { if (undo) void perform(undo); }); undoButton.disabled = true;
-		const retryButton = button('Retry unconfirmed operation', () => { if (retry.length) void perform(() => mutate(retry, retryInverse)); }); retryButton.hidden = true;
+		const retryButton = button('Retry unconfirmed operation', () => { if (retry.length) void perform(() => mutate(retry, retryInverse, retryRename)); }); retryButton.hidden = true;
 		controlBar.append(cancel, undoButton, retryButton);
 		function showRows(rows: string[]): void { results.replaceChildren(...rows.map((row) => element('li', row))); }
 		function pending(): void {
@@ -210,18 +214,24 @@ function installLibraryManagement(root: any): void {
 			try { await action(); } catch (error) { if (current()) status.textContent = error instanceof Error ? error.message : 'Operation failed.'; }
 			finally { if (alive && identity === adapter.getSessionIdentity()) { busy = false; pending(); } }
 		}
-		async function mutate(changes: LibraryMutation[], inverse: LibraryMutation[] = []): Promise<void> {
+		async function mutate(changes: LibraryMutation[], inverse: LibraryMutation[] = [], rename?: { from: string; to: string }): Promise<void> {
 			const outcome = await libraryRunMutations(service, changes);
 			if (!alive || identity !== adapter.getSessionIdentity()) return;
 			// Reuse every original id so confirmed steps return receipts and unfinished
 			// steps can continue without losing the complete operation's undo snapshot.
 			retry = outcome.failed.some((item) => item.uncertain) ? changes : [];
 			retryInverse = inverse;
+			retryRename = rename;
 			status.textContent = outcome.applied.length + ' changes confirmed; ' + outcome.failed.length + ' failed/unconfirmed; ' + outcome.notAttempted.length + ' not attempted.' + (outcome.cancelled ? ' Stopped.' : '');
 			showRows([...outcome.applied.map((item) => item.feedId + ': ' + item.kind + ' confirmed'), ...outcome.failed.map((item) => item.mutation.feedId + ': ' + item.error), ...outcome.notAttempted.map((item) => item.feedId + ': not attempted')]);
 			const appliedKeys = new Set(outcome.applied.map((item) => item.kind + ':' + item.feedId));
 			const toUndo = inverse.filter((item) => appliedKeys.has((item.kind === 'restore_feed' ? 'unsubscribe_feed' : item.kind === 'unsubscribe_feed' ? 'restore_feed' : item.kind) + ':' + item.feedId));
-			undo = toUndo.length ? async () => { undo = null; await mutate(toUndo.map((item) => ({ ...item, id: crypto.randomUUID() }))); } : null;
+			const renamed = rename && outcome.applied.length === changes.length && !outcome.failed.length && !outcome.cancelled;
+			undo = toUndo.length ? async () => { undo = null; await mutate(toUndo.map((item) => ({ ...item, id: crypto.randomUUID() })), [], renamed ? { from: rename.to, to: rename.from } : undefined); } : null;
+			if (renamed && current() && adapter.onFolderRenamed) {
+				try { await adapter.onFolderRenamed(rename.from, rename.to); }
+				catch { if (current()) status.textContent += ' Rename is saved, but reading position could not be updated.'; }
+			}
 			if (current()) await refresh();
 		}
 		function mutation(kind: string, feedId: string, fields: any = {}): LibraryMutation { return { id: crypto.randomUUID(), kind, feedId, ...fields }; }
@@ -277,7 +287,7 @@ function installLibraryManagement(root: any): void {
 			if (remove && !confirmDelete.checked) throw new Error('Select the folder deletion confirmation.');
 			const plan = libraryFolderPlan(adapter.getSubscriptions(), oldFolder.input.value.trim(), remove ? null : newFolder.input.value);
 			if (!plan.length) throw new Error('No feeds belong to that folder.');
-			await mutate(plan.map((item) => mutation('move_feed', item.feedId, { folders: item.folders })), plan.map((item) => mutation('move_feed', item.feedId, { folders: item.previous })));
+			await mutate(plan.map((item) => mutation('move_feed', item.feedId, { folders: item.folders })), plan.map((item) => mutation('move_feed', item.feedId, { folders: item.previous })), remove ? undefined : { from: oldFolder.input.value.trim(), to: libraryValidateFolders([newFolder.input.value])[0] });
 		}
 		folderSection.append(button('Rename folder', () => void perform(() => changeFolder(false))), button('Delete folder', () => void perform(() => changeFolder(true))));
 		const opml = section('Import OPML'); opml.append(element('p', 'Preview before importing. Existing subscriptions are skipped. On failure, Pigeon attempts to unsubscribe only feeds confirmed newly created by this import. Rollback is not a transaction and downloaded stories remain.'));

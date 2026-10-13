@@ -234,3 +234,28 @@ test('mounted feed saving treats titles as text, preserves checkbox labels, and 
 	await settleUntil(() => calls.length === 3 && harness.container.textContent.includes('rename_feed confirmed'));
 	assert.equal(calls[2].kind, 'rename_feed'); assert.equal(calls[2].title, '<img src=x onerror=evil()>');
 });
+
+test('folder rename emits reading-context mapping only after every receipt, before refresh, and reverses it on Undo', async () => {
+	const order: string[] = [];
+	const harness = moduleHarness({ authenticatedJson: async (_: string, init: RequestInit) => {
+		const change = JSON.parse(init.body as string).mutations[0]; order.push('write:' + change.feedId); return receipt(change);
+	}, onFolderRenamed: (from: string, to: string) => order.push('rename:' + from + ':' + to), refreshLibrary: async () => { order.push('refresh'); } });
+	harness.field('Current folder name').value = 'Old'; harness.field('New folder name').value = 'Renamed';
+	harness.button('Rename folder').click(); await settleUntil(() => !harness.button('Undo last change').disabled);
+	assert.deepEqual(order, ['write:feed/1', 'write:feed/2', 'rename:Old:Renamed', 'refresh']);
+	harness.button('Undo last change').click(); await settleUntil(() => order.length === 8);
+	assert.deepEqual(order.slice(4), ['write:feed/1', 'write:feed/2', 'rename:Renamed:Old', 'refresh']);
+});
+
+test('partial folder rename and its partial Undo keep the old reading-context mapping', async () => {
+	const changes: LibraryMutation[] = []; const mappings: string[] = [];
+	const harness = moduleHarness({ authenticatedJson: async (_: string, init: RequestInit) => {
+		const change = JSON.parse(init.body as string).mutations[0]; changes.push(change);
+		return changes.length === 2 ? { results: [{ mutationId: change.id, status: 'failed', error: 'Rejected' }] } : receipt(change);
+	}, onFolderRenamed: (from: string, to: string) => mappings.push(from + ':' + to) });
+	harness.field('Current folder name').value = 'Old'; harness.field('New folder name').value = 'Renamed';
+	harness.button('Rename folder').click(); await settleUntil(() => !harness.button('Undo last change').disabled);
+	assert.deepEqual(mappings, []);
+	harness.button('Undo last change').click(); await settleUntil(() => changes.length === 3 && harness.container.textContent.includes('move_feed confirmed'));
+	assert.deepEqual(mappings, []); assert.equal(changes[2].feedId, 'feed/1'); assert.deepEqual(changes[2].folders, ['Keep, commas', 'Old']);
+});
