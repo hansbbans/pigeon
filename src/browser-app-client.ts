@@ -29,7 +29,7 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
@@ -47,6 +47,7 @@ export interface BrowserLoadedItem {
 	categories?: string[];
 	origin?: {
 		title?: string;
+		streamId?: string;
 	};
 	alternate?: Array<{
 		href?: string;
@@ -447,6 +448,14 @@ export function buildFeedViews(
 			streamId: 'user/-/state/com.google/read',
 			unreadCount: 0,
 			kind: 'recent',
+			section: 'views',
+		},
+		{
+			id: 'starred',
+			title: 'Starred',
+			streamId: 'user/-/state/com.google/starred',
+			unreadCount: 0,
+			kind: 'starred',
 			section: 'views',
 		},
 		...folderViews,

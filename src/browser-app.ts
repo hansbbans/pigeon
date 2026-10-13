@@ -716,6 +716,38 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         display: none;
       }
 
+      .article-card.is-read:not(.is-active) .article-card-copy {
+        opacity: 0.6;
+      }
+
+      .article-card.is-read .article-title {
+        font-weight: 500;
+      }
+
+      .article-star {
+        color: var(--accent-strong);
+        margin-right: 0.4rem;
+      }
+
+      .article-card.is-active .article-star {
+        color: inherit;
+      }
+
+      .reading-preferences {
+        display: grid;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .reading-preferences select {
+        width: 100%;
+        padding: 0.6rem;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+      }
+
       .reader-copy {
         display: grid;
         gap: 0.55rem;
@@ -1417,7 +1449,9 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                     <p class="reader-pane-note" id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
                   </div>
                   <div class="reader-pane-actions" aria-label="Article actions">
-                    <button class="toolbar-pill" id="mark-unread-button" type="button" aria-label="Mark selected article as unread" data-control-tone="subtle" disabled>Mark unread</button>
+                    <button class="toolbar-pill" id="mark-unread-button" type="button" aria-label="Mark selected article as read" aria-keyshortcuts="M" data-control-tone="subtle" disabled>Mark read</button>
+                    <button class="toolbar-pill" id="star-article-button" type="button" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
+                    <button class="toolbar-pill hidden" id="undo-article-button" type="button" data-control-tone="subtle" disabled>Undo</button>
                     <button class="toolbar-pill" id="open-original-button" type="button" data-control-tone="subtle" disabled>Open original</button>
                   </div>
                 </div>
@@ -1446,6 +1480,16 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           <span>Settings</span>
           <button class="secondary-button" id="close-settings-button" type="button">Close</button>
         </h2>
+        <div class="reading-preferences">
+          <label for="auto-read-select">Mark articles read</label>
+          <select id="auto-read-select">
+            <option value="manual">Manually</option>
+            <option value="opened">When opened</option>
+            <option value="progress">After reading 60%</option>
+          </select>
+          <p class="status-meta">Your preference is saved in this browser. M toggles read status; S toggles a star. Marking unread keeps that article unread until you mark it read or sign out.</p>
+          <p class="status-meta" id="reading-preference-status" role="status" aria-live="polite"></p>
+        </div>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
     </div>
@@ -1465,6 +1509,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const themeStorageKey = client.THEME_STORAGE_KEY;
   const columnStorageKey = 'pigeon.browser.column-widths';
   const articleListModeStorageKey = 'pigeon.browser.article-list-mode';
+  const autoReadStorageKey = 'pigeon.browser.auto-read';
   const loginScreen = document.getElementById('login-screen');
   const readerShell = document.getElementById('reader-shell');
   const readerGrid = document.getElementById('reader-grid');
@@ -1500,6 +1545,10 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerSourceNote = document.getElementById('reader-source-note');
   const openOriginalButton = document.getElementById('open-original-button');
   const markUnreadButton = document.getElementById('mark-unread-button');
+  const starArticleButton = document.getElementById('star-article-button');
+  const undoArticleButton = document.getElementById('undo-article-button');
+  const autoReadSelect = document.getElementById('auto-read-select');
+  const readingPreferenceStatus = document.getElementById('reading-preference-status');
   const readerActionStatus = document.getElementById('reader-action-status');
   const readerTitle = document.getElementById('reader-title');
   const readerMeta = document.getElementById('reader-meta');
@@ -1535,12 +1584,19 @@ export function renderBrowserAppRuntimeScript(): string {
   let selectedItemId = null;
   let isMarkingAllAsRead = false;
   let activeMarkAllRequestId = 0;
-  let pendingMarkUnread = null;
+  let pendingArticleMutation = null;
   let readerActionTarget = '';
   let readerActionSelectionId = 0;
   let readerActionMessage = '';
-  let articleReadMutationId = 0;
-  const articleUnreadMutationVersions = new Map();
+  let articleStateMutationId = 0;
+  const articleStateMutations = new Map();
+  let undoArticleMutation = null;
+  let heldReaderArticle = null;
+  let autoReadPolicy = 'manual';
+  let autoReadAttempt = '';
+  let queuedAutoRead = null;
+  let readyReaderItemId = null;
+  const manuallyUnreadItemIds = new Set();
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -2044,7 +2100,7 @@ export function renderBrowserAppRuntimeScript(): string {
       title: item.title || 'Untitled article',
       published: item.published,
       categories: item.categories,
-      origin: item.origin && item.origin.title ? { title: item.origin.title } : undefined,
+      origin: item.origin ? { title: item.origin.title, streamId: item.origin.streamId } : undefined,
       alternate: alternateHref ? [{ href: alternateHref }] : undefined,
       summary: summaryContent ? { content: summaryContent.slice(0, 4000) } : undefined,
     };
@@ -2069,7 +2125,7 @@ export function renderBrowserAppRuntimeScript(): string {
       articleMetadataCache.delete(itemId);
       if (!articleCache.has(itemId)) {
         delete loadedItemsById[itemId];
-        articleUnreadMutationVersions.delete(itemId);
+        articleStateMutations.delete(itemId);
       }
     }
   }
@@ -2096,12 +2152,12 @@ export function renderBrowserAppRuntimeScript(): string {
         loadedItemsById[itemId] = metadata;
       } else {
         delete loadedItemsById[itemId];
-        articleUnreadMutationVersions.delete(itemId);
+        articleStateMutations.delete(itemId);
       }
     }
   }
 
-  function mergeArticleIntoCache(item, generation = accountGeneration, readMutationId = articleReadMutationId) {
+  function mergeArticleIntoCache(item, generation = accountGeneration, stateMutationId = articleStateMutationId) {
     if (generation !== accountGeneration || !item || !item.id) {
       return null;
     }
@@ -2111,9 +2167,12 @@ export function renderBrowserAppRuntimeScript(): string {
       return null;
     }
 
-    // A body response started before this mutation must not restore the read tag.
-    if ((articleUnreadMutationVersions.get(itemId) || 0) > readMutationId) {
-      item = { ...item, categories: (item.categories || []).filter((tag) => tag !== 'user/-/state/com.google/read') };
+    // Older body responses must not overwrite either local state mutation.
+    const mutations = articleStateMutations.get(itemId);
+    for (const field of ['read', 'starred']) {
+      if (mutations?.[field]?.version > stateMutationId) {
+        item = withArticleState(item, field, mutations[field].target);
+      }
     }
 
     articleMetadataCache.delete(itemId);
@@ -2140,11 +2199,17 @@ export function renderBrowserAppRuntimeScript(): string {
     keyboardRevealSelection = null;
     activeMarkAllRequestId += 1;
     isMarkingAllAsRead = false;
-    pendingMarkUnread = null;
+    pendingArticleMutation = null;
     readerActionTarget = '';
     readerActionSelectionId += 1;
     readerActionMessage = '';
-    articleUnreadMutationVersions.clear();
+    articleStateMutations.clear();
+    undoArticleMutation = null;
+    heldReaderArticle = null;
+    readyReaderItemId = null;
+    manuallyUnreadItemIds.clear();
+    autoReadAttempt = '';
+    queuedAutoRead = null;
     unreadCountRequestId += 1;
     inFlightUnreadCountRequest = null;
     subscriptions = [];
@@ -2245,7 +2310,7 @@ export function renderBrowserAppRuntimeScript(): string {
       itemIds: uniqueItemIds,
       generation,
       token,
-      readMutationId: articleReadMutationId,
+      stateMutationId: articleStateMutationId,
       promise: requestPromise,
       resolve: resolveRequest,
       reject: rejectRequest,
@@ -2329,7 +2394,7 @@ export function renderBrowserAppRuntimeScript(): string {
             throw new Error('Incomplete article content response');
           }
           for (const item of returnedItems) {
-            mergeArticleIntoCache(item, job.generation, job.readMutationId);
+            mergeArticleIntoCache(item, job.generation, job.stateMutationId);
           }
           if (activeViewRequestId > 0 && requestBelongsToCurrentSession(job.generation, job.token)) {
             renderArticles();
@@ -2645,7 +2710,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const hasUnreadItems = activeView.unreadCount > 0;
-    const isDisabled = isMarkingAllAsRead || Boolean(pendingMarkUnread) || !hasUnreadItems;
+    const isDisabled = isMarkingAllAsRead || Boolean(pendingArticleMutation) || !hasUnreadItems;
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
     markAllAsReadButton.disabled = isDisabled;
@@ -2734,6 +2799,11 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     const selectedIndex = getSelectedItemIndex();
     if (selectedIndex === -1) {
+      if (hasHeldReaderSelection()) {
+        const visible = getVisibleItemIds();
+        const itemId = direction > 0 ? visible[0] : visible[visible.length - 1];
+        if (itemId) { void selectArticle(itemId, { keyboard: true }); return true; }
+      }
       return false;
     }
 
@@ -2753,6 +2823,14 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function handleArticleNavigationKeydown(event) {
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    if ((key === 'm' || key === 's') && !event.metaKey && !event.ctrlKey && !event.altKey &&
+        isReaderVisible() && !isEditableTarget(event.target) && !pendingArticleMutation &&
+        !isMarkingAllAsRead && articleCache.has(selectedItemId)) {
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      void toggleSelectedArticleState(key === 'm' ? 'read' : 'starred');
+      return true;
+    }
     const direction = getNavigationDirectionFromKeyEvent(event);
     if (!direction) {
       return false;
@@ -2777,6 +2855,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     activeFrameDocument.removeEventListener('keydown', handleArticleNavigationKeydown);
+    activeFrameDocument.removeEventListener('scroll', handleReaderProgress);
     activeFrameDocument = null;
   }
 
@@ -2794,6 +2873,7 @@ export function renderBrowserAppRuntimeScript(): string {
       detachFrameNavigationListener();
     }
     frameDocument.addEventListener('keydown', handleArticleNavigationKeydown);
+    frameDocument.addEventListener('scroll', handleReaderProgress);
     activeFrameDocument = frameDocument;
   }
 
@@ -2926,7 +3006,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
     row.appendChild(titleGroup);
-    row.appendChild(createNode('span', { classNames: ['feed-count'], text: view.kind === 'today' || view.kind === 'recent' ? '' : formatUnreadCount(view.unreadCount) }));
+    row.appendChild(createNode('span', { classNames: ['feed-count'], text: ['today', 'recent', 'starred'].includes(view.kind) ? '' : formatUnreadCount(view.unreadCount) }));
     button.appendChild(row);
 
     if (view.kind === 'folder') {
@@ -3027,6 +3107,8 @@ export function renderBrowserAppRuntimeScript(): string {
       summaryParts.push('Received today');
     } else if (activeView.kind === 'recent') {
       summaryParts.push('Read items');
+    } else if (activeView.kind === 'starred') {
+      summaryParts.push('Saved with a star');
     } else if (activeView.kind === 'all') {
       summaryParts.push('Everything');
     }
@@ -3089,7 +3171,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderArticles() {
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
-    if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
+    if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
       selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
       const state = getViewState(activeViewId, false);
       if (state) state.selectedItemId = selectedItemId;
@@ -3118,16 +3200,22 @@ export function renderBrowserAppRuntimeScript(): string {
 
     articlesStatus.textContent = entries.length + ' article' + (entries.length === 1 ? '' : 's');
     for (const entry of entries) {
+      const article = loadedItemsById[entry.id];
+      const isRead = getArticleState(article, 'read');
+      const isStarred = getArticleState(article, 'starred');
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: [
           'article-card',
+          isRead ? 'is-read' : '',
           entry.id === selectedItemId ? 'is-active' : '',
           articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
         attributes: {
           type: 'button',
           'data-item-id': entry.id,
+          'data-read': isRead ? 'true' : 'false',
+          'data-starred': isStarred ? 'true' : 'false',
         },
       });
       button.addEventListener('click', () => {
@@ -3136,7 +3224,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
       const copy = createNode('span', { classNames: ['article-card-copy'] });
-      copy.appendChild(createNode('span', { classNames: ['article-title'], text: entry.title }));
+      const title = createNode('span', { classNames: ['article-title'] });
+      if (isStarred) title.appendChild(createNode('span', {
+        classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
+      }));
+      title.appendChild(createNode('span', { text: entry.title }));
+      copy.appendChild(title);
       if (articleListMode !== 'titles' && entry.preview) {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
@@ -3227,6 +3320,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function handleReaderFrameLoad() {
     attachFrameNavigationListener();
+    readyReaderItemId = renderedReaderItemId;
     if (pendingReaderFrameScrollTop !== null) {
       const scrollTop = pendingReaderFrameScrollTop;
       pendingReaderFrameScrollTop = null;
@@ -3247,6 +3341,7 @@ export function renderBrowserAppRuntimeScript(): string {
         // The frame may be unavailable while navigating to the refreshed article.
       }
     }
+    maybeAutoMarkRead();
   }
 
   function readReaderFrameScrollTop() {
@@ -3283,12 +3378,13 @@ export function renderBrowserAppRuntimeScript(): string {
     const preservedScrollTop = shouldPreserveScroll ? readReaderFrameScrollTop() : 0;
     pendingReaderFrameScrollTop = shouldPreserveScroll ? preservedScrollTop : null;
     renderedReaderItemId = itemId;
+    readyReaderItemId = null;
     readerFrameScrollTop = preservedScrollTop;
     readerFrame.srcdoc = documentHtml;
   }
 
   function renderReader() {
-    renderMarkUnreadAction();
+    renderArticleActions();
     if (!selectedItemId) {
       readerSourceLabel.textContent = 'Source';
       readerSourceNote.textContent = 'A plain article view with preserved links.';
@@ -3352,6 +3448,7 @@ export function renderBrowserAppRuntimeScript(): string {
       ),
     );
     attachFrameNavigationListener();
+    maybeAutoMarkRead();
   }
 
   async function loadStatus() {
@@ -3483,7 +3580,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function getRetainedTailIds(viewId, payload) {
     const state = getViewState(viewId, false);
     const view = views.find((candidate) => candidate.id === viewId);
-    if (!payload.continuation || !state?.hasMembership || view?.kind === 'unread') {
+    if (!payload.continuation || !state?.hasMembership || ['unread', 'recent', 'starred'].includes(view?.kind)) {
       return [];
     }
     const returnedIds = new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
@@ -3540,7 +3637,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const preservedScrollTop = getArticleScrollTop();
       itemIds = [...state.itemIds];
       nextItemIdsContinuation = state.continuation;
-      selectedItemId = state.selectedItemId;
+      selectedItemId = heldReaderArticle?.viewId === activeViewId ? heldReaderArticle.itemId : state.selectedItemId;
       syncLoadedItemsFromCache();
       renderArticles();
       renderReader();
@@ -3643,7 +3740,7 @@ export function renderBrowserAppRuntimeScript(): string {
         applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
         if (activeView.id === activeViewId) {
           const visibleItemIds = getVisibleItemIds();
-          if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
+          if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
             selectedItemId = visibleItemIds[0] || null;
           }
           saveActiveViewState();
@@ -3731,7 +3828,7 @@ export function renderBrowserAppRuntimeScript(): string {
       }
 
       const visibleItemIds = getVisibleItemIds();
-      if (!selectedItemId || !visibleItemIds.includes(selectedItemId)) {
+      if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
         selectedItemId = visibleItemIds[0] || null;
       }
       saveActiveViewState();
@@ -3802,7 +3899,7 @@ export function renderBrowserAppRuntimeScript(): string {
       // pagination confirms membership. A repeated cursor is not completion.
       if (!returnedContinuation) itemIds = [...activeState.confirmedItemIds];
       const previousSelection = selectedItemId;
-      if (selectedItemId && !itemIds.includes(selectedItemId)) {
+      if (!hasHeldReaderSelection() && selectedItemId && !itemIds.includes(selectedItemId)) {
         selectedItemId = getVisibleItemIds()[0] || null;
       }
       if (activeState) {
@@ -3905,7 +4002,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function markAllAsRead() {
     const activeView = getActiveView();
-    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead || pendingMarkUnread) {
+    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead || pendingArticleMutation) {
       return;
     }
 
@@ -3917,7 +4014,7 @@ export function renderBrowserAppRuntimeScript(): string {
       requestBelongsToCurrentSession(generation, requestToken);
     isMarkingAllAsRead = true;
     renderMarkAllAsReadAction();
-    renderMarkUnreadAction();
+    renderArticleActions();
     articlesStatus.textContent = 'Marking all items as read…';
 
     const form = new FormData();
@@ -3932,6 +4029,16 @@ export function renderBrowserAppRuntimeScript(): string {
         throw new Error('Mark all as read request failed');
       }
       if (!isCurrentRequest()) return;
+
+      const knownStreamIds = new Set(getViewState(requestViewId, false)?.itemIds || []);
+      for (const [itemId, item] of [...articleMetadataCache]) {
+        const belongs = activeView.kind === 'feed' ? item.origin?.streamId === activeView.streamId :
+          item.categories?.includes(activeView.streamId);
+        if (belongs || knownStreamIds.has(itemId)) applyArticleState(itemId, 'read', true, true);
+      }
+      undoArticleMutation = null;
+      renderArticles();
+      renderReader();
 
       const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
       if (
@@ -3952,85 +4059,216 @@ export function renderBrowserAppRuntimeScript(): string {
       if (isCurrentRequest()) {
         isMarkingAllAsRead = false;
         renderMarkAllAsReadAction();
-        renderMarkUnreadAction();
+        renderArticleActions();
       }
     }
   }
 
-  function renderMarkUnreadAction() {
+  function getArticleState(item, field) {
+    return Array.isArray(item?.categories) && item.categories.includes('user/-/state/com.google/' + field);
+  }
+
+  function withArticleState(item, field, target) {
+    const tag = 'user/-/state/com.google/' + field;
+    const categories = (item.categories || []).filter((category) => category !== tag);
+    if (target) categories.push(tag);
+    return { ...item, categories };
+  }
+
+  function hasHeldReaderSelection() {
+    return heldReaderArticle?.viewId === activeViewId && heldReaderArticle.itemId === selectedItemId &&
+      articleCache.has(selectedItemId);
+  }
+
+  function renderArticleActions() {
     const target = JSON.stringify([activeViewId, selectedItemId]);
     if (readerActionTarget !== target) {
       readerActionTarget = target;
       readerActionSelectionId += 1;
       readerActionMessage = '';
     }
-    const isPending = Boolean(pendingMarkUnread && pendingMarkUnread.selectionId === readerActionSelectionId);
-    markUnreadButton.disabled = session.status !== 'authenticated' || !selectedItemId ||
-      !articleCache.has(selectedItemId) || Boolean(pendingMarkUnread) || isMarkingAllAsRead;
-    markUnreadButton.setAttribute('aria-disabled', markUnreadButton.disabled ? 'true' : 'false');
-    markUnreadButton.setAttribute('aria-busy', isPending ? 'true' : 'false');
-    markUnreadButton.textContent = isPending ? 'Marking unread…' : 'Mark unread';
+    const isPending = Boolean(pendingArticleMutation && pendingArticleMutation.selectionId === readerActionSelectionId);
+    const article = loadedItemsById[selectedItemId];
+    const isRead = getArticleState(article, 'read');
+    const isStarred = getArticleState(article, 'starred');
+    const disabled = session.status !== 'authenticated' || !selectedItemId ||
+      !articleCache.has(selectedItemId) || Boolean(pendingArticleMutation) || isMarkingAllAsRead;
+    markUnreadButton.disabled = disabled;
+    markUnreadButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    markUnreadButton.setAttribute('aria-busy', isPending && pendingArticleMutation.field === 'read' ? 'true' : 'false');
+    markUnreadButton.setAttribute('aria-label', 'Mark selected article as ' + (isRead ? 'unread' : 'read'));
+    markUnreadButton.textContent = isPending && pendingArticleMutation.field === 'read'
+      ? 'Saving…' : isRead ? 'Mark unread' : 'Mark read';
+    starArticleButton.disabled = disabled;
+    starArticleButton.setAttribute('aria-pressed', isStarred ? 'true' : 'false');
+    starArticleButton.setAttribute('aria-label', (isStarred ? 'Unstar' : 'Star') + ' selected article');
+    starArticleButton.textContent = isPending && pendingArticleMutation.field === 'starred'
+      ? 'Saving…' : isStarred ? '★ Starred' : '☆ Star';
+    undoArticleButton.classList.toggle('hidden', !undoArticleMutation);
+    undoArticleButton.disabled = !undoArticleMutation || Boolean(pendingArticleMutation) || isMarkingAllAsRead;
+    undoArticleButton.setAttribute('aria-label', undoArticleMutation
+      ? 'Undo ' + undoArticleMutation.action + ' for ' + undoArticleMutation.title : 'Undo article action');
     readerActionStatus.textContent = readerActionMessage;
   }
 
-  async function markSelectedArticleUnread() {
-    if (session.status !== 'authenticated' || !selectedItemId || !articleCache.has(selectedItemId) ||
-        pendingMarkUnread || isMarkingAllAsRead) return;
+  function reconcileArticleCollections(itemId, field, target) {
+    const affected = field === 'read' ? ['unread', 'recent'] : ['starred'];
+    let activeAffected = false;
+    for (const viewId of affected) {
+      const state = getViewState(viewId, false);
+      if (!state) continue;
+      const belongs = viewId === 'unread' ? !target : target;
+      if (belongs && state.hasMembership && !state.itemIds.includes(itemId)) {
+        state.itemIds.push(itemId);
+        state.itemIds.sort((left, right) => (loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) ||
+          Number(right) - Number(left));
+        state.confirmedItemIds.add(itemId);
+      } else if (!belongs) {
+        state.itemIds = state.itemIds.filter((id) => id !== itemId);
+        state.confirmedItemIds.delete(itemId);
+      }
+      state.membershipEpoch += 1;
+      state.rootRequestId += 1;
+      state.appliedRootRequestId = 0;
+      if (viewId === activeViewId) {
+        activeAffected = true;
+        if (!belongs && selectedItemId === itemId) heldReaderArticle = { itemId, viewId };
+        if (belongs && heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
+        itemIds = [...state.itemIds];
+        activeItemIdsPageRequest = null;
+        isLoadingItemIdsPage = false;
+      }
+    }
+    // Detach older root requests so the next visit starts an authoritative query.
+    inFlightMembershipRequests.clear();
+    return activeAffected;
+  }
+
+  function applyArticleState(itemId, field, target, manual) {
+    const versions = articleStateMutations.get(itemId) || {};
+    versions[field] = { version: ++articleStateMutationId, target };
+    articleStateMutations.set(itemId, versions);
+    for (const cache of [articleCache, articleMetadataCache]) {
+      const item = cache.get(itemId);
+      if (item) cache.set(itemId, withArticleState(item, field, target));
+    }
+    if (field === 'read' && manual) {
+      if (target) manuallyUnreadItemIds.delete(itemId);
+      else manuallyUnreadItemIds.add(itemId);
+    }
+    syncLoadedItemsFromCache();
+    return reconcileArticleCollections(itemId, field, target);
+  }
+
+  async function toggleSelectedArticleState(field) {
+    if (!articleCache.has(selectedItemId)) return;
+    return mutateArticleState(selectedItemId, field, !getArticleState(loadedItemsById[selectedItemId], field));
+  }
+
+  async function undoLastArticleMutation() {
+    const undo = undoArticleMutation;
+    if (!undo || !requestBelongsToCurrentSession(undo.generation, undo.token)) return;
+    return mutateArticleState(undo.itemId, undo.field, undo.previous, { undo });
+  }
+
+  async function mutateArticleState(itemId, field, target, options) {
+    const item = loadedItemsById[itemId] || options?.undo?.itemSnapshot;
+    if (session.status !== 'authenticated' || !item || pendingArticleMutation || isMarkingAllAsRead) return;
     const request = {
-      itemId: selectedItemId,
-      generation: accountGeneration,
-      token: session.token,
-      selectionId: readerActionSelectionId,
+      itemId, field, target, generation: accountGeneration, token: session.token,
+      selectionId: readerActionSelectionId, previous: getArticleState(item, field),
+      title: item.title || 'Untitled article',
     };
-    const isCurrentRequest = () => pendingMarkUnread === request &&
+    const action = field === 'read' ? 'mark ' + (target ? 'read' : 'unread') : target ? 'star' : 'unstar';
+    const success = field === 'read' ? 'Marked ' + (target ? 'read.' : 'unread.') : target ? 'Starred.' : 'Unstarred.';
+    const isCurrentRequest = () => pendingArticleMutation === request &&
       requestBelongsToCurrentSession(request.generation, request.token);
     const showMessage = (message) => {
       if (isCurrentRequest() && request.selectionId === readerActionSelectionId) {
         readerActionMessage = message;
-        renderMarkUnreadAction();
+        renderArticleActions();
       }
     };
-    pendingMarkUnread = request;
-    showMessage('Marking article unread…');
-    renderMarkUnreadAction();
+    pendingArticleMutation = request;
+    showMessage(options?.undo ? 'Undoing article action…' : field === 'read'
+      ? 'Marking article ' + (target ? 'read…' : 'unread…') : target ? 'Starring article…' : 'Removing star…');
+    renderArticleActions();
     renderMarkAllAsReadAction();
     const form = new FormData();
-    form.set('i', request.itemId);
-    form.set('r', 'user/-/state/com.google/read');
+    form.set('i', itemId);
+    form.set(target ? 'a' : 'r', 'user/-/state/com.google/' + field);
+    let activeCollectionChanged = false;
     try {
       const response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form });
-      if (!response.ok) throw new Error('Mark unread request failed');
+      if (!response.ok) throw new Error('Article state request failed');
       if (!isCurrentRequest()) return;
-      articleUnreadMutationVersions.set(request.itemId, ++articleReadMutationId);
-      for (const cache of [articleCache, articleMetadataCache]) {
-        const item = cache.get(request.itemId);
-        if (item) cache.set(request.itemId, {
-          ...item, categories: (item.categories || []).filter((tag) => tag !== 'user/-/state/com.google/read'),
-        });
-      }
-      syncLoadedItemsFromCache();
-      showMessage('Marked unread.');
-      try {
-        const result = await requestUnreadCounts(true);
-        if (!isCurrentRequest()) return;
-        if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) {
-          throw new Error('Could not refresh unread counts');
+      activeCollectionChanged = applyArticleState(itemId, field, target, !options?.automatic);
+      undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
+      renderArticles();
+      renderReader();
+      showMessage(options?.undo ? 'Undid ' + options.undo.action + '.' : success);
+      if (field === 'read') {
+        try {
+          const result = await requestUnreadCounts(true);
+          if (!isCurrentRequest()) return;
+          if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) {
+            throw new Error('Could not refresh unread counts');
+          }
+          views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
+          renderFeeds();
+          renderMarkAllAsReadAction();
+        } catch (_error) {
+          showMessage((options?.undo ? 'Undid article action' : success.slice(0, -1)) + ', but could not refresh unread counts.');
         }
-        views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
-        renderFeeds();
-        renderMarkAllAsReadAction();
-      } catch (_error) {
-        showMessage('Marked unread, but could not refresh unread counts.');
       }
     } catch (_error) {
-      showMessage('Could not mark unread. Try again.');
+      showMessage(options?.undo ? 'Could not undo. Try again.' : 'Could not ' + action + '. Try again.');
     } finally {
       if (isCurrentRequest()) {
-        pendingMarkUnread = null;
-        renderMarkUnreadAction();
+        pendingArticleMutation = null;
+        renderArticleActions();
         renderMarkAllAsReadAction();
+        if (activeCollectionChanged) void revalidateActiveView({ refreshUnread: false });
+        maybeAutoMarkRead();
       }
     }
+  }
+
+  function normalizeAutoReadPolicy(value) {
+    return value === 'opened' || value === 'progress' ? value : 'manual';
+  }
+
+  function handleReaderProgress() {
+    maybeAutoMarkRead();
+  }
+
+  function maybeAutoMarkRead() {
+    if (autoReadPolicy === 'manual' || pendingArticleMutation || isMarkingAllAsRead ||
+        !isReaderVisible() || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
+        !articleCache.has(selectedItemId) || readyReaderItemId !== selectedItemId ||
+        getArticleState(loadedItemsById[selectedItemId], 'read') || manuallyUnreadItemIds.has(selectedItemId)) return;
+    if (autoReadPolicy === 'progress') {
+      try {
+        const frameDocument = readerFrame.contentDocument;
+        const height = Math.max(frameDocument?.documentElement?.scrollHeight || 0, frameDocument?.body?.scrollHeight || 0);
+        const viewport = readerFrame.contentWindow?.innerHeight || frameDocument?.documentElement?.clientHeight || 0;
+        if (!height || !viewport || (readReaderFrameScrollTop() + viewport) / height < 0.6) return;
+      } catch (_error) { return; }
+    }
+    const attempt = readerActionSelectionId + ':' + autoReadPolicy;
+    if (autoReadAttempt === attempt || queuedAutoRead) return;
+    const owner = { itemId: selectedItemId, selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token, policy: autoReadPolicy };
+    queuedAutoRead = owner;
+    Promise.resolve().then(() => {
+      if (queuedAutoRead !== owner) return;
+      queuedAutoRead = null;
+      if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.itemId !== selectedItemId ||
+          owner.selectionId !== readerActionSelectionId || manuallyUnreadItemIds.has(owner.itemId) ||
+          autoReadPolicy !== owner.policy || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
+          readyReaderItemId !== owner.itemId || pendingArticleMutation || getArticleState(loadedItemsById[owner.itemId], 'read')) return;
+      autoReadAttempt = attempt;
+      void mutateArticleState(owner.itemId, 'read', true, { automatic: true });
+    });
   }
 
   function requestUnreadCounts(force = false) {
@@ -4120,6 +4358,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function selectView(viewId) {
+    heldReaderArticle = null;
     if (viewId === activeViewId) {
       void revalidateActiveView();
       return;
@@ -4140,6 +4379,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    heldReaderArticle = null;
     selectedItemId = itemId;
     keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
@@ -4260,7 +4500,25 @@ export function renderBrowserAppRuntimeScript(): string {
     void markAllAsRead();
   });
   markUnreadButton.addEventListener('click', () => {
-    void markSelectedArticleUnread();
+    void toggleSelectedArticleState('read');
+  });
+  starArticleButton.addEventListener('click', () => {
+    void toggleSelectedArticleState('starred');
+  });
+  undoArticleButton.addEventListener('click', () => {
+    void undoLastArticleMutation();
+  });
+  autoReadSelect.addEventListener('change', () => {
+    autoReadPolicy = normalizeAutoReadPolicy(autoReadSelect.value);
+    autoReadSelect.value = autoReadPolicy;
+    autoReadAttempt = '';
+    try {
+      window.localStorage.setItem(autoReadStorageKey, autoReadPolicy);
+      readingPreferenceStatus.textContent = 'Reading preference saved.';
+    } catch (_error) {
+      readingPreferenceStatus.textContent = 'Preference changed for this visit, but could not be saved.';
+    }
+    maybeAutoMarkRead();
   });
   articleNewerButton.addEventListener('click', () => { moveArticleWindow(-1); });
   articleOlderButton.addEventListener('click', () => { moveArticleWindow(1); });
@@ -4318,6 +4576,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   applyTheme(getStoredTheme());
+  try { autoReadPolicy = normalizeAutoReadPolicy(window.localStorage.getItem(autoReadStorageKey)); }
+  catch (_error) { autoReadPolicy = 'manual'; }
+  autoReadSelect.value = autoReadPolicy;
   applyArticleListMode(getStoredArticleListMode());
   updateColumnResizerState();
 

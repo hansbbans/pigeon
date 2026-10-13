@@ -141,6 +141,10 @@ test('buildFeedViews returns built-in views plus sorted uncategorized feeds', ()
 				section: 'views',
 			},
 			{
+				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
+				unreadCount: 0, kind: 'starred', section: 'views',
+			},
+			{
 				id: 'feed/1',
 				title: 'Alpha',
 				streamId: 'feed/1',
@@ -214,6 +218,10 @@ test('buildFeedViews groups categorized feeds into folder views and keeps uncate
 				unreadCount: 0,
 				kind: 'recent',
 				section: 'views',
+			},
+			{
+				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
+				unreadCount: 0, kind: 'starred', section: 'views',
 			},
 			{
 				id: 'user/-/label/Newsletters',
@@ -581,6 +589,8 @@ function createElement(
 		tagName: tagName.toUpperCase(),
 		value: initialValue,
 		scrollTop: 0,
+		scrollHeight: 0,
+		clientHeight: 0,
 		srcdoc: '',
 		disabled: false,
 		hidden: false,
@@ -773,6 +783,9 @@ async function createBrowserHarness(options?: {
 	storedToken?: string | null;
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
+	storedAutoReadPolicy?: string | null;
+	frameScrollHeight?: number;
+	frameViewportHeight?: number;
 	storedColumnWidths?: { sidebar?: number; stream?: number };
 	readerGridWidth?: number | (() => number);
 	online?: boolean;
@@ -824,6 +837,10 @@ async function createBrowserHarness(options?: {
 		['reader-source-note', createElement('', [], 'p', registerFocus)],
 		['open-original-button', createElement('', [], 'button', registerFocus)],
 		['mark-unread-button', createElement('', [], 'button', registerFocus)],
+		['star-article-button', createElement('', [], 'button', registerFocus)],
+		['undo-article-button', createElement('', ['hidden'], 'button', registerFocus)],
+		['auto-read-select', createElement('manual', [], 'select', registerFocus)],
+		['reading-preference-status', createElement('', [], 'p', registerFocus)],
 		['reader-action-status', createElement('', [], 'p', registerFocus)],
 		['reader-title', createElement('', [], 'strong', registerFocus)],
 		['reader-meta', createElement('', [], 'p', registerFocus)],
@@ -836,6 +853,8 @@ async function createBrowserHarness(options?: {
 	const frameDocumentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
 	const frameBody = createElement('', [], 'body', registerFocus);
 	const frameDocumentElement = createElement('', [], 'html', registerFocus);
+	frameDocumentElement.scrollHeight = options?.frameScrollHeight ?? 0;
+	frameDocumentElement.clientHeight = options?.frameViewportHeight ?? 0;
 	const frameDocument = {
 		body: frameBody,
 		documentElement: frameDocumentElement,
@@ -863,6 +882,7 @@ async function createBrowserHarness(options?: {
 	if (options?.storedArticleListMode) {
 		localStorageState.set('pigeon.browser.article-list-mode', options.storedArticleListMode);
 	}
+	if (options?.storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', options.storedAutoReadPolicy);
 	if (options?.storedColumnWidths) {
 		localStorageState.set('pigeon.browser.column-widths', JSON.stringify(options.storedColumnWidths));
 	}
@@ -1103,6 +1123,7 @@ async function createBrowserHarness(options?: {
 
 	function dispatchReaderFrameScroll(scrollTop: number) {
 		readerFrameWindow.scrollTo(0, scrollTop);
+		frameDocumentHandlers.get('scroll')?.({});
 	}
 
 	function dispatchDocumentEvent(type: string) {
@@ -4824,6 +4845,219 @@ test('a pre-mutation article refresh cannot restore cached read state after mark
 	assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/read'), false);
 	assert.equal(harness.getCachedArticleState('1').metadata.includes('user/-/state/com.google/read'), false);
 	assert.equal(harness.getCachedArticleState('2').body.includes('user/-/state/com.google/read'), true);
+});
+
+async function createStatefulArticleBrowser(options?: {
+	policy?: string; frameHeight?: number; viewportHeight?: number;
+	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
+}) {
+	const state = createLargeTodaySqliteLibrary(new Date(2026, 9, 12, 12).getTime(), 2);
+	const token = await generateApiToken('today-test-password');
+	const mutations: Array<{ itemId: string; add: string | null; remove: string | null }> = [];
+	const harness = await createBrowserHarness({
+		storedAutoReadPolicy: options?.policy,
+		frameScrollHeight: options?.frameHeight,
+		frameViewportHeight: options?.viewportHeight,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
+			if (input.endsWith('/edit-tag')) mutations.push({ itemId: String(init?.body?.get('i')), add: init?.body?.get('a') as string | null, remove: init?.body?.get('r') as string | null });
+			const next = () => handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+			return options?.fetchOverride ? options.fetchOverride(input, init as RequestInit, next) : next();
+		},
+	});
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+	await flushBrowserTasks();
+	return { ...state, harness, mutations };
+}
+
+async function finishArticleMutation(harness: Awaited<ReturnType<typeof createBrowserHarness>>, buttonId: string) {
+	harness.elements.get(buttonId)!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false, 100);
+}
+
+test('manual read and star toggles persist, display state and undo each individual change', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	assert.equal(mutations.length, 0, 'manual is the default');
+	assert.equal(harness.elements.get('mark-unread-button')!.textContent, 'Mark read');
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 1);
+	assert.equal(harness.elements.get('mark-unread-button')!.textContent, 'Mark unread');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '3')!.classList.contains('is-read'), true);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 0);
+	assert.equal(harness.elements.get('undo-article-button')!.classList.contains('hidden'), true);
+	await finishArticleMutation(harness, 'star-article-button');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 1);
+	assert.equal(harness.elements.get('star-article-button')!.getAttribute('aria-pressed'), 'true');
+	assert.match(findListButtonByItemId(harness.elements.get('articles-list'), '3')!.textContent, /★/);
+	await finishArticleMutation(harness, 'star-article-button');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 0);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 1);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 0);
+});
+
+test('Starred and Unread memberships update while the changed story stays open, including undo', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('views-list'), 'starred')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-status')!.textContent === 'No articles in Starred.');
+	findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+	await finishArticleMutation(harness, 'star-article-button');
+	findListButtonByViewId(harness.elements.get('views-list'), 'starred')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '3');
+	await finishArticleMutation(harness, 'star-article-button');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 0);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.deepEqual(renderedArticleIds(harness), ['3']);
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Unread' && renderedArticleIds(harness).length === 4);
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(renderedArticleIds(harness).includes('3'), false);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(renderedArticleIds(harness).includes('3'), true);
+});
+
+test('when-opened auto-read respects manual unread across refresh and navigation without consuming Unread', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ policy: 'opened' });
+	t.after(() => database.close());
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.textContent === 'Mark unread');
+	assert.equal(mutations.length, 1);
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 2' && harness.elements.get('mark-unread-button')!.textContent === 'Mark unread');
+	await flushBrowserTasks();
+	assert.equal(mutations.length, 2, 'only opened stories are marked read');
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 2');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 0);
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read, 0);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).includes('2'));
+	findListButtonByItemId(harness.elements.get('articles-list'), '2')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read, 0);
+	assert.equal(mutations.length, 3);
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read, 1);
+});
+
+test('60% policy marks read only after sufficient article content is visible and permits undo', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ policy: 'progress', frameHeight: 1000, viewportHeight: 200 });
+	t.after(() => database.close());
+	assert.equal(mutations.length, 0);
+	harness.dispatchReaderFrameScroll(399);
+	await flushBrowserTasks();
+	assert.equal(mutations.length, 0);
+	harness.dispatchReaderFrameScroll(400);
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.textContent === 'Mark unread');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 1);
+	assert.equal(mutations.length, 1);
+	await finishArticleMutation(harness, 'undo-article-button');
+	harness.dispatchReaderFrameScroll(700);
+	await flushBrowserTasks();
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 0);
+	assert.equal(mutations.length, 2);
+});
+
+test('reading preferences persist and invalid preferences safely fall back to manual', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ policy: 'invalid' });
+	t.after(() => database.close());
+	assert.equal(harness.elements.get('auto-read-select')!.value, 'manual');
+	assert.equal(mutations.length, 0);
+	harness.elements.get('auto-read-select')!.value = 'opened';
+	harness.elements.get('auto-read-select')!.dispatch('change');
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.textContent === 'Mark unread');
+	assert.equal(harness.localStorageState.get('pigeon.browser.auto-read'), 'opened');
+	assert.equal(harness.elements.get('reading-preference-status')!.textContent, 'Reading preference saved.');
+});
+
+test('automatic read failures do not retry indefinitely and manual retry remains available', async (t) => {
+	let failing = true;
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ policy: 'opened', fetchOverride: async (input, _init, next) =>
+		input.endsWith('/edit-tag') && failing ? new Response('Error', { status: 503 }) : next() });
+	t.after(() => database.close());
+	await waitForBrowserCondition(() => harness.elements.get('reader-action-status')!.textContent === 'Could not mark read. Try again.');
+	harness.elements.get('theme-toggle-button')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(mutations.length, 1);
+	failing = false;
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 1);
+});
+
+test('read and star keyboard shortcuts work in the article and ignore editable inputs and modifiers', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	assert.equal(harness.dispatchKeydown('m', harness.elements.get('password-input') as never), false);
+	assert.equal(harness.dispatchKeydown('s', undefined, { ctrlKey: true }), false);
+	assert.equal(mutations.length, 0);
+	assert.equal(harness.dispatchFrameKeydown('s'), true);
+	await waitForBrowserCondition(() => harness.elements.get('star-article-button')!.getAttribute('aria-pressed') === 'true');
+	assert.equal(harness.dispatchFrameKeydown('m'), true);
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.textContent === 'Mark unread');
+	assert.equal(database.prepare("SELECT is_read,is_starred FROM items WHERE id='today-3'").get()!.is_starred, 1);
+});
+
+test('failed undo leaves saved state and undo available for a retry', async (t) => {
+	let failing = false;
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) =>
+		input.endsWith('/edit-tag') && failing ? new Response('Error', { status: 503 }) : next() });
+	t.after(() => database.close());
+	await finishArticleMutation(harness, 'star-article-button');
+	failing = true;
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Could not undo. Try again.');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 1);
+	assert.equal(harness.elements.get('undo-article-button')!.disabled, false);
+	failing = false;
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 0);
+});
+
+test('Undo targets the original article after navigating to another story', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	await finishArticleMutation(harness, 'star-article-button');
+	harness.dispatchKeydown('j');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 2');
+	assert.match(harness.elements.get('undo-article-button')!.getAttribute('aria-label')!, /Story 3/);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-3'").get()!.is_starred, 0);
+	assert.equal(database.prepare("SELECT is_starred FROM items WHERE id='today-2'").get()!.is_starred, 0);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 2');
+});
+
+test('an old Starred root cannot restore a story after it is unstarred', async (t) => {
+	const heldRoot = createDeferred<Response>();
+	let hold = false;
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) => {
+		if (hold && input.includes('stream/items/ids?') && input.includes('com.google%2Fstarred')) {
+			hold = false;
+			const oldResponse = await next();
+			return heldRoot.promise.then(() => oldResponse);
+		}
+		return next();
+	} });
+	t.after(() => database.close());
+	await finishArticleMutation(harness, 'star-article-button');
+	findListButtonByViewId(harness.elements.get('views-list'), 'starred')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '3');
+	hold = true;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await finishArticleMutation(harness, 'star-article-button');
+	heldRoot.resolve(new Response('release'));
+	await flushBrowserTasks();
+	assert.equal(renderedArticleIds(harness).length, 0);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+	assert.equal(harness.elements.get('star-article-button')!.getAttribute('aria-pressed'), 'false');
 });
 
 test('Today can reload an evicted selected article after reaching yesterday', async () => {
