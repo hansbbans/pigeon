@@ -336,11 +336,11 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /srcdoc/);
 	assert.match(html, /sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"/);
 	assert.match(html, /<base target="_blank" \/>/);
-	assert.match(html, /data-presentational-control="true"/);
-	assert.match(
-		html,
-		/<button[^>]+data-presentational-control="true"[^>]+data-control-tone="subtle"[^>]+disabled[^>]*>/,
-	);
+	assert.match(html, /id="article-query-form"[^>]+role="search"/);
+	assert.match(html, /id="article-search-input"[^>]+type="search"[^>]+maxlength="200"/);
+	assert.match(html, /id="article-read-filter"/);
+	assert.match(html, /id="article-sort-select"/);
+	assert.match(html, /id="article-bulk-button"/);
 	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
 	assert.match(html, /html\[data-theme="dark"\]\s*\{/);
 	assert.match(html, /#theme-toggle-button\[aria-pressed="true"\],[\s\S]*?#article-list-mode-button\[aria-pressed="true"\]\s*\{/);

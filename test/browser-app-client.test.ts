@@ -25,6 +25,7 @@ import {
 } from '../src/browser-app-client';
 import { renderBrowserAppRuntimeScript } from '../src/browser-app';
 import { handleGreaderRequest } from '../src/greader';
+import { handleNativeApiRequest } from '../src/native-api';
 import { generateApiToken } from '../src/api-auth';
 
 test('extractAuthToken parses the Auth token from a ClientLogin response', () => {
@@ -841,6 +842,15 @@ async function createBrowserHarness(options?: {
 		['undo-article-button', createElement('', ['hidden'], 'button', registerFocus)],
 		['auto-read-select', createElement('manual', [], 'select', registerFocus)],
 		['reading-preference-status', createElement('', [], 'p', registerFocus)],
+		['search-button', createElement('', [], 'button', registerFocus)],
+		['article-query-form', createElement('', [], 'form', registerFocus)],
+		['article-search-input', createElement('', [], 'input', registerFocus)],
+		['clear-article-search-button', createElement('', [], 'button', registerFocus)],
+		['article-read-filter', createElement('all', [], 'select', registerFocus)],
+		['article-sort-select', createElement('newest', [], 'select', registerFocus)],
+		['article-bulk-select', createElement('above', [], 'select', registerFocus)],
+		['article-bulk-button', createElement('', [], 'button', registerFocus)],
+		['article-query-status', createElement('', [], 'p', registerFocus)],
 		['reader-action-status', createElement('', [], 'p', registerFocus)],
 		['reader-title', createElement('', [], 'strong', registerFocus)],
 		['reader-meta', createElement('', [], 'p', registerFocus)],
@@ -1028,6 +1038,7 @@ async function createBrowserHarness(options?: {
 			},
 		},
 		FormData,
+		crypto,
 		AbortController,
 		Response,
 		URL,
@@ -2443,334 +2454,71 @@ test('runtime script expands folder feeds and requests the folder label stream w
 	await waitForBrowserCondition(() => !findListButtonByViewId(elements.get('folders-list'), 'feed/1'));
 });
 
-test('runtime mark-all action scopes a feed request and refreshes articles and unread counts', async () => {
-	let unreadCountCalls = 0;
-	const markRequests: string[] = [];
-	const { elements } = await createBrowserHarness({
-		fetchImpl: async (input, init) => {
-			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
-				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
-			}
+for (const scope of ['feed', 'folder']) {
+ test(`mark-all uses the complete ${scope} scope and supports exact Undo without changing other feeds`, async (t) => {
+  const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 65 });
+  t.after(() => database.close());
+  database.exec("INSERT INTO feeds(feed_key,display_name) VALUES('other','Other'); INSERT INTO items(id,feed_key,subject,html_content,message_id,received_at) VALUES('other-story','other','Other story','<p>Other</p>','other-message','2026-10-12T12:00:00Z')");
+  if (scope === 'folder') {
+   database.exec("UPDATE feeds SET category='Newsletters' WHERE feed_key='today-source'; INSERT INTO feed_tags(feed_key,label) VALUES('today-source','Newsletters')");
+   harness.elements.get('logout-button')!.dispatch('click');
+   await harness.elements.get('login-form')!.dispatch('submit');
+   await waitForBrowserCondition(() => Boolean(findListButtonByViewId(harness.elements.get('folders-list'), 'user/-/label/Newsletters')), 100);
+  }
+  const list = scope === 'folder' ? 'folders-list' : 'feeds-list';
+  const viewId = scope === 'folder' ? 'user/-/label/Newsletters' : 'feed/1';
+  findListButtonByViewId(harness.elements.get(list), viewId)!.dispatch('click');
+  await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 66', 100);
+  database.exec("UPDATE items SET is_read=1 WHERE id='today-5'");
+  harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+  await waitForBrowserCondition(() => harness.elements.get('article-query-status')!.textContent.startsWith('Marked 66'), 1000);
+  await waitForBrowserCondition(() => harness.elements.get('undo-article-button')!.disabled === false, 1000);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM items WHERE feed_key='today-source' AND is_read=1").get()!.count, 67);
+  assert.equal(database.prepare("SELECT is_read FROM items WHERE id='other-story'").get()!.is_read, 0);
+  assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 66');
+  assert.ok(mutations.every((mutation) => mutation.itemIds.length <= 20));
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM engagement_events WHERE event_type='read'").get()!.count, 0, 'bulk cleanup is neutral');
+  await finishArticleMutation(harness, 'undo-article-button');
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM items WHERE feed_key='today-source' AND is_read=1").get()!.count, 1);
+  assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-5'").get()!.is_read, 1);
+ });
+}
 
-			if (input === '/reader/api/0/subscription/list') {
-				return Response.json({
-					subscriptions: [
-						{ id: 'feed/1', title: 'Alpha' },
-						{ id: 'feed/2', title: 'Bravo' },
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/unread-count') {
-				unreadCountCalls += 1;
-				return Response.json({
-					unreadcounts:
-						unreadCountCalls === 1
-							? [
-									{ id: 'feed/1', count: 2 },
-									{ id: 'feed/2', count: 4 },
-									{ id: 'user/-/state/com.google/reading-list', count: 6 },
-								]
-							: [
-									{ id: 'feed/1', count: 0 },
-									{ id: 'feed/2', count: 4 },
-									{ id: 'user/-/state/com.google/reading-list', count: 4 },
-								],
-				});
-			}
-
-			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
-				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
-				return Response.json({ itemRefs: streamId === 'feed/1' && unreadCountCalls === 1 ? [{ id: '101' }] : [] });
-			}
-
-			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return Response.json({
-					items: [
-						{
-							id: 'tag:google.com,2005:reader/item/0000000000000065',
-							title: 'Alpha article',
-							published: 1_742_460_800,
-							origin: { title: 'Alpha' },
-							summary: { content: 'Alpha preview' },
-							content: { content: '<p>Alpha body</p>' },
-						},
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
-				markRequests.push(String(init.body?.get('s') ?? ''));
-				return new Response('OK', { status: 200 });
-			}
-
-			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
-		},
-	});
-
-	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
-	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			elements.get('articles-heading')?.textContent === 'Alpha' &&
-			elements.get('mark-all-as-read-button')?.disabled === false &&
-			Boolean(findListButtonByItemId(elements.get('articles-list'), '101')),
-	);
-
-	await elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			unreadCountCalls === 2 &&
-			elements.get('articles-list')?.children.length === 0 &&
-			elements.get('mark-all-as-read-button')?.disabled === true,
-	);
-
-	assert.deepEqual(markRequests, ['feed/1']);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /Alpha/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /0/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Bravo/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /4/);
-	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Alpha.');
+test('mark-all is a safe no-op when the selected feed has no unread stories', async (t) => {
+ const { database, harness, mutations } = await createStatefulArticleBrowser();
+ t.after(() => database.close());
+ database.exec('UPDATE items SET is_read=1');
+ harness.dispatchDocumentEvent('visibilitychange');
+ await waitForBrowserCondition(() => findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.textContent === 'Unread0', 100);
+ findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Today source', 100);
+ assert.equal(harness.elements.get('mark-all-as-read-button')!.disabled, true);
+ harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+ await flushBrowserTasks();
+ assert.equal(mutations.length, 0);
 });
 
-test('runtime mark-all action scopes a folder request and leaves other feeds unchanged', async () => {
-	let unreadCountCalls = 0;
-	const markRequests: string[] = [];
-	const { elements } = await createBrowserHarness({
-		fetchImpl: async (input, init) => {
-			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
-				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
-			}
-
-			if (input === '/reader/api/0/subscription/list') {
-				return Response.json({
-					subscriptions: [
-						{
-							id: 'feed/1',
-							title: 'Alpha',
-							categories: [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }],
-						},
-						{
-							id: 'feed/2',
-							title: 'Bravo',
-							categories: [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }],
-						},
-						{ id: 'feed/3', title: 'Charlie' },
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/unread-count') {
-				unreadCountCalls += 1;
-				return Response.json({
-					unreadcounts:
-						unreadCountCalls === 1
-							? [
-									{ id: 'feed/1', count: 1 },
-									{ id: 'feed/2', count: 2 },
-									{ id: 'feed/3', count: 5 },
-									{ id: 'user/-/label/Daily Reads', count: 3 },
-									{ id: 'user/-/state/com.google/reading-list', count: 8 },
-								]
-							: [
-									{ id: 'feed/1', count: 0 },
-									{ id: 'feed/2', count: 0 },
-									{ id: 'feed/3', count: 5 },
-									{ id: 'user/-/label/Daily Reads', count: 0 },
-									{ id: 'user/-/state/com.google/reading-list', count: 5 },
-								],
-				});
-			}
-
-			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
-				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
-				return Response.json({
-					itemRefs: streamId === 'user/-/label/Daily Reads' && unreadCountCalls === 1 ? [{ id: '201' }] : [],
-				});
-			}
-
-			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return Response.json({
-					items: [
-						{
-							id: 'tag:google.com,2005:reader/item/00000000000000c9',
-							title: 'Folder article',
-							published: 1_742_460_800,
-							origin: { title: 'Alpha' },
-							summary: { content: 'Folder preview' },
-							content: { content: '<p>Folder body</p>' },
-						},
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
-				markRequests.push(String(init.body?.get('s') ?? ''));
-				return new Response('OK', { status: 200 });
-			}
-
-			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
-		},
-	});
-
-	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')));
-	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			elements.get('articles-heading')?.textContent === 'Daily Reads' &&
-			elements.get('mark-all-as-read-button')?.disabled === false &&
-			Boolean(findListButtonByItemId(elements.get('articles-list'), '201')),
-	);
-
-	await elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			unreadCountCalls === 2 &&
-			elements.get('articles-list')?.children.length === 0 &&
-			elements.get('mark-all-as-read-button')?.disabled === true,
-	);
-
-	assert.deepEqual(markRequests, ['user/-/label/Daily Reads']);
-	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.textContent ?? '', /Daily Reads/);
-	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.textContent ?? '', /0/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/3')?.textContent ?? '', /Charlie/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/3')?.textContent ?? '', /5/);
-	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Daily Reads.');
+test('mark-all reports a failed HTTP-200 receipt and can be retried in the same view', async (t) => {
+ let attempts = 0;
+ const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, init, next) => {
+  if (input.endsWith('/mutations') && ++attempts === 1) {
+   const mutation = JSON.parse(init!.body as string).mutations[0];
+   return Response.json({ results: [{ mutationId: mutation.id, status: 'failed', error: 'Temporary failure' }] });
+  }
+  return next();
+ } });
+ t.after(() => database.close());
+ harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('article-query-status')!.textContent.includes('0 saved changes confirmed'), 100);
+ await waitForBrowserCondition(() => harness.elements.get('mark-all-as-read-button')!.disabled === false, 100);
+ assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+ assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+ harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('article-query-status')!.textContent.startsWith('Marked 4'), 100);
+ assert.equal(attempts, 2);
+ assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 4);
 });
 
-test('runtime mark-all action is a safe no-op for a selected feed with zero unread items', async () => {
-	let markRequestCount = 0;
-	const { elements } = await createBrowserHarness({
-		fetchImpl: async (input, init) => {
-			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
-				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
-			}
-
-			if (input === '/reader/api/0/subscription/list') {
-				return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
-			}
-
-			if (input === '/reader/api/0/unread-count') {
-				return Response.json({
-					unreadcounts: [
-						{ id: 'feed/1', count: 0 },
-						{ id: 'user/-/state/com.google/reading-list', count: 0 },
-					],
-				});
-			}
-
-			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
-				return Response.json({ itemRefs: [] });
-			}
-
-			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
-				markRequestCount += 1;
-				return new Response('OK', { status: 200 });
-			}
-
-			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
-		},
-	});
-
-	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
-	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			elements.get('articles-heading')?.textContent === 'Alpha' &&
-			elements.get('mark-all-as-read-button')?.classList.contains('hidden') === false,
-	);
-
-	const markButton = elements.get('mark-all-as-read-button');
-	assert.equal(markButton?.disabled, true);
-	assert.equal(markButton?.getAttribute('aria-label'), 'Mark all items in Alpha as read');
-	await markButton?.dispatch('click');
-	await flushBrowserTasks();
-
-	assert.equal(markRequestCount, 0);
-	assert.equal(elements.get('articles-status')?.textContent, 'No articles in Alpha.');
-	assert.equal(markButton?.disabled, true);
-});
-
-test('runtime mark-all action surfaces request failures without changing the selected view', async () => {
-	let unreadCountCalls = 0;
-	let markRequestCount = 0;
-	const { elements } = await createBrowserHarness({
-		fetchImpl: async (input, init) => {
-			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
-				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
-			}
-
-			if (input === '/reader/api/0/subscription/list') {
-				return Response.json({
-					subscriptions: [
-						{ id: 'feed/1', title: 'Alpha' },
-						{ id: 'feed/2', title: 'Bravo' },
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/unread-count') {
-				unreadCountCalls += 1;
-				return Response.json({
-					unreadcounts: [
-						{ id: 'feed/1', count: 2 },
-						{ id: 'feed/2', count: 7 },
-						{ id: 'user/-/state/com.google/reading-list', count: 9 },
-					],
-				});
-			}
-
-			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
-				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
-				return Response.json({ itemRefs: streamId === 'feed/1' ? [{ id: '301' }] : [] });
-			}
-
-			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return Response.json({
-					items: [
-						{
-							id: 'tag:google.com,2005:reader/item/000000000000012d',
-							title: 'Still unread article',
-							published: 1_742_460_800,
-							origin: { title: 'Alpha' },
-							summary: { content: 'Still visible' },
-							content: { content: '<p>Still present</p>' },
-						},
-					],
-				});
-			}
-
-			if (input === '/reader/api/0/mark-all-as-read' && init?.method === 'POST') {
-				markRequestCount += 1;
-				return new Response('Request failed', { status: 500 });
-			}
-
-			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
-		},
-	});
-
-	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
-	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await waitForBrowserCondition(
-		() =>
-			elements.get('articles-heading')?.textContent === 'Alpha' &&
-			Boolean(findListButtonByItemId(elements.get('articles-list'), '301')),
-	);
-
-	await elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not mark all as read.');
-
-	assert.equal(markRequestCount, 1);
-	assert.equal(unreadCountCalls, 1);
-	assert.ok(findListButtonByItemId(elements.get('articles-list'), '301'));
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /2/);
-	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /7/);
-	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
-});
 test('stale status responses do not overwrite logout state or suppress a later settings fetch', async () => {
 	const firstStatus = createDeferred<Response>();
 	const statusCalls: string[] = [];
@@ -4848,25 +4596,37 @@ test('a pre-mutation article refresh cannot restore cached read state after mark
 });
 
 async function createStatefulArticleBrowser(options?: {
-	policy?: string; frameHeight?: number; viewportHeight?: number;
+	policy?: string; frameHeight?: number; viewportHeight?: number; count?: number;
+	now?: number | (() => number);
 	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
 }) {
-	const state = createLargeTodaySqliteLibrary(new Date(2026, 9, 12, 12).getTime(), 2);
+	const browserNow = typeof options?.now === 'function' ? options.now() : options?.now ?? new Date(2026, 9, 12, 12).getTime();
+	const state = createLargeTodaySqliteLibrary(browserNow, options?.count ?? 2);
 	const token = await generateApiToken('today-test-password');
-	const mutations: Array<{ itemId: string; add: string | null; remove: string | null }> = [];
+	const mutations: Array<{ itemId: string; itemIds: string[]; add: string | null; remove: string | null }> = [];
 	const harness = await createBrowserHarness({
+		now: options?.now ?? browserNow,
 		storedAutoReadPolicy: options?.policy,
 		frameScrollHeight: options?.frameHeight,
 		frameViewportHeight: options?.viewportHeight,
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
-			if (input.endsWith('/edit-tag')) mutations.push({ itemId: String(init?.body?.get('i')), add: init?.body?.get('a') as string | null, remove: init?.body?.get('r') as string | null });
-			const next = () => handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+			if (input.endsWith('/edit-tag')) mutations.push({ itemId: String(init?.body?.get('i')), itemIds: init?.body?.getAll('i').map(String) || [], add: init?.body?.get('a') as string | null, remove: init?.body?.get('r') as string | null });
+			if (input.endsWith('/mutations')) {
+				for (const mutation of JSON.parse(init?.body as unknown as string).mutations) {
+					mutations.push({ itemId: mutation.itemIds[0], itemIds: mutation.itemIds,
+						add: mutation.value ? 'user/-/state/com.google/read' : null,
+						remove: mutation.value ? null : 'user/-/state/com.google/read' });
+				}
+			}
+			const next = () => input.startsWith('/api/v1/')
+				? handleNativeApiRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env)
+				: handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
 			return options?.fetchOverride ? options.fetchOverride(input, init as RequestInit, next) : next();
 		},
 	});
 	await harness.elements.get('login-form')!.dispatch('submit');
-	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story ' + ((options?.count ?? 2) + 1), 100);
 	await flushBrowserTasks();
 	return { ...state, harness, mutations };
 }
@@ -4874,6 +4634,10 @@ async function createStatefulArticleBrowser(options?: {
 async function finishArticleMutation(harness: Awaited<ReturnType<typeof createBrowserHarness>>, buttonId: string) {
 	harness.elements.get(buttonId)!.dispatch('click');
 	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false, 100);
+	await waitForBrowserCondition(() => {
+		const cache = harness.getCacheSizes();
+		return cache.active === 0 && cache.pending === 0 && cache.membership === 0;
+	}, 1000);
 }
 
 test('manual read and star toggles persist, display state and undo each individual change', async (t) => {
@@ -5058,6 +4822,288 @@ test('an old Starred root cannot restore a story after it is unstarred', async (
 	assert.equal(renderedArticleIds(harness).length, 0);
 	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
 	assert.equal(harness.elements.get('star-article-button')!.getAttribute('aria-pressed'), 'false');
+});
+
+async function setBrowserQuery(harness: Awaited<ReturnType<typeof createBrowserHarness>>, query: string) {
+	harness.elements.get('article-search-input')!.value = query;
+	harness.elements.get('article-query-form')!.dispatch('submit');
+	await flushBrowserTasks();
+}
+
+async function finishBulkRead(harness: Awaited<ReturnType<typeof createBrowserHarness>>, mode: string) {
+	harness.elements.get('article-bulk-select')!.value = mode;
+	harness.elements.get('article-bulk-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('article-bulk-button')!.disabled === false, 1000);
+	await waitForBrowserCondition(() => {
+		const cache = harness.getCacheSizes();
+		return cache.active === 0 && cache.pending === 0 && cache.membership === 0;
+	}, 1000);
+}
+
+test('server search finds matching titles and text beyond the loaded article page, with literal punctuation', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 105 });
+	t.after(() => database.close());
+	assert.equal(renderedArticleIds(harness).includes('1'), false);
+	database.prepare("UPDATE items SET subject=?,text_content=? WHERE id='today-1'").run('100%_literal Needle', 'The full text contains hidden quartz');
+	await setBrowserQuery(harness, '100%_literal');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '1', 100);
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === '100%_literal Needle', 100);
+	assert.equal(harness.elements.get('reader-title')!.textContent, '100%_literal Needle');
+	await setBrowserQuery(harness, 'hidden quartz');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '1', 100);
+	assert.match(harness.elements.get('reader-frame')!.srcdoc, /Body 1/);
+	harness.elements.get('clear-article-search-button')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 50, 100);
+	assert.equal(harness.elements.get('article-search-input')!.value, '');
+});
+
+test('server read filters and oldest sorting apply to the whole stream and keep their cache separate', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	database.exec("UPDATE items SET is_read=1 WHERE id IN ('today-1','today-2','today-3')");
+	harness.elements.get('article-read-filter')!.value = 'read';
+	harness.elements.get('article-read-filter')!.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '3,2,1', 100);
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3', 100);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+	harness.elements.get('article-sort-select')!.value = 'oldest';
+	harness.elements.get('article-sort-select')!.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join() === '1,2,3', 100);
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 1', 100);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 1');
+	harness.elements.get('article-read-filter')!.value = 'unread';
+	harness.elements.get('article-read-filter')!.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness)[0] === '67', 100);
+	assert.equal(renderedArticleIds(harness).includes('1'), false);
+	harness.elements.get('article-sort-select')!.value = 'newest';
+	harness.elements.get('article-sort-select')!.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness)[0] === '66', 100);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 66');
+});
+
+test('a held old search response cannot replace a newer query or its error status', async (t) => {
+	const oldQuery = createDeferred<Response>();
+	let held = false;
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) => {
+		if (input.startsWith('/api/v1/browser/articles?') && new URL(`https://pigeon.example${input}`).searchParams.get('q') === 'Story 1') {
+			held = true;
+			return oldQuery.promise;
+		}
+		return next();
+	} });
+	t.after(() => database.close());
+	await setBrowserQuery(harness, 'Story 1');
+	await waitForBrowserCondition(() => held);
+	await setBrowserQuery(harness, 'Story 2');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 2', 100);
+	oldQuery.resolve(new Response('Temporary failure', { status: 503 }));
+	await flushBrowserTasks();
+	assert.deepEqual(renderedArticleIds(harness), ['2']);
+	assert.equal(harness.elements.get('articles-status')!.textContent, '1 article');
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Story 2/);
+});
+
+test('revisiting a search restores its own cached selected story while offline', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	await setBrowserQuery(harness, 'Story 1');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 1', 100);
+	await setBrowserQuery(harness, 'Story 2');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 2', 100);
+	harness.setOnline(false);
+	await setBrowserQuery(harness, 'Story 1');
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 1');
+	assert.deepEqual(renderedArticleIds(harness), ['1']);
+	assert.equal(harness.elements.get('articles-status')!.textContent, 'Offline · showing cached articles.');
+});
+
+test('searched oldest-first pagination keeps every match reachable past the first page', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 205 });
+	t.after(() => database.close());
+	harness.elements.get('article-sort-select')!.value = 'oldest';
+	harness.elements.get('article-search-input')!.value = 'Story';
+	harness.elements.get('article-query-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => renderedArticleIds(harness)[0] === '207', 100);
+	const ids = await collectBrowserWindowIds(harness);
+	assert.deepEqual(ids, ['207', ...Array.from({ length: 205 }, (_, index) => String(index + 1)), '206']);
+	assert.ok(harness.getCacheSizes().bodies <= 500);
+});
+
+test('Today search resets its query-bound continuation when the local day rolls over', async (t) => {
+	let now = new Date(2026, 9, 12, 12).getTime();
+	const queryRequests: Array<{ since: string | null; continuation: string | null }> = [];
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65, now: () => now,
+		fetchOverride: async (input, _init, next) => {
+			if (input.startsWith('/api/v1/browser/articles?')) {
+				const params = new URL(`https://pigeon.example${input}`).searchParams;
+				queryRequests.push({ since: params.get('since'), continuation: params.get('continuation') });
+			}
+			return next();
+		} });
+	t.after(() => database.close());
+	await setBrowserQuery(harness, 'Story');
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 65', 100);
+	await waitForBrowserCondition(() => harness.getCacheSizes().active === 0 && harness.getCacheSizes().pending === 0, 100);
+	const previousSince = queryRequests.at(-1)!.since;
+	now += 86_400_000;
+	harness.elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 66', 100);
+	assert.deepEqual(renderedArticleIds(harness), ['66']);
+	const newDayRequests = queryRequests.filter((query) => query.since !== previousSince && query.since !== null);
+	assert.ok(newDayRequests.length > 0);
+	assert.ok(newDayRequests.every((query) => query.continuation === null), 'no old cursor is sent with the new day bounds');
+	assert.doesNotMatch(harness.elements.get('articles-status')!.textContent, /failed|Could not/);
+});
+
+test('native bulk Undo retries the same idempotency key after an applied response is lost', async (t) => {
+	const undoMutationIds: string[] = [];
+	let loseFirstUndo = true;
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, init, next) => {
+		if (input.endsWith('/mutations')) {
+			const mutation = JSON.parse(init!.body as string).mutations[0];
+			if (!mutation.value) {
+				undoMutationIds.push(mutation.id);
+				if (loseFirstUndo) { loseFirstUndo = false; await next(); return new Response('Lost response', { status: 503 }); }
+			}
+		}
+		return next();
+	} });
+	t.after(() => database.close());
+	await finishBulkRead(harness, 'below');
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Could not finish undo/);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(undoMutationIds[0], undoMutationIds[1]);
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+	assert.equal(database.prepare("SELECT COUNT(*) AS count FROM engagement_events WHERE event_type='unread'").get()!.count, 3);
+});
+
+test('bulk below uses the complete matching stream, bounded writes and exact prior read states for Undo', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	database.exec("UPDATE items SET is_read=1 WHERE id='today-5'");
+	findListButtonByItemId(harness.elements.get('articles-list'), '60')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 60');
+	await finishBulkRead(harness, 'below');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 1, 'outside initial page');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-60'").get()!.is_read, 0, 'selected story excluded');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-61'").get()!.is_read, 0, 'above excluded');
+	assert.ok(mutations.every((mutation) => mutation.itemIds.length <= 20));
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Marked 59 articles read/);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 0);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-5'").get()!.is_read, 1, 'prior read state preserved');
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 60');
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Restored previous read status for 59/);
+});
+
+test('bulk above follows the displayed oldest-first order and respects the current search', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	harness.elements.get('article-sort-select')!.value = 'oldest';
+	harness.elements.get('article-search-input')!.value = 'Story 2';
+	harness.elements.get('article-query-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).includes('25'), 100);
+	findListButtonByItemId(harness.elements.get('articles-list'), '25')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 25');
+	await finishBulkRead(harness, 'above');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read, 1);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-24'").get()!.is_read, 1);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-25'").get()!.is_read, 0);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-26'").get()!.is_read, 0);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 0, 'outside search');
+});
+
+test('bulk older-than 1, 7 and 30 days use exact age cutoffs and support Undo', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	const insert = database.prepare('INSERT INTO items(id,feed_key,subject,html_content,message_id,received_at) VALUES(?,?,?,?,?,?)');
+	const now = new Date(2026, 9, 12, 12).getTime();
+	for (const days of [2, 8, 31]) insert.run('age-' + days, 'today-source', 'Old ' + days, '<p>Old story</p>', 'age-message-' + days, new Date(now - days * 86_400_000).toISOString());
+	for (const [mode, expectedCount] of [['age-1', 3], ['age-7', 2], ['age-30', 1]] as const) {
+		await finishBulkRead(harness, mode);
+		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, expectedCount);
+		await finishArticleMutation(harness, 'undo-article-button');
+		assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+	}
+});
+
+test('partial bulk failure reports confirmed changes and Undo restores even an uncertain failed batch', async (t) => {
+	let writes = 0;
+	let failSecond = true;
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65, fetchOverride: async (input, _init, next) => {
+		if (input.endsWith('/mutations') && ++writes === 2 && failSecond) {
+			await next();
+			return new Response('Response lost after saving', { status: 503 });
+		}
+		return next();
+	} });
+	t.after(() => database.close());
+	await finishBulkRead(harness, 'below');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 40);
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Could not finish.*20 saved changes confirmed/);
+	failSecond = false;
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Restored previous read status for 40/);
+});
+
+test('partial bulk Undo is retryable and never claims that unfinished batches were restored', async (t) => {
+	let writes = 0;
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65, fetchOverride: async (input, _init, next) => {
+		if (input.endsWith('/mutations') && ++writes === 6) return new Response('Undo failed', { status: 503 });
+		return next();
+	} });
+	t.after(() => database.close());
+	await finishBulkRead(harness, 'below');
+	assert.equal(writes, 4);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 46);
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Restored 20 articles. Could not finish undo/);
+	assert.equal(harness.elements.get('undo-article-button')!.disabled, false);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+});
+
+test('bulk snapshot failure sends no mutations and clearly reports that selection could not be checked', async (t) => {
+	let failSnapshots = false;
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) =>
+		failSnapshots && input.endsWith('/contents') ? new Response('Unavailable', { status: 503 }) : next() });
+	t.after(() => database.close());
+	failSnapshots = true;
+	await finishBulkRead(harness, 'below');
+	assert.equal(mutations.length, 0);
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+	assert.match(harness.elements.get('article-query-status')!.textContent, /No read changes were sent/);
+});
+
+test('a held bulk enumeration cannot send writes or clear a new session mutation after logout', async (t) => {
+	const enumeration = createDeferred<Response>();
+	const newMutation = createDeferred<Response>();
+	let held = false;
+	let holdMutation = false;
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) => {
+		if (input.startsWith('/api/v1/browser/articles?') && !held) { held = true; return enumeration.promise; }
+		if (input.endsWith('/edit-tag') && holdMutation) return newMutation.promise;
+		return next();
+	} });
+	t.after(() => database.close());
+	harness.elements.get('article-bulk-select')!.value = 'below';
+	harness.elements.get('article-bulk-button')!.dispatch('click');
+	await waitForBrowserCondition(() => held);
+	harness.elements.get('logout-button')!.dispatch('click');
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3', 100);
+	holdMutation = true;
+	harness.elements.get('mark-unread-button')!.dispatch('click');
+	enumeration.resolve(Response.json({ itemIds: ['3', '2', '1', '4'], continuation: null }));
+	await flushBrowserTasks();
+	assert.equal(mutations.length, 1);
+	assert.equal(harness.elements.get('mark-unread-button')!.disabled, true);
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, 'Marking article read…');
+	newMutation.resolve(new Response('OK'));
+	await waitForBrowserCondition(() => harness.elements.get('mark-unread-button')!.disabled === false, 100);
 });
 
 test('Today can reload an evicted selected article after reaching yesterday', async () => {
@@ -5610,62 +5656,23 @@ test('a stale failed root refresh cannot overwrite the status of a newer success
 	assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
 });
 
-test('mark-all refreshes counts after its mutation and ignores an older foreground count result', async () => {
-	const oldCounts = createDeferred<Response>();
-	let countRequests = 0;
-	let markRequests = 0;
-	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
-		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
-		if (input.endsWith('/unread-count')) {
-			countRequests += 1;
-			if (countRequests === 2) return oldCounts.promise;
-			return Response.json({ unreadcounts: [{ id: 'feed/1', count: markRequests ? 0 : 5 }] });
-		}
-		if (input.endsWith('/mark-all-as-read')) {
-			markRequests += 1;
-			return new Response('OK');
-		}
-		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
-		return browserRegressionResponse(input, init);
-	} });
-	await harness.elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
-	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await flushBrowserTasks();
-	harness.dispatchDocumentEvent('visibilitychange');
-	harness.elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(() => findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.textContent === 'Alpha0');
-	oldCounts.resolve(Response.json({ unreadcounts: [{ id: 'feed/1', count: 5 }] }));
-	await flushBrowserTasks();
-	assert.equal(countRequests, 3);
-	assert.equal(markRequests, 1);
-	assert.equal(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.textContent, 'Alpha0');
-	assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, true);
+test('mark-all ignores an older count response after native bulk cleanup', async (t) => {
+ const oldCounts = createDeferred<Response>();
+ let countRequests = 0;
+ const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) => {
+  if (input.endsWith('/unread-count') && ++countRequests === 2) return oldCounts.promise;
+  return next();
+ } });
+ t.after(() => database.close());
+ harness.dispatchDocumentEvent('visibilitychange');
+ await waitForBrowserCondition(() => countRequests === 2);
+ harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+ await waitForBrowserCondition(() => findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.textContent === 'Unread0', 100);
+ oldCounts.resolve(Response.json({ unreadcounts: [{ id: 'feed/1', count: 4 }, { id: 'user/-/state/com.google/reading-list', count: 4 }] }));
+ await flushBrowserTasks();
+ assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.textContent, 'Unread0');
+ assert.equal(harness.elements.get('mark-all-as-read-button')!.disabled, true);
 });
-
-test('a failed mark-all request can be retried successfully in the same view', async () => {
-	let markRequests = 0;
-	const { elements } = await createBrowserHarness({ fetchImpl: async (input, init) => {
-		if (input.endsWith('/subscription/list')) return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
-		if (input.endsWith('/unread-count')) return Response.json({ unreadcounts: [{ id: 'feed/1', count: markRequests === 2 ? 0 : 5 }] });
-		if (input.endsWith('/mark-all-as-read')) return new Response(++markRequests === 1 ? 'Error' : 'OK', { status: markRequests === 1 ? 503 : 200 });
-		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
-		return browserRegressionResponse(input, init);
-	} });
-	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => elements.get('reader-title')?.textContent === 'Article 1');
-	findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await flushBrowserTasks();
-	elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not mark all as read.');
-	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
-	elements.get('mark-all-as-read-button')?.dispatch('click');
-	await waitForBrowserCondition(() => findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent === 'Alpha0');
-	assert.equal(markRequests, 2);
-	assert.equal(elements.get('articles-heading')?.textContent, 'Alpha');
-	assert.equal(elements.get('mark-all-as-read-button')?.disabled, true);
-});
-
 
 test('Today selects an already cached article and supports keyboard navigation without another body request', async () => {
 	const now = new Date(2026, 9, 2, 12).getTime();
@@ -5724,58 +5731,46 @@ for (const returnToCachedToday of [false, true]) {
 	});
 }
 
-for (const oldStatus of [200, 503]) {
-	for (const newMutationPending of [false, true]) {
-		test(`old mark-all ${oldStatus} response cannot affect a same-token new session${newMutationPending ? ' with another mutation pending' : ''}`, async () => {
-			const oldMark = createDeferred<Response>();
-			const newMark = createDeferred<Response>();
-			let markRequests = 0;
-			let subscriptionRequests = 0;
-			const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
-				if (input.endsWith('/subscription/list')) {
-					subscriptionRequests += 1;
-					return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
-				}
-				if (input.endsWith('/unread-count')) return Response.json({ unreadcounts: [{ id: 'feed/1', count: 5 }] });
-				if (input.endsWith('/mark-all-as-read')) return ++markRequests === 1 ? oldMark.promise : newMark.promise;
-				if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
-				return browserRegressionResponse(input, init);
-			} });
-			const signInToFeed = async () => {
-				await harness.elements.get('login-form')?.dispatch('submit');
-				await waitForBrowserCondition(() => Boolean(findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')));
-				findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-				await waitForBrowserCondition(() => harness.elements.get('articles-heading')?.textContent === 'Alpha'
-					&& harness.elements.get('reader-title')?.textContent === 'Article 1');
-				await flushBrowserTasks();
-			};
-			await signInToFeed();
-			harness.elements.get('mark-all-as-read-button')?.dispatch('click');
-			await waitForBrowserCondition(() => markRequests === 1);
-			await harness.elements.get('logout-button')?.dispatch('click');
-			await signInToFeed();
-			assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, false);
-			if (newMutationPending) {
-				harness.elements.get('mark-all-as-read-button')?.dispatch('click');
-				await waitForBrowserCondition(() => markRequests === 2);
-			}
-			const subscriptionsBeforeOldResponse = subscriptionRequests;
-			oldMark.resolve(new Response(oldStatus === 200 ? 'OK' : 'Old failure', { status: oldStatus }));
-			await flushBrowserTasks();
-			assert.equal(subscriptionRequests, subscriptionsBeforeOldResponse);
-			assert.equal(harness.elements.get('mark-all-as-read-button')?.disabled, newMutationPending);
-			assert.equal(harness.elements.get('articles-status')?.textContent, newMutationPending ? 'Marking all items as read…' : '1 article');
-			assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 1');
-			if (newMutationPending) {
-				newMark.resolve(new Response('OK'));
-				await waitForBrowserCondition(() => harness.elements.get('mark-all-as-read-button')?.disabled === false);
-				assert.equal(subscriptionRequests, subscriptionsBeforeOldResponse + 1);
-				assert.equal(harness.elements.get('articles-status')?.textContent, '1 article');
-			}
-		});
-	}
+for (const oldStatus of [200, 503, 401]) {
+ for (const newMutationPending of [false, true]) {
+  test(`old mark-all ${oldStatus} cannot affect a same-token session${newMutationPending ? ' with another bulk write pending' : ''}`, async (t) => {
+   const oldWrite = createDeferred<Response>();
+   const newWrite = createDeferred<Response>();
+   let writes = 0;
+   let newMutationId = '';
+   const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, init, next) => {
+    if (input.endsWith('/mutations')) {
+     writes += 1;
+     const mutation = JSON.parse(init!.body as string).mutations[0];
+     if (writes === 1) return oldWrite.promise;
+     newMutationId = mutation.id;
+     return newWrite.promise;
+    }
+    return next();
+   } });
+   t.after(() => database.close());
+   harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+   await waitForBrowserCondition(() => writes === 1, 100);
+   harness.elements.get('logout-button')!.dispatch('click');
+   await harness.elements.get('login-form')!.dispatch('submit');
+   await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 3', 100);
+   if (newMutationPending) {
+    harness.elements.get('mark-all-as-read-button')!.dispatch('click');
+    await waitForBrowserCondition(() => writes === 2, 100);
+   }
+   oldWrite.resolve(new Response('Old response', { status: oldStatus }));
+   await flushBrowserTasks();
+   assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'), false);
+   assert.equal(harness.elements.get('mark-all-as-read-button')!.disabled, newMutationPending);
+   assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+   if (newMutationPending) {
+    assert.match(harness.elements.get('article-query-status')!.textContent, /Marking read/);
+    newWrite.resolve(Response.json({ results: [{ mutationId: newMutationId, status: 'applied' }] }));
+    await waitForBrowserCondition(() => harness.elements.get('undo-article-button')!.disabled === false, 100);
+   }
+  });
+ }
 }
-
 
 for (const ignoresAbort of [false, true]) {
 	test(`clearing a session aborts old body jobs and preserves the concurrency cap${ignoresAbort ? ' when a transport ignores cancellation' : ''}`, async () => {

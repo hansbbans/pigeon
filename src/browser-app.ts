@@ -748,6 +748,41 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         border-radius: 6px;
       }
 
+      .article-query-controls {
+        display: grid;
+        gap: 0.6rem;
+        padding: 0.8rem 1.1rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .article-query-search, .article-query-options, .article-bulk-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: end;
+        gap: 0.5rem;
+      }
+
+      .article-query-search input, .article-query-options label, .article-bulk-controls label {
+        flex: 1 1 8rem;
+        min-width: 0;
+      }
+
+      .article-query-controls input, .article-query-controls select {
+        width: 100%;
+        padding: 0.5rem;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+      }
+
+      .article-query-options label, .article-bulk-controls label {
+        display: grid;
+        gap: 0.3rem;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
       .reader-copy {
         display: grid;
         gap: 0.55rem;
@@ -1337,9 +1372,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                     id="search-button"
                     type="button"
                     aria-label="Search"
-                    data-presentational-control="true"
                     data-control-tone="subtle"
-                    disabled
                   >
                     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
                       <circle cx="11" cy="11" r="7" stroke-width="1.8"></circle>
@@ -1415,6 +1448,25 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                     aria-label="Mark all items in the selected feed or folder as read"
                   >Mark all as read</button>
                 </div>
+              </div>
+              <div class="article-query-controls">
+                <form id="article-query-form" class="article-query-search" role="search">
+                  <input id="article-search-input" type="search" maxlength="200" aria-label="Search articles" placeholder="Search articles" />
+                  <button class="secondary-button" type="submit">Search</button>
+                  <button class="secondary-button" id="clear-article-search-button" type="button">Clear</button>
+                </form>
+                <div class="article-query-options">
+                  <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
+                  <label>Sort<select id="article-sort-select"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                </div>
+                <details class="article-bulk-menu">
+                  <summary>Bulk reading actions</summary>
+                  <div class="article-bulk-controls">
+                  <label>Mark read<select id="article-bulk-select"><option value="above">Above selected article</option><option value="below">Below selected article</option><option value="age-1">Older than 1 day</option><option value="age-7">Older than 7 days</option><option value="age-30">Older than 30 days</option></select></label>
+                    <button class="secondary-button" id="article-bulk-button" type="button">Apply</button>
+                  </div>
+                </details>
+                <p id="article-query-status" class="status-meta" role="status" aria-live="polite"></p>
               </div>
               <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
                 <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
@@ -1549,6 +1601,15 @@ export function renderBrowserAppRuntimeScript(): string {
   const undoArticleButton = document.getElementById('undo-article-button');
   const autoReadSelect = document.getElementById('auto-read-select');
   const readingPreferenceStatus = document.getElementById('reading-preference-status');
+  const searchButton = document.getElementById('search-button');
+  const articleQueryForm = document.getElementById('article-query-form');
+  const articleSearchInput = document.getElementById('article-search-input');
+  const clearArticleSearchButton = document.getElementById('clear-article-search-button');
+  const articleReadFilterSelect = document.getElementById('article-read-filter');
+  const articleSortSelect = document.getElementById('article-sort-select');
+  const articleBulkSelect = document.getElementById('article-bulk-select');
+  const articleBulkButton = document.getElementById('article-bulk-button');
+  const articleQueryStatus = document.getElementById('article-query-status');
   const readerActionStatus = document.getElementById('reader-action-status');
   const readerTitle = document.getElementById('reader-title');
   const readerMeta = document.getElementById('reader-meta');
@@ -1582,8 +1643,6 @@ export function renderBrowserAppRuntimeScript(): string {
   let loadedItemsById = {};
   let inFlightContentIds = [];
   let selectedItemId = null;
-  let isMarkingAllAsRead = false;
-  let activeMarkAllRequestId = 0;
   let pendingArticleMutation = null;
   let readerActionTarget = '';
   let readerActionSelectionId = 0;
@@ -1597,6 +1656,12 @@ export function renderBrowserAppRuntimeScript(): string {
   let queuedAutoRead = null;
   let readyReaderItemId = null;
   const manuallyUnreadItemIds = new Set();
+  let articleSearchQuery = '';
+  let articleReadFilter = 'all';
+  let articleSortOrder = 'newest';
+  let membershipRootRequestId = 0;
+  let activeLoadedQueryKey = '';
+  let queuedQueryReload = null;
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -2020,8 +2085,24 @@ export function renderBrowserAppRuntimeScript(): string {
     refreshInFlightContentIds();
   }
 
-  function createViewState() {
+  function getArticleQuery(viewId = activeViewId) {
+    const view = views.find((candidate) => candidate.id === viewId);
+    const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
+      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: articleSortOrder };
+    if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
+      query.dayBounds = client.getLocalDayBounds();
+    }
+    return query;
+  }
+
+  function getViewQueryKey(viewId) {
+    return JSON.stringify([viewId, getArticleQuery(viewId)]);
+  }
+
+  function createViewState(viewId) {
     return {
+      viewId, query: getArticleQuery(viewId), queryKey: getViewQueryKey(viewId),
+      locallyRemovedIds: new Set(),
       itemIds: [],
       continuation: '',
       hasMembership: false,
@@ -2042,10 +2123,16 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function getViewState(viewId, create = true) {
-    let state = viewStates.get(viewId);
+    const queryKey = getViewQueryKey(viewId);
+    let state = viewStates.get(queryKey);
     if (!state && create) {
-      state = createViewState();
-      viewStates.set(viewId, state);
+      state = createViewState(viewId);
+      viewStates.set(queryKey, state);
+      while (viewStates.size > 30) {
+        const oldestKey = [...viewStates.keys()].find((key) => key !== queryKey && key !== getViewQueryKey(activeViewId));
+        if (!oldestKey) break;
+        viewStates.delete(oldestKey);
+      }
     }
     return state || null;
   }
@@ -2197,8 +2284,6 @@ export function renderBrowserAppRuntimeScript(): string {
   function clearAccountCache() {
     accountGeneration += 1;
     keyboardRevealSelection = null;
-    activeMarkAllRequestId += 1;
-    isMarkingAllAsRead = false;
     pendingArticleMutation = null;
     readerActionTarget = '';
     readerActionSelectionId += 1;
@@ -2210,6 +2295,13 @@ export function renderBrowserAppRuntimeScript(): string {
     manuallyUnreadItemIds.clear();
     autoReadAttempt = '';
     queuedAutoRead = null;
+    articleQueryStatus.textContent = '';
+    articleSearchQuery = '';
+    articleReadFilter = 'all';
+    articleSortOrder = 'newest';
+    articleSearchInput.value = '';
+    activeLoadedQueryKey = '';
+    queuedQueryReload = null;
     unreadCountRequestId += 1;
     inFlightUnreadCountRequest = null;
     subscriptions = [];
@@ -2582,7 +2674,31 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function getWindowCandidateIds() {
+    reconcileArticleQueryBoundary();
     return isTodayView() ? getTodayCandidateIds() : itemIds;
+  }
+
+  function reconcileArticleQueryBoundary() {
+    if (!getActiveView() || !activeLoadedQueryKey || activeLoadedQueryKey === getViewQueryKey(activeViewId)) return;
+    activeLoadedQueryKey = getViewQueryKey(activeViewId);
+    const state = getViewState(activeViewId);
+    activeViewRequestId += 1;
+    itemIds = [...state.itemIds];
+    nextItemIdsContinuation = state.continuation;
+    selectedItemId = state.selectedItemId;
+    heldReaderArticle = null;
+    activeItemIdsPageRequest = null;
+    isLoadingItemIdsPage = false;
+    if (window.navigator?.onLine === false) return;
+    const owner = { queryKey: activeLoadedQueryKey, generation: accountGeneration, token: session.token };
+    queuedQueryReload = owner;
+    Promise.resolve().then(() => {
+      if (queuedQueryReload !== owner) return;
+      queuedQueryReload = null;
+      if (owner.queryKey === getViewQueryKey(activeViewId) && requestBelongsToCurrentSession(owner.generation, owner.token)) {
+        void loadActiveView();
+      }
+    });
   }
 
   function reconcileTodayMembershipBoundary() {
@@ -2691,17 +2807,13 @@ export function renderBrowserAppRuntimeScript(): string {
     return unreadCount >= 0 ? String(unreadCount) : '';
   }
 
-  function isIndividualStreamView(view) {
-    return view && (view.kind === 'feed' || view.kind === 'folder');
-  }
-
   function renderMarkAllAsReadAction() {
     if (!markAllAsReadButton) {
       return;
     }
 
     const activeView = getActiveView();
-    if (!isIndividualStreamView(activeView)) {
+    if (!activeView) {
       markAllAsReadButton.classList.add('hidden');
       markAllAsReadButton.disabled = true;
       markAllAsReadButton.setAttribute('aria-disabled', 'true');
@@ -2709,14 +2821,15 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const hasUnreadItems = activeView.unreadCount > 0;
-    const isDisabled = isMarkingAllAsRead || Boolean(pendingArticleMutation) || !hasUnreadItems;
+    const hasUnreadItems = ['today', 'starred'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
+    const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems;
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
     markAllAsReadButton.disabled = isDisabled;
     markAllAsReadButton.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
     markAllAsReadButton.setAttribute('aria-label', scopeLabel);
-    markAllAsReadButton.textContent = isMarkingAllAsRead ? 'Marking all as read…' : 'Mark all as read';
+    markAllAsReadButton.textContent = pendingArticleMutation?.kind === 'bulk' && pendingArticleMutation.scope === 'all'
+      ? 'Marking all as read…' : 'Mark all as read';
   }
   function isReaderVisible() {
     return session.status === 'authenticated' && !readerShell.classList.contains('hidden');
@@ -2826,7 +2939,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     if ((key === 'm' || key === 's') && !event.metaKey && !event.ctrlKey && !event.altKey &&
         isReaderVisible() && !isEditableTarget(event.target) && !pendingArticleMutation &&
-        !isMarkingAllAsRead && articleCache.has(selectedItemId)) {
+        articleCache.has(selectedItemId)) {
       if (typeof event.preventDefault === 'function') event.preventDefault();
       void toggleSelectedArticleState(key === 'm' ? 'read' : 'starred');
       return true;
@@ -3120,6 +3233,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderFeeds() {
+    renderArticleQueryControls();
     clearElement(viewsList);
     clearElement(foldersList);
     clearElement(feedsList);
@@ -3151,6 +3265,31 @@ export function renderBrowserAppRuntimeScript(): string {
 
     feedsStatus.textContent =
       uncategorizedFeedViews.length > 0 ? 'Uncategorized feeds' : unreadOnly ? 'No uncategorized feeds with unread items.' : 'No uncategorized feeds.';
+  }
+
+  function renderArticleQueryControls() {
+    const view = getActiveView();
+    articleReadFilterSelect.value = getArticleQuery().filter;
+    articleReadFilterSelect.disabled = !view || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
+    articleSortSelect.value = articleSortOrder;
+    articleSortSelect.disabled = Boolean(pendingArticleMutation);
+    articleBulkButton.disabled = session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
+      (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
+  }
+
+  async function changeArticleQuery() {
+    if (pendingArticleMutation?.kind === 'bulk') return;
+    saveActiveViewState();
+    const query = articleSearchInput.value.trim();
+    const filter = ['unread', 'read'].includes(articleReadFilterSelect.value) ? articleReadFilterSelect.value : 'all';
+    const sort = articleSortSelect.value === 'oldest' ? 'oldest' : 'newest';
+    const currentView = getActiveView();
+    articleSearchQuery = query.slice(0, 200);
+    if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
+    articleSortOrder = sort;
+    heldReaderArticle = null;
+    articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
+    await loadActiveView();
   }
 
   function revealKeyboardSelectedRow() {
@@ -3565,6 +3704,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function buildStreamIdsUrl(view, continuation) {
+    if (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest') {
+      return buildBrowserArticlesUrl(view, continuation);
+    }
     const params = new URLSearchParams();
     params.set('s', view.streamId);
     params.set('n', String(client.INITIAL_ITEM_ID_LIMIT));
@@ -3577,10 +3719,32 @@ export function renderBrowserAppRuntimeScript(): string {
     return '/reader/api/0/stream/items/ids?' + params.toString();
   }
 
+  function buildBrowserArticlesUrl(view, continuation, options) {
+    const query = options?.query || getArticleQuery(view.id);
+    const params = new URLSearchParams({ stream: view.streamId, q: query.q, filter: query.filter,
+      sort: query.sort, limit: String(options?.limit || client.INITIAL_ITEM_ID_LIMIT) });
+    if (view.kind === 'today') {
+      const bounds = options?.dayBounds || query.dayBounds || client.getLocalDayBounds();
+      params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
+      params.set('before', new Date(bounds.endSeconds * 1000).toISOString());
+    }
+    if (options?.before) params.set('before', options.before);
+    if (continuation) params.set('continuation', continuation);
+    return '/api/v1/browser/articles?' + params.toString();
+  }
+
+  function normalizeMembershipPayload(payload) {
+    if (Array.isArray(payload?.itemIds)) {
+      return { itemRefs: payload.itemIds.map((id) => ({ id: String(id) })), continuation: payload.continuation || '' };
+    }
+    return payload;
+  }
+
   function getRetainedTailIds(viewId, payload) {
     const state = getViewState(viewId, false);
     const view = views.find((candidate) => candidate.id === viewId);
-    if (!payload.continuation || !state?.hasMembership || ['unread', 'recent', 'starred'].includes(view?.kind)) {
+    if (!payload.continuation || !state?.hasMembership || state.query.q || state.query.filter !== 'all' ||
+        ['unread', 'recent', 'starred'].includes(view?.kind)) {
       return [];
     }
     const returnedIds = new Set((payload.itemRefs || []).map((itemRef) => String(itemRef.id)));
@@ -3634,6 +3798,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     if (viewId === activeViewId) {
+      activeLoadedQueryKey = state.queryKey;
       const preservedScrollTop = getArticleScrollTop();
       itemIds = [...state.itemIds];
       nextItemIdsContinuation = state.continuation;
@@ -3651,16 +3816,19 @@ export function renderBrowserAppRuntimeScript(): string {
     const generation = accountGeneration;
     const token = session.token;
     const pageKey = continuation || 'root';
-    const requestKey = generation + ':' + view.id + ':' + pageKey;
+    const queryKey = getViewQueryKey(view.id);
+    const requestKey = generation + ':' + queryKey + ':' + pageKey;
     const existingRequest = inFlightMembershipRequests.get(requestKey);
     if (existingRequest) {
       return existingRequest;
     }
 
     const state = getViewState(view.id);
-    const rootRequestId = continuation ? state.rootRequestId : ++state.rootRequestId;
+    const rootRequestId = continuation ? state.rootRequestId : ++membershipRootRequestId;
+    if (!continuation) state.rootRequestId = rootRequestId;
     const requestPromise = authenticatedJson(buildStreamIdsUrl(view, continuation))
-      .then((payload) => {
+      .then((rawPayload) => {
+        const payload = normalizeMembershipPayload(rawPayload);
         if (!requestBelongsToCurrentSession(generation, token)) {
           return null;
         }
@@ -3670,7 +3838,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const returnedIds = [
           ...new Set(payload.itemRefs.map((itemRef) => String(itemRef.id)).filter(Boolean)),
         ];
-        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId };
+        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId, queryKey };
       })
       .finally(() => {
         if (inFlightMembershipRequests.get(requestKey) === requestPromise) {
@@ -3714,7 +3882,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const membershipRequest = requestMembershipPage(activeView, '', { refresh: true });
       expectedRootRequestId = getViewState(activeView.id, false)?.rootRequestId;
       const result = await membershipRequest;
-      if (!result || !requestBelongsToCurrentSession(generation, token)) {
+      if (!result || result.queryKey !== getViewQueryKey(activeView.id) || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
       await ensureArticleContent(result.returnedIds.slice(0, ARTICLE_WINDOW_SIZE), { generation, token });
@@ -3872,7 +4040,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
 
     try {
-      const payload = await authenticatedJson(buildStreamIdsUrl(activeView, continuation));
+      const payload = normalizeMembershipPayload(await authenticatedJson(buildStreamIdsUrl(activeView, continuation)));
       if (requestId !== activeViewRequestId || activeItemIdsPageRequest !== pageRequest ||
           activeState.membershipEpoch !== pageRequest.epoch) {
         return;
@@ -3948,6 +4116,7 @@ export function renderBrowserAppRuntimeScript(): string {
     activeViewRequestId = requestId;
     cancelContentLoads();
     const state = getViewState(activeView.id);
+    activeLoadedQueryKey = state.queryKey;
     itemIds = [...state.itemIds];
     nextItemIdsContinuation = state.continuation;
     activeItemIdsPageRequest = null;
@@ -3974,6 +4143,7 @@ export function renderBrowserAppRuntimeScript(): string {
         expectedRootRequestId = state.rootRequestId;
         const result = await membershipRequest;
         if (!result || requestId !== activeViewRequestId || !requestBelongsToCurrentSession(result.generation, result.token) ||
+            result.queryKey !== getViewQueryKey(activeView.id) ||
             getViewState(activeView.id, false)?.rootRequestId !== result.rootRequestId) {
           return;
         }
@@ -4001,67 +4171,8 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function markAllAsRead() {
-    const activeView = getActiveView();
-    if (!isIndividualStreamView(activeView) || activeView.unreadCount <= 0 || isMarkingAllAsRead || pendingArticleMutation) {
-      return;
-    }
-
-    const requestViewId = activeView.id;
-    const requestToken = session.token;
-    const generation = accountGeneration;
-    const requestId = ++activeMarkAllRequestId;
-    const isCurrentRequest = () => requestId === activeMarkAllRequestId &&
-      requestBelongsToCurrentSession(generation, requestToken);
-    isMarkingAllAsRead = true;
-    renderMarkAllAsReadAction();
-    renderArticleActions();
-    articlesStatus.textContent = 'Marking all items as read…';
-
-    const form = new FormData();
-    form.set('s', activeView.streamId);
-
-    try {
-      const response = await authenticatedFetch('/reader/api/0/mark-all-as-read', {
-        method: 'POST',
-        body: form,
-      });
-      if (!response.ok) {
-        throw new Error('Mark all as read request failed');
-      }
-      if (!isCurrentRequest()) return;
-
-      const knownStreamIds = new Set(getViewState(requestViewId, false)?.itemIds || []);
-      for (const [itemId, item] of [...articleMetadataCache]) {
-        const belongs = activeView.kind === 'feed' ? item.origin?.streamId === activeView.streamId :
-          item.categories?.includes(activeView.streamId);
-        if (belongs || knownStreamIds.has(itemId)) applyArticleState(itemId, 'read', true, true);
-      }
-      undoArticleMutation = null;
-      renderArticles();
-      renderReader();
-
-      const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
-      if (
-        !refreshed &&
-        requestViewId === getActiveView()?.id &&
-        isCurrentRequest()
-      ) {
-        articlesStatus.textContent = 'Marked all as read, but could not refresh this view.';
-      }
-    } catch (_error) {
-      if (
-        requestViewId === getActiveView()?.id &&
-        isCurrentRequest()
-      ) {
-        articlesStatus.textContent = 'Could not mark all as read.';
-      }
-    } finally {
-      if (isCurrentRequest()) {
-        isMarkingAllAsRead = false;
-        renderMarkAllAsReadAction();
-        renderArticleActions();
-      }
-    }
+    if (markAllAsReadButton.disabled) return;
+    return markArticleRangeRead('all');
   }
 
   function getArticleState(item, field) {
@@ -4077,11 +4188,13 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function hasHeldReaderSelection() {
     return heldReaderArticle?.viewId === activeViewId && heldReaderArticle.itemId === selectedItemId &&
+      heldReaderArticle.queryKey === getViewQueryKey(activeViewId) &&
       articleCache.has(selectedItemId);
   }
 
   function renderArticleActions() {
-    const target = JSON.stringify([activeViewId, selectedItemId]);
+    renderArticleQueryControls();
+    const target = JSON.stringify([activeViewId, selectedItemId, getViewQueryKey(activeViewId)]);
     if (readerActionTarget !== target) {
       readerActionTarget = target;
       readerActionSelectionId += 1;
@@ -4092,7 +4205,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const isRead = getArticleState(article, 'read');
     const isStarred = getArticleState(article, 'starred');
     const disabled = session.status !== 'authenticated' || !selectedItemId ||
-      !articleCache.has(selectedItemId) || Boolean(pendingArticleMutation) || isMarkingAllAsRead;
+      !articleCache.has(selectedItemId) || Boolean(pendingArticleMutation);
     markUnreadButton.disabled = disabled;
     markUnreadButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     markUnreadButton.setAttribute('aria-busy', isPending && pendingArticleMutation.field === 'read' ? 'true' : 'false');
@@ -4105,34 +4218,45 @@ export function renderBrowserAppRuntimeScript(): string {
     starArticleButton.textContent = isPending && pendingArticleMutation.field === 'starred'
       ? 'Saving…' : isStarred ? '★ Starred' : '☆ Star';
     undoArticleButton.classList.toggle('hidden', !undoArticleMutation);
-    undoArticleButton.disabled = !undoArticleMutation || Boolean(pendingArticleMutation) || isMarkingAllAsRead;
+    undoArticleButton.disabled = !undoArticleMutation || Boolean(pendingArticleMutation);
     undoArticleButton.setAttribute('aria-label', undoArticleMutation
       ? 'Undo ' + undoArticleMutation.action + ' for ' + undoArticleMutation.title : 'Undo article action');
     readerActionStatus.textContent = readerActionMessage;
   }
 
   function reconcileArticleCollections(itemId, field, target) {
-    const affected = field === 'read' ? ['unread', 'recent'] : ['starred'];
     let activeAffected = false;
-    for (const viewId of affected) {
-      const state = getViewState(viewId, false);
-      if (!state) continue;
-      const belongs = viewId === 'unread' ? !target : target;
-      if (belongs && state.hasMembership && !state.itemIds.includes(itemId)) {
+    const article = loadedItemsById[itemId];
+    for (const state of viewStates.values()) {
+      const viewId = state.viewId;
+      const view = views.find((candidate) => candidate.id === viewId);
+      if (!view || (field === 'starred' ? view.kind !== 'starred' :
+          !['unread', 'recent'].includes(view.kind) && state.query.filter === 'all')) continue;
+      const read = field === 'read' ? target : getArticleState(article, 'read');
+      const starred = field === 'starred' ? target : getArticleState(article, 'starred');
+      const belongs = (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read) &&
+        (view.kind !== 'starred' || starred);
+      const scopeMatches = ['all', 'unread', 'recent', 'starred'].includes(view.kind) ||
+        (view.kind === 'feed' && article?.origin?.streamId === view.streamId) ||
+        (view.kind === 'folder' && article?.categories?.includes(view.streamId));
+      if (belongs && state.hasMembership && !state.itemIds.includes(itemId) &&
+          (state.locallyRemovedIds.has(itemId) || (!state.query.q && scopeMatches))) {
         state.itemIds.push(itemId);
-        state.itemIds.sort((left, right) => (loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) ||
-          Number(right) - Number(left));
+        state.itemIds.sort((left, right) => (state.query.sort === 'oldest' ? -1 : 1) *
+          ((loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) || Number(right) - Number(left)));
         state.confirmedItemIds.add(itemId);
+        state.locallyRemovedIds.delete(itemId);
       } else if (!belongs) {
+        if (state.itemIds.includes(itemId)) state.locallyRemovedIds.add(itemId);
         state.itemIds = state.itemIds.filter((id) => id !== itemId);
         state.confirmedItemIds.delete(itemId);
       }
       state.membershipEpoch += 1;
-      state.rootRequestId += 1;
+      state.rootRequestId = ++membershipRootRequestId;
       state.appliedRootRequestId = 0;
-      if (viewId === activeViewId) {
+      if (state.queryKey === getViewQueryKey(activeViewId)) {
         activeAffected = true;
-        if (!belongs && selectedItemId === itemId) heldReaderArticle = { itemId, viewId };
+        if (!belongs && selectedItemId === itemId) heldReaderArticle = { itemId, viewId, queryKey: state.queryKey };
         if (belongs && heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
         itemIds = [...state.itemIds];
         activeItemIdsPageRequest = null;
@@ -4145,9 +4269,12 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function applyArticleState(itemId, field, target, manual) {
-    const versions = articleStateMutations.get(itemId) || {};
-    versions[field] = { version: ++articleStateMutationId, target };
-    articleStateMutations.set(itemId, versions);
+    const version = ++articleStateMutationId;
+    if (articleCache.has(itemId) || articleMetadataCache.has(itemId) || inFlightContentRequests.has(itemId)) {
+      const versions = articleStateMutations.get(itemId) || {};
+      versions[field] = { version, target };
+      articleStateMutations.set(itemId, versions);
+    }
     for (const cache of [articleCache, articleMetadataCache]) {
       const item = cache.get(itemId);
       if (item) cache.set(itemId, withArticleState(item, field, target));
@@ -4168,12 +4295,13 @@ export function renderBrowserAppRuntimeScript(): string {
   async function undoLastArticleMutation() {
     const undo = undoArticleMutation;
     if (!undo || !requestBelongsToCurrentSession(undo.generation, undo.token)) return;
+    if (undo.kind === 'bulk') return undoBulkArticleMutation(undo);
     return mutateArticleState(undo.itemId, undo.field, undo.previous, { undo });
   }
 
   async function mutateArticleState(itemId, field, target, options) {
     const item = loadedItemsById[itemId] || options?.undo?.itemSnapshot;
-    if (session.status !== 'authenticated' || !item || pendingArticleMutation || isMarkingAllAsRead) return;
+    if (session.status !== 'authenticated' || !item || pendingArticleMutation) return;
     const request = {
       itemId, field, target, generation: accountGeneration, token: session.token,
       selectionId: readerActionSelectionId, previous: getArticleState(item, field),
@@ -4234,6 +4362,197 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
+  function isCurrentBulkRequest(request) {
+    return pendingArticleMutation === request && requestBelongsToCurrentSession(request.generation, request.token);
+  }
+
+  function formatArticleCount(count) {
+    return count + ' article' + (count === 1 ? '' : 's');
+  }
+
+  function showBulkStatus(request, message) {
+    if (isCurrentBulkRequest(request) && request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
+      articleQueryStatus.textContent = message;
+    }
+  }
+
+  async function collectBulkArticleIds(request) {
+    const collected = [];
+    const seenIds = new Set();
+    const seenContinuations = new Set();
+    let continuation = '';
+    if (request.view.kind === 'today' && request.before &&
+        new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
+    do {
+      if (!isCurrentBulkRequest(request)) return [];
+      const url = buildBrowserArticlesUrl(request.view, continuation, {
+        query: request.query, limit: 100, before: request.before, dayBounds: request.dayBounds,
+      });
+      const payload = await authenticatedJson(url);
+      if (!isCurrentBulkRequest(request)) return [];
+      if (!Array.isArray(payload?.itemIds)) throw new Error('Invalid article selection');
+      for (const id of payload.itemIds.map(String)) {
+        if (!seenIds.has(id)) { seenIds.add(id); collected.push(id); }
+      }
+      showBulkStatus(request, 'Finding matching articles… ' + collected.length + ' found.');
+      continuation = payload.continuation || '';
+      if (continuation && seenContinuations.has(continuation)) throw new Error('Repeated article continuation');
+      seenContinuations.add(continuation);
+    } while (continuation);
+    if (request.mode === 'above' || request.mode === 'below') {
+      const index = collected.indexOf(request.selectedItemId);
+      if (index < 0) throw new Error('Selected article no longer belongs to this query');
+      return request.mode === 'above' ? collected.slice(0, index) : collected.slice(index + 1);
+    }
+    return collected;
+  }
+
+  async function snapshotBulkArticleStates(request, ids) {
+    const snapshots = [];
+    for (let index = 0; index < ids.length; index += client.CONTENT_CHUNK_SIZE) {
+      if (!isCurrentBulkRequest(request)) return [];
+      const batch = ids.slice(index, index + client.CONTENT_CHUNK_SIZE);
+      const form = new FormData();
+      for (const id of batch) form.append('i', id);
+      const payload = await authenticatedJson('/reader/api/0/stream/items/contents', { method: 'POST', body: form });
+      if (!isCurrentBulkRequest(request)) return [];
+      if (!Array.isArray(payload?.items)) throw new Error('Invalid article state snapshot');
+      const byId = new Map(payload.items.map((item) => [client.normalizeBrowserItemId(String(item.id)), item]));
+      for (const id of batch) {
+        const item = byId.get(id);
+        if (!item || !Array.isArray(item.categories)) throw new Error('Incomplete article state snapshot');
+        if (!getArticleState(item, 'read')) snapshots.push({ itemId: id, previous: false,
+          manuallyUnread: manuallyUnreadItemIds.has(id), itemSnapshot: createArticleMetadata(item) });
+      }
+      showBulkStatus(request, 'Checking previous read status… ' + Math.min(index + batch.length, ids.length) + ' of ' + ids.length + '.');
+    }
+    return snapshots;
+  }
+
+  async function refreshBulkUnreadCounts(request) {
+    try {
+      const result = await requestUnreadCounts(true);
+      if (!isCurrentBulkRequest(request)) return;
+      if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) throw new Error('Invalid counts');
+      views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
+      renderFeeds();
+    } catch (_error) {
+      if (isCurrentBulkRequest(request) && request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
+        articleQueryStatus.textContent += ' Could not refresh unread counts.';
+      }
+    }
+  }
+
+  async function writeBulkArticleStates(request, snapshots, target) {
+    const attempted = [];
+    let saved = 0;
+    for (let index = 0; index < snapshots.length; index += client.CONTENT_CHUNK_SIZE) {
+      if (!isCurrentBulkRequest(request)) return { attempted, saved, cancelled: true };
+      const batch = snapshots.slice(index, index + client.CONTENT_CHUNK_SIZE);
+      attempted.push(...batch);
+      const keyField = target ? 'mutationId' : 'undoMutationId';
+      const mutationId = batch[0][keyField] || crypto.randomUUID();
+      for (const item of batch) item[keyField] = mutationId;
+      try {
+        showBulkStatus(request, (target ? 'Marking read… ' : 'Undoing… ') + saved + ' of ' + snapshots.length + '.');
+        const response = await authenticatedFetch('/api/v1/mutations', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mutations: [{ id: mutationId, kind: 'set_read_batch', scope: request.scope,
+            itemIds: batch.map((item) => item.itemId), value: target }] }),
+        });
+        if (!response.ok) throw new Error('Bulk read update failed');
+        const payload = await response.json();
+        const receipt = payload.results?.find((result) => result.mutationId === mutationId);
+        if (!receipt || !['applied', 'already_applied'].includes(receipt.status)) throw new Error('Bulk read receipt failed');
+        if (!isCurrentBulkRequest(request)) return { attempted, saved, cancelled: true };
+        for (const snapshot of batch) applyArticleState(snapshot.itemId, 'read', target,
+          target || snapshot.manuallyUnread || snapshot.itemId === selectedItemId);
+        saved += batch.length;
+        renderArticles();
+        renderReader();
+        showBulkStatus(request, (target ? 'Marking read… ' : 'Undoing… ') + saved + ' of ' + snapshots.length + '.');
+      } catch (_error) {
+        return { attempted, saved, failed: true };
+      }
+    }
+    return { attempted, saved, failed: false };
+  }
+
+  function createBulkRequest(mode) {
+    const view = getActiveView();
+    return { kind: 'bulk', field: 'read', mode, scope: mode.startsWith('age-') ? 'older' :
+      ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
+      query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId,
+      selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
+      dayBounds: client.getLocalDayBounds(), before: mode.startsWith('age-')
+        ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null };
+  }
+
+  async function finishBulkRequest(request) {
+    if (!isCurrentBulkRequest(request)) return;
+    await refreshBulkUnreadCounts(request);
+    if (!isCurrentBulkRequest(request)) return;
+    pendingArticleMutation = null;
+    renderArticleActions();
+    renderMarkAllAsReadAction();
+    if (request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
+      void revalidateActiveView({ refreshUnread: false });
+    }
+    maybeAutoMarkRead();
+  }
+
+  async function markArticleRangeRead(requestedMode) {
+    if (!getActiveView() || session.status !== 'authenticated' || pendingArticleMutation) return;
+    const mode = requestedMode || articleBulkSelect.value;
+    if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
+        (['above', 'below'].includes(mode) && !selectedItemId)) return;
+    const request = createBulkRequest(mode);
+    pendingArticleMutation = request;
+    renderArticleActions();
+    renderMarkAllAsReadAction();
+    try {
+      const ids = await collectBulkArticleIds(request);
+      if (!isCurrentBulkRequest(request)) return;
+      const snapshots = await snapshotBulkArticleStates(request, ids);
+      if (!isCurrentBulkRequest(request)) return;
+      if (snapshots.length === 0) {
+        showBulkStatus(request, 'No unread articles matched this action.');
+      } else {
+        const result = await writeBulkArticleStates(request, snapshots, true);
+        if (!isCurrentBulkRequest(request)) return;
+        // Include the failed batch because its server outcome may be unknown.
+        // Undo restores its verified previous state as well as confirmed batches.
+        undoArticleMutation = { kind: 'bulk', action: 'mark read', title: formatArticleCount(result.attempted.length),
+          generation: request.generation, token: request.token, scope: request.scope, snapshots: result.attempted };
+        showBulkStatus(request, result.failed
+          ? 'Could not finish marking read. ' + result.saved + ' saved changes confirmed. Undo restores all attempted changes.'
+          : 'Marked ' + formatArticleCount(result.saved) + ' read. Undo is available.');
+      }
+    } catch (_error) {
+      showBulkStatus(request, 'Could not find or check the matching articles. No read changes were sent.');
+    } finally { await finishBulkRequest(request); }
+  }
+
+  async function undoBulkArticleMutation(undo) {
+    if (pendingArticleMutation || !requestBelongsToCurrentSession(undo.generation, undo.token)) return;
+    const request = createBulkRequest('undo');
+    request.scope = undo.scope;
+    pendingArticleMutation = request;
+    renderArticleActions();
+    renderMarkAllAsReadAction();
+    try {
+      const result = await writeBulkArticleStates(request, undo.snapshots, false);
+      if (!isCurrentBulkRequest(request)) return;
+      if (result.failed) {
+        undoArticleMutation = { ...undo, snapshots: undo.snapshots.slice(result.saved) };
+        showBulkStatus(request, 'Restored ' + formatArticleCount(result.saved) + '. Could not finish undo; try again.');
+      } else {
+        undoArticleMutation = null;
+        showBulkStatus(request, 'Restored previous read status for ' + formatArticleCount(result.saved) + '.');
+      }
+    } finally { await finishBulkRequest(request); }
+  }
+
   function normalizeAutoReadPolicy(value) {
     return value === 'opened' || value === 'progress' ? value : 'manual';
   }
@@ -4243,7 +4562,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function maybeAutoMarkRead() {
-    if (autoReadPolicy === 'manual' || pendingArticleMutation || isMarkingAllAsRead ||
+    if (autoReadPolicy === 'manual' || pendingArticleMutation ||
         !isReaderVisible() || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
         !articleCache.has(selectedItemId) || readyReaderItemId !== selectedItemId ||
         getArticleState(loadedItemsById[selectedItemId], 'read') || manuallyUnreadItemIds.has(selectedItemId)) return;
@@ -4338,7 +4657,7 @@ export function renderBrowserAppRuntimeScript(): string {
       subscriptions = subscriptionPayload.subscriptions;
       views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts);
       const validViewIds = new Set(views.map((view) => view.id));
-      viewStates = new Map([...viewStates].filter(([viewId]) => validViewIds.has(viewId)));
+      viewStates = new Map([...viewStates].filter(([_key, state]) => validViewIds.has(state.viewId)));
       pruneExpandedFolders();
       if (!views.some((view) => view.id === activeViewId)) {
         activeViewId = 'all';
@@ -4359,6 +4678,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function selectView(viewId) {
     heldReaderArticle = null;
+    articleQueryStatus.textContent = '';
     if (viewId === activeViewId) {
       void revalidateActiveView();
       return;
@@ -4502,6 +4822,13 @@ export function renderBrowserAppRuntimeScript(): string {
   markUnreadButton.addEventListener('click', () => {
     void toggleSelectedArticleState('read');
   });
+  searchButton.addEventListener('click', () => { articleSearchInput.focus(); });
+  articleQueryForm.addEventListener('submit', (event) => { event.preventDefault(); void changeArticleQuery(); });
+  clearArticleSearchButton.addEventListener('click', () => { articleSearchInput.value = ''; void changeArticleQuery(); });
+  articleReadFilterSelect.addEventListener('change', () => { void changeArticleQuery(); });
+  articleSortSelect.addEventListener('change', () => { void changeArticleQuery(); });
+  articleBulkSelect.addEventListener('change', renderArticleQueryControls);
+  articleBulkButton.addEventListener('click', () => { void markArticleRangeRead(); });
   starArticleButton.addEventListener('click', () => {
     void toggleSelectedArticleState('starred');
   });
