@@ -9,6 +9,7 @@ import { handleStaleFeeds } from './stale-feeds-api';
 import { handleBrowserArticles } from './browser-library-api';
 import { handleBrowserReaderSource, handleBrowserReadwiseSave } from './browser-reading-api';
 import type { Env } from './types';
+import { handleBrowserPush } from './web-push';
 
 export async function handleNativeApiRequest(request: Request, env: Env): Promise<Response> {
 	const authError = await requireApiAuth(request, env.API_PASSWORD);
@@ -31,6 +32,7 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	}
 	if (path === '/api/v1/browser/reader-source') return handleBrowserReaderSource(request);
 	if (path === '/api/v1/browser/readwise/save') return handleBrowserReadwiseSave(request);
+	if (path === '/api/v1/browser/push/capabilities') return handleBrowserPush(request, env);
 
 	try {
 		await ensureDatabaseSchema(env);
@@ -57,6 +59,7 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	if (path === '/api/v1/browser/articles') {
 		return handleBrowserArticles(request, env);
 	}
+	if (path === '/api/v1/browser/push/subscription') return handleBrowserPush(request, env);
 
 	return new Response('Not found', { status: 404 });
 }
