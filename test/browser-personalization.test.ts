@@ -88,6 +88,64 @@ test('export preserves complete history beyond panel limit and rejects incomplet
 	await assert.rejects(createService({ authenticatedFetch: async () => new Response('unavailable', { status: 503 }) }).service.exportData(), /Could not export/);
 });
 
+test('reset waits for older feedback, suppresses its stale confirmation and preserves explicitly newer feedback behind the barrier', async () => {
+	let resolveOlder!: (value: any) => void;
+	const calls: any[] = []; const resetStates: boolean[] = []; const history: string[] = [];
+	const { service } = createService({ onResetStateChanged: (value: boolean) => resetStates.push(value), authenticatedJson: async (path: string, init: RequestInit) => {
+		if (path.includes('all=1')) { calls.push('reset'); history.length = 0; return { deleted: 'all' }; }
+		const change = JSON.parse(init.body as string).mutations[0]; calls.push(change);
+		if (calls.length === 1) return new Promise((resolve) => { resolveOlder = (value) => { history.push('old'); resolve(value); }; });
+		history.push('new'); return { results: [{ mutationId: change.id, status: 'applied' }] };
+	} });
+	const older = service.feedback('7', 'more_like_this');
+	const stale = assert.rejects(older, (error: any) => error.code === 'personalization_superseded');
+	const reset = service.resetAll();
+	assert.equal(service.isResetting(), true); assert.equal(service.getResetGeneration(), 1);
+	const newer = service.feedback('8', 'not_interested');
+	assert.equal(calls.length, 1, 'reset and new feedback must wait for the older write');
+	resolveOlder({ results: [{ mutationId: calls[0].id, status: 'applied' }] });
+	await stale; await reset; const fresh = await newer;
+	assert.equal(fresh.confirmed, true); assert.deepEqual(calls.map((item) => typeof item === 'string' ? item : item.itemIds[0]), ['7', 'reset', '8']);
+	assert.deepEqual(history, ['new']); assert.deepEqual(resetStates, [true, false]); assert.equal(service.isResetting(), false);
+});
+
+test('reset discards retained uncertain feedback IDs and serializes earlier topic writes before clearing preferences', async () => {
+	const mutations: any[] = []; let failing = true;
+	const { service } = createService({ authenticatedJson: async (path: string, init: RequestInit) => {
+		if (path.includes('all=1')) return { deleted: 'all' };
+		const change = JSON.parse(init.body as string).mutations[0]; mutations.push(change);
+		if (failing) throw new Error('uncertain network failure');
+		return { results: [{ mutationId: change.id, status: 'applied' }] };
+	} });
+	await assert.rejects(service.feedback('7', 'more_like_this'), /network/);
+	await service.resetAll(); failing = false;
+	await service.feedback('7', 'more_like_this');
+	assert.notEqual(mutations[0].id, mutations[1].id, 'explicit post-reset feedback must not revive the pre-reset retry');
+	let resolveTopics!: (value: any) => void; const writes: string[] = [];
+	const topicService = createService({ authenticatedJson: async (path: string, init: RequestInit) => {
+		writes.push(init.method!);
+		if (init.method === 'PUT') return new Promise((resolve) => { resolveTopics = resolve; });
+		return { deleted: 'all' };
+	} }).service;
+	const topics = topicService.saveTopics(['Old topic']); const superseded = assert.rejects(topics, /superseded/);
+	const resetting = topicService.resetAll(); assert.deepEqual(writes, ['PUT']);
+	resolveTopics(snapshot(['Old topic'])); await superseded; await resetting;
+	assert.deepEqual(writes, ['PUT', 'DELETE']);
+});
+
+test('failed reset releases the busy state, blocks queued feedback and cannot cross an account switch', async () => {
+	let resolveReset!: (value: any) => void; const calls: string[] = [];
+	const harness = createService({ authenticatedJson: async (path: string) => { calls.push(path); return new Promise((resolve) => { resolveReset = resolve; }); } });
+	const reset = harness.service.resetAll(); await settle(() => calls.length === 1);
+	const failed = assert.rejects(reset, /could not be confirmed/);
+	const feedback = harness.service.feedback('7', 'more_like_this'); const blocked = assert.rejects(feedback, /could not be confirmed/);
+	resolveReset({ deleted: 'wrong' }); await failed; await blocked;
+	assert.equal(calls.length, 1); assert.equal(harness.service.isResetting(), false);
+	const changed = harness.service.resetAll(); const rejected = assert.rejects(changed, /session changed/);
+	harness.setIdentity('account-2'); await rejected;
+	assert.equal(calls.length, 1, 'new-account reset must not be sent'); assert.equal(harness.service.isResetting(), false);
+});
+
 class Element {
 	children: Element[] = []; attrs: Record<string, string> = {}; actions: Record<string, () => void> = {};
 	own = ''; value = ''; checked = false; disabled = false; type = ''; href = ''; download = '';

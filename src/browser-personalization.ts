@@ -23,12 +23,43 @@ function installBrowserPersonalization(root: any): void {
 	root.__PIGEON_PERSONALIZATION__ = { create(adapter: any) {
 		const identity = adapter.getSessionIdentity();
 		let closed = false;
+		let resetGeneration = 0;
+		let resetting = false;
+		let resetPromise: Promise<any> | null = null;
+		const pendingWrites = new Set<Promise<any>>();
 		const feedbackRequests = new Map<string, { id: string; promise: Promise<any> | null }>();
 		const panels = new Set<() => void>();
+		const panelPendingUpdates = new Set<() => void>();
 		function current() { return !closed && identity === adapter.getSessionIdentity(); }
 		function check() { if (!current()) throw new Error('Personalization session changed. Reopen this panel.'); }
 		async function json(path: string, init?: RequestInit): Promise<any> {
 			check(); const payload = await adapter.authenticatedJson(path, init); check(); return payload;
+		}
+		function checkGeneration(generation: number) {
+			check();
+			if (generation !== resetGeneration) {
+				const error = new Error('This operation was superseded by resetting preferences.') as Error & { code: string };
+				error.code = 'personalization_superseded'; throw error;
+			}
+		}
+		function writeJSON(path: string, init: RequestInit): Promise<any> {
+			check();
+			const generation = resetGeneration;
+			const barrier = resetPromise;
+			const operation = (async () => {
+				if (barrier) await barrier;
+				checkGeneration(generation);
+				const payload = await json(path, init);
+				checkGeneration(generation);
+				return payload;
+			})();
+			pendingWrites.add(operation);
+			void operation.then(() => pendingWrites.delete(operation), () => pendingWrites.delete(operation));
+			return operation;
+		}
+		function notifyResetState() {
+			for (const update of panelPendingUpdates) update();
+			if (current() && adapter.onResetStateChanged) { try { adapter.onResetStateChanged(resetting); } catch { /* UI callback cannot change a confirmed server operation. */ } }
 		}
 		function snapshot(value: any): any {
 			if (!value || !Array.isArray(value.monitoredTopics) || !Array.isArray(value.history) || !value.policy) throw new Error('Personalization data is unavailable. Try again.');
@@ -37,20 +68,42 @@ function installBrowserPersonalization(root: any): void {
 		}
 		const service: any = {
 			isCurrent: current,
-			async load() { return snapshot(await json('/api/v1/personalization')); },
+			isResetting: () => resetting,
+			getResetGeneration: () => resetGeneration,
+			async load() {
+				const generation = resetGeneration; const barrier = resetPromise;
+				if (barrier) await barrier;
+				checkGeneration(generation);
+				const payload = await json('/api/v1/personalization'); checkGeneration(generation);
+				return snapshot(payload);
+			},
 			async saveTopics(topics: string[]) {
-				return snapshot(await json('/api/v1/personalization', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ monitoredTopics: normalizeBrowserTopics(topics) }) }));
+				const generation = resetGeneration;
+				const payload = await writeJSON('/api/v1/personalization', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ monitoredTopics: normalizeBrowserTopics(topics) }) });
+				checkGeneration(generation); return snapshot(payload);
 			},
 			async deleteHistory(id: string) {
 				if (typeof id !== 'string' || !id || id.length > 200) throw new Error('Invalid history entry.');
-				const result = await json('/api/v1/personalization?id=' + encodeURIComponent(id), { method: 'DELETE' });
+				const result = await writeJSON('/api/v1/personalization?id=' + encodeURIComponent(id), { method: 'DELETE' });
 				if (result?.deleted !== id) throw new Error('Deletion could not be confirmed. Refresh before retrying.');
 				return result;
 			},
-			async resetAll() {
-				const result = await json('/api/v1/personalization?all=1', { method: 'DELETE' });
-				if (result?.deleted !== 'all') throw new Error('Reset could not be confirmed. Refresh before retrying.');
-				return result;
+			resetAll(): Promise<any> {
+				check();
+				if (resetPromise) return resetPromise;
+				const olderWrites = [...pendingWrites];
+				resetGeneration += 1;
+				feedbackRequests.clear();
+				resetting = true;
+				const operation = Promise.allSettled(olderWrites).then(async () => {
+					check(); const result = await json('/api/v1/personalization?all=1', { method: 'DELETE' });
+					if (result?.deleted !== 'all') throw new Error('Reset could not be confirmed. Refresh before retrying.');
+					return result;
+				});
+				const tracked = operation.finally(() => { if (resetPromise === tracked) { resetPromise = null; resetting = false; notifyResetState(); } });
+				resetPromise = tracked;
+				notifyResetState();
+				return tracked;
 			},
 			async exportData(): Promise<string> {
 				check(); const response = await adapter.authenticatedFetch('/api/v1/personalization?download=1'); check();
@@ -69,12 +122,14 @@ function installBrowserPersonalization(root: any): void {
 				if (request?.promise) return request.promise;
 				if (!request) { request = { id: crypto.randomUUID(), promise: null }; feedbackRequests.set(key, request); }
 				const active = request;
-				active.promise = json('/api/v1/mutations', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+				const generation = resetGeneration;
+				active.promise = writeJSON('/api/v1/mutations', { method: 'POST', headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ mutations: [{ id: active.id, kind: 'feedback', itemIds: [readerId], feedback: type }] }) })
 					.then((payload) => {
+						checkGeneration(generation);
 						const receipt = payload?.results?.find((result: any) => result.mutationId === active.id);
 						if (!['applied', 'already_applied'].includes(receipt?.status)) throw new Error('Feedback was not confirmed. Retry to check the same operation.');
-						feedbackRequests.delete(key);
+						if (feedbackRequests.get(key) === active) feedbackRequests.delete(key);
 						return { confirmed: true, mutationId: active.id };
 					}).finally(() => { active.promise = null; });
 				return active.promise;
@@ -90,9 +145,10 @@ function installBrowserPersonalization(root: any): void {
 				const status = element('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
 				const policy = element('section'); const topics = element('section'); const history = element('section'); const exports = element('section');
 				container.append(status, policy, topics, history, exports);
-				function pending() { for (const node of container.querySelectorAll('button,input,textarea')) node.disabled = busy; }
+				function pending() { for (const node of container.querySelectorAll('button,input,textarea')) node.disabled = busy || resetting; }
+				panelPendingUpdates.add(pending);
 				async function run(action: () => Promise<void>) {
-					if (!visible() || busy) return;
+					if (!visible() || busy || resetting) return;
 					busy = true; status.textContent = 'Working…'; pending();
 					try { await action(); } catch (error) { if (visible()) status.textContent = error instanceof Error ? error.message : 'Could not complete the operation. Try again.'; }
 					finally { if (visible()) { busy = false; pending(); } }
@@ -156,7 +212,7 @@ function installBrowserPersonalization(root: any): void {
 				async function refresh() { await run(async () => { render(await service.load()); if (visible()) status.textContent = 'Personalization loaded.'; }); }
 				container.append(button('Refresh personalization', () => void refresh()));
 				void refresh();
-				function destroy() { if (!alive) return; alive = false; panels.delete(destroy); if (exportURL) root.URL.revokeObjectURL(exportURL); container.replaceChildren(); }
+				function destroy() { if (!alive) return; alive = false; panels.delete(destroy); panelPendingUpdates.delete(pending); if (exportURL) root.URL.revokeObjectURL(exportURL); container.replaceChildren(); }
 				panels.add(destroy);
 				return { refresh, destroy };
 			},
