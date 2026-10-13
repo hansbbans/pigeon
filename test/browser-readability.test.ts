@@ -1,9 +1,6 @@
 import * as assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 import { BROWSER_READABILITY_SOURCE, escapeBrowserReadabilityScript, renderBrowserReadabilityScript } from '../src/browser-readability';
@@ -29,14 +26,22 @@ test('emitted bundle is inline-script safe, executable, and does not fetch or re
 	assert.throws(() => window.__PIGEON_READING_TOOLS__.extract('<p>article</p>', 'https://public.example'), /sanitizer/);
 });
 
-const CHROME = process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : '/usr/bin/chromium';
-
-test('real browser extracts known article without executable markup or source image/media requests', { skip: !existsSync(CHROME) }, async (t) => {
-	const profile = mkdtempSync(join(tmpdir(), 'pigeon-readability-test-'));
-	t.after(() => rmSync(profile, { recursive: true, force: true }));
+// Browser smoke runs separately because npm's parallel Worker suite must not
+// launch/control native browsers. Root opens the printed fixture with CUA.
+// PIGEON_READABILITY_CUA_SMOKE=1 npx tsx --test test/browser-readability.test.ts
+test('CUA browser smoke extracts known article with no source resource requests', { skip: process.env.PIGEON_READABILITY_CUA_SMOKE !== '1' }, async (t) => {
 	const probes: string[] = [];
 	let fixture = '';
+	let resolveReport!: (value: any) => void;
+	let rejectReport!: (error: Error) => void;
+	const reportReady = new Promise<any>((resolve, reject) => { resolveReport = resolve; rejectReport = reject; });
 	const server = createServer((request, response) => {
+		if (request.url === '/report' && request.method === 'POST') {
+			let body = '';
+			request.on('data', (chunk) => { body += chunk.toString(); if (body.length > 100_000) request.destroy(); });
+			request.on('end', () => { try { resolveReport(JSON.parse(body)); response.end('reported'); } catch { rejectReport(new Error('Invalid browser smoke report')); response.writeHead(400).end(); } });
+			return;
+		}
 		if (request.url !== '/') probes.push(request.url || 'unknown');
 		response.setHeader('Content-Type', 'text/html; charset=utf-8');
 		response.end(request.url === '/' ? fixture : '<p>resource probe</p>');
@@ -58,16 +63,11 @@ test('real browser extracts known article without executable markup or source im
 			const probe = document.createElement('template'); probe.innerHTML = parsed.content;
 			const report = {title:parsed.title, text:parsed.textContent, content:parsed.content, executed:Boolean(window.__SOURCE_EXECUTED__), unsafeCount:probe.content.querySelectorAll('script,iframe,style,link,svg,[onclick],[onerror]').length};
 			const result = document.createElement('pre'); result.id='result'; result.textContent=JSON.stringify(report); document.body.append(result);
-		} catch (error) { const result=document.createElement('pre'); result.id='result'; result.textContent=JSON.stringify({error:error.message}); document.body.append(result); }` + '</script></body></html>';
-	const browser = spawn(CHROME, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-sync', '--disable-component-update', '--user-data-dir=' + profile, '--virtual-time-budget=1000', '--dump-dom', `http://127.0.0.1:${port}/`], { stdio: ['ignore', 'pipe', 'pipe'] });
-	t.after(() => { if (browser.exitCode === null) browser.kill('SIGTERM'); });
-	const deadline = setTimeout(() => browser.kill('SIGTERM'), 20_000);
-	let output = '';
-	browser.stdout.on('data', (chunk) => { output += chunk.toString(); });
-	await new Promise<void>((resolve, reject) => { browser.once('error', reject); browser.once('close', (code) => code === 0 ? resolve() : reject(new Error('Headless browser did not complete: ' + code))); }).finally(() => clearTimeout(deadline));
-	const match = output.match(/<pre id="result">([\s\S]*?)<\/pre>/);
-	assert.ok(match, 'browser did not produce an extraction result');
-	const report = JSON.parse(match[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+			fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});
+		} catch (error) { const report={error:error.message}; const result=document.createElement('pre'); result.id='result'; result.textContent=JSON.stringify(report); document.body.append(result); fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)}); }` + '</script></body></html>';
+	console.log(`Open this Readability smoke fixture with CUA: http://127.0.0.1:${port}/`);
+	const deadline = setTimeout(() => rejectReport(new Error('CUA did not open the browser fixture within 120 seconds')), 120_000);
+	const report = await reportReady.finally(() => clearTimeout(deadline));
 	assert.equal(report.error, undefined);
 	assert.equal(report.title, 'A carefully reported library restoration');
 	assert.match(report.text, /books, volunteers, and reading/);
