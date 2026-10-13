@@ -7,6 +7,7 @@ import { handleImageProxy } from './image-proxy';
 import { handlePersonalization } from './personalization-api';
 import { handleStaleFeeds } from './stale-feeds-api';
 import { handleBrowserArticles } from './browser-library-api';
+import { handleBrowserReaderSource, handleBrowserReadwiseSave } from './browser-reading-api';
 import type { Env } from './types';
 
 export async function handleNativeApiRequest(request: Request, env: Env): Promise<Response> {
@@ -28,6 +29,8 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	if (path === '/api/v1/image-proxy' && request.method === 'GET') {
 		return handleImageProxy(request);
 	}
+	if (path === '/api/v1/browser/reader-source') return handleBrowserReaderSource(request);
+	if (path === '/api/v1/browser/readwise/save') return handleBrowserReadwiseSave(request);
 
 	try {
 		await ensureDatabaseSchema(env);

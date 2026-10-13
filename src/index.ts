@@ -71,7 +71,9 @@ export default {
 			path === '/api/v1/personalization' ||
 			path === '/api/v1/image-proxy' ||
 			path === '/api/v1/stale-feeds' ||
-			path === '/api/v1/browser/articles'
+			path === '/api/v1/browser/articles' ||
+			path === '/api/v1/browser/reader-source' ||
+			path === '/api/v1/browser/readwise/save'
 		) {
 			return handleNativeApiRequest(request, env);
 		}
