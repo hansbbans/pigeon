@@ -12,6 +12,7 @@ import { handleNativeApiRequest } from './native-api';
 import { handleFeedDiscovery } from './feed-discovery';
 import { handleYouTubeChannelSearch } from './youtube-channel-search';
 import { renderBrowserServiceWorker } from './browser-service-worker';
+import { handleBrowserInstallationAsset } from './browser-manifest';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -20,6 +21,9 @@ export default {
 
 		if (path === '/health') {
 			return new Response('ok');
+		}
+		if (path === '/app/manifest.webmanifest' || path === '/app/icon.png' || path === '/app/icon-192.png' || path === '/app/icon-512.png') {
+			return handleBrowserInstallationAsset(request);
 		}
 		if (path === '/app/sw.js' && request.method === 'GET') {
 			return new Response(renderBrowserServiceWorker(), { headers: {
