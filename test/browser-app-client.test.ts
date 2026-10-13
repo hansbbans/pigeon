@@ -26,6 +26,7 @@ import {
 import { renderBrowserAppRuntimeScript } from '../src/browser-app';
 import { handleGreaderRequest } from '../src/greader';
 import { handleNativeApiRequest } from '../src/native-api';
+import { renderBrowserLibraryManagementScript } from '../src/browser-library-management';
 import { generateApiToken } from '../src/api-auth';
 
 test('extractAuthToken parses the Auth token from a ClientLogin response', () => {
@@ -648,6 +649,14 @@ function createElement(
 			children.push(child);
 			return child;
 		},
+		append(...nodes: Array<ReturnType<typeof createElement>>) {
+			for (const node of nodes) { node.parentElement = element; children.push(node); }
+		},
+		get childElementCount() { return children.length; },
+		querySelectorAll(selector: string): Array<ReturnType<typeof createElement>> {
+			const tags = selector.split(',').map((tag) => tag.toUpperCase());
+			return children.flatMap((child) => [...(tags.includes(child.tagName) ? [child] : []), ...child.querySelectorAll(selector)]);
+		},
 		replaceChildren(...newChildren: Array<ReturnType<typeof createElement>>) {
 			children.length = 0;
 			for (const child of newChildren) {
@@ -851,6 +860,10 @@ async function createBrowserHarness(options?: {
 		['article-bulk-select', createElement('above', [], 'select', registerFocus)],
 		['article-bulk-button', createElement('', [], 'button', registerFocus)],
 		['article-query-status', createElement('', [], 'p', registerFocus)],
+		['library-button', createElement('', [], 'button', registerFocus)],
+		['library-panel', createElement('', ['hidden'], 'aside', registerFocus)],
+		['close-library-button', createElement('', [], 'button', registerFocus)],
+		['library-content', createElement('', [], 'div', registerFocus)],
 		['reader-action-status', createElement('', [], 'p', registerFocus)],
 		['reader-title', createElement('', [], 'strong', registerFocus)],
 		['reader-meta', createElement('', [], 'p', registerFocus)],
@@ -1029,6 +1042,7 @@ async function createBrowserHarness(options?: {
 			createElement(tagName?: string) {
 				return createElement('', [], tagName, registerFocus, (id, options) => revealCalls.push({ id, ...options }));
 			},
+			createTextNode(text: string) { const node = createElement(); node.textContent = text; return node; },
 			getElementById(id: string) {
 				const element = elements.get(id);
 				if (!element) {
@@ -1051,6 +1065,8 @@ async function createBrowserHarness(options?: {
 	};
 
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
+	(context.window as any).document = context.document;
+	vm.runInNewContext(renderBrowserLibraryManagementScript(), context);
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
     active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
@@ -4614,6 +4630,7 @@ async function createStatefulArticleBrowser(options?: {
 			if (input.endsWith('/edit-tag')) mutations.push({ itemId: String(init?.body?.get('i')), itemIds: init?.body?.getAll('i').map(String) || [], add: init?.body?.get('a') as string | null, remove: init?.body?.get('r') as string | null });
 			if (input.endsWith('/mutations')) {
 				for (const mutation of JSON.parse(init?.body as unknown as string).mutations) {
+					if (mutation.kind !== 'set_read_batch') continue;
 					mutations.push({ itemId: mutation.itemIds[0], itemIds: mutation.itemIds,
 						add: mutation.value ? 'user/-/state/com.google/read' : null,
 						remove: mutation.value ? null : 'user/-/state/com.google/read' });
@@ -4639,6 +4656,40 @@ async function finishArticleMutation(harness: Awaited<ReturnType<typeof createBr
 		return cache.active === 0 && cache.pending === 0 && cache.membership === 0;
 	}, 1000);
 }
+
+test('mounted Library saves and undoes a feed rename through the real API and refreshes navigation', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser(); t.after(() => database.close());
+	harness.elements.get('library-button')!.dispatch('click');
+	const content = harness.elements.get('library-content')!;
+	await waitForBrowserCondition(() => content.querySelectorAll('input').some((node) => node.getAttribute('aria-label') === 'Feed title'), 100);
+	const title = content.querySelectorAll('input').find((node) => node.getAttribute('aria-label') === 'Feed title')!;
+	title.value = 'Renamed newsletter';
+	content.querySelectorAll('button').find((node) => node.textContent === 'Save feed')!.dispatch('click');
+	await waitForBrowserCondition(() => content.querySelectorAll('button').find((node) => node.textContent === 'Save feed')?.disabled === false, 200);
+	assert.equal(database.prepare("SELECT COALESCE(custom_title, display_name) AS title FROM feeds WHERE feed_key='today-source'").get()!.title, 'Renamed newsletter');
+	assert.ok(harness.elements.get('feeds-list')!.children.some((node) => node.textContent.includes('Renamed newsletter')));
+	content.querySelectorAll('button').find((node) => node.textContent === 'Undo last change')!.dispatch('click');
+	await waitForBrowserCondition(() => database.prepare("SELECT COALESCE(custom_title, display_name) AS title FROM feeds WHERE feed_key='today-source'").get()!.title === 'Today source', 200);
+	harness.elements.get('close-library-button')!.dispatch('click');
+	assert.equal(content.childElementCount, 0);
+	assert.equal(harness.elements.get('library-button')!.getAttribute('aria-expanded'), 'false');
+});
+
+test('closing Library stops follow-up feed changes while refreshing a completed same-account write', async (t) => {
+	const held = createDeferred<Response>(); let mutationCalls = 0;
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, init, next) => {
+		if (input.endsWith('/mutations') && JSON.parse(init!.body as string).mutations[0].kind === 'rename_feed') { mutationCalls++; const response = await next(); await held.promise; return response; }
+		return next();
+	} }); t.after(() => database.close());
+	harness.elements.get('library-button')!.dispatch('click'); const content = harness.elements.get('library-content')!;
+	await waitForBrowserCondition(() => content.querySelectorAll('input').some((node) => node.getAttribute('aria-label') === 'Feed title'), 100);
+	content.querySelectorAll('input').find((node) => node.getAttribute('aria-label') === 'Feed title')!.value = 'Saved after close';
+	content.querySelectorAll('button').find((node) => node.textContent === 'Save feed')!.dispatch('click');
+	await waitForBrowserCondition(() => mutationCalls === 1, 100);
+	harness.elements.get('close-library-button')!.dispatch('click'); held.resolve(new Response('released'));
+	await waitForBrowserCondition(() => harness.elements.get('feeds-list')!.children.some((node) => node.textContent.includes('Saved after close')), 200);
+	assert.equal(mutationCalls, 1); assert.equal(content.childElementCount, 0);
+});
 
 test('manual read and star toggles persist, display state and undo each individual change', async (t) => {
 	const { database, harness, mutations } = await createStatefulArticleBrowser();

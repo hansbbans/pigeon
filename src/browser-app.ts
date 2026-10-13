@@ -1,4 +1,5 @@
 import { THEME_STORAGE_KEY, renderBrowserAppClientScript } from './browser-app-client';
+import { renderBrowserLibraryManagementScript } from './browser-library-management';
 
 export function renderBrowserAppHtml(baseUrl: string): string {
 	const config = JSON.stringify({ baseUrl });
@@ -11,6 +12,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 	const sharedClientScript = renderBrowserAppClientScript();
 	const themeBootstrapScript = renderBrowserAppThemeBootstrapScript();
 	const runtimeScript = renderBrowserAppRuntimeScript();
+	const libraryScript = renderBrowserLibraryManagementScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -748,6 +750,53 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         border-radius: 6px;
       }
 
+      #library-panel {
+        position: fixed;
+        z-index: 20;
+        top: 5.25rem;
+        right: 1.25rem;
+        width: min(42rem, calc(100vw - 2.5rem));
+        max-height: calc(100vh - 6.5rem);
+        overflow: auto;
+        padding: 1.2rem;
+        box-shadow: var(--shadow);
+      }
+
+      #library-panel > header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+
+      #library-content section {
+        border-top: 1px solid var(--border);
+        margin-top: 1rem;
+        padding-top: 0.5rem;
+      }
+
+      #library-content label, #library-content summary {
+        display: block;
+        margin: 0.5rem 0;
+      }
+
+      #library-content label > span, #library-content label > input:not([type="checkbox"]), #library-content textarea {
+        display: block;
+        width: 100%;
+      }
+
+      #library-content input:not([type="checkbox"]), #library-content textarea {
+        padding: 0.55rem;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+      }
+
+      #library-content button {
+        margin: 0.25rem 0.4rem 0.25rem 0;
+      }
+
       .article-query-controls {
         display: grid;
         gap: 0.6rem;
@@ -1321,6 +1370,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
     <script>
       ${sharedClientScript}
     </script>
+    <script>${escapeScript(libraryScript)}</script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
         <div class="login-card">
@@ -1358,6 +1408,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
               <button class="toolbar-pill" id="theme-toggle-button" type="button" aria-pressed="false">Dark mode: Off</button>
               <button class="toolbar-pill" id="article-list-mode-button" type="button" aria-pressed="false">Title-only list: Off</button>
               <button class="secondary-button" id="settings-button" type="button">Settings</button>
+              <button class="secondary-button" id="library-button" type="button" aria-controls="library-panel" aria-expanded="false">Library</button>
               <button id="logout-button" type="button">Sign Out</button>
             </div>
           </header>
@@ -1544,6 +1595,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         </div>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
+      <aside class="panel hidden" id="library-panel" aria-label="Library" tabindex="-1">
+        <header><h2>Library</h2><button class="secondary-button" id="close-library-button" type="button">Close</button></header>
+        <div id="library-content"></div>
+      </aside>
     </div>
     <script>
       ${runtimeScript}
@@ -1610,6 +1665,10 @@ export function renderBrowserAppRuntimeScript(): string {
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
   const articleQueryStatus = document.getElementById('article-query-status');
+  const libraryButton = document.getElementById('library-button');
+  const libraryPanel = document.getElementById('library-panel');
+  const closeLibraryButton = document.getElementById('close-library-button');
+  const libraryContent = document.getElementById('library-content');
   const readerActionStatus = document.getElementById('reader-action-status');
   const readerTitle = document.getElementById('reader-title');
   const readerMeta = document.getElementById('reader-meta');
@@ -1662,6 +1721,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let membershipRootRequestId = 0;
   let activeLoadedQueryKey = '';
   let queuedQueryReload = null;
+  let libraryController = null;
+  let libraryPanelRequestId = 0;
   let statusLoaded = false;
   let activeFrameDocument = null;
   let theme = client.normalizeBrowserTheme(null);
@@ -2282,6 +2343,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function clearAccountCache() {
+    closeLibraryPanel();
     accountGeneration += 1;
     keyboardRevealSelection = null;
     pendingArticleMutation = null;
@@ -2936,6 +2998,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function handleArticleNavigationKeydown(event) {
+    if (!libraryPanel.classList.contains('hidden') || !settingsPanel.classList.contains('hidden')) return false;
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     if ((key === 'm' || key === 's') && !event.metaKey && !event.ctrlKey && !event.altKey &&
         isReaderVisible() && !isEditableTarget(event.target) && !pendingArticleMutation &&
@@ -4798,6 +4861,7 @@ export function renderBrowserAppRuntimeScript(): string {
   });
 
   settingsButton.addEventListener('click', () => {
+    closeLibraryPanel();
     const isHidden = settingsPanel.classList.toggle('hidden');
     if (!isHidden && !statusLoaded) {
       void loadStatus();
@@ -4807,6 +4871,62 @@ export function renderBrowserAppRuntimeScript(): string {
   closeSettingsButton.addEventListener('click', () => {
     settingsPanel.classList.add('hidden');
   });
+
+  function closeLibraryPanel() {
+    libraryPanelRequestId += 1;
+    if (libraryController) libraryController.destroy();
+    libraryController = null;
+    libraryPanel.classList.add('hidden');
+    libraryButton.setAttribute('aria-expanded', 'false');
+  }
+
+  async function openLibraryPanel() {
+    if (!isReaderVisible()) return;
+    if (!libraryPanel.classList.contains('hidden')) { closeLibraryPanel(); return; }
+    const requestId = ++libraryPanelRequestId;
+    const generation = accountGeneration;
+    const token = session.token;
+    const isCurrent = () => requestId === libraryPanelRequestId && requestBelongsToCurrentSession(generation, token);
+    libraryPanel.classList.remove('hidden');
+    libraryButton.setAttribute('aria-expanded', 'true');
+    settingsPanel.classList.add('hidden');
+    libraryContent.textContent = 'Loading library…';
+    libraryPanel.focus();
+    const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
+    if (!isCurrent()) return;
+    if (!refreshed || !window.__PIGEON_LIBRARY_MANAGEMENT__) {
+      libraryContent.textContent = 'Could not load library. Close and try again.';
+      return;
+    }
+    libraryController = window.__PIGEON_LIBRARY_MANAGEMENT__.mount({
+      container: libraryContent,
+      authenticatedFetch: async (input, init) => {
+        if (!isCurrent()) throw new Error('Library session changed.');
+        return authenticatedFetch(input, init);
+      },
+      authenticatedJson: async (input, init) => {
+        if (!isCurrent()) throw new Error('Library session changed.');
+        try { return await authenticatedJson(input, init); }
+        finally {
+          const mutatesLibrary = (init?.method && init.method !== 'GET') || String(input).startsWith('/reader/api/0/subscription/quickadd?');
+          if (!isCurrent() && requestBelongsToCurrentSession(generation, token) && mutatesLibrary) {
+            void loadSubscriptionsAndUnreadCounts({ forceUnread: true });
+          }
+        }
+      },
+      getSubscriptions: () => subscriptions,
+      getSessionIdentity: () => accountGeneration + ':' + session.token,
+      refreshLibrary: async () => {
+        if (!isCurrent()) throw new Error('Library session changed.');
+        const refreshed = await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
+        if (!isCurrent()) throw new Error('Library session changed.');
+        if (!refreshed) throw new Error('Could not refresh library. Confirmed changes are still saved.');
+      },
+    });
+  }
+
+  libraryButton.addEventListener('click', () => { void openLibraryPanel(); });
+  closeLibraryButton.addEventListener('click', () => { closeLibraryPanel(); libraryButton.focus(); });
 
   openOriginalButton.addEventListener('click', () => {
     const href = openOriginalButton.getAttribute('data-href');

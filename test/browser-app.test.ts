@@ -341,6 +341,9 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="article-read-filter"/);
 	assert.match(html, /id="article-sort-select"/);
 	assert.match(html, /id="article-bulk-button"/);
+	assert.match(html, /id="library-button"[^>]+aria-controls="library-panel"/);
+	assert.match(html, /id="library-panel"[^>]+aria-label="Library"/);
+	assert.match(html, /__PIGEON_LIBRARY_MANAGEMENT__/);
 	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
 	assert.match(html, /html\[data-theme="dark"\]\s*\{/);
 	assert.match(html, /#theme-toggle-button\[aria-pressed="true"\],[\s\S]*?#article-list-mode-button\[aria-pressed="true"\]\s*\{/);

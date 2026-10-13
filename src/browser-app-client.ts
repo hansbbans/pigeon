@@ -12,6 +12,8 @@ export interface BrowserAppSession {
 export interface BrowserSubscription {
 	id: string;
 	title: string;
+	url?: string;
+	sourceUrl?: string | null;
 	iconUrl?: string;
 	categories?: Array<{
 		id: string;
