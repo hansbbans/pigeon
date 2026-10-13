@@ -43,6 +43,20 @@ export function libraryValidateFolders(names: string[]): string[] {
 	return folders;
 }
 
+export function libraryMutationMessage(change: LibraryMutation, title: string, outcome: 'saved' | 'failed' | 'uncertain' | 'not-attempted'): string {
+	const actions: Record<string, { noun: string; saved: string }> = {
+		rename_feed: { noun: 'feed rename', saved: 'Feed renamed.' },
+		move_feed: { noun: 'folder update', saved: 'Folders updated.' },
+		unsubscribe_feed: { noun: 'unsubscribe', saved: 'Unsubscribed.' },
+		restore_feed: { noun: 'subscription restore', saved: 'Subscription restored.' },
+	};
+	const action = actions[change.kind] ?? { noun: 'change', saved: 'Change saved.' };
+	const name = change.kind === 'rename_feed' && change.title ? change.title : title || 'Feed';
+	return name + ': ' + (outcome === 'saved' ? action.saved : outcome === 'uncertain'
+		? 'Could not confirm the ' + action.noun + '. Retry this operation to check.'
+		: 'The ' + action.noun + (outcome === 'failed' ? ' was not saved.' : ' was not attempted.'));
+}
+
 export function libraryFolderPlan(subscriptions: LibrarySubscription[], oldName: string, newName: string | null): Array<{ feedId: string; folders: string[]; previous: string[] }> {
 	const name = newName === null ? null : libraryValidateFolders([newName])[0];
 	if (newName !== null && !name) throw new Error('Enter a folder name.');
@@ -182,6 +196,7 @@ function installLibraryManagement(root: any): void {
 		let retry: LibraryMutation[] = [];
 		let retryInverse: LibraryMutation[] = [];
 		let retryRename: { from: string; to: string } | undefined;
+		const feedTitles = new Map<string, string>(adapter.getSubscriptions().map((feed: LibrarySubscription) => [feed.id, feed.title]));
 		const current = () => alive && !cancelled && identity === adapter.getSessionIdentity();
 		const service = { authenticatedJson: adapter.authenticatedJson, isCurrent: current };
 		function element(tag: string, text = ''): any { const node = document.createElement(tag); node.textContent = text; return node; }
@@ -222,8 +237,14 @@ function installLibraryManagement(root: any): void {
 			retry = outcome.failed.some((item) => item.uncertain) ? changes : [];
 			retryInverse = inverse;
 			retryRename = rename;
-			status.textContent = outcome.applied.length + ' changes confirmed; ' + outcome.failed.length + ' failed/unconfirmed; ' + outcome.notAttempted.length + ' not attempted.' + (outcome.cancelled ? ' Stopped.' : '');
-			showRows([...outcome.applied.map((item) => item.feedId + ': ' + item.kind + ' confirmed'), ...outcome.failed.map((item) => item.mutation.feedId + ': ' + item.error), ...outcome.notAttempted.map((item) => item.feedId + ': not attempted')]);
+			const count = (number: number) => number + ' change' + (number === 1 ? '' : 's');
+			const uncertain = outcome.failed.filter((item) => item.uncertain).length;
+			status.textContent = 'Saved ' + count(outcome.applied.length) + '.' +
+				(outcome.failed.length - uncertain ? ' ' + count(outcome.failed.length - uncertain) + ' could not be saved.' : '') +
+				(uncertain ? ' Could not confirm ' + count(uncertain) + '.' : '') +
+				(outcome.notAttempted.length ? ' ' + count(outcome.notAttempted.length) + ' not attempted.' : '') + (outcome.cancelled ? ' Stopped.' : '');
+			const label = (item: LibraryMutation, result: 'saved' | 'failed' | 'uncertain' | 'not-attempted') => libraryMutationMessage(item, feedTitles.get(item.feedId) || 'Feed', result);
+			showRows([...outcome.applied.map((item) => label(item, 'saved')), ...outcome.failed.map((item) => label(item.mutation, item.uncertain ? 'uncertain' : 'failed')), ...outcome.notAttempted.map((item) => label(item, 'not-attempted'))]);
 			const appliedKeys = new Set(outcome.applied.map((item) => item.kind + ':' + item.feedId));
 			const toUndo = inverse.filter((item) => appliedKeys.has((item.kind === 'restore_feed' ? 'unsubscribe_feed' : item.kind === 'unsubscribe_feed' ? 'restore_feed' : item.kind) + ':' + item.feedId));
 			const renamed = rename && outcome.applied.length === changes.length && !outcome.failed.length && !outcome.cancelled;
@@ -248,8 +269,9 @@ function installLibraryManagement(root: any): void {
 		async function importEntries(entries: LibraryImportEntry[]): Promise<void> {
 			const outcome = await libraryRunImport(service, entries);
 			if (!alive || identity !== adapter.getSessionIdentity()) return;
+			const importedTitles = new Map<string, string>(outcome.added.map((item: any) => [item.id, item.title]));
 			status.textContent = `${outcome.added.length} newly added; ${outcome.skipped.length} duplicates skipped; ${outcome.rolledBack.length} unsubscribed during rollback; ${outcome.rollbackFailed.length} rollback failures; ${outcome.uncertain.length} unknown subscription results; ${outcome.notAttempted.length} not attempted.${outcome.cancelled ? ' Stopped; no further requests were made.' : ''}`;
-			showRows([...outcome.added.map((item: any) => `${item.title}: ${outcome.rolledBack.includes(item.id) ? 'unsubscribed during rollback' : 'added (inspect library if later editing failed)'}`), ...outcome.skipped.map((title: string) => title + ': duplicate skipped'), ...outcome.rollbackFailed.map((id: string) => id + ': rollback not confirmed'), ...outcome.uncertain.map((title: string) => title + ': subscription result unknown; inspect before retry'), ...(outcome.failed ? [outcome.failed] : []), ...outcome.notAttempted.map((title: string) => title + ': not attempted')]);
+			showRows([...outcome.added.map((item: any) => `${item.title}: ${outcome.rolledBack.includes(item.id) ? 'unsubscribed during rollback' : 'added (inspect library if later editing failed)'}`), ...outcome.skipped.map((title: string) => title + ': duplicate skipped'), ...outcome.rollbackFailed.map((id: string) => (importedTitles.get(id) || 'Imported feed') + ': Could not confirm undoing this subscription. Inspect your library before retrying.'), ...outcome.uncertain.map((title: string) => title + ': subscription result unknown; inspect before retry'), ...(outcome.failed ? [outcome.failed] : []), ...outcome.notAttempted.map((title: string) => title + ': not attempted')]);
 			undo = null; retry = []; if (current()) await refresh();
 		}
 		add.append(button('Add URL', () => void perform(async () => importEntries([{ url: librarySafeURL(source.input.value), title: '', folders: addFolders.values(), duplicateId: null }]))));
@@ -269,6 +291,7 @@ function installLibraryManagement(root: any): void {
 		function renderSubscriptions(): void {
 			feedList.replaceChildren();
 			for (const subscription of adapter.getSubscriptions()) {
+				feedTitles.set(subscription.id, subscription.title);
 				const details = element('details'); details.append(element('summary', subscription.title));
 				const title = field('Feed title'); title.input.value = subscription.title;
 				const folderControls = foldersEditor(libraryFolderNames(subscription)); details.append(title.wrapper, folderControls.node);
@@ -326,6 +349,6 @@ function installLibraryManagement(root: any): void {
 }
 
 export function renderBrowserLibraryManagementScript(): string {
-	return ['function __name(target) { return target; }', librarySafeURL, libraryCanonicalURL, libraryFolderNames, libraryValidateFolders, libraryFolderPlan, libraryOPMLPreview, libraryRunMutations, libraryRunImport, installLibraryManagement]
+	return ['function __name(target) { return target; }', librarySafeURL, libraryCanonicalURL, libraryFolderNames, libraryValidateFolders, libraryMutationMessage, libraryFolderPlan, libraryOPMLPreview, libraryRunMutations, libraryRunImport, installLibraryManagement]
 		.map((item) => typeof item === 'string' ? item : item.toString()).join('\n') + '\ninstallLibraryManagement(window);';
 }

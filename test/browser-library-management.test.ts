@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
-	libraryCanonicalURL, libraryFolderNames, libraryFolderPlan, libraryOPMLPreview,
+	libraryCanonicalURL, libraryFolderNames, libraryFolderPlan, libraryOPMLPreview, libraryMutationMessage,
 	libraryRunImport, libraryRunMutations, librarySafeURL, renderBrowserLibraryManagementScript,
 	type LibraryMutation, type LibrarySubscription,
 } from '../src/browser-library-management';
@@ -32,6 +32,13 @@ test('folder rename/delete preserves every unrelated exact label, including comm
 	assert.throws(() => libraryFolderPlan(subscriptions, 'Old', 'other'), /already exists/);
 	assert.throws(() => libraryFolderPlan(Array.from({ length: 101 }, (_, i) => ({ ...subscriptions[0], id: `feed/${i + 1}` })), 'Old', null), /100/);
 	assert.deepEqual(libraryFolderNames({ id: 'feed/9', title: 'P', categories: [{ id: 'user/-/label/100%25 日本語 / News' }] }), ['100%25 日本語 / News']);
+});
+
+test('library results name feeds and human actions without exposing mutation kinds or IDs', () => {
+	assert.equal(libraryMutationMessage({ id: 'receipt', kind: 'rename_feed', feedId: 'feed/1', title: 'New title' }, 'Old title', 'saved'), 'New title: Feed renamed.');
+	assert.equal(libraryMutationMessage({ id: 'receipt', kind: 'move_feed', feedId: 'feed/1' }, 'Design Weekly', 'failed'), 'Design Weekly: The folder update was not saved.');
+	assert.equal(libraryMutationMessage({ id: 'receipt', kind: 'unsubscribe_feed', feedId: 'feed/1' }, 'Design Weekly', 'uncertain'), 'Design Weekly: Could not confirm the unsubscribe. Retry this operation to check.');
+	assert.equal(libraryMutationMessage({ id: 'receipt', kind: 'restore_feed', feedId: 'feed/1' }, 'Design Weekly', 'saved'), 'Design Weekly: Subscription restored.');
 });
 
 test('OPML previews nested folder memberships and merges duplicate URLs while marking existing subscriptions', () => {
@@ -213,7 +220,7 @@ test('mounted unsubscribe requires explicit selection, disables pending controls
 	(resolveFirst as unknown as (payload: any) => void)(receipt(calls[0]));
 	await settleUntil(() => !harness.button('Undo last change').disabled);
 	harness.button('Undo last change').click();
-	await settleUntil(() => calls.length === 2 && harness.container.textContent.includes('restore_feed confirmed'));
+	await settleUntil(() => calls.length === 2 && harness.container.textContent.includes('Subscription restored.'));
 	assert.deepEqual(calls.map((change) => [change.kind, change.feedId]), [['unsubscribe_feed', 'feed/1'], ['restore_feed', 'feed/1']]);
 	harness.mounted.destroy(); assert.equal(harness.container.childElementCount, 0);
 });
@@ -231,7 +238,7 @@ test('mounted feed saving treats titles as text, preserves checkbox labels, and 
 	await settleUntil(() => !harness.button('Undo last change').disabled);
 	assert.deepEqual(calls[1].folders, ['Keep, commas', 'Old']);
 	harness.button('Undo last change').click();
-	await settleUntil(() => calls.length === 3 && harness.container.textContent.includes('rename_feed confirmed'));
+	await settleUntil(() => calls.length === 3 && harness.container.textContent.includes('Feed renamed.'));
 	assert.equal(calls[2].kind, 'rename_feed'); assert.equal(calls[2].title, '<img src=x onerror=evil()>');
 });
 
@@ -256,6 +263,6 @@ test('partial folder rename and its partial Undo keep the old reading-context ma
 	harness.field('Current folder name').value = 'Old'; harness.field('New folder name').value = 'Renamed';
 	harness.button('Rename folder').click(); await settleUntil(() => !harness.button('Undo last change').disabled);
 	assert.deepEqual(mappings, []);
-	harness.button('Undo last change').click(); await settleUntil(() => changes.length === 3 && harness.container.textContent.includes('move_feed confirmed'));
+	harness.button('Undo last change').click(); await settleUntil(() => changes.length === 3 && harness.container.textContent.includes('Folders updated.'));
 	assert.deepEqual(mappings, []); assert.equal(changes[2].feedId, 'feed/1'); assert.deepEqual(changes[2].folders, ['Keep, commas', 'Old']);
 });
