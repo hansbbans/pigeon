@@ -1,7 +1,9 @@
 /**
- * Opt-in notification panel. mount({container,authenticatedJson,getSubscriptions,getSessionIdentity})
+ * Opt-in notification panel. mount({container,authenticatedJson,authenticatedFetch?,getSubscriptions,getSessionIdentity})
  * getSessionIdentity(): {token:string,generation:number|string}; generation changes on every session transition.
  * getSubscriptions(): current GReader subscriptions (title,url) or normalized {title,feedKey}.
+ * Optional authenticatedFetch preserves HTTP status for expired-registration recovery;
+ * JSON-only adapters may throw errors with numeric .status.
  * Returns {refresh(),destroy()}. Destroy synchronously on logout/switch. No permission request during mount/refresh.
  */
 export function renderBrowserNotificationsScript(): string {
@@ -24,7 +26,13 @@ export function renderBrowserNotificationsScript(): string {
   function getRecord() { guard(); try { var raw = localStorage.getItem(key); var value = raw ? JSON.parse(raw) : null; return value && value.version === 1 ? value : null; } catch (_) { throw new Error('Browser storage is unavailable. Allow site storage before enabling notifications.'); } }
   function save(value) { guard(); try { if (value) localStorage.setItem(key, JSON.stringify(value)); else localStorage.removeItem(key); record = value; } catch (_) { throw new Error('Could not save browser notification settings. Free site storage and retry.'); } guard(); }
   async function checked(promise) { guard(); var value = await promise; guard(); return value; }
-  async function api(path, init) { guard(); return checked(adapter.authenticatedJson(path, Object.assign({}, init || {}, { signal: controller.signal }))); }
+  async function api(path, init) {
+   guard(); var options = Object.assign({}, init || {}, { signal: controller.signal });
+   if (typeof adapter.authenticatedFetch !== 'function') return checked(adapter.authenticatedJson(path, options));
+   var response = await checked(adapter.authenticatedFetch(path, options));
+   if (!response.ok) { var error = new Error('Notification request failed: ' + response.status); error.status = response.status; throw error; }
+   return checked(response.json());
+  }
   function choices() {
    guard(); var feeds = adapter.getSubscriptions() || []; var seen = new Set();
    return feeds.map(function (feed) { return { key: feedKey(feed), title: feed.title || 'Untitled feed' }; }).filter(function (feed) { if (!feed.key || seen.has(feed.key)) return false; seen.add(feed.key); return true; });
@@ -91,7 +99,15 @@ export function renderBrowserNotificationsScript(): string {
     save(Object.assign({}, record, { subscription: wire, publicKey: capabilities.publicKey, uncertain: !record.id, pendingDelete: false }));
     var updating = !!record.id; var payload = { subscription: wire, feedKeys: feedKeys };
     if (updating) { payload.id = record.id; payload.managementToken = record.managementToken; }
-    var result = await api('/api/v1/browser/push/subscription', { method: updating ? 'PUT' : 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    var result;
+    try { result = await api('/api/v1/browser/push/subscription', { method: updating ? 'PUT' : 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(payload) }); }
+    catch (error) {
+     if (!updating || error.status !== 404) throw error;
+     // A confirmed missing row cannot hold these credentials. Recreate only this account's owned endpoint.
+     guard(); save(Object.assign({}, record, { id: null, managementToken: null, uncertain: true, pendingSave: true }));
+     updating = false; created = subscription;
+     result = await api('/api/v1/browser/push/subscription', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ subscription: wire, feedKeys: feedKeys }) });
+    }
     if (!result || typeof result.id !== 'string' || !updating && typeof result.managementToken !== 'string') throw new Error('The server did not confirm this browser subscription.');
     var confirmed = Object.assign({}, record, { id: result.id, managementToken: updating ? record.managementToken : result.managementToken, uncertain: false, pendingDelete: false, pendingSave: false });
     committed = true;
@@ -120,7 +136,10 @@ export function renderBrowserNotificationsScript(): string {
      await checked(subscription.unsubscribe()); var remaining = await checked(reg.pushManager.getSubscription());
      if (remaining && remaining.endpoint === subscription.endpoint) throw new Error('This browser did not stop its subscription. Retry disabling notifications.');
     }
-    if (record.id && record.managementToken) await api('/api/v1/browser/push/subscription', { method:'DELETE', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id: record.id, managementToken: record.managementToken }) });
+    if (record.id && record.managementToken) {
+     var deletion = await api('/api/v1/browser/push/subscription', { method:'DELETE', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id: record.id, managementToken: record.managementToken }) });
+     if (!deletion || deletion.deleted !== true) throw new Error('The server did not confirm removal. Finish disabling again when online; retry credentials are preserved.');
+    }
     save(null); selected.clear(); status = 'Notifications are off for this browser.';
    } finally { busy = false; if (!destroyed && sameIdentity(identity, adapter.getSessionIdentity())) render(); }
   }

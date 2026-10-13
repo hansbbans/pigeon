@@ -17,7 +17,7 @@ class Element {
  text(): string { return this.textContent + this.children.map(child => child.text()).join(' '); }
 }
 async function settle(predicate: () => boolean) { for (let attempt = 0; attempt < 100; attempt++) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); } throw new Error('Panel did not settle'); }
-function fixture() {
+function fixture(useFetch = false) {
  const stored = new Map<string,string>(); const identity = { token: 'private-account-token', generation: 1 }; let denyStorage = false; let permissionRequests = 0; let registrations = 0; let subscriptions = 0; let unsubscriptions = 0; let current: any = null; let permission = 'default'; let grant = 'granted'; let subscribeWait: Promise<any> | null = null;
  const calls: any[] = []; let api: (path: string,init?: any) => Promise<any> = async (path,init) => path.endsWith('capabilities') ? { enabled: true, publicKey: Buffer.alloc(65,4).toString('base64url') } : init.method === 'DELETE' ? { deleted:true } : init.method === 'PUT' ? { id:'own-id' } : { id:'own-id',managementToken:'own-browser-management-secret' };
  const container = new Element('div'); const win: any = { isSecureContext:true }; const notifications: any = { get permission() { return permission; }, requestPermission: async () => { permissionRequests++; permission = grant; return grant; } };
@@ -27,6 +27,7 @@ function fixture() {
  runInNewContext(renderBrowserNotificationsScript(), { window:win, document:{ createElement:(tag: string) => new Element(tag) }, Notification:notifications, PushManager:function(){}, navigator:{serviceWorker}, crypto:webcrypto, TextEncoder, AbortController, URL, Uint8Array, atob,
   localStorage:{ getItem:(key: string) => { if (denyStorage) throw new Error('denied'); return stored.get(key) ?? null; }, setItem:(key: string,value: string) => { if (denyStorage) throw new Error('full'); stored.set(key,value); }, removeItem:(key: string) => { if (denyStorage) throw new Error('denied'); stored.delete(key); } } });
  const adapter = { container, getSessionIdentity:() => identity, getSubscriptions:() => [{ id:'feed/1',title:'Newsletter',url:'https://pigeon.example/feed/one' }, { title:'Second',feedKey:'two' }], authenticatedJson:async (path: string,init?: any) => { calls.push({path,init,token:identity.token}); return api(path,init); } };
+ if (useFetch) (adapter as any).authenticatedFetch = async (path: string, init?: any) => { calls.push({path,init,token:identity.token}); try { return Response.json(await api(path,init)); } catch (error: any) { if (!error.status) throw error; return Response.json({error:error.message},{status:error.status}); } };
  const handle = win.PigeonNotifications.mount(adapter);
  const button = (action: string) => container.all().find(node => node.dataset.action === action)!;
  const checkbox = (value: string) => container.all().find(node => node.type === 'checkbox' && node.value === value)!;
@@ -105,4 +106,26 @@ test('server confirmation followed by storage failure keeps credentials in memor
 test('failed authenticated capability refresh fails closed instead of retaining stale enable permission', async () => {
  const state=fixture(); await state.ready(); state.setAPI(async()=> { throw new Error('Unauthorized'); });
  await assert.rejects(state.handle.refresh(),/Unauthorized/); assert.equal(state.button('enable').disabled,true); assert.equal(state.count().permissionRequests,0);
+});
+
+test('confirmed PUT404 recreates only own endpoint and retains selected feeds with fresh management credentials', async () => {
+ const state=fixture(true); await state.ready(); state.checkbox('one').change(true); state.button('enable').click(); await state.ready();
+ state.setAPI(async (_path,init)=> { if(init?.method==='PUT') { const error=new Error('Subscription not found') as any; error.status=404; throw error; } return {id:'recreated',managementToken:'fresh-management'}; });
+ state.checkbox('two').change(true); state.button('enable').click(); await state.ready();
+ const calls=state.calls.filter(call=>call.init?.method==='POST'); assert.equal(calls.length,2);
+ const replacement=JSON.parse(calls[1].init.body); assert.deepEqual(replacement.feedKeys,['one','two']); assert.equal(replacement.id,undefined); assert.equal(replacement.subscription.endpoint,JSON.parse(calls[0].init.body).subscription.endpoint);
+ const record=JSON.parse([...state.stored.values()][0]); assert.equal(record.id,'recreated'); assert.equal(record.managementToken,'fresh-management'); assert.equal(state.count().subscriptions,1);
+});
+
+test('uncertain PUT failure never assumes missing registration or creates a replacement', async () => {
+ const state=fixture(true); await state.ready(); state.button('enable').click(); await state.ready();
+ state.setAPI(async()=> { throw new Error('Network outcome unknown'); }); state.button('enable').click(); await state.ready();
+ assert.equal(state.calls.filter(call=>call.init?.method==='POST').length,1); assert.equal(JSON.parse([...state.stored.values()][0]).managementToken,'own-browser-management-secret');
+});
+
+test('fulfilled DELETE without explicit deletion acknowledgement preserves retry credentials', async () => {
+ const state=fixture(); await state.ready(); state.button('enable').click(); await state.ready(); state.setAPI(async()=>({error:'not deleted'}));
+ state.button('disable').click(); await state.ready();
+ const record=JSON.parse([...state.stored.values()][0]); assert.equal(record.pendingDelete,true); assert.equal(record.managementToken,'own-browser-management-secret'); assert.match(state.container.text(),/did not confirm removal/);
+ state.setAPI(async()=>({deleted:true})); state.button('disable').click(); await state.ready(); assert.equal(state.stored.size,0);
 });
