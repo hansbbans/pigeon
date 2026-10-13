@@ -104,14 +104,18 @@ Main files:
 
 Pigeon includes two authenticated Reader clients backed by the Google Reader style API:
 
-- `/app` is the browser Reader. It supports Today, unread filtering, folders, feeds, keyboard navigation, article triage, and Mark All Read for a selected feed or folder.
+- `/app` is the browser Reader. It supports read/unread and stars with Undo, Starred and Today views, full-library search, read filters, chronological sorting, and scoped bulk read actions with Undo. Library management includes feed discovery, YouTube lookup, multiple folders, OPML preview/import, and stale-feed cleanup. For You adds recommendation scores, explanations, feedback, monitored topics, and personalization history/export/reset.
 - `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, a dedicated Unread view with global counts, long-press multi-folder feed organization, leading-edge swipe back to the feed, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, bulk Mark Above/Below triage, and direct Readwise saves.
 
 The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
 
-The browser client and native client both use the authenticated `/reader/api/0/*` endpoints; the browser Mark All Read action uses `/reader/api/0/mark-all-as-read`.
+The browser reader offers newsletter content, extracted Reader mode, and a Website mode linking to the original in a separate tab. Reading settings include light/dark/sepia/system themes, typography, density, width, margins, keyboard shortcuts, and direct/ask/proxy image policies. Image policy applies to previews as well as article bodies. Readwise uses a token held only in the current page session and clears it on sign-out; a rejected Readwise token does not sign out of Pigeon.
 
-The native reader's For You recommendations prioritize freshness and topic relevance across publishers. It shows every story scoring above 50 out of 100 within the bounded candidate pool, automatically collecting qualifying pages without a fixed count or low-scoring filler. Stars and More Like This help learn interests; Not Interested excludes the story and reduces related topic matches. Source history is a small tie-breaker. Settings supports up to 20 monitored topics, stored through `PUT /api/v1/personalization` with a body such as `{"monitoredTopics":["AI","home gyms"]}`. Matching uses bounded token and phrase overlap with aliases, rather than embeddings. The Recommended sort preserves the server's ranking; explicit reader-selected sorts remain available. Resetting personalization clears monitored topics and ranking history without changing read or starred states, and supersedes older queued feedback while preserving feedback added after the reset began.
+Offline reading is opt-in through Settings. The public app shell is cached by a service worker; account-scoped article data and pending read/star edits live in IndexedDB. The account token is not stored in those databases. Offline search covers saved stories only. Queued edits retain stable mutation IDs until the server confirms them. Cleanup protects unread, starred, and pending content; browser storage limits or eviction can still remove local copies. Online connectivity is required for source extraction, remote images/video, Readwise, subscription changes, and fresh recommendations.
+
+The readers use authenticated `/reader/api/0/*` and `/api/v1/*` endpoints. Browser bulk actions enumerate the complete matching query and use idempotent mutation batches, preserving prior state for Undo and keeping cleanup neutral for recommendations. Search uses `/api/v1/browser/articles`; recommended and score ordering apply within For You.
+
+Both readers' For You recommendations prioritize freshness and topic relevance across publishers. It shows every story scoring above 50 out of 100 within the bounded candidate pool, automatically collecting qualifying pages without a fixed count or low-scoring filler. Stars and More Like This help learn interests; Not Interested excludes the story and reduces related topic matches. Source history is a small tie-breaker. Settings supports up to 20 monitored topics, stored through `PUT /api/v1/personalization` with a body such as `{"monitoredTopics":["AI","home gyms"]}`. Matching uses bounded token and phrase overlap with aliases, rather than embeddings. The Recommended sort preserves the server's ranking; explicit reader-selected sorts remain available. Resetting personalization clears monitored topics and ranking history without changing read or starred states, and supersedes older queued feedback while preserving feedback added after the reset began.
 
 Native local checks, from `ios/PigeonReader`, are:
 
@@ -155,6 +159,18 @@ These are defined in:
 - Cloudflare Worker settings in the dashboard
 
 If you change a variable in the dashboard, commit the same change in `wrangler.toml` so the repo stays aligned with production.
+
+### Optional browser push delivery
+
+Browser push is disabled until the Worker has a matching P-256 VAPID key pair and contact identity:
+
+- `VAPID_PUBLIC_KEY`: base64url-encoded uncompressed public key (65 bytes).
+- `VAPID_PRIVATE_JWK`: private EC P-256 JWK JSON, stored as a Cloudflare secret. Never commit it.
+- `VAPID_SUBJECT`: an operator contact URL using `mailto:` or `https:`.
+
+The authenticated capabilities endpoint reports whether the configuration is valid. Each browser opts in separately and selects its feeds. Subscription records are created lazily in D1; they expire after 90 days without renewal. Changing the VAPID key pair requires browsers to subscribe again.
+
+Delivery runs with the existing hourly refresh and uses only its remaining database budget. It is best effort: at most four browsers are considered per run, with one latest unread article from the preceding 24 hours per browser. Provider failures are not replayed, and busy refresh runs can defer notifications. This avoids notification floods but does not guarantee an alert for every article. Notification actions open the signed-in reader for confirmation; the service worker never receives the account token.
 
 ## Deploying Code Updates
 
