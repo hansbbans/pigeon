@@ -1,4 +1,5 @@
 import { THEME_STORAGE_KEY, renderBrowserAppClientScript } from './browser-app-client';
+import { renderBrowserOfflineScript } from './browser-offline';
 import { renderBrowserReadingScript } from './browser-reading-preferences';
 import { renderBrowserReadabilityScript } from './browser-readability';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
@@ -18,6 +19,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 	const libraryScript = renderBrowserLibraryManagementScript();
 	const personalizationScript = renderBrowserPersonalizationScript();
 	const readingScript = renderBrowserReadingScript();
+	const offlineScript = renderBrowserOfflineScript();
 	const readabilityScript = renderBrowserReadabilityScript();
 
 	return `<!doctype html>
@@ -1381,6 +1383,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
     <script>${libraryScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${readingScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${readabilityScript}</script>
+    <script>${offlineScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${personalizationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
@@ -1512,7 +1515,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                 </div>
               </div>
               <div class="article-query-controls">
-                <form id="article-query-form" class="article-query-search" role="search">
+                <p id="offline-mode-banner" class="hidden" role="status" aria-live="polite"></p><form id="article-query-form" class="article-query-search" role="search">
                   <input id="article-search-input" type="search" maxlength="200" aria-label="Search articles" placeholder="Search articles" />
                   <button class="secondary-button" type="submit">Search</button>
                   <button class="secondary-button" id="clear-article-search-button" type="button">Clear</button>
@@ -1622,6 +1625,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           <label>Next shortcut<input id="shortcut-next" maxlength="1"></label><label>Previous shortcut<input id="shortcut-previous" maxlength="1"></label><label>Read shortcut<input id="shortcut-read" maxlength="1"></label><label>Star shortcut<input id="shortcut-star" maxlength="1"></label>
           <button type="submit">Save reading settings</button><p id="reading-settings-status" role="status"></p>
         </form></details>
+        <details><summary>Offline library</summary><p>Save articles on this device. Offline results include only locally saved stories. Read and star changes wait here until they sync.</p>
+        <button id="offline-enable-button" type="button">Save library offline</button><button id="offline-sync-button" type="button">Sync now</button>
+        <button id="offline-free-button" type="button">Free read, unstarred bodies older than 30 days</button>
+        <label><input id="offline-clear-confirm" type="checkbox">Confirm clearing read, unstarred cached bodies</label><button id="offline-clear-button" type="button">Clear eligible cached bodies</button>
+        <p id="offline-status" role="status" aria-live="polite">Offline storage has not been enabled for this account.</p></details>
         <section id="personalization-content" aria-label="Personalization"></section>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
@@ -1728,11 +1736,15 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
+  let offlineLibrary=null; let offlineOpening=null; let offlineSession=false; let offlineBusy=false; let offlineQueuedCount=0;
+  const offlineStatus=document.getElementById('offline-status');
+  const offlineEnableButton=document.getElementById('offline-enable-button'); const offlineSyncButton=document.getElementById('offline-sync-button');
   const readingTools = window.PigeonReading;
   let readingPreferences = readingTools ? readingTools.readPreferences(window.localStorage) : null;
   let readingRenderRequest = 0; let preparedReaderKey = ''; let readingAccountHash = ''; let readingData = {modes:{},positions:{}};
   let readingIdentityPromise = null; let positionSaveTimer = null; let consentItemId = null;
   const extractedArticles = new Map(); const previewImages = new Map(); const readingObjectURLs = new Set();
+  let frameObjectURLs=new Set();let visiblePreviewSources=new Set();
   const readerModeSelect = document.getElementById('reader-mode-select'); const readingStatus = document.getElementById('reader-reading-status');
   const loadImagesButton = document.getElementById('load-images-button'); const readwiseTokenInput = document.getElementById('readwise-token-input');
   const readwiseSaveButton = document.getElementById('readwise-save-button'); const zoomPanel = document.getElementById('image-zoom-panel');
@@ -2395,11 +2407,16 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function clearAccountCache() {
+    persistReadingData();
+    if(offlineLibrary)offlineLibrary.close();offlineLibrary=null;offlineOpening=null;offlineSession=false;offlineBusy=false;offlineQueuedCount=0;offlineEnableButton.disabled=false;offlineSyncButton.disabled=false;
+    offlineStatus.textContent='Offline storage has not been enabled for this account.';
+
     readingRenderRequest++; preparedReaderKey=''; readingAccountHash=''; readingIdentityPromise=null; readingData={modes:{},positions:{}};
     if(positionSaveTimer) clearTimeout(positionSaveTimer); positionSaveTimer=null; pendingReaderPosition=null; consentItemId=null;
     extractedArticles.clear(); previewImages.clear();
     for(const url of readingObjectURLs) URL.revokeObjectURL(url); readingObjectURLs.clear();
-    readwiseTokenInput.value=''; readwiseSaving=false; zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
+    frameObjectURLs.clear();visiblePreviewSources.clear();
+    readwiseTokenInput.value=''; readwiseSaving=false; readwiseSaveButton.disabled=false; zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
 
     if (personalizationService) personalizationService.destroy();
     personalizationService = null; personalizationPanel = null; pendingFeedback = null;
@@ -2493,14 +2510,94 @@ export function renderBrowserAppRuntimeScript(): string {
     return response;
   }
 
-  async function authenticatedJson(input, init) {
+  async function onlineAuthenticatedJson(input, init) {
     const response = await authenticatedFetch(input, init);
     if (!response.ok) {
-      throw new Error('Request failed: ' + response.status);
+      const error=new Error('Request failed: ' + response.status);error.status=response.status;throw error;
     }
     return response.json();
   }
 
+  function isOfflineReading(){return Boolean(offlineLibrary&&(offlineSession||window.navigator?.onLine===false));}
+  function canReadOfflinePath(input){return String(input).startsWith('/reader/api/0/')||String(input).startsWith('/api/v1/browser/articles?');}
+  async function offlineJSON(input,init) {
+    const library=offlineLibrary,generation=accountGeneration,token=session.token;if(!library)throw new Error('Offline storage is unavailable.');
+    const guard=()=>{if(library!==offlineLibrary||!requestBelongsToCurrentSession(generation,token))throw new Error('Offline account changed.');};
+    const url=new URL(input,config.baseUrl),params=url.searchParams;
+    if(url.pathname.endsWith('/subscription/list')) {
+      const feeds=await library.feeds();guard();return {subscriptions:feeds.filter(feed=>feed.isActive!==false).map(feed=>({id:feed.streamId,title:feed.title,url:config.baseUrl+'/feed/'+encodeURIComponent(feed.feedKey),sourceUrl:feed.feedURL,categories:(feed.folders||[]).map(label=>({id:'user/-/label/'+label,label}))}))};
+    }
+    if(url.pathname.endsWith('/unread-count')) {
+      const feeds=await library.feeds();guard();const counts=[];const folders=new Set();
+      counts.push({id:'user/-/state/com.google/reading-list',count:(await library.query({filter:'unread'})).total});
+      for(const feed of feeds) {guard();counts.push({id:feed.streamId,count:(await library.query({stream:feed.streamId,filter:'unread'})).total});for(const folder of feed.folders||[])folders.add(folder);}
+      for(const folder of folders){guard();counts.push({id:'user/-/label/'+folder,count:(await library.query({stream:'user/-/label/'+folder,filter:'unread'})).total});}
+      guard();return {unreadcounts:counts};
+    }
+    if(url.pathname.endsWith('/contents')) {const payload=await library.contents((init?.body?.getAll('i')||[]).map(String));guard();return {...payload,items:payload.items.map(item=>({...item,content:item.content||item.summary}))};}
+    if(url.pathname.endsWith('/ids')||url.pathname==='/api/v1/browser/articles') {
+      const cursor=params.get('continuation')||params.get('c')||'';if(cursor&&!/^offline:\\d+$/.test(cursor))throw new Error('Reload this view to use saved offline articles.');
+      const offset=cursor?Number(cursor.slice(8)):0;const limit=Number(params.get('limit')||params.get('n')||50);
+      const payload=await library.query({stream:params.get('stream')||params.get('s')||'all',q:params.get('q')||'',filter:params.get('filter')||(params.get('xt')?'unread':'all'),sort:params.get('sort')||'newest',since:params.get('since')||undefined,before:params.get('before')||undefined,limit,offset});
+      guard();const continuation=payload.hasMore?'offline:'+(offset+payload.itemIds.length):'';
+      return url.pathname.endsWith('/ids')?{itemRefs:payload.itemIds.map(id=>({id})),continuation}:{...payload,continuation};
+    }
+    throw new Error('This feature requires an online connection.');
+  }
+  async function authenticatedJson(input,init) {
+    const generation=accountGeneration,token=session.token;
+    if(isOfflineReading()&&canReadOfflinePath(input))return offlineJSON(input,init);
+    try{return await onlineAuthenticatedJson(input,init);}
+    catch(error){if(offlineLibrary&&error?.name!=='AbortError'&&!error?.status&&canReadOfflinePath(input)&&requestBelongsToCurrentSession(generation,token)) {
+      offlineSession=true;void updateOfflineStatus();return offlineJSON(input,init);
+    }throw error;}
+  }
+  async function openOfflineLibrary(existingOnly) {
+    if(offlineLibrary)return offlineLibrary;if(offlineOpening)return offlineOpening;
+    const generation=accountGeneration,token=session.token;if(!token||!window.PigeonOffline)throw new Error('Offline storage is unavailable in this browser.');
+    const promise=(async()=>{const hash=await window.PigeonOffline.accountHash(token);if(!requestBelongsToCurrentSession(generation,token))return null;
+      if(existingOnly&&!await window.PigeonOffline.hasAccount(hash))return null;
+      if(!requestBelongsToCurrentSession(generation,token))return null;
+      const library=await window.PigeonOffline.create({token,getSessionKey:()=>accountGeneration+':'+session.token,authenticatedJson:onlineAuthenticatedJson,
+        onProgress:progress=>{if(requestBelongsToCurrentSession(generation,token))offlineStatus.textContent='Saving offline metadata… '+progress.changes+' changes.';},
+        onError:error=>{if(requestBelongsToCurrentSession(generation,token))offlineStatus.textContent=error.message;}});
+      if(!requestBelongsToCurrentSession(generation,token)){library.close();return null;}offlineLibrary=library;return library;})();
+    offlineOpening=promise;try{return await promise;}finally{if(offlineOpening===promise)offlineOpening=null;}
+  }
+  async function updateOfflineStatus() {
+    const library=offlineLibrary,generation=accountGeneration,token=session.token;if(!library)return;
+    try {const stats=await library.stats();if(library!==offlineLibrary||!requestBelongsToCurrentSession(generation,token))return;
+      offlineQueuedCount=stats.pending;renderOfflineBanner();
+      offlineStatus.textContent=(isOfflineReading()?'Offline · ':'')+stats.articles+' locally saved articles; '+stats.savedBodies+' bodies; '+stats.pending+' pending edits; '+Math.round(stats.bodyBytes/1024)+' KB. '+(stats.lastSync?'Last sync '+stats.lastSync+'.':'Not synced yet.');
+    }catch(error){if(library===offlineLibrary)offlineStatus.textContent=error.message;}
+  }
+  async function syncOfflineLibrary(downloadBodies) {
+    if(offlineBusy)return;const generation=accountGeneration,token=session.token;offlineBusy=true;offlineEnableButton.disabled=true;offlineSyncButton.disabled=true;
+    const current=()=>requestBelongsToCurrentSession(generation,token);
+    try {const library=await openOfflineLibrary(!downloadBodies);if(!library||!current())return;
+      if(!window.navigator?.serviceWorker||!window.caches)throw new Error('This browser cannot save the app for offline reload.');
+      await window.navigator.serviceWorker.register('/app/sw.js',{scope:'/app'});
+      let readyTimer;try {await Promise.race([window.navigator.serviceWorker.ready,new Promise((_,reject)=>{readyTimer=setTimeout(()=>reject(new Error('Offline app setup timed out. Retry online.')),15000);})]);}finally{clearTimeout(readyTimer);}
+      if(!current())return;
+      const shell=await (await window.caches.open('pigeon-public-shell-v1')).match(new URL('/app',config.baseUrl).href);
+      if(!shell||shell.status!==200||!shell.headers.get('Content-Type')?.includes('text/html'))throw new Error('The app shell has not been saved. Reload online and retry before relying on offline reload.');
+      const replay=await library.replay();if(!current())return;if(replay.pending)throw new Error('Some pending changes were not confirmed. Retry sync before continuing.');
+      await library.sync();if(!current())return;
+      if(downloadBodies) {let offset=0;while(current()) {
+        const page=await library.query({limit:200,offset});const saved=await library.contents(page.itemIds);const missing=saved.items.filter(item=>!item.offlineSaved).map(item=>client.normalizeBrowserItemId(item.id));
+        for(let start=0;start<missing.length;start+=20){if(!current())return;const form=new FormData();for(const id of missing.slice(start,start+20))form.append('i',id);
+          const payload=await onlineAuthenticatedJson('/reader/api/0/stream/items/contents',{method:'POST',body:form});await library.storeBodies(payload.items);offlineStatus.textContent='Saving article bodies… '+(offset+start+Math.min(20,missing.length-start))+' checked.';}
+        offset+=page.itemIds.length;if(!page.hasMore)break;
+      }}
+      offlineSession=false;inFlightMembershipRequests.clear();viewStates.clear();await loadSubscriptionsAndUnreadCounts({forceUnread:true});await updateOfflineStatus();
+    }catch(error){if(current())offlineStatus.textContent='Offline sync failed: '+error.message;}
+    finally{if(current()){offlineBusy=false;offlineEnableButton.disabled=false;offlineSyncButton.disabled=false;}}
+  }
+  offlineEnableButton.addEventListener('click',()=>{void syncOfflineLibrary(true);});
+  offlineSyncButton.addEventListener('click',()=>{void syncOfflineLibrary(false);});
+  document.getElementById('offline-free-button').addEventListener('click',async()=>{if(!offlineLibrary)return;try {await offlineLibrary.freeOlderReadUnstarred(new Date(Date.now()-30*86400000).toISOString());await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
+  document.getElementById('offline-clear-button').addEventListener('click',async()=>{if(!offlineLibrary||!document.getElementById('offline-clear-confirm').checked)return;try {await offlineLibrary.clearCache();await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
+  function renderOfflineBanner(){const banner=document.getElementById('offline-mode-banner');banner.classList.toggle('hidden',!isOfflineReading()&&!offlineQueuedCount);banner.textContent=(isOfflineReading()?'Offline · saved articles only. ':'')+(offlineQueuedCount?offlineQueuedCount+' changes pending sync.':'');}
   function requestBelongsToCurrentSession(generation, token) {
     return generation === accountGeneration && token === session.token && session.status === 'authenticated';
   }
@@ -2608,6 +2705,7 @@ export function renderBrowserAppRuntimeScript(): string {
           if (missingIds.length > 0) {
             throw new Error('Incomplete article content response');
           }
+          if(offlineLibrary && !isOfflineReading()) void offlineLibrary.storeBodies(returnedItems).catch(()=>{});
           for (const item of returnedItems) {
             mergeArticleIntoCache(item, job.generation, job.stateMutationId);
           }
@@ -2945,7 +3043,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const hasUnreadItems = ['today', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
-    const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems;
+    const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems || isOfflineReading();
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
     markAllAsReadButton.disabled = isDisabled;
@@ -3403,7 +3501,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSortSelect.value = view?.kind === 'recommended' ? recommendationSort : articleSortOrder;
     for (const option of articleSortSelect.querySelectorAll('option')) option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     articleSortSelect.disabled = Boolean(pendingArticleMutation);
-    articleBulkButton.disabled = session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
+    articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
       (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
   }
 
@@ -3439,6 +3537,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderArticles() {
+    renderOfflineBanner();
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
     if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
@@ -3451,6 +3550,7 @@ export function renderBrowserAppRuntimeScript(): string {
       itemIds: visibleItemIds,
       loadedItemsById,
     });
+    visiblePreviewSources=new Set(entries.map(entry=>entry.heroImageUrl).filter(Boolean));
 
     clearElement(articlesList);
 
@@ -3618,7 +3718,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(pendingReaderPosition?.id===renderedReaderItemId) {
       const fraction=pendingReaderPosition.fraction;pendingReaderPosition=null;
       const height=Math.max(readerFrame.contentDocument?.documentElement?.scrollHeight||0,readerFrame.contentDocument?.body?.scrollHeight||0);
-      const viewport=readerFrame.contentWindow?.innerHeight||0;const top=Math.max(0,height-viewport)*fraction;
+      const viewport=readerFrame.contentWindow?.innerHeight||readerFrame.contentDocument?.documentElement?.clientHeight||0;const top=Math.max(0,height-viewport)*fraction;
       if(readerFrame.contentDocument?.documentElement)readerFrame.contentDocument.documentElement.scrollTop=top;
       if(readerFrame.contentDocument?.body)readerFrame.contentDocument.body.scrollTop=top;
       readerFrame.contentWindow?.scrollTo?.(0,top);readerFrameScrollTop=top;
@@ -3673,13 +3773,15 @@ export function renderBrowserAppRuntimeScript(): string {
         const escaped=url.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
         const result=await readingTools.applyImagePolicy('<img src="'+escaped+'">',{policy:'proxy',authenticatedFetch,registerObjectURL:value=>readingObjectURLs.add(value),isCurrent:current});
         const match=result.html.match(/\\ssrc="(blob:[^"]+)"/);return match?.[1]||'';
-      })();previewImages.set(url,promise);while(previewImages.size>500)previewImages.delete(previewImages.keys().next().value);}
+      })();previewImages.set(url,promise);while(previewImages.size>500){const old=[...previewImages.keys()].find(source=>!visiblePreviewSources.has(source));if(!old)break;const evicted=previewImages.get(old);previewImages.delete(old);void evicted.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});}}
       const src=await promise;if(current()&&src)image.setAttribute('src',src);
     }catch(_) {if(current())image.setAttribute('alt','Image unavailable through private proxy');}
   }
   function zoomReadingImage(event) {
     if(event.target?.tagName?.toLowerCase()!=='img')return;
     const src=event.target.getAttribute('src');if(!src)return;
+    if(readingPreferences?.imagePolicy==='ask'&&consentItemId!==selectedItemId)return;
+    if(readingPreferences?.imagePolicy==='proxy'&&!src.startsWith('blob:')&&!src.startsWith('data:image/'))return;
     zoomImage.setAttribute('src',src);zoomImage.setAttribute('alt',event.target.getAttribute('alt')||'Article image');
     zoomPanel.classList.remove('hidden');document.getElementById('close-image-zoom').focus();
   }
@@ -3706,12 +3808,13 @@ export function renderBrowserAppRuntimeScript(): string {
     if(!readingAccountHash || readyReaderItemId!==selectedItemId || !selectedItemId)return;
     const id=selectedItemId,generation=accountGeneration,token=session.token;
     const height=Math.max(readerFrame.contentDocument?.documentElement?.scrollHeight||0,readerFrame.contentDocument?.body?.scrollHeight||0);
-    const viewport=readerFrame.contentWindow?.innerHeight||0;
+    const viewport=readerFrame.contentWindow?.innerHeight||readerFrame.contentDocument?.documentElement?.clientHeight||0;
     const value=Math.min(1,Math.max(0,readReaderFrameScrollTop()/Math.max(1,height-viewport)));
+    delete readingData.positions[id];readingData.positions[id]=value;
+    if(offlineLibrary)void offlineLibrary.savePosition(id,value).catch(()=>{});
+    while(Object.keys(readingData.positions).length>500)delete readingData.positions[Object.keys(readingData.positions)[0]];
     if(positionSaveTimer)clearTimeout(positionSaveTimer);
     positionSaveTimer=setTimeout(()=>{positionSaveTimer=null;if(!requestBelongsToCurrentSession(generation,token))return;
-      delete readingData.positions[id];readingData.positions[id]=value;
-      while(Object.keys(readingData.positions).length>500)delete readingData.positions[Object.keys(readingData.positions)[0]];
       persistReadingData();
     },250);
   }
@@ -3724,6 +3827,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original]);
     if(preparedReaderKey===key)return;
     preparedReaderKey=key; const request=++readingRenderRequest;
+    const preparedObjectURLs=new Set();
     const current=()=>request===readingRenderRequest&&id===selectedItemId&&requestBelongsToCurrentSession(generation,token);
     readingStatus.textContent=mode==='reader'?'Extracting reader view…':mode==='website'?'Website view: open the original in a new tab. Some sites block embedded readers.':'';
     loadImagesButton.hidden=true;
@@ -3740,8 +3844,8 @@ export function renderBrowserAppRuntimeScript(): string {
     } catch(error) {if(!current())return;message='Reader extraction unavailable. Showing the newsletter body; try again or open the original.';}
     try {
       const result=await readingTools.applyImagePolicy(html,{policy:readingPreferences.imagePolicy,loadOnce:consentItemId===id,baseURL,
-        authenticatedFetch,registerObjectURL:url=>readingObjectURLs.add(url),isCurrent:current});
-      if(!current())return;
+        authenticatedFetch,registerObjectURL:url=>{readingObjectURLs.add(url);preparedObjectURLs.add(url);},isCurrent:current});
+      if(!current()){for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}return;}
       let documentHtml=client.createArticleFrameDocument(result.html,readingPreferences.theme==='dark'?'dark':'light');
       documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
       if(renderedReaderItemId!==id) {
@@ -3749,9 +3853,11 @@ export function renderBrowserAppRuntimeScript(): string {
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
       }
       renderReaderFrame(id,documentHtml); attachFrameNavigationListener();
+      if(frameObjectURLs.has(zoomImage.getAttribute('src'))){zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');}
+      for(const url of frameObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}frameObjectURLs=preparedObjectURLs;
       readingStatus.textContent=[message,result.blockedCount ? result.blockedCount+' images hidden ('+[...new Set(result.images.filter(image=>!image.loaded).map(image=>image.reason||'unavailable'))].join(', ')+').' : ''].filter(Boolean).join(' ');
       loadImagesButton.hidden=readingPreferences.imagePolicy!=='ask'||!result.blockedCount;
-    } catch(error) {if(current()){preparedReaderKey='';readingStatus.textContent='Could not prepare this reading view. Retry with Refresh view.';renderReaderFrame(id,client.createArticleFrameDocument('<p>Reading view unavailable.</p>',theme));}}
+    } catch(error) {for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}if(current()){preparedReaderKey='';readingStatus.textContent='Could not prepare this reading view. Retry with Refresh view.';renderReaderFrame(id,client.createArticleFrameDocument('<p>Reading view unavailable.</p>',theme));}}
   }
   let pendingReaderPosition=null;
   readerModeSelect.addEventListener('change',async()=>{
@@ -3787,7 +3893,9 @@ export function renderBrowserAppRuntimeScript(): string {
     event.preventDefault();if(!readingTools)return;
     const next={shortcuts:{}};for(const key of readingFields)next[key]=document.getElementById('reading-'+key).value;
     for(const key of ['next','previous','read','star'])next.shortcuts[key]=document.getElementById('shortcut-'+key).value;
-    try {readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';previewImages.clear();renderArticles();renderReader();document.getElementById('reading-settings-status').textContent='Reading settings saved.';
+    try {const previousPolicy=readingPreferences.imagePolicy;readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';
+      if(previousPolicy!==readingPreferences.imagePolicy){for(const promise of previewImages.values())void promise.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});previewImages.clear();consentItemId=null;zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');renderReaderFrame(null,client.createArticleFrameDocument('<p>Preparing private reading view…</p>',theme));}
+      renderArticles();renderReader();document.getElementById('reading-settings-status').textContent='Reading settings saved.';
       markUnreadButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.read);starArticleButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.star);
     }catch(error){document.getElementById('reading-settings-status').textContent=error.message;}
   });
@@ -4085,6 +4193,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function loadRecommendations(view, query, generation, token, stateVersion, rootRequestId) {
+    if(isOfflineReading())throw new Error('For You requires an online connection.');
     const entries = new Map(); const seen = new Set(); let continuation = '';
     do {
       const params = new URLSearchParams({view:'for-you',limit:'100'});
@@ -4229,7 +4338,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const generation = accountGeneration;
     const token = session.token;
     const requestId = activeViewRequestId;
-    if (window.navigator && window.navigator.onLine === false) {
+    if (window.navigator && window.navigator.onLine === false && !offlineLibrary) {
       if (getViewState(activeView.id, false)?.hasMembership) {
         renderArticles();
         renderReader();
@@ -4572,7 +4681,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const isStarred = getArticleState(article, 'starred');
     const disabled = session.status !== 'authenticated' || !selectedItemId ||
       !articleCache.has(selectedItemId) || Boolean(pendingArticleMutation);
-    moreLikeButton.disabled = disabled || Boolean(pendingFeedback) || Boolean(personalizationService?.isResetting());
+    moreLikeButton.disabled = disabled || isOfflineReading() || Boolean(pendingFeedback) || Boolean(personalizationService?.isResetting());
     notInterestedButton.disabled = moreLikeButton.disabled;
     markUnreadButton.disabled = disabled;
     markUnreadButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
@@ -4696,14 +4805,20 @@ export function renderBrowserAppRuntimeScript(): string {
     form.set(target ? 'a' : 'r', 'user/-/state/com.google/' + field);
     let activeCollectionChanged = false;
     try {
-      const response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form });
+      let queuedOffline=false;let response;
+      if(isOfflineReading()) {await offlineLibrary.queueMutation(itemId,field==='read'?'set_read':'set_starred',target);queuedOffline=true;response={ok:true};}
+      else {try {response=await authenticatedFetch('/reader/api/0/edit-tag',{method:'POST',body:form});}
+        catch(error){if(!offlineLibrary||!isCurrentRequest())throw error;await offlineLibrary.queueMutation(itemId,field==='read'?'set_read':'set_starred',target);offlineSession=true;queuedOffline=true;response={ok:true};}}
+      if(queuedOffline)void updateOfflineStatus();
       if (!response.ok) throw new Error('Article state request failed');
       if (!isCurrentRequest()) return;
       activeCollectionChanged = applyArticleState(itemId, field, target, !options?.automatic);
       undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
+      let offlineCopyWarning=false;
+      if(offlineLibrary&&!queuedOffline)try {const library=offlineLibrary;await library.confirmState(itemId,field==='read'?'set_read':'set_starred',target);if(!isCurrentRequest())return;}catch(error){if(!isCurrentRequest())return;offlineCopyWarning=true;}
       renderArticles();
       renderReader();
-      showMessage(options?.undo ? 'Undid ' + options.undo.action + '.' : success);
+      showMessage((options?.undo ? 'Undid ' + options.undo.action + '.' : success)+(queuedOffline?' Saved offline; pending sync.':offlineCopyWarning?' Saved online, but the offline copy could not be updated. Retry offline sync.':''));
       if (field === 'read') {
         try {
           const result = await requestUnreadCounts(true);
@@ -4741,7 +4856,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function showBulkStatus(request, message) {
     if (isCurrentBulkRequest(request) && request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
-      articleQueryStatus.textContent = message;
+      articleQueryStatus.textContent = message+(request.offlineCopyWarning?' Online changes are saved, but offline copies could not be updated. Retry offline sync.':'');
     }
   }
 
@@ -4841,8 +4956,10 @@ export function renderBrowserAppRuntimeScript(): string {
         const receipt = payload.results?.find((result) => result.mutationId === mutationId);
         if (!receipt || !['applied', 'already_applied'].includes(receipt.status)) throw new Error('Bulk read receipt failed');
         if (!isCurrentBulkRequest(request)) return { attempted, saved, cancelled: true };
-        for (const snapshot of batch) applyArticleState(snapshot.itemId, 'read', target,
-          target || snapshot.manuallyUnread || snapshot.itemId === selectedItemId);
+        for (const snapshot of batch) {
+          applyArticleState(snapshot.itemId, 'read', target,target || snapshot.manuallyUnread || snapshot.itemId === selectedItemId);
+          if(offlineLibrary)try {const library=offlineLibrary;await library.confirmState(snapshot.itemId,'set_read',target);if(!isCurrentBulkRequest(request))return {attempted,saved,failed:true};}catch(error){request.offlineCopyWarning=true;}
+        }
         saved += batch.length;
         renderArticles();
         renderReader();
@@ -4940,7 +5057,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function maybeAutoMarkRead() {
     if (autoReadPolicy === 'manual' || pendingArticleMutation ||
-        !isReaderVisible() || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
+        !isReaderVisible() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
         !articleCache.has(selectedItemId) || readyReaderItemId !== selectedItemId ||
         getArticleState(loadedItemsById[selectedItemId], 'read') || manuallyUnreadItemIds.has(selectedItemId)) return;
     if (autoReadPolicy === 'progress') {
@@ -5091,10 +5208,14 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function restoreOrBootstrapReader() {
+    const generation=accountGeneration,token=session.token;
+    if(window.PigeonOffline)try{await openOfflineLibrary(true);}catch(error){if(requestBelongsToCurrentSession(generation,token))offlineStatus.textContent=error.message;}
+    if(!requestBelongsToCurrentSession(generation,token))return;
     renderFeeds();
     renderArticles();
     renderReader();
     await loadSubscriptionsAndUnreadCounts();
+    void updateOfflineStatus();
   }
 
   async function login(password) {
@@ -5110,6 +5231,13 @@ export function renderBrowserAppRuntimeScript(): string {
       });
     } catch (_error) {
       if (attemptId !== activeLoginAttemptId) return false;
+      if(window.PigeonOffline)try {
+        const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(password));if(attemptId!==activeLoginAttemptId)return false;
+        const token=[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+        beginAuthenticatedSession(token);const library=await openOfflineLibrary(true);if(attemptId!==activeLoginAttemptId)return false;
+        if(library){offlineSession=true;cancelPendingValidation();setStoredToken(token);setLoggedIn();void restoreOrBootstrapReader();return true;}
+      }catch(_){}
+      if(attemptId!==activeLoginAttemptId)return false;
       setLoggedOut('Could not reach the server.');
       return false;
     }
@@ -5177,7 +5305,7 @@ export function renderBrowserAppRuntimeScript(): string {
   settingsButton.addEventListener('click', () => {
     closeLibraryPanel();
     const isHidden = settingsPanel.classList.toggle('hidden');
-    if (!isHidden) mountPersonalization();
+    if (!isHidden) {mountPersonalization();void updateOfflineStatus();}
     if (!isHidden && !statusLoaded) {
       void loadStatus();
     }
@@ -5238,7 +5366,7 @@ export function renderBrowserAppRuntimeScript(): string {
           state.viewId = newId; state.queryKey = JSON.stringify([newId, state.query]);
           viewStates.set(state.queryKey, state);
         }
-        if (heldReaderArticle?.viewId === oldId) heldReaderArticle.viewId = newId;
+        if (heldReaderArticle?.viewId === oldId) {heldReaderArticle.viewId = newId;try {heldReaderArticle.queryKey=JSON.stringify([newId,JSON.parse(heldReaderArticle.queryKey)[1]]);}catch(_){heldReaderArticle=null;}}
       },
       getSubscriptions: () => subscriptions,
       getSessionIdentity: () => accountGeneration + ':' + session.token,
@@ -5327,12 +5455,14 @@ export function renderBrowserAppRuntimeScript(): string {
   wireColumnResizer(sidebarColumnResizer, 'sidebar');
   wireColumnResizer(streamColumnResizer, 'stream');
   if (typeof window.addEventListener === 'function') {
+    window.addEventListener('offline',()=>{if(offlineLibrary){offlineSession=true;inFlightMembershipRequests.clear();viewStates.clear();renderOfflineBanner();void loadSubscriptionsAndUnreadCounts({forceUnread:true});}});
     window.addEventListener('resize', () => {
       if (isReaderVisible()) {
         applyStoredColumnWidths();
       }
     });
     window.addEventListener('online', () => {
+      if(offlineLibrary)void syncOfflineLibrary(false);
       void revalidateActiveView();
     });
   }
@@ -5370,12 +5500,15 @@ export function renderBrowserAppRuntimeScript(): string {
       } else if (loginError.textContent === '') {
         setLoggedOut('');
       }
-    }).catch(() => {
+    }).catch(async () => {
       if (!isActiveValidation(validationId)) {
         return;
       }
 
-      setLoggedOut('Could not restore session.');
+      try {const library=await openOfflineLibrary(true);if(!isActiveValidation(validationId))return;
+        if(library){offlineSession=true;setLoggedIn();await restoreOrBootstrapReader();return;}
+      }catch(_){}
+      if(isActiveValidation(validationId))setLoggedOut('Could not restore session.');
     });
   } else {
     setLoggedOut('');

@@ -797,6 +797,8 @@ async function createBrowserHarness(options?: {
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
 	storedAutoReadPolicy?: string | null;
+	offlineTools?: any;
+	locationHref?: string;
 	readingTools?: any;
 	extractReader?: (html:string,url:string)=>any;
 	frameScrollHeight?: number;
@@ -831,6 +833,18 @@ async function createBrowserHarness(options?: {
 		['article-list-mode-button', createElement('', [], 'button', registerFocus)],
 		['settings-button', createElement('', [], 'button', registerFocus)],
 		['personalization-content', createElement('', [], 'section', registerFocus)],
+		['offline-enable-button', createElement('', [], 'button', registerFocus)],
+		['offline-sync-button', createElement('', [], 'button', registerFocus)],
+		['offline-free-button', createElement('', [], 'button', registerFocus)],
+		['offline-clear-button', createElement('', [], 'button', registerFocus)],
+		['offline-clear-confirm', createElement('', [], 'input', registerFocus)],
+		['offline-mode-banner', createElement('', ['hidden'], 'p', registerFocus)],
+		['offline-status', createElement('', [], 'p', registerFocus)],
+		['notifications-content', createElement('', [], 'section', registerFocus)],
+		['notification-action-panel', createElement('', ['hidden'], 'div', registerFocus)],
+		['notification-action-text', createElement('', [], 'p', registerFocus)],
+		['notification-confirm-button', createElement('', [], 'button', registerFocus)],
+		['notification-cancel-button', createElement('', [], 'button', registerFocus)],
 		['reader-mode-select', createElement('newsletter', [], 'select', registerFocus)],
 		['reader-reading-status', createElement('', [], 'p', registerFocus)],
 		['load-images-button', createElement('', [], 'button', registerFocus)],
@@ -1088,6 +1102,8 @@ async function createBrowserHarness(options?: {
 	elements.set('reading-settings-status',createElement('',[],'p',registerFocus));
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
 	(context.window as any).document = context.document;
+	(context.window as any).PigeonOffline = options?.offlineTools;
+	(context.window as any).location=options?.locationHref?{href:options.locationHref}:undefined;
 	(context.window as any).PigeonReading = options?.readingTools;
 	(context.window as any).__PIGEON_READING_TOOLS__ = options?.extractReader ? {extract:options.extractReader} : undefined;
 	(context as any).TextEncoder=TextEncoder;
@@ -4638,7 +4654,7 @@ test('a pre-mutation article refresh cannot restore cached read state after mark
 });
 
 async function createStatefulArticleBrowser(options?: {
-	policy?: string; readingTools?: any; extractReader?: (html:string,url:string)=>any; frameHeight?: number; viewportHeight?: number; count?: number;
+	policy?: string; offlineTools?: any; locationHref?:string; readingTools?: any; extractReader?: (html:string,url:string)=>any; frameHeight?: number; viewportHeight?: number; count?: number;
 	now?: number | (() => number);
 	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
 }) {
@@ -4649,7 +4665,7 @@ async function createStatefulArticleBrowser(options?: {
 	const harness = await createBrowserHarness({
 		now: options?.now ?? browserNow,
 		storedAutoReadPolicy: options?.policy,
-		readingTools:options?.readingTools,extractReader:options?.extractReader,
+		readingTools:options?.readingTools,extractReader:options?.extractReader,offlineTools:options?.offlineTools,locationHref:options?.locationHref,
 		frameScrollHeight: options?.frameHeight,
 		frameViewportHeight: options?.viewportHeight,
 		fetchImpl: async (input, init) => {
@@ -4716,6 +4732,62 @@ function readingIntegrationTools(policy='ask') {
   async applyImagePolicy(html:string,options:any){calls.push({html,options});return {html:html.replace(/<img[^>]*>/g,options.loadOnce?'<img src="https://example.com/image.jpg">':'<img alt="hidden">'),images:[{loaded:!!options.loadOnce,reason:'consent'}],blockedCount:options.loadOnce?0:1};}};
 }
 
+function offlineIntegrationTools(count=2) {
+ const rows=Array.from({length:count+2},(_,index)=>({...browserRegressionItem(String(index+1),Date.UTC(2026,9,12,12)/1000+index),id:String(index+1),categories:[] as string[]}));
+ const queued:any[]=[];let closed=false;
+ const library={close(){closed=true;},async sync(){},async replay(){const applied=queued.length;queued.splice(0);return {applied,pending:0};},async storeBodies(){},async savePosition(){},async getPosition(){return 0;},
+  async stats(){return {articles:rows.length,savedBodies:rows.length,pending:queued.length,bodyBytes:100,lastSync:'2026-10-12T12:00:00Z'};},
+  async feeds(){return [{feedKey:'today-source',streamId:'feed/1',title:'Today source',isActive:true,folders:[]}];},
+  async contents(ids:string[]){return {items:rows.filter(row=>ids.includes(row.id)).map(row=>({...row,offlineSaved:true}))};},
+  async query(query:any){let filtered=rows.filter(row=>query.filter!=='unread'||!row.categories?.includes('user/-/state/com.google/read')).sort((a,b)=>query.sort==='oldest'?a.published-b.published:b.published-a.published);
+   const offset=query.offset||0,limit=query.limit||50;return {itemIds:filtered.slice(offset,offset+limit).map(row=>row.id),total:filtered.length,hasMore:offset+limit<filtered.length};},
+  async queueMutation(id:string,kind:string,value:boolean){if(closed)throw new Error('closed');queued.push({id,kind,value});const row=rows.find(row=>row.id===id)!;const category='user/-/state/com.google/'+(kind==='set_read'?'read':'starred');row.categories=(row.categories||[]).filter(c=>c!==category);if(value)row.categories.push(category);return {id:'queued-'+queued.length};},
+  async confirmState(id:string,kind:string,value:boolean){const row=rows.find(row=>row.id===id);if(!row)return {saved:false};const category='user/-/state/com.google/'+(kind==='set_read'?'read':'starred');row.categories=row.categories.filter(c=>c!==category);if(value)row.categories.push(category);return {saved:true};},
+  async clearCache(){if(queued.length)throw new Error('Sync pending edits first.');},async freeOlderReadUnstarred(){return {freed:0};}};
+ return {queued,library,accountHash:async()=> 'account-hash',hasAccount:async()=>true,create:async()=>library};
+}
+
+test('offline individual read and star edits queue once, refresh local counts, and Undo queues exact inverse',async(t)=>{
+ const tools=offlineIntegrationTools();const {database,harness,mutations}=await createStatefulArticleBrowser({offlineTools:tools});t.after(()=>database.close());
+ harness.setOnline(false);await finishArticleMutation(harness,'mark-unread-button');
+ assert.equal(tools.queued.length,1);assert.equal(tools.queued[0].kind,'set_read');assert.equal(mutations.length,0);
+ await finishArticleMutation(harness,'undo-article-button');assert.equal(tools.queued.length,2);assert.equal(tools.queued[1].value,false);
+ await finishArticleMutation(harness,'star-article-button');assert.equal(tools.queued.length,3);assert.equal(tools.queued[2].kind,'set_starred');
+ assert.ok(harness.elements.get('offline-status')!.textContent.includes('3 pending edits'));
+ harness.elements.get('logout-button')!.dispatch('click');await assert.rejects(()=>tools.library.queueMutation('1','set_read',true),/closed/);
+});
+
+test('offline membership continuation beyond fifty articles loads all saved IDs',async(t)=>{
+ const tools=offlineIntegrationTools(65);const {database,harness}=await createStatefulArticleBrowser({count:65,offlineTools:tools});t.after(()=>database.close());
+ harness.setOnline(false);harness.elements.get('refresh-view-button')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.getCacheSizes().membership===0,100);await flushBrowserTasks();
+ harness.elements.get('load-more-button')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('articles-list')!.children.length===67,200);
+ assert.equal(harness.elements.get('load-more-button')!.classList.contains('hidden'),true);
+});
+
+test('acknowledged online read and star state survives a fresh offline session without duplicate mutations',async(t)=>{
+ const tools=offlineIntegrationTools();const {database,harness,mutations}=await createStatefulArticleBrowser({offlineTools:tools});t.after(()=>database.close());
+ await finishArticleMutation(harness,'mark-unread-button');await finishArticleMutation(harness,'star-article-button');
+ assert.equal(tools.queued.length,0);assert.equal(mutations.length,2);
+ const saved=await tools.library.contents(['3']);assert.ok(saved.items[0].categories.includes('user/-/state/com.google/read'));assert.ok(saved.items[0].categories.includes('user/-/state/com.google/starred'));
+ harness.elements.get('logout-button')!.dispatch('click');
+ const fresh=await createBrowserHarness({storedToken:await generateApiToken('today-test-password'),offlineTools:tools,fetchImpl:async()=>{throw new TypeError('Network offline');}});
+ await waitForBrowserCondition(()=>!fresh.elements.get('reader-shell')!.classList.contains('hidden')&&fresh.getCachedArticleState('3').body.length>0,100);
+ assert.ok(fresh.getCachedArticleState('3').body.includes('user/-/state/com.google/read'));assert.ok(fresh.getCachedArticleState('3').body.includes('user/-/state/com.google/starred'));
+ assert.equal(tools.queued.length,0);fresh.elements.get('logout-button')!.dispatch('click');
+});
+
+test('account change while offline hashing is pending cannot create the previous account storage',async()=>{
+ const held=createDeferred<string>();const tools=offlineIntegrationTools();let hashes=0,created=0;
+ tools.accountHash=async()=>++hashes===1?held.promise:'new-hash';tools.create=async()=>{created++;return tools.library;};
+ const harness=await createBrowserHarness({offlineTools:tools,fetchImpl:async(input,init)=>markUnreadFixtureResponse(input,init)});
+ await harness.elements.get('login-form')!.dispatch('submit');await waitForBrowserCondition(()=>hashes===1,100);
+ harness.elements.get('logout-button')!.dispatch('click');await harness.elements.get('login-form')!.dispatch('submit');await waitForBrowserCondition(()=>created===1,100);
+ held.resolve('old-hash');await flushBrowserTasks();assert.equal(created,1);
+ harness.elements.get('logout-button')!.dispatch('click');
+});
+
 test('reader extraction prepares image policy before insertion, consent reloads safely, and preference shortcuts work',async(t)=>{
  const tools=readingIntegrationTools();let sources=0;
  const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,extractReader:()=>({content:'<p>Extracted story</p><img src="https://example.com/image.jpg">',url:'https://example.com/reader'}),fetchOverride:async(input,init,next)=>{
@@ -4746,6 +4818,67 @@ test('Readwise token rejection keeps Pigeon authenticated and tokens clear on si
  await waitForBrowserCondition(()=>harness.elements.get('reader-reading-status')!.textContent.includes('Readwise rejected'),100);
  assert.equal(saves,1);assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'),false);
  harness.elements.get('logout-button')!.dispatch('click');assert.equal(harness.elements.get('readwise-token-input')!.value,'');
+});
+
+test('a held Readwise save cannot keep the next session disabled or restore its old token',async(t)=>{
+ const held=createDeferred<Response>();let requested=false;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[recommendationFixture(1)],continuation:null});
+  if(input==='/api/v1/browser/readwise/save'){requested=true;return held.promise;}return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ harness.elements.get('readwise-token-input')!.value='old-session-token';harness.elements.get('readwise-save-button')!.dispatch('click');await waitForBrowserCondition(()=>requested,100);
+ harness.elements.get('logout-button')!.dispatch('click');await harness.elements.get('login-form')!.dispatch('submit');await flushBrowserTasks();
+ assert.equal(harness.elements.get('readwise-save-button')!.disabled,false);assert.equal(harness.elements.get('readwise-token-input')!.value,'');
+ held.resolve(Response.json({saved:true}));await flushBrowserTasks();assert.equal(harness.elements.get('readwise-save-button')!.disabled,false);
+ assert.equal(harness.elements.get('reader-reading-status')!.textContent.includes('Saved to Readwise'),false);
+});
+
+test('reading positions for two quickly visited articles survive the shared persistence debounce',async(t)=>{
+ const tools=readingIntegrationTools('load');const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,frameHeight:1000,viewportHeight:200});t.after(()=>database.close());
+ await flushBrowserTasks();harness.dispatchReaderFrameScroll(640);
+ findListButtonByItemId(harness.elements.get('articles-list'),'2')!.dispatch('click');await flushBrowserTasks();await flushBrowserTasks();harness.dispatchReaderFrameScroll(160);
+ await new Promise(resolve=>setTimeout(resolve,280));
+ const key=[...harness.localStorageState.keys()].find(key=>key.startsWith('pigeon.browser.reading-account.'))!;
+ const positions=JSON.parse(harness.localStorageState.get(key)!).positions;
+ assert.equal(positions['3'],0.8);assert.equal(positions['2'],0.2);
+ harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('switching to Proxy clears direct-image zoom while the new private frame is pending',async(t)=>{
+ const held=createDeferred<any>();const tools=readingIntegrationTools('load');const normalApply=tools.applyImagePolicy;
+ tools.applyImagePolicy=async(html,options)=>options.policy==='proxy'?held.promise:normalApply(html,options);
+ const {database,harness}=await createStatefulArticleBrowser({readingTools:tools});t.after(()=>database.close());await flushBrowserTasks();
+ harness.elements.get('zoom-image')!.setAttribute('src','https://example.com/direct.jpg');harness.elements.get('image-zoom-panel')!.classList.remove('hidden');
+ harness.elements.get('reading-imagePolicy')!.value='proxy';harness.elements.get('reading-settings-form')!.dispatch('submit');await flushBrowserTasks();
+ assert.equal(harness.elements.get('image-zoom-panel')!.classList.contains('hidden'),true);assert.equal(harness.elements.get('zoom-image')!.getAttribute('src'),'');
+ assert.ok(harness.elements.get('reader-frame')!.srcdoc.includes('Preparing private reading view'));
+ held.resolve({html:'<p>Private body</p>',images:[],blockedCount:0});await flushBrowserTasks();harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('offline password login opens only a previously saved derived account after network failure',async()=>{
+ const tools=offlineIntegrationTools();let created=0;let receivedToken='';
+ const originalCreate=tools.create;tools.create=async(adapter:any)=>{created++;receivedToken=adapter.token;return originalCreate();};
+ const harness=await createBrowserHarness({offlineTools:tools,fetchImpl:async()=>{throw new TypeError('Network unavailable');}});
+ await harness.elements.get('login-form')!.dispatch('submit');await waitForBrowserCondition(()=>!harness.elements.get('reader-shell')!.classList.contains('hidden'),100);
+ assert.equal(created,1);assert.equal(receivedToken,await generateApiToken('secret-password'));
+ assert.ok(harness.elements.get('offline-mode-banner')!.textContent.includes('saved articles only'));
+ harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('online rejected credentials cannot open a saved offline namespace',async()=>{
+ const tools=offlineIntegrationTools();let created=0;tools.create=async()=>{created++;return tools.library;};
+ const harness=await createBrowserHarness({offlineTools:tools,fetchImpl:async()=>new Response('Unauthorized',{status:401})});
+ await harness.elements.get('login-form')!.dispatch('submit');await flushBrowserTasks();
+ assert.equal(created,0);assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'),true);
+});
+
+test('emitted preview regex and reader CSS insert the intended blob source and real newline',()=>{
+ const script=renderBrowserAppRuntimeScript();const expression=script.match(/const match=result.html.match\((.*?)\);/s)![1];
+ assert.equal(vm.runInNewContext(expression+'.exec(html)[1]',{html:'<img src="blob:fixture-image">'}),'blob:fixture-image');
+ const context={documentHtml:'<style></style>',readingTools:{frameCSS:()=>':root{color:red}'},readingPreferences:{}};
+ vm.runInNewContext(script.split('\n').find(line=>line.includes('documentHtml=documentHtml.replace'))!,context);
+ assert.equal(context.documentHtml.includes('<style>\n:root'),true);
 });
 
 test('For You collects every page before sorting and retains canonical read/star state with real mutations', async (t) => {
