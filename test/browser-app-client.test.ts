@@ -23,9 +23,10 @@ import {
 	selectArticleHeroImageUrl,
 	sortSubscriptionsByTitle,
 } from '../src/browser-app-client';
-import { renderBrowserAppRuntimeScript } from '../src/browser-app';
+import { renderBrowserAppRuntimeScript, renderBrowserAppHtml } from '../src/browser-app';
 import { handleGreaderRequest } from '../src/greader';
 import { handleNativeApiRequest } from '../src/native-api';
+import { renderBrowserPersonalizationScript } from '../src/browser-personalization';
 import { renderBrowserLibraryManagementScript } from '../src/browser-library-management';
 import { generateApiToken } from '../src/api-auth';
 
@@ -146,6 +147,7 @@ test('buildFeedViews returns built-in views plus sorted uncategorized feeds', ()
 				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
 				unreadCount: 0, kind: 'starred', section: 'views',
 			},
+			{ id:'for-you',title:'For You',streamId:'for-you',unreadCount:0,kind:'recommended',section:'views' },
 			{
 				id: 'feed/1',
 				title: 'Alpha',
@@ -225,6 +227,7 @@ test('buildFeedViews groups categorized feeds into folder views and keeps uncate
 				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
 				unreadCount: 0, kind: 'starred', section: 'views',
 			},
+			{ id:'for-you',title:'For You',streamId:'for-you',unreadCount:0,kind:'recommended',section:'views' },
 			{
 				id: 'user/-/label/Newsletters',
 				title: 'Newsletters',
@@ -825,6 +828,10 @@ async function createBrowserHarness(options?: {
 		['theme-toggle-button', createElement('', [], 'button', registerFocus)],
 		['article-list-mode-button', createElement('', [], 'button', registerFocus)],
 		['settings-button', createElement('', [], 'button', registerFocus)],
+		['personalization-content', createElement('', [], 'section', registerFocus)],
+		['refresh-view-button', createElement('', [], 'button', registerFocus)],
+		['more-like-button', createElement('', [], 'button', registerFocus)],
+		['not-interested-button', createElement('', [], 'button', registerFocus)],
 		['settings-panel', createElement('', ['hidden'], 'aside', registerFocus)],
 		['close-settings-button', createElement('', [], 'button', registerFocus)],
 		['sidebar-current-title', createElement('', [], 'strong', registerFocus)],
@@ -1067,6 +1074,7 @@ async function createBrowserHarness(options?: {
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
 	(context.window as any).document = context.document;
 	vm.runInNewContext(renderBrowserLibraryManagementScript(), context);
+	vm.runInNewContext(renderBrowserPersonalizationScript(), context);
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
     active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
@@ -4669,10 +4677,85 @@ test('mounted Library saves and undoes a feed rename through the real API and re
 	assert.equal(database.prepare("SELECT COALESCE(custom_title, display_name) AS title FROM feeds WHERE feed_key='today-source'").get()!.title, 'Renamed newsletter');
 	assert.ok(harness.elements.get('feeds-list')!.children.some((node) => node.textContent.includes('Renamed newsletter')));
 	content.querySelectorAll('button').find((node) => node.textContent === 'Undo last change')!.dispatch('click');
-	await waitForBrowserCondition(() => database.prepare("SELECT COALESCE(custom_title, display_name) AS title FROM feeds WHERE feed_key='today-source'").get()!.title === 'Today source', 200);
+	await waitForBrowserCondition(() => database.prepare("SELECT COALESCE(custom_title, display_name) AS title FROM feeds WHERE feed_key='today-source'").get()!.title === 'Today source' && content.querySelectorAll('button').find(node=>node.textContent==='Save feed')?.disabled===false, 200);
 	harness.elements.get('close-library-button')!.dispatch('click');
 	assert.equal(content.childElementCount, 0);
 	assert.equal(harness.elements.get('library-button')!.getAttribute('aria-expanded'), 'false');
+});
+
+function recommendationFixture(id: number) {
+ return {readerId:'tag:google.com,2005:reader/item/' + id.toString(16).padStart(16,'0'),id:'today-'+id,
+  feedKey:'today-source',source:'Today source',title:'Recommended '+id,author:'Writer',receivedAt:new Date(Date.UTC(2026,9,12,id)).toISOString(),
+  originalURL:'https://example.com/story/'+id,html:'<p>Recommendation body '+id+'</p>',text:'Recommendation body '+id,
+  isRead:false,isStarred:id===1,score:id===2?90:20,explanation:'Matches your interests',matchedTopics:['reading']};
+}
+
+test('For You collects every page before sorting and retains canonical read/star state with real mutations', async (t) => {
+ let pages=0;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?')) {pages++; return Response.json(input.includes('continuation=') ? {items:[recommendationFixture(2)],continuation:null} : {items:[recommendationFixture(1),recommendationFixture(3)],continuation:'second'});}
+  return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ assert.equal(pages,2); assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/starred'),true);
+ harness.elements.get('article-sort-select')!.value='score';harness.elements.get('article-sort-select')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 2',100);
+ assert.equal(pages,4);
+ await finishArticleMutation(harness,'mark-unread-button');
+ assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read,1);
+ harness.elements.get('article-search-input')!.value='body 3';harness.elements.get('article-query-form')!.dispatch('submit');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 3',100);
+ assert.equal(harness.elements.get('articles-list')!.children.length,1);
+});
+
+test('For You reports a failed later page without pretending an incomplete recommendation sort succeeded', async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?'))return input.includes('continuation=')?new Response('Unavailable',{status:503}):Response.json({items:[recommendationFixture(1)],continuation:'next'});
+  return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('articles-status')!.textContent.includes('Could not'),100);
+ assert.equal(harness.elements.get('articles-list')!.children.length,0);
+});
+
+test('late For You membership and feedback cannot update a signed-out session',async(t)=>{
+ const held=createDeferred<Response>(); let requested=false;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?')){requested=true;return held.promise;}return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>requested,100);
+ harness.elements.get('logout-button')!.dispatch('click'); held.resolve(Response.json({items:[recommendationFixture(1)],continuation:null}));
+ await flushBrowserTasks();assert.equal(harness.getCacheSizes().bodies,0);assert.equal(harness.elements.get('reader-action-status')!.textContent,'');
+});
+
+test('confirmed Not interested removes only recommendation membership and preserves the opened story and star',async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>input.startsWith('/api/v1/recommendations?')?Response.json({items:[recommendationFixture(1)],continuation:null}):next()});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ harness.elements.get('not-interested-button')!.dispatch('click');harness.elements.get('not-interested-button')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-action-status')!.textContent==='Preference saved: not interested.',100);
+ assert.equal(harness.elements.get('articles-list')!.children.length,0);
+ assert.equal(harness.elements.get('reader-title')!.textContent,'Recommended 1');
+ assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/starred'),true);
+ assert.equal(database.prepare("SELECT COUNT(*) AS count FROM engagement_events WHERE event_type='not_interested'").get()!.count,1);
+});
+
+test('personalization reset disables feedback and suppresses a delayed pre-reset acknowledgement',async(t)=>{
+ const held=createDeferred<Response>();let feedbackStarted=false;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.endsWith('/mutations') && JSON.parse(init!.body as string).mutations[0].kind==='feedback'){feedbackStarted=true;const response=await next();await held.promise;return response;}return next();
+ }});t.after(()=>database.close());
+ harness.elements.get('more-like-button')!.dispatch('click');await waitForBrowserCondition(()=>feedbackStarted,100);
+ harness.elements.get('settings-button')!.dispatch('click');const panel=harness.elements.get('personalization-content')!;
+ await waitForBrowserCondition(()=>panel.querySelectorAll('button').some(node=>node.textContent==='Reset all preferences'),100);
+ (panel.querySelectorAll('input').find(node=>(node as any).type==='checkbox') as any).checked=true;
+ panel.querySelectorAll('button').find(node=>node.textContent==='Reset all preferences')!.dispatch('click');
+ assert.equal(harness.elements.get('not-interested-button')!.disabled,true);
+ held.resolve(new Response('released'));await waitForBrowserCondition(()=>panel.querySelectorAll('p').some(node=>node.textContent==='All preferences reset.'),100);
+ assert.equal(harness.elements.get('reader-action-status')!.textContent,'');
+ assert.equal(database.prepare('SELECT COUNT(*) AS count FROM engagement_events').get()!.count,0);
 });
 
 test('closing Library stops follow-up feed changes while refreshing a completed same-account write', async (t) => {

@@ -31,7 +31,7 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'recommended' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
@@ -460,6 +460,7 @@ export function buildFeedViews(
 			kind: 'starred',
 			section: 'views',
 		},
+		{ id: 'for-you', title: 'For You', streamId: 'for-you', unreadCount: 0, kind: 'recommended', section: 'views' },
 		...folderViews,
 		...feedViews,
 	];

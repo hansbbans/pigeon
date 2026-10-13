@@ -1,4 +1,5 @@
 import { THEME_STORAGE_KEY, renderBrowserAppClientScript } from './browser-app-client';
+import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
 
 export function renderBrowserAppHtml(baseUrl: string): string {
@@ -13,6 +14,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 	const themeBootstrapScript = renderBrowserAppThemeBootstrapScript();
 	const runtimeScript = renderBrowserAppRuntimeScript();
 	const libraryScript = renderBrowserLibraryManagementScript();
+	const personalizationScript = renderBrowserPersonalizationScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -1370,7 +1372,8 @@ export function renderBrowserAppHtml(baseUrl: string): string {
     <script>
       ${sharedClientScript}
     </script>
-    <script>${escapeScript(libraryScript)}</script>
+    <script>${libraryScript.replace(/<\/script/gi, '<\\/script')}</script>
+    <script>${personalizationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
         <div class="login-card">
@@ -1508,7 +1511,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                 </form>
                 <div class="article-query-options">
                   <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
-                  <label>Sort<select id="article-sort-select"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                  <button class="secondary-button" id="refresh-view-button" type="button">Refresh view</button><label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
                 </div>
                 <details class="article-bulk-menu">
                   <summary>Bulk reading actions</summary>
@@ -1553,6 +1556,8 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   </div>
                   <div class="reader-pane-actions" aria-label="Article actions">
                     <button class="toolbar-pill" id="mark-unread-button" type="button" aria-label="Mark selected article as read" aria-keyshortcuts="M" data-control-tone="subtle" disabled>Mark read</button>
+                    <button class="toolbar-pill" id="more-like-button" type="button" disabled>More like this</button>
+                    <button class="toolbar-pill" id="not-interested-button" type="button" disabled>Not interested</button>
                     <button class="toolbar-pill" id="star-article-button" type="button" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
                     <button class="toolbar-pill hidden" id="undo-article-button" type="button" data-control-tone="subtle" disabled>Undo</button>
                     <button class="toolbar-pill" id="open-original-button" type="button" data-control-tone="subtle" disabled>Open original</button>
@@ -1593,6 +1598,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           <p class="status-meta">Your preference is saved in this browser. M toggles read status; S toggles a star. Marking unread keeps that article unread until you mark it read or sign out.</p>
           <p class="status-meta" id="reading-preference-status" role="status" aria-live="polite"></p>
         </div>
+        <section id="personalization-content" aria-label="Personalization"></section>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
       <aside class="panel hidden" id="library-panel" aria-label="Library" tabindex="-1">
@@ -1662,6 +1668,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
   const articleSortSelect = document.getElementById('article-sort-select');
+  document.getElementById('refresh-view-button').addEventListener('click',()=>{void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
   const articleQueryStatus = document.getElementById('article-query-status');
@@ -1696,6 +1703,14 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
+  let recommendationSort = 'recommended';
+  let recommendationDetails = new Map();
+  let personalizationService = null;
+  let personalizationPanel = null;
+  let pendingFeedback = null;
+  const personalizationContent = document.getElementById('personalization-content');
+  const moreLikeButton = document.getElementById('more-like-button');
+  const notInterestedButton = document.getElementById('not-interested-button');
   let itemIds = [];
   let nextItemIdsContinuation = '';
   let isLoadingItemIdsPage = false;
@@ -2149,7 +2164,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function getArticleQuery(viewId = activeViewId) {
     const view = views.find((candidate) => candidate.id === viewId);
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
-      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: articleSortOrder };
+      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: view?.kind === 'recommended' ? recommendationSort : articleSortOrder };
     if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
       query.dayBounds = client.getLocalDayBounds();
     }
@@ -2343,6 +2358,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function clearAccountCache() {
+    if (personalizationService) personalizationService.destroy();
+    personalizationService = null; personalizationPanel = null; pendingFeedback = null;
+    recommendationDetails.clear(); recommendationSort = 'recommended';
     closeLibraryPanel();
     accountGeneration += 1;
     keyboardRevealSelection = null;
@@ -2883,7 +2901,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const hasUnreadItems = ['today', 'starred'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
+    const hasUnreadItems = ['today', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
     const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems;
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
@@ -3334,7 +3352,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const view = getActiveView();
     articleReadFilterSelect.value = getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
-    articleSortSelect.value = articleSortOrder;
+    articleSortSelect.value = view?.kind === 'recommended' ? recommendationSort : articleSortOrder;
+    for (const option of articleSortSelect.querySelectorAll('option')) option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     articleSortSelect.disabled = Boolean(pendingArticleMutation);
     articleBulkButton.disabled = session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
       (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
@@ -3349,7 +3368,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const currentView = getActiveView();
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
-    articleSortOrder = sort;
+    if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(articleSortSelect.value) ? articleSortSelect.value : 'recommended';
+    else articleSortOrder = sort;
     heldReaderArticle = null;
     articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
     await loadActiveView();
@@ -3432,6 +3452,10 @@ export function renderBrowserAppRuntimeScript(): string {
       }));
       title.appendChild(createNode('span', { text: entry.title }));
       copy.appendChild(title);
+      if (getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
+        const detail = recommendationDetails.get(entry.id);
+        copy.appendChild(createNode('span', {classNames:['article-meta'], text: 'Score ' + Number(detail.score || 0).toFixed(1) + (detail.explanation ? ' · ' + (typeof detail.explanation === 'string' ? detail.explanation : JSON.stringify(detail.explanation)) : '')}));
+      }
       if (articleListMode !== 'titles' && entry.preview) {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
@@ -3875,6 +3899,91 @@ export function renderBrowserAppRuntimeScript(): string {
     return returnedIds;
   }
 
+  async function loadRecommendations(view, query, generation, token, stateVersion, rootRequestId) {
+    const entries = new Map(); const seen = new Set(); let continuation = '';
+    do {
+      const params = new URLSearchParams({view:'for-you',limit:'100'});
+      if (continuation) params.set('continuation', continuation);
+      const payload = await authenticatedJson('/api/v1/recommendations?' + params);
+      if (!requestBelongsToCurrentSession(generation, token)) return { itemRefs: [] };
+      if (!Array.isArray(payload?.items)) throw new Error('Invalid recommendation response');
+      for (const entry of payload.items) {
+        const id = client.normalizeBrowserItemId(String(entry.readerId || ''));
+        if (!id) throw new Error('Recommendation is missing its reader identity');
+        entries.set(id, {...entry,readerId:id});
+      }
+      if (activeViewId === view.id && (!rootRequestId || getViewState(view.id,false)?.rootRequestId===rootRequestId)) articlesStatus.textContent = 'Loading complete recommendations… ' + entries.size + ' found.';
+      continuation = payload.continuation || '';
+      if (continuation && seen.has(continuation)) throw new Error('Repeated recommendation continuation');
+      seen.add(continuation);
+    } while (continuation);
+    if (!requestBelongsToCurrentSession(generation, token) ||
+        (rootRequestId && getViewState(view.id, false)?.rootRequestId !== rootRequestId)) return {itemRefs:[]};
+    let selected = []; let rank = 0;
+    for (const [id, entry] of entries) {
+      const categories = ['user/-/state/com.google/reading-list'];
+      if (entry.isRead) categories.push('user/-/state/com.google/read');
+      if (entry.isStarred) categories.push('user/-/state/com.google/starred');
+      const item = mergeArticleIntoCache({id, nativeId:entry.id, title:entry.title, author:entry.author,
+        published: Math.floor(Date.parse(entry.receivedAt)/1000), categories,
+        origin:{title:entry.source,streamId:subscriptions.find(feed => feed.url?.includes('/feed/' + entry.feedKey))?.id},
+        alternate:entry.originalURL ? [{href:entry.originalURL}] : [],
+        summary:{content:entry.html || entry.text || ''}}, generation, stateVersion);
+      recommendationDetails.set(id,{score:entry.score,explanation:entry.explanation,matchedTopics:entry.matchedTopics,published:item.published,rank:rank++});
+      if ((query.filter === 'unread' && getArticleState(item,'read')) ||
+          (query.filter === 'read' && !getArticleState(item,'read'))) continue;
+      const text = [entry.title,entry.author,entry.source,entry.text,client.sanitizeArticleHtml(entry.html || '').replace(/<[^>]*>/g,' ')].join(' ').toLocaleLowerCase();
+      if (query.q && !text.includes(query.q.toLocaleLowerCase())) continue;
+      selected.push({id,published:item.published,score:Number(entry.score)||0});
+    }
+    if (query.sort === 'score') selected.sort((a,b)=>b.score-a.score || b.published-a.published || Number(b.id)-Number(a.id));
+    else if (['newest','oldest'].includes(query.sort)) selected.sort((a,b)=>(query.sort==='oldest'?-1:1)*(b.published-a.published || Number(b.id)-Number(a.id)));
+    trimArticleCache(); trimArticleMetadataCache();
+    return {itemRefs:selected.map(item=>({id:item.id})),continuation:''};
+  }
+
+  function getPersonalizationService() {
+    if (!personalizationService && window.__PIGEON_PERSONALIZATION__) {
+      personalizationService = window.__PIGEON_PERSONALIZATION__.create({authenticatedJson,authenticatedFetch,
+        getSessionIdentity:()=>accountGeneration + ':' + session.token,
+        onResetStateChanged:()=>renderArticleActions()});
+    }
+    return personalizationService;
+  }
+
+  function mountPersonalization() {
+    const service = getPersonalizationService();
+    if (service && !personalizationPanel) personalizationPanel = service.mount({container:personalizationContent,
+      onChanged:async()=>{
+        for (const [key,state] of viewStates) if (state.viewId === 'for-you') viewStates.delete(key);
+        if (activeViewId === 'for-you') await loadActiveView();
+      }});
+  }
+
+  async function sendArticleFeedback(type) {
+    if (pendingFeedback || !selectedItemId || !articleCache.has(selectedItemId)) return;
+    const service = getPersonalizationService(); if (!service || service.isResetting()) return;
+    const request = {generation:accountGeneration,token:session.token,itemId:selectedItemId,selectionId:readerActionSelectionId,reset:service.getResetGeneration()};
+    pendingFeedback = request; renderArticleActions();
+    const current = ()=>pendingFeedback===request && requestBelongsToCurrentSession(request.generation,request.token) && service.getResetGeneration()===request.reset;
+    try {
+      await service.feedback(request.itemId,type);
+      if (!current()) return;
+      if (type === 'not_interested') {
+        for (const state of viewStates.values()) if (state.viewId==='for-you') {
+          state.itemIds=state.itemIds.filter(id=>id!==request.itemId); state.confirmedItemIds.delete(request.itemId);
+          state.hasMembership=true; state.continuation=''; state.membershipEpoch++; state.rootRequestId=++membershipRootRequestId;
+        }
+        if (activeViewId==='for-you') { heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)}; itemIds=itemIds.filter(id=>id!==request.itemId); renderArticles(); }
+      }
+      if (request.selectionId===readerActionSelectionId) readerActionMessage=type==='more_like_this'?'Preference saved: more like this.':'Preference saved: not interested.';
+    } catch (error) {
+      if (current() && error?.code!=='personalization_superseded' && request.selectionId===readerActionSelectionId) readerActionMessage='Could not save preference. Try again.';
+    } finally { if (pendingFeedback===request) {pendingFeedback=null; renderArticleActions();} }
+  }
+  moreLikeButton.addEventListener('click',()=>{void sendArticleFeedback('more_like_this');});
+  notInterestedButton.addEventListener('click',()=>{void sendArticleFeedback('not_interested');});
+
   function requestMembershipPage(view, continuation, options) {
     const generation = accountGeneration;
     const token = session.token;
@@ -3889,7 +3998,9 @@ export function renderBrowserAppRuntimeScript(): string {
     const state = getViewState(view.id);
     const rootRequestId = continuation ? state.rootRequestId : ++membershipRootRequestId;
     if (!continuation) state.rootRequestId = rootRequestId;
-    const requestPromise = authenticatedJson(buildStreamIdsUrl(view, continuation))
+    const stateVersion = articleStateMutationId;
+    const querySnapshot = { ...getArticleQuery(view.id) };
+    const requestPromise = (view.kind === 'recommended' ? loadRecommendations(view, querySnapshot, generation, token, stateVersion, rootRequestId) : authenticatedJson(buildStreamIdsUrl(view, continuation)))
       .then((rawPayload) => {
         const payload = normalizeMembershipPayload(rawPayload);
         if (!requestBelongsToCurrentSession(generation, token)) {
@@ -4269,6 +4380,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const isStarred = getArticleState(article, 'starred');
     const disabled = session.status !== 'authenticated' || !selectedItemId ||
       !articleCache.has(selectedItemId) || Boolean(pendingArticleMutation);
+    moreLikeButton.disabled = disabled || Boolean(pendingFeedback) || Boolean(personalizationService?.isResetting());
+    notInterestedButton.disabled = moreLikeButton.disabled;
     markUnreadButton.disabled = disabled;
     markUnreadButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     markUnreadButton.setAttribute('aria-busy', isPending && pendingArticleMutation.field === 'read' ? 'true' : 'false');
@@ -4305,7 +4418,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if (belongs && state.hasMembership && !state.itemIds.includes(itemId) &&
           (state.locallyRemovedIds.has(itemId) || (!state.query.q && scopeMatches))) {
         state.itemIds.push(itemId);
-        state.itemIds.sort((left, right) => (state.query.sort === 'oldest' ? -1 : 1) *
+        if (view.kind === 'recommended' && ['score','recommended'].includes(state.query.sort)) state.itemIds.sort((left,right)=>state.query.sort==='score' ? (recommendationDetails.get(right)?.score||0)-(recommendationDetails.get(left)?.score||0) : (recommendationDetails.get(left)?.rank||0)-(recommendationDetails.get(right)?.rank||0));
+        else state.itemIds.sort((left, right) => (state.query.sort === 'oldest' ? -1 : 1) *
           ((loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) || Number(right) - Number(left)));
         state.confirmedItemIds.add(itemId);
         state.locallyRemovedIds.delete(itemId);
@@ -4444,6 +4558,13 @@ export function renderBrowserAppRuntimeScript(): string {
     const seenIds = new Set();
     const seenContinuations = new Set();
     let continuation = '';
+    if (request.view.kind === 'recommended') {
+      const payload = await loadRecommendations(request.view, request.query, request.generation, request.token, articleStateMutationId);
+      const all = payload.itemRefs.map(ref => ref.id).filter(id => !request.before || (recommendationDetails.get(id)?.published || 0) * 1000 < Date.parse(request.before));
+      const index = all.indexOf(request.selectedItemId);
+      if (['above','below'].includes(request.mode) && index < 0) throw new Error('Selected article is no longer in these results.');
+      return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
+    }
     if (request.view.kind === 'today' && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
     do {
@@ -4863,6 +4984,7 @@ export function renderBrowserAppRuntimeScript(): string {
   settingsButton.addEventListener('click', () => {
     closeLibraryPanel();
     const isHidden = settingsPanel.classList.toggle('hidden');
+    if (!isHidden) mountPersonalization();
     if (!isHidden && !statusLoaded) {
       void loadStatus();
     }
@@ -4913,6 +5035,17 @@ export function renderBrowserAppRuntimeScript(): string {
             void loadSubscriptionsAndUnreadCounts({ forceUnread: true });
           }
         }
+      },
+      onFolderRenamed: (oldName, newName) => {
+        if (!isCurrent()) return;
+        const oldId = 'user/-/label/' + oldName; const newId = 'user/-/label/' + newName;
+        if (activeViewId === oldId) activeViewId = newId;
+        if (expandedFolderIds.delete(oldId)) expandedFolderIds.add(newId);
+        for (const state of viewStates.values()) if (state.viewId === oldId) {
+          state.viewId = newId; state.queryKey = JSON.stringify([newId, state.query]);
+          viewStates.set(state.queryKey, state);
+        }
+        if (heldReaderArticle?.viewId === oldId) heldReaderArticle.viewId = newId;
       },
       getSubscriptions: () => subscriptions,
       getSessionIdentity: () => accountGeneration + ':' + session.token,

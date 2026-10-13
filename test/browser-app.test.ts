@@ -1,8 +1,17 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
+import vm from 'node:vm';
+import { renderBrowserAppHtml } from '../src/browser-app';
 
 import { generateApiToken } from '../src/api-auth';
 import app from '../src/index';
+
+test('every inline script in the actual app HTML parses as executable JavaScript', () => {
+ const html = renderBrowserAppHtml('https://pigeon.example');
+ const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
+ assert.ok(scripts.length >= 5);
+ for (const [index, script] of scripts.entries()) assert.doesNotThrow(() => new vm.Script(script[1]), 'inline script ' + index);
+});
 
 const SCHEMA_VERSION_SQL = normalizeSql("SELECT value FROM _meta WHERE key = 'schema_version'");
 const FEED_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS active_feed_count,
