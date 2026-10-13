@@ -4788,6 +4788,15 @@ test('account change while offline hashing is pending cannot create the previous
  harness.elements.get('logout-button')!.dispatch('click');
 });
 
+test('notification read action requires explicit confirmation after authentication',async(t)=>{
+ const {database,harness,mutations}=await createStatefulArticleBrowser({locationHref:'https://pigeon.example/app?article=1&notificationAction=read'});t.after(()=>database.close());
+ await waitForBrowserCondition(()=>!harness.elements.get('notification-action-panel')!.classList.contains('hidden'),100);
+ assert.equal(mutations.length,0);assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read,0);
+ harness.elements.get('notification-confirm-button')!.dispatch('click');harness.elements.get('notification-confirm-button')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('notification-action-panel')!.classList.contains('hidden'),100);
+ assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read,1);assert.equal(mutations.length,1);
+});
+
 test('reader extraction prepares image policy before insertion, consent reloads safely, and preference shortcuts work',async(t)=>{
  const tools=readingIntegrationTools();let sources=0;
  const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,extractReader:()=>({content:'<p>Extracted story</p><img src="https://example.com/image.jpg">',url:'https://example.com/reader'}),fetchOverride:async(input,init,next)=>{

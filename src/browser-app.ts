@@ -1,5 +1,6 @@
 import { THEME_STORAGE_KEY, renderBrowserAppClientScript } from './browser-app-client';
 import { renderBrowserOfflineScript } from './browser-offline';
+import { renderBrowserNotificationsScript } from './browser-notifications';
 import { renderBrowserReadingScript } from './browser-reading-preferences';
 import { renderBrowserReadabilityScript } from './browser-readability';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
@@ -20,12 +21,17 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 	const personalizationScript = renderBrowserPersonalizationScript();
 	const readingScript = renderBrowserReadingScript();
 	const offlineScript = renderBrowserOfflineScript();
+	const notificationScript = renderBrowserNotificationsScript();
 	const readabilityScript = renderBrowserReadabilityScript();
 
 	return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <link rel="manifest" href="/app/manifest.webmanifest" />
+    <meta name="theme-color" content="#f5f5f2" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Pigeon" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pigeon</title>
     <script>${escapeScript(themeBootstrapScript)}</script>
@@ -1384,6 +1390,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
     <script>${readingScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${readabilityScript}</script>
     <script>${offlineScript.replace(/<\/script/gi, '<\\/script')}</script>
+    <script>${notificationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${personalizationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
@@ -1559,6 +1566,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 
             <article class="panel" id="reader-panel">
               <div class="reader-pane-surface">
+                <div id="notification-action-panel" class="hidden" role="status"><p id="notification-action-text"></p><button id="notification-confirm-button" type="button">Confirm article action</button><button id="notification-cancel-button" type="button">Cancel</button></div>
                 <div id="reader-pane-toolbar">
                   <div class="reader-pane-toolbar-copy">
                     <p class="reader-pane-label" id="reader-source-label">Source</p>
@@ -1630,6 +1638,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         <button id="offline-free-button" type="button">Free read, unstarred bodies older than 30 days</button>
         <label><input id="offline-clear-confirm" type="checkbox">Confirm clearing read, unstarred cached bodies</label><button id="offline-clear-button" type="button">Clear eligible cached bodies</button>
         <p id="offline-status" role="status" aria-live="polite">Offline storage has not been enabled for this account.</p></details>
+        <section id="notifications-content" aria-label="Notifications"></section>
         <section id="personalization-content" aria-label="Personalization"></section>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
@@ -1736,7 +1745,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
-  let offlineLibrary=null; let offlineOpening=null; let offlineSession=false; let offlineBusy=false; let offlineQueuedCount=0;
+  let pendingNotificationAction=null;
+  let offlineLibrary=null; let offlineOpening=null; let offlineSession=false; let offlineBusy=false; let offlineQueuedCount=0; let notificationPanel=null;
   const offlineStatus=document.getElementById('offline-status');
   const offlineEnableButton=document.getElementById('offline-enable-button'); const offlineSyncButton=document.getElementById('offline-sync-button');
   const readingTools = window.PigeonReading;
@@ -2408,7 +2418,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function clearAccountCache() {
     persistReadingData();
+    pendingNotificationAction=null;document.getElementById('notification-confirm-button').disabled=false;document.getElementById('notification-action-panel').classList.add('hidden');
     if(offlineLibrary)offlineLibrary.close();offlineLibrary=null;offlineOpening=null;offlineSession=false;offlineBusy=false;offlineQueuedCount=0;offlineEnableButton.disabled=false;offlineSyncButton.disabled=false;
+    if(notificationPanel)notificationPanel.destroy();notificationPanel=null;
     offlineStatus.textContent='Offline storage has not been enabled for this account.';
 
     readingRenderRequest++; preparedReaderKey=''; readingAccountHash=''; readingIdentityPromise=null; readingData={modes:{},positions:{}};
@@ -2598,6 +2610,32 @@ export function renderBrowserAppRuntimeScript(): string {
   document.getElementById('offline-free-button').addEventListener('click',async()=>{if(!offlineLibrary)return;try {await offlineLibrary.freeOlderReadUnstarred(new Date(Date.now()-30*86400000).toISOString());await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
   document.getElementById('offline-clear-button').addEventListener('click',async()=>{if(!offlineLibrary||!document.getElementById('offline-clear-confirm').checked)return;try {await offlineLibrary.clearCache();await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
   function renderOfflineBanner(){const banner=document.getElementById('offline-mode-banner');banner.classList.toggle('hidden',!isOfflineReading()&&!offlineQueuedCount);banner.textContent=(isOfflineReading()?'Offline · saved articles only. ':'')+(offlineQueuedCount?offlineQueuedCount+' changes pending sync.':'');}
+  function mountNotifications(){if(notificationPanel){void notificationPanel.refresh();return;}if(window.PigeonNotifications)notificationPanel=window.PigeonNotifications.mount({container:document.getElementById('notifications-content'),authenticatedJson:onlineAuthenticatedJson,authenticatedFetch,getSubscriptions:()=>subscriptions,getSessionIdentity:()=>({token:session.token,generation:accountGeneration})});}
+  function prepareNotificationAction() {
+    if(!window.location?.href||pendingNotificationAction)return;
+    const params=new URL(window.location.href).searchParams;const id=params.get('article'),action=params.get('notificationAction');
+    if(!id||!/^[1-9][0-9]*$/.test(id))return;
+    if(action&&!['read','star'].includes(action))return;
+    pendingNotificationAction={itemId:id,action,generation:accountGeneration,token:session.token};
+    const panel=document.getElementById('notification-action-panel');panel.classList.remove('hidden');
+    document.getElementById('notification-action-text').textContent=action==='read'?'This notification asks to mark its story read. Confirm to save that change.':action==='star'?'This notification asks to star its story. Confirm to save that change.':'Open the story from this notification.';
+    document.getElementById('notification-confirm-button').textContent=action?'Confirm article action':'Open story';
+  }
+  document.getElementById('notification-cancel-button').addEventListener('click',()=>{pendingNotificationAction=null;document.getElementById('notification-action-panel').classList.add('hidden');if(window.history?.replaceState){const url=new URL(window.location.href);url.searchParams.delete('notificationAction');window.history.replaceState(null,'',url);}});
+  document.getElementById('notification-confirm-button').addEventListener('click',async()=>{
+    const request=pendingNotificationAction,button=document.getElementById('notification-confirm-button');if(!request||button.disabled||pendingArticleMutation)return;
+    button.disabled=true;
+    try {await ensureArticleContent([request.itemId],request);if(pendingNotificationAction!==request||!requestBelongsToCurrentSession(request.generation,request.token))return;
+      selectedItemId=request.itemId;heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};renderReader();
+      if(request.action)await mutateArticleState(request.itemId,request.action==='read'?'read':'starred',true);
+      if(!requestBelongsToCurrentSession(request.generation,request.token))return;
+      if(request.action&&!getArticleState(loadedItemsById[request.itemId],request.action==='read'?'read':'starred'))throw new Error('Article action was not confirmed. Retry.');
+      pendingNotificationAction=null;document.getElementById('notification-action-panel').classList.add('hidden');
+      if(window.history?.replaceState){const url=new URL(window.location.href);url.searchParams.delete('notificationAction');window.history.replaceState(null,'',url);}
+    }catch(error){if(pendingNotificationAction===request)document.getElementById('notification-action-text').textContent='Could not complete this notification action. Retry after reconnecting.';}
+    finally{if(requestBelongsToCurrentSession(request.generation,request.token))button.disabled=false;}
+  });
+
   function requestBelongsToCurrentSession(generation, token) {
     return generation === accountGeneration && token === session.token && session.status === 'authenticated';
   }
@@ -5161,6 +5199,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!requestBelongsToCurrentSession(generation, token)) {
         return false;
       }
+      if(notificationPanel)void notificationPanel.refresh();
       return true;
     } catch (_error) {
       if (requestBelongsToCurrentSession(generation, token)) {
@@ -5216,6 +5255,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReader();
     await loadSubscriptionsAndUnreadCounts();
     void updateOfflineStatus();
+    prepareNotificationAction();
   }
 
   async function login(password) {
@@ -5305,7 +5345,7 @@ export function renderBrowserAppRuntimeScript(): string {
   settingsButton.addEventListener('click', () => {
     closeLibraryPanel();
     const isHidden = settingsPanel.classList.toggle('hidden');
-    if (!isHidden) {mountPersonalization();void updateOfflineStatus();}
+    if (!isHidden) {mountPersonalization();mountNotifications();void updateOfflineStatus();}
     if (!isHidden && !statusLoaded) {
       void loadStatus();
     }
