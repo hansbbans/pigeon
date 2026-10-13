@@ -1,4 +1,6 @@
 import { THEME_STORAGE_KEY, renderBrowserAppClientScript } from './browser-app-client';
+import { renderBrowserReadingScript } from './browser-reading-preferences';
+import { renderBrowserReadabilityScript } from './browser-readability';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
 
@@ -15,6 +17,8 @@ export function renderBrowserAppHtml(baseUrl: string): string {
 	const runtimeScript = renderBrowserAppRuntimeScript();
 	const libraryScript = renderBrowserLibraryManagementScript();
 	const personalizationScript = renderBrowserPersonalizationScript();
+	const readingScript = renderBrowserReadingScript();
+	const readabilityScript = renderBrowserReadabilityScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -716,7 +720,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         line-height: 1.4;
       }
 
-      #reader-action-status:empty {
+      #reader-action-status:empty, #reader-reading-status:empty {
         display: none;
       }
 
@@ -908,6 +912,8 @@ export function renderBrowserAppHtml(baseUrl: string): string {
         background: var(--frame);
       }
 
+      #image-zoom-panel {position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.9);padding:1rem;overflow:auto;}
+      #zoom-image {display:block;max-width:100%;max-height:85vh;margin:auto;}
       #settings-panel {
         position: fixed;
         top: 1.5rem;
@@ -1156,11 +1162,11 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .reader-copy {
-        padding: 2.85rem min(5vw, 4.15rem) 0;
+        padding: 1.4rem 1.35rem 0;
       }
 
       .reader-copy strong {
-        font-size: clamp(2.05rem, 3.1vw, 2.75rem);
+        font-size: clamp(1.35rem, 2vw, 2rem);
         line-height: 1.08;
         letter-spacing: -0.035em;
       }
@@ -1172,7 +1178,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       .reader-frame-shell {
-        padding: 1.55rem min(5vw, 4.15rem) 1.25rem;
+        padding: 1rem 0.25rem 1.25rem;
       }
 
       #reader-frame {
@@ -1373,6 +1379,8 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       ${sharedClientScript}
     </script>
     <script>${libraryScript.replace(/<\/script/gi, '<\\/script')}</script>
+    <script>${readingScript.replace(/<\/script/gi, '<\\/script')}</script>
+    <script>${readabilityScript}</script>
     <script>${personalizationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
@@ -1560,6 +1568,10 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                     <button class="toolbar-pill" id="not-interested-button" type="button" disabled>Not interested</button>
                     <button class="toolbar-pill" id="star-article-button" type="button" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
                     <button class="toolbar-pill hidden" id="undo-article-button" type="button" data-control-tone="subtle" disabled>Undo</button>
+                    <label>View<select id="reader-mode-select"><option value="newsletter">Newsletter</option><option value="reader">Reader</option><option value="website">Website</option></select></label>
+                    <button class="toolbar-pill" id="share-article-button" type="button">Share</button>
+                    <details><summary>Readwise</summary><label>Readwise token (this session only)<input id="readwise-token-input" type="password" autocomplete="off"></label><button id="readwise-save-button" type="button">Save to Readwise</button></details>
+                    <button class="toolbar-pill" id="load-images-button" type="button" hidden>Load images for this article</button>
                     <button class="toolbar-pill" id="open-original-button" type="button" data-control-tone="subtle" disabled>Open original</button>
                   </div>
                 </div>
@@ -1567,7 +1579,7 @@ export function renderBrowserAppHtml(baseUrl: string): string {
                   <span class="section-kicker">Reading Pane</span>
                   <h2>Selected article</h2>
                   <strong id="reader-title">Select an article</strong>
-                  <p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
+                  <p id="reader-reading-status" role="status" aria-live="polite"></p><p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
                 </div>
                 <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
                   <p class="reader-player-label">Video</p>
@@ -1598,9 +1610,22 @@ export function renderBrowserAppHtml(baseUrl: string): string {
           <p class="status-meta">Your preference is saved in this browser. M toggles read status; S toggles a star. Marking unread keeps that article unread until you mark it read or sign out.</p>
           <p class="status-meta" id="reading-preference-status" role="status" aria-live="polite"></p>
         </div>
+        <details><summary>Reading appearance and shortcuts</summary><form id="reading-settings-form">
+          <label>Reading theme<select id="reading-theme"><option value="light">Light</option><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="system">System</option></select></label>
+          <label>Typeface<select id="reading-font"><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
+          <label>Font size<input id="reading-fontSize" type="number" min="14" max="28"></label>
+          <label>Line height<input id="reading-lineHeight" type="number" min="1.2" max="2.2" step="0.05"></label>
+          <label>Article width<input id="reading-width" type="number" min="480" max="960"></label>
+          <label>Margins<input id="reading-margins" type="number" min="0" max="64"></label>
+          <label>Density<select id="reading-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
+          <label>Images in previews and articles<select id="reading-imagePolicy"><option value="load">Load directly</option><option value="ask">Ask first</option><option value="proxy">Private proxy</option></select></label>
+          <label>Next shortcut<input id="shortcut-next" maxlength="1"></label><label>Previous shortcut<input id="shortcut-previous" maxlength="1"></label><label>Read shortcut<input id="shortcut-read" maxlength="1"></label><label>Star shortcut<input id="shortcut-star" maxlength="1"></label>
+          <button type="submit">Save reading settings</button><p id="reading-settings-status" role="status"></p>
+        </form></details>
         <section id="personalization-content" aria-label="Personalization"></section>
         <div class="status-meta" id="settings-content">Open settings to load status.</div>
       </aside>
+      <div id="image-zoom-panel" class="hidden" role="dialog" aria-label="Article image"><button id="close-image-zoom" type="button">Close image</button><img id="zoom-image" alt=""></div>
       <aside class="panel hidden" id="library-panel" aria-label="Library" tabindex="-1">
         <header><h2>Library</h2><button class="secondary-button" id="close-library-button" type="button">Close</button></header>
         <div id="library-content"></div>
@@ -1668,7 +1693,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
   const articleSortSelect = document.getElementById('article-sort-select');
-  document.getElementById('refresh-view-button').addEventListener('click',()=>{void revalidateActiveView({refreshUnread:true});});
+  document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
   const articleQueryStatus = document.getElementById('article-query-status');
@@ -1684,7 +1709,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerPlayerContainer = document.getElementById('reader-player-container');
   const readerPlayerFallback = document.getElementById('reader-player-fallback');
   const settingsContent = document.getElementById('settings-content');
-  const DEFAULT_COLUMN_WIDTHS = { sidebar: 416, stream: 524 };
+  const DEFAULT_COLUMN_WIDTHS = { sidebar: 224, stream: 340 };
   const COLUMN_WIDTH_LIMITS = {
     sidebar: { minimum: 224, maximum: 520 },
     stream: { minimum: 288, maximum: 640 },
@@ -1703,7 +1728,18 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
+  const readingTools = window.PigeonReading;
+  let readingPreferences = readingTools ? readingTools.readPreferences(window.localStorage) : null;
+  let readingRenderRequest = 0; let preparedReaderKey = ''; let readingAccountHash = ''; let readingData = {modes:{},positions:{}};
+  let readingIdentityPromise = null; let positionSaveTimer = null; let consentItemId = null;
+  const extractedArticles = new Map(); const previewImages = new Map(); const readingObjectURLs = new Set();
+  const readerModeSelect = document.getElementById('reader-mode-select'); const readingStatus = document.getElementById('reader-reading-status');
+  const loadImagesButton = document.getElementById('load-images-button'); const readwiseTokenInput = document.getElementById('readwise-token-input');
+  const readwiseSaveButton = document.getElementById('readwise-save-button'); const zoomPanel = document.getElementById('image-zoom-panel');
+  const zoomImage = document.getElementById('zoom-image'); let readwiseSaving = false;
   let recommendationSort = 'recommended';
+  let recommendationEpoch = 0;
+  let recommendationExclusions = new Set(); let acknowledgedResetGeneration = 0;
   let recommendationDetails = new Map();
   let personalizationService = null;
   let personalizationPanel = null;
@@ -2165,6 +2201,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const view = views.find((candidate) => candidate.id === viewId);
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
       view?.kind === 'recent' ? 'read' : articleReadFilter, sort: view?.kind === 'recommended' ? recommendationSort : articleSortOrder };
+    if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
     if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
       query.dayBounds = client.getLocalDayBounds();
     }
@@ -2358,9 +2395,15 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function clearAccountCache() {
+    readingRenderRequest++; preparedReaderKey=''; readingAccountHash=''; readingIdentityPromise=null; readingData={modes:{},positions:{}};
+    if(positionSaveTimer) clearTimeout(positionSaveTimer); positionSaveTimer=null; pendingReaderPosition=null; consentItemId=null;
+    extractedArticles.clear(); previewImages.clear();
+    for(const url of readingObjectURLs) URL.revokeObjectURL(url); readingObjectURLs.clear();
+    readwiseTokenInput.value=''; readwiseSaving=false; zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
+
     if (personalizationService) personalizationService.destroy();
     personalizationService = null; personalizationPanel = null; pendingFeedback = null;
-    recommendationDetails.clear(); recommendationSort = 'recommended';
+    recommendationEpoch++; recommendationExclusions.clear(); acknowledgedResetGeneration=0; recommendationDetails.clear(); recommendationSort = 'recommended';
     closeLibraryPanel();
     accountGeneration += 1;
     keyboardRevealSelection = null;
@@ -2925,6 +2968,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getNavigationDirectionFromKeyEvent(event) {
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    const shortcuts = readingPreferences?.shortcuts || {next:'j',previous:'k',read:'m',star:'s'};
     if (key !== 'j' && key !== 'k') {
       return 0;
     }
@@ -3018,14 +3062,15 @@ export function renderBrowserAppRuntimeScript(): string {
   function handleArticleNavigationKeydown(event) {
     if (!libraryPanel.classList.contains('hidden') || !settingsPanel.classList.contains('hidden')) return false;
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
-    if ((key === 'm' || key === 's') && !event.metaKey && !event.ctrlKey && !event.altKey &&
+    const shortcuts = readingPreferences?.shortcuts || {next:'j',previous:'k',read:'m',star:'s'};
+    if ((key === shortcuts.read || key === shortcuts.star) && !event.metaKey && !event.ctrlKey && !event.altKey &&
         isReaderVisible() && !isEditableTarget(event.target) && !pendingArticleMutation &&
         articleCache.has(selectedItemId)) {
       if (typeof event.preventDefault === 'function') event.preventDefault();
-      void toggleSelectedArticleState(key === 'm' ? 'read' : 'starred');
+      void toggleSelectedArticleState(key === shortcuts.read ? 'read' : 'starred');
       return true;
     }
-    const direction = getNavigationDirectionFromKeyEvent(event);
+    const direction = !event.metaKey && !event.ctrlKey && !event.altKey && key === shortcuts.next ? 1 : !event.metaKey && !event.ctrlKey && !event.altKey && key === shortcuts.previous ? -1 : getNavigationDirectionFromKeyEvent({...event,key:['j','k'].includes(key)?'':event.key});
     if (!direction) {
       return false;
     }
@@ -3050,6 +3095,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     activeFrameDocument.removeEventListener('keydown', handleArticleNavigationKeydown);
     activeFrameDocument.removeEventListener('scroll', handleReaderProgress);
+    activeFrameDocument.removeEventListener('click', zoomReadingImage);
     activeFrameDocument = null;
   }
 
@@ -3068,6 +3114,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     frameDocument.addEventListener('keydown', handleArticleNavigationKeydown);
     frameDocument.addEventListener('scroll', handleReaderProgress);
+    frameDocument.addEventListener('click', zoomReadingImage);
     activeFrameDocument = frameDocument;
   }
 
@@ -3200,7 +3247,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
     row.appendChild(titleGroup);
-    row.appendChild(createNode('span', { classNames: ['feed-count'], text: ['today', 'recent', 'starred'].includes(view.kind) ? '' : formatUnreadCount(view.unreadCount) }));
+    row.appendChild(createNode('span', { classNames: ['feed-count'], text: ['today', 'recent', 'starred', 'recommended'].includes(view.kind) ? '' : formatUnreadCount(view.unreadCount) }));
     button.appendChild(row);
 
     if (view.kind === 'folder') {
@@ -3290,6 +3337,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const parentFolderView = getParentFolderView(activeView);
     const summaryParts = [];
+    if (activeView.kind === 'recommended') summaryParts.push('Articles matched to your interests');
     if (activeView.kind === 'folder') {
       summaryParts.push(getChildFeedViews(activeView.id).length + ' feeds');
     } else if (parentFolderView) {
@@ -3466,18 +3514,18 @@ export function renderBrowserAppRuntimeScript(): string {
         }
       }
       cardGrid.appendChild(copy);
-      if (articleListMode !== 'titles' && entry.heroImageUrl) {
-        cardGrid.appendChild(
-          createNode('img', {
+      if (articleListMode !== 'titles' && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
+        const image = createNode('img', {
             classNames: ['article-hero'],
             attributes: {
-              src: entry.heroImageUrl,
+              ...(readingPreferences?.imagePolicy === 'proxy' ? {} : {src:entry.heroImageUrl}),
               alt: '',
               loading: 'lazy',
               'data-card-hero': 'true',
             },
-          }),
-        );
+          });
+        cardGrid.appendChild(image);
+        if(readingPreferences?.imagePolicy === 'proxy') void preparePreviewImage(image,entry.heroImageUrl);
       }
       button.appendChild(cardGrid);
       listItem.appendChild(button);
@@ -3567,6 +3615,14 @@ export function renderBrowserAppRuntimeScript(): string {
         // The frame may be unavailable while navigating to the refreshed article.
       }
     }
+    if(pendingReaderPosition?.id===renderedReaderItemId) {
+      const fraction=pendingReaderPosition.fraction;pendingReaderPosition=null;
+      const height=Math.max(readerFrame.contentDocument?.documentElement?.scrollHeight||0,readerFrame.contentDocument?.body?.scrollHeight||0);
+      const viewport=readerFrame.contentWindow?.innerHeight||0;const top=Math.max(0,height-viewport)*fraction;
+      if(readerFrame.contentDocument?.documentElement)readerFrame.contentDocument.documentElement.scrollTop=top;
+      if(readerFrame.contentDocument?.body)readerFrame.contentDocument.body.scrollTop=top;
+      readerFrame.contentWindow?.scrollTo?.(0,top);readerFrameScrollTop=top;
+    }
     maybeAutoMarkRead();
   }
 
@@ -3608,6 +3664,133 @@ export function renderBrowserAppRuntimeScript(): string {
     readerFrameScrollTop = preservedScrollTop;
     readerFrame.srcdoc = documentHtml;
   }
+
+  async function preparePreviewImage(image,url) {
+    const generation=accountGeneration,token=session.token;const current=()=>requestBelongsToCurrentSession(generation,token)&&readingPreferences?.imagePolicy==='proxy';
+    try {
+      let promise=previewImages.get(url);
+      if(!promise) {promise=(async()=>{
+        const escaped=url.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
+        const result=await readingTools.applyImagePolicy('<img src="'+escaped+'">',{policy:'proxy',authenticatedFetch,registerObjectURL:value=>readingObjectURLs.add(value),isCurrent:current});
+        const match=result.html.match(/\\ssrc="(blob:[^"]+)"/);return match?.[1]||'';
+      })();previewImages.set(url,promise);while(previewImages.size>500)previewImages.delete(previewImages.keys().next().value);}
+      const src=await promise;if(current()&&src)image.setAttribute('src',src);
+    }catch(_) {if(current())image.setAttribute('alt','Image unavailable through private proxy');}
+  }
+  function zoomReadingImage(event) {
+    if(event.target?.tagName?.toLowerCase()!=='img')return;
+    const src=event.target.getAttribute('src');if(!src)return;
+    zoomImage.setAttribute('src',src);zoomImage.setAttribute('alt',event.target.getAttribute('alt')||'Article image');
+    zoomPanel.classList.remove('hidden');document.getElementById('close-image-zoom').focus();
+  }
+  async function loadReadingIdentity() {
+    if (readingAccountHash || !session.token) return;
+    if (readingIdentityPromise) return readingIdentityPromise;
+    const generation=accountGeneration, token=session.token;
+    const promise=(async()=>{
+      const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token));
+      if (!requestBelongsToCurrentSession(generation,token)) return;
+      readingAccountHash=[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+      try { const data=JSON.parse(window.localStorage.getItem('pigeon.browser.reading-account.'+readingAccountHash)||'null');
+        if(data && typeof data.modes==='object' && typeof data.positions==='object') readingData=data;
+      } catch(_) {}
+    })(); readingIdentityPromise=promise;
+    try {await promise;} finally {if(readingIdentityPromise===promise)readingIdentityPromise=null;}
+  }
+  function persistReadingData() {
+    if(!readingAccountHash)return;
+    try {window.localStorage.setItem('pigeon.browser.reading-account.'+readingAccountHash,JSON.stringify(readingData));} catch(_) {readingStatus.textContent='Reading position could not be saved in this browser.';}
+  }
+  function readingFeedId(item) {return item?.origin?.streamId || item?.origin?.title || 'unknown';}
+  function saveReadingPosition() {
+    if(!readingAccountHash || readyReaderItemId!==selectedItemId || !selectedItemId)return;
+    const id=selectedItemId,generation=accountGeneration,token=session.token;
+    const height=Math.max(readerFrame.contentDocument?.documentElement?.scrollHeight||0,readerFrame.contentDocument?.body?.scrollHeight||0);
+    const viewport=readerFrame.contentWindow?.innerHeight||0;
+    const value=Math.min(1,Math.max(0,readReaderFrameScrollTop()/Math.max(1,height-viewport)));
+    if(positionSaveTimer)clearTimeout(positionSaveTimer);
+    positionSaveTimer=setTimeout(()=>{positionSaveTimer=null;if(!requestBelongsToCurrentSession(generation,token))return;
+      delete readingData.positions[id];readingData.positions[id]=value;
+      while(Object.keys(readingData.positions).length>500)delete readingData.positions[Object.keys(readingData.positions)[0]];
+      persistReadingData();
+    },250);
+  }
+  async function prepareReadingFrame(item,href) {
+    const id=selectedItemId,generation=accountGeneration,token=session.token;
+    await loadReadingIdentity();
+    if(!requestBelongsToCurrentSession(generation,token)||id!==selectedItemId)return;
+    const mode=readingData.modes[readingFeedId(item)]||'newsletter';readerModeSelect.value=mode;
+    const original=item.content?.content || item.summary?.content || '';
+    const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original]);
+    if(preparedReaderKey===key)return;
+    preparedReaderKey=key; const request=++readingRenderRequest;
+    const current=()=>request===readingRenderRequest&&id===selectedItemId&&requestBelongsToCurrentSession(generation,token);
+    readingStatus.textContent=mode==='reader'?'Extracting reader view…':mode==='website'?'Website view: open the original in a new tab. Some sites block embedded readers.':'';
+    loadImagesButton.hidden=true;
+    let html=original,baseURL=href;let message='';
+    try {
+      if(mode==='reader') {
+        if(!href)throw new Error('No original website URL is available.');
+        let extracted=extractedArticles.get(id);
+        if(!extracted) {const source=await authenticatedJson('/api/v1/browser/reader-source?url='+encodeURIComponent(href));if(!current())return;
+          extracted=window.__PIGEON_READING_TOOLS__?.extract(source.html,source.url);if(!extracted?.content)throw new Error('Reader extraction unavailable.');
+          extractedArticles.set(id,extracted);while(extractedArticles.size>20)extractedArticles.delete(extractedArticles.keys().next().value);}
+        html=extracted.content;baseURL=extracted.url;message='Reader view extracted from the original website.';
+      } else if(mode==='website') html='<p>Open this story on its website using Open original. The website opens in a separate tab.</p>';
+    } catch(error) {if(!current())return;message='Reader extraction unavailable. Showing the newsletter body; try again or open the original.';}
+    try {
+      const result=await readingTools.applyImagePolicy(html,{policy:readingPreferences.imagePolicy,loadOnce:consentItemId===id,baseURL,
+        authenticatedFetch,registerObjectURL:url=>readingObjectURLs.add(url),isCurrent:current});
+      if(!current())return;
+      let documentHtml=client.createArticleFrameDocument(result.html,readingPreferences.theme==='dark'?'dark':'light');
+      documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
+      if(renderedReaderItemId!==id) {
+        const fraction=Number(readingData.positions[id]);
+        if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
+      }
+      renderReaderFrame(id,documentHtml); attachFrameNavigationListener();
+      readingStatus.textContent=[message,result.blockedCount ? result.blockedCount+' images hidden ('+[...new Set(result.images.filter(image=>!image.loaded).map(image=>image.reason||'unavailable'))].join(', ')+').' : ''].filter(Boolean).join(' ');
+      loadImagesButton.hidden=readingPreferences.imagePolicy!=='ask'||!result.blockedCount;
+    } catch(error) {if(current()){preparedReaderKey='';readingStatus.textContent='Could not prepare this reading view. Retry with Refresh view.';renderReaderFrame(id,client.createArticleFrameDocument('<p>Reading view unavailable.</p>',theme));}}
+  }
+  let pendingReaderPosition=null;
+  readerModeSelect.addEventListener('change',async()=>{
+    const id=selectedItemId,generation=accountGeneration;await loadReadingIdentity();if(id!==selectedItemId||generation!==accountGeneration)return;
+    const mode=['newsletter','reader','website'].includes(readerModeSelect.value)?readerModeSelect.value:'newsletter';
+    readingData.modes[readingFeedId(loadedItemsById[id])]=mode;persistReadingData();preparedReaderKey='';renderReader();
+  });
+  loadImagesButton.addEventListener('click',()=>{consentItemId=selectedItemId;preparedReaderKey='';renderReader();});
+  document.getElementById('close-image-zoom').addEventListener('click',()=>{zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');});
+  document.getElementById('share-article-button').addEventListener('click',async()=>{
+    const item=loadedItemsById[selectedItemId],url=item?.alternate?.[0]?.href,id=selectedItemId,generation=accountGeneration;if(!url)return;
+    try {if(window.navigator?.share)await window.navigator.share({title:item.title,url});else if(window.navigator?.clipboard)await window.navigator.clipboard.writeText(url);else throw new Error();
+      if(id===selectedItemId&&generation===accountGeneration)readingStatus.textContent='Article link shared or copied.';
+    }catch(error){if(id===selectedItemId&&generation===accountGeneration)readingStatus.textContent='Sharing unavailable. Use Open original to copy the website address.';}
+  });
+  readwiseSaveButton.addEventListener('click',async()=>{
+    if(readwiseSaving)return;const id=selectedItemId,generation=accountGeneration,token=session.token;
+    const url=loadedItemsById[id]?.alternate?.[0]?.href,readwiseToken=readwiseTokenInput.value.trim();if(!url||!readwiseToken){readingStatus.textContent='Enter a Readwise token and select an article with an original URL.';return;}
+    readwiseSaving=true;readwiseSaveButton.disabled=true;readingStatus.textContent='Saving to Readwise…';
+    try {const response=await authenticatedFetch('/api/v1/browser/readwise/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,token:readwiseToken})});
+      const result=await response.json();if(!requestBelongsToCurrentSession(generation,token)||id!==selectedItemId)return;
+      if(!response.ok||result.saved!==true)throw new Error(result.code==='readwise_authentication_failed'?'Readwise rejected this token. Check it and try again.':result.code==='readwise_rate_limited'?'Readwise is busy. Try again later.':'Could not save to Readwise. Try again.');
+      readingStatus.textContent='Saved to Readwise.';
+    }catch(error){if(requestBelongsToCurrentSession(generation,token)&&id===selectedItemId)readingStatus.textContent=error instanceof Error?error.message:'Could not save to Readwise.';}
+    finally{if(requestBelongsToCurrentSession(generation,token)){readwiseSaving=false;readwiseSaveButton.disabled=false;}}
+  });
+  const readingFields=['theme','font','fontSize','lineHeight','width','margins','density','imagePolicy'];
+  if(readingPreferences) {
+    for(const key of readingFields)document.getElementById('reading-'+key).value=String(readingPreferences[key]);
+    for(const key of ['next','previous','read','star'])document.getElementById('shortcut-'+key).value=readingPreferences.shortcuts[key];
+  }
+  document.getElementById('reading-settings-form').addEventListener('submit',event=>{
+    event.preventDefault();if(!readingTools)return;
+    const next={shortcuts:{}};for(const key of readingFields)next[key]=document.getElementById('reading-'+key).value;
+    for(const key of ['next','previous','read','star'])next.shortcuts[key]=document.getElementById('shortcut-'+key).value;
+    try {readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';previewImages.clear();renderArticles();renderReader();document.getElementById('reading-settings-status').textContent='Reading settings saved.';
+      markUnreadButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.read);starArticleButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.star);
+    }catch(error){document.getElementById('reading-settings-status').textContent=error.message;}
+  });
 
   function renderReader() {
     renderArticleActions();
@@ -3661,7 +3844,8 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!hasFullArticle) {
       readerMeta.textContent = [readerMeta.textContent, 'Loading article content…'].filter(Boolean).join(' · ');
     }
-    renderYouTubePlayer(articleHref, item.title || '');
+    if (!readingPreferences || readingPreferences.imagePolicy === 'load') renderYouTubePlayer(articleHref, item.title || ''); else clearYouTubePlayer();
+    if (readingTools && hasFullArticle) {void prepareReadingFrame(item,articleHref); return;}
     renderReaderFrame(
       selectedItemId,
       client.createArticleFrameDocument(
@@ -3885,6 +4069,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     if (viewId === activeViewId) {
+      if (getActiveView()?.kind === 'recommended') renderFeeds();
       activeLoadedQueryKey = state.queryKey;
       const preservedScrollTop = getArticleScrollTop();
       itemIds = [...state.itemIds];
@@ -3921,14 +4106,17 @@ export function renderBrowserAppRuntimeScript(): string {
         (rootRequestId && getViewState(view.id, false)?.rootRequestId !== rootRequestId)) return {itemRefs:[]};
     let selected = []; let rank = 0;
     for (const [id, entry] of entries) {
-      const categories = ['user/-/state/com.google/reading-list'];
+      if(recommendationExclusions.has(id))continue;
+      const subscription = subscriptions.find(feed=>{try {return decodeURIComponent(new URL(feed.url,config.baseUrl).pathname.split('/feed/')[1]||'')===entry.feedKey;}catch(_){return false;}});
+      const categories = ['user/-/state/com.google/reading-list',...(subscription?.categories||[]).map(category=>category.id)];
       if (entry.isRead) categories.push('user/-/state/com.google/read');
       if (entry.isStarred) categories.push('user/-/state/com.google/starred');
-      const item = mergeArticleIntoCache({id, nativeId:entry.id, title:entry.title, author:entry.author,
+      const mergedId = mergeArticleIntoCache({id, nativeId:entry.id, title:entry.title, author:entry.author,
         published: Math.floor(Date.parse(entry.receivedAt)/1000), categories,
-        origin:{title:entry.source,streamId:subscriptions.find(feed => feed.url?.includes('/feed/' + entry.feedKey))?.id},
+        origin:{title:entry.source,streamId:subscription?.id},
         alternate:entry.originalURL ? [{href:entry.originalURL}] : [],
-        summary:{content:entry.html || entry.text || ''}}, generation, stateVersion);
+        summary:{content:entry.text || entry.html || ''},content:{content:entry.html || ''}}, generation, stateVersion);
+      const item = articleCache.get(mergedId) || articleMetadataCache.get(mergedId);
       recommendationDetails.set(id,{score:entry.score,explanation:entry.explanation,matchedTopics:entry.matchedTopics,published:item.published,rank:rank++});
       if ((query.filter === 'unread' && getArticleState(item,'read')) ||
           (query.filter === 'read' && !getArticleState(item,'read'))) continue;
@@ -3955,6 +4143,9 @@ export function renderBrowserAppRuntimeScript(): string {
     const service = getPersonalizationService();
     if (service && !personalizationPanel) personalizationPanel = service.mount({container:personalizationContent,
       onChanged:async()=>{
+        recommendationEpoch++;
+        if(service.getResetGeneration()!==acknowledgedResetGeneration){acknowledgedResetGeneration=service.getResetGeneration();recommendationExclusions.clear();}
+        for(const key of inFlightMembershipRequests.keys()) if(key.includes('for-you'))inFlightMembershipRequests.delete(key);
         for (const [key,state] of viewStates) if (state.viewId === 'for-you') viewStates.delete(key);
         if (activeViewId === 'for-you') await loadActiveView();
       }});
@@ -3970,6 +4161,7 @@ export function renderBrowserAppRuntimeScript(): string {
       await service.feedback(request.itemId,type);
       if (!current()) return;
       if (type === 'not_interested') {
+        recommendationExclusions.add(request.itemId);
         for (const state of viewStates.values()) if (state.viewId==='for-you') {
           state.itemIds=state.itemIds.filter(id=>id!==request.itemId); state.confirmedItemIds.delete(request.itemId);
           state.hasMembership=true; state.continuation=''; state.membershipEpoch++; state.rootRequestId=++membershipRootRequestId;
@@ -4410,7 +4602,7 @@ export function renderBrowserAppRuntimeScript(): string {
           !['unread', 'recent'].includes(view.kind) && state.query.filter === 'all')) continue;
       const read = field === 'read' ? target : getArticleState(article, 'read');
       const starred = field === 'starred' ? target : getArticleState(article, 'starred');
-      const belongs = (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read) &&
+      const belongs = !(view.kind==='recommended'&&recommendationExclusions.has(itemId)) && (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read) &&
         (view.kind !== 'starred' || starred);
       const scopeMatches = ['all', 'unread', 'recent', 'starred'].includes(view.kind) ||
         (view.kind === 'feed' && article?.origin?.streamId === view.streamId) ||
@@ -4742,6 +4934,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function handleReaderProgress() {
+    saveReadingPosition();
     maybeAutoMarkRead();
   }
 

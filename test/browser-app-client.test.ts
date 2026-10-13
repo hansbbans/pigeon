@@ -797,6 +797,8 @@ async function createBrowserHarness(options?: {
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
 	storedAutoReadPolicy?: string | null;
+	readingTools?: any;
+	extractReader?: (html:string,url:string)=>any;
 	frameScrollHeight?: number;
 	frameViewportHeight?: number;
 	storedColumnWidths?: { sidebar?: number; stream?: number };
@@ -829,6 +831,16 @@ async function createBrowserHarness(options?: {
 		['article-list-mode-button', createElement('', [], 'button', registerFocus)],
 		['settings-button', createElement('', [], 'button', registerFocus)],
 		['personalization-content', createElement('', [], 'section', registerFocus)],
+		['reader-mode-select', createElement('newsletter', [], 'select', registerFocus)],
+		['reader-reading-status', createElement('', [], 'p', registerFocus)],
+		['load-images-button', createElement('', [], 'button', registerFocus)],
+		['share-article-button', createElement('', [], 'button', registerFocus)],
+		['readwise-token-input', createElement('', [], 'input', registerFocus)],
+		['readwise-save-button', createElement('', [], 'button', registerFocus)],
+		['image-zoom-panel', createElement('', ['hidden'], 'div', registerFocus)],
+		['zoom-image', createElement('', [], 'img', registerFocus)],
+		['close-image-zoom', createElement('', [], 'button', registerFocus)],
+		['reading-settings-form', createElement('', [], 'form', registerFocus)],
 		['refresh-view-button', createElement('', [], 'button', registerFocus)],
 		['more-like-button', createElement('', [], 'button', registerFocus)],
 		['not-interested-button', createElement('', [], 'button', registerFocus)],
@@ -1071,8 +1083,14 @@ async function createBrowserHarness(options?: {
 		fetch: options?.fetchImpl ?? (async () => new Response('Error=BadAuthentication', { status: 401 })),
 	};
 
+	for(const key of ['theme','font','fontSize','lineHeight','width','margins','density','imagePolicy'])elements.set('reading-'+key,createElement('',[],key.includes('Size')?'input':'select',registerFocus));
+	for(const key of ['next','previous','read','star'])elements.set('shortcut-'+key,createElement('',[],'input',registerFocus));
+	elements.set('reading-settings-status',createElement('',[],'p',registerFocus));
 	vm.runInNewContext(renderBrowserAppClientScript(), context);
 	(context.window as any).document = context.document;
+	(context.window as any).PigeonReading = options?.readingTools;
+	(context.window as any).__PIGEON_READING_TOOLS__ = options?.extractReader ? {extract:options.extractReader} : undefined;
+	(context as any).TextEncoder=TextEncoder;
 	vm.runInNewContext(renderBrowserLibraryManagementScript(), context);
 	vm.runInNewContext(renderBrowserPersonalizationScript(), context);
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `
@@ -2205,18 +2223,18 @@ test('runtime script lets column resizer drags persist reader column widths', as
 	assert.equal(dispatchDocumentPointer('pointermove', 480), true);
 	dispatchDocumentPointer('pointerup', 480);
 
-	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '496px');
+	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '304px');
 	assert.equal(sidebarResizer?.classList.contains('is-dragging'), false);
-	assert.equal(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}').sidebar, 496);
+	assert.equal(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}').sidebar, 304);
 
 	await dragStreamResizer?.dispatch('pointerdown', { clientX: 600, pointerId: 2 });
 	assert.equal(dispatchDocumentPointer('pointermove', 560), true);
 	dispatchDocumentPointer('pointerup', 560);
 
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '484px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '300px');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
-		sidebar: 496,
-		stream: 484,
+		sidebar: 304,
+		stream: 300,
 	});
 });
 
@@ -2345,21 +2363,21 @@ test('runtime script lets keyboard users resize columns and exposes separator va
 	await waitForBrowserCondition(() => elements.get('reader-shell')?.classList.contains('hidden') === false);
 
 	assert.equal(sidebarResizer?.hasEventListener('keydown'), true);
-	assert.equal(sidebarResizer?.getAttribute('aria-valuenow'), '416');
+	assert.equal(sidebarResizer?.getAttribute('aria-valuenow'), '224');
 	await sidebarResizer?.dispatch('keydown', {
 		key: 'ArrowRight',
 		preventDefault() {},
 	});
 
-	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '432px');
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '524px');
+	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '240px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '340px');
 	assert.equal(sidebarResizer?.getAttribute('aria-valuemin'), '224');
 	assert.equal(sidebarResizer?.getAttribute('aria-valuemax'), '520');
-	assert.equal(sidebarResizer?.getAttribute('aria-valuenow'), '432');
-	assert.equal(sidebarResizer?.getAttribute('aria-valuetext'), '432 pixels');
+	assert.equal(sidebarResizer?.getAttribute('aria-valuenow'), '240');
+	assert.equal(sidebarResizer?.getAttribute('aria-valuetext'), '240 pixels');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
-		sidebar: 432,
-		stream: 524,
+		sidebar: 240,
+		stream: 340,
 	});
 
 	await keyboardStreamResizer?.dispatch('keydown', {
@@ -2367,13 +2385,13 @@ test('runtime script lets keyboard users resize columns and exposes separator va
 		preventDefault() {},
 	});
 
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '508px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '324px');
 	assert.equal(keyboardStreamResizer?.getAttribute('aria-valuemin'), '288');
 	assert.equal(keyboardStreamResizer?.getAttribute('aria-valuemax'), '640');
-	assert.equal(keyboardStreamResizer?.getAttribute('aria-valuenow'), '508');
+	assert.equal(keyboardStreamResizer?.getAttribute('aria-valuenow'), '324');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
-		sidebar: 432,
-		stream: 508,
+		sidebar: 240,
+		stream: 324,
 	});
 
 	await sidebarResizer?.dispatch('keydown', {
@@ -2385,7 +2403,7 @@ test('runtime script lets keyboard users resize columns and exposes separator va
 	assert.equal(sidebarResizer?.getAttribute('aria-valuenow'), '224');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
 		sidebar: 224,
-		stream: 508,
+		stream: 324,
 	});
 });
 
@@ -4620,7 +4638,7 @@ test('a pre-mutation article refresh cannot restore cached read state after mark
 });
 
 async function createStatefulArticleBrowser(options?: {
-	policy?: string; frameHeight?: number; viewportHeight?: number; count?: number;
+	policy?: string; readingTools?: any; extractReader?: (html:string,url:string)=>any; frameHeight?: number; viewportHeight?: number; count?: number;
 	now?: number | (() => number);
 	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
 }) {
@@ -4631,6 +4649,7 @@ async function createStatefulArticleBrowser(options?: {
 	const harness = await createBrowserHarness({
 		now: options?.now ?? browserNow,
 		storedAutoReadPolicy: options?.policy,
+		readingTools:options?.readingTools,extractReader:options?.extractReader,
 		frameScrollHeight: options?.frameHeight,
 		frameViewportHeight: options?.viewportHeight,
 		fetchImpl: async (input, init) => {
@@ -4690,6 +4709,45 @@ function recommendationFixture(id: number) {
   isRead:false,isStarred:id===1,score:id===2?90:20,explanation:'Matches your interests',matchedTopics:['reading']};
 }
 
+function readingIntegrationTools(policy='ask') {
+ const preferences={theme:'sepia',font:'serif',fontSize:18,lineHeight:1.6,width:720,margins:24,density:'comfortable',imagePolicy:policy,shortcuts:{next:'n',previous:'p',read:'r',star:'t'}};
+ const calls:any[]=[];
+ return {calls,readPreferences:()=>preferences,savePreferences:(next:any)=>next,frameCSS:()=> 'body{font-size:18px}',
+  async applyImagePolicy(html:string,options:any){calls.push({html,options});return {html:html.replace(/<img[^>]*>/g,options.loadOnce?'<img src="https://example.com/image.jpg">':'<img alt="hidden">'),images:[{loaded:!!options.loadOnce,reason:'consent'}],blockedCount:options.loadOnce?0:1};}};
+}
+
+test('reader extraction prepares image policy before insertion, consent reloads safely, and preference shortcuts work',async(t)=>{
+ const tools=readingIntegrationTools();let sources=0;
+ const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,extractReader:()=>({content:'<p>Extracted story</p><img src="https://example.com/image.jpg">',url:'https://example.com/reader'}),fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[recommendationFixture(1)],continuation:null});
+  if(input.startsWith('/api/v1/browser/reader-source?')){sources++;return Response.json({url:'https://example.com/reader',html:'<article>Source</article>'});}return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1'&&tools.calls.length>0,100);
+ harness.elements.get('reader-mode-select')!.value='reader';harness.elements.get('reader-mode-select')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-frame')!.srcdoc.includes('Extracted story'),100);
+ assert.equal(sources,1);assert.equal(harness.elements.get('reader-frame')!.srcdoc.includes('src="https://example.com/image.jpg"'),false);
+ assert.equal(harness.elements.get('load-images-button')!.hidden,false);
+ harness.elements.get('load-images-button')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-frame')!.srcdoc.includes('src="https://example.com/image.jpg"'),100);
+ assert.equal(tools.calls.at(-1).options.loadOnce,true);
+ harness.dispatchKeydown('r');
+ await waitForBrowserCondition(()=>database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read===1,100);
+ await flushBrowserTasks();harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('Readwise token rejection keeps Pigeon authenticated and tokens clear on signout',async(t)=>{
+ let saves=0;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[recommendationFixture(1)],continuation:null});
+  if(input==='/api/v1/browser/readwise/save'){saves++;return Response.json({code:'readwise_authentication_failed'},{status:422});}return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ harness.elements.get('readwise-token-input')!.value='test-only-token';harness.elements.get('readwise-save-button')!.dispatch('click');harness.elements.get('readwise-save-button')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-reading-status')!.textContent.includes('Readwise rejected'),100);
+ assert.equal(saves,1);assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'),false);
+ harness.elements.get('logout-button')!.dispatch('click');assert.equal(harness.elements.get('readwise-token-input')!.value,'');
+});
+
 test('For You collects every page before sorting and retains canonical read/star state with real mutations', async (t) => {
  let pages=0;
  const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
@@ -4719,6 +4777,40 @@ test('For You reports a failed later page without pretending an incomplete recom
  assert.equal(harness.elements.get('articles-list')!.children.length,0);
 });
 
+test('For You date sorts, Read filter, and age bulk use article dates and canonical read state',async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>input.startsWith('/api/v1/recommendations?')?Response.json({items:[{...recommendationFixture(1),isRead:true},recommendationFixture(3),{...recommendationFixture(2),receivedAt:'2026-10-01T00:00:00Z'}],continuation:null}):next()});t.after(()=>database.close());
+ database.exec("UPDATE items SET is_read=1 WHERE id='today-1'; UPDATE items SET received_at='2026-10-01T00:00:00Z' WHERE id='today-2'");
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ harness.elements.get('article-sort-select')!.value='newest';harness.elements.get('article-sort-select')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 3',100);
+ harness.elements.get('article-sort-select')!.value='oldest';harness.elements.get('article-sort-select')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 2',100);
+ harness.elements.get('article-read-filter')!.value='read';harness.elements.get('article-read-filter')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ assert.equal(harness.elements.get('articles-list')!.children.length,1);
+ harness.elements.get('article-read-filter')!.value='all';harness.elements.get('article-read-filter')!.dispatch('change');
+ await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 2',100);
+ await finishBulkRead(harness,'age-1');
+ assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read,1);
+ assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read,0);
+});
+
+test('topics changed while recommendations are pending start a fresh membership request',async(t)=>{
+ const held=createDeferred<Response>();let roots=0;
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input.startsWith('/api/v1/recommendations?'))return ++roots===1?held.promise:Response.json({items:[recommendationFixture(3)],continuation:null});return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>roots===1,100);
+ harness.elements.get('settings-button')!.dispatch('click');const panel=harness.elements.get('personalization-content')!;
+ await waitForBrowserCondition(()=>panel.querySelectorAll('button').some(node=>node.textContent==='Add topic'),100);
+ panel.querySelectorAll('input').find(node=>node.getAttribute('aria-label')==='New monitored topic')!.value='reading';
+ panel.querySelectorAll('button').find(node=>node.textContent==='Add topic')!.dispatch('click');
+ await waitForBrowserCondition(()=>roots===2 && harness.elements.get('reader-title')!.textContent==='Recommended 3',100);
+ held.resolve(Response.json({items:[recommendationFixture(1)],continuation:null}));await flushBrowserTasks();
+ assert.equal(harness.elements.get('reader-title')!.textContent,'Recommended 3');
+});
+
 test('late For You membership and feedback cannot update a signed-out session',async(t)=>{
  const held=createDeferred<Response>(); let requested=false;
  const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
@@ -4740,6 +4832,33 @@ test('confirmed Not interested removes only recommendation membership and preser
  assert.equal(harness.elements.get('reader-title')!.textContent,'Recommended 1');
  assert.equal(harness.getCachedArticleState('1').body.includes('user/-/state/com.google/starred'),true);
  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM engagement_events WHERE event_type='not_interested'").get()!.count,1);
+});
+
+test('read Undo cannot restore a confirmed Not interested story to cached For You',async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>input.startsWith('/api/v1/recommendations?')?Response.json({items:[recommendationFixture(1)],continuation:null}):next()});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ harness.elements.get('article-read-filter')!.value='unread';harness.elements.get('article-read-filter')!.dispatch('change');await flushBrowserTasks();
+ await finishArticleMutation(harness,'mark-unread-button');
+ harness.elements.get('not-interested-button')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-action-status')!.textContent.includes('not interested'),100);
+ harness.setOnline(false);await finishArticleMutation(harness,'undo-article-button');
+ assert.equal(harness.elements.get('articles-list')!.children.length,0);
+ assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read,0);
+});
+
+test('recommendation feed identity matches an exact feed key and retains folders',async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
+  if(input==='/reader/api/0/subscription/list')return Response.json({subscriptions:[
+   {id:'feed/2',title:'Design weekly',url:'https://pigeon.example/feed/design-weekly'},
+   {id:'feed/1',title:'Design',url:'https://pigeon.example/feed/design',categories:[{id:'user/-/label/Design folder',label:'Design folder'}]}]});
+  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[{...recommendationFixture(1),feedKey:'design'}],continuation:null});return next();
+ }});t.after(()=>database.close());
+ findListButtonByViewId(harness.elements.get('feeds-list'),'feed/2')!.dispatch('click');await flushBrowserTasks();
+ harness.elements.get('article-read-filter')!.value='unread';harness.elements.get('article-read-filter')!.dispatch('change');await flushBrowserTasks();
+ findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
+ assert.ok(harness.getCachedArticleState('1').body.includes('user/-/label/Design folder'));
+ await finishArticleMutation(harness,'mark-unread-button');harness.setOnline(false);await finishArticleMutation(harness,'undo-article-button');
+ findListButtonByViewId(harness.elements.get('feeds-list'),'feed/2')!.dispatch('click');await flushBrowserTasks();
+ assert.equal(harness.elements.get('articles-list')!.children.length,0);
 });
 
 test('personalization reset disables feedback and suppresses a delayed pre-reset acknowledgement',async(t)=>{
