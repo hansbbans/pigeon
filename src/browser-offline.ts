@@ -3,6 +3,8 @@
  * Adapter: create({ token, getSessionKey, authenticatedJson(path, init), onProgress?, onError?, storageFactory? }).
  * getSessionKey MUST change on logout/account switch, including switch-away-and-back.
  * JSON adapter uses the current auth header. Token is hashed, never persisted.
+ * confirmState(readerId,kind,value) records ONLY a confirmed server acknowledgement;
+ * it sends no API action and preserves every queued desired-state overlay.
  * Injectable storage: async factory(hash, guard) => {get,all,batch,enqueue,close}; enqueue(mutation) must atomically assign order
  * and persist mutation with its UUID. batch accepts
  * {store,key,value} (put), or {store,key,delete:true}; it must be atomic and guard its transaction.
@@ -201,6 +203,16 @@ export function renderBrowserOfflineScript(): string {
     }
    }); },
    replay: function () { return operation(doReplay); },
+   confirmState: function (readerId, kind, value) { return operation(async function () {
+    if (!['set_read','set_starred'].includes(kind) || typeof value !== 'boolean') throw offlineError('mutation', 'Only acknowledged read and star state can be saved.');
+    var article = await resolve(readerId); if (!article) return { saved: false };
+    var field = kind === 'set_read' ? 'isRead' : 'isStarred';
+    article[field] = value;
+    var status = await read('statuses', article.id) || { itemId: article.id, isRead: article.isRead, isStarred: article.isStarred };
+    status[field] = value;
+    await write([put('articles', article.id, article), put('statuses', article.id, status)]);
+    return { saved: true, nativeId: article.id };
+   }); },
    queueMutation: function (readerId, kind, value) { return operation(async function () {
     if (!['set_read','set_starred'].includes(kind) || typeof value !== 'boolean') throw offlineError('mutation', 'Only read and star state can be queued offline.');
     var article = await resolve(readerId); if (!article) throw offlineError('identity', 'Save this article before changing it offline.');

@@ -168,3 +168,25 @@ test('session changes during asynchronous storage read prevent stale queue write
  const stale = await state.api.create(adapter); await assert.rejects(stale.queueMutation('1','set_read',true), /account changed/);
  state.setGeneration('account:3'); const resumed = await state.api.create(state.adapter()); assert.equal((await resumed.stats()).pending, 0);
 });
+
+test('acknowledged online state persists for offline query/contents without enqueue or duplicate API writes', async () => {
+ const state=fixture(); const library=await state.api.create(state.adapter()); await library.sync(); const callsBefore=state.calls.length;
+ assert.equal((await library.confirmState('1','set_read',true)).saved,true);
+ assert.equal((await library.confirmState('1','set_starred',true)).saved,true);
+ assert.deepEqual(plain((await library.query({stream:'starred',filter:'read'})).itemIds),['1']);
+ const categories=(await library.contents(['1'])).items[0].categories;assert.ok(categories.includes('user/-/state/com.google/read'));assert.ok(categories.includes('user/-/state/com.google/starred'));
+ assert.equal((await library.stats()).pending,0);assert.equal(state.calls.length,callsBefore);
+ library.close();const reopened=await state.api.create(state.adapter());assert.ok((await reopened.contents(['1'])).items[0].categories.includes('user/-/state/com.google/read'));
+ const status=state.databases.get(reopened.accountHash)!.get('statuses')!.get('native-1');assert.equal(status.isRead,true);assert.equal(status.isStarred,true);
+ assert.equal((await reopened.confirmState('999','set_read',true)).saved,false);
+ await assert.rejects(reopened.confirmState('1','rename_feed',true),/Only acknowledged/);
+});
+
+test('acknowledged base updates preserve newer pending overlays and every other state field', async () => {
+ const state=fixture();const library=await state.api.create(state.adapter());await library.sync();
+ await library.confirmState('1','set_starred',true);const queued=await library.queueMutation('1','set_read',false);
+ await library.confirmState('1','set_read',true);
+ const categories=(await library.contents(['1'])).items[0].categories;assert.ok(!categories.includes('user/-/state/com.google/read'));assert.ok(categories.includes('user/-/state/com.google/starred'));
+ assert.equal((await library.stats()).pending,1);
+ const database=state.databases.get(library.accountHash)!;assert.equal(database.get('articles')!.get('native-1').isRead,true);assert.equal(database.get('statuses')!.get('native-1').isStarred,true);assert.equal(database.get('outbox')!.get(queued.id).value,false);
+});
