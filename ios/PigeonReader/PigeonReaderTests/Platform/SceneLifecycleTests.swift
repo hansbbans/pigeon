@@ -76,8 +76,9 @@ struct SceneLifecycleTests {
 
 		#expect(snapshot.unreadCount == 8)
 		#expect(snapshot.starredCount == 1)
-		#expect(snapshot.recent.map(\.id) == ["canonical", "older"])
-		#expect(snapshot.recent.first?.deepLink == PigeonDeepLink.article("canonical", collection: ReaderSection.today.rawValue).url)
+		#expect(snapshot.recent.map(\.id) == ["read-foryou", "canonical", "older", "unread-foryou"])
+		#expect(snapshot.recent.first?.deepLink == PigeonDeepLink.article("read-foryou", collection: nil).url)
+		#expect(snapshot.recent.first { $0.id == "canonical" }?.deepLink == PigeonDeepLink.article("canonical", collection: ReaderSection.today.rawValue).url)
 		#expect(snapshot.forYou.map(\.id) == ["unread-foryou"])
 		#expect(snapshot.forYou.first?.deepLink == PigeonDeepLink.article("unread-foryou", collection: ReaderSection.forYou.rawValue).url)
 	}

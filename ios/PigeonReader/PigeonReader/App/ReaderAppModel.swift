@@ -314,6 +314,10 @@ final class ReaderAppModel {
 	private var sceneBackgroundFlushTask: Task<Void, Never>?
 	private var sceneBackgroundTaskID: SceneBackgroundTaskID?
 	private var sceneBackgroundFlushIsRunning = false
+	private let prepareWidgetSnapshot: WidgetSnapshotBuilder.Prepare
+	private let saveWidgetSnapshot: @MainActor (PigeonWidgetSnapshot) -> Void
+	private let prepareCachedSnapshot: CachedLibrarySnapshotPreparation.Prepare
+	private var widgetSnapshotGeneration = UUID()
 	var offlineLibraryStatus: OfflineLibraryStatus {
 		if isSynchronizingOfflineLibrary {
 			return offlineRepairInProgress ? .repairing : .syncing
@@ -381,6 +385,9 @@ final class ReaderAppModel {
 			try await Task.sleep(nanoseconds: nanoseconds)
 		},
 		sceneBackgroundTasks: any SceneBackgroundTaskRunning = UIApplicationSceneBackgroundTaskRunner.shared,
+		prepareWidgetSnapshot: @escaping WidgetSnapshotBuilder.Prepare = WidgetSnapshotBuilder.prepare,
+		saveWidgetSnapshot: @escaping @MainActor (PigeonWidgetSnapshot) -> Void = { $0.save() },
+		prepareCachedSnapshot: @escaping CachedLibrarySnapshotPreparation.Prepare = CachedLibrarySnapshotPreparation.prepare,
 	) {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
@@ -396,6 +403,9 @@ final class ReaderAppModel {
 		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.offlineSyncDelay = offlineSyncDelay
 		self.sceneBackgroundTasks = sceneBackgroundTasks
+		self.prepareWidgetSnapshot = prepareWidgetSnapshot
+		self.saveWidgetSnapshot = saveWidgetSnapshot
+		self.prepareCachedSnapshot = prepareCachedSnapshot
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.keyboardShortcuts = keyboardShortcuts ?? ReaderKeyboardShortcutSettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
@@ -1223,8 +1233,8 @@ final class ReaderAppModel {
 		let inMemoryIdentities = backgroundRefreshIdentities()
 		let accountID = context.accountID
 		let knownIDs = await Task.detached(priority: .utility) { [offlineStore] in
-			let cached = (try? await offlineStore.loadSnapshot(accountID: accountID))
-				?.articlesByCollection.values.flatMap { $0 } ?? []
+			let cachedSnapshot = try? await offlineStore.loadSnapshot(accountID: accountID)
+			let cached = cachedSnapshot?.articlesByCollection.values.flatMap { $0 } ?? []
 			return BackgroundRefreshArticlePlanner.knownIDs(
 				inMemory: inMemoryIdentities,
 				cached: cached.map(BackgroundRefreshArticleIdentity.init),
@@ -1344,20 +1354,28 @@ final class ReaderAppModel {
 
 	@discardableResult
 	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
+		widgetSnapshotGeneration = UUID()
 		let snapshot = makeWidgetSnapshot()
-		snapshot.save()
+		saveWidgetSnapshot(snapshot)
 		reloadWidgetTimelines()
 		return snapshot
 	}
 
 	@discardableResult
 	func writeWidgetSnapshotOffMain() async -> PigeonWidgetSnapshot {
+		let generation = UUID()
+		widgetSnapshotGeneration = generation
+		let accountID = session?.storageIdentity
+		let sessionGeneration = self.sessionGeneration
 		let input = captureWidgetSnapshotInput()
-		let snapshot = await Task.detached(priority: .utility) {
-			let snapshot = WidgetSnapshotBuilder.make(input)
-			snapshot.save()
-			return snapshot
-		}.value
+		let snapshot = await prepareWidgetSnapshot(input)
+		guard Task.isCancelled == false,
+			widgetSnapshotGeneration == generation,
+			self.sessionGeneration == sessionGeneration,
+			session?.storageIdentity == accountID else { return snapshot }
+		// The expensive library traversal runs off-actor. Commit only the bounded
+		// widget payload here so sign-out and newer snapshots cannot race the save.
+		saveWidgetSnapshot(snapshot)
 		reloadWidgetTimelines()
 		return snapshot
 	}
@@ -1560,7 +1578,9 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				if await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation) {
+				guard let needsTodaySave = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation),
+					isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
+				if needsTodaySave {
 					shouldPersistTodayAfterRestore = true
 				}
 				if snapshot.isEmpty == false {
@@ -1983,7 +2003,8 @@ final class ReaderAppModel {
 			guard isCurrentAccountOperation(context) else { return count }
 			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return count }
-			if await applyCachedSnapshot(snapshot) {
+			guard let needsTodaySave = await applyCachedSnapshot(snapshot) else { return count }
+			if needsTodaySave {
 				await persistCollections([ReaderSection.today.rawValue])
 			}
 			guard isCurrentAccountOperation(context) else { return count }
@@ -5150,11 +5171,12 @@ final class ReaderAppModel {
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return nil
 			}
-			_ = await applyCachedSnapshot(
+			guard await applyCachedSnapshot(
 				snapshot,
 				preservingPagination: true,
 				preservingCurrentSelection: preservingCurrentSelection,
-			)
+			) != nil,
+				isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return nil }
 			return libraryGeneration
 		} catch let error where isCancellation(error) {
 			return nil
@@ -5249,11 +5271,14 @@ final class ReaderAppModel {
 			}
 			switch reloadScope {
 			case .full:
-				if await applyCachedSnapshot(
+				guard let needsTodaySave = await applyCachedSnapshot(
 					snapshot,
 					preservingPagination: true,
 					preservingCurrentSelection: preservingCurrentSelection,
-				) {
+				), isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
+					return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
+				}
+				if needsTodaySave {
 					await persistCollections([ReaderSection.today.rawValue])
 				}
 			case .collections(let collectionIDs):
@@ -5437,28 +5462,69 @@ final class ReaderAppModel {
 	}
 
 	@discardableResult
+	/// Nil means ownership or a concurrent mutation invalidated the snapshot;
+	/// callers must leave hydration retryable instead of treating it as applied.
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
 		preservingCurrentSelection: Bool = false,
-	) async -> Bool {
-		guard let accountID = session?.storageIdentity else { return false }
-		let sortOrders = self.sortOrders
-		let canonicalOrder = self.canonicalArticleOrder
-		let articlesByCollection = snapshot.articlesByCollection
-		let preparedArticlesByCollection = await Task.detached(priority: .utility) {
-			CachedLibrarySnapshotPreparation.sortedArticlesByCollection(
-				articlesByCollection,
-				sortOrders: sortOrders,
-				canonicalOrder: canonicalOrder,
+	) async -> Bool? {
+		guard let context = currentOperationContext(), let accountContext = accountContext() else { return nil }
+		let initialSortOrders = sortOrders
+		let initialCanonicalOrder = canonicalArticleOrder
+		let mutationRevision = nextPendingArticleStateRevision
+		while Task.isCancelled == false {
+			let capturedSortOrders = sortOrders
+			let capturedCanonicalOrder = canonicalArticleOrder
+			let ordering = cachedSnapshotOrdering(
+				snapshot,
+				initialSortOrders: initialSortOrders,
+				initialCanonicalOrder: initialCanonicalOrder,
 			)
-		}.value
-		guard Task.isCancelled == false, session?.storageIdentity == accountID else { return false }
-		return applyPreparedCachedSnapshot(
-			snapshot,
-			preparedArticlesByCollection: preparedArticlesByCollection,
-			preservingPagination: preservingPagination,
-			preservingCurrentSelection: preservingCurrentSelection,
+			let prepared = await prepareCachedSnapshot(snapshot.articlesByCollection, ordering)
+			guard Task.isCancelled == false,
+				isCurrentAccountOperation(accountContext), isCurrentOperation(context),
+				nextPendingArticleStateRevision == mutationRevision else { return nil }
+			// A user can change sorting while preparation is suspended. Prepare again
+			// rather than publishing rows that disagree with their current preference.
+			guard capturedSortOrders == sortOrders, capturedCanonicalOrder == canonicalArticleOrder else { continue }
+			return applyPreparedCachedSnapshot(
+				snapshot,
+				preparedArticlesByCollection: prepared,
+				ordering: ordering,
+				preservingPagination: preservingPagination,
+				preservingCurrentSelection: preservingCurrentSelection,
+			)
+		}
+		return nil
+	}
+
+	private func cachedSnapshotOrdering(
+		_ snapshot: CachedLibrarySnapshot,
+		initialSortOrders: [String: ArticleSortOrder],
+		initialCanonicalOrder: [String: [String]],
+	) -> CachedLibrarySnapshotPreparation.Ordering {
+		var effectiveSortOrders = sortOrders
+		if let restoration = snapshot.restoration, hasAppliedRestorationSettings == false {
+			effectiveSortOrders = restoration.sortOrders.reduce(into: [:]) { result, pair in
+				if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
+			}
+			if isShowingBootstrapSnapshot, bootstrapAccountID == session?.storageIdentity {
+				for collectionID in bootstrapChangedSortOrderIDs {
+					effectiveSortOrders[collectionID] = sortOrders[collectionID]
+				}
+			}
+		}
+		for (collectionID, order) in sortOrders where initialSortOrders[collectionID] != order {
+			effectiveSortOrders[collectionID] = order
+		}
+		var effectiveCanonicalOrder = snapshot.restoration?.canonicalArticleOrder ?? canonicalArticleOrder
+		for (collectionID, order) in canonicalArticleOrder where initialCanonicalOrder[collectionID] != order {
+			effectiveCanonicalOrder[collectionID] = order
+		}
+		return CachedLibrarySnapshotPreparation.Ordering(
+			sortOrders: effectiveSortOrders,
+			canonicalOrder: effectiveCanonicalOrder,
 		)
 	}
 
@@ -5466,6 +5532,7 @@ final class ReaderAppModel {
 	private func applyPreparedCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preparedArticlesByCollection: [String: [Recommendation]],
+		ordering: CachedLibrarySnapshotPreparation.Ordering,
 		preservingPagination: Bool,
 		preservingCurrentSelection: Bool,
 	) -> Bool {
@@ -5514,31 +5581,20 @@ final class ReaderAppModel {
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
-			canonicalArticleOrder = restoration.canonicalArticleOrder
 			if hasAppliedRestorationSettings == false {
-				let restoredSortOrders: [String: ArticleSortOrder] = restoration.sortOrders.reduce(into: [:]) { result, pair in
-					if let order = ArticleSortOrder(rawValue: pair.value) { result[pair.key] = order }
-				}
 				let restoredArticleFilters: [ArticleFilterKey: ReaderArticleFilter] = restoration.articleFilters.reduce(into: [:]) { result, pair in
 					if let filter = ReaderArticleFilter(rawValue: pair.value) {
 						result[ArticleFilterKey(sessionIdentity: session.storageIdentity, collectionID: pair.key)] = filter
 					}
 				}
-				var mergedSortOrders = restoredSortOrders
 				var mergedArticleFilters = restoredArticleFilters
 				if preserveBootstrapHomeState {
-					for collectionID in bootstrapChangedSortOrderIDs {
-						if let currentOrder = sortOrders[collectionID] {
-							mergedSortOrders[collectionID] = currentOrder
-						}
-					}
 					for key in bootstrapChangedArticleFilterKeys {
 						if let currentFilter = articleFilters[key] {
 							mergedArticleFilters[key] = currentFilter
 						}
 					}
 				}
-				sortOrders = mergedSortOrders
 				articleFilters = mergedArticleFilters
 				if preserveBootstrapHomeState == false || bootstrapChangedSidebarFilter == false {
 					sidebarFilter = ReaderSidebarFilter(rawValue: restoration.sidebarFilter) ?? .all
@@ -5567,6 +5623,8 @@ final class ReaderAppModel {
 				hasAppliedCompactColumnRestoration = true
 			}
 		}
+		sortOrders = ordering.sortOrders
+		canonicalArticleOrder = ordering.canonicalOrder
 
 		if let cachedNavigation = snapshot.navigation {
 			var restoredNavigation = cachedNavigation

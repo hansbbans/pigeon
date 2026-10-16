@@ -29,7 +29,7 @@ struct PlatformIntegrationTests {
 	@Test func backgroundRefreshDeduplicatesCanonicalAndGReaderArticleAliases() {
 		let cachedCanonical = Self.article(id: "canonical", receivedAt: 1)
 		let gReaderCopy = Self.article(id: "greader-copy", receivedAt: 2, readerId: cachedCanonical.id)
-		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [cachedCanonical])
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [Recommendation](), cached: [cachedCanonical])
 		let knownAliasDelta = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: known,
 			current: [gReaderCopy],
@@ -125,7 +125,7 @@ struct PlatformIntegrationTests {
 		let unreadNew = Self.article(id: "unread-new", receivedAt: 4)
 		let readNew = Self.article(id: "read-new", receivedAt: 5, isRead: true)
 		let readDuplicate = Self.article(id: "read-new", receivedAt: 6, isRead: true)
-		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [])
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [Recommendation](), cached: [Recommendation]())
 		let delta = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: known,
 			current: [readNew, unreadNew, readDuplicate],

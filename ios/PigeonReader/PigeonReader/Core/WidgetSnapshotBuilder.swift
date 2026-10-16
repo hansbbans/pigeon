@@ -56,6 +56,12 @@ nonisolated struct WidgetSnapshotInput: Sendable {
 }
 
 nonisolated enum WidgetSnapshotBuilder {
+	typealias Prepare = @Sendable (WidgetSnapshotInput) async -> PigeonWidgetSnapshot
+
+	static func prepare(_ input: WidgetSnapshotInput) async -> PigeonWidgetSnapshot {
+		await Task.detached(priority: .utility) { make(input) }.value
+	}
+
 	static func make(_ input: WidgetSnapshotInput) -> PigeonWidgetSnapshot {
 		let todayID = ReaderSection.today.rawValue
 		let forYouID = ReaderSection.forYou.rawValue
