@@ -4766,6 +4766,53 @@ test('offline membership continuation beyond fifty articles loads all saved IDs'
  assert.equal(harness.elements.get('load-more-button')!.classList.contains('hidden'),true);
 });
 
+async function createSavedOfflineBrowser(count: number) {
+ const harness = await createBrowserHarness({
+  storedToken: await generateApiToken('today-test-password'), offlineTools: offlineIntegrationTools(count), online: false,
+  fetchImpl: async () => { throw new TypeError('Network offline'); },
+ });
+ await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article ' + (count + 2), 100);
+ await flushBrowserTasks();
+ return harness;
+}
+
+async function loadSavedOfflineWindow(harness: Awaited<ReturnType<typeof createBrowserHarness>>, size: number) {
+ for (let attempt = 0; attempt < 15; attempt++) {
+  const ids = renderedArticleIds(harness);
+  if (ids.length === size && harness.getCacheSizes().bodies >= size) return;
+  harness.elements.get('load-more-button')!.dispatch('click');
+  await flushBrowserTasks();
+ }
+ assert.fail('Saved article window did not finish loading');
+}
+
+for (const navigation of ['Older button', 'next shortcut']) {
+ test(`offline ${navigation} opens the saved window beyond 200 articles`, async () => {
+  const harness = await createSavedOfflineBrowser(210);
+  await loadSavedOfflineWindow(harness, 200);
+  assert.equal(renderedArticleIds(harness).at(-1), '13');
+  if (navigation === 'next shortcut') {
+   findListButtonByItemId(harness.elements.get('articles-list'), '13')!.dispatch('click');
+   await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 13');
+   harness.dispatchKeydown('j');
+  } else harness.elements.get('article-older-button')!.dispatch('click');
+  await waitForBrowserCondition(() => renderedArticleIds(harness).length === 12 && harness.elements.get('reader-title')!.textContent === 'Article 12', 200);
+  assert.deepEqual(renderedArticleIds(harness), Array.from({ length: 12 }, (_, index) => String(12 - index)));
+  assert.equal(harness.elements.get('article-older-button')!.disabled, true);
+ });
+}
+
+test('offline next shortcut loads the next saved membership page at a partial window boundary', async () => {
+ const harness = await createSavedOfflineBrowser(65);
+ await loadSavedOfflineWindow(harness, 50);
+ const last = renderedArticleIds(harness).at(-1)!;
+ findListButtonByItemId(harness.elements.get('articles-list'), last)!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article ' + last);
+ harness.dispatchKeydown('j');
+ await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article ' + (Number(last) - 1), 200);
+ assert.equal(renderedArticleIds(harness).length, 67);
+});
+
 test('acknowledged online read and star state survives a fresh offline session without duplicate mutations',async(t)=>{
  const tools=offlineIntegrationTools();const {database,harness,mutations}=await createStatefulArticleBrowser({offlineTools:tools});t.after(()=>database.close());
  await finishArticleMutation(harness,'mark-unread-button');await finishArticleMutation(harness,'star-article-button');
@@ -4845,8 +4892,11 @@ test('a held Readwise save cannot keep the next session disabled or restore its 
 
 test('reading positions for two quickly visited articles survive the shared persistence debounce',async(t)=>{
  const tools=readingIntegrationTools('load');const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,frameHeight:1000,viewportHeight:200});t.after(()=>database.close());
+ await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'), 100);
  await flushBrowserTasks();harness.dispatchReaderFrameScroll(640);
- findListButtonByItemId(harness.elements.get('articles-list'),'2')!.dispatch('click');await flushBrowserTasks();await flushBrowserTasks();harness.dispatchReaderFrameScroll(160);
+ findListButtonByItemId(harness.elements.get('articles-list'),'2')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 2</p>'), 100);
+ await flushBrowserTasks();harness.dispatchReaderFrameScroll(160);
  await new Promise(resolve=>setTimeout(resolve,280));
  const key=[...harness.localStorageState.keys()].find(key=>key.startsWith('pigeon.browser.reading-account.'))!;
  const positions=JSON.parse(harness.localStorageState.get(key)!).positions;

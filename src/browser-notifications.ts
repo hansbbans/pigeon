@@ -39,7 +39,35 @@ export function renderBrowserNotificationsScript(): string {
   }
   function showError(error) { if (!destroyed && sameIdentity(identity, adapter.getSessionIdentity())) { status = error.message || 'Could not update notifications. Retry when online.'; render(); } }
   async function registration() {
-   guard(); return checked(navigator.serviceWorker.register('/app/sw.js', { scope: '/app' }));
+   guard(); var reg = await checked(navigator.serviceWorker.register('/app/sw.js', { scope: '/app' }));
+   if (reg.active) return reg;
+   // register() resolves while a first worker is still installing. Push requires
+   // an active worker; shell fetching during install may take several seconds.
+   return checked(new Promise(function (resolve, reject) {
+    var worker = null; var finished = false;
+    var timer = setTimeout(function () { finish(new Error('Notification worker activation timed out. Retry when online.')); }, 15000);
+    function finish(error) {
+     if (finished) return; finished = true; clearTimeout(timer);
+     reg.removeEventListener('updatefound', inspect);
+     if (worker) worker.removeEventListener('statechange', inspect);
+     controller.signal.removeEventListener('abort', cancelled);
+     if (error) reject(error); else resolve(reg);
+    }
+    function cancelled() { finish(new Error('Notification setup was cancelled. Reopen notification settings.')); }
+    function inspect() {
+     if (reg.active) { finish(); return; }
+     var pending = reg.installing || reg.waiting;
+     if (worker !== pending) {
+      if (worker) worker.removeEventListener('statechange', inspect);
+      worker = pending;
+      if (worker) worker.addEventListener('statechange', inspect);
+     }
+     if (!worker || worker.state === 'redundant') finish(new Error('Notification worker could not activate. Retry when online.'));
+    }
+    reg.addEventListener('updatefound', inspect);
+    controller.signal.addEventListener('abort', cancelled, { once: true });
+    if (controller.signal.aborted) cancelled(); else inspect();
+   }));
   }
   function render() {
    guard(); var container = adapter.container; container.replaceChildren();

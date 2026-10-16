@@ -3035,7 +3035,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
     renderReader();
     saveActiveViewState();
-    if (!window.navigator || window.navigator.onLine !== false) void continueLoadingWindow(activeViewRequestId);
+    if (offlineLibrary || !window.navigator || window.navigator.onLine !== false) void continueLoadingWindow(activeViewRequestId);
     if (inFlightContentIds.length === 0 && !isLoadingItemIdsPage && !shouldContinueLoadingWindow()) keyboardRevealSelection = null;
     return true;
   }
@@ -3184,7 +3184,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
       if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedTodayBoundary()) {
-        if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || window.navigator?.onLine === false) return false;
+        if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || (window.navigator?.onLine === false && !offlineLibrary)) return false;
         void loadAdjacentKeyboardArticle();
         return true;
       }
