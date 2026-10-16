@@ -1120,7 +1120,7 @@ final class ReaderAppModel {
 		}
 		guard Task.isCancelled == false else { return }
 		await restorationSaveTask?.value
-		await offlinePersistenceTask?.value
+		_ = await offlinePersistenceTask?.value
 		guard Task.isCancelled == false else { return }
 		await writeWidgetSnapshotOffMain()
 	}
