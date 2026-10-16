@@ -9,7 +9,7 @@ struct ArticleRowView: View {
 	let thumbnailScope: String?
 	let imageProxySession: PigeonSession?
 	let select: (() -> Void)?
-	@State private var didRequestBlockedThumbnail = false
+	@State private var thumbnailState = ArticleRowThumbnailState()
 
 	init(
 		article: Recommendation,
@@ -47,14 +47,37 @@ struct ArticleRowView: View {
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.opacity(article.isRead ? 0.55 : 1)
 		.animation(ReaderMotion.animation(reduceMotion: reduceMotion), value: article.isRead)
+		.task(id: thumbnailRequest) {
+			let request = thumbnailRequest
+			guard thumbnailState.activate(request) else { return }
+			let selectedURL = await Task.detached(priority: .utility) {
+				request.selectURL()
+			}.value
+			guard Task.isCancelled == false, request == thumbnailRequest else { return }
+			thumbnailState.completeSelection(selectedURL, for: request)
+		}
+	}
+
+	private var thumbnailRequest: ArticleRowThumbnailRequest {
+		ArticleRowThumbnailRequest(
+			articleID: article.id,
+			html: article.html,
+			baseURL: article.safeOriginalURL,
+			scope: imageProxySession?.storageIdentity ?? thumbnailScope,
+			policy: remoteImagePolicy,
+			isImageRich: density == .imageRich,
+		)
+	}
+
+	private var currentThumbnailURL: URL? {
+		thumbnailState.url(for: thumbnailRequest)
 	}
 
 	private var thumbnailPresentation: ArticleImagePolicy.ListThumbnail {
 		ArticleImagePolicy.listThumbnail(
 			policy: remoteImagePolicy,
-			html: article.html,
-			baseURL: article.safeOriginalURL,
-			didRequestBlockedLoad: didRequestBlockedThumbnail,
+			thumbnailURL: currentThumbnailURL,
+			didRequestBlockedLoad: thumbnailState.requestedBlockedLoad(for: thumbnailRequest),
 		)
 	}
 
@@ -130,7 +153,7 @@ struct ArticleRowView: View {
 	@ViewBuilder
 	private var thumbnail: some View {
 		if remoteImagePolicy == .privacyProxied,
-			let url = ArticleListThumbnailRequest.thumbnailURL(in: article.html, baseURL: article.safeOriginalURL) {
+			let url = currentThumbnailURL {
 			ArticleListThumbnailView(remoteURL: url, policy: remoteImagePolicy, session: imageProxySession)
 		} else {
 			thumbnailContent
@@ -160,7 +183,7 @@ struct ArticleRowView: View {
 			}
 		case .askToLoad:
 			Button {
-				didRequestBlockedThumbnail = true
+				thumbnailState.requestBlockedLoad(for: thumbnailRequest)
 			} label: {
 				imagePlaceholder
 					.frame(width: 72, height: 54)

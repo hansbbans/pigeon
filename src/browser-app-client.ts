@@ -12,6 +12,8 @@ export interface BrowserAppSession {
 export interface BrowserSubscription {
 	id: string;
 	title: string;
+	url?: string;
+	sourceUrl?: string | null;
 	iconUrl?: string;
 	categories?: Array<{
 		id: string;
@@ -29,7 +31,7 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'recommended' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
@@ -44,8 +46,10 @@ export interface BrowserLoadedItem {
 	id: string;
 	title: string;
 	published: number;
+	categories?: string[];
 	origin?: {
 		title?: string;
+		streamId?: string;
 	};
 	alternate?: Array<{
 		href?: string;
@@ -448,6 +452,15 @@ export function buildFeedViews(
 			kind: 'recent',
 			section: 'views',
 		},
+		{
+			id: 'starred',
+			title: 'Starred',
+			streamId: 'user/-/state/com.google/starred',
+			unreadCount: 0,
+			kind: 'starred',
+			section: 'views',
+		},
+		{ id: 'for-you', title: 'For You', streamId: 'for-you', unreadCount: 0, kind: 'recommended', section: 'views' },
 		...folderViews,
 		...feedViews,
 	];

@@ -1,8 +1,17 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
+import vm from 'node:vm';
+import { renderBrowserAppHtml } from '../src/browser-app';
 
 import { generateApiToken } from '../src/api-auth';
 import app from '../src/index';
+
+test('every inline script in the actual app HTML parses as executable JavaScript', () => {
+ const html = renderBrowserAppHtml('https://pigeon.example');
+ const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
+ assert.ok(scripts.length >= 5);
+ for (const [index, script] of scripts.entries()) assert.doesNotThrow(() => new vm.Script(script[1]), 'inline script ' + index);
+});
 
 const SCHEMA_VERSION_SQL = normalizeSql("SELECT value FROM _meta WHERE key = 'schema_version'");
 const FEED_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS active_feed_count,
@@ -292,6 +301,11 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="sidebar-column-resizer"[\s\S]*?aria-controls="feeds-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="224"[\s\S]*?aria-valuemax="520"[\s\S]*?aria-valuenow="416"/);
 	assert.match(html, /id="stream-column-resizer"[\s\S]*?aria-controls="articles-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="288"[\s\S]*?aria-valuemax="640"[\s\S]*?aria-valuenow="524"/);
 	assert.match(html, /id="reader-pane-toolbar"/);
+	assert.match(html, /id="mark-unread-button"[^>]+type="button"[^>]+aria-label="Mark selected article as read"[^>]+disabled>Mark read<\/button>/);
+	assert.match(html, /id="star-article-button"[^>]+aria-pressed="false"/);
+	assert.match(html, /id="undo-article-button"/);
+	assert.match(html, /<select id="auto-read-select">/);
+	assert.match(html, /id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"/);
 	assert.match(html, /id="real-views-section"/);
 	assert.match(html, /id="folder-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);
@@ -331,11 +345,14 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /srcdoc/);
 	assert.match(html, /sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"/);
 	assert.match(html, /<base target="_blank" \/>/);
-	assert.match(html, /data-presentational-control="true"/);
-	assert.match(
-		html,
-		/<button[^>]+data-presentational-control="true"[^>]+data-control-tone="subtle"[^>]+disabled[^>]*>/,
-	);
+	assert.match(html, /id="article-query-form"[^>]+role="search"/);
+	assert.match(html, /id="article-search-input"[^>]+type="search"[^>]+maxlength="200"/);
+	assert.match(html, /id="article-read-filter"/);
+	assert.match(html, /id="article-sort-select"/);
+	assert.match(html, /id="article-bulk-button"/);
+	assert.match(html, /id="library-button"[^>]+aria-controls="library-panel"/);
+	assert.match(html, /id="library-panel"[^>]+aria-label="Library"/);
+	assert.match(html, /__PIGEON_LIBRARY_MANAGEMENT__/);
 	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
 	assert.match(html, /html\[data-theme="dark"\]\s*\{/);
 	assert.match(html, /#theme-toggle-button\[aria-pressed="true"\],[\s\S]*?#article-list-mode-button\[aria-pressed="true"\]\s*\{/);
