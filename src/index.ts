@@ -11,6 +11,8 @@ import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
 import { handleFeedDiscovery } from './feed-discovery';
 import { handleYouTubeChannelSearch } from './youtube-channel-search';
+import { renderBrowserServiceWorker } from './browser-service-worker';
+import { handleBrowserInstallationAsset } from './browser-manifest';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -19,6 +21,15 @@ export default {
 
 		if (path === '/health') {
 			return new Response('ok');
+		}
+		if (path === '/app/manifest.webmanifest' || path === '/app/icon.png' || path === '/app/icon-192.png' || path === '/app/icon-512.png') {
+			return handleBrowserInstallationAsset(request);
+		}
+		if (path === '/app/sw.js' && request.method === 'GET') {
+			return new Response(renderBrowserServiceWorker(), { headers: {
+				'Content-Type': 'application/javascript; charset=utf-8',
+				'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app',
+			} });
 		}
 
 		if (path === '/feeds/opml') {
@@ -70,7 +81,12 @@ export default {
 			path === '/api/v1/mutations' ||
 			path === '/api/v1/personalization' ||
 			path === '/api/v1/image-proxy' ||
-			path === '/api/v1/stale-feeds'
+			path === '/api/v1/stale-feeds' ||
+			path === '/api/v1/browser/articles' ||
+			path === '/api/v1/browser/reader-source' ||
+			path === '/api/v1/browser/readwise/save' ||
+			path === '/api/v1/browser/push/capabilities' ||
+			path === '/api/v1/browser/push/subscription'
 		) {
 			return handleNativeApiRequest(request, env);
 		}

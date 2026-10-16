@@ -3,6 +3,7 @@
 import { fetchAndStoreRssFeed, RefreshQueryBudget, type FeedToFetch } from './rss-fetcher';
 import { safeHost, selectFeedsFairly } from './refresh-policy';
 import type { Env } from './types';
+import { dispatchBrowserPush } from './web-push';
 
 const CANDIDATE_LIMIT = 200;
 // Five is a selection ceiling; the shared D1 statement budget may defer costly writes.
@@ -189,6 +190,11 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 			try { await releaseReservedRefreshLease(env, feed); }
 			catch (error) { console.error(`[Cron] Could not release ${feed.feed_key}`, error instanceof Error ? error.message : String(error)); }
 		}
+	}
+	try {
+		await dispatchBrowserPush(env, budget);
+	} catch {
+		console.warn('[Web Push] Background notification cycle failed');
 	}
 }
 
