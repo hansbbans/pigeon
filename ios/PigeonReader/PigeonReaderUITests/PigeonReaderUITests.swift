@@ -1101,16 +1101,25 @@ final class PigeonReaderUITests: XCTestCase {
 
 	private func revealSettingsRow(_ target: XCUIElement, timeout: TimeInterval = 15, swipeDown: Bool = false) -> Bool {
 		let deadline = Date().addingTimeInterval(timeout)
+		func rowIsVisible() -> Bool {
+			guard target.exists, target.isHittable else { return false }
+			let top = app.navigationBars.allElementsBoundByIndex
+				.filter(\.isHittable).map { $0.frame.maxY }.max() ?? app.frame.minY
+			let viewport = CGRect(
+				x: app.frame.minX + 8, y: top + 8,
+				width: app.frame.width - 16, height: app.frame.maxY - top - 24,
+			)
+			let center = CGPoint(x: target.frame.midX, y: target.frame.midY)
+			return viewport.contains(center)
+		}
 
 		while Date() < deadline {
-			if target.exists, target.isHittable {
-				return true
-			}
+			if rowIsVisible() { return true }
 			if swipeDown { app.swipeDown() } else { app.swipeUp() }
 			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.15))
 		}
 
-		return target.exists && target.isHittable
+		return rowIsVisible()
 	}
 
 	private func revealSidebar(containing target: XCUIElement, timeout: TimeInterval = 10) -> Bool {
