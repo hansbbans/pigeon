@@ -1188,7 +1188,7 @@ final class ReaderAppModel {
 		await refreshForLifecycle()
 	}
 
-	private func performLifecycleRefresh(accountID: String) async {
+	func performLifecycleRefresh(accountID: String) async {
 		guard isApplicationActive, session?.storageIdentity == accountID else { return }
 		let preparationFailureAtBefore = lastOfflinePreparationFailureAt
 		await prepareOfflineLibrary(force: true)
@@ -1209,15 +1209,15 @@ final class ReaderAppModel {
 		}
 		let selectedCollectionToRefresh = selectedCollection
 		let selectedCollectionID = selectedCollectionToRefresh.id
-		let freshnessBefore = collectionFreshness[selectedCollectionID]?.updatedAt
-		await load(collection: selectedCollectionToRefresh, force: true)
+		let collectionRefreshed = await loadCollectionFromNetwork(
+			collection: selectedCollectionToRefresh, force: true, now: .now,
+		)
 		guard Task.isCancelled == false,
 			isApplicationActive,
 			isCurrentOperation(context),
 			selectedNavigationID == selectedCollectionID else {
 			return
 		}
-		let collectionRefreshed = collectionFreshness[selectedCollectionID]?.updatedAt != freshnessBefore
 		if isOffline || collectionRefreshed == false {
 			isOffline = true
 			lastLifecycleRefreshFailureAccountID = accountID
@@ -2399,13 +2399,14 @@ final class ReaderAppModel {
 		await persistPrewarmedCollectionIfNeeded(collection)
 	}
 
+	@discardableResult
 	private func loadCollectionFromNetwork(
 		collection: ReaderNavigationItem,
 		force: Bool,
 		now: Date,
-	) async {
+	) async -> Bool {
 		guard let apiClient, let accountContext = accountContext(for: apiClient) else {
-			return
+			return false
 		}
 		var freshnessBeforePreparation: Date?
 		let collectionHasCachedState = articleCache[collection.id] != nil
@@ -2421,16 +2422,16 @@ final class ReaderAppModel {
 					&& collection.kind != .smart) {
 			freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
 			await prepareOfflineLibrary()
-			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
+			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return false }
 			let loadedDuringPreparation = collectionFreshness[collection.id].map {
 				$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
 			} ?? false
 			if loadedDuringPreparation || isOffline {
-				return
+				return loadedDuringPreparation && isOffline == false
 			}
 		}
 		guard var context = operationContext(for: apiClient) else {
-			return
+			return false
 		}
 		while Task.isCancelled == false, isCurrentAccountOperation(accountContext) {
 			let key = ReaderCollectionLoadKey(
@@ -2439,8 +2440,11 @@ final class ReaderAppModel {
 				libraryGeneration: context.generation,
 				preparationID: context.preparationID,
 			)
-			await collectionLoadCoordinator.run(for: key) { @MainActor [weak self] in
-				guard let self else { return }
+			let collectionRefreshed = await collectionLoadCoordinator.run(for: key) { @MainActor [weak self] in
+				guard let self else { return false }
+				// Capture the baseline inside the shared operation. A lifecycle
+				// waiter may join after live rows have already been published.
+				let freshnessBefore = self.collectionFreshness[collection.id]?.updatedAt
 				await self.performCollectionLoad(
 					collection: collection,
 					force: force,
@@ -2449,13 +2453,18 @@ final class ReaderAppModel {
 					apiClientOverride: apiClient,
 					contextOverride: context,
 				)
+				guard self.isCurrentOperation(context) else { return false }
+				return self.collectionFreshness[collection.id].map {
+					$0.isCached == false && $0.updatedAt != freshnessBefore
+				} ?? false
 			}
-			guard isCurrentAccountOperation(accountContext) else { return }
+			guard isCurrentAccountOperation(accountContext) else { return false }
 			guard let currentContext = operationContext(for: apiClient), currentContext != context else {
-				return
+				return collectionRefreshed
 			}
 			context = currentContext
 		}
+		return false
 	}
 
 	private func performCollectionLoad(

@@ -49,28 +49,29 @@ nonisolated struct ReaderCollectionLoadKey: Hashable, Sendable {
 /// cancel work another caller is still using.
 @MainActor
 final class ReaderCollectionLoadCoordinator {
-	private var tasks: [ReaderCollectionLoadKey: Task<Void, Never>] = [:]
+	private var tasks: [ReaderCollectionLoadKey: Task<Bool, Never>] = [:]
 	private var generations: [ReaderCollectionLoadKey: UUID] = [:]
 
 	func run(
 		for key: ReaderCollectionLoadKey,
-		operation: @escaping @MainActor @Sendable () async -> Void,
-	) async {
+		operation: @escaping @MainActor @Sendable () async -> Bool,
+	) async -> Bool {
 		if let existingTask = tasks[key] {
-			await existingTask.value
-			return
+			return await existingTask.value
 		}
 
 		let generation = UUID()
 		generations[key] = generation
 		let task = Task { @MainActor [weak self] in
-			await operation()
-			guard let self, self.generations[key] == generation else { return }
-			self.tasks[key] = nil
-			self.generations[key] = nil
+			let succeeded = await operation()
+			if let self, self.generations[key] == generation {
+				self.tasks[key] = nil
+				self.generations[key] = nil
+			}
+			return succeeded
 		}
 		tasks[key] = task
-		await task.value
+		return await task.value
 	}
 
 	func remove(collectionID: String) {

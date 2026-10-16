@@ -8056,6 +8056,61 @@ struct ReaderAppModelTests {
 		#expect(request.request.url?.path.isEmpty == false)
 	}
 
+	@Test(.timeLimit(.minutes(1)))
+	func lifecycleJoiningAPublishedLoadKeepsTheLibraryOnlineAndRefreshesCachedFolders() async throws {
+		let fixture = try await makeCachedFolderFixture(token: "lifecycle-shared-publication")
+		let client = StartupHTTPClient(
+			subscriptionsData: try subscriptionsData([fixture.subscription]),
+			recommendationsData: try responseData(items: [makeArticle(id: "live-for-you")]),
+			folderItemIDs: ["live-folder"],
+		)
+		let gate = TestPreparationGate()
+		let model = try makeModel(
+			httpClient: client, session: fixture.session, offlineStore: fixture.store,
+			offlineSynchronizationEnabled: false,
+			prepareWidgetSnapshot: { input in
+				let snapshot = await WidgetSnapshotBuilder.prepare(input)
+				await gate.pauseFirst()
+				return snapshot
+			},
+			saveWidgetSnapshot: { _ in },
+		)
+		model.setNavigation(ReaderNavigationState(items: [.smart(.forYou), fixture.folder]))
+		model.setArticles([fixture.cachedArticle], for: fixture.folder)
+		model.setApplicationActive(true)
+		let firstLoad = Task { await model.load(section: .forYou, force: true) }
+		await gate.waitUntilPaused()
+		#expect(model.allArticles(for: .smart(.forYou)).map(\.id) == ["live-for-you"])
+
+		var lifecycleStarted = false
+		let lifecycle = Task { @MainActor in
+			lifecycleStarted = true
+			await model.performLifecycleRefresh(accountID: fixture.session.storageIdentity)
+		}
+		// With offline sync disabled, this same-actor entry reaches the shared
+		// load's suspension before another main-actor task can release its gate.
+		while lifecycleStarted == false { await Task.yield() }
+		await gate.release()
+		await firstLoad.value
+		await lifecycle.value
+		#expect(model.isOffline == false)
+
+		model.select(item: fixture.folder)
+		await model.loadForDisplay(collection: fixture.folder)
+		#expect(await client.folderPageRequestCount() == 1)
+		#expect(model.allArticles(for: fixture.folder).contains { $0.id == "live-folder" })
+	}
+
+	@Test func failedLifecycleLoadStillMarksTheCachedLibraryOffline() async throws {
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false)
+		model.setArticles([makeArticle(id: "cached-for-you")], for: .forYou)
+		model.setApplicationActive(true)
+		let accountID = try #require(model.session?.storageIdentity)
+		await model.performLifecycleRefresh(accountID: accountID)
+		#expect(model.isOffline)
+		#expect(model.allArticles(for: .smart(.forYou)).map(\.id) == ["cached-for-you"])
+	}
+
 	@Test func lifecycleRefreshDoesNotMarkAClosedAccountOfflineAfterAHeldLoad() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
