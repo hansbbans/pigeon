@@ -45,6 +45,23 @@ struct PlatformIntegrationTests {
 		#expect(delta.map(\.id) == [newCanonical.id])
 	}
 
+	@Test func backgroundRefreshPlannerWorksFromLightweightIdentitiesWithoutArticleBodies() {
+		let cached = BackgroundRefreshArticleIdentity(
+			Recommendation(
+				id: "cached", readerId: "cached", feedKey: "feed", source: "Feed", title: "cached",
+				html: String(repeating: "<p>huge</p>", count: 1000), text: nil, originalURL: nil,
+				receivedAt: Date(timeIntervalSince1970: 1), isRead: false, isStarred: false,
+				score: 0, confidence: 0, sampleCount: 0, explanation: "Test", learningState: "Test",
+			)
+		)
+		let incoming = BackgroundRefreshArticleIdentity(
+			id: "new", readerId: "new", isRead: false, receivedAt: Date(timeIntervalSince1970: 2)
+		)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [cached], cached: [cached])
+		let delta = BackgroundRefreshArticlePlanner.newArticles(knownIDs: known, current: [cached, incoming])
+		#expect(delta.map(\.id) == ["new"])
+	}
+
 	@Test func feedNotificationsMatchStreamAndRecommendationFeedKeysFromLegacySlugPrefs() throws {
 		let subscription = try Self.subscription(id: "feed/7", path: "daily")
 		let enabledIDs: Set<String> = ["daily"]

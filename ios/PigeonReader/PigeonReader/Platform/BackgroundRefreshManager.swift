@@ -8,18 +8,56 @@ nonisolated enum BackgroundRefreshPolicy {
 	}
 }
 
+nonisolated protocol BackgroundRefreshArticleIdentifying: Sendable {
+	var id: String { get }
+	var readerId: String { get }
+	var isRead: Bool { get }
+	var receivedAt: Date { get }
+}
+
+extension Recommendation: BackgroundRefreshArticleIdentifying {}
+
+nonisolated struct BackgroundRefreshArticleIdentity: BackgroundRefreshArticleIdentifying, Sendable {
+	let id: String
+	let readerId: String
+	let isRead: Bool
+	let receivedAt: Date
+
+	init(id: String, readerId: String, isRead: Bool, receivedAt: Date) {
+		self.id = id
+		self.readerId = readerId
+		self.isRead = isRead
+		self.receivedAt = receivedAt
+	}
+
+	init(_ article: some BackgroundRefreshArticleIdentifying) {
+		self.init(id: article.id, readerId: article.readerId, isRead: article.isRead, receivedAt: article.receivedAt)
+	}
+}
+
 nonisolated enum BackgroundRefreshArticlePlanner {
-	private static func aliases(of article: Recommendation) -> [String] {
+	private static func aliases(of article: some BackgroundRefreshArticleIdentifying) -> [String] {
 		Array(ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId))
 	}
 
-	static func knownIDs(inMemory: [Recommendation], cached: [Recommendation]) -> Set<String> {
-		(inMemory + cached).reduce(into: Set<String>()) { result, article in
+	static func knownIDs<InMemory: Sequence, Cached: Sequence>(
+		inMemory: InMemory,
+		cached: Cached,
+	) -> Set<String> where InMemory.Element: BackgroundRefreshArticleIdentifying, Cached.Element: BackgroundRefreshArticleIdentifying {
+		var result = Set<String>()
+		for article in inMemory {
 			result.formUnion(aliases(of: article))
 		}
+		for article in cached {
+			result.formUnion(aliases(of: article))
+		}
+		return result
 	}
 
-	static func newArticles(knownIDs: Set<String>, current: [Recommendation]) -> [Recommendation] {
+	static func newArticles<S: Sequence>(
+		knownIDs: Set<String>,
+		current: S,
+	) -> [S.Element] where S.Element: BackgroundRefreshArticleIdentifying {
 		var seenIDs = Set<String>()
 		return current
 			.sorted { left, right in
@@ -31,7 +69,7 @@ nonisolated enum BackgroundRefreshArticlePlanner {
 				}
 				return left.readerId < right.readerId
 			}
-			.reduce(into: [Recommendation]()) { result, article in
+			.reduce(into: [S.Element]()) { result, article in
 				// A first sync, another device's read state, or a collection that
 				// was not in the local snapshot can introduce already-read IDs.
 				// Those are new to this cache, not new unread mail.

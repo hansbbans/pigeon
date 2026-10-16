@@ -8,7 +8,7 @@ struct PendingFeedRequest: Identifiable, Equatable {
 	let url: URL
 }
 
-struct WidgetStarredCountResolver {
+nonisolated struct WidgetStarredCountResolver {
 	static func resolve(
 		cachedCount: Int?,
 		knownStarredCount: Int,
@@ -304,11 +304,16 @@ final class ReaderAppModel {
 	private var isApplicationActive = false
 	private var lifecycleRefreshTask: Task<Void, Never>?
 	private var lifecycleRefreshTaskID: UUID?
+	private var foregroundAppearanceTask: Task<Void, Never>?
 	private var lastLifecycleRefreshFailureAt: Date?
 	private var lastLifecycleRefreshFailureAccountID: String?
 	private var lastOfflinePreparationFailureAt: Date?
 	private var lastOfflinePreparationFailureAccountID: String?
 	private static let lifecycleRetryInterval: TimeInterval = 60
+	private let sceneBackgroundTasks: any SceneBackgroundTaskRunning
+	private var sceneBackgroundFlushTask: Task<Void, Never>?
+	private var sceneBackgroundTaskID: SceneBackgroundTaskID?
+	private var sceneBackgroundFlushIsRunning = false
 	var offlineLibraryStatus: OfflineLibraryStatus {
 		if isSynchronizingOfflineLibrary {
 			return offlineRepairInProgress ? .repairing : .syncing
@@ -375,6 +380,7 @@ final class ReaderAppModel {
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
 			try await Task.sleep(nanoseconds: nanoseconds)
 		},
+		sceneBackgroundTasks: any SceneBackgroundTaskRunning = UIApplicationSceneBackgroundTaskRunner.shared,
 	) {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
@@ -389,6 +395,7 @@ final class ReaderAppModel {
 		self.mutationReplayer = OfflineMutationReplayer(store: offlineStore)
 		self.offlineSynchronizationEnabled = offlineSynchronizationEnabled
 		self.offlineSyncDelay = offlineSyncDelay
+		self.sceneBackgroundTasks = sceneBackgroundTasks
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.keyboardShortcuts = keyboardShortcuts ?? ReaderKeyboardShortcutSettings()
 		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
@@ -737,6 +744,9 @@ final class ReaderAppModel {
 			lifecycleRefreshTask?.cancel()
 			lifecycleRefreshTask = nil
 			lifecycleRefreshTaskID = nil
+			foregroundAppearanceTask?.cancel()
+			foregroundAppearanceTask = nil
+			cancelSceneBackgroundFlush()
 			sessionGeneration = UUID()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
@@ -1045,7 +1055,77 @@ final class ReaderAppModel {
 			lifecycleRefreshTask?.cancel()
 			lifecycleRefreshTask = nil
 			lifecycleRefreshTaskID = nil
+			foregroundAppearanceTask?.cancel()
+			foregroundAppearanceTask = nil
 		}
+	}
+
+	/// Scene-phase callbacks must return immediately. Heavy refresh, snapshot
+	/// building, and persistence run on unstructured tasks so a background
+	/// scene-update cannot stall on the main actor.
+	func handleScenePhase(_ phase: ScenePhase) {
+		switch SceneLifecyclePolicy.action(for: phase) {
+		case .becomeActive:
+			setApplicationActive(true)
+			consumePendingFeedRequest()
+			let appearanceTask = Task { await self.handleForegroundAppearance() }
+			foregroundAppearanceTask = appearanceTask
+		case .resignActive:
+			setApplicationActive(false)
+		case .flushInBackground:
+			setApplicationActive(false)
+			startSceneBackgroundFlush()
+		}
+	}
+
+	func waitForSceneBackgroundFlush() async {
+		await sceneBackgroundFlushTask?.value
+	}
+
+	private func handleForegroundAppearance() async {
+		await handleLocalDayChange()
+		await refreshForLifecycle()
+	}
+
+	private func startSceneBackgroundFlush() {
+		guard sceneBackgroundFlushIsRunning == false else { return }
+		sceneBackgroundFlushIsRunning = true
+		let taskID = sceneBackgroundTasks.beginTask(name: "pigeon.scene-background-flush") { [weak self] in
+			Task { @MainActor in
+				self?.cancelSceneBackgroundFlush()
+			}
+		}
+		sceneBackgroundTaskID = taskID
+		sceneBackgroundFlushTask = Task.detached { [weak self] in
+			await self?.flushForSceneBackground()
+			await self?.finishSceneBackgroundFlush()
+		}
+	}
+
+	func flushForSceneBackground() async {
+		guard Task.isCancelled == false else { return }
+		scheduleRestorationSave()
+		if unpersistedPrewarmCollectionIDs.isEmpty == false {
+			await persistCollections(unpersistedPrewarmCollectionIDs)
+		}
+		guard Task.isCancelled == false else { return }
+		await restorationSaveTask?.value
+		await offlinePersistenceTask?.value
+		guard Task.isCancelled == false else { return }
+		await writeWidgetSnapshotOffMain()
+	}
+
+	private func finishSceneBackgroundFlush() {
+		if let sceneBackgroundTaskID {
+			sceneBackgroundTasks.endTask(sceneBackgroundTaskID)
+		}
+		sceneBackgroundTaskID = nil
+		sceneBackgroundFlushIsRunning = false
+	}
+
+	private func cancelSceneBackgroundFlush() {
+		sceneBackgroundFlushTask?.cancel()
+		finishSceneBackgroundFlush()
 	}
 
 	func refreshForLifecycle() async {
@@ -1140,23 +1220,29 @@ final class ReaderAppModel {
 			isConstrained: background.pathIsConstrained,
 			allowsLowDataMode: allowsLowDataBackgroundRefresh
 		), let context = accountContext(), Task.isCancelled == false else { return false }
-		let cachedArticles: [Recommendation]
-		if let cached = try? await offlineStore.loadSnapshot(accountID: context.accountID) {
-			cachedArticles = cached.articlesByCollection.values.flatMap { $0 }
-		} else {
-			cachedArticles = []
-		}
+		let inMemoryIdentities = backgroundRefreshIdentities()
+		let accountID = context.accountID
+		let knownIDs = await Task.detached(priority: .utility) { [offlineStore] in
+			let cached = (try? await offlineStore.loadSnapshot(accountID: accountID))
+				?.articlesByCollection.values.flatMap { $0 } ?? []
+			return BackgroundRefreshArticlePlanner.knownIDs(
+				inMemory: inMemoryIdentities,
+				cached: cached.map(BackgroundRefreshArticleIdentity.init),
+			)
+		}.value
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
-		let knownIDs = BackgroundRefreshArticlePlanner.knownIDs(
-			inMemory: articleCache.values.flatMap { $0 },
-			cached: cachedArticles,
-		)
 		await prepareOfflineLibrary()
 		guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return false }
-		let newlyArrived = BackgroundRefreshArticlePlanner.newArticles(
-			knownIDs: knownIDs,
-			current: articleCache.values.flatMap { $0 },
-		)
+		let currentIdentities = backgroundRefreshIdentities()
+		let newlyArrivedIdentities = await Task.detached(priority: .utility) {
+			BackgroundRefreshArticlePlanner.newArticles(
+				knownIDs: knownIDs,
+				current: currentIdentities,
+			)
+		}.value
+		let newlyArrived = newlyArrivedIdentities.compactMap { identity in
+			article(withId: identity.id) ?? article(withId: identity.readerId)
+		}
 		let refreshedSubscriptions = subscriptions
 		ReaderNotificationManager.shared.expandEnabledAliases(using: refreshedSubscriptions)
 		for article in newlyArrived.prefix(20) {
@@ -1165,8 +1251,14 @@ final class ReaderAppModel {
 		}
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		lastBackgroundRefreshAt = .now
-		writeWidgetSnapshot()
+		await writeWidgetSnapshotOffMain()
 		return true
+	}
+
+	private func backgroundRefreshIdentities() -> [BackgroundRefreshArticleIdentity] {
+		articleCache.values.flatMap { articles in
+			articles.map(BackgroundRefreshArticleIdentity.init)
+		}
 	}
 
 	func handleDeepLink(
@@ -1247,83 +1339,48 @@ final class ReaderAppModel {
 			await setStarred(article, starred: true)
 		}
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
-		writeWidgetSnapshot()
+		await writeWidgetSnapshotOffMain()
 	}
 
 	@discardableResult
 	func writeWidgetSnapshot() -> PigeonWidgetSnapshot {
 		let snapshot = makeWidgetSnapshot()
 		snapshot.save()
-		WidgetCenter.shared.reloadAllTimelines()
+		reloadWidgetTimelines()
+		return snapshot
+	}
+
+	@discardableResult
+	func writeWidgetSnapshotOffMain() async -> PigeonWidgetSnapshot {
+		let input = captureWidgetSnapshotInput()
+		let snapshot = await Task.detached(priority: .utility) {
+			let snapshot = WidgetSnapshotBuilder.make(input)
+			snapshot.save()
+			return snapshot
+		}.value
+		reloadWidgetTimelines()
 		return snapshot
 	}
 
 	func makeWidgetSnapshot() -> PigeonWidgetSnapshot {
-		let previousSnapshot = PigeonWidgetSnapshot.load()
-		let allArticles = deduplicatedArticles(
-			articleCache.values
-				.flatMap { $0 }
-				.sorted { left, right in
-					if left.receivedAt != right.receivedAt {
-						return left.receivedAt > right.receivedAt
-					}
-					if left.id != right.id {
-						return left.id < right.id
-					}
-					return left.readerId < right.readerId
-				}
-		)
-		let todayID = ReaderSection.today.rawValue
-		let recent = allArticles.prefix(5).map { article in
-			let collection = articleCache[todayID]?.contains(where: { articlesMatch($0, article) }) == true
-				? todayID
-				: nil
-			return Self.widgetArticle(article, collection: collection)
-		}
-		// For You's default list is Unread; keep the home-screen widget on the same stories.
-		let forYou = deduplicatedArticles(
-			(articleCache[ReaderSection.forYou.rawValue] ?? []).filter { $0.isRead == false }
-		)
-			.prefix(5)
-			.map { Self.widgetArticle($0, collection: ReaderSection.forYou.rawValue) }
-		return PigeonWidgetSnapshot(
-			generatedAt: .now,
-			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? allArticles.count(where: { $0.isRead == false }),
-			starredCount: widgetStarredCount(from: allArticles, previousTotal: previousSnapshot.starredCount),
-			recent: Array(recent),
-			forYou: Array(forYou),
+		WidgetSnapshotBuilder.make(captureWidgetSnapshotInput())
+	}
+
+	private func captureWidgetSnapshotInput(now: Date = .now) -> WidgetSnapshotInput {
+		WidgetSnapshotInput(
+			articlesByCollection: articleCache.mapValues { articles in
+				articles.map(WidgetSnapshotArticleRecord.init)
+			},
+			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount,
+			starredUnreadCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount,
+			starredHasMore: streamContinuations[ReaderSection.starred.rawValue] != nil,
+			previousStarredCount: PigeonWidgetSnapshot.load().starredCount,
+			generatedAt: now,
 		)
 	}
 
-	/// The counts widget labels this as a starred total, not an unread badge.
-	/// Prefer a complete Starred page (including read rows). A cached page with
-	/// a continuation is only a lower bound, so retain the prior widget total
-	/// until pagination finishes rather than treating that page as the total.
-	private func widgetStarredCount(
-		from articles: some Collection<Recommendation>,
-		previousTotal: Int?,
-	) -> Int {
-		let cachedStarred = articles.count(where: \.isStarred)
-		let unreadStarredBadge = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
-		let starredID = ReaderSection.starred.rawValue
-		let cachedStarredCount = articleCache[starredID].map { deduplicatedArticles($0).count }
-		return WidgetStarredCountResolver.resolve(
-			cachedCount: cachedStarredCount,
-			knownStarredCount: cachedStarred,
-			unreadBadge: unreadStarredBadge,
-			previousTotal: previousTotal,
-			hasMore: streamContinuations[starredID] != nil,
-		)
-	}
-
-	private static func widgetArticle(_ article: Recommendation, collection: String? = nil) -> PigeonWidgetArticle {
-		PigeonWidgetArticle(
-			id: article.id,
-			title: article.title,
-			source: article.source,
-			receivedAt: article.receivedAt,
-			deepLink: PigeonDeepLink.article(article.id, collection: collection).url,
-		)
+	private func reloadWidgetTimelines() {
+		WidgetCenter.shared.reloadAllTimelines()
 	}
 
 	func exportPersonalization() async -> String? {
@@ -1503,7 +1560,7 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				if applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation) {
+				if await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation) {
 					shouldPersistTodayAfterRestore = true
 				}
 				if snapshot.isEmpty == false {
@@ -1926,7 +1983,7 @@ final class ReaderAppModel {
 			guard isCurrentAccountOperation(context) else { return count }
 			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return count }
-			if applyCachedSnapshot(snapshot) {
+			if await applyCachedSnapshot(snapshot) {
 				await persistCollections([ReaderSection.today.rawValue])
 			}
 			guard isCurrentAccountOperation(context) else { return count }
@@ -1953,7 +2010,7 @@ final class ReaderAppModel {
 			clearDetachedSelectedArticle()
 			selectedArticleID = nil
 			preferredCompactColumn = .content
-			writeWidgetSnapshot()
+			await writeWidgetSnapshotOffMain()
 			await refreshOfflineStorageStats()
 			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
@@ -2573,7 +2630,7 @@ final class ReaderAppModel {
 				resolvedPaginationCollections.insert(collection.id)
 			}
 			if reusesUnchangedPersistedPage == false {
-				writeWidgetSnapshot()
+				await writeWidgetSnapshotOffMain()
 			}
 			if let cacheErrorMessage = mutationIntentResult.errorMessage {
 				// The live page is still authoritative for this display even when
@@ -2849,7 +2906,7 @@ final class ReaderAppModel {
 					to: unreadCountAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
 				)
 			}
-			writeWidgetSnapshot()
+			await writeWidgetSnapshotOffMain()
 			if let cacheErrorMessage = mutationIntentResult.errorMessage,
 				selectedNavigationID == collection.id {
 				errorMessage = cacheErrorMessage
@@ -5093,7 +5150,7 @@ final class ReaderAppModel {
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return nil
 			}
-			_ = applyCachedSnapshot(
+			_ = await applyCachedSnapshot(
 				snapshot,
 				preservingPagination: true,
 				preservingCurrentSelection: preservingCurrentSelection,
@@ -5192,7 +5249,7 @@ final class ReaderAppModel {
 			}
 			switch reloadScope {
 			case .full:
-				if applyCachedSnapshot(
+				if await applyCachedSnapshot(
 					snapshot,
 					preservingPagination: true,
 					preservingCurrentSelection: preservingCurrentSelection,
@@ -5384,6 +5441,33 @@ final class ReaderAppModel {
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
 		preservingCurrentSelection: Bool = false,
+	) async -> Bool {
+		guard let accountID = session?.storageIdentity else { return false }
+		let sortOrders = self.sortOrders
+		let canonicalOrder = self.canonicalArticleOrder
+		let articlesByCollection = snapshot.articlesByCollection
+		let preparedArticlesByCollection = await Task.detached(priority: .utility) {
+			CachedLibrarySnapshotPreparation.sortedArticlesByCollection(
+				articlesByCollection,
+				sortOrders: sortOrders,
+				canonicalOrder: canonicalOrder,
+			)
+		}.value
+		guard Task.isCancelled == false, session?.storageIdentity == accountID else { return false }
+		return applyPreparedCachedSnapshot(
+			snapshot,
+			preparedArticlesByCollection: preparedArticlesByCollection,
+			preservingPagination: preservingPagination,
+			preservingCurrentSelection: preservingCurrentSelection,
+		)
+	}
+
+	@discardableResult
+	private func applyPreparedCachedSnapshot(
+		_ snapshot: CachedLibrarySnapshot,
+		preparedArticlesByCollection: [String: [Recommendation]],
+		preservingPagination: Bool,
+		preservingCurrentSelection: Bool,
 	) -> Bool {
 		guard let session else { return false }
 		cancelPrewarmPersistence()
@@ -5505,11 +5589,7 @@ final class ReaderAppModel {
 		if snapshot.integrity.usesWarmIncrementalPath == false {
 			hasLoadedNavigation = false
 		}
-		articleCache = snapshot.articlesByCollection.reduce(into: [:]) { result, pair in
-			result[pair.key] = sortOrder(for: pair.key).sorted(
-				canonicalArticles(for: pair.key, fallback: pair.value),
-			)
-		}
+		articleCache = preparedArticlesByCollection
 		// The canonical cache is now the source of article state. A bootstrap is
 		// metadata only, so it is safe to clear the visible bootstrap marker here.
 		isShowingBootstrapSnapshot = false
@@ -5732,6 +5812,9 @@ final class ReaderAppModel {
 		lifecycleRefreshTask?.cancel()
 		lifecycleRefreshTask = nil
 		lifecycleRefreshTaskID = nil
+		foregroundAppearanceTask?.cancel()
+		foregroundAppearanceTask = nil
+		cancelSceneBackgroundFlush()
 		articleStateGeneration = UUID()
 		articleMutationTask?.cancel()
 		articleMutationTask = nil
@@ -6261,51 +6344,53 @@ final class ReaderAppModel {
 		persistArticles: Bool = true,
 	) async -> Bool {
 		let predecessor = offlinePersistenceTask
-		let task = Task { @MainActor [weak self] in
+		let task = Task { [weak self] in
 			if let predecessor {
 				_ = await predecessor.value
 			}
-			guard let self,
-				self.isCurrentCollectionOperation(
-					context,
-					collectionID: collectionID,
-					operationID: operationID,
-					isLoadMore: isLoadMore,
-				) else {
-				return false
-			}
+			guard let self else { return false }
+			return await self.writePersistedCollectionState(
+				articles,
+				collectionID: collectionID,
+				navigation: navigation,
+				continuation: continuation,
+				context: context,
+				operationID: operationID,
+				isLoadMore: isLoadMore,
+				persistArticles: persistArticles,
+			)
+		}
+		offlinePersistenceTask = task
+		return await task.value
+	}
 
-			do {
-				if persistArticles {
-					try await self.offlineStore.saveArticles(
-						articles,
-						collectionID: collectionID,
-						accountID: context.accountID,
-					)
-					guard self.isCurrentCollectionOperation(
-						context,
-						collectionID: collectionID,
-						operationID: operationID,
-						isLoadMore: isLoadMore,
-					) else {
-						return false
-					}
-					try await self.offlineStore.saveNavigation(navigation, accountID: context.accountID)
-					guard self.isCurrentCollectionOperation(
-						context,
-						collectionID: collectionID,
-						operationID: operationID,
-						isLoadMore: isLoadMore,
-					) else {
-						return false
-					}
-				}
-				try await self.offlineStore.saveCollectionContinuation(
-					continuation,
+	private func writePersistedCollectionState(
+		_ articles: [Recommendation],
+		collectionID: String,
+		navigation: ReaderNavigationState,
+		continuation: String?,
+		context: OperationContext,
+		operationID: UUID,
+		isLoadMore: Bool,
+		persistArticles: Bool,
+	) async -> Bool {
+		guard isCurrentCollectionOperation(
+			context,
+			collectionID: collectionID,
+			operationID: operationID,
+			isLoadMore: isLoadMore,
+		) else {
+			return false
+		}
+
+		do {
+			if persistArticles {
+				try await offlineStore.saveArticles(
+					articles,
 					collectionID: collectionID,
 					accountID: context.accountID,
 				)
-				guard self.isCurrentCollectionOperation(
+				guard isCurrentCollectionOperation(
 					context,
 					collectionID: collectionID,
 					operationID: operationID,
@@ -6313,23 +6398,43 @@ final class ReaderAppModel {
 				) else {
 					return false
 				}
-				return true
-			} catch is CancellationError {
-				return false
-			} catch {
-				if self.isCurrentCollectionOperation(
+				try await offlineStore.saveNavigation(navigation, accountID: context.accountID)
+				guard isCurrentCollectionOperation(
 					context,
 					collectionID: collectionID,
 					operationID: operationID,
 					isLoadMore: isLoadMore,
-				) {
-					self.errorMessage = error.localizedDescription
+				) else {
+					return false
 				}
+			}
+			try await offlineStore.saveCollectionContinuation(
+				continuation,
+				collectionID: collectionID,
+				accountID: context.accountID,
+			)
+			guard isCurrentCollectionOperation(
+				context,
+				collectionID: collectionID,
+				operationID: operationID,
+				isLoadMore: isLoadMore,
+			) else {
 				return false
 			}
+			return true
+		} catch is CancellationError {
+			return false
+		} catch {
+			if isCurrentCollectionOperation(
+				context,
+				collectionID: collectionID,
+				operationID: operationID,
+				isLoadMore: isLoadMore,
+			) {
+				errorMessage = error.localizedDescription
+			}
+			return false
 		}
-		offlinePersistenceTask = task
-		return await task.value
 	}
 
 	private func resetStreamPagination() {
@@ -6763,7 +6868,7 @@ final class ReaderAppModel {
 			try await offlineStore.saveNavigation(savedNavigation, accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return }
 			scheduleRestorationSave()
-			writeWidgetSnapshot()
+			await writeWidgetSnapshotOffMain()
 		} catch {
 			guard isCurrentAccountOperation(context) else { return }
 			errorMessage = error.localizedDescription

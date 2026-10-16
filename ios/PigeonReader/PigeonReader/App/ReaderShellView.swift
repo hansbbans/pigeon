@@ -88,7 +88,7 @@ struct ReaderShellView: View {
 			model.configurePlatformServices()
 			await model.prepareOfflineLibrary()
 			await model.handleLocalDayChange()
-			model.writeWidgetSnapshot()
+			await model.writeWidgetSnapshotOffMain()
 			if let action = ReaderNotificationManager.shared.consumePendingAction() {
 				await model.handleNotificationAction(action)
 			}
@@ -99,16 +99,10 @@ struct ReaderShellView: View {
 			// downloading the complete offline library takes much longer.
 			_ = await model.loadNavigation(force: true, reportError: false)
 		}
-		.task(id: scenePhase) {
-			let active = scenePhase == .active
-			model.setApplicationActive(active)
-			guard active else { return }
-			await model.refreshForLifecycle()
-		}
-		.onChange(of: scenePhase) { _, phase in
-			guard phase == .active else { return }
-			Task { await model.handleLocalDayChange() }
-			model.consumePendingFeedRequest()
+		.onChange(of: scenePhase, initial: true) { _, phase in
+			// Keep this handler cheap. Scene-update watchdogs kill a backgrounded
+			// app that stays on the main actor for more than a few seconds.
+			model.handleScenePhase(phase)
 		}
 		.onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
 			Task { await model.handleLocalDayChange() }

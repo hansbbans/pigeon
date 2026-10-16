@@ -7653,6 +7653,63 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .smart(.forYou)).map(\.id) == ["after-reconnect"])
 	}
 
+	@Test func scenePhaseBackgroundRequestsABackgroundTaskAndDoesNotRefresh() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+		model.setArticles([makeArticle(id: "scene-flush-recent", receivedAt: 1_786_272_200)], for: .unread)
+
+		model.handleScenePhase(.background)
+
+		#expect(runner.beginCount == 1)
+		#expect(runner.names == ["pigeon.scene-background-flush"])
+		#expect(await controlled.requestCount() == 0)
+
+		await model.waitForSceneBackgroundFlush()
+
+		#expect(runner.endCount == 1)
+		#expect(PigeonWidgetSnapshot.load().recent.map(\.id).contains("scene-flush-recent"))
+	}
+
+	@Test func scenePhaseInactiveStaysCheapAndDoesNotFlush() async throws {
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let model = try makeModel(
+			httpClient: ControlledHTTPClient(),
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+
+		model.handleScenePhase(.inactive)
+
+		#expect(runner.beginCount == 0)
+		await model.waitForSceneBackgroundFlush()
+		#expect(runner.endCount == 0)
+	}
+
+	@Test func scenePhaseActiveStartsLifecycleRefreshWithoutABackgroundTask() async throws {
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+		model.configurePlatformServices()
+		model.handleScenePhase(.active)
+
+		#expect(runner.beginCount == 0)
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "after-active")]))
+		#expect(request.request.url?.path.isEmpty == false)
+	}
+
 	@Test func lifecycleRefreshDoesNotMarkAClosedAccountOfflineAfterAHeldLoad() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
@@ -9902,6 +9959,7 @@ struct ReaderAppModelTests {
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSynchronizationEnabled: Bool = true,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { _ in },
+		sceneBackgroundTasks: (any SceneBackgroundTaskRunning)? = nil,
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
@@ -9920,6 +9978,7 @@ struct ReaderAppModelTests {
 				readerViewExtractor: readerViewExtractor,
 				bootstrapProvider: bootstrapProvider,
 				offlineSyncDelay: offlineSyncDelay,
+				sceneBackgroundTasks: sceneBackgroundTasks ?? UIApplicationSceneBackgroundTaskRunner.shared,
 		)
 	}
 
