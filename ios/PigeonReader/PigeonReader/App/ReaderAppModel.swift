@@ -314,6 +314,7 @@ final class ReaderAppModel {
 	private var sceneBackgroundFlushTask: Task<Void, Never>?
 	private var sceneBackgroundTaskID: SceneBackgroundTaskID?
 	private var sceneBackgroundFlushIsRunning = false
+	private var sceneBackgroundFlushID: UUID?
 	private let prepareWidgetSnapshot: WidgetSnapshotBuilder.Prepare
 	private let saveWidgetSnapshot: @MainActor (PigeonWidgetSnapshot) -> Void
 	private let prepareCachedSnapshot: CachedLibrarySnapshotPreparation.Prepare
@@ -1100,15 +1101,15 @@ final class ReaderAppModel {
 	private func startSceneBackgroundFlush() {
 		guard sceneBackgroundFlushIsRunning == false else { return }
 		sceneBackgroundFlushIsRunning = true
+		let flushID = UUID()
+		sceneBackgroundFlushID = flushID
 		let taskID = sceneBackgroundTasks.beginTask(name: "pigeon.scene-background-flush") { [weak self] in
-			Task { @MainActor in
-				self?.cancelSceneBackgroundFlush()
-			}
+			self?.cancelSceneBackgroundFlush(id: flushID)
 		}
 		sceneBackgroundTaskID = taskID
 		sceneBackgroundFlushTask = Task.detached { [weak self] in
 			await self?.flushForSceneBackground()
-			await self?.finishSceneBackgroundFlush()
+			await self?.finishSceneBackgroundFlush(id: flushID)
 		}
 	}
 
@@ -1125,17 +1126,21 @@ final class ReaderAppModel {
 		await writeWidgetSnapshotOffMain()
 	}
 
-	private func finishSceneBackgroundFlush() {
+	private func finishSceneBackgroundFlush(id: UUID) {
+		guard sceneBackgroundFlushID == id else { return }
 		if let sceneBackgroundTaskID {
 			sceneBackgroundTasks.endTask(sceneBackgroundTaskID)
 		}
 		sceneBackgroundTaskID = nil
+		sceneBackgroundFlushID = nil
+		sceneBackgroundFlushTask = nil
 		sceneBackgroundFlushIsRunning = false
 	}
 
-	private func cancelSceneBackgroundFlush() {
+	private func cancelSceneBackgroundFlush(id: UUID? = nil) {
+		guard let currentID = sceneBackgroundFlushID, id == nil || id == currentID else { return }
 		sceneBackgroundFlushTask?.cancel()
-		finishSceneBackgroundFlush()
+		finishSceneBackgroundFlush(id: currentID)
 	}
 
 	func refreshForLifecycle() async {

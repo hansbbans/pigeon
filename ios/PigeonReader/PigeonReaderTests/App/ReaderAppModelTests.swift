@@ -7974,6 +7974,56 @@ struct ReaderAppModelTests {
 		#expect(PigeonWidgetSnapshot.load().recent.map(\.id).contains("scene-flush-recent"))
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func obsoleteSceneFlushCompletionAndExpirationDoNotEndTheNextGrant(expirationFirst: Bool) async throws {
+		let firstGate = TestPreparationGate()
+		let secondGate = TestPreparationGate()
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let model = try makeModel(
+			httpClient: ControlledHTTPClient(),
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+			prepareWidgetSnapshot: { input in
+				let prepared = await WidgetSnapshotBuilder.prepare(input)
+				if await firstGate.pauseFirst() == false {
+					await secondGate.pauseFirst()
+				}
+				return prepared
+			},
+			saveWidgetSnapshot: { _ in },
+		)
+		model.handleScenePhase(.background)
+		await firstGate.waitUntilPaused()
+		var firstWaitStarted = false
+		let firstCompletion = Task { @MainActor in
+			firstWaitStarted = true
+			await model.waitForSceneBackgroundFlush()
+		}
+		while firstWaitStarted == false { await Task.yield() }
+		let firstID = SceneBackgroundTaskID(rawValue: 1)
+		let secondID = SceneBackgroundTaskID(rawValue: 2)
+		runner.expire(firstID)
+		#expect(runner.endedIDs == [firstID])
+
+		model.handleScenePhase(.background)
+		await secondGate.waitUntilPaused()
+		#expect(runner.beginCount == 2)
+		if expirationFirst {
+			runner.expire(firstID)
+			#expect(runner.endedIDs == [firstID])
+		}
+		await firstGate.release()
+		await firstCompletion.value
+		#expect(runner.endedIDs == [firstID])
+
+		runner.expire(firstID)
+		#expect(runner.endedIDs == [firstID])
+		await secondGate.release()
+		await model.waitForSceneBackgroundFlush()
+		#expect(await secondGate.wasCancelled == false)
+		#expect(runner.endedIDs == [firstID, secondID])
+	}
+
 	@Test func scenePhaseInactiveStaysCheapAndDoesNotFlush() async throws {
 		let runner = RecordingSceneBackgroundTaskRunner()
 		let model = try makeModel(

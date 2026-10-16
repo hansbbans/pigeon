@@ -10,7 +10,7 @@ nonisolated struct SceneBackgroundTaskID: Hashable, Sendable {
 /// without stalling the scene-update watchdog.
 @MainActor
 protocol SceneBackgroundTaskRunning: AnyObject {
-	func beginTask(name: String, expirationHandler: @escaping @Sendable () -> Void) -> SceneBackgroundTaskID
+	func beginTask(name: String, expirationHandler: @escaping @MainActor @Sendable () -> Void) -> SceneBackgroundTaskID
 	func endTask(_ identifier: SceneBackgroundTaskID)
 }
 
@@ -20,8 +20,10 @@ final class UIApplicationSceneBackgroundTaskRunner: SceneBackgroundTaskRunning {
 
 	private init() {}
 
-	func beginTask(name: String, expirationHandler: @escaping @Sendable () -> Void) -> SceneBackgroundTaskID {
-		let identifier = UIApplication.shared.beginBackgroundTask(withName: name, expirationHandler: expirationHandler)
+	func beginTask(name: String, expirationHandler: @escaping @MainActor @Sendable () -> Void) -> SceneBackgroundTaskID {
+		let identifier = UIApplication.shared.beginBackgroundTask(withName: name) {
+			Task { @MainActor in expirationHandler() }
+		}
 		return SceneBackgroundTaskID(rawValue: identifier.rawValue)
 	}
 

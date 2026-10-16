@@ -146,17 +146,25 @@ final class RecordingSceneBackgroundTaskRunner: SceneBackgroundTaskRunning {
 	private(set) var beginCount = 0
 	private(set) var endCount = 0
 	private(set) var names: [String] = []
+	private(set) var endedIDs: [SceneBackgroundTaskID] = []
+	private var expirationHandlers: [SceneBackgroundTaskID: @MainActor @Sendable () -> Void] = [:]
 	private var nextRawValue = 1
 
-	func beginTask(name: String, expirationHandler: @escaping @Sendable () -> Void) -> SceneBackgroundTaskID {
+	func beginTask(name: String, expirationHandler: @escaping @MainActor @Sendable () -> Void) -> SceneBackgroundTaskID {
 		beginCount += 1
 		names.append(name)
 		defer { nextRawValue += 1 }
-		return SceneBackgroundTaskID(rawValue: nextRawValue)
+		let identifier = SceneBackgroundTaskID(rawValue: nextRawValue)
+		expirationHandlers[identifier] = expirationHandler
+		return identifier
+	}
+
+	func expire(_ identifier: SceneBackgroundTaskID) {
+		expirationHandlers[identifier]?()
 	}
 
 	func endTask(_ identifier: SceneBackgroundTaskID) {
 		endCount += 1
-		_ = identifier
+		endedIDs.append(identifier)
 	}
 }
