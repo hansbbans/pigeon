@@ -16,8 +16,15 @@ class Element {
  all(): Element[] { return [this,...this.children.flatMap(child => child.all())]; }
  text(): string { return this.textContent + this.children.map(child => child.text()).join(' '); }
 }
-async function settle(predicate: () => boolean) { for (let attempt = 0; attempt < 100; attempt++) { if (predicate()) return; await new Promise(resolve => setImmediate(resolve)); } throw new Error('Panel did not settle'); }
-function fixture(useFetch = false, installing = false) {
+async function settle(predicate: () => boolean) {
+ const deadline = Date.now() + 2000;
+ while (Date.now() < deadline) {
+  if (predicate()) return;
+  await new Promise(resolve => setTimeout(resolve, 5));
+ }
+ if (!predicate()) throw new Error('Panel did not settle');
+}
+function fixture(useFetch = false, installing = false, digestDelayMs = 0) {
  const stored = new Map<string,string>(); const identity = { token: 'private-account-token', generation: 1 }; let denyStorage = false; let permissionRequests = 0; let registrations = 0; let subscriptions = 0; let unsubscriptions = 0; let current: any = null; let permission = 'default'; let grant = 'granted'; let subscribeWait: Promise<any> | null = null;
  const calls: any[] = []; let api: (path: string,init?: any) => Promise<any> = async (path,init) => path.endsWith('capabilities') ? { enabled: true, publicKey: Buffer.alloc(65,4).toString('base64url') } : init.method === 'DELETE' ? { deleted:true } : init.method === 'PUT' ? { id:'own-id' } : { id:'own-id',managementToken:'own-browser-management-secret' };
  const container = new Element('div'); const win: any = { isSecureContext:true }; const notifications: any = { get permission() { return permission; }, requestPermission: async () => { permissionRequests++; permission = grant; return grant; } };
@@ -26,7 +33,8 @@ function fixture(useFetch = false, installing = false) {
  const registration = Object.assign(new EventTarget(), { active: installing ? null : worker, installing: installing ? worker : null, waiting: null, pushManager: { getSubscription: async () => current, subscribe: async () => { subscriptions++; if (subscribeWait) return subscribeWait; return makeSubscription('https://fcm.googleapis.com/wp/own-' + subscriptions); } } });
  function makeSubscription(endpoint: string) { const value = { endpoint, toJSON: () => ({ endpoint, keys: { p256dh:'fixture-public',auth:'fixture-auth' } }), unsubscribe: async () => { unsubscriptions++; if (current === value) current = null; return true; } }; current = value; return value; }
  const serviceWorker = { register: async (path: string,options: any) => { registrations++; assert.equal(path,'/app/sw.js'); assert.equal(options.scope,'/app'); return registration; }, getRegistration: async () => registration };
- runInNewContext(renderBrowserNotificationsScript(), { window:win, document:{ createElement:(tag: string) => new Element(tag) }, Notification:notifications, PushManager:function(){}, navigator:{serviceWorker}, crypto:webcrypto, TextEncoder, AbortController, URL, Uint8Array, atob,
+ const cryptoAdapter = digestDelayMs ? { subtle: { digest: async (algorithm: any, data: any) => { await new Promise(resolve => setTimeout(resolve, digestDelayMs)); return webcrypto.subtle.digest(algorithm, data); } } } : webcrypto;
+ runInNewContext(renderBrowserNotificationsScript(), { window:win, document:{ createElement:(tag: string) => new Element(tag) }, Notification:notifications, PushManager:function(){}, navigator:{serviceWorker}, crypto:cryptoAdapter, TextEncoder, AbortController, URL, Uint8Array, atob,
   setTimeout:(callback: () => void, delay: number) => { assert.equal(delay, 15000); const id=++nextTimer; timers.set(id,callback); return id; }, clearTimeout:(id: number) => timers.delete(id),
   localStorage:{ getItem:(key: string) => { if (denyStorage) throw new Error('denied'); return stored.get(key) ?? null; }, setItem:(key: string,value: string) => { if (denyStorage) throw new Error('full'); stored.set(key,value); }, removeItem:(key: string) => { if (denyStorage) throw new Error('denied'); stored.delete(key); } } });
  const adapter = { container, getSessionIdentity:() => identity, getSubscriptions:() => [{ id:'feed/1',title:'Newsletter',url:'https://pigeon.example/feed/one' }, { title:'Second',feedKey:'two' }], authenticatedJson:async (path: string,init?: any) => { calls.push({path,init,token:identity.token}); return api(path,init); } };
@@ -49,6 +57,18 @@ test('mount loads capability without permission/subscription; enable persists on
  assert.match([...state.stored.keys()][0],/^pigeon\.browser\.push\.v1\.[a-f0-9]{64}$/); assert.ok(!JSON.stringify([...state.stored]).includes('private-account-token'));
  const record=JSON.parse([...state.stored.values()][0]); assert.equal(record.managementToken,'own-browser-management-secret'); assert.equal(record.uncertain,false);
  assert.match(state.container.text(),/enabled for 1 selected feeds/);
+});
+
+test('notification readiness waits for delayed account hashing without prompting or subscribing', async () => {
+ const state=fixture(false,false,25);
+ await state.ready();
+ assert.equal(state.button('enable').disabled,false);
+ assert.equal(state.count().permissionRequests,0);
+ assert.equal(state.count().registrations,0);
+ assert.equal(state.count().subscriptions,0);
+ assert.equal(state.calls.length,1);
+ assert.match(state.calls[0].path,/capabilities$/);
+ state.handle.destroy();
 });
 
 test('same browser saves per-feed choices with own token and empty selection pauses delivery', async () => {

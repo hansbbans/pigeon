@@ -5513,6 +5513,88 @@ struct ReaderAppModelTests {
 		#expect(model.sortOrder(for: .starred) == .newest)
 	}
 
+	@Test(.timeLimit(.minutes(1)))
+	func cachedHydrationUsesRestoredSortAndRepreparesAfterAUserSortChange() async throws {
+		let session = try makeSession(token: "cached-sort-race")
+		let store = OfflineLibraryStore.inMemory()
+		let older = makeArticle(id: "older", receivedAt: 1)
+		let newer = makeArticle(id: "newer", receivedAt: 2)
+		try await store.saveNavigation(ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)]), accountID: session.storageIdentity)
+		try await store.saveArticles([newer, older], collectionID: ReaderSection.unread.rawValue, accountID: session.storageIdentity)
+		var restoration = ReaderRestorationState.initial
+		restoration.sortOrders = [ReaderSection.unread.rawValue: ArticleSortOrder.oldest.rawValue]
+		try await store.saveRestoration(restoration, accountID: session.storageIdentity)
+		let gate = TestPreparationGate()
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store,
+			prepareCachedSnapshot: { articles, ordering in
+				let prepared = await CachedLibrarySnapshotPreparation.prepare(articles, ordering: ordering)
+				await gate.pauseFirst()
+				return prepared
+			},
+		)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await gate.waitUntilPaused()
+		// The saved Oldest preference must be passed to the first preparation;
+		// changing to Score during its suspension must supersede that result.
+		model.setSortOrder(.score, for: .unread)
+		await gate.release()
+		await preparation.value
+		#expect(model.sortOrder(for: .unread) == .score)
+		#expect(model.allArticles(for: .unread).map(\.id) == [newer.id, older.id])
+	}
+
+	@Test func cachedHydrationUsesPersistedOldestOrderBeforePublishing() async throws {
+		let session = try makeSession(token: "cached-oldest")
+		let store = OfflineLibraryStore.inMemory()
+		let older = makeArticle(id: "older", receivedAt: 1)
+		let newer = makeArticle(id: "newer", receivedAt: 2)
+		try await store.saveNavigation(ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)]), accountID: session.storageIdentity)
+		try await store.saveArticles([newer, older], collectionID: ReaderSection.unread.rawValue, accountID: session.storageIdentity)
+		var restoration = ReaderRestorationState.initial
+		restoration.sortOrders = [ReaderSection.unread.rawValue: ArticleSortOrder.oldest.rawValue]
+		try await store.saveRestoration(restoration, accountID: session.storageIdentity)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.sortOrder(for: .unread) == .oldest)
+		#expect(model.allArticles(for: .unread).map(\.id) == [older.id, newer.id])
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func mutationDuringCachedPreparationKeepsVisibleEditsAndAllowsFreshHydration() async throws {
+		let session = try makeSession(token: "cached-mutation-race")
+		let store = OfflineLibraryStore.inMemory()
+		let story = makeArticle(id: "editable-story", receivedAt: 1)
+		try await store.saveNavigation(ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1), .smart(.starred)]), accountID: session.storageIdentity)
+		try await store.saveArticles([story], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
+		let gate = TestPreparationGate()
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store,
+			prepareCachedSnapshot: { articles, ordering in
+				let prepared = await CachedLibrarySnapshotPreparation.prepare(articles, ordering: ordering)
+				await gate.pauseFirst()
+				return prepared
+			},
+		)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await gate.waitUntilPaused()
+		// A visible live page may arrive while disk hydration is being prepared.
+		model.setArticles([story], for: .forYou)
+		await model.setRead(story, read: true)
+		await model.setStarred(story, starred: true)
+		await gate.release()
+		await preparation.value
+		let visible = try #require(model.allArticles(for: .forYou).first)
+		#expect(visible.isRead && visible.isStarred)
+		// An invalidated first hydration must remain retryable.
+		let fresh = makeArticle(id: "fresh-hydration-story", receivedAt: 2)
+		try await store.saveArticles([visible, fresh], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).contains { $0.id == fresh.id })
+		let restored = try #require(model.allArticles(for: .forYou).first { $0.id == story.id })
+		#expect(restored.isRead && restored.isStarred)
+	}
+
 	@Test func cachedForYouRestorationUsesTheSavedCanonicalServerOrder() async throws {
 		let session = try makeSession(token: "cached-recommendations-token")
 		let store = OfflineLibraryStore.inMemory()
@@ -7835,6 +7917,145 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: .smart(.forYou)).map(\.id) == ["after-reconnect"])
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func obsoleteWidgetPreparationCannotOverwriteANewerSnapshotOrSignOut(disconnect: Bool) async throws {
+		let gate = TestPreparationGate()
+		var written: [PigeonWidgetSnapshot] = []
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true), offlineSynchronizationEnabled: false,
+			prepareWidgetSnapshot: { input in
+				let prepared = await WidgetSnapshotBuilder.prepare(input)
+				await gate.pauseFirst()
+				return prepared
+			},
+			saveWidgetSnapshot: { written.append($0) },
+		)
+		model.setArticles([makeArticle(id: "old-account-story")], for: .forYou)
+		let first = Task { await model.writeWidgetSnapshotOffMain() }
+		await gate.waitUntilPaused()
+		if disconnect {
+			model.disconnect()
+			#expect(model.session == nil)
+		} else {
+			model.setArticles([makeArticle(id: "newer-story")], for: .forYou)
+			await model.writeWidgetSnapshotOffMain()
+		}
+		let current = try #require(written.last)
+		#expect(current.recent.map(\.id) == (disconnect ? [] : ["newer-story"]))
+		let committedCount = written.count
+		await gate.release()
+		_ = await first.value
+		#expect(written.count == committedCount)
+		#expect(written.last == current)
+	}
+
+	@Test func scenePhaseBackgroundRequestsABackgroundTaskAndDoesNotRefresh() async throws {
+		let previousSnapshot = PigeonWidgetSnapshot.load()
+		defer { previousSnapshot.save() }
+
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+		model.setArticles([makeArticle(id: "scene-flush-recent", receivedAt: 1_786_272_200)], for: .unread)
+
+		model.handleScenePhase(.background)
+
+		#expect(runner.beginCount == 1)
+		#expect(runner.names == ["pigeon.scene-background-flush"])
+		#expect(await controlled.requestCount() == 0)
+
+		await model.waitForSceneBackgroundFlush()
+
+		#expect(runner.endCount == 1)
+		#expect(PigeonWidgetSnapshot.load().recent.map(\.id).contains("scene-flush-recent"))
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true])
+	func obsoleteSceneFlushCompletionAndExpirationDoNotEndTheNextGrant(expirationFirst: Bool) async throws {
+		let firstGate = TestPreparationGate()
+		let secondGate = TestPreparationGate()
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let model = try makeModel(
+			httpClient: ControlledHTTPClient(),
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+			prepareWidgetSnapshot: { input in
+				let prepared = await WidgetSnapshotBuilder.prepare(input)
+				if await firstGate.pauseFirst() == false {
+					await secondGate.pauseFirst()
+				}
+				return prepared
+			},
+			saveWidgetSnapshot: { _ in },
+		)
+		model.handleScenePhase(.background)
+		await firstGate.waitUntilPaused()
+		var firstWaitStarted = false
+		let firstCompletion = Task { @MainActor in
+			firstWaitStarted = true
+			await model.waitForSceneBackgroundFlush()
+		}
+		while firstWaitStarted == false { await Task.yield() }
+		let firstID = SceneBackgroundTaskID(rawValue: 1)
+		let secondID = SceneBackgroundTaskID(rawValue: 2)
+		runner.expire(firstID)
+		#expect(runner.endedIDs == [firstID])
+
+		model.handleScenePhase(.background)
+		await secondGate.waitUntilPaused()
+		#expect(runner.beginCount == 2)
+		if expirationFirst {
+			runner.expire(firstID)
+			#expect(runner.endedIDs == [firstID])
+		}
+		await firstGate.release()
+		await firstCompletion.value
+		#expect(runner.endedIDs == [firstID])
+
+		runner.expire(firstID)
+		#expect(runner.endedIDs == [firstID])
+		await secondGate.release()
+		await model.waitForSceneBackgroundFlush()
+		#expect(await secondGate.wasCancelled == false)
+		#expect(runner.endedIDs == [firstID, secondID])
+	}
+
+	@Test func scenePhaseInactiveStaysCheapAndDoesNotFlush() async throws {
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let model = try makeModel(
+			httpClient: ControlledHTTPClient(),
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+
+		model.handleScenePhase(.inactive)
+
+		#expect(runner.beginCount == 0)
+		await model.waitForSceneBackgroundFlush()
+		#expect(runner.endCount == 0)
+	}
+
+	@Test func scenePhaseActiveStartsLifecycleRefreshWithoutABackgroundTask() async throws {
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(
+			httpClient: controlled,
+			offlineSynchronizationEnabled: false,
+			sceneBackgroundTasks: runner,
+		)
+		model.configurePlatformServices()
+		model.handleScenePhase(.active)
+
+		#expect(runner.beginCount == 0)
+		let request = await controlled.nextRequest()
+		await controlled.resolve(request, data: try responseData(items: [makeArticle(id: "after-active")]))
+		#expect(request.request.url?.path.isEmpty == false)
+	}
+
 	@Test func lifecycleRefreshDoesNotMarkAClosedAccountOfflineAfterAHeldLoad() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled, offlineSynchronizationEnabled: false)
@@ -10084,6 +10305,10 @@ struct ReaderAppModelTests {
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSynchronizationEnabled: Bool = true,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { _ in },
+		sceneBackgroundTasks: (any SceneBackgroundTaskRunning)? = nil,
+		prepareWidgetSnapshot: @escaping WidgetSnapshotBuilder.Prepare = WidgetSnapshotBuilder.prepare,
+		saveWidgetSnapshot: @escaping @MainActor (PigeonWidgetSnapshot) -> Void = { $0.save() },
+		prepareCachedSnapshot: @escaping CachedLibrarySnapshotPreparation.Prepare = CachedLibrarySnapshotPreparation.prepare,
 	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let storedSession = session ?? PigeonSession(baseURL: baseURL, token: "server-token")
@@ -10098,10 +10323,14 @@ struct ReaderAppModelTests {
 			offlineStore: offlineStore ?? OfflineLibraryStore.inMemory(),
 			offlineSynchronizationEnabled: offlineSynchronizationEnabled,
 			readerTypography: ReaderTypographySettings(defaults: isolatedDefaults),
-				keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
-				readerViewExtractor: readerViewExtractor,
-				bootstrapProvider: bootstrapProvider,
-				offlineSyncDelay: offlineSyncDelay,
+			keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: isolatedDefaults),
+			readerViewExtractor: readerViewExtractor,
+			bootstrapProvider: bootstrapProvider,
+			offlineSyncDelay: offlineSyncDelay,
+			sceneBackgroundTasks: sceneBackgroundTasks ?? UIApplicationSceneBackgroundTaskRunner.shared,
+			prepareWidgetSnapshot: prepareWidgetSnapshot,
+			saveWidgetSnapshot: saveWidgetSnapshot,
+			prepareCachedSnapshot: prepareCachedSnapshot,
 		)
 	}
 

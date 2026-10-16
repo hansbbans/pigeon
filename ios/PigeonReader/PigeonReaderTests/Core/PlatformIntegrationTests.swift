@@ -29,7 +29,7 @@ struct PlatformIntegrationTests {
 	@Test func backgroundRefreshDeduplicatesCanonicalAndGReaderArticleAliases() {
 		let cachedCanonical = Self.article(id: "canonical", receivedAt: 1)
 		let gReaderCopy = Self.article(id: "greader-copy", receivedAt: 2, readerId: cachedCanonical.id)
-		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [cachedCanonical])
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [Recommendation](), cached: [cachedCanonical])
 		let knownAliasDelta = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: known,
 			current: [gReaderCopy],
@@ -43,6 +43,23 @@ struct PlatformIntegrationTests {
 			current: [newCanonical, newGReaderCopy],
 		)
 		#expect(delta.map(\.id) == [newCanonical.id])
+	}
+
+	@Test func backgroundRefreshPlannerWorksFromLightweightIdentitiesWithoutArticleBodies() {
+		let cached = BackgroundRefreshArticleIdentity(
+			Recommendation(
+				id: "cached", readerId: "cached", feedKey: "feed", source: "Feed", title: "cached",
+				html: String(repeating: "<p>huge</p>", count: 1000), text: nil, originalURL: nil,
+				receivedAt: Date(timeIntervalSince1970: 1), isRead: false, isStarred: false,
+				score: 0, confidence: 0, sampleCount: 0, explanation: "Test", learningState: "Test",
+			)
+		)
+		let incoming = BackgroundRefreshArticleIdentity(
+			id: "new", readerId: "new", isRead: false, receivedAt: Date(timeIntervalSince1970: 2)
+		)
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [cached], cached: [cached])
+		let delta = BackgroundRefreshArticlePlanner.newArticles(knownIDs: known, current: [cached, incoming])
+		#expect(delta.map(\.id) == ["new"])
 	}
 
 	@Test func feedNotificationsMatchStreamAndRecommendationFeedKeysFromLegacySlugPrefs() throws {
@@ -108,7 +125,7 @@ struct PlatformIntegrationTests {
 		let unreadNew = Self.article(id: "unread-new", receivedAt: 4)
 		let readNew = Self.article(id: "read-new", receivedAt: 5, isRead: true)
 		let readDuplicate = Self.article(id: "read-new", receivedAt: 6, isRead: true)
-		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [], cached: [])
+		let known = BackgroundRefreshArticlePlanner.knownIDs(inMemory: [Recommendation](), cached: [Recommendation]())
 		let delta = BackgroundRefreshArticlePlanner.newArticles(
 			knownIDs: known,
 			current: [readNew, unreadNew, readDuplicate],

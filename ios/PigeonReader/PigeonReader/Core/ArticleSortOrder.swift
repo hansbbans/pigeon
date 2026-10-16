@@ -1,6 +1,6 @@
 import Foundation
 
-enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable {
 	case recommended
 	case newest
 	case oldest
