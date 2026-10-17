@@ -7289,6 +7289,55 @@ struct ReaderAppModelTests {
 		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2"])
 	}
 
+	@Test(.timeLimit(.minutes(1)), arguments: [false, true], ["success", "cancel", "disconnect"])
+	func markAllReadReportsPendingAndRejectsDuplicateActions(isFeed: Bool, outcome: String) async throws {
+		let folder = makePaginationCollection()
+		let child = ReaderNavigationItem(
+			id: "feed/1::\(folder.id)", title: "News", streamID: "feed/1", kind: .feed,
+			unreadCount: 3, parentID: folder.id, feedKey: "feed/1", iconURL: nil, smartSection: nil,
+		)
+		let collection = isFeed ? child : folder
+		let httpClient = PaginationHTTPClient(streamID: collection.streamID, originStreamID: "feed/1")
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: httpClient, offlineStore: store)
+		let accountID = try #require(model.session?.storageIdentity)
+		model.setNavigation(ReaderNavigationState(items: [folder, child]), markAsLoaded: true)
+		model.setArticles([makeArticle(id: "newest", feedKey: "feed/1")], for: collection)
+		model.select(item: collection)
+		model.articleFilter = .all
+		await httpClient.pauseNextItemIDRequest()
+		let operation = Task { await model.markAllStoriesAsRead(in: collection) }
+		await httpClient.waitUntilItemIDRequestIsPaused()
+
+		#expect(model.markingAllReadCollectionID == collection.id)
+		#expect(model.canMarkAllStoriesAsRead(in: collection) == false)
+		#expect(model.canMarkAllStoriesAsRead(in: isFeed ? folder : child) == false)
+		await model.markAllStoriesAsRead(in: collection)
+		#expect(await httpClient.requests().filter { $0.path == "/reader/api/0/stream/items/ids" }.count == 1)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
+		#expect(model.allArticles(for: collection).first?.isRead == false)
+
+		if outcome == "cancel" { operation.cancel() }
+		if outcome == "disconnect" {
+			model.disconnect()
+			#expect(model.markingAllReadCollectionID == nil)
+		}
+		await httpClient.resumeItemIDRequest()
+		await operation.value
+
+		#expect(model.markingAllReadCollectionID == nil)
+		#expect(model.errorMessage == nil)
+		let pending = try await store.pendingMutations(accountID: accountID, limit: 100)
+		if outcome == "success" {
+			#expect(pending.count == 1)
+			#expect(model.navigation.item(withID: collection.id)?.unreadCount == 0)
+			#expect(model.canUndoBulkRead(in: collection))
+		} else {
+			#expect(pending.isEmpty)
+			if outcome == "cancel" { #expect(model.canMarkAllStoriesAsRead(in: collection)) }
+		}
+	}
+
 	@Test func folderMarkAllLeavesCountsAndQueueUntouchedWhenPaginationFails() async throws {
 		let folder = makePaginationCollection()
 		let child = ReaderNavigationItem(
@@ -7321,6 +7370,8 @@ struct ReaderAppModelTests {
 		#expect(model.navigation.item(withID: child.id)?.unreadCount == 3)
 		#expect(model.allArticles(for: folder).first?.isRead == false)
 		#expect(model.errorMessage != nil)
+		#expect(model.markingAllReadCollectionID == nil)
+		#expect(model.canMarkAllStoriesAsRead(in: folder))
 	}
 
 	@Test func markOlderThanWithUnreadFilterMarksOnlyVisibleOlderUnreadRows() async throws {

@@ -146,6 +146,10 @@ struct PreviewHTTPClient: HTTPClient {
 				data = Data("{\"unreadcounts\":[]}".utf8)
 			}
 		case "/reader/api/0/stream/items/ids":
+			if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture") {
+				// Model the slow canonical lookup triggered by stale unread counts.
+				try await Task.sleep(for: .seconds(3))
+			}
 			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
 				let stream = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "s" }?.value
 				if stream == "feed/navigation-1-2" {

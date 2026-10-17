@@ -129,6 +129,42 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
 	}
 
+	func testFeedMarkReadShowsProgressWhileCompleting() throws {
+		try verifyMarkAllReadProgress(isFeed: true)
+	}
+
+	func testFolderMarkReadShowsProgressAfterMenuCloses() throws {
+		try verifyMarkAllReadProgress(isFeed: false)
+	}
+
+	private func verifyMarkAllReadProgress(isFeed: Bool) throws {
+		app.terminate()
+		app.launchArguments = [
+			"-reader-sample-data", "-reader-folder-read-data", "-reader-mark-read-progress-fixture",
+			"-reader-show-sidebar", "-reader-reset-reader-state",
+		]
+		app.launch()
+		let feed = app.buttons["Dense Discovery"]
+		XCTAssertTrue(revealSidebar(containing: feed))
+		if isFeed { feed.tap() } else { app.staticTexts["Design"].tap() }
+		XCTAssertTrue(app.navigationBars[isFeed ? "Dense Discovery" : "Design"].firstMatch.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 8))
+		if isFeed {
+			app.buttons["article-list-mark-read"].tap()
+		} else {
+			app.buttons["article-list-more"].tap()
+			app.buttons["Read actions"].tap()
+			app.buttons["Mark All as Read"].tap()
+		}
+		let progress = app.descendants(matching: .any)["article-list-mark-read-progress"].firstMatch
+		XCTAssertTrue(progress.waitForExistence(timeout: 2))
+		if isFeed { XCTAssertFalse(app.buttons["article-list-mark-read"].isEnabled) }
+		attachScreenshot(named: isFeed ? "feed-mark-read-pending" : "folder-mark-read-pending")
+		XCTAssertTrue(progress.waitForNonExistence(timeout: 15))
+		XCTAssertTrue(revealSidebar(containing: feed))
+		XCTAssertEqual(feed.value as? String, "0 unread")
+	}
+
 	func testFeedMarkReadIsAvailableInNavigationAndCanBeUndone() throws {
 		app.terminate()
 		app.launchArguments = [
@@ -1129,6 +1165,11 @@ final class PigeonReaderUITests: XCTestCase {
 		while Date() < deadline {
 			if target.exists {
 				return true
+			}
+			let showSidebar = app.buttons["Show Sidebar"]
+			if showSidebar.exists, showSidebar.isHittable {
+				showSidebar.tap()
+				continue
 			}
 			if backButton.waitForExistence(timeout: 1), backButton.isHittable {
 				backButton.tap()

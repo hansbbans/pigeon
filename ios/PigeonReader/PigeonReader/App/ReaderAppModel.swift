@@ -284,6 +284,8 @@ final class ReaderAppModel {
 	private var activeSearchScope: ReaderSearchScope?
 	private var activeSearchCollectionID: String?
 	private var bulkReadUndo: BulkReadUndo?
+	private var activeMarkAllReadID: UUID?
+	private(set) var markingAllReadCollectionID: String?
 	private var scrollReadTriggered: Set<String> = []
 	private(set) var searchResults: [Recommendation] = []
 	private(set) var articleListMutationRevision: UInt64 = 0
@@ -813,6 +815,8 @@ final class ReaderAppModel {
 			isSearchingArticles = false
 			bulkReadUndo = nil
 			bulkReadUndoTitle = nil
+			activeMarkAllReadID = nil
+			markingAllReadCollectionID = nil
 			articleUndo = nil
 			readerPreparation.reset()
 			listPositions.reset()
@@ -4388,6 +4392,7 @@ final class ReaderAppModel {
 	}
 
 	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
+		guard markingAllReadCollectionID == nil else { return false }
 		let collection = navigation.item(withID: collection.id) ?? collection
 		let isUnsearchedRealCollection =
 			(collection.kind == .folder || collection.kind == .feed)
@@ -4406,6 +4411,17 @@ final class ReaderAppModel {
 	}
 
 	func markAllStoriesAsRead(in collection: ReaderNavigationItem) async {
+		guard activeMarkAllReadID == nil, Task.isCancelled == false else { return }
+		let operationID = UUID()
+		activeMarkAllReadID = operationID
+		markingAllReadCollectionID = collection.id
+		defer {
+			// An old account's completion must not clear a newer action's feedback.
+			if activeMarkAllReadID == operationID {
+				activeMarkAllReadID = nil
+				markingAllReadCollectionID = nil
+			}
+		}
 		if (collection.kind == .folder || collection.kind == .feed),
 			activeSearchScope == nil || activeSearchCollectionID != collection.id,
 			articleFilter(for: collection.id) != .read,
@@ -4415,7 +4431,7 @@ final class ReaderAppModel {
 				in: collection,
 				actionTime: actionTime,
 				context: context,
-			), isCurrentOperation(context) else {
+			), isCurrentOperation(context), Task.isCancelled == false else {
 				return
 			}
 			reconcileMarkAllNavigationCounts(
@@ -4426,7 +4442,7 @@ final class ReaderAppModel {
 			// Persist the corrected navigation even when the complete stream is empty
 			// and there are no cached article rows to repair.
 			await persistCollections(plan.reconciledCollections)
-			guard isCurrentOperation(context) else { return }
+			guard Task.isCancelled == false, isCurrentOperation(context) else { return }
 			await markArticlesAsRead(
 				plan.targets,
 				in: collection,
@@ -5955,6 +5971,8 @@ final class ReaderAppModel {
 		isSearchingArticles = false
 		bulkReadUndo = nil
 		bulkReadUndoTitle = nil
+		activeMarkAllReadID = nil
+		markingAllReadCollectionID = nil
 		articleUndo = nil
 		readerPreparation.reset()
 		listPositions.reset()
