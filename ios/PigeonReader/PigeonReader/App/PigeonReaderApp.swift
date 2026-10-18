@@ -70,6 +70,18 @@ struct PigeonReaderApp: App {
 			RootView()
 				.environment(model)
 				.onOpenURL { url in
+					#if DEBUG
+					if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture"),
+						url.absoluteString == "pigeon://ui-test/hold-mark-read" {
+						Task { await PreviewHTTPClient.markReadProgressGate.hold() }
+						return
+					}
+					if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture"),
+						url.absoluteString == "pigeon://ui-test/complete-mark-read" {
+						Task { await PreviewHTTPClient.markReadProgressGate.release() }
+						return
+					}
+					#endif
 					Task { await model.handleDeepLink(url) }
 				}
 		}

@@ -114,6 +114,7 @@ enum PreviewData {
 	static func makeModel() -> ReaderAppModel {
 		let showsToday = ProcessInfo.processInfo.arguments.contains("-reader-today-data")
 		let showsFolderRead = ProcessInfo.processInfo.arguments.contains("-reader-folder-read-data")
+		let delaysMarkAllRead = ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture")
 		let usesNavigationFixture = ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture")
 		var articles = showsToday ? todayArticles : Self.articles
 		if showsFolderRead {
@@ -189,10 +190,10 @@ enum PreviewData {
 					),
 				],
 				unreadCounts: [
-					ReaderUnreadCount(id: "feed/1", count: 1),
+					ReaderUnreadCount(id: "feed/1", count: delaysMarkAllRead ? 2 : 1),
 					ReaderUnreadCount(id: "feed/2", count: 1),
 					ReaderUnreadCount(id: "feed/3", count: showsFolderRead ? 1 : 0),
-					ReaderUnreadCount(id: "user/-/label/Design", count: showsFolderRead ? 2 : 1),
+					ReaderUnreadCount(id: "user/-/label/Design", count: delaysMarkAllRead ? 3 : (showsFolderRead ? 2 : 1)),
 					ReaderUnreadCount(id: "user/-/label/Technology", count: 1),
 					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: articles.count(where: { $0.isRead == false })),
 				],

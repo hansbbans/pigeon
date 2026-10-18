@@ -239,6 +239,17 @@ struct ArticleListView: View {
 			}
 		}
 		.frame(maxWidth: .infinity, maxHeight: .infinity)
+		.overlay(alignment: .top) {
+			if model.markingAllReadCollectionID == collection.id {
+				searchStatus {
+					ProgressView().controlSize(.small).accessibilityHidden(true)
+					Text("Marking all as read…")
+				}
+				.accessibilityElement(children: .combine)
+				.accessibilityIdentifier("article-list-mark-read-progress")
+				.allowsHitTesting(false)
+			}
+		}
 		.overlay(alignment: .bottom) {
 			if articles.isEmpty == false && isSearchActive {
 				if searchPhase == .searching {
@@ -253,6 +264,11 @@ struct ArticleListView: View {
 						Button("Retry") { searchAttempt &+= 1 }
 					}
 				}
+			}
+		}
+		.onChange(of: model.markingAllReadCollectionID) { _, collectionID in
+			if collectionID == collection.id {
+				AccessibilityNotification.Announcement("Marking all as read").post()
 			}
 		}
 		.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: presentation)

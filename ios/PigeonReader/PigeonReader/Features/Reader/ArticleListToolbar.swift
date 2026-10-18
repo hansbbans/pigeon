@@ -25,6 +25,7 @@ struct ArticleListToolbar: ToolbarContent {
 					Task { await model.markAllStoriesAsRead(in: collection) }
 				}
 				.disabled(model.canMarkAllStoriesAsRead(in: collection) == false)
+				.accessibilityValue(model.markingAllReadCollectionID == collection.id ? "Marking all as read" : "")
 				.accessibilityHint("Marks all unread stories in this feed as read")
 				.accessibilityIdentifier("article-list-mark-read")
 			}
@@ -67,7 +68,7 @@ struct ArticleListToolbar: ToolbarContent {
 				.accessibilityIdentifier("article-list-density")
 
 				Menu("Read actions", systemImage: "checkmark.circle") {
-					Button("Mark All as Read", systemImage: "checkmark.circle") {
+					Button(model.markingAllReadCollectionID == collection.id ? "Marking All as Read…" : "Mark All as Read", systemImage: "checkmark.circle") {
 						Task { await model.markAllStoriesAsRead(in: collection) }
 					}
 					.disabled(model.canMarkAllStoriesAsRead(in: collection) == false)
