@@ -149,6 +149,7 @@ final class PigeonReaderUITests: XCTestCase {
 		if isFeed { feed.tap() } else { app.staticTexts["Design"].tap() }
 		XCTAssertTrue(app.navigationBars[isFeed ? "Dense Discovery" : "Design"].firstMatch.waitForExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 8))
+		XCUIDevice.shared.system.open(try XCTUnwrap(URL(string: "pigeon://ui-test/hold-mark-read")))
 		if isFeed {
 			app.buttons["article-list-mark-read"].tap()
 		} else {
@@ -160,6 +161,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(progress.waitForExistence(timeout: 2))
 		if isFeed { XCTAssertFalse(app.buttons["article-list-mark-read"].isEnabled) }
 		attachScreenshot(named: isFeed ? "feed-mark-read-pending" : "folder-mark-read-pending")
+		XCUIDevice.shared.system.open(try XCTUnwrap(URL(string: "pigeon://ui-test/complete-mark-read")))
 		XCTAssertTrue(progress.waitForNonExistence(timeout: 15))
 		XCTAssertTrue(revealSidebar(containing: feed))
 		XCTAssertEqual(feed.value as? String, "0 unread")

@@ -46,6 +46,21 @@ private nonisolated struct PreviewRecommendationsResponse: Encodable, Sendable {
 }
 
 struct PreviewHTTPClient: HTTPClient {
+	actor MarkReadProgressGate {
+		private var isReleased = true
+
+		func hold() { isReleased = false }
+
+		func wait() async throws {
+			while isReleased == false {
+				try await Task.sleep(for: .milliseconds(50))
+			}
+		}
+
+		func release() { isReleased = true }
+	}
+
+	nonisolated static let markReadProgressGate = MarkReadProgressGate()
 	private let recommendations: [Recommendation]
 	private let personalizationStore: PreviewPersonalizationStore
 
@@ -147,8 +162,8 @@ struct PreviewHTTPClient: HTTPClient {
 			}
 		case "/reader/api/0/stream/items/ids":
 			if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture") {
-				// Model the slow canonical lookup triggered by stale unread counts.
-				try await Task.sleep(for: .seconds(3))
+				// Let the UI test observe pending feedback before completing lookup.
+				try await Self.markReadProgressGate.wait()
 			}
 			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
 				let stream = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "s" }?.value
