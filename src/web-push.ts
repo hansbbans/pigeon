@@ -172,7 +172,7 @@ export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBud
   WHERE vapid_public = ? AND updated_at >= ? AND last_attempt_at < ? ORDER BY last_attempt_at, id LIMIT ?`)
   .bind(config.publicKey, new Date(now.getTime() - 90 * 86400_000).toISOString(), new Date(now.getTime() - 60_000).toISOString(), MAX_SENDS).all<Subscription>();
  for (const subscription of results) {
-  if (!budget.reserve(3)) break; // article lookup + atomic claim + possible invalid-subscription deletion
+  if (!budget.reserve(3)) break; // article lookup + atomic claim + expiry renewal or invalid-subscription deletion
   const item = await env.DB.prepare(`SELECT i.rowid AS row_id, i.subject, f.feed_key, COALESCE(f.custom_title, f.display_name) AS feed_title
    FROM sync_changes c JOIN items i ON i.id = c.entity_id JOIN feeds f ON f.feed_key = i.feed_key
    WHERE c.entity_type = 'article' AND c.operation = 'upsert' AND c.sequence > ? AND c.sequence <= ?
@@ -192,7 +192,10 @@ export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBud
    const response = await fetcher(subscription.endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
     headers: { Authorization: await createVapidAuthorization(subscription.endpoint, config, now), 'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '300', Urgency: 'normal' }, body });
    if (response.status === 404 || response.status === 410) await env.DB.prepare('DELETE FROM browser_push_subscriptions WHERE id = ?').bind(subscription.id).run();
-   else if (!response.ok) console.warn('[Web Push] Provider rejected delivery', response.status);
+   // Accepted delivery is activity: renew the 90-day expiry unless settings changed meanwhile.
+   else if (response.ok) await env.DB.prepare('UPDATE browser_push_subscriptions SET updated_at = ? WHERE id = ? AND updated_at = ?')
+    .bind(now.toISOString(), subscription.id, subscription.updated_at).run();
+   else console.warn('[Web Push] Provider rejected delivery', response.status);
    await response.body?.cancel();
   } catch { console.warn('[Web Push] Delivery failed'); } // never log endpoint, keys or private article metadata
  }

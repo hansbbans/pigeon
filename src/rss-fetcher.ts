@@ -504,8 +504,8 @@ function appendFeedAttachments(
 	attachments: Array<{ url: string; mimeType?: string; title?: string }>,
 ): string {
 	const additions = attachments.flatMap((attachment) => {
-		if (content.includes(attachment.url)) return [];
 		const url = escapeHtmlAttribute(attachment.url);
+		if (content.includes(attachment.url) || content.includes(escapeHtmlText(attachment.url))) return [];
 		const title = escapeHtmlText(attachment.title || 'Media attachment');
 		const isImage = attachment.mimeType?.toLowerCase().startsWith('image/') ||
 			/\.(?:avif|gif|jpe?g|png|webp)(?:$|[?#])/i.test(attachment.url);

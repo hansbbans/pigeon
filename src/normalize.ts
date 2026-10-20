@@ -53,11 +53,17 @@ export function resolveFeedDisplayName(
 ): string {
 	const listIdHeader = headers.find((h) => h.key === 'list-id')?.value;
 	if (listIdHeader) {
-		const humanName = listIdHeader.replace(/<[^>]+>/, '').trim();
+		const humanName = unquotePhrase(listIdHeader.replace(/<[^>]+>/, '').trim());
 		if (humanName) return humanName;
 	}
 
 	return fromName || humanizeEmail(fromAddress);
+}
+
+/** Unwrap an RFC 5322 quoted-string phrase, e.g. `"Morning Brew"` → `Morning Brew`. */
+function unquotePhrase(value: string): string {
+	const quoted = value.match(/^"((?:[^"\\]|\\.)*)"$/);
+	return quoted ? quoted[1].replace(/\\(.)/g, '$1').trim() : value;
 }
 
 const GENERIC_LOCAL_PARTS = new Set([

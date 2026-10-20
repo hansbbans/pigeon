@@ -60,7 +60,7 @@ export function libraryMutationMessage(change: LibraryMutation, title: string, o
 export function libraryFolderPlan(subscriptions: LibrarySubscription[], oldName: string, newName: string | null): Array<{ feedId: string; folders: string[]; previous: string[] }> {
 	const name = newName === null ? null : libraryValidateFolders([newName])[0];
 	if (newName !== null && !name) throw new Error('Enter a folder name.');
-	if (name !== null && name !== oldName && subscriptions.some((subscription) => libraryFolderNames(subscription).some((folder) => folder.toLowerCase() === name.toLowerCase()))) throw new Error('A folder with that name already exists.');
+	if (name !== null && name !== oldName && subscriptions.some((subscription) => libraryFolderNames(subscription).some((folder) => folder !== oldName && folder.toLowerCase() === name.toLowerCase()))) throw new Error('A folder with that name already exists.');
 	const affected = subscriptions.filter((subscription) => libraryFolderNames(subscription).includes(oldName));
 	if (affected.length > 100) throw new Error('This folder contains more than 100 feeds. Change smaller groups first.');
 	return affected.map((subscription) => {

@@ -30,6 +30,8 @@ test('folder rename/delete preserves every unrelated exact label, including comm
 	assert.deepEqual(libraryFolderPlan(subscriptions, 'Old', 'New').map((item) => item.folders), [['Keep, commas', 'New'], ['New', 'Other']]);
 	assert.deepEqual(libraryFolderPlan(subscriptions, 'Old', null).map((item) => item.folders), [['Keep, commas'], ['Other']]);
 	assert.throws(() => libraryFolderPlan(subscriptions, 'Old', 'other'), /already exists/);
+	assert.deepEqual(libraryFolderPlan(subscriptions, 'Old', 'OLD').map((item) => item.folders), [['Keep, commas', 'OLD'], ['OLD', 'Other']]);
+	assert.throws(() => libraryFolderPlan(subscriptions, 'Old', 'KEEP, COMMAS'), /already exists/);
 	assert.throws(() => libraryFolderPlan(Array.from({ length: 101 }, (_, i) => ({ ...subscriptions[0], id: `feed/${i + 1}` })), 'Old', null), /100/);
 	assert.deepEqual(libraryFolderNames({ id: 'feed/9', title: 'P', categories: [{ id: 'user/-/label/100%25 日本語 / News' }] }), ['100%25 日本語 / News']);
 });

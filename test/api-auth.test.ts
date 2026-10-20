@@ -32,3 +32,50 @@ test('requireApiAuth rejects missing or invalid authorization headers', async ()
 	assert.equal((await requireApiAuth(missingAuthRequest, 'secret-password'))?.status, 401);
 	assert.equal((await requireApiAuth(invalidAuthRequest, 'secret-password'))?.status, 401);
 });
+
+test('requireApiAuth rejects the SHA-256("") token when the password is unset or empty', async () => {
+	const emptyToken = await generateApiToken('');
+	const request = () => new Request('https://example.com/feeds/subscribe', {
+		headers: { Authorization: `GoogleLogin auth=pigeon/${emptyToken}` },
+	});
+
+	assert.equal((await requireApiAuth(request(), ''))?.status, 401);
+	assert.equal((await requireApiAuth(request(), undefined as unknown as string))?.status, 401);
+});
+
+test('requireApiAuth rejects tokens that differ only in length or a trailing byte', async () => {
+	const token = await generateApiToken('secret-password');
+	for (const candidate of [token.slice(0, -1), `${token}0`, `${token.slice(0, -1)}${token.endsWith('0') ? '1' : '0'}`, '']) {
+		const request = new Request('https://example.com/feeds/subscribe', {
+			headers: { Authorization: `GoogleLogin auth=pigeon/${candidate}` },
+		});
+		assert.equal((await requireApiAuth(request, 'secret-password'))?.status, 401, candidate);
+	}
+});
+
+test('constantTimeEqual compares strings without accepting prefixes or different lengths', async () => {
+	const { constantTimeEqual } = await import('../src/api-auth');
+	assert.equal(constantTimeEqual('abc', 'abc'), true);
+	assert.equal(constantTimeEqual('abc', 'abd'), false);
+	assert.equal(constantTimeEqual('abc', 'ab'), false);
+	assert.equal(constantTimeEqual('', ''), true);
+	assert.equal(constantTimeEqual('😀', '😀'), true);
+	assert.equal(constantTimeEqual('😀', '😁'), false);
+});
+
+test('GReader routes refuse the empty-password token when API_PASSWORD is unset', async () => {
+	const { handleGreaderRequest } = await import('../src/greader');
+	const emptyToken = await generateApiToken('');
+	for (const API_PASSWORD of ['', undefined]) {
+		const env = { API_PASSWORD, DB: {} } as never;
+		const tokenResponse = await handleGreaderRequest(new Request('https://example.com/reader/api/0/token', {
+			headers: { Authorization: `GoogleLogin auth=pigeon/${emptyToken}` },
+		}), env);
+		assert.equal(tokenResponse.status, 401);
+		const loginResponse = await handleGreaderRequest(
+			new Request('https://example.com/accounts/ClientLogin?Passwd=', { method: 'GET' }),
+			env,
+		);
+		assert.equal(loginResponse.status, 401);
+	}
+});

@@ -74,11 +74,22 @@ async function updateArchiveState(request: Request, env: Env): Promise<Response>
 		return Response.json({ error: `feedKeys must contain 1-${MAX_BULK_FEEDS} unique valid keys` }, { status: 400 });
 	}
 	const archived = body.action === 'archive' ? 1 : 0;
-	await env.DB.batch([
+	const feedKeysJSON = JSON.stringify(feedKeys);
+	// All-or-nothing: the update applies only when every key names an existing feed.
+	const [result] = await env.DB.batch([
 		env.DB.prepare(`UPDATE feeds SET stale_archived = ?
-		 WHERE feed_key IN (SELECT value FROM json_each(?)) AND is_active = 1`)
-			.bind(archived, JSON.stringify(feedKeys)),
+		 WHERE feed_key IN (SELECT value FROM json_each(?)) AND is_active = 1
+		   AND (SELECT COUNT(*) FROM feeds WHERE feed_key IN (SELECT value FROM json_each(?))) = ?`)
+			.bind(archived, feedKeysJSON, feedKeysJSON, feedKeys.length),
 	]);
+	if (!result?.meta.changes) {
+		const { results } = await env.DB.prepare(
+			'SELECT value AS feed_key FROM json_each(?) WHERE value NOT IN (SELECT feed_key FROM feeds)',
+		).bind(feedKeysJSON).all<{ feed_key: string }>();
+		if (results.length > 0) {
+			return Response.json({ error: 'Unknown feed', unknownFeedKeys: results.map((row) => row.feed_key) }, { status: 404 });
+		}
+	}
 	return Response.json({ action: body.action, feedKeys });
 }
 

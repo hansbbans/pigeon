@@ -363,12 +363,15 @@ function deduplicateCandidates(candidates: FeedDiscoveryCandidate[]): FeedDiscov
 	const byUrl = new Map<string, FeedDiscoveryCandidate>();
 	for (const candidate of candidates) {
 		const existing = byUrl.get(candidate.url);
-		if (!existing || candidate.score > existing.score) {
+		if (!existing) {
 			byUrl.set(candidate.url, candidate);
-		} else {
-			existing.aliases = [...new Set([...existing.aliases, ...candidate.aliases])].sort();
-			if (!existing.items && candidate.items) existing.items = candidate.items;
+			continue;
 		}
+		// Merge both ways so the result does not depend on fetch completion order.
+		const [winner, loser] = candidate.score > existing.score ? [candidate, existing] : [existing, candidate];
+		winner.aliases = [...new Set([...winner.aliases, ...loser.aliases])].sort();
+		if (!winner.items && loser.items) winner.items = loser.items;
+		byUrl.set(candidate.url, winner);
 	}
 	return [...byUrl.values()];
 }

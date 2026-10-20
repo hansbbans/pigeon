@@ -82,3 +82,32 @@ test('extractOriginalUrlFromEmail rejects low-confidence unrelated links', () =>
 
 	assert.equal(url, null);
 });
+
+test('extractOriginalUrlFromEmail does not treat domains ending in x.com as social hosts', () => {
+	for (const host of ['www.vox.com', 'www.netflix.com', 'www.fox.com']) {
+		const url = extractOriginalUrlFromEmail({
+			subject: 'Climate policy explained: what the Senate did',
+			htmlContent: `<a href="https://${host}/2026/10/19/climate-policy-explained-senate">Continue reading</a>`,
+		});
+		assert.equal(url, `https://${host}/2026/10/19/climate-policy-explained-senate`);
+	}
+	const social = extractOriginalUrlFromEmail({
+		subject: 'Climate policy explained: what the Senate did',
+		htmlContent: '<a href="https://x.com/2026/10/19/climate-policy-explained-senate">Continue reading</a>',
+	});
+	assert.equal(social, null);
+});
+
+test('extractOriginalUrlFromEmail decodes href entities exactly once', () => {
+	const ampersand = extractOriginalUrlFromEmail({
+		subject: 'Climate policy explained: what the Senate did',
+		htmlContent: '<a href="https://www.example.com/2026/10/19/climate-policy-explained-senate?q=a&amp;amp;b">Continue reading</a>',
+	});
+	assert.equal(ampersand, 'https://www.example.com/2026/10/19/climate-policy-explained-senate?q=a&amp;b');
+
+	const numeric = extractOriginalUrlFromEmail({
+		subject: 'Climate policy explained: what the Senate did',
+		htmlContent: '<a href="https://www.example.com/2026/10/19/climate-policy-explained-senate?q=a&amp;#38;b">Continue reading</a>',
+	});
+	assert.equal(numeric, 'https://www.example.com/2026/10/19/climate-policy-explained-senate?q=a&#38;b');
+});

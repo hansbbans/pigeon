@@ -132,9 +132,30 @@ export function sanitizeArticleHtml(articleHtml: string | undefined): string {
 	return articleHtml
 		.replace(/<(script|iframe|frame|frameset|object|embed|applet)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
 		.replace(/<(script|iframe|frame|frameset|object|embed|applet)\b[^>]*\/?>/gi, '')
-		.replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-		.replace(/\s+srcdoc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-		.replace(/\s+(?:href|src|action|formaction|poster)\s*=\s*(?:"\s*(?:javascript|vbscript|data):[^\"]*"|'\s*(?:javascript|vbscript|data):[^']*'|\s*(?:javascript|vbscript|data):[^\s>]*)/gi, '');
+		// Attribute rules apply only inside start tags, so article text such as
+		// `onSubmit = handler` or `online=true` is never rewritten. Quoted values
+		// are consumed whole so a `>` or `on…=` inside them cannot end the tag early;
+		// an unterminated tag or quote runs to end of input, as it does in the browser.
+		.replace(/<[a-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^"'>])*(?:>|["'][\s\S]*$|$)/gi, (tag) => {
+			const nameLength = /^<[a-z][^\s/>]*/i.exec(tag)?.[0].length ?? 1;
+			const attributes = tag.slice(nameLength).replace(
+				/[\s/]+([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g,
+				(attribute: string, name: string, doubleQuoted?: string, singleQuoted?: string, unquoted?: string) => {
+					const attributeName = name.toLowerCase();
+					if (attributeName.startsWith('on') || attributeName === 'srcdoc') return '';
+					if (!/^(?:href|src|action|formaction|poster|xlink:href)$/.test(attributeName)) return attribute;
+					// Browsers decode entities and drop tabs/newlines/leading controls before reading the scheme.
+					const scheme = (doubleQuoted ?? singleQuoted ?? unquoted ?? '')
+						.replace(/&#x0*([0-9a-f]+);?/gi, (_match: string, hex: string) => String.fromCharCode(Number.parseInt(hex, 16) & 0xffff))
+						.replace(/&#0*([0-9]+);?/g, (_match: string, decimal: string) => String.fromCharCode(Number.parseInt(decimal, 10) & 0xffff))
+						.replace(/&colon;/gi, ':')
+						.replace(/&(?:tab|newline);/gi, '')
+						.replace(/[\u0000-\u0020]+/g, '');
+					return /^(?:javascript|vbscript|data):/i.test(scheme) ? '' : attribute;
+				},
+			);
+			return tag.slice(0, nameLength) + attributes;
+		});
 }
 
 export function extractAuthToken(responseText: string): string | null {
@@ -584,7 +605,9 @@ function looksLikeHtmlPreview(value: string): boolean {
 }
 
 function stripArticlePreviewMarkup(value: string): string {
-	return decodeArticlePreviewEntities(value)
+	// Strip tags before decoding so escaped text like `&lt;div&gt;` survives;
+	// cleanArticlePreviewText decodes entities afterwards.
+	return value
 		.replace(/<style[\s\S]*?<\/style>/gi, ' ')
 		.replace(/<script[\s\S]*?<\/script>/gi, ' ')
 		.replace(/<[^>]+>/g, ' ');
@@ -602,7 +625,9 @@ function cleanArticlePreviewText(value: string): string {
 		return decoded;
 	}
 
-	return `${decoded.slice(0, 277).trimEnd()}...`;
+	// Back off one code unit rather than leave a lone high surrogate at the cut.
+	const end = /[\ud800-\udbff]/.test(decoded.charAt(276)) ? 276 : 277;
+	return `${decoded.slice(0, end).trimEnd()}...`;
 }
 
 function decodeArticlePreviewEntities(value: string): string {
@@ -701,7 +726,9 @@ export function selectArticleHeroImageUrl(articleHtml: string | undefined): stri
 		if (!style) {
 			return false;
 		}
-		return /(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?|(?:width|max-width|height|max-height)\s*:\s*0(?:px)?)/i.test(
+		// Anchor each property at a declaration boundary and require the value to end,
+		// so `border-width:0`, `line-height:0`, or `opacity:0.9` are not hidden.
+		return /(?:^|[;\s])(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?|(?:width|max-width|height|max-height)\s*:\s*0(?:px)?)\s*(?:!important\s*)?(?:;|$)/i.test(
 			style,
 		);
 	}

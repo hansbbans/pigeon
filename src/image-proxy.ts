@@ -49,7 +49,8 @@ export async function handleImageProxy(
 				try {
 					currentUrl = assertSafeFeedUrl(new URL(location, currentUrl));
 				} catch {
-					return new Response('Unsafe image redirect', { status: 400 });
+					// The client's URL was valid; the upstream server redirected somewhere unsafe.
+					return new Response('Unsafe image redirect', { status: 502 });
 				}
 				continue;
 			}

@@ -27,7 +27,10 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 		}
 		return forwardRecommendations(request, env);
 	}
-	if (path === '/api/v1/image-proxy' && request.method === 'GET') {
+	if (path === '/api/v1/image-proxy') {
+		if (request.method !== 'GET') {
+			return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+		}
 		return handleImageProxy(request);
 	}
 	if (path === '/api/v1/browser/reader-source') return handleBrowserReaderSource(request);

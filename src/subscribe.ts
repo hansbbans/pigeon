@@ -135,6 +135,9 @@ export async function subscribeToFeed(
 			now,
 			now,
 		);
+	const categoryTagInsert = category
+		? [env.DB.prepare('INSERT OR IGNORE INTO feed_tags (feed_key, label) VALUES (?, ?)').bind(feedKey, category)]
+		: [];
 	const baselineInsert = env.DB.prepare(
 		'INSERT OR IGNORE INTO _meta (key, value) VALUES (?, ?)',
 	).bind(initialImportBaselineKey(feedKey), serializeInitialImportBaseline(baseline));
@@ -154,6 +157,7 @@ export async function subscribeToFeed(
 	try {
 		await env.DB.batch([
 			feedInsert,
+			...categoryTagInsert,
 			baselineInsert,
 			...itemStatements,
 			...feedAliasStatements(env.DB, feedKey, canonicalUrl.href, aliasUrls),

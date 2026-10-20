@@ -239,22 +239,24 @@ function removeElementByPattern(html: string, pattern: RegExp): string {
 	return result;
 }
 
-function extractElementInnerHtmlByClass(html: string, className: string): string | null {
-	const pattern = new RegExp(
-		`<([a-z][a-z0-9:-]*)\\b[^>]*\\bclass=(["'])[^"'<>]*\\b${escapeRegex(className)}\\b[^"'<>]*\\2[^>]*>`,
+// Match className as a whole whitespace-separated class token; `\b` would also
+// match inside hyphenated names like `email-content-header`.
+function classTokenOpenTagPattern(className: string): RegExp {
+	return new RegExp(
+		`<([a-z][a-z0-9:-]*)\\b[^>]*\\bclass=(["'])(?:[^"'<>]*\\s)?${escapeRegex(className)}(?:\\s[^"'<>]*)?\\2[^>]*>`,
 		'i',
 	);
-	return extractElementInnerHtmlByPattern(html, pattern);
+}
+
+function extractElementInnerHtmlByClass(html: string, className: string): string | null {
+	return extractElementInnerHtmlByPattern(html, classTokenOpenTagPattern(className));
 }
 
 function removeElementsByClass(html: string, classNames: string[]): string {
-	return classNames.reduce((result, className) => {
-		const pattern = new RegExp(
-			`<([a-z][a-z0-9:-]*)\\b[^>]*\\bclass=(["'])[^"'<>]*\\b${escapeRegex(className)}\\b[^"'<>]*\\2[^>]*>`,
-			'i',
-		);
-		return removeElementByPattern(result, pattern);
-	}, html);
+	return classNames.reduce(
+		(result, className) => removeElementByPattern(result, classTokenOpenTagPattern(className)),
+		html,
+	);
 }
 
 function removeElementById(html: string, id: string): string {

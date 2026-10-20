@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '13');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '14');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -152,7 +152,8 @@ BEGIN
     is_read = excluded.is_read,
     is_starred = excluded.is_starred,
     updated_at = excluded.updated_at,
-    version = item_statuses.version + 1;
+    version = item_statuses.version + 1,
+    mutation_id = NULL;
 END;
 
 CREATE TABLE IF NOT EXISTS refresh_activity (

@@ -111,11 +111,14 @@ export interface TopicScore {
 
 function canonicalToken(token: string): string {
 	let normalized = token.normalize('NFKC').toLowerCase();
+	// Stop words like "this" and "does" must survive intact so isUsefulTopicToken can drop them.
+	if (STOP_WORDS.has(normalized) || BOILERPLATE_WORDS.has(normalized) || IRREGULAR_PLURAL_TOKENS.has(normalized)) {
+		return ALIAS_TO_CANONICAL.get(normalized) ?? normalized;
+	}
 	if (normalized.length >= 4 && normalized.endsWith('ies')) {
 		normalized = `${normalized.slice(0, -3)}y`;
 	} else if (
-		normalized.length >= 4 && normalized.endsWith('s') &&
-		!normalized.endsWith('ss') && !IRREGULAR_PLURAL_TOKENS.has(normalized)
+		normalized.length >= 4 && normalized.endsWith('s') && !normalized.endsWith('ss')
 	) {
 		normalized = normalized.slice(0, -1);
 	}

@@ -242,6 +242,14 @@ final class ReaderAppModel {
 	private var collectionActivityGeneration = UUID()
 	private var articleStateGeneration = UUID()
 	private var inFlightReadwiseSaves: Set<String> = []
+	private let readwiseSyncDefaults: UserDefaults
+	/// Serializes server writes so an older PUT/DELETE can never land after a newer one.
+	private var readwiseServerOperation: Task<Bool, Never>?
+	/// Bumped on every local save/remove so in-flight reconciliation can't undo it.
+	private var readwiseTokenRevision = 0
+	private var readwiseReconciliationGeneration: UUID?
+	private var reconciledReadwiseGeneration: UUID?
+	private static let readwisePendingServerSyncKey = "pigeon.readwise.pending-server-sync.v1"
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
 	private var hasLoadedNavigation = false
@@ -382,6 +390,7 @@ final class ReaderAppModel {
 		offlineSynchronizationEnabled: Bool = true,
 		readerTypography: ReaderTypographySettings? = nil,
 		keyboardShortcuts: ReaderKeyboardShortcutSettings? = nil,
+		readwiseSyncDefaults: UserDefaults = .standard,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
@@ -396,6 +405,7 @@ final class ReaderAppModel {
 		self.httpClient = httpClient
 		self.readwiseTokenStore = readwiseTokenStore
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
+		self.readwiseSyncDefaults = readwiseSyncDefaults
 		self.readerModeStore = readerModeStore
 		self.articleFilterStore = articleFilterStore
 		self.smartViewStore = smartViewStore
@@ -846,14 +856,150 @@ final class ReaderAppModel {
 		}
 	}
 
-	func saveReadwiseToken(_ token: String) throws {
+	/// Saves the token to Keychain, then backs it up to the Pigeon server so it
+	/// survives a fresh install. Throws only when the local save fails; returns
+	/// whether the server copy was updated. A failed upload is retried on the
+	/// next reconciliation.
+	@discardableResult
+	func saveReadwiseToken(_ token: String) async throws -> Bool {
 		try readwiseTokenStore.save(token)
 		hasReadwiseToken = true
+		let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+		return await recordLocalReadwiseChange(.upload) { apiClient in
+			try await apiClient.saveReadwiseToken(normalized)
+		}
 	}
 
-	func removeReadwiseToken() throws {
+	/// Removes the token from Keychain and the Pigeon server. Throws only when the
+	/// local removal fails; returns whether the server copy was deleted.
+	@discardableResult
+	func removeReadwiseToken() async throws -> Bool {
 		try readwiseTokenStore.remove()
 		hasReadwiseToken = false
+		return await recordLocalReadwiseChange(.delete) { apiClient in
+			try await apiClient.deleteReadwiseToken()
+		}
+	}
+
+	/// Starts server reconciliation without blocking the caller. Safe to call on
+	/// every launch/sign-in; it runs at most once per session.
+	func startReadwiseTokenServerSync() {
+		guard apiClient != nil,
+			reconciledReadwiseGeneration != sessionGeneration,
+			readwiseReconciliationGeneration != sessionGeneration else { return }
+		Task { await syncReadwiseTokenWithServer() }
+	}
+
+	/// Restores the server's token when Keychain is empty (fresh install), uploads
+	/// the local token when the server has none (existing installs), and replays a
+	/// pending local change that couldn't reach the server earlier.
+	func syncReadwiseTokenWithServer() async {
+		guard let apiClient, let context = accountContext(for: apiClient),
+			reconciledReadwiseGeneration != context.generation,
+			readwiseReconciliationGeneration != context.generation else { return }
+		readwiseReconciliationGeneration = context.generation
+		let succeeded = await enqueueReadwiseServerOperation { [weak self] in
+			guard let self else { return false }
+			return await self.reconcileReadwiseToken(apiClient: apiClient, context: context)
+		}.value
+		if readwiseReconciliationGeneration == context.generation {
+			readwiseReconciliationGeneration = nil
+		}
+		if succeeded, isCurrentAccountOperation(context) {
+			reconciledReadwiseGeneration = context.generation
+		}
+	}
+
+	private enum ReadwisePendingServerSync: String {
+		case upload
+		case delete
+	}
+
+	private var readwisePendingServerSync: ReadwisePendingServerSync? {
+		get { readwiseSyncDefaults.string(forKey: Self.readwisePendingServerSyncKey).flatMap(ReadwisePendingServerSync.init) }
+		set { readwiseSyncDefaults.set(newValue?.rawValue, forKey: Self.readwisePendingServerSyncKey) }
+	}
+
+	private func recordLocalReadwiseChange(
+		_ pending: ReadwisePendingServerSync,
+		send: @escaping @MainActor (PigeonAPIClient) async throws -> Void,
+	) async -> Bool {
+		readwiseTokenRevision &+= 1
+		let revision = readwiseTokenRevision
+		readwisePendingServerSync = pending
+		guard let apiClient, let context = accountContext(for: apiClient) else { return false }
+		return await enqueueReadwiseServerOperation { [weak self] in
+			guard let self, self.isCurrentAccountOperation(context), self.readwiseTokenRevision == revision else {
+				return false
+			}
+			do {
+				try await send(apiClient)
+			} catch {
+				return false
+			}
+			if self.readwiseTokenRevision == revision {
+				self.readwisePendingServerSync = nil
+			}
+			return true
+		}.value
+	}
+
+	private func enqueueReadwiseServerOperation(
+		_ operation: @escaping @MainActor () async -> Bool,
+	) -> Task<Bool, Never> {
+		let previous = readwiseServerOperation
+		let task = Task { @MainActor in
+			_ = await previous?.value
+			return await operation()
+		}
+		readwiseServerOperation = task
+		return task
+	}
+
+	private func reconcileReadwiseToken(apiClient: PigeonAPIClient, context: AccountOperationContext) async -> Bool {
+		let revision = readwiseTokenRevision
+		let isCurrent = { [weak self] in
+			guard let self else { return false }
+			return self.isCurrentAccountOperation(context) && self.readwiseTokenRevision == revision
+		}
+		guard isCurrent() else { return false }
+		let localToken = (try? readwiseTokenStore.load())?.trimmingCharacters(in: .whitespacesAndNewlines)
+		let local = localToken?.isEmpty == false ? localToken : nil
+		do {
+			switch (readwisePendingServerSync, local) {
+			case (.delete, nil):
+				try await apiClient.deleteReadwiseToken()
+				guard isCurrent() else { return false }
+				readwisePendingServerSync = nil
+			case (.upload, let local?):
+				try await apiClient.saveReadwiseToken(local)
+				guard isCurrent() else { return false }
+				readwisePendingServerSync = nil
+			case (_, let local?):
+				let remote = try await apiClient.readwiseToken()
+				guard isCurrent() else { return false }
+				if remote == nil {
+					try await apiClient.saveReadwiseToken(local)
+					guard isCurrent() else { return false }
+				}
+				readwisePendingServerSync = nil
+			case (_, nil):
+				let remote = try await apiClient.readwiseToken()
+				guard isCurrent() else { return false }
+				guard let remote else {
+					readwisePendingServerSync = nil
+					return true
+				}
+				try readwiseTokenStore.save(remote)
+				hasReadwiseToken = true
+				readwisePendingServerSync = nil
+			}
+			return true
+		} catch {
+			// Best effort: never surface or log the token. The next launch or
+			// sign-in retries.
+			return false
+		}
 	}
 
 	func loadPersonalization() async {

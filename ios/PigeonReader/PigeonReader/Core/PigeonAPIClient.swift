@@ -531,6 +531,30 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
+	/// Server-side backup of the Readwise Reader token so it survives a fresh install.
+	func readwiseToken() async throws -> String? {
+		let (data, _) = try await requestJSON(path: "api/v1/readwise/token")
+		let token = try JSONDecoder().decode(ReadwiseTokenPayload.self, from: data).token?
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+		return token?.isEmpty == false ? token : nil
+	}
+
+	func saveReadwiseToken(_ token: String) async throws {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/readwise/token"))
+		request.httpMethod = "PUT"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(ReadwiseTokenPayload(token: token))
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
+	func deleteReadwiseToken() async throws {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/readwise/token"))
+		request.httpMethod = "DELETE"
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
 	func exportPersonalization() async throws -> String {
 		var components = try endpointComponents(path: "api/v1/personalization")
 		components.queryItems = [URLQueryItem(name: "download", value: "1")]
@@ -662,6 +686,10 @@ struct PigeonAPIClient: Sendable {
 
 private struct EngagementEnvelope: Codable, Sendable {
 	let events: [EngagementEvent]
+}
+
+private struct ReadwiseTokenPayload: Codable, Sendable {
+	let token: String?
 }
 
 private struct PersonalizationTopicsUpdate: Codable, Sendable {

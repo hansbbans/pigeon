@@ -41,7 +41,10 @@ function truncatePreview(value: string): string {
 		return value;
 	}
 
-	const truncated = value.slice(0, MAX_PREVIEW_LENGTH);
+	// Back off one code unit rather than cut between a high and low surrogate.
+	const lastCodeUnit = value.charCodeAt(MAX_PREVIEW_LENGTH - 1);
+	const cut = lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff ? MAX_PREVIEW_LENGTH - 1 : MAX_PREVIEW_LENGTH;
+	const truncated = value.slice(0, cut);
 	const lastWordBoundary = truncated.lastIndexOf(' ');
 	const safeTruncation = lastWordBoundary > MAX_PREVIEW_LENGTH * 0.6
 		? truncated.slice(0, lastWordBoundary)

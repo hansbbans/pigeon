@@ -1,8 +1,26 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '13';
+const REQUIRED_SCHEMA_VERSION = '14';
 const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 const LEGACY_SYNC_SCHEMA_VERSION = 12;
+const RETENTION_INDEX_SCHEMA_VERSION = 13;
+
+// A status write without a mutation id must not report the previous mutation's
+// id; the mutation path sets mutation_id after updating items.
+const ITEMS_UPDATE_STATUS_TRIGGER = `CREATE TRIGGER IF NOT EXISTS trg_items_update_status
+			 AFTER UPDATE OF is_read, is_starred ON items
+			 WHEN COALESCE(OLD.is_read, 0) <> COALESCE(NEW.is_read, 0)
+			   OR COALESCE(OLD.is_starred, 0) <> COALESCE(NEW.is_starred, 0)
+			 BEGIN
+			   INSERT INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at, version)
+			   VALUES ('default', NEW.id, COALESCE(NEW.is_read, 0), COALESCE(NEW.is_starred, 0), datetime('now'), 1)
+			   ON CONFLICT(account_id, item_id) DO UPDATE SET
+			     is_read = excluded.is_read,
+			     is_starred = excluded.is_starred,
+			     updated_at = excluded.updated_at,
+			     version = item_statuses.version + 1,
+			     mutation_id = NULL;
+			 END`;
 
 const migrationPromises = new WeakMap<D1Database, Promise<void>>();
 
@@ -183,23 +201,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			 END`,
 		)
 		.run();
-	await db
-		.prepare(
-			`CREATE TRIGGER IF NOT EXISTS trg_items_update_status
-			 AFTER UPDATE OF is_read, is_starred ON items
-			 WHEN COALESCE(OLD.is_read, 0) <> COALESCE(NEW.is_read, 0)
-			   OR COALESCE(OLD.is_starred, 0) <> COALESCE(NEW.is_starred, 0)
-			 BEGIN
-			   INSERT INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at, version)
-			   VALUES ('default', NEW.id, COALESCE(NEW.is_read, 0), COALESCE(NEW.is_starred, 0), datetime('now'), 1)
-			   ON CONFLICT(account_id, item_id) DO UPDATE SET
-			     is_read = excluded.is_read,
-			     is_starred = excluded.is_starred,
-			     updated_at = excluded.updated_at,
-			     version = item_statuses.version + 1;
-			 END`,
-		)
-		.run();
+	await db.prepare(ITEMS_UPDATE_STATUS_TRIGGER).run();
 
 	await db
 		.prepare(
@@ -410,7 +412,18 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
-			.bind(REQUIRED_SCHEMA_VERSION, String(LEGACY_SYNC_SCHEMA_VERSION)),
+			.bind(String(RETENTION_INDEX_SCHEMA_VERSION), String(LEGACY_SYNC_SCHEMA_VERSION)),
+	]);
+
+	// v14: databases created before v14 keep the old trigger because of IF NOT EXISTS.
+	await db.batch([
+		db.prepare('DROP TRIGGER IF EXISTS trg_items_update_status'),
+		db.prepare(ITEMS_UPDATE_STATUS_TRIGGER),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, String(RETENTION_INDEX_SCHEMA_VERSION)),
 	]);
 }
 

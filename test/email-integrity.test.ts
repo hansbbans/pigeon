@@ -167,3 +167,40 @@ test('oversized HTML-only email retains bounded content when no plain-text alter
 		assert.doesNotMatch(html, /\uFFFD/);
 	} finally { db.database.close(); }
 });
+
+test('a multipart email keeps HTML that fits on its own when HTML plus text exceeds the budget', async () => {
+	const db = new EmailDatabase();
+	try {
+		const html = `<h1>Big newsletter</h1><p>${'x'.repeat(880_000)}</p>`;
+		const text = `Big newsletter\n${'y'.repeat(30_000)}`;
+		const body = [
+			'--b1', 'Content-Type: text/plain; charset=UTF-8', '', text,
+			'--b1', 'Content-Type: text/html; charset=UTF-8', '', html,
+			'--b1--', '',
+		].join('\r\n');
+		await deliver(db, 'large-multipart', 'Fri, 02 Oct 2026 12:00:00 +0000', body, 'multipart/alternative; boundary="b1"');
+		const item = db.database.prepare('SELECT html_content, text_content, content_size FROM items').get() as Record<string, string | number>;
+		assert.match(String(item.html_content), /^<h1>Big newsletter<\/h1>/);
+		assert.ok(Number(item.content_size) <= 900_000, `Stored content was ${item.content_size} bytes`);
+		assert.ok(String(item.text_content).startsWith('Big newsletter'));
+	} finally {
+		db.database.close();
+	}
+});
+
+test('a multipart email still falls back to text when the HTML alone exceeds the budget', async () => {
+	const db = new EmailDatabase();
+	try {
+		const html = `<h1>Huge</h1><p>${'x'.repeat(950_000)}</p>`;
+		const body = [
+			'--b1', 'Content-Type: text/plain; charset=UTF-8', '', 'Plain fallback',
+			'--b1', 'Content-Type: text/html; charset=UTF-8', '', html,
+			'--b1--', '',
+		].join('\r\n');
+		await deliver(db, 'huge-multipart', 'Fri, 02 Oct 2026 12:00:00 +0000', body, 'multipart/alternative; boundary="b1"');
+		const item = db.database.prepare('SELECT html_content FROM items').get() as Record<string, string>;
+		assert.equal(String(item.html_content).trim(), 'Plain fallback');
+	} finally {
+		db.database.close();
+	}
+});

@@ -6,7 +6,7 @@ import { handleStatusRetryRequest } from '../src/status';
 
 class RetryStatement {
 	values: unknown[] = [];
-	constructor(readonly sql: string, private readonly changes: number) {}
+	constructor(readonly sql: string, private readonly changes: number, private readonly feedExists = true) {}
 	bind(...values: unknown[]): this {
 		this.values = values;
 		return this;
@@ -31,7 +31,10 @@ class RetryStatement {
 	}
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '13' } as T;
+			return { value: '14' } as T;
+		}
+		if (this.sql.startsWith('SELECT 1 AS found FROM feeds')) {
+			return (this.feedExists ? { found: 1 } : null) as T | null;
 		}
 		throw new Error(`Unexpected first(): ${this.sql}`);
 	}
@@ -42,12 +45,16 @@ class RetryStatement {
 
 class RetryDb {
 	lastRetry: RetryStatement | null = null;
-	constructor(private readonly changes: number, private readonly failure?: 'schema' | 'queue') {}
+	constructor(
+		private readonly changes: number,
+		private readonly failure?: 'schema' | 'queue',
+		private readonly feedExists = true,
+	) {}
 	prepare(sql: string): RetryStatement {
 		if (this.failure === 'schema' || (this.failure === 'queue' && sql.includes('SET next_fetch_at = ?'))) {
 			throw new Error('database unavailable');
 		}
-		const statement = new RetryStatement(sql, this.changes);
+		const statement = new RetryStatement(sql, this.changes, this.feedExists);
 		if (sql.includes('SET next_fetch_at = ?')) this.lastRetry = statement;
 		return statement;
 	}
@@ -85,12 +92,18 @@ test('manual retry requires authentication and only queues an idle active RSS fe
 	assert.match(db.lastRetry.sql, /retry_after_at IS NULL/);
 });
 
-test('manual retry reports a conflict when the feed is missing, rate limited, or already leased', async () => {
+test('manual retry reports a conflict when the feed is rate limited or already leased', async () => {
 	const response = await request(new RetryDb(0));
 	assert.equal(response.status, 409);
 	assert.deepEqual(await response.json(), {
-		error: 'Feed not found, waiting for Retry-After, or refresh already in progress',
+		error: 'Feed is waiting for Retry-After or a refresh is already in progress',
 	});
+});
+
+test('manual retry reports 404 when no active RSS feed has the key', async () => {
+	const response = await request(new RetryDb(0, undefined, false));
+	assert.equal(response.status, 404);
+	assert.deepEqual(await response.json(), { error: 'Feed not found' });
 });
 
 test('manual retry rejects non-object JSON without queueing a feed', async () => {

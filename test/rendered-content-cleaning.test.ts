@@ -36,7 +36,7 @@ class FakePreparedStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '13' } as T;
+			return { value: '14' } as T;
 		}
 
 		throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -464,4 +464,24 @@ test('reader URL rewriting resumes after self-closing MathML style and title', (
  const html = '<p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="/real">Real</a>';
  const expected = '<div data-pigeon-rendered="email-fragment" style="text-align:left"><p>Body</p><math><style/><title/><mtext>Math</mtext></math><a href="https://example.com/real">Real</a></div>';
  assert.equal(createRenderedContent({ htmlContent: html, originalUrl: 'https://example.com/article' }), expected);
+});
+
+test('rendered content matches class hints as whole class tokens only', () => {
+	const html = '<!doctype html><html><body><div class="email-content-header"><p>Sponsored by Acme.</p></div><div class="wrapper email-content"><p>This is the actual newsletter body.</p></div></body></html>';
+	const rendered = createRenderedContent({ htmlContent: html });
+	assert.match(rendered, /actual newsletter body/);
+	assert.doesNotMatch(rendered, /Sponsored by Acme/);
+});
+
+test('rendered content does not strip a body wrapped in a longer footer-like class', () => {
+	const html = '<!doctype html><html><body><div class="email-footer-wrapper"><p>Main story text.</p><div class="email-footer"><p>Unsubscribe here.</p></div></div></body></html>';
+	const rendered = createRenderedContent({ htmlContent: html });
+	assert.match(rendered, /Main story text/);
+	assert.doesNotMatch(rendered, /Unsubscribe here/);
+});
+
+test('createPreviewText does not split a surrogate pair at the truncation boundary', () => {
+	const preview = createPreviewText({ textContent: `${'a'.repeat(279)}😀 trailing words` });
+	assert.doesNotMatch(preview, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+	assert.equal(preview, `${'a'.repeat(279)}...`);
 });
