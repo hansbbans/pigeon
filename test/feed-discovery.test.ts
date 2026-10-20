@@ -154,3 +154,39 @@ test('discovery API requires authentication and redacts URLs in errors', async (
 	assert.equal(authenticated.status, 400);
 	assert.doesNotMatch(await authenticated.text(), /sensitive|token=secret/i);
 });
+
+test('merges aliases from lower-scoring duplicates regardless of completion order', async () => {
+	globalThis.fetch = (async (input) => {
+		const url = String(input);
+		if (url === 'https://example.com/') {
+			return new Response(
+				'<html><head><link rel="alternate" type="application/rss+xml" href="/alt.xml"></head></html>',
+				{ status: 200, headers: { 'Content-Type': 'text/html' } },
+			);
+		}
+		if (url === 'https://example.com/alt.xml') {
+			// Finish after the lower-scoring fallback so the winner replaces it.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			return new Response(null, { status: 301, headers: { Location: '/final.xml' } });
+		}
+		if (url === 'https://example.com/feed/') {
+			return new Response(null, { status: 301, headers: { Location: '/final.xml' } });
+		}
+		if (url === 'https://example.com/final.xml') {
+			return new Response(rss('Final Feed'), {
+				status: 200,
+				headers: { 'Content-Type': 'application/rss+xml' },
+			});
+		}
+		return new Response('missing', { status: 404 });
+	}) as typeof fetch;
+
+	const result = await discoverFeeds('https://example.com/');
+	assert.equal(result.candidates.length, 1);
+	assert.equal(result.candidates[0].url, 'https://example.com/final.xml');
+	assert.equal(result.candidates[0].source, 'alternate');
+	assert.deepEqual(result.candidates[0].aliases, [
+		'https://example.com/alt.xml',
+		'https://example.com/feed/',
+	]);
+});

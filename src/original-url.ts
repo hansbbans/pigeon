@@ -19,7 +19,7 @@ const SUBJECT_TOKEN_SPLIT = /[^a-z0-9]+/g;
 const BAD_TEXT = /\b(unsubscribe|manage subscription|manage account|email preferences|privacy|terms|login|log in|sign in|share|comment|comments|reply|like|liked|restack|podcast|listen|download app|read in app|open app|follow us|linkedin|facebook|instagram|twitter|x\.com)\b/i;
 const BAD_URL =
 	/(?:mailto:|tel:|read-in-app|redirect=app-store|[?&](?:action=share|comments?=true|submitLike=true|triggerShare=true)|\/(?:account|comments?|manage|preferences|profile|settings|share|subscribe|unsubscribe)(?:[/?#]|$)|\/(?:login|oauth|podcast|listen)(?:[/?#]|$))/i;
-const BAD_HOST = /(?:facebook\.com|twitter\.com|x\.com|linkedin\.com|instagram\.com|youtube\.com|tiktok\.com)$/i;
+const BAD_HOST = /(?:^|\.)(?:facebook\.com|twitter\.com|x\.com|linkedin\.com|instagram\.com|youtube\.com|tiktok\.com)$/i;
 
 export function extractOriginalUrl(options: ExtractOriginalUrlOptions): string | null {
 	const subject = decodeHtmlEntities(options.subject || '').trim();
@@ -108,7 +108,7 @@ function extractTextCandidates(textContent: string, subject: string, senderDomai
 	const candidates: Candidate[] = [];
 
 	for (const match of textContent.matchAll(/https?:\/\/[^\s<>"')]+/gi)) {
-		const url = normalizeCandidateUrl(match[0]);
+		const url = normalizeCandidateUrl(decodeHtmlEntities(match[0]));
 		if (!url) {
 			continue;
 		}
@@ -206,7 +206,8 @@ function normalizeCandidateUrl(value: string | undefined): string | null {
 		return null;
 	}
 
-	const decoded = decodeHtmlEntities(value).trim();
+	// Callers pass values that are already entity-decoded (tag attributes) or plain text.
+	const decoded = value.trim();
 	if (!decoded) {
 		return null;
 	}
@@ -313,15 +314,15 @@ function decodeBase64Url(input: string): string {
 	return atob(padded);
 }
 
+const NAMED_ENTITIES: Record<string, string> = { quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' };
+
+// Single pass so decoded output (e.g. `&amp;#38;` -> `&#38;`) is never decoded again.
 function decodeHtmlEntities(value: string): string {
-	return value
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;|&apos;/g, "'")
-		.replace(/&amp;/g, '&')
-		.replace(/&lt;/g, '<')
-		.replace(/&gt;/g, '>')
-		.replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => safeCodePoint(parseInt(hex, 16)))
-		.replace(/&#([0-9]+);/g, (_, decimal: string) => safeCodePoint(parseInt(decimal, 10)));
+	return value.replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|(quot|apos|amp|lt|gt));/gi, (entity, hex?: string, decimal?: string, name?: string) => {
+		if (hex) return safeCodePoint(parseInt(hex, 16));
+		if (decimal) return safeCodePoint(parseInt(decimal, 10));
+		return NAMED_ENTITIES[name!] ?? entity;
+	});
 }
 
 function safeCodePoint(value: number): string {

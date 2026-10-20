@@ -10,7 +10,7 @@ const ITEMS_SQL =
 	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?';
 
 const FEEDS_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC';
-const OPML_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY display_name';
+const OPML_SQL_FRAGMENT = 'FROM feeds f WHERE f.is_active = 1';
 
 class FeedVariantStatement {
 	private readonly sql: string;
@@ -75,7 +75,7 @@ class FeedVariantStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '13' } as T;
+			return { value: '14' } as T;
 		}
 
 		if (this.sql === FEED_SQL) {

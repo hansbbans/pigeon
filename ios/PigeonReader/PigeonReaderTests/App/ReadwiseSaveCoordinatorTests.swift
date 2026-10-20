@@ -45,17 +45,17 @@ struct ReadwiseSaveCoordinatorTests {
 	}
 
 	@Test
-	func tokenCanBeSavedUpdatedAndRemovedThroughTheModel() throws {
+	func tokenCanBeSavedUpdatedAndRemovedThroughTheModel() async throws {
 		let tokenStore = TestReadwiseTokenStore()
 		let model = try makeModel(httpClient: MockHTTPClient(), tokenStore: tokenStore)
 
 		#expect(model.hasReadwiseToken == false)
-		try model.saveReadwiseToken("first-token")
+		try await model.saveReadwiseToken("first-token")
 		#expect(model.hasReadwiseToken)
 		#expect(tokenStore.token == "first-token")
-		try model.saveReadwiseToken("second-token")
+		try await model.saveReadwiseToken("second-token")
 		#expect(tokenStore.token == "second-token")
-		try model.removeReadwiseToken()
+		try await model.removeReadwiseToken()
 		#expect(model.hasReadwiseToken == false)
 		#expect(tokenStore.token == nil)
 	}

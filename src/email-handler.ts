@@ -166,7 +166,9 @@ export async function handleIncomingEmail(
 			console.warn(
 				`Content too large (${sourceContentSize} bytes), limiting stored body | feed_key=${feedKey} subject="${storedSubject}"`,
 			);
-			if (textContent) htmlContent = '';
+			// Only drop the HTML when it cannot fit by itself; otherwise keep it and
+			// let the text copy be truncated to the remaining budget below.
+			if (textContent && new Blob([htmlContent]).size > MAX_CONTENT_SIZE) htmlContent = '';
 		}
 
 		// html_content is NOT NULL in schema — always store something
@@ -195,6 +197,9 @@ export async function handleIncomingEmail(
 					 ON CONFLICT(feed_key) DO UPDATE SET
 				   display_name = CASE
 				     WHEN excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%'
+				       THEN excluded.display_name
+				     -- Heal names stored with List-Id quotes before the phrase was unquoted.
+				     WHEN feeds.display_name LIKE '"%"' AND excluded.display_name NOT LIKE '"%"'
 				       THEN excluded.display_name
 				     ELSE feeds.display_name
 				   END,

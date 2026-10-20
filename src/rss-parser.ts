@@ -48,6 +48,7 @@ const XML_OPTIONS = {
 	attributeNamePrefix: '@_',
 	textNodeName: '#text',
 	parseAttributeValue: false,
+	parseTagValue: false,
 	trimValues: true,
 	processEntities: true,
 	removeNSPrefix: false,
@@ -271,7 +272,7 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: Namesp
 				: textValue(findKey(entry, ['id'])) ?? link ?? '',
 			title,
 			link,
-			pubDate: normalizeDate(textValue(findKey(entry, ['published', 'updated']))),
+			pubDate: firstDate(entry, ['published', 'updated']),
 			content:
 				atomContentValue(findKey(entry, ['content']), xhtmlScopes) ??
 				atomContentValue(findKey(entry, ['summary']), xhtmlScopes) ??
@@ -365,9 +366,9 @@ function parseRssItem(item: FeedRecord, baseUrl?: string): ParsedItem {
 		guid: textValue(guidValue) ?? attributeValue(item, ['rdf:about', 'about']) ?? link ?? '',
 		title: textValue(findKey(item, ['title'])) ?? 'Untitled',
 		link,
-		pubDate: normalizeDate(textValue(findKey(item, ['pubDate', 'dc:date', 'date']))),
-		content: textValue(findKey(item, ['content:encoded', 'description', 'summary'])) ?? '',
-		author: textValue(findKey(item, ['author', 'dc:creator', 'creator'])),
+		pubDate: firstDate(item, ['pubDate', 'dc:date', 'date']),
+		content: firstText(item, ['content:encoded', 'description', 'summary']) ?? '',
+		author: firstText(item, ['author', 'dc:creator', 'creator']),
 		attachments: parseRssAttachments(item, baseUrl),
 	};
 }
@@ -495,6 +496,23 @@ function findKey(record: FeedRecord, candidates: string[]): unknown {
 	for (const candidate of candidates) {
 		const exact = Object.keys(record).find((key) => key.toLowerCase() === candidate.toLowerCase());
 		if (exact !== undefined) return record[exact];
+	}
+	return undefined;
+}
+
+// Try each candidate in order so an empty preferred element does not hide a populated fallback.
+function firstText(record: FeedRecord, candidates: string[]): string | undefined {
+	for (const candidate of candidates) {
+		const text = textValue(findKey(record, [candidate]));
+		if (text) return text;
+	}
+	return undefined;
+}
+
+function firstDate(record: FeedRecord, candidates: string[]): string | undefined {
+	for (const candidate of candidates) {
+		const date = normalizeDate(textValue(findKey(record, [candidate])));
+		if (date) return date;
 	}
 	return undefined;
 }

@@ -183,3 +183,31 @@ test('concurrent notification scans use atomic claim so a browser receives only 
  await Promise.all([dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now), dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now)]);
  assert.equal(calls, 1);
 });
+
+test('successful deliveries renew a subscription so active browsers never age out; failing ones still expire', async (t) => {
+ const state = await fixture(t);
+ const active = await state.subscribe('https://fcm.googleapis.com/wp/active');
+ const failing = await state.subscribe('https://fcm.googleapis.com/wp/failing');
+ const start = new Date(Date.now() + 120_000);
+ const savedAt = new Date(start.getTime() - 80 * 86400_000).toISOString();
+ state.db.prepare('UPDATE browser_push_subscriptions SET updated_at = ?').run(savedAt);
+ const delivered: string[] = [];
+ const fetcher = (async (input: any) => {
+  delivered.push(String(input));
+  return new Response(null, { status: String(input).endsWith('/active') ? 201 : 500 });
+ }) as typeof fetch;
+ const updatedAt = (id: string) => (state.db.prepare('SELECT updated_at FROM browser_push_subscriptions WHERE id = ?').get(id) as { updated_at: string }).updated_at;
+
+ state.insert('first', 'one', start.toISOString());
+ await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, start);
+ assert.deepEqual(delivered.sort(), ['https://fcm.googleapis.com/wp/active', 'https://fcm.googleapis.com/wp/failing']);
+ assert.equal(updatedAt(active.id), start.toISOString());
+ assert.equal(updatedAt(failing.id), savedAt);
+
+ // 100 days after the last settings save, the actively delivering browser still receives pushes.
+ delivered.length = 0;
+ const later = new Date(start.getTime() + 20 * 86400_000);
+ state.insert('second', 'one', later.toISOString());
+ await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, later);
+ assert.deepEqual(delivered, ['https://fcm.googleapis.com/wp/active']);
+});

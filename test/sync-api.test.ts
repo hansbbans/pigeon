@@ -201,6 +201,38 @@ test('durable mutations are exactly-once and surface their idempotency key in st
 	state.database.close();
 });
 
+test('a later non-mutation status write clears the stale mutationId while mutations still record theirs', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const itemId = 'tag:google.com,2005:reader/item/000000000000000b';
+	const mutate = (id: string, value: boolean) => handleMutationBatch(new Request('https://pigeon.example/api/v1/mutations', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ mutations: [{ id, kind: 'set_read', itemIds: [itemId], value, scope: 'single' }] }),
+	}), state.env);
+	const statusRow = () => state.database.prepare(
+		"SELECT is_read, mutation_id, version FROM item_statuses WHERE item_id = '11111111-1111-4111-8111-111111111111'",
+	).get() as { is_read: number; mutation_id: string | null; version: number };
+
+	assert.equal((await mutate('mutation-read-a', true)).status, 200);
+	assert.deepEqual({ ...statusRow(), version: undefined }, { is_read: 1, mutation_id: 'mutation-read-a', version: undefined });
+
+	// A GReader-style write (no mutation id) must not inherit the previous id.
+	const before = state.database.prepare('SELECT MAX(sequence) AS sequence FROM sync_changes').get() as { sequence: number };
+	state.database.prepare('UPDATE items SET is_read = 0 WHERE rowid = 11').run();
+	assert.equal(statusRow().is_read, 0);
+	assert.equal(statusRow().mutation_id, null);
+	const changes = (await (await sync(state.env, `v1:${before.sequence}`, 20)).json() as { changes: Array<Record<string, unknown>> }).changes;
+	const status = changes.filter((change) => change.entityType === 'status').at(-1);
+	assert.equal((status?.payload as { isRead: boolean }).isRead, false);
+	assert.equal((status?.payload as { mutationId?: string | null }).mutationId ?? null, null);
+
+	// The mutation path updates items first, then records its id afterwards.
+	assert.equal((await mutate('mutation-read-b', true)).status, 200);
+	assert.deepEqual({ is_read: statusRow().is_read, mutation_id: statusRow().mutation_id }, { is_read: 1, mutation_id: 'mutation-read-b' });
+	state.database.close();
+});
+
 test('feed rename, move, and unsubscribe mutations are durable and idempotent', async () => {
 	const state = fixture();
 	insertLibrary(state.database);

@@ -11,6 +11,7 @@ import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
 import { handleFeedDiscovery } from './feed-discovery';
 import { handleYouTubeChannelSearch } from './youtube-channel-search';
+import { handleReadwiseTokenRequest } from './readwise-token-api';
 import { renderBrowserServiceWorker } from './browser-service-worker';
 import { handleBrowserInstallationAsset } from './browser-manifest';
 
@@ -72,6 +73,10 @@ export default {
 
 		if (path === '/app/status/retry' && request.method === 'POST') {
 			return handleStatusRetryRequest(request, env);
+		}
+
+		if (path === '/api/v1/readwise/token') {
+			return handleReadwiseTokenRequest(request, env);
 		}
 
 		if (
@@ -282,18 +287,22 @@ async function handleFeedList(env: Env): Promise<Response> {
 
 async function handleOpml(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
-		`SELECT feed_key, display_name, custom_title, category, source_url, site_url
-		 FROM feeds WHERE is_active = 1 ORDER BY display_name`,
+		`SELECT f.feed_key, f.display_name, f.custom_title, f.category, f.site_url,
+		        (SELECT json_group_array(ft.label) FROM feed_tags ft WHERE ft.feed_key = f.feed_key) AS folders_json
+		 FROM feeds f WHERE f.is_active = 1`,
 	).all<{
 		feed_key: string;
 		display_name: string;
 		custom_title: string | null;
 		category: string | null;
-		source_url: string | null;
 		site_url: string | null;
+		folders_json: string | null;
 	}>();
 
-	const opml = generateOpml(results, env.BASE_URL);
+	const opml = generateOpml(
+		results.map(({ folders_json, ...feed }) => ({ ...feed, folders: JSON.parse(folders_json ?? '[]') as string[] })),
+		env.BASE_URL,
+	);
 
 	return new Response(opml, {
 		headers: {

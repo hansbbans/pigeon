@@ -165,3 +165,10 @@ test('distinct liked stories retain a consistent topic, while rejected topics tr
 	const freshScore = scoreTopics({ title: 'Fresh AI chip benchmarks', text: null }, [], buildTopicProfile([distinctLikes[0]], NOW));
 	assert.ok(oldScore.learnedBoost < freshScore.learnedBoost);
 });
+
+test('extractTopicFeatures drops stop words that end in s and keeps series intact', () => {
+	const features = [...extractTopicFeatures({ title: 'This does matter in the TV series' })];
+	assert.ok(!features.some((feature) => /\b(thi|doe)\b/.test(feature)), features.join(', '));
+	assert.ok(features.includes('series'), features.join(', '));
+	assert.ok(!features.some((feature) => feature.includes('sery')), features.join(', '));
+});

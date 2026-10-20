@@ -181,7 +181,7 @@ function isBlockedIpv4(hostname: string): boolean {
 	if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) return false;
 	const octets = hostname.split('.').map(Number);
 	if (octets.some((octet) => octet > 255)) return true;
-	const [a, b] = octets;
+	const [a, b, c] = octets;
 
 	return (
 		a === 0 ||
@@ -190,7 +190,7 @@ function isBlockedIpv4(hostname: string): boolean {
 		(a === 100 && b >= 64 && b <= 127) ||
 		(a === 169 && b === 254) ||
 		(a === 172 && b >= 16 && b <= 31) ||
-		(a === 192 && b === 0) ||
+		(a === 192 && b === 0 && (c === 0 || c === 2)) ||
 		(a === 192 && b === 168) ||
 		(a === 198 && (b === 18 || b === 19)) ||
 		a >= 224
@@ -198,22 +198,41 @@ function isBlockedIpv4(hostname: string): boolean {
 }
 
 function isBlockedIpv6(hostname: string): boolean {
-	const normalized = hostname.toLowerCase().split('%', 1)[0];
-	if (normalized === '::' || normalized === '::1') return true;
-	if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-	if (/^fe[89ab]/.test(normalized)) return true;
-	if (normalized.startsWith('::ffff:')) {
-		const mappedAddress = normalized.slice('::ffff:'.length);
-		if (mappedAddress.includes('.')) return isBlockedIpv4(mappedAddress);
-		const mappedHex = mappedAddress.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-		if (mappedHex) {
-			const high = Number.parseInt(mappedHex[1], 16);
-			const low = Number.parseInt(mappedHex[2], 16);
-			return isBlockedIpv4(
-				`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`,
-			);
-		}
-		return true;
+	const hextets = parseIpv6(hostname.toLowerCase().split('%', 1)[0]);
+	if (!hextets) return true;
+	const [h0, h1, h2, h3, h4, h5, h6, h7] = hextets;
+	const embeddedIpv4 = `${h6 >> 8}.${h6 & 0xff}.${h7 >> 8}.${h7 & 0xff}`;
+	// Unique local fc00::/7 and link-local fe80::/10.
+	if ((h0 & 0xfe00) === 0xfc00 || (h0 & 0xffc0) === 0xfe80) return true;
+	// IPv4-compatible ::/96 (includes :: and ::1) and IPv4-mapped ::ffff:0:0/96.
+	if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && (h5 === 0 || h5 === 0xffff)) {
+		return isBlockedIpv4(embeddedIpv4);
 	}
+	// NAT64 well-known prefix 64:ff9b::/96 translates to the embedded IPv4 address.
+	if (h0 === 0x64 && h1 === 0xff9b && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) {
+		return isBlockedIpv4(embeddedIpv4);
+	}
+	// Local-use NAT64 64:ff9b:1::/48 can map to arbitrary internal IPv4 space.
+	if (h0 === 0x64 && h1 === 0xff9b && h2 === 1) return true;
 	return false;
+}
+
+function parseIpv6(address: string): number[] | null {
+	let source = address;
+	const dotted = source.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+	if (dotted) {
+		const octets = dotted[2].split('.').map(Number);
+		if (octets.some((octet) => octet > 255)) return null;
+		source = `${dotted[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+	}
+	const halves = source.split('::');
+	if (halves.length > 2) return null;
+	const parseGroups = (part: string) => (part ? part.split(':') : []);
+	const head = parseGroups(halves[0]);
+	const tail = halves.length === 2 ? parseGroups(halves[1]) : [];
+	const missing = 8 - head.length - tail.length;
+	if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+	const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+	if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+	return groups.map((group) => Number.parseInt(group, 16));
 }

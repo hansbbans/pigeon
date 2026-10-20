@@ -31,7 +31,7 @@ test('privacy image proxy rejects private targets and revalidates redirects', as
 	const redirected = await handleImageProxy(request('https://images.example/start'), async () =>
 		new Response(null, { status: 302, headers: { Location: 'http://192.168.1.7/secret.png' } }),
 	);
-	assert.equal(redirected.status, 400);
+	assert.equal(redirected.status, 502);
 });
 
 test('privacy image proxy rejects active and oversized content', async () => {
@@ -74,9 +74,29 @@ for (const redirectCase of ['follow', 'unsafe', 'missing_location', 'limit', 'ca
 			assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [7, 8, 9]);
 			assert.equal(requests, 2);
 		} else {
-			assert.equal(response.status, redirectCase === 'unsafe' ? 400 : 502);
+			assert.equal(response.status, 502);
 			assert.equal(requests, redirectCase === 'limit' ? 6 : 1);
 		}
 		assert.equal(canceled, requests - (response.status === 200 ? 1 : 0));
 	});
 }
+
+test('privacy image proxy reports an unsafe redirect target as a bad gateway', async () => {
+	const redirected = await handleImageProxy(request('https://images.example/start'), async () =>
+		new Response(null, { status: 302, headers: { Location: 'http://192.168.1.7/secret.png' } }),
+	);
+	assert.equal(redirected.status, 502);
+});
+
+test('image proxy rejects non-GET methods with 405 and an Allow header', async () => {
+	const { generateApiToken } = await import('../src/api-auth');
+	const { default: app } = await import('../src/index');
+	const token = await generateApiToken('secret-password');
+	for (const method of ['POST', 'PUT', 'DELETE', 'HEAD']) {
+		const response = await app.fetch(new Request('https://pigeon.example/api/v1/image-proxy?url=https%3A%2F%2Fimages.example%2Fa.png', {
+			method, headers: { Authorization: `GoogleLogin auth=pigeon/${token}` },
+		}), { API_PASSWORD: 'secret-password', DB: {} } as never);
+		assert.equal(response.status, 405, method);
+		assert.equal(response.headers.get('Allow'), 'GET');
+	}
+});

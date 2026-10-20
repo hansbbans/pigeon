@@ -47,7 +47,7 @@ class FakePreparedStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '13' } as T;
+			return { value: '14' } as T;
 		}
 
 		if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -275,7 +275,7 @@ function createReaderApiEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '13' } as T;
+				return { value: '14' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -471,7 +471,7 @@ function createEditTagEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '13' } as T;
+				return { value: '14' } as T;
 			}
 
 			throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -549,7 +549,7 @@ function createSubscriptionEditEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '13' } as T;
+				return { value: '14' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -623,7 +623,7 @@ function createMarkAllAsReadEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '13' } as T;
+				return { value: '14' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -751,7 +751,7 @@ function createMarkAllAsReadEnv(
 
 			if (
 				this.sql ===
-					"UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND datetime(received_at) <= datetime(?, 'unixepoch')"
+					"UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')"
 			) {
 				const feedKey = String(this.values[0]);
 				const cutoffMs = cutoffMillis(this.values[1]);
@@ -772,7 +772,7 @@ function createMarkAllAsReadEnv(
 				this.sql ===
 					'UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)' ||
 				this.sql ===
-					"UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND datetime(received_at) <= datetime(?, 'unixepoch')"
+					"UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')"
 			) {
 				const cutoffMs = this.values.length > 0 ? cutoffMillis(this.values[0]) : null;
 				const activeFeedKeys = new Set(
@@ -823,7 +823,7 @@ function createMarkAllAsReadEnv(
 				return;
 			}
 
-			if (this.sql === "UPDATE items SET is_read = 1 WHERE datetime(received_at) <= datetime(?, 'unixepoch')") {
+			if (this.sql === "UPDATE items SET is_read = 1 WHERE strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')") {
 				const cutoffMs = cutoffMillis(this.values[0]);
 				for (const item of items) {
 					if (Date.parse(item.received_at) <= cutoffMs) {

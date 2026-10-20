@@ -99,7 +99,8 @@ export function selectFeedsFairly<T extends HostFeed>(feeds: T[], limit: number)
 	}
 
 	const selected: T[] = [];
-	const hosts = [...queues.keys()].sort();
+	// Map preserves first-appearance order, so hosts stay in the caller's most-overdue-first order.
+	const hosts = [...queues.keys()];
 	while (selected.length < limit) {
 		let selectedThisRound = false;
 		for (const host of hosts) {

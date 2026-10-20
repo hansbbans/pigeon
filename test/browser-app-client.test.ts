@@ -20,6 +20,7 @@ import {
 	limitInitialItemIds,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
+	sanitizeArticleHtml,
 	selectArticleHeroImageUrl,
 	sortSubscriptionsByTitle,
 } from '../src/browser-app-client';
@@ -552,6 +553,81 @@ test('selectArticleHeroImageUrl skips obviously hidden tracker-style images and 
 		),
 		'//cdn.example/hero-2.jpg',
 	);
+});
+
+test('sanitizeArticleHtml leaves on*= and href-like text outside tags untouched', () => {
+	assert.equal(
+		sanitizeArticleHtml('<pre><code>const onSubmit = handleForm;</code></pre>'),
+		'<pre><code>const onSubmit = handleForm;</code></pre>',
+	);
+	assert.equal(sanitizeArticleHtml('<p>Set online=true in your config.</p>'), '<p>Set online=true in your config.</p>');
+	assert.equal(
+		sanitizeArticleHtml('<p>Write href="javascript:void(0)" or src=data:x in docs.</p>'),
+		'<p>Write href="javascript:void(0)" or src=data:x in docs.</p>',
+	);
+});
+
+test('sanitizeArticleHtml still strips event handlers and script URLs inside tags, including obfuscated forms', () => {
+	assert.equal(sanitizeArticleHtml('<img src="https://x.com/a.png" onerror="alert(1)">'), '<img src="https://x.com/a.png">');
+	assert.equal(sanitizeArticleHtml("<div onclick='x()' class=\"k\">Hi</div>"), '<div class="k">Hi</div>');
+	assert.equal(sanitizeArticleHtml('<a href="javascript:alert(1)">bad</a>'), '<a>bad</a>');
+	assert.equal(sanitizeArticleHtml('<img src=data:image/svg+xml,abc>'), '<img>');
+	assert.equal(sanitizeArticleHtml('<iframe srcdoc="x"></iframe><div srcdoc="y">k</div>'), '<div>k</div>');
+	assert.doesNotMatch(sanitizeArticleHtml('<img/onerror=alert(1) src=x>'), /onerror/i);
+	assert.doesNotMatch(sanitizeArticleHtml('<a href="jav&#x61;script:alert(1)">x</a>'), /href/i);
+	assert.doesNotMatch(sanitizeArticleHtml('<a href="&#106;ava&#9;script&colon;alert(1)">x</a>'), /href/i);
+	assert.doesNotMatch(sanitizeArticleHtml('<a href=" java\tscript:alert(1)">x</a>'), /href/i);
+	assert.equal(sanitizeArticleHtml('<a href="https://example.com/?a=1&amp;b=2">ok</a>'), '<a href="https://example.com/?a=1&amp;b=2">ok</a>');
+	assert.equal(sanitizeArticleHtml('<p style="color: red">Keep</p>'), '<p style="color: red">Keep</p>');
+});
+
+test('selectArticleHeroImageUrl does not treat non-hiding zero-valued styles as hidden', () => {
+	for (const style of ['display:block;border-width:0', 'line-height:0', 'min-height:0', 'opacity:0.9', 'min-width: 0px; opacity: 0.5', 'width:0.5em']) {
+		assert.equal(
+			selectArticleHeroImageUrl(`<img src="https://x.com/hero.jpg" width="600" style="${style}">`),
+			'https://x.com/hero.jpg',
+			style,
+		);
+	}
+	for (const style of ['display:none', 'opacity:0', 'opacity: 0.0 !important', 'width:0', 'max-height:0px', 'color:red; height: 0px;', 'visibility:hidden', 'DISPLAY: NONE']) {
+		assert.equal(selectArticleHeroImageUrl(`<img src="https://x.com/hero.jpg" style="${style}">`), null, style);
+	}
+});
+
+test('buildArticleListEntries keeps escaped angle brackets in HTML summaries', () => {
+	assert.deepEqual(
+		buildArticleListEntries({
+			itemIds: ['escaped'],
+			loadedItemsById: {
+				escaped: {
+					id: 'escaped',
+					title: 'Escaped',
+					published: 1_742_460_804,
+					origin: { title: 'Code' },
+					summary: { content: '<p>If x &lt; y and y &gt; z then use &lt;div&gt; tags.</p>' },
+					content: { content: '<p>Body</p>' },
+				},
+			},
+		}).map((entry) => entry.preview),
+		['If x < y and y > z then use <div> tags.'],
+	);
+});
+
+test('buildArticleListEntries truncates previews without splitting surrogate pairs', () => {
+	const [entry] = buildArticleListEntries({
+		itemIds: ['emoji'],
+		loadedItemsById: {
+			emoji: {
+				id: 'emoji',
+				title: 'Emoji',
+				published: 1_742_460_804,
+				origin: { title: 'Emoji' },
+				summary: { content: 'a'.repeat(276) + '😀' + 'b'.repeat(20) },
+			},
+		},
+	});
+	assert.doesNotMatch(entry.preview, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+	assert.ok(entry.preview.endsWith('...'));
 });
 
 test('selectArticleHeroImageUrl ignores malformed oversized numeric entities instead of throwing', () => {

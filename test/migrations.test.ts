@@ -495,6 +495,22 @@ class LegacySchemaDb {
 	}
 
 	async batch(statements: LegacySchemaStatement[]): Promise<void | Array<void | { meta: { changes: number } }>> {
+		if (statements[0]?.sql === 'DROP TRIGGER IF EXISTS trg_items_update_status') {
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_items_update_status')) {
+					this.state.operations.push('recreate-status-trigger');
+				} else if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					if (nextValue === '14' && this.state.schemaVersion === String(snapshot.values[1] ?? '')) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:14');
+					}
+				}
+			}
+			return;
+		}
+
 		if (statements.some((statement) => statement.sql.startsWith('CREATE TABLE IF NOT EXISTS maintenance_state'))) {
 			for (const statement of statements) {
 				const snapshot = statement.snapshot();
@@ -601,7 +617,7 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '13');
+	assert.equal(db.state.schemaVersion, '14');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
@@ -637,7 +653,7 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '13');
+	assert.equal(db.state.schemaVersion, '14');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -669,7 +685,7 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '13');
+	assert.equal(db.state.schemaVersion, '14');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -696,7 +712,7 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	);
 
 	assert.equal(firstResponse.status, 200);
-	assert.equal(persistedState.schemaVersion, '13');
+	assert.equal(persistedState.schemaVersion, '14');
 	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
 
 	persistedState.operations.length = 0;
@@ -807,7 +823,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
 	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
-	assert.equal(winner.batches.length, 2);
+	assert.equal(winner.batches.length, 3);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
@@ -845,7 +861,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
 	).get() as { value: string };
-	assert.equal(schemaVersion.value, '13');
+	assert.equal(schemaVersion.value, '14');
 
 	const indexMigrationBatch = winner.batches[1];
 	assert.equal(
@@ -997,7 +1013,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'13',
+		'14',
 	);
 	assert.deepEqual(db.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 	assert.deepEqual(db.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
@@ -1007,7 +1023,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		),
 		false,
 	);
-	assert.equal(db.batches.length, 1);
+	assert.equal(db.batches.length, 2);
 	assert.equal(
 		db.batches[0][0]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
@@ -1040,6 +1056,12 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 	);
 	assert.equal(db.batches[0][12]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
 	assert.deepEqual(db.batches[0].at(-1)?.values, ['13', '12']);
+	assert.deepEqual(db.batches[1].map((statement) => statement.sql.split('\n', 1)[0]), [
+		'DROP TRIGGER IF EXISTS trg_items_update_status',
+		'CREATE TRIGGER IF NOT EXISTS trg_items_update_status',
+		"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+	]);
+	assert.deepEqual(db.batches[1].at(-1)?.values, ['14', '13']);
 	assert.equal(
 		db.batches[0].some((statement) =>
 			statement.sql.includes('INSERT INTO sync_changes') ||
@@ -1115,7 +1137,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	]);
 
 	for (const wrapper of [firstDb, secondDb]) {
-		assert.equal(wrapper.batches.length, 1);
+		assert.equal(wrapper.batches.length, 2);
 		assert.deepEqual(wrapper.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 		assert.deepEqual(wrapper.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 		assert.equal(
@@ -1127,7 +1149,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	}
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'13',
+		'14',
 	);
 	assert.equal(
 		database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_state'").get() !== undefined,
@@ -1154,6 +1176,50 @@ test('SQLite v13 migration failures propagate instead of silently returning', as
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
 		'12',
+	);
+	database.close();
+});
+
+test('SQLite v13 migration recreates the status trigger so plain writes clear mutation ids', async () => {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	// Reproduce a v13 database whose trigger predates mutation_id clearing.
+	database.exec(`
+		DROP TRIGGER trg_items_update_status;
+		CREATE TRIGGER trg_items_update_status
+		AFTER UPDATE OF is_read, is_starred ON items
+		WHEN COALESCE(OLD.is_read, 0) <> COALESCE(NEW.is_read, 0)
+		  OR COALESCE(OLD.is_starred, 0) <> COALESCE(NEW.is_starred, 0)
+		BEGIN
+		  INSERT INTO item_statuses (account_id, item_id, is_read, is_starred, updated_at, version)
+		  VALUES ('default', NEW.id, COALESCE(NEW.is_read, 0), COALESCE(NEW.is_starred, 0), datetime('now'), 1)
+		  ON CONFLICT(account_id, item_id) DO UPDATE SET
+		    is_read = excluded.is_read,
+		    is_starred = excluded.is_starred,
+		    updated_at = excluded.updated_at,
+		    version = item_statuses.version + 1;
+		END;
+		UPDATE _meta SET value = '13' WHERE key = 'schema_version';
+		INSERT INTO feeds (feed_key, display_name) VALUES ('feed-a', 'Feed A');
+		INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+		VALUES ('article-a', 'feed-a', 'A', '<p>A</p>', 'message-a', '2026-08-01T00:00:00.000Z');
+		UPDATE item_statuses SET mutation_id = 'stale-mutation' WHERE item_id = 'article-a';
+	`);
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'14',
+	);
+	database.exec("UPDATE items SET is_read = 1 WHERE id = 'article-a'");
+	assert.deepEqual(
+		{ ...(database.prepare("SELECT is_read, mutation_id FROM item_statuses WHERE item_id = 'article-a'").get() as object) },
+		{ is_read: 1, mutation_id: null },
 	);
 	database.close();
 });

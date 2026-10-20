@@ -277,3 +277,22 @@ test('Atom out-of-line and empty content uses a typed summary without replacing 
   assert.deepEqual(parseFeed(qualified).items.map((item) => item.content), ['<div><span>Readable &amp; summary</span></div>', '<p>Literal &lt;code&gt; &amp; summary</p>', '<p>Formatted <b>summary</b></p>', '<div><p>Inline body</p></div>', '']);
  }
 });
+
+test('RSS text that looks numeric is preserved verbatim', () => {
+	const feed = parseFeed(`<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>
+		<item><guid>12345678901234567890123</guid><title>0x10</title></item>
+		<item><guid>12345678901234567890124</guid><title>1e3</title></item>
+		<item><guid>007</guid><title>Bond</title></item>
+	</channel></rss>`);
+	assert.deepEqual(feed.items.map((item) => item.guid), ['12345678901234567890123', '12345678901234567890124', '007']);
+	assert.deepEqual(feed.items.map((item) => item.title), ['0x10', '1e3', 'Bond']);
+});
+
+test('RSS empty preferred elements fall back to later candidates', () => {
+	const feed = parseFeed(`<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>T</title>
+		<item><guid>a</guid><title>x</title><content:encoded></content:encoded><description>Hello desc</description><author></author><dc:creator>Jane</dc:creator><pubDate></pubDate><dc:date>2026-10-01T00:00:00Z</dc:date></item>
+	</channel></rss>`);
+	assert.equal(feed.items[0].content, 'Hello desc');
+	assert.equal(feed.items[0].author, 'Jane');
+	assert.ok(feed.items[0].pubDate?.startsWith('2026-10-01'));
+});

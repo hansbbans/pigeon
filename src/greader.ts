@@ -2,7 +2,7 @@ import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
 import { createRenderedContent } from './rendered-content';
-import { generateApiToken, requireApiAuth } from './api-auth';
+import { constantTimeEqual, generateApiToken, requireApiAuth } from './api-auth';
 import {
 	buildStateTransitionEventStatements,
 	classifyClientFamily,
@@ -36,10 +36,9 @@ function labelFromStreamId(streamId: string | null): string | null {
 	return streamId.slice('user/-/label/'.length);
 }
 
-function labelsFromForm(body: FormData, key: string): string[] {
+function labelsFromForm(body: URLSearchParams, key: string): string[] {
 	const labels = body
 		.getAll(key)
-		.filter((value): value is string => typeof value === 'string')
 		.map(labelFromStreamId)
 		.filter((label): label is string => Boolean(label));
 	return [...new Set(labels)];
@@ -69,20 +68,27 @@ function parseMarkAllTimestamp(raw: string | null): MarkAllTimestampCutoff {
 		return { kind: 'none' };
 	}
 
+	// Compare at millisecond precision, the precision of stored received_at
+	// values. A whole-second cutoff still covers that entire second.
+	let milliseconds: bigint;
 	if (normalized.length <= 10) {
-		return { kind: 'cutoff', seconds: normalized };
+		milliseconds = value * 1_000n + 999n;
+	} else if (normalized.length <= 13) {
+		milliseconds = value;
+	} else if (normalized.length <= 16) {
+		milliseconds = value / 1_000n;
+	} else if (normalized.length <= 19) {
+		milliseconds = value / 1_000_000n;
+	} else {
+		return { kind: 'invalid' };
 	}
-	if (normalized.length <= 13) {
-		return { kind: 'cutoff', seconds: (value / 1_000n).toString() };
-	}
-	if (normalized.length <= 16) {
-		return { kind: 'cutoff', seconds: (value / 1_000_000n).toString() };
-	}
-	if (normalized.length <= 19) {
-		return { kind: 'cutoff', seconds: (value / 1_000_000_000n).toString() };
-	}
-	return { kind: 'invalid' };
+	const fraction = (milliseconds % 1_000n).toString().padStart(3, '0');
+	return { kind: 'cutoff', seconds: `${milliseconds / 1_000n}.${fraction}` };
 }
+
+// datetime() truncates to whole seconds; %f keeps milliseconds on both sides.
+const MARK_ALL_CUTOFF_CLAUSE =
+	"strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')";
 
 const MAX_MEMBERSHIP_PAYLOAD_BYTES = 900_000;
 const MAX_D1_BATCH_STATEMENTS = 50;
@@ -394,7 +400,7 @@ async function handleClientLogin(request: Request, env: Env): Promise<Response> 
 		passwd = body.get('Passwd') as string | null;
 	}
 
-	if (!passwd || passwd !== env.API_PASSWORD) {
+	if (!env.API_PASSWORD || !passwd || !constantTimeEqual(passwd, env.API_PASSWORD)) {
 		return new Response('Error=BadAuthentication', { status: 401, headers: { 'Content-Type': 'text/plain' } });
 	}
 
@@ -540,27 +546,27 @@ async function parseRequestParams(request: Request, url: URL): Promise<URLSearch
 
 	const contentType = (request.headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
 
-	if (contentType === 'application/x-www-form-urlencoded') {
-		return new URLSearchParams(await request.text());
-	}
-
+	let params: URLSearchParams;
 	if (contentType === 'multipart/form-data') {
 		const formData = await request.formData();
-		const params = new URLSearchParams();
+		params = new URLSearchParams();
 		for (const [key, value] of formData.entries()) {
 			if (typeof value === 'string') {
 				params.append(key, value);
 			}
 		}
-		return params;
+	} else {
+		// Form-encoded, or a raw urlencoded body sent with another content type.
+		params = new URLSearchParams(await request.text());
 	}
 
-	const rawBody = await request.text();
-	if (rawBody.trim()) {
-		return new URLSearchParams(rawBody);
+	// Like FreshRSS's $_REQUEST, query-string params fill in keys the body omits.
+	for (const key of new Set(url.searchParams.keys())) {
+		if (!params.has(key)) {
+			for (const value of url.searchParams.getAll(key)) params.append(key, value);
+		}
 	}
-
-	return new URLSearchParams(url.searchParams);
+	return params;
 }
 
 async function selectStreamRowIds(options: {
@@ -599,7 +605,8 @@ async function selectStreamRowIds(options: {
 		sql += ' AND i.is_read = 0';
 	}
 	if (options.olderThanUnix) {
-		sql += " AND datetime(i.received_at) > datetime(?, 'unixepoch')";
+		// ot means "not older than": keep items at or after the cutoff, compared at millisecond precision.
+		sql += " AND strftime('%Y-%m-%dT%H:%M:%fZ', i.received_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')";
 		binds.push(parseInt(options.olderThanUnix, 10));
 	}
 	const cursor = options.continuation
@@ -940,6 +947,13 @@ async function addLabelsToFeed(env: Env, rowid: number, feedKey: string, labels:
 	}
 
 	try {
+		// A legacy primary category may have no feed_tags row; keep it as a tag so
+		// syncPrimaryFeedCategory does not replace it with the new label.
+		await env.DB.prepare(`INSERT OR IGNORE INTO feed_tags (feed_key, label)
+		 SELECT feed_key, category FROM feeds
+		  WHERE rowid = ? AND feed_key = ? AND category IS NOT NULL AND category <> ''`)
+			.bind(rowid, feedKey)
+			.run();
 		await env.DB.prepare(`INSERT OR IGNORE INTO feed_tags (feed_key, label)
 		 SELECT ?, value FROM json_each(?)`)
 			.bind(feedKey, JSON.stringify(uniqueLabels))
@@ -977,12 +991,12 @@ async function removeLabelsFromFeed(env: Env, rowid: number, feedKey: string, la
 }
 
 async function handleSubscriptionEdit(request: Request, env: Env): Promise<Response> {
-	const body = await request.formData();
-	const ac = body.get('ac') as string | null;
-	const streamId = body.get('s') as string | null;
+	const body = await parseRequestParams(request, new URL(request.url));
+	const ac = body.get('ac');
+	const streamId = body.get('s');
 	const addLabels = labelsFromForm(body, 'a');
 	const removeLabels = labelsFromForm(body, 'r');
-	const title = body.get('t') as string | null;
+	const title = body.get('t');
 
 	// Log ALL subscription/edit requests
 	console.log('[GReader] subscription/edit called:', {
@@ -1073,10 +1087,10 @@ async function handleSubscriptionEdit(request: Request, env: Env): Promise<Respo
 }
 
 async function handleEditTag(request: Request, env: Env): Promise<Response> {
-	const body = await request.formData();
-	const ids = body.getAll('i') as string[];
-	const addTag = body.get('a') as string | null;
-	const removeTag = body.get('r') as string | null;
+	const body = await parseRequestParams(request, new URL(request.url));
+	const ids = body.getAll('i');
+	const addTags = new Set(body.getAll('a'));
+	const removeTags = new Set(body.getAll('r'));
 
 	const rowids = [...new Set(ids.map(parseGoogleReaderItemRowid).filter((rowid): rowid is number => rowid !== null))];
 	if (rowids.length === 0) {
@@ -1092,7 +1106,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 		 WHERE rowid IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(rowids)));
 	}
 
-	if (addTag === 'user/-/state/com.google/read') {
+	if (addTags.has('user/-/state/com.google/read')) {
 		eventStmts.push(
 			...(await buildTransitionEventsBestEffort(env, rowids, {
 				kind: 'read',
@@ -1103,7 +1117,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 		);
 		addBulkUpdate('is_read', 1);
 	}
-	if (removeTag === 'user/-/state/com.google/read') {
+	if (removeTags.has('user/-/state/com.google/read')) {
 		eventStmts.push(
 			...(await buildTransitionEventsBestEffort(env, rowids, {
 				kind: 'read',
@@ -1114,7 +1128,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 		);
 		addBulkUpdate('is_read', 0);
 	}
-	if (addTag === 'user/-/state/com.google/starred') {
+	if (addTags.has('user/-/state/com.google/starred')) {
 		eventStmts.push(
 			...(await buildTransitionEventsBestEffort(env, rowids, {
 				kind: 'star',
@@ -1125,7 +1139,7 @@ async function handleEditTag(request: Request, env: Env): Promise<Response> {
 		);
 		addBulkUpdate('is_starred', 1);
 	}
-	if (removeTag === 'user/-/state/com.google/starred') {
+	if (removeTags.has('user/-/state/com.google/starred')) {
 		eventStmts.push(
 			...(await buildTransitionEventsBestEffort(env, rowids, {
 				kind: 'star',
@@ -1149,7 +1163,7 @@ async function loadMarkAllRowIds(
 	env: Env,
 	options: { streamId: string; feedKey: string | null; cutoff: MarkAllTimestampCutoff },
 ): Promise<number[]> {
-	const cutoffClause = options.cutoff.kind === 'cutoff' ? " AND datetime(received_at) <= datetime(?, 'unixepoch')" : '';
+	const cutoffClause = options.cutoff.kind === 'cutoff' ? ` AND ${MARK_ALL_CUTOFF_CLAUSE}` : '';
 	const cutoffBind = options.cutoff.kind === 'cutoff' ? [options.cutoff.seconds] : [];
 
 	if (options.feedKey) {
@@ -1227,7 +1241,8 @@ async function runMarkAllUpdate(
 
 async function handleQuickAdd(request: Request, env: Env): Promise<Response> {
 	const url = new URL(request.url);
-	const quickaddUrl = url.searchParams.get('quickadd');
+	const params = await parseRequestParams(request, url);
+	const quickaddUrl = params.get('quickadd') || url.searchParams.get('quickadd');
 
 	console.log('[GReader] quickadd called with URL:', quickaddUrl);
 
@@ -1255,9 +1270,9 @@ async function handleQuickAdd(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response> {
-	const body = await request.formData();
-	const streamId = body.get('s') as string | null;
-	const parsedTs = parseMarkAllTimestamp(body.get('ts') as string | null);
+	const body = await parseRequestParams(request, new URL(request.url));
+	const streamId = body.get('s');
+	const parsedTs = parseMarkAllTimestamp(body.get('ts'));
 
 	if (!streamId) {
 		return new Response('Missing stream ID', { status: 400 });
@@ -1276,7 +1291,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 				env,
 				rowids,
 				{
-					sql: "UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND datetime(received_at) <= datetime(?, 'unixepoch')",
+					sql: `UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND ${MARK_ALL_CUTOFF_CLAUSE}`,
 					binds: [feedKey, parsedTs.seconds],
 				},
 				clientFamily,
@@ -1292,7 +1307,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 		}
 	} else if (labelFromStreamId(streamId)) {
 		const label = labelFromStreamId(streamId) as string;
-		const tsClause = parsedTs.kind === 'cutoff' ? " AND datetime(received_at) <= datetime(?, 'unixepoch')" : '';
+		const tsClause = parsedTs.kind === 'cutoff' ? ` AND ${MARK_ALL_CUTOFF_CLAUSE}` : '';
 		const sql = `UPDATE items
 		    SET is_read = 1
 		  WHERE feed_key IN (
@@ -1324,7 +1339,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 				env,
 				rowids,
 				{
-					sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause} AND datetime(received_at) <= datetime(?, 'unixepoch')`,
+					sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause} AND ${MARK_ALL_CUTOFF_CLAUSE}`,
 					binds: [parsedTs.seconds],
 				},
 				clientFamily,

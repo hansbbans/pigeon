@@ -102,3 +102,14 @@ test('refresh errors redact URLs, query secrets, and excessive detail', () => {
 	assert.match(redacted, /email redacted/);
 	assert.ok(redacted.length <= 240);
 });
+
+test('selectFeedsFairly keeps due order across hosts instead of alphabetizing', () => {
+	const feeds = ['zeit.de', 'a.com', 'b.com', 'c.com', 'd.com', 'e.com'].map((host) => ({
+		feed_key: host,
+		source_url: `https://${host}/feed`,
+	}));
+	assert.deepEqual(
+		selectFeedsFairly(feeds, 5).map((feed) => feed.feed_key),
+		['zeit.de', 'a.com', 'b.com', 'c.com', 'd.com'],
+	);
+});

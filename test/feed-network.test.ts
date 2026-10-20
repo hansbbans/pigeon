@@ -180,3 +180,32 @@ for (const redirectCase of ['follow', 'unsafe', 'missing_location', 'limit', 'ca
 		assert.equal(canceled, 1);
 	});
 }
+
+for (const unsafeUrl of [
+	'http://[::127.0.0.1]/feed',
+	'http://[::7f00:1]/feed',
+	'http://[::10.0.0.1]/feed',
+	'http://[64:ff9b::127.0.0.1]/feed',
+	'http://[64:ff9b::a9fe:a9fe]/feed',
+	'http://[64:ff9b::192.168.1.1]/feed',
+	'http://[64:ff9b:1::1]/feed',
+	'http://[::ffff:7f00:1]/feed',
+	'http://192.0.0.1/feed',
+	'http://192.0.2.1/feed',
+]) {
+	test(`rejects embedded-IPv4 or reserved address ${unsafeUrl}`, () => {
+		assert.throws(() => assertSafeFeedUrl(unsafeUrl), /private or internal/i);
+	});
+}
+
+for (const safeUrl of [
+	'http://192.0.78.9/feed',
+	'http://192.0.1.1/feed',
+	'http://[2606:4700:4700::1111]/feed',
+	'http://[2001:db8:1::1]/feed',
+	'http://[64:ff9b::8.8.8.8]/feed',
+]) {
+	test(`allows public address ${safeUrl}`, () => {
+		assert.doesNotThrow(() => assertSafeFeedUrl(safeUrl));
+	});
+}

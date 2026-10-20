@@ -118,3 +118,23 @@ test('stale archive applies the stored identifier UTF8 boundary without truncati
 		state.sqlite.close();
 	}
 });
+
+test('stale archive returns 404 for nonexistent feed keys without archiving the known ones', async () => {
+	const state = fixture();
+	try {
+		state.sqlite.exec("INSERT INTO feeds (feed_key, display_name) VALUES ('known', 'Known')");
+		const response = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds', {
+			method: 'POST', body: JSON.stringify({ action: 'archive', feedKeys: ['known', 'missing-feed'] }),
+		}), state.env);
+		assert.equal(response.status, 404);
+		assert.deepEqual(await response.json(), { error: 'Unknown feed', unknownFeedKeys: ['missing-feed'] });
+		assert.equal((state.sqlite.prepare("SELECT stale_archived FROM feeds WHERE feed_key = 'known'").get() as { stale_archived: number }).stale_archived, 0);
+
+		const allMissing = await handleStaleFeeds(new Request('https://pigeon.example/api/v1/stale-feeds', {
+			method: 'POST', body: JSON.stringify({ action: 'unarchive', feedKeys: ['nope'] }),
+		}), state.env);
+		assert.equal(allMissing.status, 404);
+	} finally {
+		state.sqlite.close();
+	}
+});

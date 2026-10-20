@@ -296,8 +296,16 @@ export async function handleStatusRetryRequest(request: Request, env: Env): Prom
 			.bind(now, body.feed_key, now, now)
 			.run();
 		if (result.meta.changes === 0) {
+			const feed = await env.DB.prepare(
+				"SELECT 1 AS found FROM feeds WHERE feed_key = ? AND source_type = 'rss' AND is_active = 1",
+			)
+				.bind(body.feed_key)
+				.first<{ found: number }>();
+			if (!feed) {
+				return Response.json({ error: 'Feed not found' }, { status: 404 });
+			}
 			return Response.json(
-				{ error: 'Feed not found, waiting for Retry-After, or refresh already in progress' },
+				{ error: 'Feed is waiting for Retry-After or a refresh is already in progress' },
 				{ status: 409 },
 			);
 		}
