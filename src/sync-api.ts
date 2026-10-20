@@ -63,11 +63,23 @@ export async function handleIncrementalSync(request: Request, env: Env): Promise
 		return Response.json({ error: errorMessage(error) }, { status: 400 });
 	}
 	const limit = parseLimit(url.searchParams.get('limit'));
+	// Payloads are read from current rows, so an event followed by a later event
+	// for the same item would only resend data the later event also carries.
+	// Article payloads include read and star state, which also supersedes older
+	// status events. Feed events stay uncompacted so feeds precede their articles.
 	const { results } = await env.DB.prepare(
-		`SELECT sequence, entity_type, entity_id, operation, changed_at
-		 FROM sync_changes
-		 WHERE sequence > ?
-		 ORDER BY sequence ASC
+		`SELECT c.sequence, c.entity_type, c.entity_id, c.operation, c.changed_at
+		 FROM sync_changes c
+		 WHERE c.sequence > ?
+		   AND NOT (c.entity_type IN ('article', 'status') AND EXISTS (
+		     SELECT 1 FROM sync_changes later
+		     WHERE later.entity_type = 'article' AND later.entity_id = c.entity_id AND later.sequence > c.sequence
+		   ))
+		   AND NOT (c.entity_type = 'status' AND EXISTS (
+		     SELECT 1 FROM sync_changes later
+		     WHERE later.entity_type = 'status' AND later.entity_id = c.entity_id AND later.sequence > c.sequence
+		   ))
+		 ORDER BY c.sequence ASC
 		 LIMIT ?`,
 	)
 		.bind(cursor, limit + 1)
