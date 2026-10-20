@@ -114,6 +114,12 @@ struct SettingsView: View {
 				}
 
 				Section("Reading") {
+					Picker("Default article view", selection: $model.defaultArticleView) {
+						ForEach(ReaderMode.defaultArticleViewChoices) { mode in
+							Text(mode.title).tag(mode)
+						}
+					}
+					.accessibilityIdentifier("default-article-view-picker")
 					Picker("Theme", selection: $typography.theme) {
 						ForEach(ReaderTheme.allCases) { theme in
 							Text(theme.title).tag(theme)

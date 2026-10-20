@@ -155,6 +155,9 @@ final class ReaderAppModel {
 	var errorMessage: String?
 	var settingsErrorMessage: String?
 	var isShowingSettings = false
+	var defaultArticleView: ReaderMode {
+		didSet { readerModeStore.setDefaultArticleView(defaultArticleView) }
+	}
 	private(set) var subscriptions: [FeedSubscription] = []
 	var isLoadingLibrary = false
 	private(set) var hasReadwiseToken = false
@@ -407,6 +410,7 @@ final class ReaderAppModel {
 		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
 		self.readwiseSyncDefaults = readwiseSyncDefaults
 		self.readerModeStore = readerModeStore
+		self.defaultArticleView = readerModeStore.defaultArticleView
 		self.articleFilterStore = articleFilterStore
 		self.smartViewStore = smartViewStore
 		self.enabledSmartViewSections = smartViewStore.enabledSections
@@ -1596,7 +1600,7 @@ final class ReaderAppModel {
 		if let session, let stored = readerModeStore.storedMode(for: aliases, session: session) {
 			return stored
 		}
-		return readerModeStore.storedMode(for: aliases) ?? .feedContent
+		return readerModeStore.storedMode(for: aliases) ?? defaultArticleView
 	}
 
 	func setReaderMode(_ mode: ReaderMode, for feedID: String) {

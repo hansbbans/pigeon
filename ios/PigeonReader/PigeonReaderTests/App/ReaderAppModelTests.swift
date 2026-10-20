@@ -468,6 +468,43 @@ struct ReaderAppModelTests {
 		#expect(extractor.extractedHTML?.contains("Newsletter body") == true)
 	}
 
+	@Test func readerModeResolutionUsesTheGlobalDefaultOnlyForInheritedFeeds() throws {
+		let suiteName = "pigeon-reader-mode-model-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let session = try makeSession(token: "reader-mode-account")
+		let readerModeStore = ReaderModeStore(defaults: defaults)
+		readerModeStore.setMode(.website, for: "website-feed", session: session)
+		readerModeStore.setMode(.feedContent, for: "explicit-feed", session: session)
+
+		let model = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: readerModeStore,
+			session: session,
+		)
+
+		#expect(model.defaultArticleView == .feedContent)
+		#expect(model.readerMode(for: "inherited-feed") == .feedContent)
+		#expect(model.readerMode(for: "website-feed") == .website)
+		#expect(model.readerMode(for: "explicit-feed") == .feedContent)
+
+		model.defaultArticleView = .readerView
+
+		#expect(model.readerMode(for: "inherited-feed") == .readerView)
+		#expect(model.readerMode(for: "website-feed") == .website)
+		#expect(model.readerMode(for: "explicit-feed") == .feedContent)
+		#expect(ReaderModeStore(defaults: defaults).defaultArticleView == .readerView)
+
+		let reloadedModel = try makeModel(
+			httpClient: MockHTTPClient(),
+			readerModeStore: ReaderModeStore(defaults: defaults),
+			session: session,
+		)
+		#expect(reloadedModel.defaultArticleView == .readerView)
+		#expect(reloadedModel.readerMode(for: "inherited-feed") == .readerView)
+		#expect(reloadedModel.readerMode(for: "website-feed") == .website)
+	}
+
 	@Test func loadReaderViewPreservesOriginal404WhenFeedFallbackAlsoFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
