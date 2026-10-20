@@ -230,7 +230,23 @@ export async function buildRssItemStatements(
 							  )
 							THEN excluded.original_url
 							ELSE items.original_url
-						END`
+						END
+				-- Skip no-op rewrites. Any write fires the article sync trigger,
+				-- which would make clients download the unchanged body again.
+				WHERE items.from_name IS NOT excluded.from_name
+					OR items.from_email IS NOT NULL
+					OR items.html_content IS NOT excluded.html_content
+					OR items.text_content IS NOT excluded.text_content
+					OR items.content_pruned_at IS NOT NULL
+					OR (
+						excluded.original_url IS NOT NULL
+						AND items.original_url IS NOT excluded.original_url
+						AND (
+							items.original_url IS NULL
+							OR items.original_url LIKE 'https://feeds.feedblitz.com/%'
+							OR excluded.feed_key LIKE '%feedblitz%'
+						)
+					)`
 			: `INSERT OR IGNORE INTO items (
 					id, message_id, feed_key, subject,
 					from_name, received_at, html_content, text_content, original_url

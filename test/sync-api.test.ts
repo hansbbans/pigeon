@@ -1616,3 +1616,136 @@ test('fetched typed HTML with an article URL preserves attribute examples in rea
   assert.ok((await generateAtomFeed({ feed_key: 'reader-link-feed', display_name: 'Examples', from_email: null, custom_title: null, source_type: 'rss' }, [stored], 'https://pigeon.example')).includes(`<content type="html"><![CDATA[${expected}]]></content>`));
  } finally { globalThis.fetch = originalFetch; state.database.close(); }
 });
+
+async function syncAll(env: never, cursor?: string, limit = 200) {
+	const changes: Array<Record<string, unknown> & { sequence: number; entityType: string; entityId: string }> = [];
+	let next = cursor;
+	for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+		const body = await (await sync(env, next, limit)).json() as {
+			cursor: string;
+			hasMore: boolean;
+			changes: typeof changes;
+		};
+		changes.push(...body.changes);
+		next = body.cursor;
+		if (!body.hasMore) return { changes, cursor: next };
+	}
+	throw new Error('sync did not finish');
+}
+
+const ARTICLE_ID = '11111111-1111-4111-8111-111111111111';
+
+test('incremental sync skips article and status events superseded by a later article event', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	for (const html of ['<p>v2</p>', '<p>v3</p>', '<p>v4</p>']) {
+		state.database.prepare('UPDATE items SET html_content = ? WHERE id = ?').run(html, ARTICLE_ID);
+	}
+
+	const { changes } = await syncAll(state.env);
+	const articleChanges = changes.filter((change) => change.entityType === 'article');
+	assert.equal(articleChanges.length, 1);
+	assert.equal((articleChanges[0].payload as { html: string }).html, '<p>v4</p>');
+	// The article payload carries the current read and star state, so its older
+	// status event would only be overwritten by the later article event.
+	assert.equal(changes.filter((change) => change.entityType === 'status').length, 0);
+	// Feed events are not compacted, so feeds still precede their articles.
+	assert.deepEqual(
+		changes.map((change) => change.entityType),
+		['feed', 'feed', 'article'],
+	);
+	state.database.close();
+});
+
+test('incremental sync keeps a status event that is newer than the latest article event', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	state.database.prepare('UPDATE items SET html_content = ? WHERE id = ?').run('<p>v2</p>', ARTICLE_ID);
+	state.database.prepare("UPDATE item_statuses SET is_read = 1 WHERE item_id = ?").run(ARTICLE_ID);
+	state.database.prepare("UPDATE item_statuses SET is_starred = 1 WHERE item_id = ?").run(ARTICLE_ID);
+
+	const { changes } = await syncAll(state.env);
+	const itemChanges = changes.filter((change) => change.entityId === ARTICLE_ID);
+	assert.deepEqual(itemChanges.map((change) => change.entityType), ['article', 'status']);
+	assert.deepEqual(itemChanges[1].payload, {
+		...(itemChanges[1].payload as object),
+		isRead: true,
+		isStarred: true,
+	});
+	state.database.close();
+});
+
+test('compacted sync pages stay ordered and complete from any cursor', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const { cursor: firstCursor } = await syncAll(state.env);
+	for (let index = 0; index < 5; index += 1) {
+		state.database.prepare('UPDATE items SET html_content = ? WHERE id = ?').run(`<p>edit ${index}</p>`, ARTICLE_ID);
+	}
+
+	const singlePages = await syncAll(state.env, firstCursor, 1);
+	assert.deepEqual(
+		singlePages.changes.map((change) => change.entityType),
+		['article'],
+	);
+	assert.equal((singlePages.changes[0].payload as { html: string }).html, '<p>edit 4</p>');
+	const empty = await syncAll(state.env, singlePages.cursor, 1);
+	assert.deepEqual(empty.changes, []);
+	state.database.close();
+});
+
+test('refetching an unchanged RSS item does not log another article change', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const parsed = { link: 'https://example.com', sourceUrl: 'https://feeds.example.com/design.xml' };
+	const item = {
+		guid: 'https://example.com/posts/1',
+		title: 'Unchanged post',
+		link: 'https://example.com/posts/1',
+		pubDate: '2026-10-19T12:00:00.000Z',
+		content: '<p>Same body</p>',
+		attachments: [],
+	};
+	const store = async (items: typeof item[]) => {
+		const statements = await buildRssItemStatements(
+			state.db as never,
+			'design-weekly',
+			parsed,
+			items,
+			'2026-10-20T00:00:00.000Z',
+			{ updateExisting: true },
+		);
+		await state.db.batch(statements as never);
+	};
+	const articleEvents = () => (state.database.prepare(
+		"SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'article'",
+	).get() as { n: number }).n;
+
+	await store([item]);
+	const afterInsert = articleEvents();
+	await store([item]);
+	await store([item]);
+	assert.equal(articleEvents(), afterInsert);
+
+	await store([{ ...item, content: '<p>Edited body</p>' }]);
+	assert.equal(articleEvents(), afterInsert + 1);
+
+	await store([{ ...item, content: '<p>Edited body</p>', author: 'New Author' }]);
+	assert.equal(articleEvents(), afterInsert + 2);
+	assert.equal((state.database.prepare(
+		"SELECT from_name FROM items WHERE message_id <> 'message-1'",
+	).get() as { from_name: string }).from_name, 'New Author');
+
+	state.database.prepare(
+		"UPDATE items SET html_content = '', content_pruned_at = '2026-10-20 00:00:00' WHERE message_id <> 'message-1'",
+	).run();
+	const afterPrune = articleEvents();
+	await store([{ ...item, content: '<p>Edited body</p>', author: 'New Author' }]);
+	assert.equal(articleEvents(), afterPrune + 1);
+	const restored = state.database.prepare(
+		"SELECT html_content, content_pruned_at FROM items WHERE message_id <> 'message-1'",
+	).get() as { html_content: string; content_pruned_at: string | null };
+	assert.equal(restored.content_pruned_at, null);
+	assert.match(restored.html_content, /Edited body/);
+	state.database.close();
+});
