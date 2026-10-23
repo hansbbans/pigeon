@@ -1195,8 +1195,30 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       @media (min-width: 901px) {
+        /* Desktop: fill the whole browser window instead of a centered, padded card. */
+        #app {
+          padding: 0;
+        }
+
+        .login-shell {
+          min-height: 100vh;
+        }
+
+        .reader-shell {
+          width: 100%;
+        }
+
+        .reader-window {
+          height: 100dvh;
+          display: flex;
+          flex-direction: column;
+          border: 0;
+          border-radius: 0;
+          box-shadow: none;
+        }
+
         .reader-grid {
-          height: calc(100dvh - 8.1rem);
+          flex: 1 1 auto;
           min-height: 0;
         }
 
@@ -1229,10 +1251,6 @@ export function renderBrowserAppHtml(baseUrl: string): string {
       }
 
       @media (max-width: 1100px) {
-        #app {
-          padding: 0.9rem;
-        }
-
         #reader-toolbar {
           padding: 0.85rem;
         }
