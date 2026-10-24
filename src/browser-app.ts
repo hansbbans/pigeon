@@ -3806,7 +3806,9 @@ export function renderBrowserAppRuntimeScript(): string {
     return readerFrameScrollTop;
   }
 
-  function renderReaderFrame(itemId, documentHtml) {
+  function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
+    // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
+    if (!preparedReading) preparedReaderKey = '';
     const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
     if (!shouldReplace) {
       return;
@@ -3908,7 +3910,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const fraction=Number(readingData.positions[id]);
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
       }
-      renderReaderFrame(id,documentHtml); attachFrameNavigationListener();
+      renderReaderFrame(id,documentHtml,true); attachFrameNavigationListener();
       if(frameObjectURLs.has(zoomImage.getAttribute('src'))){zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');}
       for(const url of frameObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}frameObjectURLs=preparedObjectURLs;
       readingStatus.textContent=[message,result.blockedCount ? result.blockedCount+' images hidden ('+[...new Set(result.images.filter(image=>!image.loaded).map(image=>image.reason||'unavailable'))].join(', ')+').' : ''].filter(Boolean).join(' ');
