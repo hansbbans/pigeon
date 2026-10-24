@@ -28,18 +28,22 @@ class ScopeTests(unittest.TestCase):
         paths = ["future-tool.py", "project.yml", "Package.resolved", "package-lock.json", "scripts/ExportOptions-TestFlight.plist", ".github/workflows/ci.yml", ".github/scripts/ci_scope.py", "docs/generated.json", "docs/embedded.swift", "/README.md", "docs/../README.md"]
         native_files = {"pigeon": "ios/PigeonReader/App.swift", "todomd": "Sources/TodoMDApp/App.swift", "swole": "Swole/App/App.swift"}
         for repo in native_files:
-            for path in [*paths, native_files[repo]]:
+            for path in [*paths, *([] if repo == "pigeon" else ["package.json"]), native_files[repo]]:
+                if repo == "pigeon" and path == "package-lock.json":
+                    continue
                 with self.subTest(repo=repo, path=path):
                     result = classify(repo, ["README.md", path])
                     self.assertTrue(result["native"])
                     self.assertEqual(result["worker"], repo == "pigeon")
 
     def test_pigeon_backend_only_runs_worker(self):
-        for path in ["src/greader.ts", "test/api-auth.test.ts", "test/fixtures/email.eml", "migrations/001.sql"]:
+        for path in ["src/greader.ts", "test/api-auth.test.ts", "test/fixtures/email.eml", "migrations/001.sql", "package.json", "package-lock.json"]:
             result = classify("pigeon", [path, "README.md"])
             self.assertFalse(result["native"])
             self.assertTrue(result["worker"])
         self.assertTrue(classify("pigeon", ["src/greader.ts", "ios/PigeonReader/App.swift"])["native"])
+        self.assertTrue(classify("pigeon", ["package.json", "ios/PigeonReader/App.swift"])["native"])
+        self.assertTrue(classify("pigeon", ["ios/PigeonReader/package.json"])["native"])
 
     def test_empty_and_forced_scope_run_full_validation(self):
         for repo in ("pigeon", "todomd", "swole"):
