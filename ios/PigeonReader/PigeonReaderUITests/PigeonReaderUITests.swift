@@ -928,6 +928,41 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "image-rich-thumbnail-permission-restored")
 	}
 
+	func testDisplayMenuSwitchesBetweenFrontPageAndClassic() throws {
+		try launchFeedList()
+		XCTAssertTrue(articleList.waitForExistence(timeout: 10))
+
+		chooseLayout("Front Page")
+		// The collection pane identifier lands on its scroll container, as it does on Classic's list.
+		let frontPage = app.scrollViews.matching(NSPredicate(format: "identifier BEGINSWITH %@", "collection-pane-")).firstMatch
+		XCTAssertTrue(frontPage.waitForExistence(timeout: 5))
+		XCTAssertFalse(articleList.exists, "Front Page replaces the Classic rows.")
+		let story = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-")).firstMatch
+		XCTAssertTrue(story.waitForExistence(timeout: 5))
+		attachScreenshot(named: "front-page-layout")
+
+		story.tap()
+		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
+		let back = app.descendants(matching: .any)["article-back-to-feed"]
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+		XCTAssertTrue(frontPage.waitForExistence(timeout: 5), "Returning from a story keeps the chosen layout.")
+
+		chooseLayout("Classic")
+		XCTAssertTrue(articleList.waitForExistence(timeout: 5))
+		XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-")).firstMatch.exists)
+		// The opened story is now read, so For You's unread filter has dropped it from Classic.
+		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 5))
+	}
+
+	private func chooseLayout(_ title: String) {
+		app.buttons["article-list-more"].tap()
+		app.buttons["article-list-density"].tap()
+		let option = app.buttons[title]
+		XCTAssertTrue(option.waitForExistence(timeout: 5))
+		option.tap()
+	}
+
 	func testInlineSuccessfulSaveDoesNotInterruptReading() throws {
 		app.terminate()
 		app.launchArguments += ["-reader-save-success"]

@@ -47,6 +47,27 @@ struct ReaderTypographySettingsTests {
 	}
 
 	@Test
+	func homeLayoutDefaultsToClassicPersistsAndIgnoresUnknownValues() throws {
+		let suiteName = "pigeon-reader-home-layout-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+
+		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
+		#expect(ReaderHomeLayout.allCases.map(\.title) == ["Classic", "Front Page"])
+
+		let settings = ReaderTypographySettings(defaults: defaults)
+		settings.homeLayout = .frontPage
+		#expect(defaults.string(forKey: ReaderTypographySettings.homeLayoutKey) == "front-page")
+		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .frontPage)
+
+		settings.homeLayout = .classic
+		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
+
+		defaults.set("magazine", forKey: ReaderTypographySettings.homeLayoutKey)
+		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
+	}
+
+	@Test
 	func keepsThemePickerOrderTitlesAndRawValuePersistenceCompatible() throws {
 		let suiteName = "pigeon-reader-theme-compatibility-\(UUID().uuidString)"
 		let defaults = try #require(UserDefaults(suiteName: suiteName))

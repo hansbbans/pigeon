@@ -19,6 +19,7 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")
+			UserDefaults.standard.removeObject(forKey: ReaderTypographySettings.homeLayoutKey)
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.nextKey)
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.previousKey)
 			UserDefaults.standard.removeObject(forKey: ReaderSmartViewStore.key)

@@ -125,6 +125,12 @@ struct SettingsView: View {
 							Text(theme.title).tag(theme)
 						}
 					}
+					Picker("Layout", selection: $typography.homeLayout) {
+						ForEach(ReaderHomeLayout.allCases) { layout in
+							Text(layout.title).tag(layout)
+						}
+					}
+					.accessibilityIdentifier("home-layout-picker")
 					Picker("Timeline", selection: $typography.timelineDensity) {
 						ForEach(ReaderTimelineDensity.allCases) { density in
 							Text(density.title).tag(density)
