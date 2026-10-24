@@ -49,9 +49,11 @@ def classify(repo, paths, force_full=False):
         docs = valid and path.endswith(".md") and (path in ROOT_DOCS or doc_dir or path in {"SwoleMCP/README.md", "scripts/testflight-monitor.md"})
         if docs or path in RELEASE_TOOLING[repo]:
             continue
-        # These backend inputs cannot change the native app. Dependencies and
-        # configuration are deliberately outside this narrow allowlist.
+        # These backend inputs cannot change the native app. Other dependencies
+        # and configuration are deliberately outside this narrow allowlist; the
+        # root npm manifests are in it because only the Worker job runs npm.
         backend = valid and repo == "pigeon" and (
+            path in {"package.json", "package-lock.json"} or
             (path.startswith("src/") and path.endswith(".ts")) or
             (path.startswith("test/") and (path.endswith(".ts") or path.startswith("test/fixtures/"))) or
             (path.startswith("migrations/") and path.endswith(".sql"))
