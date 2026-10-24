@@ -4966,6 +4966,19 @@ test('a held Readwise save cannot keep the next session disabled or restore its 
  assert.equal(harness.elements.get('reader-reading-status')!.textContent.includes('Saved to Readwise'),false);
 });
 
+test('returning to the same article after a view with no selection re-renders its body',async(t)=>{
+ const tools=readingIntegrationTools('load');const {database,harness}=await createStatefulArticleBrowser({readingTools:tools});t.after(()=>database.close());
+ await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'), 100);
+ findListButtonByViewId(harness.elements.get('views-list'),'starred')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent==='Select an article', 100);
+ assert.equal(harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'),false);
+ findListButtonByViewId(harness.elements.get('views-list'),'all')!.dispatch('click');
+ await waitForBrowserCondition(() => findListButtonByItemId(harness.elements.get('articles-list'),'3')!==null, 100);
+ findListButtonByItemId(harness.elements.get('articles-list'),'3')!.dispatch('click');
+ await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'), 100);
+ harness.elements.get('logout-button')!.dispatch('click');
+});
+
 test('reading positions for two quickly visited articles survive the shared persistence debounce',async(t)=>{
  const tools=readingIntegrationTools('load');const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,frameHeight:1000,viewportHeight:200});t.after(()=>database.close());
  await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'), 100);
