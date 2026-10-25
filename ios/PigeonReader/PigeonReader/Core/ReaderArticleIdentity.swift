@@ -7,6 +7,9 @@ nonisolated enum ReaderArticleIdentity {
 	private static let googleReaderPrefix = "tag:google.com,2005:reader/item/"
 
 	static func normalized(_ rawValue: String) -> String {
+		// Most ids are already canonical. Bulk actions compare thousands of pairs,
+		// so skip trimming and lowercasing when they would not change anything.
+		if isCanonical(rawValue) { return rawValue }
 		let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard value.isEmpty == false else { return "" }
 		if value.hasPrefix(googleReaderPrefix),
@@ -27,13 +30,27 @@ nonisolated enum ReaderArticleIdentity {
 	}
 
 	static func matches(_ lhs: Recommendation, _ rhs: Recommendation) -> Bool {
-		!aliases(id: lhs.id, readerID: lhs.readerId)
-			.isDisjoint(with: aliases(id: rhs.id, readerID: rhs.readerId))
+		let rhsID = normalized(rhs.id)
+		let rhsReaderID = normalized(rhs.readerId)
+		return matches(normalized(lhs.id), rhsID, rhsReaderID)
+			|| matches(normalized(lhs.readerId), rhsID, rhsReaderID)
 	}
 
 	static func matches(_ article: Recommendation, id: String) -> Bool {
-		!aliases(id: article.id, readerID: article.readerId)
-			.isDisjoint(with: Set([normalized(id)].filter { $0.isEmpty == false }))
+		matches(normalized(id), normalized(article.id), normalized(article.readerId))
+	}
+
+	private static func matches(_ alias: String, _ first: String, _ second: String) -> Bool {
+		alias.isEmpty == false && (alias == first || alias == second)
+	}
+
+	/// Plain lowercase ASCII without whitespace or the Google Reader prefix is
+	/// already its own normalized form.
+	private static func isCanonical(_ value: String) -> Bool {
+		guard value.isEmpty == false, value.utf8.starts(with: googleReaderPrefix.utf8) == false else { return false }
+		return value.utf8.allSatisfy { byte in
+			byte > 0x20 && byte < 0x7F && (byte < 0x41 || byte > 0x5A)
+		}
 	}
 }
 

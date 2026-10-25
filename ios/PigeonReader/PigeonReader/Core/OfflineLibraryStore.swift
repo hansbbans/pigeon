@@ -1559,7 +1559,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			guard let id = string(at: 0, statement: statement),
 				let payload = data(at: 1, statement: statement),
 				let article = try? decoder.decode(Recommendation.self, from: payload),
-				overlays.keys.contains(where: { ReaderArticleIdentity.matches(article, id: $0) }) else {
+				// Overlay keys are normalized aliases, so a lookup replaces a scan.
+				ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
+					.contains(where: { overlays[$0] != nil }) else {
 				return
 			}
 			records.append(
