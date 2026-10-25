@@ -52,6 +52,19 @@ nonisolated enum ReaderTimelineDensity: String, CaseIterable, Identifiable, Send
 	}
 }
 
+nonisolated enum ReaderHomeLayout: String, CaseIterable, Identifiable, Sendable {
+	case classic
+	case frontPage = "front-page"
+
+	var id: Self { self }
+	var title: String {
+		switch self {
+		case .classic: "Classic"
+		case .frontPage: "Front Page"
+		}
+	}
+}
+
 nonisolated enum ReaderMarkReadBehavior: String, CaseIterable, Identifiable, Sendable {
 	case manually
 	case onOpen = "on-open"
@@ -88,6 +101,7 @@ final class ReaderTypographySettings {
 	private let imagePolicyKey = "pigeon.reader.remote-images"
 	private let densityKey = "pigeon.reader.timeline-density"
 	private let markReadBehaviorKey = "pigeon.reader.mark-read-behavior"
+	static let homeLayoutKey = "pigeon.reader.home-layout.v1"
 	private var storedTextScale: Double
 	private var storedLineHeight: Double
 	private var storedHorizontalMargin: Double
@@ -96,6 +110,7 @@ final class ReaderTypographySettings {
 	private var storedImagePolicy: ReaderRemoteImagePolicy
 	private var storedDensity: ReaderTimelineDensity
 	private var storedMarkReadBehavior: ReaderMarkReadBehavior
+	private var storedHomeLayout: ReaderHomeLayout
 
 	init(defaults: UserDefaults = .standard) {
 		self.defaults = defaults
@@ -119,6 +134,7 @@ final class ReaderTypographySettings {
 		storedImagePolicy = defaults.string(forKey: imagePolicyKey).flatMap(ReaderRemoteImagePolicy.init(rawValue:)) ?? .normal
 		storedDensity = defaults.string(forKey: densityKey).flatMap(ReaderTimelineDensity.init(rawValue:)) ?? .comfortable
 		storedMarkReadBehavior = defaults.string(forKey: markReadBehaviorKey).flatMap(ReaderMarkReadBehavior.init(rawValue:)) ?? .onOpen
+		storedHomeLayout = defaults.string(forKey: Self.homeLayoutKey).flatMap(ReaderHomeLayout.init(rawValue:)) ?? .classic
 	}
 
 	var textScale: Double {
@@ -182,6 +198,14 @@ final class ReaderTypographySettings {
 		set {
 			storedMarkReadBehavior = newValue
 			defaults.set(newValue.rawValue, forKey: markReadBehaviorKey)
+		}
+	}
+
+	var homeLayout: ReaderHomeLayout {
+		get { storedHomeLayout }
+		set {
+			storedHomeLayout = newValue
+			defaults.set(newValue.rawValue, forKey: Self.homeLayoutKey)
 		}
 	}
 

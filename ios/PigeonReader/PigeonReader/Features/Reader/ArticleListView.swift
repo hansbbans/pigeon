@@ -45,7 +45,8 @@ struct ArticleListView: View {
 			: model.articles(for: collection)
 		let articles = updateBuffer.displayedArticles(in: listContext, fallback: sourceArticles)
 		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: articles.map(\.id)) != nil
-		let isPositionReady = (hasSavedPosition == false || readyContext == listContext)
+		// Front Page has no saved-position restore, so it is ready as soon as it appears.
+		let isPositionReady = (usesFrontPage || hasSavedPosition == false || readyContext == listContext)
 			&& isExplicitListTransitioning == false
 		let holdsUpdates = isScrolling || isNativeTransitioning || isCollectionTransitioning
 			|| isExplicitListTransitioning || isLayoutReflowing || isPositionReady == false
@@ -66,7 +67,7 @@ struct ArticleListView: View {
 			isLoading: isLoading
 		)
 		let preparesThumbnails = model.selectedNavigationID == collection.id
-			&& model.readerTypography.timelineDensity == .imageRich
+			&& (usesFrontPage || model.readerTypography.timelineDensity == .imageRich)
 			&& model.readerTypography.remoteImagePolicy == .normal
 		let thumbnailRequest = ReaderFeedThumbnailPrefetchRequest(
 			scope: preparesThumbnails ? model.session?.storageIdentity : nil,
@@ -126,6 +127,13 @@ struct ArticleListView: View {
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
+			} else if usesFrontPage {
+				frontPage(articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
+					.task(id: thumbnailRequest) {
+						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
+						await ReaderFeedThumbnailStore.shared.prefetch(articles: thumbnailRequest.articles, scope: scope)
+					}
+					.transition(.opacity)
 			} else {
 				ScrollViewReader { proxy in
 					List {
@@ -287,7 +295,7 @@ struct ArticleListView: View {
 		}
 		.onChange(of: listContext) { _, context in
 			viewport.commitContextChange(to: context, scope: listScope)
-			if isExplicitListTransitioning && articles.isEmpty {
+			if isExplicitListTransitioning && (articles.isEmpty || usesFrontPage) {
 				readyContext = context
 				isExplicitListTransitioning = false
 			}
@@ -300,6 +308,7 @@ struct ArticleListView: View {
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("collection-pane-\(collection.id)")
 		.navigationTitle(navigationTitle)
+		.toolbarTitleDisplayMode(usesFrontPage ? .inline : .automatic)
 		.searchable(text: $searchText, prompt: "Titles, authors, feeds, and text")
 		.searchScopes($searchScope) {
 			ForEach(ReaderSearchScope.allCases) { scope in
@@ -369,6 +378,63 @@ struct ArticleListView: View {
 		.alert("Couldn’t Save to Reader", isPresented: $isShowingReadwiseSaveMessage) {
 		} message: {
 			Text(readwiseSaveMessage ?? "")
+		}
+	}
+
+	/// Front Page is an iPhone layout; iPad keeps Classic rows in its split view.
+	private var usesFrontPage: Bool {
+		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+	}
+
+	private func frontPage(articles: [Recommendation], isSearchActive: Bool, holdsUpdates: Bool) -> some View {
+		ScrollViewReader { proxy in
+			FrontPageView(
+				title: collection.title,
+				unreadCount: model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount,
+				articles: articles,
+				selectedArticleID: model.selectedArticleID,
+				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+				thumbnailScope: model.session?.storageIdentity,
+				select: { article in
+					model.retainPresentedArticles(articles, in: collection)
+					model.select(article: article)
+				},
+				onNearEndChange: { if isNearEnd != $0 { isNearEnd = $0 } },
+				onUserScroll: {
+					if paginationGate.userDidScroll() { paginationMovement &+= 1 }
+				},
+				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
+			) { article in
+				readButton(for: article)
+				starButton(for: article)
+				Divider()
+				markAboveButton(for: article)
+				markBelowButton(for: article)
+			} footer: {
+				Text(model.collectionStatusText(for: collection))
+					.font(.footnote)
+					.foregroundStyle(.secondary)
+					.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
+				loadMoreControls(for: collection, isSearchActive: isSearchActive)
+			}
+			.task(id: acceptedScrollRequest) {
+				guard let request = acceptedScrollRequest else { return }
+				await Task.yield()
+				guard Task.isCancelled == false, acceptedScrollRequest == request else { return }
+				withAnimation(reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false)) {
+					proxy.scrollTo(FrontPageLayout.topAnchorID, anchor: .top)
+				}
+				acceptedScrollRequest = nil
+			}
+			.overlay(alignment: .top) {
+				if updateBuffer.needsAcceptance, holdsUpdates == false {
+					ReaderNewStoriesButton(count: updateBuffer.newStoryCount, action: showUpdatedStories)
+				}
+			}
+			.onDisappear {
+				isScrolling = false
+				isNearEnd = false
+			}
 		}
 	}
 

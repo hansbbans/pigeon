@@ -5,6 +5,7 @@ struct ArticleListToolbar: ToolbarContent {
 	let onListContextWillChange: () -> Void
 	let onTimelineDensityWillChange: () -> Void
 	@Environment(ReaderAppModel.self) private var model
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
 	init(
 		collection: ReaderNavigationItem,
@@ -57,14 +58,27 @@ struct ArticleListToolbar: ToolbarContent {
 				.accessibilityIdentifier("article-list-sort")
 
 				Menu("Display", systemImage: "rectangle.grid.1x2") {
-					Picker("Timeline density", selection: densityBinding) {
-						ForEach(ReaderTimelineDensity.allCases) { density in
-							Text(density.title).tag(density)
+					if horizontalSizeClass == .compact {
+						Picker("Layout", selection: layoutBinding) {
+							ForEach(ReaderHomeLayout.allCases) { layout in
+								Text(layout.title).tag(layout)
+							}
 						}
+						.accessibilityIdentifier("article-list-layout-options")
 					}
-					.accessibilityIdentifier("article-list-density-options")
+					// Density only shapes Classic rows.
+					if usesFrontPage == false {
+						Picker("Timeline density", selection: densityBinding) {
+							ForEach(ReaderTimelineDensity.allCases) { density in
+								Text(density.title).tag(density)
+							}
+						}
+						.accessibilityIdentifier("article-list-density-options")
+					}
 				}
-				.accessibilityValue(model.readerTypography.timelineDensity.title)
+				.accessibilityValue(usesFrontPage
+					? ReaderHomeLayout.frontPage.title
+					: model.readerTypography.timelineDensity.title)
 				.accessibilityIdentifier("article-list-density")
 
 				Menu("Read actions", systemImage: "checkmark.circle") {
@@ -120,6 +134,17 @@ struct ArticleListToolbar: ToolbarContent {
 				onListContextWillChange()
 				model.setSortOrder(newSortOrder, for: collection)
 			},
+		)
+	}
+
+	private var usesFrontPage: Bool {
+		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+	}
+
+	private var layoutBinding: Binding<ReaderHomeLayout> {
+		Binding(
+			get: { model.readerTypography.homeLayout },
+			set: { model.readerTypography.homeLayout = $0 },
 		)
 	}
 
