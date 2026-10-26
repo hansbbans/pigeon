@@ -22,12 +22,26 @@ stale_seconds="${IOS_RUNNER_LOCK_STALE_SECONDS:-10800}"
 # it is this old.
 ownerless_seconds="${IOS_RUNNER_LOCK_OWNERLESS_SECONDS:-60}"
 poll_seconds="${IOS_RUNNER_LOCK_POLL_SECONDS:-15}"
+# After taking the lock, wait this long and confirm it is still ours. A waiter
+# that judged the previous lock abandoned a moment before we replaced it could
+# otherwise rename ours away.
+settle_seconds="${IOS_RUNNER_LOCK_SETTLE_SECONDS:-2}"
 # The step's shell. When the runner cancels the step it kills that shell but
 # not this script, so the script must notice and stop on its own.
 parent_pid="${IOS_RUNNER_LOCK_PARENT_PID:-$PPID}"
 
 process_alive() {
-  [[ "$1" =~ ^[0-9]+$ ]] && ps -p "$1" >/dev/null 2>&1
+  local pid="$1" status
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  # kill -0 is a builtin, so it answers without forking even when the Mac is
+  # too loaded to spawn ps. It fails both for a dead process and for another
+  # user's process, so ask ps before declaring a holder dead.
+  kill -0 "$pid" 2>/dev/null && return 0
+  ps -p "$pid" >/dev/null 2>&1
+  status=$?
+  # ps exits 1 when the pid is gone. Any other failure is ps itself failing,
+  # which is no evidence that the holder is dead.
+  [[ "$status" -ne 1 ]]
 }
 
 # The PID that lives for the whole job: the Runner.Worker above the step
@@ -63,8 +77,12 @@ lock_age() {
   echo $(( $(date +%s) - modified ))
 }
 
+owner_line() {
+  sed -n '1p' "$1/owner" 2>/dev/null || true
+}
+
 current_owner() {
-  sed -n '1p' "$lock_dir/owner" 2>/dev/null || true
+  owner_line "$lock_dir"
 }
 
 current_holder_pid() {
@@ -85,40 +103,63 @@ abandoned_reason() {
   return 0
 }
 
-acquire() {
-  local waited=0 age holder holder_pid reason stale_dir
-  while ! mkdir "$lock_dir" 2>/dev/null; do
-    if ! process_alive "$parent_pid"; then
-      echo "The step that started this wait is gone; not taking the iOS runner lock" >&2
-      exit 1
-    fi
-    holder="$(current_owner)"
-    holder_pid="$(current_holder_pid)"
-    age="$(lock_age)"
-    reason="$(abandoned_reason "$holder" "$holder_pid" "$age")"
-    if [[ -n "$reason" ]]; then
-      echo "::warning::Replacing an abandoned iOS runner lock (${holder:-no owner}): $reason"
-      # Only one waiter can rename the directory, so only one replaces it.
-      stale_dir="$lock_dir.stale.$$.$RANDOM"
-      if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
-        rm -rf "$stale_dir"
-      fi
-      continue
-    fi
-    if (( waited >= wait_seconds )); then
-      echo "Gave up after waiting ${waited}s for the iOS runner lock held by ${holder:-unknown}" >&2
-      exit 1
-    fi
-    echo "Waiting for the iOS runner lock held by ${holder:-unknown} (${age}s old, waited ${waited}s)"
-    sleep "$poll_seconds"
-    waited=$(( waited + poll_seconds ))
-  done
-  if ! process_alive "$parent_pid"; then
-    rmdir "$lock_dir" 2>/dev/null || true
-    echo "The step that started this wait is gone; released the iOS runner lock again" >&2
-    exit 1
+# Rename the abandoned lock away so only one waiter replaces it. Returns 0 when
+# the lock held by $1 is gone and the caller may try mkdir again.
+replace_abandoned_lock() {
+  local holder="$1" stale_dir
+  stale_dir="$lock_dir.stale.$$.$RANDOM"
+  mv "$lock_dir" "$stale_dir" 2>/dev/null || return 1
+  if [[ "$(owner_line "$stale_dir")" == "$holder" ]]; then
+    rm -rf "$stale_dir"
+    return 0
   fi
-  printf '%s\n%s\n' "$owner" "$(job_pid)" > "$lock_dir/owner"
+  # Another waiter replaced the lock between our check and the rename. Put the
+  # new holder's lock back; rename(2) only overwrites an empty directory, so a
+  # lock that already has an owner file is never clobbered.
+  if ! python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$stale_dir" "$lock_dir" 2>/dev/null; then
+    rm -rf "$stale_dir"
+  fi
+  return 1
+}
+
+acquire() {
+  local waited=0 age holder holder_pid reason
+  while true; do
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      if ! process_alive "$parent_pid"; then
+        echo "The step that started this wait is gone; not taking the iOS runner lock" >&2
+        exit 1
+      fi
+      holder="$(current_owner)"
+      holder_pid="$(current_holder_pid)"
+      age="$(lock_age)"
+      reason="$(abandoned_reason "$holder" "$holder_pid" "$age")"
+      if [[ -n "$reason" ]]; then
+        echo "::warning::Replacing an abandoned iOS runner lock (${holder:-no owner}): $reason"
+        if replace_abandoned_lock "$holder"; then
+          continue
+        fi
+      fi
+      if (( waited >= wait_seconds )); then
+        echo "Gave up after waiting ${waited}s for the iOS runner lock held by ${holder:-unknown}" >&2
+        exit 1
+      fi
+      echo "Waiting for the iOS runner lock held by ${holder:-unknown} (${age}s old, waited ${waited}s)"
+      sleep "$poll_seconds"
+      waited=$(( waited + poll_seconds ))
+    done
+    if ! process_alive "$parent_pid"; then
+      rmdir "$lock_dir" 2>/dev/null || true
+      echo "The step that started this wait is gone; released the iOS runner lock again" >&2
+      exit 1
+    fi
+    printf '%s\n%s\n' "$owner" "$(job_pid)" > "$lock_dir/owner"
+    sleep "$settle_seconds"
+    if [[ "$(current_owner)" == "$owner" ]]; then
+      break
+    fi
+    echo "::warning::The iOS runner lock was taken over by $(current_owner) right after we acquired it; waiting again"
+  done
   echo "Acquired the iOS runner lock as $owner (job pid $(sed -n '2p' "$lock_dir/owner"))"
 }
 

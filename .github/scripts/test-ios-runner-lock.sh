@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" >/dev/null && pwd -P)"
 SCRIPT="$SCRIPT_DIR/ios-runner-lock.sh"
 TEST_ROOT="$(mktemp -d /tmp/pigeon-runner-lock-test.XXXXXX)"
 LOCK="$TEST_ROOT/lock"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+trap 'chmod -R u+w "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
 
 fail_test() {
   echo "$1" >&2
@@ -16,7 +16,8 @@ fail_test() {
 run_lock() {
   local owner="$1"
   shift
-  IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_OWNER="$owner" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" "$@"
+  IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_OWNER="$owner" IOS_RUNNER_LOCK_POLL_SECONDS=1 \
+    IOS_RUNNER_LOCK_SETTLE_SECONDS="${IOS_RUNNER_LOCK_SETTLE_SECONDS:-0}" bash "$SCRIPT" "$@"
 }
 
 assert_owner() {
@@ -101,6 +102,40 @@ if IOS_RUNNER_LOCK_PARENT_PID="$dead_pid" IOS_RUNNER_LOCK_WAIT_SECONDS=30 run_lo
 fi
 assert_owner first
 run_lock first release
+
+# An abandoned lock that cannot be renamed away is waited on, then given up
+# on, rather than retried in a tight loop.
+mkdir -p "$TEST_ROOT/ro/lock"
+printf '%s\n%s\n' 'vanished' "$dead_pid" > "$TEST_ROOT/ro/lock/owner"
+chmod 555 "$TEST_ROOT/ro"
+if output="$(IOS_RUNNER_LOCK_DIR="$TEST_ROOT/ro/lock" IOS_RUNNER_LOCK_OWNER=ninth IOS_RUNNER_LOCK_POLL_SECONDS=1 \
+    IOS_RUNNER_LOCK_WAIT_SECONDS=2 IOS_RUNNER_LOCK_SETTLE_SECONDS=0 bash "$SCRIPT" acquire 2>&1)"; then
+  chmod 755 "$TEST_ROOT/ro"
+  fail_test "took an abandoned lock it could not rename away"
+fi
+chmod 755 "$TEST_ROOT/ro"
+grep -q "Gave up" <<<"$output" || fail_test "an unrenamable abandoned lock did not reach the wait cap: $output"
+
+# A lock renamed away by a racing waiter right after acquisition is noticed
+# during the settle period instead of being treated as held.
+( IOS_RUNNER_LOCK_SETTLE_SECONDS=3 IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock tenth acquire > "$TEST_ROOT/tenth.log" 2>&1; echo $? > "$TEST_ROOT/tenth.status" ) &
+sleep 1
+printf '%s\n%s\n' 'thief' "$$" > "$LOCK/owner"
+wait
+[[ "$(cat "$TEST_ROOT/tenth.status")" != 0 ]] || fail_test "acquire reported success after its lock was taken over: $(cat "$TEST_ROOT/tenth.log")"
+grep -q "taken over" "$TEST_ROOT/tenth.log" || fail_test "the takeover was not noticed: $(cat "$TEST_ROOT/tenth.log")"
+assert_owner thief
+rm -rf "$LOCK"
+
+# A waiter that judged the old lock abandoned must not steal a lock another
+# job acquired in the meantime: the renamed directory is put back untouched.
+mkdir "$LOCK"
+printf '%s\n%s\n' 'fresh-holder' "$$" > "$LOCK/owner"
+if IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock eleventh acquire; then
+  fail_test "a lock with a live holder was stolen"
+fi
+assert_owner fresh-holder
+rm -rf "$LOCK"
 
 # Outside Actions, acquire and release run in separate shells with no explicit owner.
 IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" acquire

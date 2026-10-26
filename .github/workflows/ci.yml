@@ -80,11 +80,6 @@ jobs:
       SCHEME: PigeonReader
     steps:
       - uses: actions/checkout@v5
-      - name: Kill xcodebuild orphans from earlier runs
-        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
-      - name: Acquire the shared iOS runner lock
-        timeout-minutes: 65
-        run: bash .github/scripts/ios-runner-lock.sh acquire
       - name: Verify native build tools
         run: |
           set -euo pipefail
@@ -101,10 +96,16 @@ jobs:
         run: bash .github/scripts/verify-product-display-names.sh
       - name: Verify signing profile mapping
         run: bash .github/scripts/verify-provisioning-profile-mapping.sh
+      - name: Kill xcodebuild orphans from earlier runs
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+      - name: Acquire the shared iOS runner lock
+        timeout-minutes: 65
+        run: bash .github/scripts/ios-runner-lock.sh acquire
       - name: Select simulator
         id: simulator
         run: .github/scripts/select-ios-simulator.sh
       - name: Run unit and UI tests
+        timeout-minutes: 60
         env:
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
           TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
@@ -132,6 +133,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Clean Release build
+        timeout-minutes: 20
         env:
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
@@ -148,6 +150,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$build_log"
           .github/scripts/fail-on-first-party-warnings.sh "$build_log"
+
+      - name: Kill build processes this job left behind
+        if: always()
+        shell: bash
+        env:
+          ORPHAN_INCLUDE_CURRENT_RUN: "1"
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
 
       - name: Shut down this job's simulator
         if: always()
