@@ -27,7 +27,7 @@ RELEASE_TOOLING = {
     },
 }
 ROOT_DOCS = {
-    "README.md", "AGENTS.md", "CHANGELOG.md", "ROADMAP.md", "TODOS.md",
+    "README.md", "AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "ROADMAP.md", "TODOS.md",
     "todo-md-spec.md", "perspectives-user-stories.md",
 }
 PIGEON_DOC_DIRS = {

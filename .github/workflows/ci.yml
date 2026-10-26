@@ -43,6 +43,10 @@ jobs:
         run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
       - name: Verify simulator ownership guards
         run: python3 .github/scripts/test_ios_simulator_session.py
+      - name: Verify shared runner helpers
+        run: |
+          bash .github/scripts/test-ios-runner-lock.sh
+          bash .github/scripts/test-kill-orphaned-xcodebuild.sh
 
   worker:
     needs: scope
@@ -68,13 +72,19 @@ jobs:
       - macOS
       - ARM64
       - pigeon-ci
-    timeout-minutes: 45
+    # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
+    timeout-minutes: 120
     env:
       APP_DIRECTORY: ios/PigeonReader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
       SCHEME: PigeonReader
     steps:
       - uses: actions/checkout@v5
+      - name: Kill xcodebuild orphans from earlier runs
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+      - name: Acquire the shared iOS runner lock
+        timeout-minutes: 65
+        run: bash .github/scripts/ios-runner-lock.sh acquire
       - name: Verify native build tools
         run: |
           set -euo pipefail
@@ -143,6 +153,11 @@ jobs:
         if: always()
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
+
+      - name: Release the shared iOS runner lock
+        if: always()
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh release
 
   required:
     name: CI required validation

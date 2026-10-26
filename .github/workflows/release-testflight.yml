@@ -32,7 +32,7 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: write
 
 concurrency:
   group: pigeon-testflight-release
@@ -46,7 +46,8 @@ jobs:
       - macOS
       - ARM64
       - pigeon-ci
-    timeout-minutes: 90
+    # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
+    timeout-minutes: 150
     environment: testflight
     outputs:
       marketing_version: ${{ steps.release_metadata.outputs.marketing_version }}
@@ -97,6 +98,15 @@ jobs:
             echo "Trigger this workflow from the main branch." >&2
             exit 1
           fi
+
+      - name: Kill xcodebuild orphans from earlier runs
+        shell: bash
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+
+      - name: Acquire the shared iOS runner lock
+        timeout-minutes: 65
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh acquire
 
       - name: Verify runner prerequisites
         shell: bash
@@ -452,6 +462,19 @@ jobs:
             echo "- Upload: accepted by xcodebuild export; downstream App Store Connect API verification is required."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Tag the released commit
+        continue-on-error: true
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.release_metadata.outputs.marketing_version }}
+          BUILD_NUMBER: ${{ steps.release_metadata.outputs.build_number }}
+        run: |
+          set -euo pipefail
+          tag="testflight/${BUILD_NUMBER}"
+          git tag -a "$tag" -m "TestFlight ${APP_VERSION} (${BUILD_NUMBER})" HEAD
+          git push origin "refs/tags/${tag}"
+          echo "Tagged $(git rev-parse --short HEAD) as ${tag}"
+
       - name: Clean up release assets
         if: always()
         shell: bash
@@ -485,6 +508,11 @@ jobs:
         if: always() && steps.simulator.outputs.ownership_file != ''
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
+
+      - name: Release the shared iOS runner lock
+        if: always()
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh release
 
   verify:
     name: Verify App Store Connect build
