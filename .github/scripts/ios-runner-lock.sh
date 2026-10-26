@@ -11,9 +11,15 @@ set -euo pipefail
 
 action="${1:-}"
 lock_dir="${IOS_RUNNER_LOCK_DIR:-/tmp/ios-ci-runner.lock}"
-owner="${IOS_RUNNER_LOCK_OWNER:-${GITHUB_REPOSITORY:-local}#${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}}"
+# Outside Actions the owner is the user name, so acquire and release from
+# separate shells still agree.
+owner="${IOS_RUNNER_LOCK_OWNER:-${GITHUB_REPOSITORY:-local}#${GITHUB_RUN_ID:-$(id -un)}-${GITHUB_RUN_ATTEMPT:-1}}"
 wait_seconds="${IOS_RUNNER_LOCK_WAIT_SECONDS:-3600}"
 stale_seconds="${IOS_RUNNER_LOCK_STALE_SECONDS:-10800}"
+# A lock directory without an owner file is either mid-acquire (a few
+# milliseconds) or left over from a killed acquire; treat it as abandoned once
+# it is this old.
+ownerless_seconds="${IOS_RUNNER_LOCK_OWNERLESS_SECONDS:-60}"
 poll_seconds="${IOS_RUNNER_LOCK_POLL_SECONDS:-15}"
 
 lock_age() {
@@ -37,9 +43,13 @@ acquire() {
   while ! mkdir "$lock_dir" 2>/dev/null; do
     holder="$(current_owner)"
     age="$(lock_age)"
-    if (( age > stale_seconds )); then
-      echo "::warning::Replacing a stale iOS runner lock held by $holder for ${age}s"
-      rm -rf "$lock_dir"
+    if (( age > stale_seconds )) || { [[ "$holder" == "unknown" ]] && (( age > ownerless_seconds )); }; then
+      echo "::warning::Replacing an abandoned iOS runner lock held by $holder for ${age}s"
+      # Only one waiter can rename the directory, so only one replaces it.
+      stale_dir="$lock_dir.stale.$$.$RANDOM"
+      if mv "$lock_dir" "$stale_dir" 2>/dev/null; then
+        rm -rf "$stale_dir"
+      fi
       continue
     fi
     if (( waited >= wait_seconds )); then

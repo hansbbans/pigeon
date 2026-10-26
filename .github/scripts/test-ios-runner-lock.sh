@@ -57,6 +57,20 @@ run_lock third release
 run_lock third release
 [[ ! -d "$LOCK" ]] || fail_test "release recreated the lock"
 
+mkdir "$LOCK"
+if IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock fourth acquire; then
+  fail_test "a fresh ownerless lock (another job mid-acquire) was replaced"
+fi
+touch -t 202001010000 "$LOCK"
+IOS_RUNNER_LOCK_WAIT_SECONDS=5 run_lock fourth acquire
+assert_owner fourth
+run_lock fourth release
+
+# Outside Actions, acquire and release run in separate shells with no explicit owner.
+IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" acquire
+IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" release
+[[ ! -d "$LOCK" ]] || fail_test "the default local owner could not release its own lock"
+
 if run_lock third frobnicate 2>/dev/null; then
   fail_test "unknown action was accepted"
 fi

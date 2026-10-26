@@ -20,6 +20,8 @@ cat > "$PROCESS_LIST" <<'LIST'
 103 /Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator
 104 /Users/ci/actions-runner-todomd/_work/_temp/todomd-ci/111-1/derived-data/Build/Products/Debug-iphonesimulator/TodoMDAppUITests-Runner.app/PlugIns/TodoMDAppUITests.xctest/TodoMDAppUITests
 105 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -derivedDataPath /Users/hans/Library/Developer/Xcode/DerivedData/TodoMD-abc
+106 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project TodoMD.xcodeproj -scheme TodoMDApp -configuration Release -archivePath /Users/ci/actions-runner-todomd/_work/todomd/todomd/build/TodoMDApp.xcarchive archive
+107 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -exportArchive -archivePath /Users/ci/actions-runner-pigeon/_work/pigeon/pigeon/.release/pigeon-testflight-1-1/PigeonReader.xcarchive
 not-a-pid xcodebuild /Users/ci/actions-runner-todomd/_work/_temp/todomd-ci/111-1
 LIST
 
@@ -36,7 +38,9 @@ grep -q "(pid 101)" <<<"$output" && fail_test "the current run's xcodebuild was 
 grep -q "(pid 102)" <<<"$output" && fail_test "another runner's xcodebuild was reported"
 grep -q "(pid 103)" <<<"$output" && fail_test "a manual Simulator session was reported"
 grep -q "(pid 105)" <<<"$output" && fail_test "a local developer build was reported"
-grep -q "handled: 2" <<<"$output" || fail_test "expected two orphans, got: $output"
+grep -q "(pid 106)" <<<"$output" || fail_test "an earlier release archive under the workspace was not reported: $output"
+grep -q "(pid 107)" <<<"$output" && fail_test "another runner's release archive was reported"
+grep -q "handled: 3" <<<"$output" || fail_test "expected three orphans, got: $output"
 
 # GitHub Actions sets GITHUB_RUN_ID for every step, so drop it explicitly.
 if env -u GITHUB_RUN_ID -u GITHUB_RUN_ATTEMPT RUNNER_TEMP=/tmp ORPHAN_PROCESS_LIST="$PROCESS_LIST" bash "$SCRIPT" 2>/dev/null; then
