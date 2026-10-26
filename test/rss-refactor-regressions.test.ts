@@ -1,7 +1,10 @@
 import * as assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, test } from 'node:test';
 
 import {
+	buildRssItemStatements,
 	fetchAndStoreRssFeed,
 	htmlToBoundedText,
 	MAX_RSS_TEXT_CONTENT_SIZE,
@@ -137,7 +140,7 @@ class RecordingDb {
 			},
 			async first<T>() {
 				if (sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-					return { value: '14' } as T;
+					return { value: '15' } as T;
 				}
 				if (sql === 'SELECT value FROM _meta WHERE key = ?') {
 					return null;
@@ -231,7 +234,7 @@ class FeedStoreStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '14' } as T;
+			return { value: '15' } as T;
 		}
 		if (this.sql === 'SELECT value FROM _meta WHERE key = ?') {
 			return null;
@@ -878,4 +881,36 @@ test('Math annotation unknown and double-escaped MIME references remain foreign'
   const source = `<math><annotation-xml encoding="${encoding}"><script/><a href="/literal">Example</a></script></annotation-xml></math>`;
   assert.equal(rewriteRssContentLinks(source, 'https://example.com/'), `<math><annotation-xml encoding="${encoding}"><script/><a href="https://example.com/literal">Example</a></script></annotation-xml></math>`, encoding);
  }
+});
+
+test('RSS refresh upserts bump content_version only when the stored article changes', async () => {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec("INSERT INTO feeds (feed_key, display_name, source_type, source_url) VALUES ('versioned', 'Versioned', 'rss', 'https://example.com/feed.xml')");
+	const db = {
+		prepare(sql: string) {
+			const statement = database.prepare(sql);
+			return { bind: (...values: never[]) => ({ run: async () => statement.run(...values) }) };
+		},
+	} as unknown as D1Database;
+	const refresh = async (content: string) => {
+		const statements = await buildRssItemStatements(
+			db,
+			'versioned',
+			{ link: 'https://example.com/', sourceUrl: 'https://example.com/feed.xml' },
+			[{ guid: 'item-1', title: 'Versioned item', link: 'https://example.com/posts/1', content, attachments: [] }],
+			'2026-03-20T12:00:00.000Z',
+			{ updateExisting: true },
+		);
+		for (const statement of statements) await statement.run();
+		return (database.prepare("SELECT content_version FROM items WHERE feed_key = 'versioned'").get() as { content_version: number }).content_version;
+	};
+
+	assert.equal(await refresh('<p>First body</p>'), 0);
+	assert.equal(await refresh('<p>First body</p>'), 0);
+	assert.equal(await refresh('<p>Second body</p>'), 1);
+	assert.equal(await refresh('<p>Second body</p>'), 1);
+	database.exec("UPDATE items SET is_read = 1, is_starred = 1 WHERE feed_key = 'versioned'");
+	assert.equal(await refresh('<p>Second body</p>'), 1);
+	database.close();
 });

@@ -207,7 +207,7 @@ class SqliteD1Database {
 				key TEXT PRIMARY KEY,
 				value TEXT
 			);
-			INSERT INTO _meta (key, value) VALUES ('schema_version', '14');
+			INSERT INTO _meta (key, value) VALUES ('schema_version', '15');
 			CREATE TABLE feeds (
 				feed_key TEXT PRIMARY KEY,
 				display_name TEXT NOT NULL,

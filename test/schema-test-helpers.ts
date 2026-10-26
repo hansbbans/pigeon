@@ -28,7 +28,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '14',
+		schemaVersion: '15',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
@@ -96,6 +96,7 @@ export function createCurrentSchemaState(): SchemaState {
 			'content_pruned_at',
 			'is_read',
 			'is_starred',
+			'content_version',
 		]),
 		operations: [],
 	};
@@ -134,6 +135,7 @@ export function createLegacySchemaState(): SchemaState {
 	}
 	state.itemColumns.delete('original_url');
 	state.itemColumns.delete('content_pruned_at');
+	state.itemColumns.delete('content_version');
 	return state;
 }
 

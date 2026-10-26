@@ -1,9 +1,10 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '14';
+const REQUIRED_SCHEMA_VERSION = '15';
 const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 const LEGACY_SYNC_SCHEMA_VERSION = 12;
 const RETENTION_INDEX_SCHEMA_VERSION = 13;
+const STATUS_TRIGGER_SCHEMA_VERSION = 14;
 
 // A status write without a mutation id must not report the previous mutation's
 // id; the mutation path sets mutation_id after updating items.
@@ -423,7 +424,22 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
-			.bind(REQUIRED_SCHEMA_VERSION, String(RETENTION_INDEX_SCHEMA_VERSION)),
+			.bind(String(STATUS_TRIGGER_SCHEMA_VERSION), String(RETENTION_INDEX_SCHEMA_VERSION)),
+	]);
+
+	// v15: per-item body versions for first-party clients, and a covering
+	// unread index so unread-count never reads the row pages that hold bodies.
+	await addColumnIfMissing(db, itemColumns, 'items', 'content_version INTEGER NOT NULL DEFAULT 0');
+	await db.batch([
+		db.prepare('DROP INDEX IF EXISTS idx_items_unread_feed'),
+		db.prepare(
+			'CREATE INDEX IF NOT EXISTS idx_items_unread_feed_date ON items(feed_key, received_at DESC) WHERE is_read = 0',
+		),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, String(STATUS_TRIGGER_SCHEMA_VERSION)),
 	]);
 }
 

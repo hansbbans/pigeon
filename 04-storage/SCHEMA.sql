@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v13
+-- D1 Schema v15
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '14');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '15');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS items (
   content_pruned_at TEXT,
   is_read INTEGER DEFAULT 0,
   is_starred INTEGER DEFAULT 0,
+  -- Bumped by every writer that changes html_content, text_content, or
+  -- content_pruned_at; read and star changes leave it alone.
+  content_version INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
 );
 
@@ -100,8 +103,8 @@ CREATE INDEX IF NOT EXISTS idx_items_retention_candidates
 CREATE INDEX IF NOT EXISTS idx_items_starred_date
   ON items(received_at DESC)
   WHERE is_starred = 1;
-CREATE INDEX IF NOT EXISTS idx_items_unread_feed
-  ON items(feed_key)
+CREATE INDEX IF NOT EXISTS idx_items_unread_feed_date
+  ON items(feed_key, received_at DESC)
   WHERE is_read = 0;
 CREATE INDEX IF NOT EXISTS idx_items_unread_date
   ON items(received_at DESC)

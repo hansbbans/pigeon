@@ -495,6 +495,22 @@ class LegacySchemaDb {
 	}
 
 	async batch(statements: LegacySchemaStatement[]): Promise<void | Array<void | { meta: { changes: number } }>> {
+		if (statements[0]?.sql === 'DROP INDEX IF EXISTS idx_items_unread_feed') {
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_items_unread_feed_date')) {
+					this.state.operations.push('create-unread-feed-date-index');
+				} else if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					if (nextValue === '15' && this.state.schemaVersion === String(snapshot.values[1] ?? '')) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:15');
+					}
+				}
+			}
+			return;
+		}
+
 		if (statements[0]?.sql === 'DROP TRIGGER IF EXISTS trg_items_update_status') {
 			for (const statement of statements) {
 				const snapshot = statement.snapshot();
@@ -617,7 +633,7 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '14');
+	assert.equal(db.state.schemaVersion, '15');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
@@ -653,7 +669,7 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '14');
+	assert.equal(db.state.schemaVersion, '15');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -685,7 +701,7 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '14');
+	assert.equal(db.state.schemaVersion, '15');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -712,7 +728,7 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	);
 
 	assert.equal(firstResponse.status, 200);
-	assert.equal(persistedState.schemaVersion, '14');
+	assert.equal(persistedState.schemaVersion, '15');
 	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
 
 	persistedState.operations.length = 0;
@@ -823,7 +839,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
 	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
-	assert.equal(winner.batches.length, 3);
+	assert.equal(winner.batches.length, 4);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
@@ -861,7 +877,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
 	).get() as { value: string };
-	assert.equal(schemaVersion.value, '14');
+	assert.equal(schemaVersion.value, '15');
 
 	const indexMigrationBatch = winner.batches[1];
 	assert.equal(
@@ -989,7 +1005,8 @@ function createSqliteV12Fixture(): DatabaseSync {
 		DROP INDEX idx_items_retention_rank;
 		DROP INDEX idx_items_retention_candidates;
 		DROP INDEX idx_items_starred_date;
-		DROP INDEX idx_items_unread_feed;
+		DROP INDEX idx_items_unread_feed_date;
+		ALTER TABLE items DROP COLUMN content_version;
 		DROP INDEX idx_items_unread_date;
 		DROP INDEX idx_items_read_date;
 		DROP INDEX idx_refresh_activity_feed;
@@ -1013,7 +1030,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'14',
+		'15',
 	);
 	assert.deepEqual(db.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 	assert.deepEqual(db.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
@@ -1023,7 +1040,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		),
 		false,
 	);
-	assert.equal(db.batches.length, 2);
+	assert.equal(db.batches.length, 3);
 	assert.equal(
 		db.batches[0][0]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
@@ -1062,6 +1079,15 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 	]);
 	assert.deepEqual(db.batches[1].at(-1)?.values, ['14', '13']);
+	assert.deepEqual(db.batches[2].map((statement) => statement.sql), [
+		'DROP INDEX IF EXISTS idx_items_unread_feed',
+		'CREATE INDEX IF NOT EXISTS idx_items_unread_feed_date ON items(feed_key, received_at DESC) WHERE is_read = 0',
+		"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+	]);
+	assert.deepEqual(db.batches[2].at(-1)?.values, ['15', '14']);
+	assert.ok(
+		db.executedSql.some((statement) => statement.sql === 'ALTER TABLE items ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0'),
+	);
 	assert.equal(
 		db.batches[0].some((statement) =>
 			statement.sql.includes('INSERT INTO sync_changes') ||
@@ -1077,7 +1103,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		'idx_items_retention_rank',
 		'idx_items_retention_candidates',
 		'idx_items_starred_date',
-		'idx_items_unread_feed',
+		'idx_items_unread_feed_date',
 		'idx_items_unread_date',
 		'idx_items_read_date',
 	]) {
@@ -1093,6 +1119,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 	assert.match(indexSql.find(({ name }) => name === 'idx_items_retention_candidates')?.sql ?? '', /content_pruned_at IS NULL/);
 	assert.match(indexSql.find(({ name }) => name === 'idx_items_starred_date')?.sql ?? '', /WHERE is_starred = 1/);
 	assert.equal(indexes.some(({ name }) => name === 'idx_items_unread'), false);
+	assert.equal(indexes.some(({ name }) => name === 'idx_items_unread_feed'), false);
 	const activityIndexColumns = database.prepare(
 		"PRAGMA index_info('idx_refresh_activity_feed')",
 	).all() as Array<{ seqno: number; name: string }>;
@@ -1137,7 +1164,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	]);
 
 	for (const wrapper of [firstDb, secondDb]) {
-		assert.equal(wrapper.batches.length, 2);
+		assert.equal(wrapper.batches.length, 3);
 		assert.deepEqual(wrapper.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 		assert.deepEqual(wrapper.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 		assert.equal(
@@ -1149,7 +1176,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	}
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'14',
+		'15',
 	);
 	assert.equal(
 		database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_state'").get() !== undefined,
@@ -1214,12 +1241,80 @@ test('SQLite v13 migration recreates the status trigger so plain writes clear mu
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'14',
+		'15',
 	);
 	database.exec("UPDATE items SET is_read = 1 WHERE id = 'article-a'");
 	assert.deepEqual(
 		{ ...(database.prepare("SELECT is_read, mutation_id FROM item_statuses WHERE item_id = 'article-a'").get() as object) },
 		{ is_read: 1, mutation_id: null },
+	);
+	database.close();
+});
+
+function createSqliteV14Fixture(): DatabaseSync {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec(`
+		ALTER TABLE items DROP COLUMN content_version;
+		DROP INDEX idx_items_unread_feed_date;
+		CREATE INDEX idx_items_unread_feed ON items(feed_key) WHERE is_read = 0;
+		UPDATE _meta SET value = '14' WHERE key = 'schema_version';
+		INSERT INTO feeds (feed_key, display_name) VALUES ('feed-a', 'Feed A');
+		INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+		VALUES ('article-a', 'feed-a', 'A', '<p>A</p>', 'message-a', '2026-08-01T00:00:00.000Z');
+	`);
+	return database;
+}
+
+const UNREAD_COUNT_SQL = `SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
+		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`;
+
+test('SQLite v14 migration adds content_version and a covering unread feed index', async () => {
+	const database = createSqliteV14Fixture();
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'15',
+	);
+	assert.equal(db.batches.length, 3);
+	assert.deepEqual(db.batches[2].at(-1)?.values, ['15', '14']);
+	assert.deepEqual(
+		{ ...(database.prepare("SELECT content_version FROM items WHERE id = 'article-a'").get() as object) },
+		{ content_version: 0 },
+	);
+	const indexes = (database.prepare("PRAGMA index_list('items')").all() as Array<{ name: string }>).map(({ name }) => name);
+	assert.equal(indexes.includes('idx_items_unread_feed'), false);
+	assert.equal(indexes.includes('idx_items_unread_feed_date'), true);
+	const plan = database.prepare(`EXPLAIN QUERY PLAN ${UNREAD_COUNT_SQL}`).all() as Array<{ detail: string }>;
+	assert.match(plan.map(({ detail }) => detail).join('\n'), /COVERING INDEX idx_items_unread_feed_date/);
+	database.close();
+});
+
+test('a fresh SCHEMA.sql database is already at the required version and runs no migration work', async () => {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(db.batches.length, 0);
+	assert.deepEqual(db.executedSql.map((statement) => statement.sql.split(' (', 1)[0]), [
+		'CREATE TABLE IF NOT EXISTS _meta',
+		'INSERT OR IGNORE INTO _meta',
+	]);
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'15',
 	);
 	database.close();
 });

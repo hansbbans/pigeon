@@ -27,6 +27,10 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 	return message.includes('no such table') && message.includes(tableName);
 }
 
+function isPigeonClient(request: Request): boolean {
+	return request.headers.has('X-Pigeon-Client');
+}
+
 function labelFromStreamId(streamId: string | null): string | null {
 	if (!streamId || !streamId.startsWith('user/-/label/')) {
 		return null;
@@ -113,6 +117,9 @@ interface StreamCursor {
 interface StreamRow {
 	rowid: number;
 	received_at: string;
+	is_read: number | null;
+	is_starred: number | null;
+	content_version: number;
 }
 
 function chunkValues<T>(values: T[], size: number): T[][] {
@@ -233,77 +240,87 @@ function decodeContinuation(
 	}
 }
 
-type FeedMembership = { feedKeys: string[] } | { itemRowids: number[] } | { feedRowids: number[] };
-
-function feedMembershipSql(membership: FeedMembership): string {
-	if ('itemRowids' in membership) return 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))';
-	if ('feedRowids' in membership) return 'SELECT feed_key FROM feeds WHERE rowid IN (SELECT value FROM json_each(?))';
-	return 'SELECT value FROM json_each(?)';
+// Feed keys can be several KB long. Callers scope label lookups with a
+// subquery that yields feed keys instead of repeating keys in bindings.
+interface FeedKeyFilter {
+	sql: string;
+	binds: string[];
 }
 
-async function loadFeedTags(env: Env, membership?: FeedMembership): Promise<Map<string, string[]>> {
-	const tagsByFeedKey = new Map<string, string[]>();
-	const addTag = (feedKey: string, label: string | null) => {
-		if (!label) {
-			return;
-		}
-		const existing = tagsByFeedKey.get(feedKey) ?? [];
-		if (!existing.includes(label)) {
-			existing.push(label);
-			tagsByFeedKey.set(feedKey, existing);
-		}
-	};
-
-	const hasFeedKeyFilter = membership !== undefined;
-	const values: Array<string | number> = membership === undefined
-		? []
-		: 'itemRowids' in membership ? membership.itemRowids : 'feedRowids' in membership ? membership.feedRowids : membership.feedKeys;
-	if (hasFeedKeyFilter && values.length === 0) {
-		return tagsByFeedKey;
-	}
-
-	const keyPages = hasFeedKeyFilter ? membershipPages([...new Set(values)]) : [null];
-	for (const feedKeyPage of keyPages) {
-		const feedKeyCondition = membership
-			? ` AND f.feed_key IN (${feedMembershipSql(membership)})`
-			: '';
-
-		try {
-			const { results } = await env.DB.prepare(
+function feedLabelStatements(env: Env, filter: FeedKeyFilter | null, includeFeedTags: boolean): D1PreparedStatement[] {
+	const binds = filter?.binds ?? [];
+	const statements: D1PreparedStatement[] = [];
+	if (includeFeedTags) {
+		statements.push(
+			env.DB.prepare(
 				`SELECT f.feed_key, ft.label
 				   FROM feeds f
 				   JOIN feed_tags ft ON ft.feed_key = f.feed_key
-				  WHERE f.is_active = 1${feedKeyCondition}
+				  WHERE f.is_active = 1${filter ? ` AND f.feed_key IN (${filter.sql})` : ''}
 				  ORDER BY ft.label COLLATE NOCASE`,
-			)
-				.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
-				.all<{ feed_key: string; label: string }>();
-			for (const row of results) {
-				addTag(row.feed_key, row.label);
-			}
-		} catch (error) {
-			if (!isMissingTableError(error, 'feed_tags')) {
-				throw error;
-			}
-		}
-
-		const categoryFeedKeyCondition = membership
-			? ` AND feed_key IN (${feedMembershipSql(membership)})`
-			: '';
-		const { results: categoryResults } = await env.DB.prepare(
+			).bind(...binds),
+		);
+	}
+	statements.push(
+		env.DB.prepare(
 			`SELECT feed_key, category
 			   FROM feeds
-			  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${categoryFeedKeyCondition}
+			  WHERE is_active = 1 AND category IS NOT NULL AND category <> ''${filter ? ` AND feed_key IN (${filter.sql})` : ''}
 			  ORDER BY category COLLATE NOCASE`,
-		)
-			.bind(...(feedKeyPage === null ? [] : [feedKeyPage]))
-			.all<{ feed_key: string; category: string | null }>();
-		for (const row of categoryResults) {
-			addTag(row.feed_key, row.category);
+		).bind(...binds),
+	);
+	return statements;
+}
+
+function collectFeedLabels(labelResults: D1Result[], includeFeedTags: boolean): Map<string, string[]> {
+	const labelsByFeedKey = new Map<string, string[]>();
+	const addLabel = (feedKey: string, label: string | null) => {
+		if (!label) {
+			return;
+		}
+		const existing = labelsByFeedKey.get(feedKey) ?? [];
+		if (!existing.includes(label)) {
+			existing.push(label);
+			labelsByFeedKey.set(feedKey, existing);
+		}
+	};
+
+	const categoryRows = labelResults[labelResults.length - 1].results as Array<{ feed_key: string; category: string | null }>;
+	if (includeFeedTags) {
+		const tagRows = labelResults[labelResults.length - 2].results as Array<{ feed_key: string; label: string }>;
+		for (const row of tagRows) {
+			addLabel(row.feed_key, row.label);
 		}
 	}
+	for (const row of categoryRows) {
+		addLabel(row.feed_key, row.category);
+	}
+	return labelsByFeedKey;
+}
 
-	return tagsByFeedKey;
+// One D1 round trip for a handler's statements plus the label lookups that
+// decorate its rows. Databases that predate feed_tags rerun without that lookup.
+async function batchWithFeedLabels(
+	env: Env,
+	statements: D1PreparedStatement[],
+	filter: FeedKeyFilter | null = null,
+): Promise<{ results: D1Result[]; labelsByFeedKey: Map<string, string[]> }> {
+	const run = async (includeFeedTags: boolean) => {
+		const results = await env.DB.batch([...statements, ...feedLabelStatements(env, filter, includeFeedTags)]);
+		return {
+			results: results.slice(0, statements.length),
+			labelsByFeedKey: collectFeedLabels(results.slice(statements.length), includeFeedTags),
+		};
+	};
+
+	try {
+		return await run(true);
+	} catch (error) {
+		if (!isMissingTableError(error, 'feed_tags')) {
+			throw error;
+		}
+		return run(false);
+	}
 }
 
 async function syncPrimaryFeedCategory(env: Env, rowid: number, feedKey: string): Promise<void> {
@@ -430,7 +447,8 @@ async function handleTagList(env: Env): Promise<Response> {
 		{ id: 'user/-/state/com.google/reading-list' },
 	];
 
-	const labels = [...new Set([...((await loadFeedTags(env)).values())].flat())].sort((left, right) =>
+	const { labelsByFeedKey } = await batchWithFeedLabels(env, []);
+	const labels = [...new Set([...labelsByFeedKey.values()].flat())].sort((left, right) =>
 		left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true }),
 	);
 	for (const label of labels) {
@@ -441,9 +459,12 @@ async function handleTagList(env: Env): Promise<Response> {
 }
 
 async function handleSubscriptionList(env: Env): Promise<Response> {
-	const { results } = await env.DB.prepare(
-		'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url FROM feeds WHERE is_active = 1',
-	).all<{
+	const { results: [feedResult], labelsByFeedKey } = await batchWithFeedLabels(env, [
+		env.DB.prepare(
+			'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url FROM feeds WHERE is_active = 1',
+		),
+	]);
+	const results = feedResult.results as Array<{
 		rowid: number;
 		feed_key: string;
 		display_name: string;
@@ -453,13 +474,12 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		icon_url: string | null;
 		source_url: string | null;
 		site_url: string | null;
-	}>();
+	}>;
 
-	const tagsByFeedKey = await loadFeedTags(env);
 	const subscriptions = results.map((f) => ({
 		id: `feed/${f.rowid}`,
 		title: f.custom_title || f.display_name,
-		categories: (tagsByFeedKey.get(f.feed_key) ?? []).map((label) => ({ id: `user/-/label/${label}`, label })),
+		categories: (labelsByFeedKey.get(f.feed_key) ?? []).map((label) => ({ id: `user/-/label/${label}`, label })),
 		url: `${env.BASE_URL}/feed/${f.feed_key}`,
 		sourceUrl: f.source_url,
 		htmlUrl: f.site_url || f.source_url || env.BASE_URL,
@@ -476,17 +496,25 @@ function newestTimestampUsec(current: string | undefined, candidate: string): st
 }
 
 async function handleUnreadCount(env: Env): Promise<Response> {
-	const { results } = await env.DB.prepare(
-		`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+	// Labels are needed only for publishers with unread items; the filter keeps
+	// a large read-only library's metadata out of the response path.
+	const { results: [countResult], labelsByFeedKey } = await batchWithFeedLabels(
+		env,
+		[
+			env.DB.prepare(
+				`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
 		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
 		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`,
-	).all<{
+			),
+		],
+		{ sql: 'SELECT feed_key FROM items WHERE is_read = 0', binds: [] },
+	);
+	const results = countResult.results as Array<{
 		rowid: number;
 		feed_key: string;
 		count: number;
 		newest: string;
-	}>();
-	const tagsByFeedKey = await loadFeedTags(env, { feedRowids: results.map((feed) => feed.rowid) });
+	}>;
 
 	let totalUnreadCount = 0;
 	let newestUnreadUsec: string | undefined;
@@ -502,7 +530,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 	}
 	for (const row of results) {
 		const newestItemTimestampUsec = (isoToUnix(row.newest) * 1_000_000).toString();
-		for (const label of tagsByFeedKey.get(row.feed_key) ?? []) {
+		for (const label of labelsByFeedKey.get(row.feed_key) ?? []) {
 			const streamId = `user/-/label/${label}`;
 			const existing = labelCounts.get(streamId) ?? { count: 0, newestItemTimestampUsec: undefined };
 			existing.count += row.count;
@@ -576,9 +604,9 @@ async function selectStreamRowIds(options: {
 	olderThanUnix: string;
 	continuation: string;
 	env: Env;
-}): Promise<{ rowids: number[]; continuation?: string }> {
+}): Promise<{ rows: StreamRow[]; continuation?: string }> {
 	let sql =
-		'SELECT i.rowid, i.received_at FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE f.is_active = 1';
+		'SELECT i.rowid, i.received_at, i.is_read, i.is_starred, i.content_version FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE f.is_active = 1';
 	const binds: (string | number)[] = [];
 	const label = labelFromStreamId(options.streamId);
 
@@ -595,7 +623,7 @@ async function selectStreamRowIds(options: {
 	} else {
 		const feedKey = await resolveStreamFeedKey(options.streamId, options.env);
 		if (!feedKey) {
-			return { rowids: [] };
+			return { rows: [] };
 		}
 		sql += ' AND i.feed_key = ?';
 		binds.push(feedKey);
@@ -606,8 +634,13 @@ async function selectStreamRowIds(options: {
 	}
 	if (options.olderThanUnix) {
 		// ot means "not older than": keep items at or after the cutoff, compared at millisecond precision.
+		const olderThanSeconds = parseInt(options.olderThanUnix, 10);
 		sql += " AND strftime('%Y-%m-%dT%H:%M:%fZ', i.received_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')";
-		binds.push(parseInt(options.olderThanUnix, 10));
+		binds.push(olderThanSeconds);
+		// Stored received_at values are 24-character UTC ISO strings, so the same
+		// cutoff as a plain string comparison lets SQLite seek the date indexes.
+		sql += ' AND i.received_at >= ?';
+		binds.push(new Date(olderThanSeconds * 1000).toISOString());
 	}
 	const cursor = options.continuation
 		? decodeContinuation(options.continuation, {
@@ -641,7 +674,7 @@ async function selectStreamRowIds(options: {
 	const page = results.slice(0, options.limit);
 	const nextCursor = results.length > options.limit ? page[page.length - 1] : null;
 	return {
-		rowids: page.map((row) => row.rowid),
+		rows: page,
 		...(nextCursor
 			? {
 					continuation: encodeContinuation({
@@ -657,7 +690,42 @@ async function selectStreamRowIds(options: {
 	};
 }
 
-async function loadResponseItems(rowids: number[], env: Env): Promise<
+interface ResponseFeedRow {
+	rowid: number;
+	feed_key: string;
+	display_name: string;
+	custom_title: string | null;
+	category: string | null;
+	source_url: string | null;
+	site_url: string | null;
+}
+
+interface ResponseItemRow {
+	rowid: number;
+	id: string;
+	feed_key: string;
+	from_name: string | null;
+	subject: string;
+	html_content: string;
+	text_content: string | null;
+	content_pruned_at: string | null;
+	original_url: string | null;
+	received_at: string;
+	is_read: number;
+	is_starred: number;
+	content_version: number;
+}
+
+interface ResponseItemBody {
+	direction: string;
+	content: string;
+}
+
+async function loadResponseItems(
+	rowids: number[],
+	env: Env,
+	options: { singleBody: boolean },
+): Promise<
 	Array<{
 		id: string;
 		categories: string[];
@@ -667,8 +735,9 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		crawlTimeMsec: string;
 		timestampUsec: string;
 		author: string;
-		summary: { direction: string; content: string };
-		content: { direction: string; content: string };
+		summary?: ResponseItemBody;
+		content: ResponseItemBody;
+		contentVersion: string;
 		isBodyPruned: boolean;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
@@ -678,81 +747,44 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 		return [];
 	}
 
-	type ResponseItemRow = {
-		rowid: number;
-		id: string;
-		feed_key: string;
-		from_name: string | null;
-		subject: string;
-		html_content: string;
-		text_content: string | null;
-		content_pruned_at: string | null;
-		original_url: string | null;
-		received_at: string;
-		is_read: number;
-		is_starred: number;
-	};
-	const itemResults = await Promise.all(
-		membershipPages(rowids).map(async (rowidPage) => {
-			const selectRows = (originalUrlExpression: string) =>
-				env.DB.prepare(
-					`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred
-					 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
-				)
-					.bind(rowidPage)
-					.all<ResponseItemRow>();
+	// Every lookup depends only on the requested rowids, so each membership
+	// page is one D1 round trip: the items, their feeds, and the feeds' labels.
+	const loadPage = async (rowidPage: string) => {
+		const filter: FeedKeyFilter = {
+			sql: 'SELECT feed_key FROM items WHERE rowid IN (SELECT value FROM json_each(?))',
+			binds: [rowidPage],
+		};
+		const statements = (originalUrlExpression: string) => [
+			env.DB.prepare(
+				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version
+				 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
+			).bind(rowidPage),
+			env.DB.prepare(
+				`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${filter.sql})`,
+			).bind(rowidPage),
+		];
 
-			try {
-				return await selectRows('i.original_url');
-			} catch (error) {
-				if (!isMissingColumnError(error, 'original_url')) {
-					throw error;
-				}
-				return selectRows('NULL');
+		try {
+			return await batchWithFeedLabels(env, statements('i.original_url'), filter);
+		} catch (error) {
+			if (!isMissingColumnError(error, 'original_url')) {
+				throw error;
 			}
-		}),
-	);
-	const items = itemResults.flatMap((result) => result.results);
-
-	// Publisher keys can be several KB long. Derive their membership in SQLite
-	// from the compact item rowids instead of repeating those keys in bindings.
-	const foundRowids = items.map((item) => item.rowid);
-	const membership = { itemRowids: foundRowids };
-	const feedTagsByKey = await loadFeedTags(env, membership);
-	const feedMap = new Map<
-		string,
-		{
-			rowid: number;
-			display_name: string;
-			custom_title: string | null;
-			category: string | null;
-			source_url: string | null;
-			site_url: string | null;
+			return batchWithFeedLabels(env, statements('NULL'), filter);
 		}
-	>();
+	};
 
-	if (foundRowids.length > 0) {
-		const feedResults = await Promise.all(
-			membershipPages(foundRowids).map((rowidPage) => {
-				return env.DB.prepare(
-					`SELECT rowid, feed_key, display_name, custom_title, category, source_url, site_url FROM feeds WHERE feed_key IN (${feedMembershipSql(membership)})`,
-				)
-					.bind(rowidPage)
-					.all<{
-						rowid: number;
-						feed_key: string;
-						display_name: string;
-						custom_title: string | null;
-						category: string | null;
-						source_url: string | null;
-						site_url: string | null;
-					}>();
-			}),
-		);
-		for (const result of feedResults) {
-			for (const f of result.results) {
-				feedMap.set(f.feed_key, f);
-			}
+	const items: ResponseItemRow[] = [];
+	const feedMap = new Map<string, ResponseFeedRow>();
+	const labelsByFeedKey = new Map<string, string[]>();
+	for (const page of await Promise.all(membershipPages(rowids).map(loadPage))) {
+		const [itemResult, feedResult] = page.results;
+		items.push(...(itemResult.results as ResponseItemRow[]));
+		for (const feed of feedResult.results as ResponseFeedRow[]) {
+			feedMap.set(feed.feed_key, feed);
+		}
+		for (const [feedKey, labels] of page.labelsByFeedKey) {
+			labelsByFeedKey.set(feedKey, labels);
 		}
 	}
 
@@ -761,14 +793,17 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 			const feed = feedMap.get(item.feed_key);
 			const ts = isoToUnix(item.received_at);
 			const categories = ['user/-/state/com.google/reading-list'];
-			const renderedContent = createRenderedContent({
-				htmlContent: item.html_content,
-				textContent: item.text_content,
-				originalUrl: item.original_url,
-			});
+			const body: ResponseItemBody = {
+				direction: 'ltr',
+				content: createRenderedContent({
+					htmlContent: item.html_content,
+					textContent: item.text_content,
+					originalUrl: item.original_url,
+				}),
+			};
 			if (item.is_read) categories.push('user/-/state/com.google/read');
 			if (item.is_starred) categories.push('user/-/state/com.google/starred');
-			for (const label of feedTagsByKey.get(item.feed_key) ?? []) {
+			for (const label of labelsByFeedKey.get(item.feed_key) ?? []) {
 				categories.push(`user/-/label/${label}`);
 			}
 
@@ -783,8 +818,11 @@ async function loadResponseItems(rowids: number[], env: Env): Promise<
 					crawlTimeMsec: (ts * 1000).toString(),
 					timestampUsec: (ts * 1_000_000).toString(),
 					author: item.from_name || '',
-					summary: { direction: 'ltr', content: renderedContent },
-					content: { direction: 'ltr', content: renderedContent },
+					// Third-party readers expect the body in both fields; Pigeon
+					// clients read content only and skip the duplicate bytes.
+					...(options.singleBody ? {} : { summary: body }),
+					content: body,
+					contentVersion: String(item.content_version),
 					isBodyPruned: item.content_pruned_at != null,
 					...(item.original_url
 						? {
@@ -831,7 +869,15 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 		continuation: c,
 		env,
 	});
-	const itemRefs = page.rowids.map((rowid) => ({ id: String(rowid) }));
+	// Pigeon clients use the read, starred, and contentVersion extensions to
+	// apply state locally and fetch only bodies that changed.
+	const itemRefs = page.rows.map((row) => ({
+		id: String(row.rowid),
+		timestampUsec: String(isoToUnix(row.received_at) * 1_000_000),
+		read: Boolean(row.is_read),
+		starred: Boolean(row.is_starred),
+		contentVersion: String(row.content_version),
+	}));
 	return Response.json({
 		itemRefs,
 		...(page.continuation ? { continuation: page.continuation } : {}),
@@ -878,7 +924,7 @@ async function handleStreamItemContents(request: Request, env: Env): Promise<Res
 	if (rowids.length === 0) {
 		return Response.json(createItemsEnvelope([], 'user/-/state/com.google/reading-list'));
 	}
-	const responseItems = await loadResponseItems(rowids, env);
+	const responseItems = await loadResponseItems(rowids, env, { singleBody: isPigeonClient(request) });
 	return Response.json(createItemsEnvelope(responseItems, 'user/-/state/com.google/reading-list'));
 }
 
@@ -925,7 +971,11 @@ async function handleStreamContents(request: Request, url: URL, env: Env): Promi
 		continuation: c,
 		env,
 	});
-	const items = await loadResponseItems(page.rowids, env);
+	const items = await loadResponseItems(
+		page.rows.map((row) => row.rowid),
+		env,
+		{ singleBody: isPigeonClient(request) },
+	);
 
 	return Response.json({
 		...createItemsEnvelope(items, streamId),

@@ -221,6 +221,7 @@ export async function buildRssItemStatements(
 						html_content = excluded.html_content,
 						text_content = excluded.text_content,
 						content_pruned_at = NULL,
+						content_version = items.content_version + 1,
 					original_url = CASE
 							WHEN excluded.original_url IS NOT NULL
 							  AND (
