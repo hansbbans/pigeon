@@ -19,6 +19,8 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	let explanation: String
 	let learningState: String
 	var isBodyPruned: Bool? = nil
+	/// Server version of the `html` currently held; nil when unknown (legacy servers or caches).
+	var contentVersion: String? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -75,6 +77,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			explanation: explanation,
 			learningState: learningState,
 			isBodyPruned: isBodyPruned,
+			contentVersion: contentVersion,
 		)
 	}
 }

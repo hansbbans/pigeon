@@ -1,3 +1,45 @@
+# Perf: fast folder/feed opening (started 2026-10-26)
+
+Branch `claude/perf-navigation`, worktree `~/code/pigeon-perf`. Goal: tapping a folder or feed shows stories as fast as possible on iOS and web.
+
+## Measured baseline (prod D1 6,712 items / 54 feeds / avg body 39 KB; iOS perf UI tests on Pigeon Claude sim)
+- iOS cold feed open: 1 `stream/items/ids` + up to 5 sequential `stream/items/contents` (10 ids each) = 6 round trips; every revisit re-downloads all 50 bodies (`refreshExistingContent: true`).
+- Server `stream/items/contents`: 4 sequential D1 queries per call, body serialized twice (`summary` + `content`). Render CPU 1.2 ms/item avg (58 ms per 50) — fine on Workers.
+- D1 SQL: feed unread 3 ms, folder 1.5 ms, reading-list 0.4 ms, Today 11.4 ms (non-sargable strftime) vs 0.4 ms sargable, unread-count 65 ms (MAX(received_at) forces row reads through 2.8k overflow pages), contents 50 rows 34 ms.
+- Web: first visit = ids then contents (20 of 50 bodies), revalidate re-downloads all 50 cached bodies; shell HTML ~400 KB rebuilt per request, no cache headers.
+- iOS UI perf tests (3 iterations): folder expand/collapse 11.9 s clock / 2.41 s CPU; cached feed navigation 24.2 s / 5.54 s CPU; sidebar scroll 5.2 s / 1.02 s CPU.
+
+## Protocol additions (first-party only; Reeder/NetNewsWire unaffected)
+1. `items.content_version INTEGER NOT NULL DEFAULT 0` (schema v15). Bumped by every writer that changes `html_content`, `text_content`, or `content_pruned_at` (rss-fetcher upsert, cron prune). Read/star changes do not bump it.
+2. `GET /reader/api/0/stream/items/ids`: each itemRef = `{ id, timestampUsec, read, starred, contentVersion }` (last three are Pigeon extensions; `contentVersion` is a string).
+3. `stream/items/contents` and `stream/contents`: each item gains `contentVersion`. When the request has an `X-Pigeon-Client` header, emit only `content` (omit `summary`). Without it keep both.
+4. Schema v15 replaces `idx_items_unread_feed` with `idx_items_unread_feed_date ON items(feed_key, received_at DESC) WHERE is_read = 0`.
+
+## Tasks
+### Server (src/greader.ts, migrations, rss-fetcher, cron-handler)
+- [x] S1 schema v15: content_version column + index swap (+ SCHEMA.sql)
+- [x] S2 bump content_version in rss-fetcher upsert and cron prune
+- [x] S3 ids refs carry timestampUsec/read/starred/contentVersion
+- [x] S4 loadResponseItems: one `batch()` (items+feeds+tags+categories), contentVersion in items, single body for X-Pigeon-Client
+- [x] S5 Today `ot`: sargable `received_at >= ISO` predicate
+- [x] S6 unread-count + subscription/list: one batch instead of 3 sequential queries
+### Web (src/browser-app.ts, browser-app-client.ts, index.ts shell route)
+- [x] W1 first visit via single `stream/contents?n=50`, X-Pigeon-Client header
+- [x] W2 revalidate: apply read/star from refs, fetch only missing/changed bodies; ensureArticleContent skips cached
+- [x] W3 mergeArticleIntoCache incremental; Set-based membership checks
+- [x] W4 memoize shell HTML; ETag + Cache-Control on /app
+### iOS
+- [x] I1 Recommendation.contentVersion; thread through model merges
+- [x] I2 stream ref/item models gain the new fields
+- [x] I3 recommendationsPage: reuse cached bodies by version, apply read/star from refs, one contents request (≤50 ids), X-Pigeon-Client everywhere, drop refreshExistingContent
+- [x] I4 tests for the new flow; fix chunk-sequencing tests
+- [x] O1 OfflineLibraryStore: cached ISO8601 formatters, reader_id index, no double decode in scoped load
+### Wrap-up
+- [ ] npm test + typecheck; iOS unit suite; perf UI tests after
+- [ ] CHANGELOG Unreleased, README notes
+- [ ] PR, CI, /code-review, merge, deploy worker, verify live
+
+
 # Pigeon — Task Tracker
 
 ## Phase 1: Foundation

@@ -66,18 +66,29 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		decoder.dateDecodingStrategy = .custom { decoder in
 			let container = try decoder.singleValueContainer()
 			let value = try container.decode(String.self)
-			let fractional = ISO8601DateFormatter()
-			fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-			if let date = fractional.date(from: value) { return date }
-			let standard = ISO8601DateFormatter()
-			standard.formatOptions = [.withInternetDateTime]
-			guard let date = standard.date(from: value) else {
+			// Every cached article decodes at least one date. Allocating formatters
+			// per value made a full snapshot load pay tens of microseconds per
+			// article twice over; ISO8601DateFormatter is thread-safe, so share them.
+			if let date = Self.fractionalISO8601Formatter.date(from: value) { return date }
+			guard let date = Self.standardISO8601Formatter.date(from: value) else {
 				throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected an ISO 8601 date")
 			}
 			return date
 		}
 		self.decoder = decoder
 	}
+
+	nonisolated(unsafe) private static let fractionalISO8601Formatter: ISO8601DateFormatter = {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		return formatter
+	}()
+
+	nonisolated(unsafe) private static let standardISO8601Formatter: ISO8601DateFormatter = {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime]
+		return formatter
+	}()
 
 	static func inMemory() -> OfflineLibraryStore {
 		OfflineLibraryStore(databaseURL: nil)
@@ -2971,6 +2982,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			"CREATE TABLE IF NOT EXISTS cached_articles (account_id TEXT NOT NULL, id TEXT NOT NULL, reader_id TEXT NOT NULL, feed_key TEXT NOT NULL, received_at REAL NOT NULL, is_read INTEGER NOT NULL, is_starred INTEGER NOT NULL, body_pruned INTEGER NOT NULL DEFAULT 0, payload BLOB NOT NULL, PRIMARY KEY (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_cached_articles_account_date ON cached_articles(account_id, received_at DESC)",
 			"CREATE INDEX IF NOT EXISTS idx_cached_articles_feed ON cached_articles(account_id, feed_key, received_at DESC)",
+			"CREATE INDEX IF NOT EXISTS idx_cached_articles_reader ON cached_articles(account_id, reader_id)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_articles (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, article_id TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY (account_id, collection_id, article_id))",
 			"CREATE INDEX IF NOT EXISTS idx_cached_collection_order ON cached_collection_articles(account_id, collection_id, position)",
 			"CREATE TABLE IF NOT EXISTS cached_collection_pagination (account_id TEXT NOT NULL, collection_id TEXT NOT NULL, continuation TEXT NOT NULL, PRIMARY KEY (account_id, collection_id))",

@@ -2740,7 +2740,6 @@ final class ReaderAppModel {
 					from: collection.streamID,
 					excludeTag: collection.smartSection?.streamExcludeTag,
 					cachedRecommendations: articleCache[collection.id] ?? [],
-					refreshExistingContent: true,
 				)
 				dayBounds = nil
 			}
@@ -2901,7 +2900,6 @@ final class ReaderAppModel {
 			from: streamID,
 			dayBounds: dayBounds,
 			cachedRecommendations: cachedRecommendations,
-			refreshExistingContent: true,
 		)
 		try Task.checkCancellation()
 		guard isCurrentCollectionOperation(
@@ -2965,7 +2963,6 @@ final class ReaderAppModel {
 				dayBounds: dayBounds,
 				continuation: nextContinuation,
 				cachedRecommendations: articles,
-				refreshExistingContent: true,
 			)
 			try Task.checkCancellation()
 			guard isCurrentCollectionOperation(
@@ -3022,7 +3019,6 @@ final class ReaderAppModel {
 					dayBounds: dayBounds,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
-					refreshExistingContent: true,
 				)
 			} else if collection.smartSection?.usesRecommendationEndpoint == true {
 				streamContinuations[collection.id] = nil
@@ -3033,7 +3029,6 @@ final class ReaderAppModel {
 					excludeTag: collection.smartSection?.streamExcludeTag,
 					continuation: continuation,
 					cachedRecommendations: articleCache[collection.id] ?? [],
-					refreshExistingContent: true,
 				)
 			}
 			try Task.checkCancellation()
@@ -3888,6 +3883,7 @@ final class ReaderAppModel {
 				? existing.learningState
 				: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
 			isBodyPruned: preserveBody ? existing.isBodyPruned : incoming.isBodyPruned,
+			contentVersion: preserveBody || incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 		)
 	}
 
@@ -3916,6 +3912,7 @@ final class ReaderAppModel {
 			explanation: incoming.explanation.isEmpty ? existing.explanation : incoming.explanation,
 			learningState: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
 			isBodyPruned: incoming.isBodyPruned,
+			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 		)
 	}
 
@@ -3940,6 +3937,7 @@ final class ReaderAppModel {
 			explanation: merged.explanation,
 			learningState: merged.learningState,
 			isBodyPruned: merged.isBodyPruned,
+			contentVersion: merged.contentVersion,
 		)
 	}
 

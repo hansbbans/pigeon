@@ -7100,7 +7100,7 @@ struct ReaderAppModelTests {
 		)
 		let navigation = ReaderNavigationState(items: [folder, child])
 		let store = OfflineLibraryStore.inMemory()
-		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1", contentVersion: "v1")
 		let model = try makeModel(httpClient: httpClient, offlineStore: store)
 		model.setNavigation(navigation, markAsLoaded: true)
 		let cachedReadStory = makeArticle(
@@ -7108,6 +7108,7 @@ struct ReaderAppModelTests {
 			isRead: true,
 			receivedAt: 1_786_272_003,
 			feedKey: "feed/1",
+			contentVersion: "v1",
 		)
 		model.setArticles([cachedReadStory], for: folder)
 		model.select(item: folder)
@@ -7139,11 +7140,11 @@ struct ReaderAppModelTests {
 			smartSection: nil,
 		)
 		let navigation = ReaderNavigationState(items: [folder, child])
-		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1", contentVersion: "v1")
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: httpClient, offlineStore: store)
 		model.setNavigation(navigation, markAsLoaded: true)
-		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1", contentVersion: "v1")
 		model.setArticles([firstPageStory], for: folder)
 		model.select(item: folder)
 		model.articleFilter = .all
@@ -7302,11 +7303,11 @@ struct ReaderAppModelTests {
 			smartSection: nil,
 		)
 		let navigation = ReaderNavigationState(items: [folder, child])
-		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1")
+		let httpClient = PaginationHTTPClient(streamID: folder.streamID, originStreamID: "feed/1", contentVersion: "v1")
 		let store = OfflineLibraryStore.inMemory()
 		let model = try makeModel(httpClient: httpClient, offlineStore: store)
 		model.setNavigation(navigation, markAsLoaded: true)
-		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1")
+		let firstPageStory = makeArticle(id: "newest", receivedAt: 1_786_272_003, feedKey: "feed/1", contentVersion: "v1")
 		model.setArticles([firstPageStory], for: folder)
 		model.select(item: folder)
 		model.articleFilter = .all
@@ -9990,8 +9991,10 @@ struct ReaderAppModelTests {
 		let launchMedian = median(launchSamples)
 		let refreshMedian = median(refreshSamples)
 		print("RELOAD_BENCH summary baselineLaunchMedian=\(baselineLaunchMedian) launchMedian=\(launchMedian) baselineRefreshMedian=\(baselineRefreshMedian) refreshMedian=\(refreshMedian) launchAvgRequests=\(launchRequests / 3) launchAvgBytes=\(launchBytes / 3) refreshAvgRequests=\(refreshRequests / 3) refreshAvgBytes=\(refreshBytes / 3)")
-		#expect(launchMedian <= baselineLaunchMedian * 0.1)
-		#expect(refreshMedian <= baselineRefreshMedian * 0.1)
+		// The network baseline now makes one contents request per page instead of
+		// five sequential chunks, so the warm path's advantage is ~4-6x, not 10x.
+		#expect(launchMedian <= baselineLaunchMedian * 0.3)
+		#expect(refreshMedian <= baselineRefreshMedian * 0.3)
 	}
 
 	private func median(_ samples: [Double]) -> Double {
@@ -10682,6 +10685,7 @@ struct ReaderAppModelTests {
 		html: String = "<p>Body</p>",
 		originalURL: URL? = nil,
 		title: String? = nil,
+		contentVersion: String? = nil,
 	) -> Recommendation {
 		Recommendation(
 			id: id,
@@ -10699,7 +10703,8 @@ struct ReaderAppModelTests {
 			confidence: 0,
 			sampleCount: 0,
 			explanation: "Starting with recency",
-			learningState: "Starting with recency"
+			learningState: "Starting with recency",
+			contentVersion: contentVersion,
 		)
 	}
 
@@ -11746,6 +11751,9 @@ private actor PaginationHTTPClient: HTTPClient {
 	private let streamID: String
 	private let originStreamID: String?
 	private let emptyStream: Bool
+	/// When set, refs and items carry this `contentVersion` like a Pigeon server,
+	/// so cached bodies holding the same version are reused instead of refetched.
+	private let contentVersion: String?
 	private var capturedRequests: [RequestSnapshot] = []
 	private var shouldFailNextItemIDRequest = false
 	private var shouldPauseNextItemIDRequest = false
@@ -11759,11 +11767,13 @@ private actor PaginationHTTPClient: HTTPClient {
 		streamID: String = "user/-/label/News",
 		originStreamID: String? = nil,
 		emptyStream: Bool = false,
+		contentVersion: String? = nil,
 	) {
 		self.repeatsContinuation = repeatsContinuation
 		self.streamID = streamID
 		self.originStreamID = originStreamID
 		self.emptyStream = emptyStream
+		self.contentVersion = contentVersion
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -11810,15 +11820,15 @@ private actor PaginationHTTPClient: HTTPClient {
 			}
 			switch query["c"] {
 			case nil:
-				data = Data(#"{"itemRefs":[{"id":"newest"},{"id":"middle"}],"continuation":"page-2"}"#.utf8)
+				data = Data("{\"itemRefs\":[\(itemRef("newest")),\(itemRef("middle"))],\"continuation\":\"page-2\"}".utf8)
 			case "page-2":
 				let continuation = repeatsContinuation ? ",\"continuation\":\"page-2\"" : ""
-				data = Data("{\"itemRefs\":[{\"id\":\"older\"}]\(continuation)}".utf8)
+				data = Data("{\"itemRefs\":[\(itemRef("older"))]\(continuation)}".utf8)
 			default:
 				data = Data(#"{"itemRefs":[]}"#.utf8)
 			}
 		case "/reader/api/0/stream/items/contents":
-			data = Self.contentsResponse(
+			data = contentsResponse(
 				for: Self.formValues(from: request.httpBody, named: "i"),
 				streamID: originStreamID ?? streamID,
 			)
@@ -11862,7 +11872,13 @@ private actor PaginationHTTPClient: HTTPClient {
 		}
 	}
 
-	private static func contentsResponse(for ids: [String], streamID: String) -> Data {
+	private func itemRef(_ id: String) -> String {
+		guard let contentVersion else { return "{\"id\":\"\(id)\"}" }
+		return "{\"id\":\"\(id)\",\"contentVersion\":\"\(contentVersion)\"}"
+	}
+
+	private func contentsResponse(for ids: [String], streamID: String) -> Data {
+		let versionField = contentVersion.map { ",\"contentVersion\":\"\($0)\"" } ?? ""
 		let items = ids.map { id in
 			let published: Int
 			switch id {
@@ -11870,7 +11886,7 @@ private actor PaginationHTTPClient: HTTPClient {
 			case "middle": published = 1_786_272_002
 			default: published = 1_786_272_001
 			}
-			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+			return "{\"id\":\"\(id)\",\"categories\":[],\"title\":\"\(id.capitalized)\",\"published\":\(published),\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"\(streamID)\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}\(versionField)}"
 		}.joined(separator: ",")
 		return Data("{\"id\":\"\(streamID)\",\"updated\":0,\"items\":[\(items)]}".utf8)
 	}

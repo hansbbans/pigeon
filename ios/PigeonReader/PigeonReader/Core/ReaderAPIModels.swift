@@ -74,6 +74,11 @@ nonisolated struct ReaderStreamItemIDsResponse: Decodable, Sendable {
 
 nonisolated struct ReaderStreamItemReference: Decodable, Sendable {
 	let id: String
+	// Pigeon extensions; absent on plain Google Reader servers.
+	var timestampUsec: String? = nil
+	var read: Bool? = nil
+	var starred: Bool? = nil
+	var contentVersion: String? = nil
 }
 
 nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
@@ -87,6 +92,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let alternate: [ReaderAlternateLink]
 	let origin: ReaderStreamOrigin?
 	let isBodyPruned: Bool?
+	let contentVersion: String?
 
 	private enum CodingKeys: String, CodingKey {
 		case id
@@ -99,6 +105,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		case alternate
 		case origin
 		case isBodyPruned
+		case contentVersion
 	}
 
 	init(from decoder: Decoder) throws {
@@ -113,6 +120,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		alternate = try container.decodeIfPresent([ReaderAlternateLink].self, forKey: .alternate) ?? []
 		origin = try container.decodeIfPresent(ReaderStreamOrigin.self, forKey: .origin)
 		isBodyPruned = try container.decodeIfPresent(Bool.self, forKey: .isBodyPruned)
+		contentVersion = try container.decodeIfPresent(String.self, forKey: .contentVersion)
 	}
 
 	var isRead: Bool {
