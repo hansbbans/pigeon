@@ -66,6 +66,40 @@ IOS_RUNNER_LOCK_WAIT_SECONDS=5 run_lock fourth acquire
 assert_owner fourth
 run_lock fourth release
 
+# A lock whose holder process is gone is replaced immediately, before any age rule.
+sleep 0.1 &
+dead_pid=$!
+wait "$dead_pid"
+mkdir "$LOCK"
+printf '%s\n%s\n' 'crashed-job' "$dead_pid" > "$LOCK/owner"
+IOS_RUNNER_LOCK_WAIT_SECONDS=5 run_lock fifth acquire
+assert_owner fifth
+run_lock fifth release
+
+# A lock whose holder process is alive is honored even without an explicit owner match.
+mkdir "$LOCK"
+printf '%s\n%s\n' 'running-job' "$$" > "$LOCK/owner"
+if IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock sixth acquire; then
+  fail_test "a lock with a live holder process was replaced"
+fi
+assert_owner running-job
+rm -rf "$LOCK"
+
+# The acquired lock records a live job pid on its second line.
+run_lock seventh acquire
+recorded_pid="$(sed -n '2p' "$LOCK/owner")"
+[[ "$recorded_pid" =~ ^[0-9]+$ ]] || fail_test "no job pid recorded: $(cat "$LOCK/owner")"
+ps -p "$recorded_pid" >/dev/null || fail_test "recorded job pid $recorded_pid is not alive"
+run_lock seventh release
+
+# A waiter whose step shell has died stops waiting instead of taking the lock later.
+run_lock first acquire
+if IOS_RUNNER_LOCK_PARENT_PID="$dead_pid" IOS_RUNNER_LOCK_WAIT_SECONDS=30 run_lock eighth acquire 2>/dev/null; then
+  fail_test "an orphaned waiter took the lock"
+fi
+assert_owner first
+run_lock first release
+
 # Outside Actions, acquire and release run in separate shells with no explicit owner.
 IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" acquire
 IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" release

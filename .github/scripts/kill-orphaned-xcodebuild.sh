@@ -35,7 +35,12 @@ orphan_pids() {
       *) continue ;;
     esac
     [[ "$command" == *"${runner_work_root%/}/"* ]] || continue
-    [[ "$command" != *"$current_run"* ]] || continue
+    # The run id appears as a path component or suffix (".../todomd-ci/<run>-<attempt>/",
+    # "pigeon-ci-<run>-<attempt>", "...-<run>-<attempt>.xcresult"); anchor it so
+    # neighbouring ids such as 1<run> or <run>-10 are not spared.
+    if [[ "$command" =~ [-/]${current_run}([/. ]|$) ]]; then
+      continue
+    fi
     printf '%s\t%s\n' "$pid" "$command"
   done < <(list_processes)
 }

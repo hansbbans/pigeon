@@ -22,6 +22,9 @@ cat > "$PROCESS_LIST" <<'LIST'
 105 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -derivedDataPath /Users/hans/Library/Developer/Xcode/DerivedData/TodoMD-abc
 106 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -project TodoMD.xcodeproj -scheme TodoMDApp -configuration Release -archivePath /Users/ci/actions-runner-todomd/_work/todomd/todomd/build/TodoMDApp.xcarchive archive
 107 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -exportArchive -archivePath /Users/ci/actions-runner-pigeon/_work/pigeon/pigeon/.release/pigeon-testflight-1-1/PigeonReader.xcarchive
+108 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -derivedDataPath /Users/ci/actions-runner-todomd/_work/_temp/todomd-ci/1222-1/derived-data
+109 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -derivedDataPath /Users/ci/actions-runner-todomd/_work/_temp/todomd-ci/222-10/derived-data
+110 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -derivedDataPath /Users/ci/actions-runner-todomd/_work/_temp/pigeon-ci-222-1 -resultBundlePath /Users/ci/actions-runner-todomd/_work/_temp/PigeonReaderTests-222-1.xcresult
 not-a-pid xcodebuild /Users/ci/actions-runner-todomd/_work/_temp/todomd-ci/111-1
 LIST
 
@@ -40,7 +43,10 @@ grep -q "(pid 103)" <<<"$output" && fail_test "a manual Simulator session was re
 grep -q "(pid 105)" <<<"$output" && fail_test "a local developer build was reported"
 grep -q "(pid 106)" <<<"$output" || fail_test "an earlier release archive under the workspace was not reported: $output"
 grep -q "(pid 107)" <<<"$output" && fail_test "another runner's release archive was reported"
-grep -q "handled: 3" <<<"$output" || fail_test "expected three orphans, got: $output"
+grep -q "(pid 108)" <<<"$output" || fail_test "run 1222-1 was mistaken for the current run 222-1: $output"
+grep -q "(pid 109)" <<<"$output" || fail_test "run 222-10 was mistaken for the current run 222-1: $output"
+grep -q "(pid 110)" <<<"$output" && fail_test "the current run's suffix-style paths were reported"
+grep -q "handled: 5" <<<"$output" || fail_test "expected five orphans, got: $output"
 
 # GitHub Actions sets GITHUB_RUN_ID for every step, so drop it explicitly.
 if env -u GITHUB_RUN_ID -u GITHUB_RUN_ATTEMPT RUNNER_TEMP=/tmp ORPHAN_PROCESS_LIST="$PROCESS_LIST" bash "$SCRIPT" 2>/dev/null; then
