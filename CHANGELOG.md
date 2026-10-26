@@ -2,6 +2,19 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- Opening a folder or feed is much faster. The app asks the server once for the page of story identifiers, reuses every story body it already has when the server confirms the body is unchanged, and downloads any new or changed bodies in a single request instead of five sequential ones. Read and starred state arrives with the identifiers, so an unchanged page needs one small round trip.
+- The server answers story-content requests with one batched database round trip instead of four sequential queries, sends each body once to Pigeon's own apps, and uses index-only plans for Today, per-feed unread lists, and unread counts.
+- The web app loads a first visit to a feed or folder with a single request, refreshes cached views without re-downloading unchanged bodies, and serves the app shell with cache validation headers.
+
+### For contributors
+
+- Database schema v15 adds `items.content_version` (bumped whenever a story body changes or is pruned) and replaces `idx_items_unread_feed` with a covering `(feed_key, received_at DESC)` unread index. Deploy the Worker so the migration runs before relying on the new iOS build.
+- `stream/items/ids` item references now carry `timestampUsec`, `read`, `starred`, and `contentVersion`; `stream/items/contents` and `stream/contents` items carry `contentVersion` and omit `summary` when the request sends `X-Pigeon-Client`. Third-party Google Reader clients see the previous shapes.
+
 ## [0.1.7.0] - 2026-10-07
 
 ### Fixed

@@ -57,6 +57,13 @@ class SqliteD1Statement {
 		this.db.prepare(this.sql).run(...this.values);
 	}
 
+	// D1 batch results carry both rows and change counts.
+	async execute(): Promise<{ results: unknown[]; meta: { changes: number } }> {
+		const { results } = await this.all();
+		const { changes } = this.db.prepare('SELECT changes() AS changes').get() as { changes: number };
+		return { results, meta: { changes: Number(changes) } };
+	}
+
 	isEngagementInsert(): boolean {
 		return this.sql.startsWith('INSERT OR IGNORE INTO engagement_events');
 	}
@@ -83,14 +90,16 @@ class SqliteD1Database {
 		this.executedSql.length = 0;
 	}
 
-	async batch(statements: SqliteD1Statement[]): Promise<void> {
+	async batch(statements: SqliteD1Statement[]): Promise<Array<{ results: unknown[]; meta: { changes: number } }>> {
 		this.batchSizes.push(statements.length);
 		if (this.failEngagementWrites && statements.some((statement) => statement.isEngagementInsert())) {
 			throw new Error('simulated engagement write failure');
 		}
+		const results = [];
 		for (const statement of statements) {
-			await statement.run();
+			results.push(await statement.execute());
 		}
+		return results;
 	}
 }
 
@@ -416,7 +425,7 @@ test('native engagement is authenticated, validated, migrated, and idempotent', 
 	);
 	assert.equal(
 		(db.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'14',
+		'15',
 	);
 	const eventColumns = db
 		.prepare('PRAGMA table_info(engagement_events)')
@@ -1517,4 +1526,96 @@ test('recommendations match monitored topics in bounded HTML when text content i
 	);
 	assert.ok(boundedExcerptSelect);
 	assert.match(boundedExcerptSelect.sql, /1, 8000/);
+});
+
+// --- One D1 round trip per GReader read endpoint ---
+
+async function greaderGet(env: never, path: string, headers: Record<string, string> = {}): Promise<Response> {
+	return handleGreaderRequest(
+		new Request(`${BASE_URL}${path}`, { headers: { Authorization: await authorization(), ...headers } }),
+		env,
+	);
+}
+
+test('stream/items/contents loads 50 items in one batch and emits a single body for Pigeon clients', async () => {
+	const items = Array.from({ length: 50 }, (_, index) => ({
+		id: `batched-${String(index).padStart(2, '0')}`,
+		feedKey: index % 2 === 0 ? 'even-feed' : 'odd-feed',
+		title: `Batched ${index}`,
+		receivedAt: minutesAgo(index),
+		htmlContent: `<p>Body ${index}</p>`,
+	}));
+	const { env, db, database } = createFixture(items);
+	await ensureDatabaseSchema(env);
+	db.exec("UPDATE items SET content_version = 4 WHERE id = 'batched-00'");
+	db.exec("UPDATE feeds SET category = 'Folder' WHERE feed_key = 'even-feed'");
+	const rowids = (db.prepare('SELECT rowid FROM items ORDER BY rowid').all() as Array<{ rowid: number }>).map((row) => row.rowid);
+	const query = new URLSearchParams(rowids.map((rowid) => ['i', String(rowid)]));
+
+	database.clearExecutedSql();
+	const batchesBefore = database.batchSizes.length;
+	const pigeon = await greaderGet(env, `/reader/api/0/stream/items/contents?${query}`, { 'X-Pigeon-Client': 'pigeon-ios/2' });
+	assert.equal(pigeon.status, 200);
+	assert.deepEqual(database.batchSizes.slice(batchesBefore), [4]);
+	assert.equal(database.executedSql.length, 4);
+	assert.equal(database.executedSql.filter((query) => query.sql.startsWith('SELECT i.rowid, i.id, i.feed_key')).length, 1);
+
+	const pigeonItems = (await pigeon.json() as { items: Array<Record<string, unknown>> }).items;
+	assert.equal(pigeonItems.length, 50);
+	assert.equal(pigeonItems.every((item) => !('summary' in item)), true);
+	const first = pigeonItems.find((item) => item.title === 'Batched 0');
+	assert.ok(first);
+	assert.equal(first.contentVersion, '4');
+	assert.deepEqual(first.content, { direction: 'ltr', content: '<p>Body 0</p>' });
+	assert.deepEqual(first.categories, ['user/-/state/com.google/reading-list', 'user/-/label/Folder']);
+	assert.equal(pigeonItems.find((item) => item.title === 'Batched 1')?.contentVersion, '0');
+
+	database.clearExecutedSql();
+	const reader = await greaderGet(env, `/reader/api/0/stream/items/contents?${query}`);
+	assert.equal(reader.status, 200);
+	assert.deepEqual(database.batchSizes.slice(batchesBefore + 1), [4]);
+	const readerItems = (await reader.json() as { items: Array<Record<string, unknown>> }).items;
+	const readerFirst = readerItems.find((item) => item.title === 'Batched 0');
+	assert.ok(readerFirst);
+	assert.deepEqual(readerFirst.summary, { direction: 'ltr', content: '<p>Body 0</p>' });
+	assert.deepEqual(readerFirst.content, { direction: 'ltr', content: '<p>Body 0</p>' });
+	assert.equal(readerFirst.contentVersion, '4');
+});
+
+test('unread-count and subscription/list each run one batch with their label lookups', async () => {
+	const { env, db, database } = createFixture([
+		{ id: 'count-1', feedKey: 'alpha-feed', title: 'Alpha', receivedAt: '2026-10-02T12:00:00.000Z' },
+		{ id: 'count-2', feedKey: 'bravo-feed', title: 'Bravo', receivedAt: '2026-10-02T12:05:00.000Z', isRead: 1 },
+	]);
+	await ensureDatabaseSchema(env);
+	db.exec("INSERT INTO feed_tags (feed_key, label) VALUES ('alpha-feed', 'Daily'), ('bravo-feed', 'Daily')");
+
+	database.clearExecutedSql();
+	const batchesBefore = database.batchSizes.length;
+	const unread = await greaderGet(env, '/reader/api/0/unread-count');
+	assert.equal(unread.status, 200);
+	assert.deepEqual(database.batchSizes.slice(batchesBefore), [3]);
+	assert.equal(database.executedSql.length, 3);
+	assert.deepEqual(
+		(await unread.json() as { unreadcounts: Array<{ id: string; count: number }> }).unreadcounts.map(({ id, count }) => ({ id, count })),
+		[
+			{ id: 'feed/1', count: 1 },
+			{ id: 'user/-/label/Daily', count: 1 },
+			{ id: 'user/-/state/com.google/reading-list', count: 1 },
+		],
+	);
+
+	database.clearExecutedSql();
+	const subscriptions = await greaderGet(env, '/reader/api/0/subscription/list');
+	assert.equal(subscriptions.status, 200);
+	assert.deepEqual(database.batchSizes.slice(batchesBefore + 1), [3]);
+	assert.equal(database.executedSql.length, 3);
+	assert.deepEqual(
+		(await subscriptions.json() as { subscriptions: Array<{ id: string; categories: Array<{ label: string }> }> }).subscriptions
+			.map(({ id, categories }) => ({ id, labels: categories.map(({ label }) => label) })),
+		[
+			{ id: 'feed/1', labels: ['Daily'] },
+			{ id: 'feed/2', labels: ['Daily'] },
+		],
+	);
 });

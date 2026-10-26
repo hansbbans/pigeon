@@ -18,6 +18,7 @@ import {
 	filterItemIdsForLocalDay,
 	getLocalDayBounds,
 	limitInitialItemIds,
+	normalizeBrowserItemId,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
 	sanitizeArticleHtml,
@@ -868,6 +869,41 @@ function createFixedDateConstructor(timestamp: number | (() => number)) {
 	};
 }
 
+type HarnessFetch = (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
+
+// First visits now ask for one `stream/contents` page. Fixtures written against
+// the older ids + contents pair still describe the same server state, so when a
+// fixture does not answer `stream/contents` itself, compose the page it would
+// have produced from its ids and contents answers.
+function withLegacyMembershipFixtures(fetchImpl: HarnessFetch): HarnessFetch {
+	const streamContentsPrefix = '/reader/api/0/stream/contents?';
+	return async (input, init) => {
+		if (!String(input).startsWith(streamContentsPrefix) || (init?.method && init.method !== 'GET')) return fetchImpl(input, init);
+		let response: Response | null = null;
+		try {
+			response = await fetchImpl(input, init);
+		} catch (error) {
+			if (!(error instanceof Error && error.message.startsWith('Unexpected fetch'))) throw error;
+		}
+		if (response && response.status !== 404) return response;
+		const idsResponse = await fetchImpl('/reader/api/0/stream/items/ids?' + String(input).slice(streamContentsPrefix.length), init);
+		if (!idsResponse.ok) return idsResponse;
+		const idsPayload = (await idsResponse.json()) as { itemRefs?: Array<{ id: string }>; continuation?: string };
+		const ids = (idsPayload.itemRefs ?? []).map((itemRef) => String(itemRef.id));
+		let items: unknown[] = [];
+		if (ids.length > 0) {
+			const body = new FormData();
+			for (const id of ids) body.append('i', id);
+			const contentsResponse = await fetchImpl('/reader/api/0/stream/items/contents', { ...init, method: 'POST', body });
+			if (!contentsResponse.ok) return contentsResponse;
+			const returned = ((await contentsResponse.json()) as { items?: Array<{ id: string }> }).items ?? [];
+			const byId = new Map(returned.map((item) => [normalizeBrowserItemId(String(item.id)), item]));
+			items = ids.map((id) => byId.get(id)).filter(Boolean);
+		}
+		return Response.json({ id: 'legacy', updated: 0, items, ...(idsPayload.continuation ? { continuation: idsPayload.continuation } : {}) });
+	};
+}
+
 async function createBrowserHarness(options?: {
 	storedToken?: string | null;
 	storedTheme?: string | null;
@@ -1170,7 +1206,7 @@ async function createBrowserHarness(options?: {
 		console,
 		setTimeout,
 		clearTimeout,
-		fetch: options?.fetchImpl ?? (async () => new Response('Error=BadAuthentication', { status: 401 })),
+		fetch: withLegacyMembershipFixtures(options?.fetchImpl ?? (async () => new Response('Error=BadAuthentication', { status: 401 }))),
 	};
 
 	for(const key of ['theme','font','fontSize','lineHeight','width','margins','density','imagePolicy'])elements.set('reading-'+key,createElement('',[],key.includes('Size')?'input':'select',registerFocus));
@@ -2749,6 +2785,14 @@ test('stale status responses do not overwrite logout state or suppress a later s
 test('load-more does not duplicate an in-flight chunk and advances after the first chunk settles', async () => {
 	const firstContentResponse = createDeferred<Response>();
 	const contentRequests: string[][] = [];
+	const article = (id: string) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					});
 	const { elements } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
@@ -2763,13 +2807,21 @@ test('load-more does not duplicate an in-flight chunk and advances after the fir
 
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({
-					unreadcounts: [{ id: 'feed/1', count: 25 }],
+					unreadcounts: [{ id: 'feed/1', count: 75 }],
+				});
+			}
+
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				return Response.json({
+					items: Array.from({ length: 50 }, (_, index) => article(String(index + 1))),
+					continuation: 'page-2',
 				});
 			}
 
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+				assert.equal(new URL(`https://pigeon.example${String(input)}`).searchParams.get('c'), 'page-2');
 				return Response.json({
-					itemRefs: Array.from({ length: 25 }, (_, index) => ({ id: String(index + 1) })),
+					itemRefs: Array.from({ length: 25 }, (_, index) => ({ id: String(index + 51) })),
 				});
 			}
 
@@ -2779,16 +2831,7 @@ test('load-more does not duplicate an in-flight chunk and advances after the fir
 				if (contentRequests.length === 1) {
 					return firstContentResponse.promise;
 				}
-				return Response.json({
-					items: ids.map((id) => ({
-						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
-						title: `Article ${id}`,
-						published: 1_742_460_800,
-						origin: { title: 'Alpha' },
-						summary: { content: `Preview ${id}` },
-						content: { content: `<p>Body ${id}</p>` },
-					})),
-				});
+				return Response.json({ items: ids.map(article) });
 			}
 
 			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
@@ -2796,34 +2839,27 @@ test('load-more does not duplicate an in-flight chunk and advances after the fir
 	});
 
 	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(
+		() => elements.get('load-more-button')?.disabled === false && elements.get('load-more-button')?.classList.contains('hidden') === false,
+	);
+	assert.deepEqual(contentRequests, []);
+	await elements.get('load-more-button')?.dispatch('click');
 	await waitForBrowserCondition(() => contentRequests.length === 1);
 	const loadMoreToggleCalls = () =>
 		elements.get('load-more-button')?.toggleCalls.filter((call) => call.name === 'hidden').map((call) => call.force) ?? [];
 
 	assert.ok(loadMoreToggleCalls().includes(false));
 	assert.equal(elements.get('load-more-button')?.disabled, true);
-	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 1))]);
+	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 51))]);
 
 	await elements.get('load-more-button')?.dispatch('click');
 	await flushBrowserTasks();
 	await flushBrowserTasks();
 
-	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 1))]);
+	assert.deepEqual(contentRequests, [Array.from({ length: 20 }, (_, index) => String(index + 51))]);
 
 	firstContentResponse.resolve(
-		Response.json({
-			items: Array.from({ length: 20 }, (_, index) => {
-				const id = String(index + 1);
-				return {
-					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
-					title: `Article ${id}`,
-					published: 1_742_460_800,
-					origin: { title: 'Alpha' },
-					summary: { content: `Preview ${id}` },
-					content: { content: `<p>Body ${id}</p>` },
-				};
-			}),
-		}),
+		Response.json({ items: Array.from({ length: 20 }, (_, index) => article(String(index + 51))) }),
 	);
 	await waitForBrowserCondition(() => elements.get('load-more-button')?.disabled === false);
 
@@ -2831,7 +2867,7 @@ test('load-more does not duplicate an in-flight chunk and advances after the fir
 	await waitForBrowserCondition(() => contentRequests.length === 2);
 
 	assert.ok(loadMoreToggleCalls().filter((force) => force === false).length >= 2);
-	assert.deepEqual(contentRequests[1], ['21', '22', '23', '24', '25']);
+	assert.deepEqual(contentRequests[1], ['71', '72', '73', '74', '75']);
 });
 
 test('load-more fetches continuation pages beyond 50 items without duplicating boundary ids', async () => {
@@ -2851,16 +2887,26 @@ test('load-more fetches continuation pages beyond 50 items without duplicating b
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 55 }] });
 			}
 
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				idRequests.push(null);
+				return Response.json({
+					items: Array.from({ length: 50 }, (_, index) => String(index + 1)).map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})),
+					continuation: 'page-2',
+				});
+			}
+
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				const url = new URL(`https://pigeon.example${String(input)}`);
 				const continuation = url.searchParams.get('c');
 				idRequests.push(continuation);
-				if (!continuation) {
-					return Response.json({
-						itemRefs: Array.from({ length: 50 }, (_, index) => ({ id: String(index + 1) })),
-						continuation: 'page-2',
-					});
-				}
+				assert.ok(continuation, 'first visits load bodies through stream/contents');
 				if (continuation === 'page-2') {
 					return Response.json({
 						itemRefs: [{ id: '50' }],
@@ -2894,31 +2940,28 @@ test('load-more fetches continuation pages beyond 50 items without duplicating b
 
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(
-		() => contentRequests.length === 1 && elements.get('load-more-button')?.disabled === false,
+		() => idRequests.length === 1 && elements.get('load-more-button')?.disabled === false &&
+			(elements.get('articles-list')?.textContent ?? '').includes('Article 50'),
 	);
-	await elements.get('load-more-button')?.dispatch('click');
-	await waitForBrowserCondition(
-		() => contentRequests.length === 2 && elements.get('load-more-button')?.disabled === false,
-	);
-	await elements.get('load-more-button')?.dispatch('click');
-	await waitForBrowserCondition(
-		() => contentRequests.length === 3 && elements.get('load-more-button')?.disabled === false,
-	);
+	assert.equal(contentRequests.length, 0);
+	assert.equal(elements.get('articles-list')?.children.length, 50);
 	await elements.get('load-more-button')?.dispatch('click');
 	await elements.get('load-more-button')?.dispatch('click');
 	await waitForBrowserCondition(
 		() => idRequests.length === 2 && elements.get('load-more-button')?.disabled === false,
 	);
-	assert.equal(contentRequests.length, 3);
+	assert.equal(contentRequests.length, 0);
 	assert.equal(elements.get('load-more-button')?.classList.contains('hidden'), false);
 
 	await elements.get('load-more-button')?.dispatch('click');
 	await elements.get('load-more-button')?.dispatch('click');
-	await waitForBrowserCondition(() => idRequests.length === 3 && contentRequests.length === 4);
+	await waitForBrowserCondition(() => idRequests.length === 3 && contentRequests.length === 1);
+	await waitForBrowserCondition(() => elements.get('load-more-button')?.disabled === false);
 
 	assert.deepEqual(idRequests, [null, 'page-2', 'page-3']);
-	assert.deepEqual(contentRequests[3], ['51', '52', '53', '54', '55']);
+	assert.deepEqual(contentRequests, [['51', '52', '53', '54', '55']]);
 	assert.match(elements.get('articles-list')?.textContent ?? '', /Article 51/);
+	assert.equal(elements.get('articles-list')?.children.length, 55);
 	assert.equal(elements.get('load-more-button')?.classList.contains('hidden'), true);
 });
 
@@ -3660,6 +3703,18 @@ test('cached view entry restores selection and scroll while refreshing new and r
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 2 }] });
 			}
+			if (String(input).startsWith('/reader/api/0/stream/contents?') &&
+				new URL(`https://pigeon.example${String(input)}`).searchParams.get('s') === 'feed/1') {
+				feedRootRequests += 1;
+				return Response.json({ items: ['1', '2'].map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})) });
+			}
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				const url = new URL(`https://pigeon.example${String(input)}`);
 				const streamId = url.searchParams.get('s');
@@ -3842,6 +3897,7 @@ test('foreground and reconnect revalidation share one in-flight membership reque
 
 test('offline foreground keeps the cached view and logout invalidates late responses', async () => {
 	let rootRequests = 0;
+	let contentRequests = 0;
 	let releaseLateContent: ((response: Response) => void) | null = null;
 	const lateContent = new Promise<Response>((resolve) => {
 		releaseLateContent = resolve;
@@ -3857,23 +3913,36 @@ test('offline foreground keeps the cached view and logout invalidates late respo
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
 			}
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				rootRequests += 1;
+				return Response.json({ items: [{
+					id: 'tag:google.com,2005:reader/item/0000000000000001',
+					title: 'Article 1',
+					published: 1_742_460_800,
+					origin: { title: 'Alpha' },
+					content: { content: '<p>Body 1</p>' },
+				}] });
+			}
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				rootRequests += 1;
 				return Response.json({ itemRefs: [{ id: '1' }] });
 			}
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return rootRequests === 1 ? lateContent : Response.json({ items: [] });
+				contentRequests += 1;
+				return contentRequests === 1 ? lateContent : Response.json({ items: [] });
 			}
 			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
 		},
 	});
 
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => rootRequests === 1);
+	await waitForBrowserCondition(() => rootRequests === 1 && elements.get('reader-title')?.textContent === 'Article 1');
+	dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => rootRequests === 2 && contentRequests === 1);
 	setOnline(false);
 	dispatchDocumentEvent('visibilitychange');
 	await flushBrowserTasks();
-	assert.equal(rootRequests, 1);
+	assert.equal(rootRequests, 2);
 	assert.equal(elements.get('articles-status')?.textContent, 'Offline · showing cached articles.');
 
 	await elements.get('logout-button')?.dispatch('click');
@@ -3957,6 +4026,17 @@ test('large refreshes keep content requests bounded and do not refetch evicted p
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
 			}
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				membershipRequests += 1;
+				return Response.json({ items: itemIds.slice(0, 50).map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})) });
+			}
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				membershipRequests += 1;
 				return Response.json({ itemRefs: itemIds.map((id) => ({ id })) });
@@ -3985,9 +4065,10 @@ test('large refreshes keep content requests bounded and do not refetch evicted p
 
 	const { elements, dispatchDocumentEvent } = harness;
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => membershipRequests === 1 && contentRequests === 1 && activeContentRequests === 0);
+	await waitForBrowserCondition(() => membershipRequests === 1 && elements.get('reader-title')?.textContent === 'Article 1');
+	assert.equal(contentRequests, 0);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => contentRequests === 11 && activeContentRequests === 0, 100);
+	await waitForBrowserCondition(() => membershipRequests === 2 && contentRequests === 10 && activeContentRequests === 0, 100);
 	await collectBrowserWindowIds(harness);
 	for (let page = 0; page < 2; page += 1) {
 		elements.get('article-newer-button')!.dispatch('click');
@@ -4284,6 +4365,20 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
 			}
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				const streamId = new URL(`https://pigeon.example${String(input)}`).searchParams.get('s');
+				const pageIds = streamId === 'feed/1' ? feedIds : allIds;
+				if (streamId === 'feed/1') feedMembershipRequests += 1;
+				else allMembershipRequests += 1;
+				return Response.json({ items: pageIds.slice(0, 50).map((id) => ({
+						id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+						title: `Article ${id}`,
+						published: 1_742_460_800,
+						origin: { title: 'Alpha' },
+						summary: { content: `Preview ${id}` },
+						content: { content: `<p>Body ${id}</p>` },
+					})) });
+			}
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				const url = new URL(`https://pigeon.example${String(input)}`);
 				const streamId = url.searchParams.get('s');
@@ -4323,9 +4418,10 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 
 	const { elements, dispatchDocumentEvent } = harness;
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => allMembershipRequests === 1 && contentRequests.length === 1);
+	await waitForBrowserCondition(() => allMembershipRequests === 1 && elements.get('reader-title')?.textContent === 'Article 1');
+	assert.equal(contentRequests.length, 0);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => contentRequests.length >= 11, 120);
+	await waitForBrowserCondition(() => contentRequests.length >= 10, 120);
 	await collectBrowserWindowIds(harness);
 	for (let page = 0; page < 2; page += 1) {
 		elements.get('article-newer-button')!.dispatch('click');
@@ -4337,9 +4433,10 @@ test('revalidation fetches a selected preserved-tail body that was evicted from 
 
 	phase = 'feed';
 	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
-	await waitForBrowserCondition(() => feedMembershipRequests === 1 && feedContentRequests === 1);
+	await waitForBrowserCondition(() => feedMembershipRequests === 1 && elements.get('reader-title')?.textContent === 'Article 1001');
+	assert.equal(feedContentRequests, 0);
 	dispatchDocumentEvent('visibilitychange');
-	await waitForBrowserCondition(() => feedContentRequests >= 11, 140);
+	await waitForBrowserCondition(() => feedContentRequests >= 10, 140);
 	await collectBrowserWindowIds(harness);
 
 	phase = 'all-refresh';
@@ -4433,6 +4530,9 @@ test('logout keeps old body requests counted until their network work settles', 
 			if (input === '/reader/api/0/unread-count') {
 				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
 			}
+			if (String(input).startsWith('/reader/api/0/stream/contents?')) {
+				return Response.json({ items: itemIds.slice(0, 50).map(contentFor) });
+			}
 			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
 				return Response.json({ itemRefs: itemIds.map((id) => ({ id })) });
 			}
@@ -4461,13 +4561,18 @@ test('logout keeps old body requests counted until their network work settles', 
 	});
 
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => contentRequests === 1 && activeNetworkRequests === 1);
+	await waitForBrowserCondition(() => (elements.get('reader-title')?.textContent ?? '') === 'Article 1');
+	assert.equal(contentRequests, 0);
 	dispatchDocumentEvent('visibilitychange');
 	await waitForBrowserCondition(() => contentRequests === 2 && activeNetworkRequests === 2);
 
 	await elements.get('logout-button')?.dispatch('click');
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => loginCount === 2 && contentRequests === 2);
+	await waitForBrowserCondition(() => loginCount === 2 && (elements.get('reader-title')?.textContent ?? '') === 'Article 1');
+	dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+	assert.equal(contentRequests, 2, 'new session body work waits behind the old requests');
 
 	oldBodies[0].resolve(Response.json({ items: [] }));
 	oldBodies[1].resolve(Response.json({ items: [] }));
@@ -5729,20 +5834,27 @@ test('Unread refresh discards old paginated membership after another client mark
 	assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 51');
 });
 
-test('failed initial article-body loads keep a visible error and can be retried', async () => {
+test('a failed first stream page keeps a visible error and refresh recovers the view', async () => {
 	let shouldFail = true;
+	let streamPages = 0;
 	const { elements } = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/contents?')) {
+			streamPages += 1;
+			return shouldFail ? new Response('Error', { status: 503 }) : Response.json({ items: [browserRegressionItem('1', 1_742_460_800)] });
+		}
 		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }] });
 		if (input.endsWith('/contents') && shouldFail) return new Response('Error', { status: 503 });
 		return browserRegressionResponse(input, init);
 	} });
 	await elements.get('login-form')?.dispatch('submit');
-	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not load article bodies.');
-	assert.equal(elements.get('load-more-button')?.disabled, false);
+	await waitForBrowserCondition(() => elements.get('articles-status')?.textContent === 'Could not load this view.');
+	assert.equal(streamPages, 1);
+	assert.equal(elements.get('articles-list')?.children.length, 0);
 	shouldFail = false;
-	elements.get('load-more-button')?.dispatch('click');
+	elements.get('refresh-view-button')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('reader-frame')?.srcdoc ?? '').includes('Body 1</p>'));
 	assert.equal(elements.get('articles-status')?.textContent, '1 article');
+	assert.equal(streamPages, 1, 'refreshing an unloaded view revalidates through membership refs');
 });
 
 test('clearing the saved session cancels a pending successful login', async () => {
@@ -6211,7 +6323,12 @@ test('mark-all ignores an older count response after native bulk cleanup', async
 test('Today selects an already cached article and supports keyboard navigation without another body request', async () => {
 	const now = new Date(2026, 9, 2, 12).getTime();
 	let bodyRequests = 0;
+	let streamPages = 0;
 	const harness = await createBrowserHarness({ now, fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/contents?')) {
+			streamPages += 1;
+			return Response.json({ items: ['1', '2'].map((id) => browserRegressionItem(id, Math.floor(now / 1000))) });
+		}
 		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] });
 		if (input.endsWith('/contents')) bodyRequests += 1;
 		return browserRegressionResponse(input, init, Math.floor(now / 1000));
@@ -6224,7 +6341,8 @@ test('Today selects an already cached article and supports keyboard navigation w
 	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')?.classList.contains('is-active'), true);
 	assert.equal(harness.dispatchKeydown('j'), true);
 	await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 2');
-	assert.equal(bodyRequests, 1);
+	assert.equal(streamPages, 2);
+	assert.equal(bodyRequests, 0);
 });
 
 for (const returnToCachedToday of [false, true]) {
@@ -6319,10 +6437,13 @@ for (const ignoresAbort of [false, true]) {
 		let roots = 0;
 		const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/account-${++loginCount}`);
+			const sessionIds = loginCount === 1 ? Array.from({ length: 50 }, (_, index) => String(index + 1)) : ['100'];
+			if (input.startsWith('/reader/api/0/stream/contents?')) {
+				return Response.json({ items: sessionIds.map((id) => browserRegressionItem(id, 1_742_460_800)) });
+			}
 			if (input.startsWith('/reader/api/0/stream/items/ids?')) {
 				roots += 1;
-				const ids = loginCount === 1 ? Array.from({ length: 50 }, (_, index) => String(index + 1)) : ['100'];
-				return Response.json({ itemRefs: ids.map((id) => ({ id })) });
+				return Response.json({ itemRefs: sessionIds.map((id) => ({ id })) });
 			}
 			if (input.endsWith('/contents')) {
 				activeBodies += 1;
@@ -6343,21 +6464,25 @@ for (const ignoresAbort of [false, true]) {
 			return browserRegressionResponse(input, init);
 		} });
 		await harness.elements.get('login-form')?.dispatch('submit');
-		await waitForBrowserCondition(() => oldBodyRequests === 1);
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 1');
+		assert.equal(oldBodyRequests, 0);
 		harness.dispatchDocumentEvent('visibilitychange');
 		await waitForBrowserCondition(() => oldBodyRequests === 2);
 		await harness.elements.get('logout-button')?.dispatch('click');
 		assert.equal(signals.length, 2);
 		assert.ok(signals.every((signal) => signal.aborted));
 		await harness.elements.get('login-form')?.dispatch('submit');
-		await waitForBrowserCondition(() => roots === 3);
+		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 100');
+		assert.equal(newBodyRequests, 0);
+		harness.dispatchDocumentEvent('visibilitychange');
+		await waitForBrowserCondition(() => roots === 2);
 		if (ignoresAbort) {
 			await flushBrowserTasks();
 			assert.equal(newBodyRequests, 0);
 			oldBodies[0].resolve(Response.json({ items: [browserRegressionItem('1', 1_742_460_800)] }));
 		}
-		await waitForBrowserCondition(() => harness.elements.get('reader-title')?.textContent === 'Article 100');
-		assert.equal(newBodyRequests, 1);
+		await waitForBrowserCondition(() => newBodyRequests === 1);
+		assert.equal(harness.elements.get('reader-title')?.textContent, 'Article 100');
 		assert.equal(newBodySignal?.aborted, false);
 		assert.equal(maxActiveBodies, 2);
 		if (ignoresAbort) {
@@ -6758,6 +6883,21 @@ test('current Settings retry failure remains retryable and successful retry refr
 	assert.match(h.elements.get('settings-content')?.textContent ?? '', /Current status/);
 });
 
+// Plain stream first visits now arrive fully hydrated, so a membership page
+// whose bodies load in chunks only happens on the search/filter/sort path.
+function queryMembershipCursor(input: string): string | null | undefined {
+	if (!input.includes('/stream/items/ids?') && !input.startsWith('/api/v1/browser/articles?')) return undefined;
+	const params = new URL(`https://test${input}`).searchParams;
+	return params.get('c') ?? params.get('continuation');
+}
+
+async function openOldestFirstQuery(harness: Awaited<ReturnType<typeof createBrowserHarness>>) {
+	await waitForBrowserCondition(() => harness.elements.get('articles-status')?.textContent === 'No articles in All items.');
+	harness.elements.get('article-sort-select')!.value = 'oldest';
+	harness.elements.get('article-sort-select')!.dispatch('change');
+	await flushBrowserTasks();
+}
+
 for (const selectedTail of [false, true]) {
 	for (const failCurrentPage of [false, true]) {
 		test(`unconfirmed ${selectedTail ? 'selected' : 'unselected'} deleted tail cannot block current pagination with page failure ${failCurrentPage}`, async () => {
@@ -6765,8 +6905,9 @@ for (const selectedTail of [false, true]) {
 			const ids = Array.from({ length: 60 }, (_, index) => String(index + 1));
 			const currentIds = ids.filter((id) => id !== '41');
 			const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
-				if (input.includes('/stream/items/ids?')) {
-					const cursor = new URL(`https://test${input}`).searchParams.get('c');
+				if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: [] });
+				const cursor = queryMembershipCursor(input);
+				if (cursor !== undefined) {
 					if (cursor) {
 						pages += 1;
 						if (failCurrentPage && pages === 1) return new Response('Unavailable', { status: 503 });
@@ -6786,6 +6927,7 @@ for (const selectedTail of [false, true]) {
 				return browserRegressionResponse(input, init);
 			} });
 			await h.elements.get('login-form')?.dispatch('submit');
+			await openOldestFirstQuery(h);
 			await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 1');
 			assert.match(findListButtonByItemId(h.elements.get('articles-list'), '41')?.textContent ?? '', /Loading/);
 			if (selectedTail) {
@@ -6820,8 +6962,10 @@ for (const selectedTail of [false, true]) {
 test('confirmed current body failures remain visible and retry before membership pagination', async () => {
 	let rejectBodies = true, bodyAttempts = 0, pages = 0;
 	const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
-		if (input.includes('/stream/items/ids?')) {
-			if (new URL(`https://test${input}`).searchParams.has('c')) pages += 1;
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: [] });
+		const cursor = queryMembershipCursor(input);
+		if (cursor !== undefined) {
+			if (cursor) pages += 1;
 			return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }], continuation: 'current-page' });
 		}
 		if (input.endsWith('/contents')) {
@@ -6832,6 +6976,7 @@ test('confirmed current body failures remain visible and retry before membership
 		return browserRegressionResponse(input, init);
 	} });
 	await h.elements.get('login-form')?.dispatch('submit');
+	await openOldestFirstQuery(h);
 	await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load article bodies.');
 	await h.elements.get('load-more-button')?.dispatch('click');
 	await flushBrowserTasks();
@@ -6850,8 +6995,10 @@ test('unhydrated selected provisional survivor loads when its current page confi
 	const original = Array.from({ length: 60 }, (_, index) => String(index + 1));
 	const current = [...Array.from({ length: 10 }, (_, index) => String(index + 61)), ...original];
 	const h = await createBrowserHarness({ fetchImpl: async (input, init) => {
-		if (input.includes('/stream/items/ids?')) {
-			if (new URL(`https://test${input}`).searchParams.has('c')) {
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: [] });
+		const cursor = queryMembershipCursor(input);
+		if (cursor !== undefined) {
+			if (cursor) {
 				pages += 1;
 				return Response.json({ itemRefs: current.slice(50).map((id) => ({ id })) });
 			}
@@ -6865,6 +7012,7 @@ test('unhydrated selected provisional survivor loads when its current page confi
 		return browserRegressionResponse(input, init);
 	} });
 	await h.elements.get('login-form')?.dispatch('submit');
+	await openOldestFirstQuery(h);
 	await waitForBrowserCondition(() => h.elements.get('reader-title')?.textContent === 'Article 1');
 	findListButtonByItemId(h.elements.get('articles-list'), '41')?.dispatch('click');
 	await waitForBrowserCondition(() => h.elements.get('articles-status')?.textContent === 'Could not load article bodies.');
@@ -6888,6 +7036,12 @@ class BrowserSqliteStatement {
 	async all<T>() { return { results: this.database.prepare(this.sql).all(...this.values) as T[] }; }
 	async first<T>() { return (this.database.prepare(this.sql).get(...this.values) as T | undefined) ?? null; }
 	async run() { return { meta: { changes: Number(this.database.prepare(this.sql).run(...this.values).changes) } }; }
+	// D1 batch results carry both rows and change counts.
+	async execute() {
+		const { results } = await this.all();
+		const { changes } = this.database.prepare('SELECT changes() AS changes').get() as { changes: number };
+		return { results, meta: { changes: Number(changes) } };
+	}
 }
 
 function createLargeTodaySqliteLibrary(now: number, count = 2_105) {
@@ -6907,7 +7061,7 @@ function createLargeTodaySqliteLibrary(now: number, count = 2_105) {
 		prepare: (sql: string) => new BrowserSqliteStatement(database, sql),
 		async batch(statements: BrowserSqliteStatement[]) {
 			database.exec('BEGIN');
-			try { const results = []; for (const statement of statements) results.push(await statement.run()); database.exec('COMMIT'); return results; }
+			try { const results = []; for (const statement of statements) results.push(await statement.execute()); database.exec('COMMIT'); return results; }
 			catch (error) { database.exec('ROLLBACK'); throw error; }
 		},
 	};
@@ -7259,3 +7413,148 @@ for (const scenario of ['adjacent', 'page failure', 'body failure', 'selection s
   } finally { state.database.close(); }
  });
 }
+
+function versionedArticle(id: string, contentVersion: string, categories: string[] = []) {
+	// First-party responses omit `summary`; the preview must come from the body.
+	return { ...browserRegressionItem(id, 1_742_460_800 + Number(id)), categories, contentVersion };
+}
+
+test('a plain stream first visit loads membership and bodies with one stream/contents page and the first-party header', async () => {
+	const requests: Array<{ input: string; method: string; client: string | undefined }> = [];
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		requests.push({ input, method: init?.method ?? 'GET', client: init?.headers?.['X-Pigeon-Client'] });
+		if (input.startsWith('/reader/api/0/stream/contents?')) {
+			const params = new URL(`https://pigeon.example${input}`).searchParams;
+			const ids = params.get('xt') ? ['2'] : ['1', '2', '3'];
+			return Response.json({ id: params.get('s'), updated: 1, items: ids.map((id) => versionedArticle(id, 'v1', id === '1' ? ['user/-/state/com.google/read'] : [])) });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	await flushBrowserTasks();
+
+	const streamPages = requests.filter((request) => request.input.startsWith('/reader/api/0/stream/contents?'));
+	assert.equal(streamPages.length, 1);
+	const params = new URL(`https://pigeon.example${streamPages[0].input}`).searchParams;
+	assert.equal(params.get('s'), 'user/-/state/com.google/reading-list');
+	assert.equal(params.get('n'), '50');
+	assert.equal(params.has('xt'), false);
+	assert.ok(requests.every((request) => request.input === '/accounts/ClientLogin' || request.client === 'pigeon-web/1'),
+		'every authenticated request identifies the web client');
+	assert.equal(requests.some((request) => request.input.includes('/stream/items/ids?')), false);
+	assert.equal(requests.some((request) => request.input.endsWith('/stream/items/contents')), false);
+	assert.deepEqual(renderedArticleIds(harness), ['1', '2', '3']);
+	assert.equal(harness.getCacheSizes().bodies, 3);
+	assert.equal(harness.elements.get('articles-status')!.textContent, '3 articles');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'true');
+	assert.match(findListButtonByItemId(harness.elements.get('articles-list'), '2')!.textContent, /Body 2/);
+	assert.match(harness.elements.get('reader-frame')!.srcdoc, /Body 1/);
+	assert.equal(harness.elements.get('load-more-button')!.classList.contains('hidden'), true);
+
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 2');
+	const unreadPage = requests.filter((request) => request.input.startsWith('/reader/api/0/stream/contents?')).at(-1)!;
+	assert.equal(new URL(`https://pigeon.example${unreadPage.input}`).searchParams.get('xt'), 'user/-/state/com.google/read');
+	assert.deepEqual(renderedArticleIds(harness), ['2']);
+});
+
+test('first visits with a search, filter, or sort override keep the browser articles path', async () => {
+	const requests: string[] = [];
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		requests.push(input);
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: ['1', '2'].map((id) => versionedArticle(id, 'v1')) });
+		if (input.startsWith('/api/v1/browser/articles?')) {
+			assert.equal(new URL(`https://pigeon.example${input}`).searchParams.get('q'), 'needle');
+			return Response.json({ itemIds: ['7'], continuation: '' });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	await setBrowserQuery(harness, 'needle');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 7');
+
+	assert.equal(requests.filter((input) => input.startsWith('/reader/api/0/stream/contents?')).length, 1);
+	assert.equal(requests.filter((input) => input.startsWith('/api/v1/browser/articles?')).length, 1);
+	assert.equal(requests.filter((input) => input.endsWith('/stream/items/contents')).length, 1, 'query results still hydrate through chunked body requests');
+	assert.deepEqual(renderedArticleIds(harness), ['7']);
+});
+
+test('revalidation reuses cached bodies by content version and applies read and star flags from refs', async () => {
+	const contentRequests: string[][] = [];
+	let idsRequests = 0;
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: ['1', '2', '3'].map((id) => versionedArticle(id, 'v1')) });
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) {
+			idsRequests += 1;
+			return Response.json({ itemRefs: [
+				{ id: '1', timestampUsec: '1', read: true, starred: false, contentVersion: 'v1' },
+				{ id: '2', timestampUsec: '1', read: false, starred: true, contentVersion: 'v2' },
+				{ id: '4', timestampUsec: '1', read: false, starred: false, contentVersion: 'v1' },
+			] });
+		}
+		if (input.endsWith('/stream/items/contents')) {
+			const ids = (init?.body?.getAll('i') ?? []).map(String);
+			contentRequests.push(ids);
+			return Response.json({ items: ids.map((id) => ({ ...versionedArticle(id, id === '2' ? 'v2' : 'v1', id === '2' ? ['user/-/state/com.google/starred'] : []), title: id === '2' ? 'Article 2 revised' : `Article ${id}` })) });
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'false');
+
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => idsRequests === 1 && Boolean(findListButtonByItemId(harness.elements.get('articles-list'), '4')));
+	await flushBrowserTasks();
+
+	assert.deepEqual(contentRequests, [['2', '4']], 'only changed or missing bodies are downloaded');
+	assert.deepEqual(renderedArticleIds(harness), ['1', '2', '4']);
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'true');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '2')!.getAttribute('data-starred'), 'true');
+	assert.match(findListButtonByItemId(harness.elements.get('articles-list'), '2')!.textContent, /Article 2 revised/);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Article 1');
+	assert.equal(harness.elements.get('mark-unread-button')!.textContent, 'Mark unread');
+});
+
+test('revalidation refetches every window body when refs omit content versions', async () => {
+	const contentRequests: string[][] = [];
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: ['1', '2'].map((id) => versionedArticle(id, 'v1')) });
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [{ id: '1' }, { id: '2' }] });
+		if (input.endsWith('/stream/items/contents')) {
+			contentRequests.push((init?.body?.getAll('i') ?? []).map(String));
+		}
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await waitForBrowserCondition(() => contentRequests.length === 1);
+	await flushBrowserTasks();
+	assert.deepEqual(contentRequests, [['1', '2']]);
+	assert.equal(harness.elements.get('articles-status')!.textContent, '2 articles');
+});
+
+test('a read change made during revalidation is not reverted by older ref flags', async () => {
+	const refs = createDeferred<Response>();
+	const harness = await createBrowserHarness({ fetchImpl: async (input, init) => {
+		if (input.startsWith('/reader/api/0/stream/contents?')) return Response.json({ items: ['1'].map((id) => versionedArticle(id, 'v1'))});
+		if (input.startsWith('/reader/api/0/stream/items/ids?')) return refs.promise;
+		if (input.endsWith('/edit-tag')) return new Response('OK');
+		return browserRegressionResponse(input, init);
+	} });
+	await harness.elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Article 1');
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await finishArticleMutation(harness, 'mark-unread-button');
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'true');
+
+	refs.resolve(Response.json({ itemRefs: [{ id: '1', read: false, starred: false, contentVersion: 'v1' }] }));
+	await waitForBrowserCondition(() => harness.getCacheSizes().membership === 0);
+	await flushBrowserTasks();
+	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'true');
+	assert.equal(harness.elements.get('mark-unread-button')!.textContent, 'Mark unread');
+});

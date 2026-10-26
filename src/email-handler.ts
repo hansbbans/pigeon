@@ -214,7 +214,9 @@ export async function handleIncomingEmail(
 				 )
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(message_id) DO UPDATE SET
-				   original_url = COALESCE(items.original_url, excluded.original_url)`,
+				   original_url = excluded.original_url,
+				   content_version = items.content_version + 1
+				 WHERE items.original_url IS NULL AND excluded.original_url IS NOT NULL`,
 			).bind(
 				id,
 				feedKey,

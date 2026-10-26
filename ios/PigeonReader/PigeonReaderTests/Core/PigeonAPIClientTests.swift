@@ -509,16 +509,11 @@ struct PigeonAPIClientTests {
 		})
 
 		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
-		#expect(contentRequests.count == 3)
+		#expect(contentRequests.count == 1)
 		#expect(contentRequests.allSatisfy { $0.method == "POST" })
 		let contentRequestIDs = contentRequests.map { Self.formValues(from: $0.body, named: "i") }
-		let expectedContentRequestIDs: [[String]] = [
-			Array((12...21).reversed()).map(String.init),
-			Array((2...11).reversed()).map(String.init),
-			["1"],
-		]
-		#expect(contentRequestIDs == expectedContentRequestIDs)
-		#expect(contentRequestIDs.allSatisfy { $0.count <= 10 })
+		#expect(contentRequestIDs == [Array((1...21).reversed()).map(String.init)])
+		#expect(contentRequestIDs.allSatisfy { $0.count <= 50 })
 		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/contents" }) == false)
 
 		let secondPage = try await client.recommendationsPage(
@@ -534,18 +529,18 @@ struct PigeonAPIClientTests {
 		let secondItemIDRequest = try #require(allItemIDRequests.dropFirst().first)
 		#expect(URLComponents(url: secondItemIDRequest.url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "c" })?.value == "folder-page-2")
 		let allContentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
-		#expect(allContentRequests.count == 4)
+		#expect(allContentRequests.count == 2)
 		#expect(Self.formValues(from: allContentRequests.last?.body, named: "i") == ["0"])
 	}
 
-	@Test func folderRecommendationsReuseCachedBodiesInServerOrder() async throws {
-		let mock = FolderLoadingHTTPClient()
+	@Test func folderRecommendationsReuseCachedBodiesWithMatchingVersionsAndApplyRefStatuses() async throws {
+		let mock = FolderLoadingHTTPClient(contentVersions: [:], readIDs: ["20"], starredIDs: ["19"])
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let client = PigeonAPIClient(
 			session: PigeonSession(baseURL: baseURL, token: "server-token"),
 			httpClient: mock,
 		)
-		let cached = (1...21).map { Self.cachedRecommendation(itemID: $0) }
+		let cached = (1...21).map { Self.cachedRecommendation(itemID: $0, contentVersion: "v1") }
 
 		let page = try await client.recommendationsPage(
 			from: "user/-/label/News",
@@ -553,21 +548,123 @@ struct PigeonAPIClientTests {
 		)
 
 		#expect(page.items.map(\.title) == (1...21).reversed().map { "Cached \($0)" })
+		#expect(page.items.map(\.isRead) == (1...21).reversed().map { $0 == 20 })
+		#expect(page.items.map(\.isStarred) == (1...21).reversed().map { $0 == 19 })
+		#expect(page.items.allSatisfy { $0.contentVersion == "v1" })
 		#expect(page.continuation == "folder-page-2")
+		#expect(page.fetchedContentCount == 0)
 		let requests = await mock.requests()
 		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }.count == 1)
 		#expect(requests.contains(where: { $0.url.path == "/reader/api/0/stream/items/contents" }) == false)
 	}
 
-	@Test func folderRecommendationsFetchOnlyMissingOrPrunedCachedBodies() async throws {
+	@Test func folderRecommendationsRefetchBodiesWhoseVersionChanged() async throws {
+		let mock = FolderLoadingHTTPClient(contentVersions: ["5": "v2"])
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+		let cached = (1...21).map { Self.cachedRecommendation(itemID: $0, contentVersion: "v1") }
+
+		let page = try await client.recommendationsPage(
+			from: "user/-/label/News",
+			cachedRecommendations: cached,
+		)
+
+		#expect(page.items.map(\.title) == (1...21).reversed().map { $0 == 5 ? "Story 5" : "Cached \($0)" })
+		#expect(page.items.first(where: { $0.title == "Story 5" })?.contentVersion == "v2")
+		#expect(page.fetchedContentCount == 1)
+		let contentRequests = await mock.requests().filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 1)
+		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == ["5"])
+	}
+
+	@Test func folderRecommendationsRefetchEveryBodyWhenRefsCarryNoVersion() async throws {
 		let mock = FolderLoadingHTTPClient()
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let client = PigeonAPIClient(
 			session: PigeonSession(baseURL: baseURL, token: "server-token"),
 			httpClient: mock,
 		)
+		let cached = (1...21).map { Self.cachedRecommendation(itemID: $0, contentVersion: "v1") }
+
+		let page = try await client.recommendationsPage(
+			from: "user/-/label/News",
+			cachedRecommendations: cached,
+		)
+
+		#expect(page.items.map(\.title) == ["Newest"] + (1...20).reversed().map { "Story \($0)" })
+		#expect(page.items.allSatisfy { $0.contentVersion == nil })
+		#expect(page.fetchedContentCount == 21)
+		let contentRequests = await mock.requests().filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 1)
+		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == (1...21).reversed().map(String.init))
+	}
+
+	@Test func folderRecommendationsFetchAFullPageInOneContentsRequest() async throws {
+		let mock = FolderLoadingHTTPClient(firstPageIDs: Array((1...50).reversed()))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		let page = try await client.recommendationsPage(from: "user/-/label/News")
+
+		#expect(page.items.count == 50)
+		#expect(page.fetchedContentCount == 50)
+		let contentRequests = await mock.requests().filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 1)
+		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == (1...50).reversed().map(String.init))
+	}
+
+	@Test func folderRecommendationsSplitOversizedPagesIntoBoundedConcurrentContentsRequests() async throws {
+		let mock = FolderLoadingHTTPClient(firstPageIDs: Array((1...120).reversed()))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		let page = try await client.recommendationsPage(from: "user/-/label/News")
+
+		#expect(page.items.map(\.readerId) == (1...120).reversed().map { Self.readerID(itemID: $0) })
+		#expect(page.fetchedContentCount == 120)
+		let contentRequests = await mock.requests().filter { $0.url.path == "/reader/api/0/stream/items/contents" }
+		#expect(contentRequests.count == 3)
+		let requestedIDs = contentRequests.map { Self.formValues(from: $0.body, named: "i") }
+		#expect(requestedIDs.allSatisfy { $0.count <= 50 })
+		#expect(Set(requestedIDs.flatMap { $0 }) == Set((1...120).map(String.init)))
+		#expect(await mock.peakConcurrentContentRequests() <= 3)
+	}
+
+	@Test func streamRequestsIdentifyThePigeonClient() async throws {
+		let mock = FolderLoadingHTTPClient()
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
+
+		_ = try await client.recommendationsPage(from: "user/-/label/News")
+
+		let requests = await mock.requests()
+		let paths = requests.map(\.url.path)
+		#expect(paths.contains("/reader/api/0/stream/items/ids"))
+		#expect(paths.contains("/reader/api/0/stream/items/contents"))
+		#expect(requests.allSatisfy { $0.pigeonClient == "pigeon-reader/1" })
+	}
+
+	@Test func folderRecommendationsFetchOnlyMissingOrPrunedCachedBodies() async throws {
+		let mock = FolderLoadingHTTPClient(contentVersions: [:])
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(
+			session: PigeonSession(baseURL: baseURL, token: "server-token"),
+			httpClient: mock,
+		)
 		let cached = (1...21).map { itemID in
-			Self.cachedRecommendation(itemID: itemID, html: itemID == 21 ? "" : "<p>Cached</p>")
+			Self.cachedRecommendation(itemID: itemID, html: itemID == 21 ? "" : "<p>Cached</p>", contentVersion: "v1")
 		}
 
 		let page = try await client.recommendationsPage(
@@ -582,6 +679,7 @@ struct PigeonAPIClientTests {
 		let contentRequests = requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }
 		#expect(contentRequests.count == 1)
 		#expect(Self.formValues(from: contentRequests.first?.body, named: "i") == ["21"])
+		#expect(page.fetchedContentCount == 1)
 	}
 
 	@Test func folderRecommendationsRejectIncompleteContentResponses() async throws {
@@ -616,7 +714,7 @@ struct PigeonAPIClientTests {
 		#expect(recommendations.count == 21)
 		let requests = await mock.requests()
 		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/ids" }.count == 1)
-		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }.count == 3)
+		#expect(requests.filter { $0.url.path == "/reader/api/0/stream/items/contents" }.count == 1)
 	}
 
 	private static func formValues(from body: Data?, named name: String) -> [String] {
@@ -625,12 +723,20 @@ struct PigeonAPIClientTests {
 		return queryItems.filter { $0.name == name }.compactMap(\.value)
 	}
 
-	private static func cachedRecommendation(itemID: Int, html: String = "<p>Cached</p>") -> Recommendation {
+	private static func readerID(itemID: Int) -> String {
 		let hex = String(itemID, radix: 16)
 		let paddedHex = String(repeating: "0", count: max(0, 16 - hex.count)) + hex
-		return Recommendation(
+		return "tag:google.com,2005:reader/item/\(paddedHex)"
+	}
+
+	private static func cachedRecommendation(
+		itemID: Int,
+		html: String = "<p>Cached</p>",
+		contentVersion: String? = nil,
+	) -> Recommendation {
+		Recommendation(
 			id: "cached-\(itemID)",
-			readerId: "tag:google.com,2005:reader/item/\(paddedHex)",
+			readerId: readerID(itemID: itemID),
 			feedKey: "news",
 			source: "News",
 			title: "Cached \(itemID)",
@@ -645,6 +751,7 @@ struct PigeonAPIClientTests {
 			sampleCount: 0,
 			explanation: "Cached",
 			learningState: "Cached",
+			contentVersion: contentVersion,
 		)
 	}
 }
@@ -718,20 +825,44 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 		let url: URL
 		let method: String?
 		let body: Data?
+		let pigeonClient: String?
 	}
 
 	private var capturedRequests: [Request] = []
 	private let omittedContentIDs: Set<String>
+	/// When non-nil the fake behaves like a Pigeon server: refs and items carry
+	/// `contentVersion` (default "v1", overridable per id) plus `read`/`starred`.
+	private let contentVersions: [String: String]?
+	private let readIDs: Set<String>
+	private let starredIDs: Set<String>
+	private let firstPageIDs: [Int]
+	private var inFlightContentRequests = 0
+	private var peakInFlightContentRequests = 0
 
-	init(omittingContentIDs: Set<String> = []) {
+	init(
+		omittingContentIDs: Set<String> = [],
+		contentVersions: [String: String]? = nil,
+		readIDs: Set<String> = [],
+		starredIDs: Set<String> = [],
+		firstPageIDs: [Int] = Array((1...21).reversed()),
+	) {
 		self.omittedContentIDs = omittingContentIDs
+		self.contentVersions = contentVersions
+		self.readIDs = readIDs
+		self.starredIDs = starredIDs
+		self.firstPageIDs = firstPageIDs
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
 		guard let url = request.url else {
 			throw PigeonError.invalidServerURL
 		}
-		capturedRequests.append(Request(url: url, method: request.httpMethod, body: request.httpBody))
+		capturedRequests.append(Request(
+			url: url,
+			method: request.httpMethod,
+			body: request.httpBody,
+			pigeonClient: request.value(forHTTPHeaderField: "X-Pigeon-Client"),
+		))
 
 		switch url.path {
 		case "/reader/api/0/stream/contents":
@@ -740,8 +871,13 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 		case "/reader/api/0/stream/items/ids":
 			return try itemIDsResponse(for: url)
 		case "/reader/api/0/stream/items/contents":
+			inFlightContentRequests += 1
+			peakInFlightContentRequests = max(peakInFlightContentRequests, inFlightContentRequests)
+			// Yield so overlapping chunk requests can actually overlap.
+			try await Task.sleep(for: .milliseconds(5))
+			inFlightContentRequests -= 1
 			let ids = Self.formValues(from: request.httpBody, named: "i")
-			return (Self.contentsResponse(for: ids.filter { omittedContentIDs.contains($0) == false }), try Self.response(for: url, statusCode: 200))
+			return (contentsResponse(for: ids.filter { omittedContentIDs.contains($0) == false }), try Self.response(for: url, statusCode: 200))
 		default:
 			return (Data("not found".utf8), try Self.response(for: url, statusCode: 404))
 		}
@@ -749,6 +885,22 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 
 	func requests() -> [Request] {
 		capturedRequests
+	}
+
+	func peakConcurrentContentRequests() -> Int {
+		peakInFlightContentRequests
+	}
+
+	private func contentVersion(for id: String) -> String? {
+		guard let contentVersions else { return nil }
+		return contentVersions[id] ?? "v1"
+	}
+
+	private func itemRef(for id: String) -> String {
+		guard let version = contentVersion(for: id) else {
+			return "{\"id\":\"\(id)\"}"
+		}
+		return "{\"id\":\"\(id)\",\"timestampUsec\":\"1786272000000000\",\"read\":\(readIDs.contains(id)),\"starred\":\(starredIDs.contains(id)),\"contentVersion\":\"\(version)\"}"
 	}
 
 	private func itemIDsResponse(for url: URL) throws -> (Data, URLResponse) {
@@ -761,7 +913,7 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 		let payload: Data
 		switch continuation {
 		case nil:
-			let itemRefs = (1...21).reversed().map { "{\"id\":\"\($0)\"}" }.joined(separator: ",")
+			let itemRefs = firstPageIDs.map { itemRef(for: String($0)) }.joined(separator: ",")
 			payload = Data("{\"itemRefs\":[\(itemRefs)],\"continuation\":\"folder-page-2\"}".utf8)
 		case "folder-page-2":
 			payload = Data("{\"itemRefs\":[{\"id\":\"0\"}]}".utf8)
@@ -771,7 +923,7 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 		return (payload, try Self.response(for: url, statusCode: 200))
 	}
 
-	private static func contentsResponse(for ids: [String]) -> Data {
+	private func contentsResponse(for ids: [String]) -> Data {
 		let items = ids.map { id in
 			let title: String
 			if id == "21" {
@@ -783,7 +935,8 @@ private actor FolderLoadingHTTPClient: HTTPClient {
 			}
 			let hexID = String(UInt64(id) ?? 0, radix: 16)
 			let readerID = String(repeating: "0", count: max(0, 16 - hexID.count)) + hexID
-			return "{\"id\":\"tag:google.com,2005:reader/item/\(readerID)\",\"categories\":[],\"title\":\"\(title)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}}"
+			let versionField = contentVersion(for: id).map { ",\"contentVersion\":\"\($0)\"" } ?? ""
+			return "{\"id\":\"tag:google.com,2005:reader/item/\(readerID)\",\"categories\":[],\"title\":\"\(title)\",\"published\":1786272000,\"summary\":{\"content\":\"<p>Body</p>\"},\"content\":{\"content\":\"<p>Body</p>\"},\"alternate\":[],\"origin\":{\"streamId\":\"feed/7\",\"title\":\"News\",\"htmlUrl\":\"https://example.com\"}\(versionField)}"
 		}.joined(separator: ",")
 		return Data("{\"id\":\"user/-/state/com.google/reading-list\",\"updated\":0,\"items\":[\(items)]}".utf8)
 	}

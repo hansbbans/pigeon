@@ -51,7 +51,8 @@ UPDATE items
 SET html_content = '<p>This older read article is no longer stored offline.</p>',
     text_content = NULL,
     content_size = 0,
-    content_pruned_at = ?
+    content_pruned_at = ?,
+    content_version = content_version + 1
 WHERE id IN (
   SELECT id
   FROM prune_candidates

@@ -36,7 +36,7 @@ class FakePreparedStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '14' } as T;
+			return { value: '15' } as T;
 		}
 
 		throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -135,6 +135,7 @@ function createEnv(htmlContent = HTML_WITH_STYLE) {
 			received_at: '2026-03-20T12:34:56.000Z',
 			is_read: 0,
 			is_starred: 0,
+			content_version: 0,
 		},
 	];
 
@@ -156,6 +157,11 @@ function createEnv(htmlContent = HTML_WITH_STYLE) {
 		DB: {
 			prepare(sql: string) {
 				return new FakePreparedStatement(sql, items, feeds);
+			},
+			async batch(statements: FakePreparedStatement[]) {
+				const results = [];
+				for (const statement of statements) results.push(await statement.all());
+				return results;
 			},
 		},
 	};

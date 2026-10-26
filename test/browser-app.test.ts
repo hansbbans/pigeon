@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 import vm from 'node:vm';
-import { renderBrowserAppHtml } from '../src/browser-app';
+import { renderBrowserAppHtml, renderBrowserAppShell } from '../src/browser-app';
 
 import { generateApiToken } from '../src/api-auth';
 import app from '../src/index';
@@ -391,6 +391,51 @@ test('GET /app/ returns the same HTML shell as /app', async () => {
 	assert.match(html, /id="app"/);
 	assert.match(html, /id="login-form"/);
 	assert.match(html, /id="logout-button"/);
+});
+
+test('GET /app sends a strong ETag with private revalidation caching', async () => {
+	const response = await app.fetch(
+		new Request('https://pigeon.example/app'),
+		createEnv() as never,
+	);
+
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+	const etag = response.headers.get('ETag');
+	assert.ok(etag && /^"[^"]+"$/.test(etag), `strong ETag expected, got ${etag}`);
+	assert.equal(renderBrowserAppShell('https://pigeon.example').etag, etag);
+	assert.notEqual(renderBrowserAppShell('https://other.example').etag, etag);
+});
+
+test('GET /app returns 304 for a matching If-None-Match and 200 otherwise', async () => {
+	const first = await app.fetch(new Request('https://pigeon.example/app'), createEnv() as never);
+	const etag = first.headers.get('ETag')!;
+
+	for (const header of [etag, `W/${etag}`, `"stale", ${etag}`, '*']) {
+		const response = await app.fetch(
+			new Request('https://pigeon.example/app/', { headers: { 'If-None-Match': header } }),
+			createEnv() as never,
+		);
+		assert.equal(response.status, 304, header);
+		assert.equal(response.headers.get('ETag'), etag);
+		assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+		assert.equal(await response.text(), '');
+	}
+
+	const miss = await app.fetch(
+		new Request('https://pigeon.example/app', { headers: { 'If-None-Match': '"stale"' } }),
+		createEnv() as never,
+	);
+	assert.equal(miss.status, 200);
+	assert.match(await miss.text(), /id="app"/);
+});
+
+test('renderBrowserAppShell memoizes the rendered HTML per base URL', () => {
+	const first = renderBrowserAppShell('https://pigeon.example');
+	assert.equal(renderBrowserAppShell('https://pigeon.example'), first);
+	assert.equal(renderBrowserAppHtml('https://pigeon.example'), first.html);
+	assert.notEqual(renderBrowserAppShell('https://other.example'), first);
+	assert.match(renderBrowserAppShell('https://other.example').html, /<strong>other\.example<\/strong>/);
 });
 
 test('GET /app/status requires auth', async () => {

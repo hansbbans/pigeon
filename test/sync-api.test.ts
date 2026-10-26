@@ -46,6 +46,13 @@ class SqliteStatement {
 		return { meta: { changes: Number(result.changes) } };
 	}
 
+	// D1 batch results carry both rows and change counts.
+	async execute(): Promise<{ results: unknown[]; meta: { changes: number } }> {
+		const { results } = await this.all();
+		const { changes } = this.database.prepare('SELECT changes() AS changes').get() as { changes: number };
+		return { results, meta: { changes: Number(changes) } };
+	}
+
 	private recordQuery(): void {
 		if (this.limits && ++this.limits.queries > this.limits.maxQueries) {
 			throw new Error('D1 query budget exceeded');
@@ -60,11 +67,11 @@ class SqliteD1 {
 		return new SqliteStatement(this.database, sql, this.limits);
 	}
 
-	async batch(statements: SqliteStatement[]): Promise<Array<{ meta: { changes: number } }>> {
+	async batch(statements: SqliteStatement[]): Promise<Array<{ results: unknown[]; meta: { changes: number } }>> {
 		this.database.exec('BEGIN IMMEDIATE');
 		try {
 			const results = [];
-			for (const statement of statements) results.push(await statement.run());
+			for (const statement of statements) results.push(await statement.execute());
 			this.database.exec('COMMIT');
 			return results;
 		} catch (error) {
@@ -1581,7 +1588,8 @@ for (const unreadPublishers of [0, 2]) {
    assert.equal(body.unreadcounts.filter((count) => count.id.startsWith('feed/')).length, unreadPublishers);
    assert.equal(metadataRows, unreadPublishers * 2, 'only unread active publishers need labels and legacy categories');
    assert.ok(metadataBytes < 40_000, `read ${metadataBytes} metadata bytes`);
-   assert.ok(limits.queries <= (unreadPublishers ? 6 : 4), `used ${limits.queries} statements`);
+   // Three schema-check statements plus one three-statement batch (counts, feed tags, categories).
+   assert.ok(limits.queries <= 6, `used ${limits.queries} statements`);
   } finally { state.database.close(); }
  });
 }
