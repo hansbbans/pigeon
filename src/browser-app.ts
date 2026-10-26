@@ -6,7 +6,49 @@ import { renderBrowserReadabilityScript } from './browser-readability';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
 
+export interface BrowserAppShell {
+	html: string;
+	etag: string;
+}
+
+// The shell is a static ~400 KB document per deployment; render it once per
+// base URL for the life of the isolate instead of rebuilding it per request.
+const browserAppShellCache = new Map<string, BrowserAppShell>();
+
+export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
+	let shell = browserAppShellCache.get(baseUrl);
+	if (!shell) {
+		const html = buildBrowserAppHtml(baseUrl);
+		shell = { html, etag: `"${hashBrowserAppHtml(html)}"` };
+		browserAppShellCache.set(baseUrl, shell);
+	}
+	return shell;
+}
+
 export function renderBrowserAppHtml(baseUrl: string): string {
+	return renderBrowserAppShell(baseUrl).html;
+}
+
+export function matchesBrowserAppEtag(ifNoneMatch: string | null, etag: string): boolean {
+	if (!ifNoneMatch) return false;
+	return ifNoneMatch.split(',').some((candidate) => {
+		const trimmed = candidate.trim();
+		return trimmed === '*' || trimmed === etag || trimmed === `W/${etag}`;
+	});
+}
+
+function hashBrowserAppHtml(html: string): string {
+	// FNV-1a over UTF-16 code units: cheap, deterministic, and only needs to
+	// distinguish deployments of the same shell for revalidation.
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < html.length; index += 1) {
+		hash ^= html.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return `${html.length.toString(16)}-${hash.toString(16).padStart(8, '0')}`;
+}
+
+function buildBrowserAppHtml(baseUrl: string): string {
 	const config = JSON.stringify({ baseUrl });
 	let serverLabel = baseUrl;
 	try {
@@ -2330,7 +2372,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function createArticleMetadata(item) {
-    const summaryContent = item.summary && typeof item.summary.content === 'string' ? item.summary.content : '';
+    // First-party responses carry only the body; keep its head as the preview source.
+    const bodyContent = item.content && typeof item.content.content === 'string' ? item.content.content : '';
+    const summaryContent = item.summary && typeof item.summary.content === 'string' ? item.summary.content : bodyContent;
     const alternateHref =
       item.alternate && item.alternate[0] && typeof item.alternate[0].href === 'string'
         ? item.alternate[0].href
@@ -2420,18 +2464,56 @@ export function renderBrowserAppRuntimeScript(): string {
     articleCache.delete(itemId);
     articleCache.set(itemId, item);
     loadedItemsById[itemId] = item;
+    trimArticleMetadataCache();
+    trimArticleCache();
+    return itemId;
+  }
+
+  // Record loaded bodies against every view that lists them. Runs once per
+  // response so membership is scanned per chunk, not per article.
+  function markContentLoaded(loadedIds) {
+    if (loadedIds.length === 0) return;
+    const todayState = getViewState('today', false);
     for (const state of viewStates.values()) {
-      if (state.itemIds.includes(itemId)) {
+      const memberIds = new Set(state.itemIds);
+      for (const itemId of loadedIds) {
+        if (!memberIds.has(itemId)) continue;
         state.contentLoadedIds.add(itemId);
-        if (state === getViewState('today', false) && typeof item.published === 'number' && Number.isFinite(item.published)) {
-          state.publicationDates.set(itemId, item.published);
+        if (state === todayState) {
+          const published = articleCache.get(itemId)?.published;
+          if (typeof published === 'number' && Number.isFinite(published)) state.publicationDates.set(itemId, published);
         }
       }
     }
-    trimArticleMetadataCache();
-    trimArticleCache();
-    syncLoadedItemsFromCache();
-    return itemId;
+  }
+
+  // Membership refs carry the server's read/star flags; apply them to cached
+  // copies unless a newer local mutation already owns that field.
+  function applyItemRefStates(itemRefs, stateMutationId) {
+    for (const itemRef of itemRefs || []) {
+      if (!itemRef || (typeof itemRef.read !== 'boolean' && typeof itemRef.starred !== 'boolean')) continue;
+      const itemId = String(itemRef.id);
+      const mutations = articleStateMutations.get(itemId);
+      for (const field of ['read', 'starred']) {
+        if (typeof itemRef[field] !== 'boolean' || mutations?.[field]?.version > stateMutationId) continue;
+        for (const cache of [articleCache, articleMetadataCache]) {
+          const item = cache.get(itemId);
+          if (item && getArticleState(item, field) !== itemRef[field]) cache.set(itemId, withArticleState(item, field, itemRef[field]));
+        }
+      }
+      const current = articleCache.get(itemId) || articleMetadataCache.get(itemId);
+      if (current) loadedItemsById[itemId] = current;
+    }
+  }
+
+  // A body is reusable only when the server reports the version we cached.
+  // Missing versions (older servers, evicted bodies) mean "unknown": fetch.
+  function needsBodyRefresh(itemRef) {
+    const cached = articleCache.get(String(itemRef.id));
+    if (!cached) return true;
+    const version = itemRef.contentVersion;
+    return version === undefined || version === null || cached.contentVersion === undefined || cached.contentVersion === null ||
+      String(cached.contentVersion) !== String(version);
   }
 
   function clearAccountCache() {
@@ -2529,6 +2611,7 @@ export function renderBrowserAppRuntimeScript(): string {
       headers: {
         ...(init && init.headers ? init.headers : {}),
         ...getAuthorizationHeader(),
+        'X-Pigeon-Client': client.PIGEON_CLIENT_ID,
       },
     });
 
@@ -2564,12 +2647,15 @@ export function renderBrowserAppRuntimeScript(): string {
       for(const folder of folders){guard();counts.push({id:'user/-/label/'+folder,count:(await library.query({stream:'user/-/label/'+folder,filter:'unread'})).total});}
       guard();return {unreadcounts:counts};
     }
-    if(url.pathname.endsWith('/contents')) {const payload=await library.contents((init?.body?.getAll('i')||[]).map(String));guard();return {...payload,items:payload.items.map(item=>({...item,content:item.content||item.summary}))};}
-    if(url.pathname.endsWith('/ids')||url.pathname==='/api/v1/browser/articles') {
+    const savedContents=async(ids)=>{const payload=await library.contents(ids.map(String));guard();return {...payload,items:payload.items.map(item=>({...item,content:item.content||item.summary}))};};
+    if(url.pathname.endsWith('/stream/items/contents'))return savedContents(init?.body?.getAll('i')||[]);
+    if(url.pathname.endsWith('/stream/contents')||url.pathname.endsWith('/ids')||url.pathname==='/api/v1/browser/articles') {
       const cursor=params.get('continuation')||params.get('c')||'';if(cursor&&!/^offline:\\d+$/.test(cursor))throw new Error('Reload this view to use saved offline articles.');
       const offset=cursor?Number(cursor.slice(8)):0;const limit=Number(params.get('limit')||params.get('n')||50);
       const payload=await library.query({stream:params.get('stream')||params.get('s')||'all',q:params.get('q')||'',filter:params.get('filter')||(params.get('xt')?'unread':'all'),sort:params.get('sort')||'newest',since:params.get('since')||undefined,before:params.get('before')||undefined,limit,offset});
       guard();const continuation=payload.hasMore?'offline:'+(offset+payload.itemIds.length):'';
+      if(url.pathname.endsWith('/stream/contents')) {const saved=await savedContents(payload.itemIds);const byId=new Map(saved.items.map(item=>[client.normalizeBrowserItemId(String(item.id)),item]));
+        return {...saved,items:payload.itemIds.map(id=>byId.get(String(id))).filter(Boolean),continuation};}
       return url.pathname.endsWith('/ids')?{itemRefs:payload.itemIds.map(id=>({id})),continuation}:{...payload,continuation};
     }
     throw new Error('This feature requires an online connection.');
@@ -2762,9 +2848,12 @@ export function renderBrowserAppRuntimeScript(): string {
             throw new Error('Incomplete article content response');
           }
           if(offlineLibrary && !isOfflineReading()) void offlineLibrary.storeBodies(returnedItems).catch(()=>{});
+          const mergedIds = [];
           for (const item of returnedItems) {
-            mergeArticleIntoCache(item, job.generation, job.stateMutationId);
+            const mergedId = mergeArticleIntoCache(item, job.generation, job.stateMutationId);
+            if (mergedId) mergedIds.push(mergedId);
           }
+          markContentLoaded(mergedIds);
           if (activeViewRequestId > 0 && requestBelongsToCurrentSession(job.generation, job.token)) {
             renderArticles();
             renderReader();
@@ -2796,6 +2885,9 @@ export function renderBrowserAppRuntimeScript(): string {
     const newItemIds = [];
     for (const itemId of uniqueItemIds) {
       const existingRequest = inFlightContentRequests.get(itemId);
+      if (!existingRequest && !options?.refresh && articleCache.has(itemId)) {
+        continue;
+      }
       if (existingRequest) {
         const requestItemIds = pendingRequests.get(existingRequest) || [];
         requestItemIds.push(itemId);
@@ -3273,9 +3365,11 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function createPendingContentPlan(preferredItemId) {
-    const loadedIds = new Set(articleCache.keys());
+    const loadedIds = articleCache;
     const activeState = getViewState(activeViewId, false);
     const knownContentIds = activeState?.contentLoadedIds || new Set();
+    const memberIds = new Set(itemIds);
+    const plannedIdSet = new Set();
     const plannedIds = [];
     const targetItemId = preferredItemId || selectedItemId;
 
@@ -3286,12 +3380,13 @@ export function renderBrowserAppRuntimeScript(): string {
         !itemId ||
         loadedIds.has(itemId) ||
         (!force && knownContentIds.has(itemId)) ||
-        plannedIds.includes(itemId) ||
+        plannedIdSet.has(itemId) ||
         (activeState?.hasMembership && !activeState.confirmedItemIds.has(itemId)) ||
-        !itemIds.includes(itemId)
+        !memberIds.has(itemId)
       ) {
         return;
       }
+      plannedIdSet.add(itemId);
       plannedIds.push(itemId);
     };
 
@@ -4140,10 +4235,11 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  function buildStreamIdsUrl(view, continuation) {
-    if (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest') {
-      return buildBrowserArticlesUrl(view, continuation);
-    }
+  function usesBrowserArticlesQuery() {
+    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest');
+  }
+
+  function buildStreamParams(view, continuation) {
     const params = new URLSearchParams();
     params.set('s', view.streamId);
     params.set('n', String(client.INITIAL_ITEM_ID_LIMIT));
@@ -4153,7 +4249,34 @@ export function renderBrowserAppRuntimeScript(): string {
     if (continuation) {
       params.set('c', continuation);
     }
-    return '/reader/api/0/stream/items/ids?' + params.toString();
+    return params;
+  }
+
+  function buildStreamIdsUrl(view, continuation) {
+    if (usesBrowserArticlesQuery()) {
+      return buildBrowserArticlesUrl(view, continuation);
+    }
+    return '/reader/api/0/stream/items/ids?' + buildStreamParams(view, continuation).toString();
+  }
+
+  // A first visit needs membership and bodies together; one stream/contents
+  // page delivers both instead of ids followed by chunked body requests.
+  function buildStreamContentsUrl(view) {
+    return '/reader/api/0/stream/contents?' + buildStreamParams(view, '').toString();
+  }
+
+  async function loadStreamContentsPage(view, generation, token, stateVersion) {
+    const payload = await authenticatedJson(buildStreamContentsUrl(view));
+    if (!requestBelongsToCurrentSession(generation, token)) return { itemRefs: [] };
+    if (!payload || !Array.isArray(payload.items)) throw new Error('Invalid stream contents response');
+    if (offlineLibrary && !isOfflineReading()) void offlineLibrary.storeBodies(payload.items).catch(() => {});
+    const itemRefs = [];
+    for (const item of payload.items) {
+      const itemId = mergeArticleIntoCache(item, generation, stateVersion);
+      if (itemId) itemRefs.push({ id: itemId, contentVersion: item.contentVersion });
+    }
+    markContentLoaded(itemRefs.map((itemRef) => itemRef.id));
+    return { itemRefs, continuation: payload.continuation ? String(payload.continuation) : '' };
   }
 
   function buildBrowserArticlesUrl(view, continuation, options) {
@@ -4225,11 +4348,12 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     if (isContinuationPage && !continuation) state.itemIds = [...state.confirmedItemIds];
     state.hasMembership = true;
+    const memberIds = new Set(state.itemIds);
     for (const id of state.publicationDates.keys()) {
-      if (!state.itemIds.includes(id)) state.publicationDates.delete(id);
+      if (!memberIds.has(id)) state.publicationDates.delete(id);
     }
     state.refreshedAt = Date.now();
-    if (!state.selectedItemId || !state.itemIds.includes(state.selectedItemId)) {
+    if (!state.selectedItemId || !memberIds.has(state.selectedItemId)) {
       const view = views.find((candidate) => candidate.id === viewId);
       state.selectedItemId = view?.kind === 'today' ? null : state.itemIds[0] || null;
     }
@@ -4271,7 +4395,7 @@ export function renderBrowserAppRuntimeScript(): string {
     } while (continuation);
     if (!requestBelongsToCurrentSession(generation, token) ||
         (rootRequestId && getViewState(view.id, false)?.rootRequestId !== rootRequestId)) return {itemRefs:[]};
-    let selected = []; let rank = 0;
+    let selected = []; let rank = 0; const mergedIds = [];
     for (const [id, entry] of entries) {
       if(recommendationExclusions.has(id))continue;
       const subscription = subscriptions.find(feed=>{try {return decodeURIComponent(new URL(feed.url,config.baseUrl).pathname.split('/feed/')[1]||'')===entry.feedKey;}catch(_){return false;}});
@@ -4283,6 +4407,7 @@ export function renderBrowserAppRuntimeScript(): string {
         origin:{title:entry.source,streamId:subscription?.id},
         alternate:entry.originalURL ? [{href:entry.originalURL}] : [],
         summary:{content:entry.text || entry.html || ''},content:{content:entry.html || ''}}, generation, stateVersion);
+      if (mergedId) mergedIds.push(mergedId);
       const item = articleCache.get(mergedId) || articleMetadataCache.get(mergedId);
       recommendationDetails.set(id,{score:entry.score,explanation:entry.explanation,matchedTopics:entry.matchedTopics,published:item.published,rank:rank++});
       if ((query.filter === 'unread' && getArticleState(item,'read')) ||
@@ -4293,7 +4418,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     if (query.sort === 'score') selected.sort((a,b)=>b.score-a.score || b.published-a.published || Number(b.id)-Number(a.id));
     else if (['newest','oldest'].includes(query.sort)) selected.sort((a,b)=>(query.sort==='oldest'?-1:1)*(b.published-a.published || Number(b.id)-Number(a.id)));
-    trimArticleCache(); trimArticleMetadataCache();
+    markContentLoaded(mergedIds); trimArticleCache(); trimArticleMetadataCache();
     return {itemRefs:selected.map(item=>({id:item.id})),continuation:''};
   }
 
@@ -4359,7 +4484,10 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!continuation) state.rootRequestId = rootRequestId;
     const stateVersion = articleStateMutationId;
     const querySnapshot = { ...getArticleQuery(view.id) };
-    const requestPromise = (view.kind === 'recommended' ? loadRecommendations(view, querySnapshot, generation, token, stateVersion, rootRequestId) : authenticatedJson(buildStreamIdsUrl(view, continuation)))
+    const loadsBodies = Boolean(options?.initial) && !continuation && view.kind !== 'recommended' && !usesBrowserArticlesQuery();
+    const requestPromise = (view.kind === 'recommended' ? loadRecommendations(view, querySnapshot, generation, token, stateVersion, rootRequestId)
+      : loadsBodies ? loadStreamContentsPage(view, generation, token, stateVersion)
+      : authenticatedJson(buildStreamIdsUrl(view, continuation)))
       .then((rawPayload) => {
         const payload = normalizeMembershipPayload(rawPayload);
         if (!requestBelongsToCurrentSession(generation, token)) {
@@ -4371,7 +4499,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const returnedIds = [
           ...new Set(payload.itemRefs.map((itemRef) => String(itemRef.id)).filter(Boolean)),
         ];
-        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId, queryKey };
+        return { payload, returnedIds, generation, token, viewId: view.id, rootRequestId, queryKey, stateVersion };
       })
       .finally(() => {
         if (inFlightMembershipRequests.get(requestKey) === requestPromise) {
@@ -4418,7 +4546,20 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!result || result.queryKey !== getViewQueryKey(activeView.id) || !requestBelongsToCurrentSession(generation, token)) {
         return;
       }
-      await ensureArticleContent(result.returnedIds.slice(0, ARTICLE_WINDOW_SIZE), { generation, token });
+      applyItemRefStates(result.payload.itemRefs, result.stateVersion);
+      const windowRefs = new Map();
+      for (const itemRef of result.payload.itemRefs) {
+        if (windowRefs.size >= ARTICLE_WINDOW_SIZE) break;
+        if (!windowRefs.has(String(itemRef.id))) windowRefs.set(String(itemRef.id), itemRef);
+      }
+      // Offline membership and bodies both come from the saved library, whose
+      // refs carry no versions; re-reading every saved body would only repeat work.
+      const staleIds = isOfflineReading()
+        ? [...windowRefs.keys()].filter((itemId) => !articleCache.has(itemId))
+        : [...windowRefs.values()].filter(needsBodyRefresh).map((itemRef) => String(itemRef.id));
+      if (staleIds.length > 0) {
+        await ensureArticleContent(staleIds, { generation, token, refresh: true });
+      }
       const retainedTailIds = getRetainedTailIds(activeView.id, result.payload);
       if (selectedTailId && retainedTailIds.includes(selectedTailId) && !articleCache.has(selectedTailId)) {
         // A cached tail is outside the authoritative root. Its missing body must
@@ -4568,6 +4709,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const pageRequest = { viewId: activeView.id, epoch: activeState.membershipEpoch };
+    const stateVersion = articleStateMutationId;
     activeItemIdsPageRequest = pageRequest;
     isLoadingItemIdsPage = true;
     renderArticles();
@@ -4578,6 +4720,7 @@ export function renderBrowserAppRuntimeScript(): string {
           activeState.membershipEpoch !== pageRequest.epoch) {
         return;
       }
+      applyItemRefStates(payload.itemRefs, stateVersion);
 
       const knownIds = new Set(itemIds);
       const appendedIds = [];
@@ -4605,8 +4748,9 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       if (activeState) {
         activeState.itemIds = [...itemIds];
+        const memberIds = new Set(itemIds);
         for (const id of activeState.publicationDates.keys()) {
-          if (!itemIds.includes(id)) activeState.publicationDates.delete(id);
+          if (!memberIds.has(id)) activeState.publicationDates.delete(id);
         }
         activeState.selectedItemId = selectedItemId;
         activeState.continuation = nextItemIdsContinuation;
@@ -4681,14 +4825,18 @@ export function renderBrowserAppRuntimeScript(): string {
           return;
         }
         applyMembershipPayload(activeView.id, result.payload, { continuation: '', rootRequestId: result.rootRequestId });
+        markContentLoaded(result.returnedIds.filter((itemId) => articleCache.has(itemId)));
         const currentState = getViewState(activeView.id);
         itemIds = [...currentState.itemIds];
         nextItemIdsContinuation = currentState.continuation;
         selectedItemId = currentState.selectedItemId;
-        renderArticles();
-        renderReader();
-        if (itemIds.length > 0) {
-          await loadContentChunk(isTodayView() ? null : selectedItemId, requestId);
+        // applyMembershipPayload already rendered this view; only start body
+        // loading when something is still missing or the window auto-extends.
+        const preferredItemId = isTodayView() ? null : selectedItemId;
+        if (itemIds.length > 0 && (shouldAutoLoadWindow() || createPendingContentPlan(preferredItemId).length > 0)) {
+          await loadContentChunk(preferredItemId, requestId);
+        } else {
+          saveActiveViewState();
         }
       } catch (_error) {
         if (requestId === activeViewRequestId && session.token && state.rootRequestId === expectedRootRequestId) {
@@ -4819,7 +4967,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if (target) manuallyUnreadItemIds.delete(itemId);
       else manuallyUnreadItemIds.add(itemId);
     }
-    syncLoadedItemsFromCache();
+    const current = articleCache.get(itemId) || articleMetadataCache.get(itemId);
+    if (current) loadedItemsById[itemId] = current;
     return reconcileArticleCollections(itemId, field, target);
   }
 

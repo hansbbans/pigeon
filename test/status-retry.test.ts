@@ -31,7 +31,7 @@ class RetryStatement {
 	}
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '14' } as T;
+			return { value: '15' } as T;
 		}
 		if (this.sql.startsWith('SELECT 1 AS found FROM feeds')) {
 			return (this.feedExists ? { found: 1 } : null) as T | null;

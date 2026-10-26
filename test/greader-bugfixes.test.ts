@@ -8,10 +8,19 @@ import { handleGreaderRequest } from '../src/greader';
 import { handleSubscribe } from '../src/subscribe';
 import { handleIncrementalSync } from '../src/sync-api';
 
+interface ExecutedStatement {
+	sql: string;
+	values: unknown[];
+}
+
 class SqliteStatement {
 	private values: unknown[] = [];
 
-	constructor(private readonly database: DatabaseSync, private readonly sql: string) {}
+	constructor(
+		private readonly database: DatabaseSync,
+		private readonly sql: string,
+		private readonly executedSql: ExecutedStatement[],
+	) {}
 
 	bind(...values: unknown[]): this {
 		this.values = values;
@@ -19,31 +28,43 @@ class SqliteStatement {
 	}
 
 	async all<T>(): Promise<{ results: T[] }> {
+		this.executedSql.push({ sql: this.sql, values: [...this.values] });
 		return { results: this.database.prepare(this.sql).all(...(this.values as never[])) as T[] };
 	}
 
 	async first<T>(): Promise<T | null> {
+		this.executedSql.push({ sql: this.sql, values: [...this.values] });
 		return (this.database.prepare(this.sql).get(...(this.values as never[])) as T | undefined) ?? null;
 	}
 
 	async run(): Promise<{ meta: { changes: number } }> {
+		this.executedSql.push({ sql: this.sql, values: [...this.values] });
 		const result = this.database.prepare(this.sql).run(...(this.values as never[]));
 		return { meta: { changes: Number(result.changes) } };
+	}
+
+	// D1 batch results carry both rows and change counts.
+	async execute(): Promise<{ results: unknown[]; meta: { changes: number } }> {
+		const { results } = await this.all();
+		const { changes } = this.database.prepare('SELECT changes() AS changes').get() as { changes: number };
+		return { results, meta: { changes: Number(changes) } };
 	}
 }
 
 class SqliteD1 {
+	readonly executedSql: ExecutedStatement[] = [];
+
 	constructor(readonly database: DatabaseSync) {}
 
 	prepare(sql: string): SqliteStatement {
-		return new SqliteStatement(this.database, sql);
+		return new SqliteStatement(this.database, sql, this.executedSql);
 	}
 
-	async batch(statements: SqliteStatement[]): Promise<Array<{ meta: { changes: number } }>> {
+	async batch(statements: SqliteStatement[]): Promise<Array<{ results: unknown[]; meta: { changes: number } }>> {
 		this.database.exec('BEGIN IMMEDIATE');
 		try {
 			const results = [];
-			for (const statement of statements) results.push(await statement.run());
+			for (const statement of statements) results.push(await statement.execute());
 			this.database.exec('COMMIT');
 			return results;
 		} catch (error) {
@@ -83,8 +104,9 @@ function fixture() {
 	const database = new DatabaseSync(':memory:');
 	database.exec('PRAGMA foreign_keys = ON');
 	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
-	const env = { DB: new SqliteD1(database), BASE_URL: 'https://pigeon.example', API_PASSWORD: PASSWORD } as never;
-	return { database, env };
+	const db = new SqliteD1(database);
+	const env = { DB: db, BASE_URL: 'https://pigeon.example', API_PASSWORD: PASSWORD } as never;
+	return { database, db, env };
 }
 
 async function auth(): Promise<string> {
@@ -431,6 +453,79 @@ test('GReader edit-tag applies every repeated a and r tag', async () => {
 		assert.equal(remove.status, 200);
 		assert.equal(isStarred(state.database, 11), 0);
 		assert.equal(isRead(state.database, 11), 0);
+	} finally {
+		state.database.close();
+	}
+});
+
+// --- Pigeon client extensions: item ref state and sargable ot ---
+
+async function streamItemIds(env: never, query: string): Promise<Array<Record<string, unknown>>> {
+	const response = await handleGreaderRequest(new Request(
+		`https://pigeon.example/reader/api/0/stream/items/ids?${query}`,
+		{ headers: { Authorization: await auth() } },
+	), env);
+	assert.equal(response.status, 200);
+	return ((await response.json()) as { itemRefs: Array<Record<string, unknown>> }).itemRefs;
+}
+
+test('GReader stream/items/ids carries read, starred, and content version state in each item ref', async () => {
+	const state = fixture();
+	try {
+		insertFeed(state.database);
+		insertItem(state.database, 11, '2026-03-20T12:00:00.000Z');
+		insertItem(state.database, 12, '2026-03-20T12:00:01.250Z');
+		state.database.exec('UPDATE items SET is_read = 1, is_starred = 1, content_version = 3 WHERE rowid = 12');
+
+		assert.deepEqual(await streamItemIds(state.env, 's=feed/7&n=10'), [
+			{ id: '12', timestampUsec: '1774008001000000', read: true, starred: true, contentVersion: '3' },
+			{ id: '11', timestampUsec: '1774008000000000', read: false, starred: false, contentVersion: '0' },
+		]);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('GReader unread ot streams match the millisecond cutoff and search the unread date index', async () => {
+	const state = fixture();
+	try {
+		insertFeed(state.database);
+		const cutoff = Math.floor(Date.parse('2026-03-20T12:00:01.000Z') / 1000);
+		insertItem(state.database, 11, '2026-03-20T12:00:00.999Z');
+		insertItem(state.database, 12, '2026-03-20T12:00:01.000Z');
+		insertItem(state.database, 13, '2026-03-20T12:00:01.500Z');
+		insertItem(state.database, 14, '2026-03-20T12:00:02.000Z');
+		insertItem(state.database, 15, '2026-03-20T12:00:03.000Z');
+		state.database.exec('UPDATE items SET is_read = 1 WHERE rowid = 15');
+
+		const refs = await streamItemIds(state.env, `s=user/-/state/com.google/reading-list&xt=user/-/state/com.google/read&n=10&ot=${cutoff}`);
+		const legacyRows = state.database.prepare(
+			`SELECT rowid FROM items WHERE is_read = 0
+			    AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')
+			  ORDER BY received_at DESC, rowid DESC`,
+		).all(cutoff) as Array<{ rowid: number }>;
+		assert.deepEqual(refs.map((ref) => ref.id), ['14', '13', '12']);
+		assert.deepEqual(refs.map((ref) => ref.id), legacyRows.map((row) => String(row.rowid)));
+
+		const streamQuery = state.db.executedSql.find((query) => query.sql.startsWith('SELECT i.rowid, i.received_at'));
+		assert.ok(streamQuery);
+		const plan = state.database.prepare(`EXPLAIN QUERY PLAN ${streamQuery.sql}`).all(...(streamQuery.values as never[])) as Array<{ detail: string }>;
+		assert.match(plan.map(({ detail }) => detail).join('\n'), /SEARCH i USING INDEX idx_items_unread_date \(received_at>\?\)/);
+	} finally {
+		state.database.close();
+	}
+});
+
+test('GReader streams ignore a malformed or out-of-range ot cutoff instead of failing', async () => {
+	const state = fixture();
+	try {
+		insertFeed(state.database);
+		insertItem(state.database, 11, '2026-03-20T12:00:00.000Z');
+		insertItem(state.database, 12, '2026-03-20T12:00:01.000Z');
+
+		for (const ot of ['abc', '99999999999999', '-1e400']) {
+			assert.deepEqual((await streamItemIds(state.env, `s=feed/7&n=10&ot=${ot}`)).map((ref) => ref.id), ['12', '11']);
+		}
 	} finally {
 		state.database.close();
 	}

@@ -165,7 +165,7 @@ export function renderBrowserOfflineScript(): string {
    (feed && feed.folders || []).forEach(function (folder) { categories.push('user/-/label/' + folder); });
    return { id: article.readerId, nativeId: article.id, decimalId: article.decimalId, title: article.title, author: article.author, published: Math.floor(new Date(article.receivedAt).getTime()/1000), categories: categories,
     origin: { title: feed && feed.title || article.source, streamId: feed && feed.streamId || '' }, alternate: article.originalURL ? [{ href: article.originalURL }] : [],
-    summary: { content: body && body.html || '<p>This article body has not been saved offline.</p>' }, offlineSaved: !!body, isBodyPruned: article.isBodyPruned };
+    summary: { content: body && body.html || '<p>This article body has not been saved offline.</p>' }, contentVersion: body && body.contentVersion, offlineSaved: !!body, isBodyPruned: article.isBodyPruned };
   }
   async function doReplay() {
    var applied = 0;
@@ -255,7 +255,7 @@ export function renderBrowserOfflineScript(): string {
     for (var item of items) {
      var article = await resolve(item.id); if (!article) continue; // native mapping must come from sync first
      var html = item.content && item.content.content || item.summary && item.summary.content || '';
-     writes.push(put('bodies', article.id, { id: article.id, html: html, text: item.offlineText || html.replace(/<[^>]*>/g, ' ') }));
+     writes.push(put('bodies', article.id, { id: article.id, html: html, text: item.offlineText || html.replace(/<[^>]*>/g, ' '), contentVersion: item.contentVersion == null ? undefined : String(item.contentVersion) }));
     }
     await write(writes); return { saved: writes.length };
    }); },

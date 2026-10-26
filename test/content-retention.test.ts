@@ -144,12 +144,16 @@ test('content retention preserves the newest 200 items plus old unread and starr
 	runBodyRetention(database, 'feed');
 
 	const row = (id: string) => database.prepare(
-		'SELECT html_content, content_pruned_at FROM items WHERE id = ?',
-	).get(id) as { html_content: string; content_pruned_at: string | null };
+		'SELECT html_content, content_pruned_at, content_version FROM items WHERE id = ?',
+	).get(id) as { html_content: string; content_pruned_at: string | null; content_version: number };
 	assert.match(row('old-read').html_content, /no longer stored offline/);
 	assert.equal(row('old-read').content_pruned_at, '2026-08-15T12:00:00.000Z');
+	assert.equal(row('old-read').content_version, 1);
 	assert.equal(row('old-unread').content_pruned_at, null);
+	assert.equal(row('old-unread').content_version, 0);
 	assert.equal(row('old-starred').content_pruned_at, null);
+	assert.equal(row('old-starred').content_version, 0);
+	assert.equal(row('recent-0').content_version, 0);
 	database.close();
 });
 
@@ -227,13 +231,14 @@ test('GReader starred, unread, and read streams use bounded date indexes', () =>
 		assert.match(plan.map(({ detail }) => detail).join('\n'), new RegExp(indexName));
 	}
 
+	// unread-count reads feed_key and MAX(received_at) per feed; a covering index
+	// keeps it off the row pages that hold article bodies.
 	const countPlan = database.prepare(
-		`EXPLAIN QUERY PLAN SELECT i.feed_key, COUNT(*)
-		 FROM feeds f JOIN items i ON i.feed_key = f.feed_key
-		 WHERE f.is_active = 1 AND i.is_read = 0
-		 GROUP BY i.feed_key`,
+		`EXPLAIN QUERY PLAN SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
+		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`,
 	).all() as Array<{ detail: string }>;
-	assert.match(countPlan.map(({ detail }) => detail).join('\n'), /idx_items_unread_feed/);
+	assert.match(countPlan.map(({ detail }) => detail).join('\n'), /SCAN i USING COVERING INDEX idx_items_unread_feed_date/);
 	database.close();
 });
 

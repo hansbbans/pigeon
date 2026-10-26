@@ -17,6 +17,7 @@ const ITEM_ROW = {
 	received_at: '2026-03-20T12:34:56.000Z',
 	is_read: 0,
 	is_starred: 0,
+	content_version: 0,
 };
 
 const FEED_ROW = {
@@ -34,6 +35,28 @@ async function generateAuthHeader(password: string): Promise<string> {
 	return `GoogleLogin auth=pigeon/${token}`;
 }
 
+function itemRef(
+	id: string,
+	receivedAt: string,
+	state: { read?: boolean; starred?: boolean; contentVersion?: string } = {},
+) {
+	return {
+		id,
+		timestampUsec: String(Date.parse(receivedAt) * 1000),
+		read: state.read ?? false,
+		starred: state.starred ?? false,
+		contentVersion: state.contentVersion ?? '0',
+	};
+}
+
+const STREAM_IDS_SELECT = 'SELECT i.rowid, i.received_at, i.is_read, i.is_starred, i.content_version FROM items i';
+
+async function batchAll<T extends { all<R>(): Promise<{ results: R[] }> }>(statements: T[]) {
+	const results = [];
+	for (const statement of statements) results.push(await statement.all());
+	return results;
+}
+
 class FakePreparedStatement {
 	private readonly sql: string;
 
@@ -47,7 +70,7 @@ class FakePreparedStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '14' } as T;
+			return { value: '15' } as T;
 		}
 
 		if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -79,8 +102,18 @@ class FakePreparedStatement {
 			};
 		}
 
-		if (this.sql.includes('SELECT i.rowid, i.received_at FROM items i')) {
-			return { results: [{ rowid: ITEM_ROW.rowid, received_at: ITEM_ROW.received_at }] as T[] };
+		if (this.sql.includes(STREAM_IDS_SELECT)) {
+			return {
+				results: [
+					{
+						rowid: ITEM_ROW.rowid,
+						received_at: ITEM_ROW.received_at,
+						is_read: ITEM_ROW.is_read,
+						is_starred: ITEM_ROW.is_starred,
+						content_version: ITEM_ROW.content_version,
+					},
+				] as T[],
+			};
 		}
 
 		if (this.sql.includes('SELECT i.rowid, i.id, i.feed_key')) {
@@ -171,6 +204,7 @@ function createEnv() {
 			prepare(sql: string) {
 				return new FakePreparedStatement(sql);
 			},
+			batch: batchAll,
 		},
 	};
 }
@@ -191,6 +225,7 @@ function createLargeBatchEnv(itemCount: number) {
 			received_at: `2026-03-20T12:34:${String((rowid - 1) % 60).padStart(2, '0')}.000Z`,
 			is_read: 0,
 			is_starred: 0,
+			content_version: 0,
 		};
 	});
 
@@ -222,6 +257,7 @@ function createPaginatedStreamEnv(itemCount: number) {
 			received_at: new Date(Date.UTC(2026, 2, 20, 0, 0, rowid)).toISOString(),
 			is_read: 0,
 			is_starred: 0,
+			content_version: 0,
 		};
 	});
 	const feeds = items.map((item) => ({
@@ -275,7 +311,7 @@ function createReaderApiEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '14' } as T;
+				return { value: '15' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -323,7 +359,7 @@ function createReaderApiEnv(
 				};
 			}
 
-			if (this.sql.includes('SELECT i.rowid, i.received_at FROM items i')) {
+			if (this.sql.includes(STREAM_IDS_SELECT)) {
 				const limit = Number(this.values[this.values.length - 1]);
 				const hasCursor = this.sql.includes('i.received_at < ? OR (i.received_at = ? AND i.rowid < ?)');
 				const cursorReceivedAt = hasCursor ? String(this.values[this.values.length - 4]) : null;
@@ -369,7 +405,13 @@ function createReaderApiEnv(
 								right.received_at.localeCompare(left.received_at) || right.rowid - left.rowid,
 						)
 						.slice(0, limit)
-						.map((item) => ({ rowid: item.rowid, received_at: item.received_at })) as T[],
+						.map((item) => ({
+							rowid: item.rowid,
+							received_at: item.received_at,
+							is_read: item.is_read,
+							is_starred: item.is_starred,
+							content_version: item.content_version,
+						})) as T[],
 				};
 			}
 
@@ -449,6 +491,7 @@ function createReaderApiEnv(
 			prepare(sql: string) {
 				return new ReaderApiPreparedStatement(sql);
 			},
+			batch: batchAll,
 		},
 	};
 }
@@ -471,7 +514,7 @@ function createEditTagEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '14' } as T;
+				return { value: '15' } as T;
 			}
 
 			throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -549,7 +592,7 @@ function createSubscriptionEditEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '14' } as T;
+				return { value: '15' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -623,7 +666,7 @@ function createMarkAllAsReadEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '14' } as T;
+				return { value: '15' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -971,12 +1014,7 @@ function createSqliteMarkAllAsReadEnv(
 				prepare(sql: string) {
 					return new SqlitePreparedStatement(sql);
 				},
-				async batch(stmts: SqlitePreparedStatement[]) {
-					for (const stmt of stmts) {
-						await stmt.run();
-					}
-					return [];
-				},
+				batch: batchAll,
 			},
 		},
 	};
@@ -1026,7 +1064,7 @@ test('stream/items/ids returns decimal item references', async () => {
 
 	assert.equal(response.status, 200);
 	const payload = await response.json();
-	assert.deepEqual(payload.itemRefs, [{ id: '1' }]);
+	assert.deepEqual(payload.itemRefs, [itemRef('1', ITEM_ROW.received_at)]);
 });
 
 test('subscription/edit stores repeated label additions and removals for a feed', async () => {
@@ -1516,7 +1554,7 @@ test('stream/items/ids returns only items from feeds in the requested label stre
 
 	assert.equal(response.status, 200);
 	assert.deepEqual(await response.json(), {
-		itemRefs: [{ id: '1' }],
+		itemRefs: [itemRef('1', '2026-03-20T12:34:56.000Z')],
 	});
 });
 
@@ -1565,7 +1603,7 @@ test('stream/items/ids includes feeds matched through multi-label feed tags', as
 
 	assert.equal(response.status, 200);
 	assert.deepEqual(await response.json(), {
-		itemRefs: [{ id: '1' }],
+		itemRefs: [itemRef('1', '2026-03-20T12:34:56.000Z')],
 	});
 });
 
@@ -1711,7 +1749,7 @@ test('unread totals and reading-list streams exclude items from inactive feeds',
 		),
 		env as never,
 	);
-	assert.deepEqual(await idsResponse.json(), { itemRefs: [{ id: '1' }] });
+	assert.deepEqual(await idsResponse.json(), { itemRefs: [itemRef('1', activeItem.received_at)] });
 
 	const contentsResponse = await handleGreaderRequest(
 		new Request(

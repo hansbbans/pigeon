@@ -2,6 +2,9 @@ export const AUTH_STORAGE_KEY = 'pigeon.browser.auth';
 export const THEME_STORAGE_KEY = 'pigeon.browser.theme';
 export const INITIAL_ITEM_ID_LIMIT = 50;
 export const CONTENT_CHUNK_SIZE = 20;
+// Identifies first-party clients so the server can omit the duplicate
+// `summary` body and include content versions.
+export const PIGEON_CLIENT_ID = 'pigeon-web/1';
 export type BrowserTheme = 'light' | 'dark';
 
 export interface BrowserAppSession {
@@ -60,6 +63,7 @@ export interface BrowserLoadedItem {
 	content?: {
 		content?: string;
 	};
+	contentVersion?: string;
 }
 
 export interface BrowserArticleListEntry {
@@ -796,6 +800,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   THEME_STORAGE_KEY: ${JSON.stringify(THEME_STORAGE_KEY)},
   INITIAL_ITEM_ID_LIMIT: ${INITIAL_ITEM_ID_LIMIT},
   CONTENT_CHUNK_SIZE: ${CONTENT_CHUNK_SIZE},
+  PIGEON_CLIENT_ID: ${JSON.stringify(PIGEON_CLIENT_ID)},
   extractAuthToken,
   createLoggedOutSession,
   createSessionFromToken,
