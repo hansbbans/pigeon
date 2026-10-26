@@ -17,9 +17,11 @@ stale_seconds="${IOS_RUNNER_LOCK_STALE_SECONDS:-10800}"
 poll_seconds="${IOS_RUNNER_LOCK_POLL_SECONDS:-15}"
 
 lock_age() {
+  # `date -r FILE` reports the modification time on both macOS and GNU
+  # coreutils (the tooling tests run on Linux). An unreadable lock counts as new.
   local modified
-  modified="$(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || true)"
-  if [[ -z "$modified" ]]; then
+  modified="$(date -r "$lock_dir" +%s 2>/dev/null || true)"
+  if [[ ! "$modified" =~ ^[0-9]+$ ]]; then
     echo 0
     return
   fi
