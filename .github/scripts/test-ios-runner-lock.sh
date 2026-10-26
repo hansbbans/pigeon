@@ -21,7 +21,9 @@ run_lock() {
 
 assert_owner() {
   local actual
-  actual="$(cat "$LOCK/owner" 2>/dev/null || echo '<none>')"
+  # The owner file holds the owner on line 1 and the holder's job pid on line 2.
+  actual="$(sed -n '1p' "$LOCK/owner" 2>/dev/null || true)"
+  [[ -n "$actual" ]] || actual='<none>'
   [[ "$actual" == "$1" ]] || fail_test "expected lock owner $1, found $actual"
 }
 
