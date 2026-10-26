@@ -5,7 +5,7 @@ import { generateOpml } from './opml';
 import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
-import { renderBrowserAppHtml } from './browser-app';
+import { matchesBrowserAppEtag, renderBrowserAppShell } from './browser-app';
 import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
@@ -62,9 +62,16 @@ export default {
 		}
 
 		if (path === '/app' || path === '/app/') {
-			return new Response(renderBrowserAppHtml(env.BASE_URL), {
-				headers: { 'Content-Type': 'text/html; charset=utf-8' },
-			});
+			const shell = renderBrowserAppShell(env.BASE_URL);
+			const headers = {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'private, max-age=0, must-revalidate',
+				ETag: shell.etag,
+			};
+			if (matchesBrowserAppEtag(request.headers.get('If-None-Match'), shell.etag)) {
+				return new Response(null, { status: 304, headers });
+			}
+			return new Response(shell.html, { headers });
 		}
 
 		if (path === '/app/status') {
