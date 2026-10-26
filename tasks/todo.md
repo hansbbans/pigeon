@@ -35,9 +35,16 @@ Branch `claude/perf-navigation`, worktree `~/code/pigeon-perf`. Goal: tapping a 
 - [x] I4 tests for the new flow; fix chunk-sequencing tests
 - [x] O1 OfflineLibraryStore: cached ISO8601 formatters, reader_id index, no double decode in scoped load
 ### Wrap-up
-- [ ] npm test + typecheck; iOS unit suite; perf UI tests after
-- [ ] CHANGELOG Unreleased, README notes
-- [ ] PR, CI, /code-review, merge, deploy worker, verify live
+- [x] npm test (886 pass) + typecheck; iOS unit suite (805 pass); perf UI tests unchanged within noise (fixtures bypass the network)
+- [x] CHANGELOG Unreleased, README notes
+- [x] PR #140, /code-review (7 of 8 findings fixed)
+- [ ] CI green, merge, deploy worker first (v15 migration), then TestFlight; verify live
+
+## Review
+- Root cause of slow folder/feed opens was the network protocol, not rendering: six sequential round trips per cold open and full body re-downloads on every revisit. Server SQL was already cheap except unread-count (65 ms, fixed by a covering index) and Today (non-sargable cutoff).
+- Body versioning (`content_version`) is what lets revisits skip downloads; every body writer must bump it (rss upsert, cron prune, email original_url fill).
+- Remaining ideas not done: prune `sync_changes` (74k rows, never compacted); `app/status` full item scan; iOS view-layer micro-costs (linear `item(withID:)`, per-render filters) were not measurable in the perf UI tests.
+
 
 
 # Pigeon — Task Tracker
