@@ -38,7 +38,8 @@ grep -q "(pid 103)" <<<"$output" && fail_test "a manual Simulator session was re
 grep -q "(pid 105)" <<<"$output" && fail_test "a local developer build was reported"
 grep -q "handled: 2" <<<"$output" || fail_test "expected two orphans, got: $output"
 
-if RUNNER_TEMP=/tmp ORPHAN_PROCESS_LIST="$PROCESS_LIST" bash "$SCRIPT" 2>/dev/null; then
+# GitHub Actions sets GITHUB_RUN_ID for every step, so drop it explicitly.
+if env -u GITHUB_RUN_ID -u GITHUB_RUN_ATTEMPT RUNNER_TEMP=/tmp ORPHAN_PROCESS_LIST="$PROCESS_LIST" bash "$SCRIPT" 2>/dev/null; then
   fail_test "missing GITHUB_RUN_ID was accepted"
 fi
 
