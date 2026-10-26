@@ -3883,7 +3883,10 @@ final class ReaderAppModel {
 				? existing.learningState
 				: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
 			isBodyPruned: preserveBody ? existing.isBodyPruned : incoming.isBodyPruned,
-			contentVersion: preserveBody || incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
+			// A preserved readable body is a deliberate superset of the server's pruned
+			// placeholder, so adopt the server's version: the next ids page then matches
+			// instead of refetching the placeholder on every visit.
+			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 		)
 	}
 

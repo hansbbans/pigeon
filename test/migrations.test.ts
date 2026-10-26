@@ -903,14 +903,14 @@ test('SQLite v11 migration claims every source backfill once across independent 
 		indexMigrationBatch[7]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_items_starred_date ON items(received_at DESC) WHERE is_starred = 1',
 	);
-	assert.equal(indexMigrationBatch[8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_feed ON items(feed_key) WHERE is_read = 0');
-	assert.equal(indexMigrationBatch[9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
-	assert.equal(indexMigrationBatch[10]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
+	// v15 replaces the per-feed unread index, so the v13 block no longer builds it.
+	assert.equal(indexMigrationBatch[8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
+	assert.equal(indexMigrationBatch[9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
 	assert.equal(
-		indexMigrationBatch[11]?.sql,
+		indexMigrationBatch[10]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed ON refresh_activity(feed_key, attempted_at DESC, id DESC)',
 	);
-	assert.equal(indexMigrationBatch[12]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
+	assert.equal(indexMigrationBatch[11]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
 	assert.deepEqual(indexMigrationBatch.at(-1)?.values, ['13', '12']);
 	const maintenanceRow = database.prepare(
 		'SELECT job_name, completed_day, claimed_day, claim_token, lease_until, cursor_feed_key FROM maintenance_state',
@@ -1064,14 +1064,14 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		db.batches[0][7]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_items_starred_date ON items(received_at DESC) WHERE is_starred = 1',
 	);
-	assert.equal(db.batches[0][8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_feed ON items(feed_key) WHERE is_read = 0');
-	assert.equal(db.batches[0][9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
-	assert.equal(db.batches[0][10]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
+	// v15 replaces the per-feed unread index, so the v13 block no longer builds it.
+	assert.equal(db.batches[0][8]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0');
+	assert.equal(db.batches[0][9]?.sql, 'CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1');
 	assert.equal(
-		db.batches[0][11]?.sql,
+		db.batches[0][10]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_refresh_activity_feed ON refresh_activity(feed_key, attempted_at DESC, id DESC)',
 	);
-	assert.equal(db.batches[0][12]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
+	assert.equal(db.batches[0][11]?.sql, "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?");
 	assert.deepEqual(db.batches[0].at(-1)?.values, ['13', '12']);
 	assert.deepEqual(db.batches[1].map((statement) => statement.sql.split('\n', 1)[0]), [
 		'DROP TRIGGER IF EXISTS trg_items_update_status',

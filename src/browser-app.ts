@@ -4552,7 +4552,11 @@ export function renderBrowserAppRuntimeScript(): string {
         if (windowRefs.size >= ARTICLE_WINDOW_SIZE) break;
         if (!windowRefs.has(String(itemRef.id))) windowRefs.set(String(itemRef.id), itemRef);
       }
-      const staleIds = [...windowRefs.values()].filter(needsBodyRefresh).map((itemRef) => String(itemRef.id));
+      // Offline membership and bodies both come from the saved library, whose
+      // refs carry no versions; re-reading every saved body would only repeat work.
+      const staleIds = isOfflineReading()
+        ? [...windowRefs.keys()].filter((itemId) => !articleCache.has(itemId))
+        : [...windowRefs.values()].filter(needsBodyRefresh).map((itemRef) => String(itemRef.id));
       if (staleIds.length > 0) {
         await ensureArticleContent(staleIds, { generation, token, refresh: true });
       }

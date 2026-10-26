@@ -204,3 +204,24 @@ test('a multipart email still falls back to text when the HTML alone exceeds the
 		db.database.close();
 	}
 });
+
+test('a redelivery that fills in the original URL bumps the content version once', async () => {
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'versioned-message', 'Fri, 02 Oct 2026 12:00:00 +0000');
+		await deliver(db, 'versioned-message', 'Fri, 02 Oct 2026 12:00:00 +0000');
+		let row = db.database.prepare('SELECT original_url, content_version FROM items').get() as { original_url: string | null; content_version: number };
+		assert.equal(row.original_url, null);
+		assert.equal(row.content_version, 0, 'an unchanged duplicate must not bump the version');
+
+		const html = '<p>Newsletter body</p><p><a href="https://example.com/posts/newsletter">View in browser</a></p>';
+		await deliver(db, 'versioned-message', 'Fri, 02 Oct 2026 12:00:00 +0000', html, 'text/html; charset=UTF-8');
+		row = db.database.prepare('SELECT original_url, content_version FROM items').get() as { original_url: string | null; content_version: number };
+		assert.equal(row.original_url, 'https://example.com/posts/newsletter');
+		assert.equal(row.content_version, 1, 'filling in original_url changes the rendered body and link');
+
+		await deliver(db, 'versioned-message', 'Fri, 02 Oct 2026 12:00:00 +0000', html, 'text/html; charset=UTF-8');
+		row = db.database.prepare('SELECT content_version FROM items').get() as { content_version: number };
+		assert.equal(row.content_version, 1, 'a second redelivery with the same URL is a no-op');
+	} finally { db.database.close(); }
+});

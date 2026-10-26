@@ -298,6 +298,10 @@ function collectFeedLabels(labelResults: D1Result[], includeFeedTags: boolean): 
 	return labelsByFeedKey;
 }
 
+// Databases that predate feed_tags are remembered per isolate so the first
+// failing batch is the only one that repeats its heavier statements.
+const databasesWithoutFeedTags = new WeakSet<D1Database>();
+
 // One D1 round trip for a handler's statements plus the label lookups that
 // decorate its rows. Databases that predate feed_tags rerun without that lookup.
 async function batchWithFeedLabels(
@@ -313,12 +317,16 @@ async function batchWithFeedLabels(
 		};
 	};
 
+	if (databasesWithoutFeedTags.has(env.DB)) {
+		return run(false);
+	}
 	try {
 		return await run(true);
 	} catch (error) {
 		if (!isMissingTableError(error, 'feed_tags')) {
 			throw error;
 		}
+		databasesWithoutFeedTags.add(env.DB);
 		return run(false);
 	}
 }
@@ -632,15 +640,20 @@ async function selectStreamRowIds(options: {
 	if (options.excludeTag === 'user/-/state/com.google/read') {
 		sql += ' AND i.is_read = 0';
 	}
-	if (options.olderThanUnix) {
-		// ot means "not older than": keep items at or after the cutoff, compared at millisecond precision.
-		const olderThanSeconds = parseInt(options.olderThanUnix, 10);
+	const olderThanSeconds = options.olderThanUnix ? parseInt(options.olderThanUnix, 10) : NaN;
+	const olderThanDate = Number.isFinite(olderThanSeconds) ? new Date(olderThanSeconds * 1000) : null;
+	if (olderThanDate && Number.isFinite(olderThanDate.getTime())) {
+		// ot means "not older than": keep items at or after the cutoff, compared at
+		// millisecond precision. A malformed or out-of-range ot is ignored rather
+		// than turned into an invalid bind.
 		sql += " AND strftime('%Y-%m-%dT%H:%M:%fZ', i.received_at) >= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')";
 		binds.push(olderThanSeconds);
-		// Stored received_at values are 24-character UTC ISO strings, so the same
-		// cutoff as a plain string comparison lets SQLite seek the date indexes.
+		// Let SQLite seek the date indexes: every stored received_at starts with
+		// its UTC calendar date, whether written as ISO 8601 or "YYYY-MM-DD HH:MM:SS",
+		// so a string comparison against the cutoff's date prefix is a safe coarse
+		// bound. The exact strftime predicate above still decides rows on that day.
 		sql += ' AND i.received_at >= ?';
-		binds.push(new Date(olderThanSeconds * 1000).toISOString());
+		binds.push(olderThanDate.toISOString().slice(0, 10));
 	}
 	const cursor = options.continuation
 		? decodeContinuation(options.continuation, {

@@ -403,7 +403,6 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			'CREATE INDEX IF NOT EXISTS idx_items_retention_candidates ON items(feed_key, datetime(received_at), id) WHERE content_pruned_at IS NULL AND is_read = 1 AND is_starred = 0',
 		),
 		db.prepare('CREATE INDEX IF NOT EXISTS idx_items_starred_date ON items(received_at DESC) WHERE is_starred = 1'),
-		db.prepare('CREATE INDEX IF NOT EXISTS idx_items_unread_feed ON items(feed_key) WHERE is_read = 0'),
 		db.prepare('CREATE INDEX IF NOT EXISTS idx_items_unread_date ON items(received_at DESC) WHERE is_read = 0'),
 		db.prepare('CREATE INDEX IF NOT EXISTS idx_items_read_date ON items(received_at DESC) WHERE is_read = 1'),
 		db.prepare(

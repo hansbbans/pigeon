@@ -515,3 +515,18 @@ test('GReader unread ot streams match the millisecond cutoff and search the unre
 		state.database.close();
 	}
 });
+
+test('GReader streams ignore a malformed or out-of-range ot cutoff instead of failing', async () => {
+	const state = fixture();
+	try {
+		insertFeed(state.database);
+		insertItem(state.database, 11, '2026-03-20T12:00:00.000Z');
+		insertItem(state.database, 12, '2026-03-20T12:00:01.000Z');
+
+		for (const ot of ['abc', '99999999999999', '-1e400']) {
+			assert.deepEqual((await streamItemIds(state.env, `s=feed/7&n=10&ot=${ot}`)).map((ref) => ref.id), ['12', '11']);
+		}
+	} finally {
+		state.database.close();
+	}
+});
