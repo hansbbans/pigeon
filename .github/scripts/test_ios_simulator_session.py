@@ -34,43 +34,49 @@ class SimulatorOwnershipTests(unittest.TestCase):
     def test_active_owned_device_is_preserved_without_leaving_a_stale_reservation(self):
         self.check_cleanup(processes="1 0 xcodebuild -destination id=owned", expect_shutdown=False)
 
-    def test_start_records_only_a_successful_boot_as_owned(self):
+    def run_start(self, snapshot, outcomes=None, raises=None):
+        """Run start() against a device snapshot; return the ownership record, the
+        simctl calls made, and the reservation lock's content (None if absent)."""
         with tempfile.TemporaryDirectory() as directory:
-            environment = {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(Path(directory) / "outputs")}
-            snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
-                {"name": "iPhone 17", "udid": "preexisting", "state": "Booted"},
-                {"name": "iPhone 17", "udid": "owned", "state": "Shutdown"},
-            ]}
-            with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run") as command:
-                session.start()
-                self.assertEqual(command.call_args_list, [
-                    call(["xcrun", "simctl", "boot", "owned"], check=True),
-                    call(["xcrun", "simctl", "bootstatus", "owned", "-b"], check=True, timeout=300),
-                ])
-            record = json.loads((Path(directory) / "pigeon-simulator-42-1.json").read_text())
-            self.assertTrue(record["boot_confirmed"])
-            self.assertEqual(record["preexisting_booted"], ["preexisting"])
-
-    def test_boot_that_never_finishes_still_owns_the_device(self):
-        with tempfile.TemporaryDirectory() as directory:
-            environment = {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(Path(directory) / "outputs")}
-            snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "owned", "state": "Shutdown"}]}
-            outcomes = [None, session.subprocess.TimeoutExpired("bootstatus", 300)]
-            with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run", side_effect=outcomes):
-                with self.assertRaises(session.subprocess.TimeoutExpired):
+            root = Path(directory)
+            ownership = root / "pigeon-simulator-42-1.json"
+            environment = {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(root / "outputs")}
+            with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run", side_effect=outcomes) as command:
+                if raises is None:
                     session.start()
-            record = json.loads((Path(directory) / "pigeon-simulator-42-1.json").read_text())
-            self.assertTrue(record["boot_confirmed"], "a booted device must be shut down at cleanup even if the boot wait failed")
+                else:
+                    with self.assertRaises(raises):
+                        session.start()
+            lock = root / "pigeon-simulator-owned.lock"
+            return json.loads(ownership.read_text()), command.call_args_list, (lock.read_text() if lock.is_file() else None), str(ownership)
+
+    def test_start_records_only_a_successful_boot_as_owned(self):
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+            {"name": "iPhone 17", "udid": "preexisting", "state": "Booted"},
+            {"name": "iPhone 17", "udid": "owned", "state": "Shutdown"},
+        ]}
+        record, calls, lock_target, ownership = self.run_start(snapshot)
+        self.assertEqual(calls, [
+            call(["xcrun", "simctl", "boot", "owned"], check=True),
+            call(["xcrun", "simctl", "bootstatus", "owned", "-b"], check=True, timeout=session.BOOT_TIMEOUT_SECONDS),
+        ])
+        self.assertTrue(record["boot_confirmed"])
+        self.assertEqual(record["preexisting_booted"], ["preexisting"])
+        self.assertEqual(lock_target, ownership)
+
+    def test_boot_that_never_finishes_still_owns_the_device_and_continues(self):
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "owned", "state": "Shutdown"}]}
+        outcomes = [None, session.subprocess.TimeoutExpired("bootstatus", session.BOOT_TIMEOUT_SECONDS)]
+        record, calls, lock_target, ownership = self.run_start(snapshot, outcomes)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(record["boot_confirmed"], "a booted device must be shut down at cleanup even if the boot wait timed out")
+        self.assertEqual(lock_target, ownership, "the reservation must survive a timed-out boot wait so cleanup still owns the device")
 
     def test_failed_boot_never_claims_the_device(self):
-        with tempfile.TemporaryDirectory() as directory:
-            environment = {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(Path(directory) / "outputs")}
-            snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "owned", "state": "Shutdown"}]}
-            with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run", side_effect=session.subprocess.CalledProcessError(1, "simctl")):
-                with self.assertRaises(session.subprocess.CalledProcessError):
-                    session.start()
-            record = json.loads((Path(directory) / "pigeon-simulator-42-1.json").read_text())
-            self.assertFalse(record["boot_confirmed"])
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "owned", "state": "Shutdown"}]}
+        record, calls, lock_target, ownership = self.run_start(snapshot, session.subprocess.CalledProcessError(1, "simctl"), raises=session.subprocess.CalledProcessError)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(record["boot_confirmed"])
 
     def check_cleanup(self, boot_confirmed=True, preexisting=None, processes="", expect_shutdown=False, expect_lock=False):
         with tempfile.TemporaryDirectory() as directory:
