@@ -71,6 +71,11 @@ def start():
         subprocess.run(["xcrun", "simctl", "boot", udid], check=True)
         record["boot_confirmed"] = True
         ownership_file.write_text(json.dumps(record))
+        # `boot` returns before the device is usable. Wait for the boot to finish,
+        # otherwise the UI test runner can time out "waiting for AX loaded
+        # notification" on a loaded Mac. The device is already owned, so a
+        # failure here still shuts it down at cleanup.
+        subprocess.run(["xcrun", "simctl", "bootstatus", udid, "-b"], check=True, timeout=300)
         print("Booted task-owned simulator: " + udid, flush=True)
         return
     raise RuntimeError("No idle unreserved iPhone simulator is available")

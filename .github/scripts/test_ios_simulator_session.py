@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 spec = importlib.util.spec_from_file_location("simulator_session", Path(__file__).with_name("ios-simulator-session.py"))
 session = importlib.util.module_from_spec(spec)
@@ -43,10 +43,24 @@ class SimulatorOwnershipTests(unittest.TestCase):
             ]}
             with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run") as command:
                 session.start()
-                command.assert_called_once_with(["xcrun", "simctl", "boot", "owned"], check=True)
+                self.assertEqual(command.call_args_list, [
+                    call(["xcrun", "simctl", "boot", "owned"], check=True),
+                    call(["xcrun", "simctl", "bootstatus", "owned", "-b"], check=True, timeout=300),
+                ])
             record = json.loads((Path(directory) / "pigeon-simulator-42-1.json").read_text())
             self.assertTrue(record["boot_confirmed"])
             self.assertEqual(record["preexisting_booted"], ["preexisting"])
+
+    def test_boot_that_never_finishes_still_owns_the_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {"GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": directory, "GITHUB_OUTPUT": str(Path(directory) / "outputs")}
+            snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "owned", "state": "Shutdown"}]}
+            outcomes = [None, session.subprocess.TimeoutExpired("bootstatus", 300)]
+            with patch.dict(os.environ, environment), patch.object(session, "devices", return_value=snapshot), patch.object(session.tempfile, "gettempdir", return_value=directory), patch.object(session.subprocess, "run", side_effect=outcomes):
+                with self.assertRaises(session.subprocess.TimeoutExpired):
+                    session.start()
+            record = json.loads((Path(directory) / "pigeon-simulator-42-1.json").read_text())
+            self.assertTrue(record["boot_confirmed"], "a booted device must be shut down at cleanup even if the boot wait failed")
 
     def test_failed_boot_never_claims_the_device(self):
         with tempfile.TemporaryDirectory() as directory:
