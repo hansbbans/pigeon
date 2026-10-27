@@ -2,10 +2,15 @@
 
 All notable changes to Pigeon are documented in this file.
 
-## Unreleased
+## [0.1.8.0] - 2026-10-26
+
+### Added
+
+- A newspaper-style Front Page home layout for iPhone: a masthead, a lead story with an image and summary, then a two-column headline grid. Classic stays the default; switch in the list's More → Display → Layout or in Settings → Reading → Layout.
 
 ### Changed
 
+- Marking many stories read and undoing it match stories by identity, so large bulk actions finish faster.
 - Opening a folder or feed is much faster. The app asks the server once for the page of story identifiers, reuses every story body it already has when the server confirms the body is unchanged, and downloads any new or changed bodies in a single request instead of five sequential ones. Read and starred state arrives with the identifiers, so an unchanged page needs one small round trip.
 - The server answers story-content requests with one batched database round trip instead of four sequential queries, sends each body once to Pigeon's own apps, and uses index-only plans for Today, per-feed unread lists, and unread counts.
 - The web app loads a first visit to a feed or folder with a single request, refreshes cached views without re-downloading unchanged bodies, and serves the app shell with cache validation headers.
