@@ -43,6 +43,10 @@ jobs:
         run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
       - name: Verify simulator ownership guards
         run: python3 .github/scripts/test_ios_simulator_session.py
+      - name: Verify shared runner helpers
+        run: |
+          bash .github/scripts/test-ios-runner-lock.sh
+          bash .github/scripts/test-kill-orphaned-xcodebuild.sh
 
   worker:
     needs: scope
@@ -68,7 +72,9 @@ jobs:
       - macOS
       - ARM64
       - pigeon-ci
-    timeout-minutes: 45
+    # Up to 60 minutes may be spent waiting for the shared iOS runner lock,
+    # then the build and the always() cleanup need their own budget.
+    timeout-minutes: 150
     env:
       APP_DIRECTORY: ios/PigeonReader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
@@ -91,10 +97,16 @@ jobs:
         run: bash .github/scripts/verify-product-display-names.sh
       - name: Verify signing profile mapping
         run: bash .github/scripts/verify-provisioning-profile-mapping.sh
+      - name: Kill xcodebuild orphans from earlier runs
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+      - name: Acquire the shared iOS runner lock
+        timeout-minutes: 65
+        run: bash .github/scripts/ios-runner-lock.sh acquire
       - name: Select simulator
         id: simulator
         run: .github/scripts/select-ios-simulator.sh
       - name: Run unit and UI tests
+        timeout-minutes: 60
         env:
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
           TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
@@ -122,6 +134,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Clean Release build
+        timeout-minutes: 20
         env:
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
@@ -139,10 +152,22 @@ jobs:
             CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$build_log"
           .github/scripts/fail-on-first-party-warnings.sh "$build_log"
 
+      - name: Kill build processes this job left behind
+        if: always()
+        shell: bash
+        env:
+          ORPHAN_INCLUDE_CURRENT_RUN: "1"
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+
       - name: Shut down this job's simulator
         if: always()
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
+
+      - name: Release the shared iOS runner lock
+        if: always()
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh release
 
   required:
     name: CI required validation
