@@ -47,7 +47,7 @@ jobs:
       - ARM64
       - pigeon-ci
     # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
-    timeout-minutes: 150
+    timeout-minutes: 160
     environment: testflight
     outputs:
       marketing_version: ${{ steps.release_metadata.outputs.marketing_version }}
@@ -515,6 +515,13 @@ jobs:
         if: always() && steps.simulator.outputs.ownership_file != ''
         shell: bash
         run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
+
+      - name: Kill build processes this job left behind
+        if: always()
+        shell: bash
+        env:
+          ORPHAN_INCLUDE_CURRENT_RUN: "1"
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
 
       - name: Release the shared iOS runner lock
         if: always()

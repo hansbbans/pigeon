@@ -77,12 +77,14 @@ lock_age() {
   echo $(( $(date +%s) - modified ))
 }
 
-owner_line() {
-  sed -n '1p' "$1/owner" 2>/dev/null || true
+# The inode identifies a lock directory across a rename, so a waiter can tell
+# the directory it judged abandoned from one another job created since.
+dir_inode() {
+  ls -di "$1" 2>/dev/null | awk '{print $1}' || true
 }
 
 current_owner() {
-  owner_line "$lock_dir"
+  sed -n '1p' "$lock_dir/owner" 2>/dev/null || true
 }
 
 current_holder_pid() {
@@ -104,26 +106,27 @@ abandoned_reason() {
 }
 
 # Rename the abandoned lock away so only one waiter replaces it. Returns 0 when
-# the lock held by $1 is gone and the caller may try mkdir again.
+# the directory judged abandoned (by inode) is gone and mkdir may be retried.
 replace_abandoned_lock() {
-  local holder="$1" stale_dir
+  local judged_inode="$1" stale_dir
   stale_dir="$lock_dir.stale.$$.$RANDOM"
   mv "$lock_dir" "$stale_dir" 2>/dev/null || return 1
-  if [[ "$(owner_line "$stale_dir")" == "$holder" ]]; then
+  if [[ -n "$judged_inode" && "$(dir_inode "$stale_dir")" == "$judged_inode" ]]; then
     rm -rf "$stale_dir"
     return 0
   fi
-  # Another waiter replaced the lock between our check and the rename. Put the
-  # new holder's lock back; rename(2) only overwrites an empty directory, so a
-  # lock that already has an owner file is never clobbered.
-  if ! python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$stale_dir" "$lock_dir" 2>/dev/null; then
+  # Another job replaced the lock between our check and the rename. Put its
+  # directory back: rename(2) overwrites only an empty target, so a lock that
+  # already has an owner file is never clobbered.
+  if ! perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$stale_dir" "$lock_dir" 2>/dev/null; then
     rm -rf "$stale_dir"
   fi
   return 1
 }
 
 acquire() {
-  local waited=0 age holder holder_pid reason
+  local waited=0 age holder holder_pid reason judged_inode my_job_pid
+  my_job_pid="$(job_pid)"
   while true; do
     while ! mkdir "$lock_dir" 2>/dev/null; do
       if ! process_alive "$parent_pid"; then
@@ -132,11 +135,17 @@ acquire() {
       fi
       holder="$(current_owner)"
       holder_pid="$(current_holder_pid)"
+      if [[ "$holder" == "$owner" && "$holder_pid" == "$my_job_pid" ]]; then
+        # A racing waiter renamed our fresh lock away and then put it back.
+        echo "Acquired the iOS runner lock as $owner (job pid $my_job_pid; restored after a racing rename)"
+        return
+      fi
+      judged_inode="$(dir_inode "$lock_dir")"
       age="$(lock_age)"
       reason="$(abandoned_reason "$holder" "$holder_pid" "$age")"
       if [[ -n "$reason" ]]; then
         echo "::warning::Replacing an abandoned iOS runner lock (${holder:-no owner}): $reason"
-        if replace_abandoned_lock "$holder"; then
+        if replace_abandoned_lock "$judged_inode"; then
           continue
         fi
       fi
@@ -153,7 +162,10 @@ acquire() {
       echo "The step that started this wait is gone; released the iOS runner lock again" >&2
       exit 1
     fi
-    printf '%s\n%s\n' "$owner" "$(job_pid)" > "$lock_dir/owner"
+    if ! printf '%s\n%s\n' "$owner" "$my_job_pid" > "$lock_dir/owner" 2>/dev/null; then
+      echo "::warning::The iOS runner lock directory vanished right after we created it; waiting again"
+      continue
+    fi
     sleep "$settle_seconds"
     if [[ "$(current_owner)" == "$owner" ]]; then
       break

@@ -118,7 +118,11 @@ grep -q "Gave up" <<<"$output" || fail_test "an unrenamable abandoned lock did n
 
 # A lock renamed away by a racing waiter right after acquisition is noticed
 # during the settle period instead of being treated as held.
-( IOS_RUNNER_LOCK_SETTLE_SECONDS=3 IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock tenth acquire > "$TEST_ROOT/tenth.log" 2>&1; echo $? > "$TEST_ROOT/tenth.status" ) &
+( if IOS_RUNNER_LOCK_SETTLE_SECONDS=3 IOS_RUNNER_LOCK_WAIT_SECONDS=2 run_lock tenth acquire > "$TEST_ROOT/tenth.log" 2>&1; then
+    echo 0 > "$TEST_ROOT/tenth.status"
+  else
+    echo $? > "$TEST_ROOT/tenth.status"
+  fi ) &
 sleep 1
 printf '%s\n%s\n' 'thief' "$$" > "$LOCK/owner"
 wait
@@ -126,6 +130,26 @@ wait
 grep -q "taken over" "$TEST_ROOT/tenth.log" || fail_test "the takeover was not noticed: $(cat "$TEST_ROOT/tenth.log")"
 assert_owner thief
 rm -rf "$LOCK"
+[[ -f "$TEST_ROOT/tenth.status" ]] || fail_test "the takeover test did not record an exit status"
+
+# A lock renamed away during the settle period and then put back by the racing
+# waiter still belongs to this job; acquire notices instead of waiting on itself.
+( if IOS_RUNNER_LOCK_SETTLE_SECONDS=2 IOS_RUNNER_LOCK_WAIT_SECONDS=10 run_lock twelfth acquire > "$TEST_ROOT/twelfth.log" 2>&1; then
+    echo 0 > "$TEST_ROOT/twelfth.status"
+  else
+    echo $? > "$TEST_ROOT/twelfth.status"
+  fi ) &
+sleep 1
+saved_owner="$(cat "$LOCK/owner")"
+printf '%s\n%s\n' 'thief' "$$" > "$LOCK/owner"
+sleep 2
+printf '%s\n' "$saved_owner" > "$LOCK/owner"
+wait
+[[ "$(cat "$TEST_ROOT/twelfth.status")" == 0 ]] || fail_test "acquire did not recognise its own restored lock: $(cat "$TEST_ROOT/twelfth.log")"
+grep -q "restored after a racing rename" "$TEST_ROOT/twelfth.log" || fail_test "the restored lock was not reported: $(cat "$TEST_ROOT/twelfth.log")"
+assert_owner twelfth
+run_lock twelfth release
+[[ ! -d "$LOCK" ]] || fail_test "the restored lock could not be released"
 
 # A waiter that judged the old lock abandoned must not steal a lock another
 # job acquired in the meantime: the renamed directory is put back untouched.
