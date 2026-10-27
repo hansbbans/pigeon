@@ -32,7 +32,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 concurrency:
   group: pigeon-testflight-release
@@ -46,8 +46,12 @@ jobs:
       - macOS
       - ARM64
       - pigeon-ci
-    # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
-    timeout-minutes: 160
+    # Up to 60 minutes may be spent waiting for the shared iOS runner lock,
+    # then tests, archive, upload and cleanup need their own budgets.
+    timeout-minutes: 210
+    permissions:
+      actions: read
+      contents: write
     environment: testflight
     outputs:
       marketing_version: ${{ steps.release_metadata.outputs.marketing_version }}
@@ -420,6 +424,11 @@ jobs:
           )
           xcodebuild "${archive_arguments[@]}"
 
+      - name: Release the shared iOS runner lock after the archive
+        # Export and upload are network-bound; other repos' builds can start.
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh release
+
       - name: Upload archive to TestFlight
         timeout-minutes: 30
         shell: bash
@@ -439,10 +448,6 @@ jobs:
             -authenticationKeyPath "$AUTH_KEY_PATH" \
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
-
-      - name: Release the shared iOS runner lock after the upload
-        shell: bash
-        run: bash .github/scripts/ios-runner-lock.sh release
 
       - name: Record uploaded build metadata
         id: release_metadata
@@ -511,17 +516,17 @@ jobs:
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null
           rm -rf "$RELEASE_ROOT"
 
-      - name: Shut down this job's simulator
-        if: always() && steps.simulator.outputs.ownership_file != ''
-        shell: bash
-        run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
-
       - name: Kill build processes this job left behind
         if: always()
         shell: bash
         env:
           ORPHAN_INCLUDE_CURRENT_RUN: "1"
         run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+
+      - name: Shut down this job's simulator
+        if: always() && steps.simulator.outputs.ownership_file != ''
+        shell: bash
+        run: python3 .github/scripts/ios-simulator-session.py finish "${{ steps.simulator.outputs.ownership_file }}"
 
       - name: Release the shared iOS runner lock
         if: always()

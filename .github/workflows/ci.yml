@@ -72,7 +72,6 @@ jobs:
       - macOS
       - ARM64
       - pigeon-ci
-    # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
     # Up to 60 minutes may be spent waiting for the shared iOS runner lock,
     # then the build and the always() cleanup need their own budget.
     timeout-minutes: 150

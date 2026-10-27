@@ -105,21 +105,39 @@ abandoned_reason() {
   return 0
 }
 
-# Rename the abandoned lock away so only one waiter replaces it. Returns 0 when
-# the directory judged abandoned (by inode) is gone and mkdir may be retried.
+# Replace an abandoned lock. Only the waiter that creates the takeover marker
+# inside it proceeds, and it re-checks right before the rename that the
+# directory is still the one it judged (same inode, same owner line), so a
+# lock another job acquired in the meantime is never touched. Returns 0 when
+# the judged lock is gone and mkdir may be retried.
 replace_abandoned_lock() {
-  local judged_inode="$1" stale_dir
+  local holder="$1" judged_inode="$2" marker="$lock_dir/takeover" stale_dir marker_age
+  if ! mkdir "$marker" 2>/dev/null; then
+    # A waiter that died between marking and renaming leaves the marker behind.
+    marker_age="$(date -r "$marker" +%s 2>/dev/null || true)"
+    if [[ "$marker_age" =~ ^[0-9]+$ ]] && (( $(date +%s) - marker_age > ownerless_seconds )); then
+      rmdir "$marker" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if [[ "$(dir_inode "$lock_dir")" != "$judged_inode" || "$(current_owner)" != "$holder" ]]; then
+    rmdir "$marker" 2>/dev/null || true
+    return 1
+  fi
   stale_dir="$lock_dir.stale.$$.$RANDOM"
-  mv "$lock_dir" "$stale_dir" 2>/dev/null || return 1
-  if [[ -n "$judged_inode" && "$(dir_inode "$stale_dir")" == "$judged_inode" ]]; then
+  if ! mv "$lock_dir" "$stale_dir" 2>/dev/null; then
+    rmdir "$marker" 2>/dev/null || true
+    return 1
+  fi
+  if [[ "$(dir_inode "$stale_dir")" == "$judged_inode" ]]; then
     rm -rf "$stale_dir"
     return 0
   fi
-  # Another job replaced the lock between our check and the rename. Put its
-  # directory back: rename(2) overwrites only an empty target, so a lock that
-  # already has an owner file is never clobbered.
+  # The lock changed in the instant between the re-check and the rename. Put
+  # it back if the path is still free (rename(2) overwrites only an empty
+  # directory) and never delete it: its holder's settle check will notice.
   if ! perl -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$stale_dir" "$lock_dir" 2>/dev/null; then
-    rm -rf "$stale_dir"
+    echo "::warning::Displaced another job's fresh iOS runner lock to $stale_dir; leaving it in place"
   fi
   return 1
 }
@@ -145,7 +163,7 @@ acquire() {
       reason="$(abandoned_reason "$holder" "$holder_pid" "$age")"
       if [[ -n "$reason" ]]; then
         echo "::warning::Replacing an abandoned iOS runner lock (${holder:-no owner}): $reason"
-        if replace_abandoned_lock "$judged_inode"; then
+        if replace_abandoned_lock "$holder" "$judged_inode"; then
           continue
         fi
       fi

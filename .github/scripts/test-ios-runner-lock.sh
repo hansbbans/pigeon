@@ -8,9 +8,27 @@ TEST_ROOT="$(mktemp -d /tmp/pigeon-runner-lock-test.XXXXXX)"
 LOCK="$TEST_ROOT/lock"
 trap 'chmod -R u+w "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
 
+# Everything the script prints goes to a log that is shown only on failure, so
+# its ::warning:: lines do not become annotations on every tooling run.
+LOG="$TEST_ROOT/test-output.log"
+exec 3>&1
+exec > "$LOG" 2>&1
+
 fail_test() {
-  echo "$1" >&2
+  cat "$LOG" >&3
+  echo "$1" >&3
   exit 1
+}
+
+# The background acquire needs a moment to create the lock; poll instead of
+# assuming a fixed delay (hosted runners can be slow).
+wait_for_owner_file() {
+  local attempt
+  for attempt in $(seq 1 100); do
+    [[ -f "$LOCK/owner" ]] && return 0
+    sleep 0.1
+  done
+  fail_test "the background acquire never wrote its owner file"
 }
 
 run_lock() {
@@ -123,7 +141,7 @@ grep -q "Gave up" <<<"$output" || fail_test "an unrenamable abandoned lock did n
   else
     echo $? > "$TEST_ROOT/tenth.status"
   fi ) &
-sleep 1
+wait_for_owner_file
 printf '%s\n%s\n' 'thief' "$$" > "$LOCK/owner"
 wait
 [[ "$(cat "$TEST_ROOT/tenth.status")" != 0 ]] || fail_test "acquire reported success after its lock was taken over: $(cat "$TEST_ROOT/tenth.log")"
@@ -139,7 +157,7 @@ rm -rf "$LOCK"
   else
     echo $? > "$TEST_ROOT/twelfth.status"
   fi ) &
-sleep 1
+wait_for_owner_file
 saved_owner="$(cat "$LOCK/owner")"
 printf '%s\n%s\n' 'thief' "$$" > "$LOCK/owner"
 sleep 2
@@ -161,6 +179,15 @@ fi
 assert_owner fresh-holder
 rm -rf "$LOCK"
 
+# A takeover marker left by a waiter that died mid-replacement does not block
+# the next waiter once it is old.
+mkdir -p "$LOCK/takeover"
+printf '%s\n%s\n' 'crashed-job' "$dead_pid" > "$LOCK/owner"
+touch -t 202001010000 "$LOCK/takeover"
+IOS_RUNNER_LOCK_WAIT_SECONDS=5 run_lock thirteenth acquire
+assert_owner thirteenth
+run_lock thirteenth release
+
 # Outside Actions, acquire and release run in separate shells with no explicit owner.
 IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" acquire
 IOS_RUNNER_LOCK_DIR="$LOCK" IOS_RUNNER_LOCK_POLL_SECONDS=1 bash "$SCRIPT" release
@@ -170,4 +197,4 @@ if run_lock third frobnicate 2>/dev/null; then
   fail_test "unknown action was accepted"
 fi
 
-echo "ios_runner_lock test: PASS"
+echo "ios_runner_lock test: PASS" >&3

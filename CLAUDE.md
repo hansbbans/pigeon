@@ -10,6 +10,7 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 - Checks: `npm run check` (tests, typecheck, audit); `npm test` for a quick loop.
 - **deploy** means `npm run deploy` (ships `pigeon-recommendations`, then `pigeon`). CI never deploys, so production drifts behind `main`. Before deploying: compare `npx wrangler deployments list` with `main`, and read the live schema with `npx wrangler d1 execute pigeon-db --remote --command "SELECT value FROM _meta WHERE key='schema_version'"`. Schema bumps are one-way (an older Worker throws on a newer schema), so keep them out of hotfixes. Afterwards check `https://pigeon.hanscho.com/health` and report the deployed commit. No D1 restore point before deploys; Hans declined that.
 - Production bugs: check live data and the live Worker version before reading code.
+- Worker invariants: dates are ISO 8601 UTC; Atom entries wrap HTML in CDATA; the email handler catches and logs instead of rethrowing (a rethrow makes Cloudflare retry the message); D1 rows are capped at 1 MB, so check content size before inserting (`MAX_CONTENT_SIZE` in `src/email-handler.ts`); dedupe with `INSERT OR IGNORE` against the `message_id` UNIQUE index; the email handler cannot run locally, so test it with saved `.eml` fixtures.
 - Writers to `items` must avoid no-op updates (they bloat `sync_changes`, see the compaction in the sync route). Never delete `sync_changes` rows; web push relies on each article's first event.
 
 ## iOS
