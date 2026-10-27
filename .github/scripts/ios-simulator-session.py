@@ -38,6 +38,10 @@ def active_use(udid, rows):
     return False
 
 
+# How long to wait for a booted device to finish starting up.
+BOOT_TIMEOUT_SECONDS = 300
+
+
 def start():
     snapshot = devices()
     booted = [d["udid"] for group in snapshot.values() for d in group if d["state"] != "Shutdown"]
@@ -71,6 +75,17 @@ def start():
         subprocess.run(["xcrun", "simctl", "boot", udid], check=True)
         record["boot_confirmed"] = True
         ownership_file.write_text(json.dumps(record))
+        # `boot` returns before the device is usable. Wait for the boot to finish,
+        # otherwise the UI test runner can time out "waiting for AX loaded
+        # notification" on a loaded Mac. The device is already owned, so a
+        # failure here still shuts it down at cleanup. A wait that outlasts the
+        # cap is reported and the job goes on: xcodebuild has its own readiness
+        # wait, and a slow boot must not fail the job before it starts.
+        try:
+            subprocess.run(["xcrun", "simctl", "bootstatus", udid, "-b"], check=True, timeout=BOOT_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            print("::warning::Simulator " + udid + " did not finish booting within "
+                  + str(BOOT_TIMEOUT_SECONDS) + "s; continuing and leaving the wait to xcodebuild", flush=True)
         print("Booted task-owned simulator: " + udid, flush=True)
         return
     raise RuntimeError("No idle unreserved iPhone simulator is available")

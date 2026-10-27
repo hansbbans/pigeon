@@ -48,7 +48,7 @@ jobs:
       - pigeon-ci
     # Up to 60 minutes may be spent waiting for the shared iOS runner lock,
     # then tests, archive, upload and cleanup need their own budgets.
-    timeout-minutes: 210
+    timeout-minutes: 220
     permissions:
       actions: read
       contents: write

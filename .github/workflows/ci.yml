@@ -74,7 +74,7 @@ jobs:
       - pigeon-ci
     # Up to 60 minutes may be spent waiting for the shared iOS runner lock,
     # then the build and the always() cleanup need their own budget.
-    timeout-minutes: 150
+    timeout-minutes: 160
     env:
       APP_DIRECTORY: ios/PigeonReader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
