@@ -16,7 +16,7 @@ from ci_scope import classify, changed_paths, scope, validate_gate
 class ScopeTests(unittest.TestCase):
     def test_documentation_and_release_tooling_skip_native(self):
         cases = {
-            "pigeon": ["README.md", "08-testing/TESTING.md", "docs/testflight-release.md", "scripts/testflight-ci-gate.mjs", "test/testflight-ci-gate.test.mjs"],
+            "pigeon": ["README.md", "CLAUDE.md", "08-testing/TESTING.md", "docs/testflight-release.md", "scripts/testflight-ci-gate.mjs", "test/testflight-ci-gate.test.mjs"],
             "todomd": ["CHANGELOG.md", "docs/testflight-monitoring.md", "Tools/assign_testflight_groups.rb", "scripts/tests/testflight_monitor_test.rb"],
             "swole": ["SwoleMCP/README.md", "scripts/testflight-monitor.md", "scripts/release_testflight.sh", "scripts/tests/testflight_monitor_test.rb"],
         }
