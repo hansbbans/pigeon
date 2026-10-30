@@ -33,6 +33,9 @@ struct ArticleReaderHeaderView: View {
 				Text(article.source)
 					.font(.subheadline.weight(.semibold))
 					.foregroundStyle(.tint)
+				if article.isPaywalled == true {
+					PaywallLabel()
+				}
 				Spacer(minLength: 12)
 				Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
 					.font(.subheadline)

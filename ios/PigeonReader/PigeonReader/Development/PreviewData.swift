@@ -305,6 +305,7 @@ enum PreviewData {
 			sampleCount: 8,
 			explanation: "Recent and similar to stories you read for several minutes.",
 			learningState: "Learning your interests",
+			isPaywalled: true,
 		),
 		Recommendation(
 			id: "preview-3",

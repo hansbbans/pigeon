@@ -93,6 +93,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let origin: ReaderStreamOrigin?
 	let isBodyPruned: Bool?
 	let contentVersion: String?
+	let isPaywalled: Bool?
 
 	private enum CodingKeys: String, CodingKey {
 		case id
@@ -106,6 +107,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		case origin
 		case isBodyPruned
 		case contentVersion
+		case isPaywalled
 	}
 
 	init(from decoder: Decoder) throws {
@@ -121,6 +123,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		origin = try container.decodeIfPresent(ReaderStreamOrigin.self, forKey: .origin)
 		isBodyPruned = try container.decodeIfPresent(Bool.self, forKey: .isBodyPruned)
 		contentVersion = try container.decodeIfPresent(String.self, forKey: .contentVersion)
+		isPaywalled = try container.decodeIfPresent(Bool.self, forKey: .isPaywalled)
 	}
 
 	var isRead: Bool {

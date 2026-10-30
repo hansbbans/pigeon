@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
+import { isPaywalledHtml } from './paywall';
 
 const DEFAULT_SYNC_LIMIT = 100;
 const MAX_SYNC_LIMIT = 200;
@@ -199,6 +200,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			isRead: article.is_read === 1,
 			isStarred: article.is_starred === 1,
 			isBodyPruned: article.content_pruned_at !== null,
+			isPaywalled: isPaywalledHtml(article.html_content),
 		});
 	}
 

@@ -365,6 +365,7 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				published: 1_742_460_800,
 				preview: 'Loaded preview',
 				heroImageUrl: null,
+				isPaywalled: false,
 				isLoaded: true,
 			},
 			{
@@ -374,10 +375,21 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				published: 0,
 				preview: '',
 				heroImageUrl: null,
+				isPaywalled: false,
 				isLoaded: false,
 			},
 		],
 	);
+});
+
+test('buildArticleListEntries carries the server paywall flag', () => {
+	const [entry] = buildArticleListEntries({
+		itemIds: ['teaser'],
+		loadedItemsById: {
+			teaser: { id: 'teaser', title: 'Teaser', published: 1_742_460_800, isPaywalled: true, content: { content: '<p>Intro</p>' } },
+		},
+	});
+	assert.equal(entry.isPaywalled, true);
 });
 
 test('buildArticleListEntries removes escaped invisible newsletter spacer entities from previews', () => {

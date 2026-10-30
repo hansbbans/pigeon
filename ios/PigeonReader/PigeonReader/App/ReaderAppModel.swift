@@ -3887,6 +3887,7 @@ final class ReaderAppModel {
 			// placeholder, so adopt the server's version: the next ids page then matches
 			// instead of refetching the placeholder on every visit.
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
+			isPaywalled: preserveBody || incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
 		)
 	}
 
@@ -3916,6 +3917,7 @@ final class ReaderAppModel {
 			learningState: incoming.learningState.isEmpty ? existing.learningState : incoming.learningState,
 			isBodyPruned: incoming.isBodyPruned,
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
+			isPaywalled: incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
 		)
 	}
 
@@ -3941,6 +3943,7 @@ final class ReaderAppModel {
 			learningState: merged.learningState,
 			isBodyPruned: merged.isBodyPruned,
 			contentVersion: merged.contentVersion,
+			isPaywalled: merged.isPaywalled,
 		)
 	}
 

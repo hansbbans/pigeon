@@ -13,6 +13,7 @@ import {
 } from './rss-fetcher';
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
+import { isPaywalledHtml } from './paywall';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
 
@@ -750,7 +751,7 @@ async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], 
 	const items: Array<RecommendationSnapshotEntry & {
 		readerId: string; feedKey: string; source: string; author: string | null; title: string;
 		originalURL: string | null; receivedAt: string; isRead: boolean; isStarred: boolean;
-		html: string; text: string | null; isBodyPruned: boolean;
+		html: string; text: string | null; isBodyPruned: boolean; isPaywalled: boolean;
 	}> = [];
 	let nextOffset = offset;
 	let hasMore = false;
@@ -782,7 +783,8 @@ async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], 
 			items.push({ ...entry, readerId: toGoogleItemId(row.rowid), feedKey: row.feed_key, source: row.source,
 				author: row.author, title: row.title, originalURL: row.original_url, receivedAt: row.received_at,
 				isRead: row.is_read === 1, isStarred: row.is_starred === 1,
-				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null });
+				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null,
+				isPaywalled: isPaywalledHtml(row.html_content) });
 		}
 		if (results.length === capacity) {
 			nextOffset = page.offset + results.at(-1)!.ordinal + 1;
@@ -931,6 +933,7 @@ export async function handleRecommendations(request: Request, env: Env, sessions
 				html: content?.html ?? '',
 				text: content?.text ?? null,
 				isBodyPruned: content?.isBodyPruned ?? false,
+				isPaywalled: isPaywalledHtml(content?.html),
 			};
 		}),
 	});

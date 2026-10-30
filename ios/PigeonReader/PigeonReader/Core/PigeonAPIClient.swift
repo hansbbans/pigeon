@@ -631,6 +631,7 @@ struct PigeonAPIClient: Sendable {
 			learningState: "Reader subscription",
 			isBodyPruned: item.isBodyPruned,
 			contentVersion: item.contentVersion,
+			isPaywalled: item.isPaywalled,
 		)
 	}
 
