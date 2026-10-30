@@ -1462,9 +1462,10 @@ struct OfflineLibraryStoreTests {
 
 	@Test func prunedLivePagePreservesTheCompleteStoredBodyWithoutAnInMemoryCache() async throws {
 		let store = OfflineLibraryStore.inMemory()
-		let complete = makeArticle(isRead: false)
+		var complete = makeArticle(isRead: false)
+		complete.isPaywalled = true
 		try await store.saveArticles([complete], collectionID: ReaderSection.forYou.rawValue, accountID: "account-a")
-		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true)
+		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true, isPaywalled: false)
 		pruned.isRead = true
 		pruned.isStarred = true
 		try await store.saveArticles([pruned], collectionID: "feed/daily", accountID: "account-a")
@@ -1475,6 +1476,7 @@ struct OfflineLibraryStoreTests {
 			#expect(stored.text == complete.text)
 			#expect(stored.isRead && stored.isStarred)
 			#expect(stored.isBodyPruned != true)
+			#expect(stored.isPaywalled == true)
 		}
 	}
 

@@ -1766,11 +1766,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		var storedBodyPruned = bodyPruned || article.isBodyPruned == true
 		if let existingWithBody = existing.first(where: { $0.article.hasReadableHTML }),
 			storedArticle.hasReadableHTML == false {
-			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned, isPaywalled: existingWithBody.article.isPaywalled)
 			storedBodyPruned = existingWithBody.bodyPruned
 		} else if storedBodyPruned,
 			let existingWithBody = existing.first(where: { $0.bodyPruned == false && $0.article.hasReadableHTML }) {
-			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil, isPaywalled: existingWithBody.article.isPaywalled)
 			storedBodyPruned = false
 		}
 
@@ -1939,7 +1939,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			var bodyPruned = representative.bodyPruned
 			if representative.article.hasReadableHTML == false,
 				let withBody = existing.first(where: { $0.article.hasReadableHTML }) {
-				merged = merged.replacingHTML(withBody.article.html)
+				merged = merged.replacingBody(html: withBody.article.html, text: merged.text, isBodyPruned: merged.isBodyPruned, isPaywalled: withBody.article.isPaywalled)
 				bodyPruned = withBody.bodyPruned
 			}
 			for previous in existing where previous.id != storageID {
@@ -2748,7 +2748,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				canonicalArticle.hasReadableHTML else {
 				return
 			}
-			replacements[stageID] = articleWithID(stagedArticle.replacingHTML(canonicalArticle.html), id: stageID)
+			replacements[stageID] = articleWithID(stagedArticle.replacingBody(html: canonicalArticle.html, text: stagedArticle.text, isBodyPruned: stagedArticle.isBodyPruned, isPaywalled: canonicalArticle.isPaywalled), id: stageID)
 		}
 		for article in replacements.values {
 			try writeArticle(article, bodyPruned: false, accountID: stagingAccountID, database: database)

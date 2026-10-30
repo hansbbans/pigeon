@@ -5606,7 +5606,7 @@ final class ReaderAppModel {
 			return article
 		}
 		if existing.hasReadableHTML == false, article.hasReadableHTML {
-			return existing.replacingBody(html: article.html, text: article.text, isBodyPruned: article.isBodyPruned)
+			return existing.replacingBody(html: article.html, text: article.text, isBodyPruned: article.isBodyPruned, isPaywalled: article.isPaywalled)
 		}
 		return existing
 	}

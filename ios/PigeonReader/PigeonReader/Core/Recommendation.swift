@@ -56,10 +56,11 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	}
 
 	func replacingHTML(_ html: String) -> Recommendation {
-		replacingBody(html: html, text: text, isBodyPruned: isBodyPruned)
+		replacingBody(html: html, text: text, isBodyPruned: isBodyPruned, isPaywalled: isPaywalled)
 	}
 
-	func replacingBody(html: String, text: String?, isBodyPruned: Bool?) -> Recommendation {
+	/// The paywall flag describes the body, so callers pass the flag of whichever article supplied it.
+	func replacingBody(html: String, text: String?, isBodyPruned: Bool?, isPaywalled: Bool?) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId,
