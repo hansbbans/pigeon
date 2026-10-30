@@ -119,7 +119,7 @@ export function renderBrowserOfflineScript(): string {
   function normalize(payload) {
    var readerId = payload.readerId; var id = decimal(readerId);
    return { id: payload.id, decimalId: id, readerId: readerId, feedKey: payload.feedKey, title: payload.title || '', author: payload.author || '', source: payload.source || '', originalURL: payload.originalURL || null,
-    receivedAt: payload.receivedAt, isRead: !!payload.isRead, isStarred: !!payload.isStarred, isBodyPruned: !!payload.isBodyPruned,
+    receivedAt: payload.receivedAt, isRead: !!payload.isRead, isStarred: !!payload.isStarred, isBodyPruned: !!payload.isBodyPruned, isPaywalled: !!payload.isPaywalled,
     preview: String(payload.text || '').slice(0, 600), savedAt: new Date().toISOString() };
   }
   async function pending() { return (await all('outbox')).sort(function (a, b) { return a.order - b.order; }); }
@@ -165,7 +165,7 @@ export function renderBrowserOfflineScript(): string {
    (feed && feed.folders || []).forEach(function (folder) { categories.push('user/-/label/' + folder); });
    return { id: article.readerId, nativeId: article.id, decimalId: article.decimalId, title: article.title, author: article.author, published: Math.floor(new Date(article.receivedAt).getTime()/1000), categories: categories,
     origin: { title: feed && feed.title || article.source, streamId: feed && feed.streamId || '' }, alternate: article.originalURL ? [{ href: article.originalURL }] : [],
-    summary: { content: body && body.html || '<p>This article body has not been saved offline.</p>' }, contentVersion: body && body.contentVersion, offlineSaved: !!body, isBodyPruned: article.isBodyPruned };
+    summary: { content: body && body.html || '<p>This article body has not been saved offline.</p>' }, contentVersion: body && body.contentVersion, offlineSaved: !!body, isBodyPruned: article.isBodyPruned, isPaywalled: !!article.isPaywalled };
   }
   async function doReplay() {
    var applied = 0;

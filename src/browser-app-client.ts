@@ -64,6 +64,7 @@ export interface BrowserLoadedItem {
 		content?: string;
 	};
 	contentVersion?: string;
+	isPaywalled?: boolean;
 }
 
 export interface BrowserArticleListEntry {
@@ -73,6 +74,7 @@ export interface BrowserArticleListEntry {
 	published: number;
 	preview: string;
 	heroImageUrl: string | null;
+	isPaywalled: boolean;
 	isLoaded: boolean;
 }
 
@@ -563,6 +565,7 @@ export function buildArticleListEntries(options: {
 				published: 0,
 				preview: '',
 				heroImageUrl: null,
+				isPaywalled: false,
 				isLoaded: false,
 			};
 		}
@@ -574,6 +577,7 @@ export function buildArticleListEntries(options: {
 			published: loadedItem.published,
 			preview: createArticlePreview(loadedItem),
 			heroImageUrl: selectArticleHeroImageUrl(loadedItem.content?.content),
+			isPaywalled: loadedItem.isPaywalled === true,
 			isLoaded: true,
 		};
 	});

@@ -805,7 +805,7 @@ struct ReaderAppModelTests {
 		try await store.saveNavigation(ReaderNavigationState(items: [feed]), accountID: accountID)
 		// Mimic the committed full-sync snapshot losing a feed-only body, while
 		// its complete live copy is still open. The SQL column and Codable flag are true.
-		try await store.saveArticles([article.replacingBody(html: "", text: "Unavailable body", isBodyPruned: true)], collectionID: feed.id, accountID: accountID)
+		try await store.saveArticles([article.replacingBody(html: "", text: "Unavailable body", isBodyPruned: true, isPaywalled: nil)], collectionID: feed.id, accountID: accountID)
 		model.setNavigation(ReaderNavigationState(items: [feed]))
 		model.setArticles([article], for: feed)
 		model.select(item: feed)

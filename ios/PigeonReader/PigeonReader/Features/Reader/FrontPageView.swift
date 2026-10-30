@@ -206,6 +206,9 @@ struct FrontPageStoryView: View {
 				}
 				HStack(spacing: 6) {
 					Text(article.receivedAt, format: .relative(presentation: .named))
+					if article.isPaywalled == true {
+						PaywallLabel()
+					}
 					if article.isStarred {
 						Image(systemName: "star.fill")
 							.foregroundStyle(.orange)

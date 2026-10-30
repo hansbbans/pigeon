@@ -1619,3 +1619,27 @@ test('unread-count and subscription/list each run one batch with their label loo
 		],
 	);
 });
+
+test('recommendation, GReader, and sync payloads mark paywalled newsletter teasers', async () => {
+	const { env, db } = createFixture([
+		{ id: 'teaser-ai', feedKey: 'paid', title: 'AI teaser', receivedAt: minutesAgo(2), isStarred: 1 },
+		{ id: 'full-ai', feedKey: 'complete', title: 'AI healthcare', receivedAt: minutesAgo(1), isStarred: 1 },
+	]);
+	await nativeRequest(env, '/api/v1/personalization', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ monitoredTopics: ['AI'] }) });
+	db.prepare("UPDATE items SET html_content = ? WHERE id = 'teaser-ai'")
+		.run('<p>The first few paragraphs...</p><div class="paywall" data-component-name="Paywall"><h2>Keep reading with a 7-day free trial</h2></div>');
+	for (const view of ['for-you', 'unread', 'starred']) {
+		const response = await nativeRequest(env, `/api/v1/recommendations?view=${view}`);
+		const items = (await response.json() as { items: { id: string; isPaywalled: boolean }[] }).items;
+		assert.equal(items.find((item) => item.id === 'teaser-ai')?.isPaywalled, true, view);
+		assert.equal(items.find((item) => item.id === 'full-ai')?.isPaywalled, false, view);
+	}
+	const contents = await greaderRequest(env, '/reader/api/0/stream/items/contents', new URLSearchParams([['i', '1'], ['i', '2']]), 'Pigeon');
+	const readerItems = (await contents.json() as { items: { title: string; isPaywalled: boolean }[] }).items;
+	assert.deepEqual(readerItems.map((item) => [item.title, item.isPaywalled]).sort(), [['AI healthcare', false], ['AI teaser', true]]);
+	const synced = await nativeRequest(env, '/api/v1/sync?limit=200');
+	const articles = (await synced.json() as { changes: { entityType: string; entityId: string; payload: { isPaywalled?: boolean } }[] }).changes
+		.filter((change) => change.entityType === 'article');
+	assert.equal(articles.find((change) => change.entityId === 'teaser-ai')?.payload.isPaywalled, true);
+	assert.equal(articles.find((change) => change.entityId === 'full-ai')?.payload.isPaywalled, false);
+});

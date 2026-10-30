@@ -100,6 +100,9 @@ struct ArticleRowView: View {
 					.font(.body.weight(.semibold))
 					.lineLimit(density == .titleOnly ? 1 : 2)
 				Spacer(minLength: 4)
+				if density == .titleOnly, article.isPaywalled == true {
+					PaywallLabel()
+				}
 				if article.sampleCount > 0 || article.score > 0 {
 					ScoreBadge(score: article.score)
 				}
@@ -118,6 +121,9 @@ struct ArticleRowView: View {
 					Text(article.receivedAt, format: .relative(presentation: .named))
 						.font(.caption)
 						.foregroundStyle(.secondary)
+					if article.isPaywalled == true {
+						PaywallLabel()
+					}
 					Spacer()
 				Image(systemName: "star.fill")
 					.font(.caption)

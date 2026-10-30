@@ -49,6 +49,7 @@ nonisolated struct IncrementalSyncPayload: Codable, Equatable, Sendable {
 	let isRead: Bool?
 	let isStarred: Bool?
 	let isBodyPruned: Bool?
+	var isPaywalled: Bool? = nil
 
 	let itemId: String?
 	let updatedAt: Date?

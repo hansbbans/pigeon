@@ -791,6 +791,24 @@ function buildBrowserAppHtml(baseUrl: string): string {
         color: inherit;
       }
 
+      .article-paywall {
+        display: inline-block;
+        margin-left: 0.45rem;
+        padding: 0.05rem 0.4rem;
+        border: 1px solid currentColor;
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        vertical-align: 0.12em;
+      }
+
+      .article-card.is-active .article-paywall {
+        color: inherit;
+      }
+
       .reading-preferences {
         display: grid;
         gap: 0.5rem;
@@ -3750,6 +3768,7 @@ export function renderBrowserAppRuntimeScript(): string {
         classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
       }));
       title.appendChild(createNode('span', { text: entry.title }));
+      if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
       copy.appendChild(title);
       if (getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
         const detail = recommendationDetails.get(entry.id);
@@ -4099,7 +4118,7 @@ export function renderBrowserAppRuntimeScript(): string {
     openOriginalButton.disabled = !articleHref;
     openOriginalButton.setAttribute('data-href', articleHref);
     readerTitle.textContent = item.title || 'Untitled article';
-    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
+    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published), item.isPaywalled ? 'Paywall: teaser only' : '']
       .filter(Boolean)
       .join(' · ');
     if (!hasFullArticle) {

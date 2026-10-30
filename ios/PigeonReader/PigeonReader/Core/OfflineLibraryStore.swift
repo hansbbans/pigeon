@@ -1037,6 +1037,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					isRead: article.isRead, isStarred: article.isStarred, score: article.score,
 					confidence: article.confidence, sampleCount: article.sampleCount,
 					explanation: article.explanation, learningState: article.learningState,
+					isPaywalled: article.isPaywalled,
 				)
 				try execute(
 					"UPDATE cached_articles SET payload = ?, body_pruned = 1 WHERE account_id = ? AND id = ?",
@@ -1309,6 +1310,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				sampleCount: existing?.article.sampleCount ?? 0,
 				explanation: existing?.article.explanation ?? "From \(source)",
 				learningState: existing?.article.learningState ?? "Synced article",
+				// The flag describes the body, so it follows whichever body is kept.
+				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
 				)),
 				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
 			)
@@ -1545,6 +1548,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			isPaywalled: article.isPaywalled,
 		)
 	}
 
@@ -1762,11 +1766,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		var storedBodyPruned = bodyPruned || article.isBodyPruned == true
 		if let existingWithBody = existing.first(where: { $0.article.hasReadableHTML }),
 			storedArticle.hasReadableHTML == false {
-			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned, isPaywalled: existingWithBody.article.isPaywalled)
 			storedBodyPruned = existingWithBody.bodyPruned
 		} else if storedBodyPruned,
 			let existingWithBody = existing.first(where: { $0.bodyPruned == false && $0.article.hasReadableHTML }) {
-			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil)
+			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil, isPaywalled: existingWithBody.article.isPaywalled)
 			storedBodyPruned = false
 		}
 
@@ -1850,6 +1854,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			isPaywalled: article.isPaywalled,
 		)
 	}
 
@@ -1934,7 +1939,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			var bodyPruned = representative.bodyPruned
 			if representative.article.hasReadableHTML == false,
 				let withBody = existing.first(where: { $0.article.hasReadableHTML }) {
-				merged = merged.replacingHTML(withBody.article.html)
+				merged = merged.replacingBody(html: withBody.article.html, text: merged.text, isBodyPruned: merged.isBodyPruned, isPaywalled: withBody.article.isPaywalled)
 				bodyPruned = withBody.bodyPruned
 			}
 			for previous in existing where previous.id != storageID {
@@ -2743,7 +2748,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				canonicalArticle.hasReadableHTML else {
 				return
 			}
-			replacements[stageID] = articleWithID(stagedArticle.replacingHTML(canonicalArticle.html), id: stageID)
+			replacements[stageID] = articleWithID(stagedArticle.replacingBody(html: canonicalArticle.html, text: stagedArticle.text, isBodyPruned: stagedArticle.isBodyPruned, isPaywalled: canonicalArticle.isPaywalled), id: stageID)
 		}
 		for article in replacements.values {
 			try writeArticle(article, bodyPruned: false, accountID: stagingAccountID, database: database)

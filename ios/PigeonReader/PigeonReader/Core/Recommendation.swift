@@ -21,6 +21,8 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	var isBodyPruned: Bool? = nil
 	/// Server version of the `html` currently held; nil when unknown (legacy servers or caches).
 	var contentVersion: String? = nil
+	/// True when the server saw only the publisher's paywalled teaser of this article.
+	var isPaywalled: Bool? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -54,10 +56,11 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	}
 
 	func replacingHTML(_ html: String) -> Recommendation {
-		replacingBody(html: html, text: text, isBodyPruned: isBodyPruned)
+		replacingBody(html: html, text: text, isBodyPruned: isBodyPruned, isPaywalled: isPaywalled)
 	}
 
-	func replacingBody(html: String, text: String?, isBodyPruned: Bool?) -> Recommendation {
+	/// The paywall flag describes the body, so callers pass the flag of whichever article supplied it.
+	func replacingBody(html: String, text: String?, isBodyPruned: Bool?, isPaywalled: Bool?) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId,
@@ -78,6 +81,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			learningState: learningState,
 			isBodyPruned: isBodyPruned,
 			contentVersion: contentVersion,
+			isPaywalled: isPaywalled,
 		)
 	}
 }

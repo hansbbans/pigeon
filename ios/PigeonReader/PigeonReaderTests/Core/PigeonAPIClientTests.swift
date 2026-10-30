@@ -267,6 +267,22 @@ struct PigeonAPIClientTests {
 		#expect(envelope.mutations == [mutation])
 	}
 
+	@Test func paywallFlagDecodesFromRecommendationsAndReaderItems() async throws {
+		let response = Data(
+			#"{"generatedAt":"2026-10-29T12:00:00Z","view":"for-you","items":[{"id":"item-1","readerId":"reader-1","feedKey":"daily","source":"Daily","title":"Teaser","html":"<p>Intro</p>","text":null,"originalURL":null,"receivedAt":"2026-10-29T11:00:00Z","isRead":false,"isStarred":false,"score":0,"confidence":0,"sampleCount":0,"explanation":"","learningState":"","isPaywalled":true}]}"#.utf8,
+		)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: MockHTTPClient(responseData: response))
+		let recommendation = try #require(try await client.recommendations(for: .forYou).first)
+		#expect(recommendation.isPaywalled == true)
+
+		let item = try JSONDecoder().decode(
+			ReaderStreamItem.self,
+			from: Data(#"{"id":"1","title":"Teaser","published":1793271600,"content":{"content":"<p>Intro</p>"},"isPaywalled":true}"#.utf8),
+		)
+		#expect(item.isPaywalled == true)
+	}
+
 	@Test func mutationBatchRejectsDuplicateReceiptsBeforeReplayCanTrap() async throws {
 		let response = Data(
 			#"{"results":[{"mutationId":"mutation-1","status":"applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null},{"mutationId":"mutation-1","status":"already_applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null}]}"#.utf8,

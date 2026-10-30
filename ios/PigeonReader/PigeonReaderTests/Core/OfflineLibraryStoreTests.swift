@@ -205,6 +205,48 @@ struct OfflineLibraryStoreTests {
 		#expect(article.isStarred)
 	}
 
+	@Test func syncedPaywallFlagFollowsTheStoredBody() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveArticles([makeArticle(html: "<p>Old</p>")], collectionID: "feed/7", accountID: "account-a")
+		let page = try decodePage(
+			"""
+			{
+			  "cursor": "v1:2",
+			  "hasMore": false,
+			  "changes": [
+			    {
+			      "sequence": 2,
+			      "entityType": "article",
+			      "entityId": "article-1",
+			      "operation": "upsert",
+			      "changedAt": "2026-10-29T12:00:00.000Z",
+			      "payload": {
+			        "id": "article-1",
+			        "readerId": "reader-1",
+			        "feedKey": "daily",
+			        "source": "Daily",
+			        "title": "Teaser",
+			        "html": "<p>The first few paragraphs...</p>",
+			        "receivedAt": "2026-10-29T11:00:00.000Z",
+			        "isRead": false,
+			        "isStarred": false,
+			        "isBodyPruned": false,
+			        "isPaywalled": true
+			      }
+			    }
+			  ]
+			}
+			"""
+		)
+
+		try await store.apply(page, accountID: "account-a")
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		let article = try #require(snapshot.articlesByCollection["feed/7"]?.first)
+		#expect(article.html == "<p>The first few paragraphs...</p>")
+		#expect(article.isPaywalled == true)
+	}
+
 	@Test func scopedSnapshotIsolatesMembershipsAndIncludesRequestedEmptyCollections() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let navigation = ReaderNavigationState(
@@ -1420,9 +1462,10 @@ struct OfflineLibraryStoreTests {
 
 	@Test func prunedLivePagePreservesTheCompleteStoredBodyWithoutAnInMemoryCache() async throws {
 		let store = OfflineLibraryStore.inMemory()
-		let complete = makeArticle(isRead: false)
+		var complete = makeArticle(isRead: false)
+		complete.isPaywalled = true
 		try await store.saveArticles([complete], collectionID: ReaderSection.forYou.rawValue, accountID: "account-a")
-		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true)
+		var pruned = complete.replacingBody(html: "<p>Server retention notice</p>", text: "Unavailable", isBodyPruned: true, isPaywalled: false)
 		pruned.isRead = true
 		pruned.isStarred = true
 		try await store.saveArticles([pruned], collectionID: "feed/daily", accountID: "account-a")
@@ -1433,6 +1476,7 @@ struct OfflineLibraryStoreTests {
 			#expect(stored.text == complete.text)
 			#expect(stored.isRead && stored.isStarred)
 			#expect(stored.isBodyPruned != true)
+			#expect(stored.isPaywalled == true)
 		}
 	}
 

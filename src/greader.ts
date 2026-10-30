@@ -2,6 +2,7 @@ import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
 import { createRenderedContent } from './rendered-content';
+import { isPaywalledHtml } from './paywall';
 import { constantTimeEqual, generateApiToken, requireApiAuth } from './api-auth';
 import {
 	buildStateTransitionEventStatements,
@@ -752,6 +753,7 @@ async function loadResponseItems(
 		content: ResponseItemBody;
 		contentVersion: string;
 		isBodyPruned: boolean;
+		isPaywalled: boolean;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -837,6 +839,7 @@ async function loadResponseItems(
 					content: body,
 					contentVersion: String(item.content_version),
 					isBodyPruned: item.content_pruned_at != null,
+					isPaywalled: isPaywalledHtml(item.html_content),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],
