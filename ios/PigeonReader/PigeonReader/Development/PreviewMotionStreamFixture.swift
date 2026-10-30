@@ -33,8 +33,9 @@ nonisolated enum PreviewMotionStreamFixture {
 				"origin": ["streamId": stream, "title": stream],
 				"categories": number.isMultiple(of: 3) ? ["user/-/state/com.google/read"] : []]
 		}
-		guard items.isEmpty == false else { return nil }
-		return try JSONSerialization.data(withJSONObject: ["items": items])
+		// The reader requires the stream ID; without it every page fails to decode.
+		guard let stream = (items.first?["origin"] as? [String: Any])?["streamId"] else { return nil }
+		return try JSONSerialization.data(withJSONObject: ["id": stream, "items": items])
 	}
 }
 #endif

@@ -140,6 +140,18 @@ struct ReaderListViewportControllerResizeTests {
 		#expect(fixture.followingContentIsVisible)
 	}
 
+	@Test func neighborStandingInForARemovedRowStartsAtTheTopOfTheList() async throws {
+		// The saved row sat half under the bar and the Unread filter removed it.
+		let removed = ReaderListPosition(articleID: "read-story", viewportOffset: -40, neighbors: ["story"])
+		let fixture = try ReaderListViewportResizeFixture(savedPosition: removed)
+		defer { fixture.teardown() }
+		fixture.controller.completeCoarseRestore()
+		await fixture.settle()
+
+		#expect(abs(fixture.rowViewportOffset) <= 0.5)
+		#expect(fixture.store.position(for: fixture.context)?.articleID == fixture.articleID)
+	}
+
 	@Test func densityReflowWaitsForTheAnchoredRowsOwnLayout() async throws {
 		let fixture = try ReaderListViewportResizeFixture()
 		defer { fixture.teardown() }
@@ -217,6 +229,7 @@ private final class ReaderListViewportResizeFixture {
 		initialRowHeight: CGFloat = 80,
 		initialContentOffsetY: CGFloat = 330,
 		includeFollowingContent: Bool = false,
+		savedPosition: ReaderListPosition? = nil,
 	) throws {
 		let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
 		window = UIWindow(windowScene: scene)
@@ -252,6 +265,7 @@ private final class ReaderListViewportResizeFixture {
 			if includeFollowingContent { scrollView.addSubview(followingContent) }
 			controller.register(row, articleID: articleID)
 		}
+		if let savedPosition { store.save(savedPosition, for: context) }
 		_ = controller.activate(
 			context: context,
 			articleIDs: [articleID],
