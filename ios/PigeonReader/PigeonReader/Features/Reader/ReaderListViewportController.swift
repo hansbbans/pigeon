@@ -487,8 +487,12 @@ final class ReaderListViewportController {
 	private func restore(_ position: ReaderListPosition, row: (String, CGRect), in scrollView: UIScrollView) -> ReaderListPosition {
 		// Preserve the exact partial-row offset whenever possible. If a row shrinks
 		// below the old negative offset, leave one point visible so the anchor and
-		// the content immediately after it remain in the viewport.
-		let viewportOffset = max(position.viewportOffset, -Double(max(0, row.1.height - 1)))
+		// the content immediately after it remain in the viewport. A neighbor that
+		// stands in for a removed row (an Unread filter dropping a read story)
+		// starts at the top of the list: the removed row's partial offset would
+		// tuck the neighbor under the navigation bar.
+		let savedOffset = row.0 == position.articleID ? position.viewportOffset : max(0, position.viewportOffset)
+		let viewportOffset = max(savedOffset, -Double(max(0, row.1.height - 1)))
 		let desiredOffset = row.1.minY - scrollView.adjustedContentInset.top - viewportOffset
 		let minimum = -scrollView.adjustedContentInset.top
 		let maximum = max(minimum, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
@@ -497,7 +501,7 @@ final class ReaderListViewportController {
 			animated: false,
 		)
 		return ReaderListPosition(
-			articleID: position.articleID,
+			articleID: row.0,
 			viewportOffset: viewportOffset,
 			neighbors: position.neighbors,
 		)

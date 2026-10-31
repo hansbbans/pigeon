@@ -32,6 +32,15 @@ struct PreviewMotionStreamFixtureTests {
 		#expect(try PreviewMotionStreamFixture.data(for: unrelated) == nil)
 	}
 
+	@Test func bodyFixtureDecodesAsTheReaderStreamResponse() throws {
+		var request = URLRequest(url: URL(string: "https://pigeon.preview/reader/api/0/stream/items/contents")!)
+		request.httpBody = Data("i=feed/navigation-1-1-story-2".utf8)
+		let data = try #require(try PreviewMotionStreamFixture.data(for: request))
+		let response = try JSONDecoder().decode(ReaderStreamContentsResponse.self, from: data)
+		#expect(response.id == "feed/navigation-1-1")
+		#expect(response.items.map(\.title) == ["Motion story 2"])
+	}
+
 	private func page(_ url: String) throws -> [String: Any] {
 		let response = try PreviewMotionStreamFixture.data(for: URLRequest(url: URL(string: url)!))
 		let data = try #require(response)
