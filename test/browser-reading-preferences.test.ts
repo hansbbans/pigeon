@@ -68,8 +68,34 @@ test('Match app article theme follows the app theme attribute on the frame docum
  assert.equal(state.api.normalizePreferences({}).theme,'app');
  assert.match(css,/:root\{color-scheme:light;color:#1c1c1e;background:#fff\}/);
  assert.match(css,/html\[data-theme="dark"\]\{color-scheme:dark;color:#dcdcdf;background:#1f1f21\}/);
- assert.match(css,/html\[data-theme="dark"\] a\{color:#8fb3e8\}/);
+ assert.match(css,/html\[data-theme="dark"\] a,html\[data-theme="dark"\] a \*\{color:#8fb3e8!important\}/);
  assert.doesNotMatch(css,/@media\(prefers-color-scheme:dark\)/);
+});
+
+test('dark article CSS overrides newsletter-painted backgrounds and text but not media',()=>{
+ const state=fixture();
+ const app=state.api.frameCSS({theme:'app'});
+ assert.match(app,/html\[data-theme="dark"\] body \*:not\(img\):not\(picture\):not\(video\):not\(svg\):not\(svg \*\)\{background-color:transparent!important;color:inherit!important/);
+ assert.match(app,/html\[data-theme="dark"\] body\{background:#1f1f21!important;color:#dcdcdf!important\}/);
+ assert.match(app,/html\[data-theme="dark"\] a,html\[data-theme="dark"\] a \*\{color:#8fb3e8!important\}/);
+ assert.doesNotMatch(app.split('html[data-theme="dark"]')[0],/!important/,'light rules leave the newsletter alone');
+ const dark=state.api.frameCSS({theme:'dark'});
+ assert.match(dark,/(^|\})body \*:not\(img\)[^{]*\{background-color:transparent!important/);
+ assert.match(state.api.frameCSS({theme:'system'}),/@media\(prefers-color-scheme:dark\)\{[^@]*body \*:not\(img\)/);
+ assert.doesNotMatch(state.api.frameCSS({theme:'light'}),/!important/);
+ assert.doesNotMatch(state.api.frameCSS({theme:'sepia'}),/!important/);
+});
+
+test('a light theme saved under the old light default reads as Match app once, then sticks when chosen again',()=>{
+ const state=fixture();
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({theme:'light',fontSize:20}));
+ assert.equal(state.api.readPreferences().theme,'app');
+ assert.equal(state.api.readPreferences().fontSize,20);
+ state.api.savePreferences({theme:'light',fontSize:20});
+ assert.equal(JSON.parse(state.values.get('pigeon.browser.reading.v1')!).schema,2);
+ assert.equal(state.api.readPreferences().theme,'light');
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({theme:'sepia'}));
+ assert.equal(state.api.readPreferences().theme,'sepia');
 });
 
 test('ask policy strips all network resource channels while retaining inert image metadata and safe text links',async()=>{

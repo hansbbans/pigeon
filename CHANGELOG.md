@@ -10,7 +10,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Changed
 
-- The web reader has a quieter design: three hairline-separated columns, icon toolbars instead of rows of word buttons, a short source-and-time line on each story, and a neutral graphite dark mode in place of the navy one. Dark mode follows the system until you pick one. Sort, filters, titles-only and bulk mark-read live in the list's ⋯ menu; More like this, Not interested, View and Readwise live in the article's ⋯ menu. The sidebar can be hidden, and narrow windows show one column at a time. Articles now match the app theme by default (Settings → Appearance → Article theme).
+- The web reader has a quieter design: three hairline-separated columns, icon toolbars instead of rows of word buttons, a short source-and-time line on each story, and a neutral graphite dark mode in place of the navy one. Dark mode follows the system until you pick one. Sort, filters, titles-only and bulk mark-read live in the list's ⋯ menu; More like this, Not interested, View and Readwise live in the article's ⋯ menu. The sidebar can be hidden, and narrow windows show one column at a time. Articles now match the app theme by default (Settings → Appearance → Article theme), and in dark mode a newsletter's own white background and dark text give way to the dark theme while its images keep their colors. A Light article theme saved under the old default switches to Match app once.
 
 ## [0.1.8.0] - 2026-10-26
 

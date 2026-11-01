@@ -7723,3 +7723,13 @@ test('popover menus close on Escape and after choosing an item', async () => {
 	await dispatchWindowEvent('blur');
 	assert.equal(actionsMenu.open, false, 'clicking into the article frame blurs the window and closes menus');
 });
+
+test('dark article frames override newsletter-painted colors while light frames leave them alone', () => {
+	const newsletter = '<table bgcolor="#ffffff" style="background-color:#ffffff"><tr><td style="color:#111111">Body</td></tr></table>';
+	const dark = createArticleFrameDocument(newsletter, 'dark');
+	assert.match(dark, /<html lang="en" data-theme="dark">/);
+	assert.match(dark, /html\[data-theme="dark"\] body \*:not\(img\):not\(picture\):not\(video\):not\(svg\):not\(svg \*\) \{\s*background-color: transparent !important;\s*color: inherit !important;/);
+	assert.match(dark, /bgcolor="#ffffff"/, 'the newsletter markup itself is untouched');
+	const light = createArticleFrameDocument(newsletter, 'light');
+	assert.match(light, /<html lang="en" data-theme="light">/);
+});

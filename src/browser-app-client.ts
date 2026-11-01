@@ -250,6 +250,23 @@ export function createArticleFrameDocument(
         scrollbar-gutter: stable both-edges;
       }
 
+      /* Newsletters paint their own white backgrounds and dark text; in dark mode those give way. */
+      html[data-theme="dark"] body {
+        background: var(--frame-page) !important;
+        color: var(--frame-text) !important;
+      }
+
+      html[data-theme="dark"] body *:not(img):not(picture):not(video):not(svg):not(svg *) {
+        background-color: transparent !important;
+        color: inherit !important;
+        border-color: var(--frame-border) !important;
+      }
+
+      html[data-theme="dark"] a,
+      html[data-theme="dark"] a * {
+        color: var(--frame-link) !important;
+      }
+
       body {
         margin: 0;
         padding: 32px 36px 48px;
