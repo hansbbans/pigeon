@@ -59,9 +59,15 @@ private struct ReaderFolderDisclosureButton: UIViewRepresentable {
 
 	func makeUIView(context: Context) -> UIButton {
 		let button = UIButton(type: .system)
-		// A quiet disclosure mark: small, light and secondary, so the folder
-		// title stays the strongest thing on the row.
-		button.tintColor = .tertiaryLabel
+		// A quiet disclosure mark: footnote-sized, medium weight, secondary label
+		// color, so the folder title leads while the only expand control keeps
+		// at least 3:1 contrast. The text-style configuration follows Dynamic Type.
+		button.tintColor = .secondaryLabel
+		button.setImage(UIImage(
+			systemName: "chevron.right",
+			withConfiguration: UIImage.SymbolConfiguration(textStyle: .footnote)
+				.applying(UIImage.SymbolConfiguration(weight: .medium))
+		), for: .normal)
 		button.addAction(UIAction { [coordinator = context.coordinator] _ in
 			coordinator.onToggle()
 		}, for: .touchUpInside)
@@ -72,9 +78,6 @@ private struct ReaderFolderDisclosureButton: UIViewRepresentable {
 		context.coordinator.onToggle = onToggle
 		button.accessibilityIdentifier = identifier
 		button.accessibilityLabel = "\(isExpanded ? "Collapse" : "Expand") \(folderTitle)"
-		button.setImage(UIImage(systemName: "chevron.right", withConfiguration: UIImage.SymbolConfiguration(
-			pointSize: UIFont.preferredFont(forTextStyle: .footnote).pointSize, weight: .medium
-		)), for: .normal)
 		let transform = CGAffineTransform(rotationAngle: isExpanded ? .pi / 2 : 0)
 		let changesExpansion = context.coordinator.isExpanded.map { $0 != isExpanded } ?? false
 		context.coordinator.isExpanded = isExpanded
