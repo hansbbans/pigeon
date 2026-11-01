@@ -256,15 +256,22 @@ export function createArticleFrameDocument(
         color: var(--frame-text) !important;
       }
 
-      html[data-theme="dark"] body *:not(img):not(picture):not(video):not(svg):not(svg *) {
+      /* :where() keeps this catch-all at the specificity of "html[data-theme] body", so the link and
+         code rules below, also important, win by source order. */
+      html[data-theme="dark"] body :where(:not(img, picture, video, svg, svg *)) {
         background-color: transparent !important;
         color: inherit !important;
         border-color: var(--frame-border) !important;
       }
 
-      html[data-theme="dark"] a,
-      html[data-theme="dark"] a * {
+      html[data-theme="dark"] body a,
+      html[data-theme="dark"] body a :where(:not(img, picture, video, svg, svg *)) {
         color: var(--frame-link) !important;
+      }
+
+      html[data-theme="dark"] body pre,
+      html[data-theme="dark"] body code {
+        background-color: var(--frame-pre) !important;
       }
 
       body {
@@ -796,12 +803,15 @@ export function formatArticleListTime(timestampSeconds: number | null | undefine
 	}
 	const date = new Date(timestampSeconds * 1000);
 	const now = new Date(nowMs);
+	// Calendar boundaries, so 23- and 25-hour daylight-saving days still split at local midnight.
 	const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+	const startOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+	const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
 	const time = date.getTime();
-	if (time >= startOfToday && time < startOfToday + 86400000) {
+	if (time >= startOfToday && time < startOfTomorrow) {
 		return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 	}
-	if (time >= startOfToday - 86400000 && time < startOfToday) {
+	if (time >= startOfYesterday && time < startOfToday) {
 		return 'Yesterday';
 	}
 	const sameYear = date.getFullYear() === now.getFullYear();

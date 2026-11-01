@@ -1012,6 +1012,7 @@ async function createBrowserHarness(options?: {
 		['reading-preference-status', createElement('', [], 'p', registerFocus)],
 		['search-button', createElement('', [], 'button', registerFocus)],
 		['article-query-controls', createElement('', [], 'div', registerFocus)],
+		['app-theme-select', createElement('system', [], 'select', registerFocus)],
 		['sidebar-toggle-button', createElement('', [], 'button', registerFocus)],
 		['stream-back-button', createElement('', [], 'button', registerFocus)],
 		['reader-back-button', createElement('', [], 'button', registerFocus)],
@@ -2427,7 +2428,7 @@ test('runtime script applies stored column widths only after the reader grid is 
 	await waitForBrowserCondition(() => !elements.get('reader-shell')?.classList.contains('hidden'));
 
 	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '224px');
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '340px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '356px');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
 		sidebar: 520,
 		stream: 640,
@@ -2467,7 +2468,7 @@ test('runtime script does not overwrite saved column widths during responsive wi
 	readerGridWidth = 1000;
 	dispatchWindowEvent('resize');
 	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '224px');
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '440px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '456px');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
 		sidebar: 496,
 		stream: 484,
@@ -7587,6 +7588,12 @@ test('formatArticleListTime gives short Reeder-style row times', () => {
 	assert.match(formatArticleListTime(seconds(new Date(2026, 10, 1, 9, 40)), now), /9:40/);
 	assert.equal(formatArticleListTime(seconds(new Date(2026, 9, 31, 23, 59)), now), 'Yesterday');
 	assert.doesNotMatch(formatArticleListTime(seconds(new Date(2026, 9, 30, 8, 0)), now), /2026|:/);
+	// Nov 1, 2026 is a 25-hour day in zones that end daylight saving that night; boundaries stay at midnight.
+	const lateToday = new Date(2026, 10, 1, 23, 30).getTime();
+	assert.match(formatArticleListTime(seconds(new Date(2026, 10, 1, 23, 30)), lateToday), /11:30|23:30/);
+	const nextMorning = new Date(2026, 10, 2, 9, 0).getTime();
+	assert.equal(formatArticleListTime(seconds(new Date(2026, 10, 1, 0, 30)), nextMorning), 'Yesterday');
+	assert.doesNotMatch(formatArticleListTime(seconds(new Date(2026, 9, 31, 23, 30)), nextMorning), /Yesterday/);
 	assert.match(formatArticleListTime(seconds(new Date(2025, 2, 20, 8, 0)), now), /2025/);
 	assert.equal(formatArticleListTime(0, now), '');
 	assert.equal(formatArticleListTime(undefined, now), '');
@@ -7728,8 +7735,42 @@ test('dark article frames override newsletter-painted colors while light frames 
 	const newsletter = '<table bgcolor="#ffffff" style="background-color:#ffffff"><tr><td style="color:#111111">Body</td></tr></table>';
 	const dark = createArticleFrameDocument(newsletter, 'dark');
 	assert.match(dark, /<html lang="en" data-theme="dark">/);
-	assert.match(dark, /html\[data-theme="dark"\] body \*:not\(img\):not\(picture\):not\(video\):not\(svg\):not\(svg \*\) \{\s*background-color: transparent !important;\s*color: inherit !important;/);
+	assert.match(dark, /html\[data-theme="dark"\] body :where\(:not\(img, picture, video, svg, svg \*\)\) \{\s*background-color: transparent !important;\s*color: inherit !important;/);
+	// Links and code come after the zero-specificity catch-all with equal specificity, so they win.
+	const catchAll = dark.indexOf('body :where(');
+	assert.ok(catchAll > 0 && dark.indexOf('html[data-theme="dark"] body a,') > catchAll);
+	assert.ok(dark.indexOf('html[data-theme="dark"] body pre,') > catchAll);
+	assert.match(dark, /html\[data-theme="dark"\] body a,\s*html\[data-theme="dark"\] body a :where\(:not\(img, picture, video, svg, svg \*\)\) \{\s*color: var\(--frame-link\) !important;/);
 	assert.match(dark, /bgcolor="#ffffff"/, 'the newsletter markup itself is untouched');
 	const light = createArticleFrameDocument(newsletter, 'light');
 	assert.match(light, /<html lang="en" data-theme="light">/);
+});
+
+test('Settings Appearance can return the app to following the system theme', async () => {
+	const { elements, localStorageState } = await createBrowserHarness({ fetchImpl: createRedesignFetch(), storedTheme: 'dark' });
+	const select = elements.get('app-theme-select');
+	assert.equal(select?.value, 'dark');
+	select!.value = 'system';
+	await select?.dispatch('change');
+	assert.equal(localStorageState.has(THEME_STORAGE_KEY), false);
+	assert.equal(select?.value, 'system');
+	select!.value = 'light';
+	await select?.dispatch('change');
+	assert.equal(localStorageState.get(THEME_STORAGE_KEY), 'light');
+	assert.equal(elements.get('theme-toggle-button')?.getAttribute('aria-pressed'), 'false');
+	await elements.get('theme-toggle-button')?.dispatch('click');
+	assert.equal(select?.value, 'dark', 'the sidebar toggle is reflected in Settings');
+});
+
+test('signing out returns the narrow layout to the list and closes search', async () => {
+	const { elements } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '101')));
+	await findListButtonByItemId(elements.get('articles-list'), '101')?.dispatch('click');
+	await elements.get('search-button')?.dispatch('click');
+	assert.equal(elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'reader');
+	assert.equal(elements.get('article-query-controls')?.classList.contains('is-searching'), true);
+	await elements.get('logout-button')?.dispatch('click');
+	assert.equal(elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'stream');
+	assert.equal(elements.get('article-query-controls')?.classList.contains('is-searching'), false);
 });

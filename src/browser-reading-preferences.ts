@@ -25,25 +25,19 @@ export function renderBrowserReadingScript(): string {
   if(input && input.shortcuts) { var keys=['next','previous','read','star'].map(function(action){return input.shortcuts[action];}); if(keys.some(function(key){return !validKey(key);}) || new Set(keys.map(function(key){return key.toLowerCase();})).size!==4) throw new Error('Choose a different single printable key for each reader shortcut.'); }
   var preferences=normalizePreferences(input); try {(storage || localStorage).setItem(STORAGE_KEY,JSON.stringify(Object.assign({schema:2},preferences)));} catch (_) {throw new Error('Reading preferences could not be saved. Allow browser storage and retry.');} return preferences;
  }
- // Dark article CSS. Newsletters hard-code white backgrounds and dark text inline or in their own
- // style blocks; important author rules beat both, so the newsletter's colors give way to the
- // theme while images, video and SVG keep theirs.
- function darkCSS(scope) {
-  var root=scope ? scope.trim() : ':root';
-  var content=scope+'body *:not(img):not(picture):not(video):not(svg):not(svg *)';
-  return root+'{color-scheme:dark;color:#dcdcdf;background:#1f1f21}'+
-   scope+'body{background:#1f1f21!important;color:#dcdcdf!important}'+
-   content+'{background-color:transparent!important;color:inherit!important;border-color:#3a3a3e!important}'+
-   scope+'a,'+scope+'a *{color:#8fb3e8!important}'+
-   scope+'blockquote{border-color:#3a3a3e}'+scope+'pre,'+scope+'code{background:#262629!important}';
+ // Light, dark, "app" and "system" colors come from the frame document's data-theme, which the app
+ // sets from this preference (frameTheme) and keeps in step with the app and the OS. Only sepia
+ // paints its own palette here.
+ function frameTheme(input,appTheme,systemDark) {
+  var theme=normalizePreferences(input).theme;
+  if(theme==='dark') return 'dark';
+  if(theme==='app') return appTheme==='dark' ? 'dark' : 'light';
+  if(theme==='system') return systemDark ? 'dark' : 'light';
+  return 'light';
  }
  function frameCSS(input) {
   var p=normalizePreferences(input); var font=p.font==='serif' ? 'Georgia, Charter, serif' : p.font==='sans' ? 'Arial, Helvetica, sans-serif' : '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  var dark=darkCSS('');
-  var light=':root{color-scheme:light;color:#1c1c1e;background:#fff}a{color:#3466b0}';
-  var colors=p.theme==='dark' ? dark : p.theme==='sepia' ? ':root{color-scheme:light;color:#40362c;background:#f4ecd8}a{color:#765b2d}' : light;
-  if(p.theme==='system') colors+='@media(prefers-color-scheme:dark){'+dark+'}';
-  if(p.theme==='app') colors+=darkCSS('html[data-theme="dark"] ');
+  var colors=p.theme==='sepia' ? ':root{color-scheme:light;color:#40362c;background:#f4ecd8}a{color:#765b2d}' : '';
   return colors+'*{box-sizing:border-box}html{overflow-wrap:anywhere}body{font-family:'+font+';font-size:'+p.fontSize+'px;line-height:'+p.lineHeight+';max-width:'+p.width+'px;margin:0 auto;padding:'+p.margins+'px}p,figure,ul,ol{margin:0 0 '+(p.density==='compact'?'0.65':'1')+'em}h1,h2,h3,h4,h5,h6{line-height:1.25}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.75em}blockquote{margin:1em 0;padding-left:1em;border-left:3px solid #b6bbc1}.pigeon-image-hidden{display:block;padding:.75em;border:1px dashed #a5a9af;color:inherit}';
  }
  function safeURL(raw,base,links) {
@@ -98,6 +92,6 @@ export function renderBrowserReadingScript(): string {
    guard();return {html:template.innerHTML,images:imageRecords,blockedCount:imageRecords.filter(function(image){return !image.loaded;}).length};
   } catch(error) {revokeAll();throw error;}
  }
- window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,applyImagePolicy:applyImagePolicy};
+ window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,applyImagePolicy:applyImagePolicy,frameTheme:frameTheme};
 })();`;
 }

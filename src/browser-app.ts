@@ -191,7 +191,7 @@ ${renderBrowserAppStyles()}
                 <div class="stream-title-row article-pane-heading">
                   <button class="icon-button" id="stream-back-button" type="button" data-icon="back" title="Feeds">Feeds</button>
                   <div class="sidebar-current">
-                    <strong id="articles-heading">All items</strong>
+                    <strong id="articles-heading" tabindex="-1">All items</strong>
                     <p class="status-meta" id="articles-status" role="status" aria-live="polite">Choose a feed to load article previews.</p>
                   </div>
                   <button
@@ -284,7 +284,7 @@ ${renderBrowserAppStyles()}
                       <p class="reader-pane-label" id="reader-source-label">Source</p>
                       <p class="reader-pane-note" id="reader-source-note"></p>
                     </div>
-                    <strong id="reader-title">Select an article</strong>
+                    <strong id="reader-title" tabindex="-1">Select an article</strong>
                     <p class="panel-note" id="reader-meta"></p>
                     <p id="reader-reading-status" role="status" aria-live="polite"></p>
                     <button class="secondary-button" id="load-images-button" type="button" hidden>Load images for this article</button>
@@ -311,6 +311,10 @@ ${renderBrowserAppStyles()}
         </header>
         <section class="settings-group reading-preferences">
           <h3>Reading</h3>
+          <div class="settings-row">
+            <label for="app-theme-select">Appearance</label>
+            <select id="app-theme-select"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          </div>
           <div class="settings-row">
             <label for="auto-read-select">Mark articles read</label>
             <select id="auto-read-select">
@@ -414,6 +418,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerScroll = document.getElementById('reader-scroll');
   const popoverMenus = [document.getElementById('article-options-menu'), document.getElementById('article-actions-menu')];
   const sidebarCollapsedStorageKey = 'pigeon.browser.sidebar-collapsed';
+  const appThemeSelect = document.getElementById('app-theme-select');
   const articleQueryForm = document.getElementById('article-query-form');
   const articleSearchInput = document.getElementById('article-search-input');
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
@@ -440,7 +445,7 @@ export function renderBrowserAppRuntimeScript(): string {
     sidebar: { minimum: 224, maximum: 520 },
     stream: { minimum: 288, maximum: 640 },
     readerMinimum: 320,
-    resizerTotal: 16,
+    resizerTotal: 0,
   };
   let session = client.createLoggedOutSession();
   let activeValidationId = 0;
@@ -635,7 +640,10 @@ export function renderBrowserAppRuntimeScript(): string {
       return null;
     }
 
-    return gridWidth - COLUMN_WIDTH_LIMITS.readerMinimum - COLUMN_WIDTH_LIMITS.resizerTotal;
+    const hiddenSidebarWidth = readerGrid.classList.contains('is-sidebar-collapsed')
+      ? (appliedColumnWidths.sidebar ?? DEFAULT_COLUMN_WIDTHS.sidebar)
+      : 0;
+    return gridWidth - COLUMN_WIDTH_LIMITS.readerMinimum - COLUMN_WIDTH_LIMITS.resizerTotal + hiddenSidebarWidth;
   }
 
   function getCurrentColumnWidths() {
@@ -899,6 +907,15 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderThemeToggle() {
     themeToggleButton.textContent = theme === 'dark' ? 'Dark mode: On' : 'Dark mode: Off';
     themeToggleButton.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    appThemeSelect.value = hasStoredTheme() ? theme : 'system';
+  }
+
+  function clearStoredTheme() {
+    try {
+      window.localStorage.removeItem(themeStorageKey);
+    } catch (_error) {
+      // Storage may be unavailable; the in-memory theme still applies.
+    }
   }
 
   function renderArticleListModeToggle() {
@@ -909,7 +926,28 @@ export function renderBrowserAppRuntimeScript(): string {
   function applyTheme(nextTheme) {
     theme = client.normalizeBrowserTheme(nextTheme);
     document.documentElement.setAttribute('data-theme', theme);
+    if (typeof document.querySelectorAll === 'function') {
+      for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+        meta.setAttribute('content', theme === 'dark' ? '#19191b' : '#f5f5f6');
+      }
+    }
     renderThemeToggle();
+    syncReaderFrameTheme();
+  }
+
+  function getReaderFrameTheme() {
+    if (!readingTools || !readingPreferences || typeof readingTools.frameTheme !== 'function') return theme;
+    return readingTools.frameTheme(readingPreferences, theme, getSystemTheme() === 'dark');
+  }
+
+  // The article frame is same-origin, so a theme change only flips its root attribute.
+  function syncReaderFrameTheme() {
+    try {
+      const root = readerFrame.contentDocument && readerFrame.contentDocument.documentElement;
+      if (root && typeof root.setAttribute === 'function') root.setAttribute('data-theme', getReaderFrameTheme());
+    } catch (_error) {
+      // The frame may be between documents.
+    }
   }
 
   function applyArticleListMode(nextMode) {
@@ -2090,6 +2128,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function setLoggedOut(message) {
     activeLoginAttemptId += 1;
+    setMobilePane('stream');
+    setSearchOpen(false);
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
     clearStoredToken();
@@ -2143,7 +2183,7 @@ export function renderBrowserAppRuntimeScript(): string {
       },
     });
     button.addEventListener('click', () => {
-      setMobilePane('stream');
+      setMobilePane('stream', true);
       void selectView(view.id);
     });
 
@@ -2408,7 +2448,7 @@ export function renderBrowserAppRuntimeScript(): string {
         },
       });
       button.addEventListener('click', () => {
-        setMobilePane('reader');
+        setMobilePane('reader', true);
         void selectArticle(entry.id);
       });
 
@@ -2650,7 +2690,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(!requestBelongsToCurrentSession(generation,token)||id!==selectedItemId)return;
     const mode=readingData.modes[readingFeedId(item)]||'newsletter';readerModeSelect.value=mode;
     const original=item.content?.content || item.summary?.content || '';
-    const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original,theme]);
+    const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original]);
     if(preparedReaderKey===key)return;
     preparedReaderKey=key; const request=++readingRenderRequest;
     const preparedObjectURLs=new Set();
@@ -2672,8 +2712,8 @@ export function renderBrowserAppRuntimeScript(): string {
       const result=await readingTools.applyImagePolicy(html,{policy:readingPreferences.imagePolicy,loadOnce:consentItemId===id,baseURL,
         authenticatedFetch,registerObjectURL:url=>{readingObjectURLs.add(url);preparedObjectURLs.add(url);},isCurrent:current});
       if(!current()){for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}return;}
-      let documentHtml=client.createArticleFrameDocument(result.html,readingPreferences.theme==='dark'?'dark':readingPreferences.theme==='app'?theme:'light');
-      documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'html{scrollbar-gutter:stable both-edges}body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
+      let documentHtml=client.createArticleFrameDocument(result.html,getReaderFrameTheme());
+      documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
       if(renderedReaderItemId!==id) {
         const fraction=Number(readingData.positions[id]);
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
@@ -4178,8 +4218,21 @@ export function renderBrowserAppRuntimeScript(): string {
 
   themeToggleButton.addEventListener('click', () => {
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    applyTheme(nextTheme);
     setStoredTheme(nextTheme);
+    applyTheme(nextTheme);
+    renderArticles();
+    renderReader();
+  });
+
+  appThemeSelect.addEventListener('change', () => {
+    const choice = appThemeSelect.value;
+    if (choice === 'dark' || choice === 'light') {
+      setStoredTheme(choice);
+      applyTheme(choice);
+    } else {
+      clearStoredTheme();
+      applyTheme(getSystemTheme());
+    }
     renderArticles();
     renderReader();
   });
@@ -4337,8 +4390,17 @@ export function renderBrowserAppRuntimeScript(): string {
     searchButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
   }
 
-  function setMobilePane(pane) {
+  function setMobilePane(pane, moveFocus) {
     readerGrid.setAttribute('data-mobile-pane', pane);
+    if (!moveFocus || typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 760px)').matches) return;
+    // The pane that held focus is now display:none; hand focus to the pane that replaced it.
+    const findActive = (root, selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
+    const target = pane === 'reader'
+      ? readerTitle
+      : pane === 'sidebar'
+        ? findActive(document.getElementById('feeds-panel'), '.list-button.is-active') || streamBackButton
+        : findActive(articlesList, '.article-card.is-active') || articlesHeading;
+    if (target && typeof target.focus === 'function') target.focus();
   }
 
   function setReaderEmpty(isEmpty) {
@@ -4354,6 +4416,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function applySidebarCollapsed(isCollapsed) {
     readerGrid.classList.toggle('is-sidebar-collapsed', isCollapsed);
+    if (canApplyColumnWidths()) applyStoredColumnWidths();
     sidebarToggleButton.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
     sidebarToggleButton.setAttribute('title', isCollapsed ? 'Show sidebar' : 'Hide sidebar');
   }
@@ -4373,8 +4436,8 @@ export function renderBrowserAppRuntimeScript(): string {
       window.localStorage.setItem(sidebarCollapsedStorageKey, isCollapsed ? 'true' : 'false');
     } catch (_error) {}
   });
-  streamBackButton.addEventListener('click', () => { setMobilePane('sidebar'); });
-  readerBackButton.addEventListener('click', () => { setMobilePane('stream'); });
+  streamBackButton.addEventListener('click', () => { setMobilePane('sidebar', true); });
+  readerBackButton.addEventListener('click', () => { setMobilePane('stream', true); });
   for (const menu of popoverMenus) {
     if (!menu) continue;
     menu.addEventListener('toggle', () => { if (menu.open) closePopoverMenus(menu); });
@@ -4446,7 +4509,10 @@ export function renderBrowserAppRuntimeScript(): string {
     const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
     if (systemThemeQuery && typeof systemThemeQuery.addEventListener === 'function') {
       systemThemeQuery.addEventListener('change', () => {
-        if (hasStoredTheme()) return;
+        if (hasStoredTheme()) {
+          syncReaderFrameTheme();
+          return;
+        }
         applyTheme(getSystemTheme());
         renderArticles();
         renderReader();

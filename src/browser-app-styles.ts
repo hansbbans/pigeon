@@ -788,6 +788,8 @@ ${iconVariables()}
       #reader-source-note::before { content: "·"; margin-right: 0.4rem; }
       #reader-source-note:empty { display: none; }
 
+      #articles-heading:focus, #reader-title:focus { outline: none; }
+
       #reader-title {
         display: block;
         font-size: clamp(1.5rem, 2.3vw, 2rem);

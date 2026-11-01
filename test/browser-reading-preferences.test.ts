@@ -57,33 +57,29 @@ test('reading preferences persist typed bounded settings and unique keyboard sho
 
 test('frame CSS uses only safe enum fonts/colors and bounded numbers; system theme follows media preference',()=>{
  const state=fixture();const css=state.api.frameCSS({theme:'system',font:'url(https://evil.test/font)',fontSize:'18;@import x',width:'NaN',margins:-10});
- assert.match(css,/@media\(prefers-color-scheme:dark\)/);assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
+ assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
  assert.doesNotMatch(css,/@import|https:\/\/|javascript:|url\(/);
  const failing={getItem:()=>{throw new Error('denied');},setItem:()=>{throw new Error('denied');}};
  assert.equal(state.api.readPreferences(failing).theme,'app');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
 });
 
-test('Match app article theme follows the app theme attribute on the frame document',()=>{
- const state=fixture();const css=state.api.frameCSS({});
+test('Match app is the default article theme',()=>{
+ const state=fixture();
  assert.equal(state.api.normalizePreferences({}).theme,'app');
- assert.match(css,/:root\{color-scheme:light;color:#1c1c1e;background:#fff\}/);
- assert.match(css,/html\[data-theme="dark"\]\{color-scheme:dark;color:#dcdcdf;background:#1f1f21\}/);
- assert.match(css,/html\[data-theme="dark"\] a,html\[data-theme="dark"\] a \*\{color:#8fb3e8!important\}/);
- assert.doesNotMatch(css,/@media\(prefers-color-scheme:dark\)/);
+ assert.equal(state.api.frameTheme({},'dark',false),'dark');
 });
 
-test('dark article CSS overrides newsletter-painted backgrounds and text but not media',()=>{
+test('frame theme follows the article theme choice; only sepia paints its own palette',()=>{
  const state=fixture();
- const app=state.api.frameCSS({theme:'app'});
- assert.match(app,/html\[data-theme="dark"\] body \*:not\(img\):not\(picture\):not\(video\):not\(svg\):not\(svg \*\)\{background-color:transparent!important;color:inherit!important/);
- assert.match(app,/html\[data-theme="dark"\] body\{background:#1f1f21!important;color:#dcdcdf!important\}/);
- assert.match(app,/html\[data-theme="dark"\] a,html\[data-theme="dark"\] a \*\{color:#8fb3e8!important\}/);
- assert.doesNotMatch(app.split('html[data-theme="dark"]')[0],/!important/,'light rules leave the newsletter alone');
- const dark=state.api.frameCSS({theme:'dark'});
- assert.match(dark,/(^|\})body \*:not\(img\)[^{]*\{background-color:transparent!important/);
- assert.match(state.api.frameCSS({theme:'system'}),/@media\(prefers-color-scheme:dark\)\{[^@]*body \*:not\(img\)/);
- assert.doesNotMatch(state.api.frameCSS({theme:'light'}),/!important/);
- assert.doesNotMatch(state.api.frameCSS({theme:'sepia'}),/!important/);
+ assert.equal(state.api.frameTheme({theme:'app'},'dark',false),'dark');
+ assert.equal(state.api.frameTheme({theme:'app'},'light',true),'light');
+ assert.equal(state.api.frameTheme({theme:'dark'},'light',false),'dark');
+ assert.equal(state.api.frameTheme({theme:'light'},'dark',true),'light');
+ assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');
+ assert.equal(state.api.frameTheme({theme:'system'},'dark',false),'light');
+ assert.equal(state.api.frameTheme({theme:'sepia'},'dark',true),'light');
+ for(const theme of ['app','light','dark','system']) assert.doesNotMatch(state.api.frameCSS({theme}),/color-scheme|background:#|!important/);
+ assert.match(state.api.frameCSS({theme:'sepia'}),/:root\{color-scheme:light;color:#40362c;background:#f4ecd8\}/);
 });
 
 test('a light theme saved under the old light default reads as Match app once, then sticks when chosen again',()=>{
