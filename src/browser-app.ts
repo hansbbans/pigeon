@@ -100,14 +100,14 @@ ${renderBrowserAppStyles()}
       <section class="login-shell" id="login-screen">
         <div class="login-card">
           <h1>Pigeon</h1>
-          <p>Sign in with your Pigeon password.</p>
+          <p>Sign in to your reader.</p>
           <form id="login-form">
             <input name="Email" type="text" autocomplete="username" value="pigeon" hidden />
             <label class="login-field" for="password-input">
               <span class="login-field-label">Password</span>
-              <input id="password-input" name="Passwd" type="password" autocomplete="current-password" placeholder="Pigeon password" />
+              <input id="password-input" name="Passwd" type="password" autocomplete="current-password" />
             </label>
-            <button id="login-button" type="submit">Sign In</button>
+            <button id="login-button" type="submit">Sign in</button>
             <div id="login-error" aria-live="polite"></div>
             <p class="login-help">In Reeder Classic, use the username <strong>pigeon</strong> and this same password.</p>
           </form>
@@ -116,7 +116,7 @@ ${renderBrowserAppStyles()}
             <strong>${escapeHtml(serverLabel)}</strong>
           </div>
           <div class="session-recovery">
-            <button class="secondary-button" id="clear-session-button" type="button">Clear Saved Session</button>
+            <button class="secondary-button" id="clear-session-button" type="button">Clear saved session</button>
           </div>
         </div>
       </section>
@@ -211,10 +211,9 @@ ${renderBrowserAppStyles()}
                       <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
                       <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
                       <hr />
-                      <p class="menu-heading">Mark as read</p>
                       <div class="menu-bulk article-bulk-controls">
-                        <select id="article-bulk-select" aria-label="Which articles to mark read"><option value="above">Above selected article</option><option value="below">Below selected article</option><option value="age-1">Older than 1 day</option><option value="age-7">Older than 7 days</option><option value="age-30">Older than 30 days</option></select>
-                        <button class="secondary-button" id="article-bulk-button" type="button">Mark read</button>
+                        <label>Mark read<select id="article-bulk-select"><option value="above">Above selected</option><option value="below">Below selected</option><option value="age-1">Older than 1 day</option><option value="age-7">Older than 7 days</option><option value="age-30">Older than 30 days</option></select></label>
+                        <button class="secondary-button" id="article-bulk-button" type="button">Apply</button>
                       </div>
                     </div>
                   </details>
@@ -1657,9 +1656,10 @@ export function renderBrowserAppRuntimeScript(): string {
       return '';
     }
 
-    return new Date(timestampSeconds * 1000).toLocaleString(undefined, {
-      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
-    });
+    const date = new Date(timestampSeconds * 1000);
+    const options = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+    if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+    return date.toLocaleString(undefined, options);
   }
 
   function getActiveView() {
@@ -4389,6 +4389,10 @@ export function renderBrowserAppRuntimeScript(): string {
       if (menu && menu.open && !(typeof menu.contains === 'function' && menu.contains(target))) menu.open = false;
     }
   });
+  if (typeof window.addEventListener === 'function') {
+    // Clicks inside the article frame never reach this document; the window blurs instead.
+    window.addEventListener('blur', () => { closePopoverMenus(null); });
+  }
   applySidebarCollapsed(getStoredSidebarCollapsed());
 
   document.addEventListener('keydown', (event) => {

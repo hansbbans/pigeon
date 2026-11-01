@@ -7699,7 +7699,7 @@ test('search field opens from the list header and closes when cleared', async ()
 });
 
 test('popover menus close on Escape and after choosing an item', async () => {
-	const { elements, dispatchKeydown } = await createBrowserHarness({ fetchImpl: createRedesignFetch() }) as any;
+	const { elements, dispatchKeydown, dispatchWindowEvent } = await createBrowserHarness({ fetchImpl: createRedesignFetch() }) as any;
 	const optionsMenu = elements.get('article-options-menu');
 	const actionsMenu = elements.get('article-actions-menu');
 	optionsMenu.open = true;
@@ -7718,4 +7718,8 @@ test('popover menus close on Escape and after choosing an item', async () => {
 	optionsMenu.open = true;
 	dispatchKeydown('Escape');
 	assert.equal(optionsMenu.open, false);
+
+	actionsMenu.open = true;
+	await dispatchWindowEvent('blur');
+	assert.equal(actionsMenu.open, false, 'clicking into the article frame blurs the window and closes menus');
 });

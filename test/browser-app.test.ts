@@ -279,7 +279,7 @@ test('GET /app returns an HTML shell', async () => {
 	const html = await response.text();
 	assert.match(html, /id="app"/);
 	assert.match(html, /id="login-form"/);
-	assert.match(html, /Sign in with your Pigeon password\./);
+	assert.match(html, /Sign in to your reader\./);
 	assert.match(html, /name="Email" type="text" autocomplete="username" value="pigeon"/);
 	assert.match(html, /<span class="login-field-label">Password<\/span>/);
 	assert.match(html, /In Reeder Classic, use the username <strong>pigeon<\/strong> and this same password/);
