@@ -16,6 +16,7 @@ import {
 	createSessionFromToken,
 	extractAuthToken,
 	filterItemIdsForLocalDay,
+	formatArticleListTime,
 	getLocalDayBounds,
 	limitInitialItemIds,
 	normalizeBrowserItemId,
@@ -532,8 +533,8 @@ test('createArticleFrameDocument wraps article HTML in a complete readable docum
 	assert.match(emptyDocumentHtml, /No article content available/);
 	assert.match(darkDocumentHtml, /<html lang="en" data-theme="dark">/);
 	assert.match(darkDocumentHtml, /html\[data-theme="dark"\]/);
-	assert.match(darkDocumentHtml, /--frame-page:\s*#0f172a/);
-	assert.match(darkDocumentHtml, /--frame-link:\s*#8ab4ff/);
+	assert.match(darkDocumentHtml, /--frame-page:\s*#1f1f21/);
+	assert.match(darkDocumentHtml, /--frame-link:\s*#8fb3e8/);
 });
 
 test('selectArticleHeroImageUrl returns the first usable absolute image URL from loaded article HTML', () => {
@@ -921,6 +922,7 @@ async function createBrowserHarness(options?: {
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
 	storedAutoReadPolicy?: string | null;
+	storedSidebarCollapsed?: string | null;
 	offlineTools?: any;
 	locationHref?: string;
 	readingTools?: any;
@@ -1009,6 +1011,15 @@ async function createBrowserHarness(options?: {
 		['auto-read-select', createElement('manual', [], 'select', registerFocus)],
 		['reading-preference-status', createElement('', [], 'p', registerFocus)],
 		['search-button', createElement('', [], 'button', registerFocus)],
+		['article-query-controls', createElement('', [], 'div', registerFocus)],
+		['app-theme-select', createElement('system', [], 'select', registerFocus)],
+		['sidebar-toggle-button', createElement('', [], 'button', registerFocus)],
+		['stream-back-button', createElement('', [], 'button', registerFocus)],
+		['reader-back-button', createElement('', [], 'button', registerFocus)],
+		['reader-copy', createElement('', [], 'div', registerFocus)],
+		['reader-scroll', createElement('', [], 'div', registerFocus)],
+		['article-options-menu', createElement('', [], 'details', registerFocus)],
+		['article-actions-menu', createElement('', [], 'details', registerFocus)],
 		['article-query-form', createElement('', [], 'form', registerFocus)],
 		['article-search-input', createElement('', [], 'input', registerFocus)],
 		['clear-article-search-button', createElement('', [], 'button', registerFocus)],
@@ -1063,6 +1074,7 @@ async function createBrowserHarness(options?: {
 		localStorageState.set('pigeon.browser.article-list-mode', options.storedArticleListMode);
 	}
 	if (options?.storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', options.storedAutoReadPolicy);
+	if (options?.storedSidebarCollapsed) localStorageState.set('pigeon.browser.sidebar-collapsed', options.storedSidebarCollapsed);
 	if (options?.storedColumnWidths) {
 		localStorageState.set('pigeon.browser.column-widths', JSON.stringify(options.storedColumnWidths));
 	}
@@ -1782,7 +1794,6 @@ test('runtime script toggles and restores title-only article list mode', async (
 		},
 	});
 
-	assert.equal(elements.get('article-list-mode-button')?.textContent, 'Title-only list: Off');
 	assert.equal(elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'false');
 
 	await elements.get('login-form')?.dispatch('submit');
@@ -1793,7 +1804,7 @@ test('runtime script toggles and restores title-only article list mode', async (
 	await elements.get('article-list-mode-button')?.dispatch('click');
 	const titleOnlyCard = findListButtonByItemId(elements.get('articles-list'), '301');
 
-	assert.equal(elements.get('article-list-mode-button')?.textContent, 'Title-only list: On');
+	assert.equal(elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'true');
 	assert.equal(elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'true');
 	assert.equal(localStorageState.get('pigeon.browser.article-list-mode'), 'titles');
 	assert.ok(titleOnlyCard?.classList.contains('is-text-only'));
@@ -1805,7 +1816,6 @@ test('runtime script toggles and restores title-only article list mode', async (
 	await elements.get('article-list-mode-button')?.dispatch('click');
 	const previewCard = findListButtonByItemId(elements.get('articles-list'), '301');
 
-	assert.equal(elements.get('article-list-mode-button')?.textContent, 'Title-only list: Off');
 	assert.equal(elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'false');
 	assert.equal(localStorageState.get('pigeon.browser.article-list-mode'), 'preview');
 	assert.match(findDescendantByClass(previewCard, 'article-preview')?.textContent ?? '', /This preview should disappear/);
@@ -1816,7 +1826,7 @@ test('runtime script toggles and restores title-only article list mode', async (
 	);
 
 	const restored = await createBrowserHarness({ storedArticleListMode: 'titles' });
-	assert.equal(restored.elements.get('article-list-mode-button')?.textContent, 'Title-only list: On');
+	assert.equal(restored.elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'true');
 	assert.equal(restored.elements.get('article-list-mode-button')?.getAttribute('aria-pressed'), 'true');
 });
 
@@ -1942,7 +1952,8 @@ test('runtime script falls back to a text-first card layout and keeps preview me
 	assert.match(findDescendantByClass(articleCard, 'article-title')?.textContent ?? '', /Text-first article/);
 	assert.match(findDescendantByClass(articleCard, 'article-preview')?.textContent ?? '', /Preview stays visible/);
 	assert.match(findDescendantByClass(articleCard, 'article-meta')?.textContent ?? '', /Alpha/);
-	assert.match(findDescendantByClass(articleCard, 'article-meta')?.textContent ?? '', /\d{1,2}:\d{2}/);
+	assert.match(findDescendantByClass(articleCard, 'article-time')?.textContent ?? '', /\S/);
+	assert.match(findDescendantByClass(articleCard, 'article-meta')?.getAttribute('title') ?? '', /\d{1,2}:\d{2}/);
 });
 
 test('runtime script keeps real views and real feeds separated with intact counts', async () => {
@@ -2417,7 +2428,7 @@ test('runtime script applies stored column widths only after the reader grid is 
 	await waitForBrowserCondition(() => !elements.get('reader-shell')?.classList.contains('hidden'));
 
 	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '224px');
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '340px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '356px');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
 		sidebar: 520,
 		stream: 640,
@@ -2457,7 +2468,7 @@ test('runtime script does not overwrite saved column widths during responsive wi
 	readerGridWidth = 1000;
 	dispatchWindowEvent('resize');
 	assert.equal(grid?.style.getPropertyValue('--sidebar-column-width'), '224px');
-	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '440px');
+	assert.equal(grid?.style.getPropertyValue('--stream-column-width'), '456px');
 	assert.deepEqual(JSON.parse(localStorageState.get('pigeon.browser.column-widths') ?? '{}'), {
 		sidebar: 496,
 		stream: 484,
@@ -3180,7 +3191,7 @@ test('switching views during an in-flight content load still fetches bodies for 
 	assert.deepEqual(contentRequests[0], ['101', '102']);
 	assert.deepEqual(contentRequests[1], ['301']);
 	assert.match(elements.get('reader-title')?.textContent ?? '', /Article 301/);
-	assert.match(elements.get('reader-meta')?.textContent ?? '', /Bravo/);
+	assert.match(elements.get('reader-source-label')?.textContent ?? '', /Bravo/);
 
 	allItemsContentResponse.resolve(
 		Response.json({
@@ -3254,8 +3265,8 @@ test('runtime script keeps the active article title and metadata outside the ifr
 	);
 
 	assert.match(elements.get('reader-title')?.textContent ?? '', /Reader polish story/);
-	assert.match(elements.get('reader-meta')?.textContent ?? '', /Alpha/);
-	assert.match(elements.get('reader-meta')?.textContent ?? '', /2025/);
+	assert.match(elements.get('reader-source-label')?.textContent ?? '', /Alpha/);
+	assert.match(elements.get('reader-source-note')?.textContent ?? '', /2025/);
 	assert.equal(elements.get('reader-frame')?.srcdoc, createArticleFrameDocument(articleBody));
 	assert.doesNotMatch(elements.get('reader-title')?.textContent ?? '', /Full body copy that belongs in the frame/);
 	assert.doesNotMatch(elements.get('reader-meta')?.textContent ?? '', /Full body copy that belongs in the frame/);
@@ -3410,7 +3421,7 @@ test('runtime script re-renders the active article frame with dark styles when e
 
 	assert.equal(elements.get('reader-frame')?.srcdoc, createArticleFrameDocument(articleBody, 'dark'));
 	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /<html lang="en" data-theme="dark">/);
-	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /--frame-link:\s*#8ab4ff/);
+	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /--frame-link:\s*#8fb3e8/);
 });
 
 test('runtime script uses j and k to move between articles while keeping the active reader state in sync', async () => {
@@ -7569,4 +7580,197 @@ test('a read change made during revalidation is not reverted by older ref flags'
 	await flushBrowserTasks();
 	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '1')!.getAttribute('data-read'), 'true');
 	assert.equal(harness.elements.get('mark-unread-button')!.textContent, 'Mark unread');
+});
+
+test('formatArticleListTime gives short Reeder-style row times', () => {
+	const now = new Date(2026, 10, 1, 15, 0, 0).getTime();
+	const seconds = (date: Date) => Math.floor(date.getTime() / 1000);
+	assert.match(formatArticleListTime(seconds(new Date(2026, 10, 1, 9, 40)), now), /9:40/);
+	assert.equal(formatArticleListTime(seconds(new Date(2026, 9, 31, 23, 59)), now), 'Yesterday');
+	assert.doesNotMatch(formatArticleListTime(seconds(new Date(2026, 9, 30, 8, 0)), now), /2026|:/);
+	// Nov 1, 2026 is a 25-hour day in zones that end daylight saving that night; boundaries stay at midnight.
+	const lateToday = new Date(2026, 10, 1, 23, 30).getTime();
+	assert.match(formatArticleListTime(seconds(new Date(2026, 10, 1, 23, 30)), lateToday), /11:30|23:30/);
+	const nextMorning = new Date(2026, 10, 2, 9, 0).getTime();
+	assert.equal(formatArticleListTime(seconds(new Date(2026, 10, 1, 0, 30)), nextMorning), 'Yesterday');
+	assert.doesNotMatch(formatArticleListTime(seconds(new Date(2026, 9, 31, 23, 30)), nextMorning), /Yesterday/);
+	assert.match(formatArticleListTime(seconds(new Date(2025, 2, 20, 8, 0)), now), /2025/);
+	assert.equal(formatArticleListTime(0, now), '');
+	assert.equal(formatArticleListTime(undefined, now), '');
+});
+
+function createRedesignFetch() {
+	return async (input: string, init?: RequestInit) => {
+		if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+			return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+		}
+		if (input === '/reader/api/0/subscription/list') {
+			return Response.json({
+				subscriptions: [
+					{ id: 'feed/1', title: 'Alpha' },
+					{ id: 'feed/2', title: 'Bravo', categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }] },
+				],
+			});
+		}
+		if (input === '/reader/api/0/unread-count') {
+			return Response.json({ unreadcounts: [{ id: 'feed/1', count: 1 }, { id: 'feed/2', count: 1 }] });
+		}
+		if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+			return Response.json({ itemRefs: [{ id: '101' }] });
+		}
+		if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+			return Response.json({
+				items: [{
+					id: 'tag:google.com,2005:reader/item/0000000000000065',
+					title: 'Redesign article',
+					published: 1_742_460_800,
+					origin: { title: 'Alpha' },
+					summary: { content: 'Preview' },
+					content: { content: '<p>Body</p>' },
+				}],
+			});
+		}
+		throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+	};
+}
+
+test('folder disclosure is a drawn chevron, not a typed > or v', async () => {
+	const { elements } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters')));
+
+	const toggle = findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters');
+	assert.equal(findDescendantByClass(toggle, 'feed-disclosure')?.textContent, '');
+	assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
+	await toggle?.dispatch('click');
+	const expanded = findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters');
+	assert.equal(expanded?.getAttribute('aria-expanded'), 'true');
+	assert.equal(findDescendantByClass(expanded, 'feed-disclosure')?.textContent, '');
+	assert.equal(findListButtonByViewId(elements.get('views-list'), 'all')?.getAttribute('data-view-kind'), 'all');
+});
+
+test('sidebar toggle hides the feeds column and remembers it across reloads', async () => {
+	const { elements, localStorageState } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	const grid = elements.get('reader-grid');
+	const toggle = elements.get('sidebar-toggle-button');
+	assert.equal(grid?.classList.contains('is-sidebar-collapsed'), false);
+	assert.equal(toggle?.getAttribute('aria-expanded'), 'true');
+
+	await toggle?.dispatch('click');
+	assert.equal(grid?.classList.contains('is-sidebar-collapsed'), true);
+	assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
+	assert.equal(localStorageState.get('pigeon.browser.sidebar-collapsed'), 'true');
+
+	const restored = await createBrowserHarness({ fetchImpl: createRedesignFetch(), storedSidebarCollapsed: 'true' });
+	assert.equal(restored.elements.get('reader-grid')?.classList.contains('is-sidebar-collapsed'), true);
+
+	await toggle?.dispatch('click');
+	assert.equal(grid?.classList.contains('is-sidebar-collapsed'), false);
+	assert.equal(localStorageState.get('pigeon.browser.sidebar-collapsed'), 'false');
+});
+
+test('narrow layout moves from feeds to list to article and back', async () => {
+	const { elements } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	const grid = elements.get('reader-grid');
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '101')));
+
+	await elements.get('stream-back-button')?.dispatch('click');
+	assert.equal(grid?.getAttribute('data-mobile-pane'), 'sidebar');
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	assert.equal(grid?.getAttribute('data-mobile-pane'), 'stream');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '101')));
+	await findListButtonByItemId(elements.get('articles-list'), '101')?.dispatch('click');
+	assert.equal(grid?.getAttribute('data-mobile-pane'), 'reader');
+	await elements.get('reader-back-button')?.dispatch('click');
+	assert.equal(grid?.getAttribute('data-mobile-pane'), 'stream');
+});
+
+test('search field opens from the list header and closes when cleared', async () => {
+	const { elements } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '101')));
+	const controls = elements.get('article-query-controls');
+	const searchButton = elements.get('search-button');
+
+	await searchButton?.dispatch('click');
+	assert.equal(controls?.classList.contains('is-searching'), true);
+	assert.equal(searchButton?.getAttribute('aria-expanded'), 'true');
+	await searchButton?.dispatch('click');
+	assert.equal(controls?.classList.contains('is-searching'), false);
+
+	await searchButton?.dispatch('click');
+	await elements.get('clear-article-search-button')?.dispatch('click');
+	assert.equal(controls?.classList.contains('is-searching'), false);
+	assert.equal(searchButton?.getAttribute('aria-expanded'), 'false');
+});
+
+test('popover menus close on Escape and after choosing an item', async () => {
+	const { elements, dispatchKeydown, dispatchWindowEvent } = await createBrowserHarness({ fetchImpl: createRedesignFetch() }) as any;
+	const optionsMenu = elements.get('article-options-menu');
+	const actionsMenu = elements.get('article-actions-menu');
+	optionsMenu.open = true;
+	await optionsMenu.dispatch('toggle');
+	actionsMenu.open = true;
+	await actionsMenu.dispatch('toggle');
+	assert.equal(optionsMenu.open, false, 'opening one menu closes the other');
+	assert.equal(actionsMenu.open, true);
+
+	await actionsMenu.dispatch('click', { target: elements.get('more-like-button') });
+	assert.equal(actionsMenu.open, true, 'non-menu-item clicks keep the menu open');
+	elements.get('more-like-button').classList.add('menu-item');
+	await actionsMenu.dispatch('click', { target: elements.get('more-like-button') });
+	assert.equal(actionsMenu.open, false);
+
+	optionsMenu.open = true;
+	dispatchKeydown('Escape');
+	assert.equal(optionsMenu.open, false);
+
+	actionsMenu.open = true;
+	await dispatchWindowEvent('blur');
+	assert.equal(actionsMenu.open, false, 'clicking into the article frame blurs the window and closes menus');
+});
+
+test('dark article frames override newsletter-painted colors while light frames leave them alone', () => {
+	const newsletter = '<table bgcolor="#ffffff" style="background-color:#ffffff"><tr><td style="color:#111111">Body</td></tr></table>';
+	const dark = createArticleFrameDocument(newsletter, 'dark');
+	assert.match(dark, /<html lang="en" data-theme="dark">/);
+	assert.match(dark, /html\[data-theme="dark"\] body :where\(:not\(img, picture, video, svg, svg \*\)\) \{\s*background-color: transparent !important;\s*color: inherit !important;/);
+	// Links and code come after the zero-specificity catch-all with equal specificity, so they win.
+	const catchAll = dark.indexOf('body :where(');
+	assert.ok(catchAll > 0 && dark.indexOf('html[data-theme="dark"] body a,') > catchAll);
+	assert.ok(dark.indexOf('html[data-theme="dark"] body pre,') > catchAll);
+	assert.match(dark, /html\[data-theme="dark"\] body a,\s*html\[data-theme="dark"\] body a :where\(:not\(img, picture, video, svg, svg \*\)\) \{\s*color: var\(--frame-link\) !important;/);
+	assert.match(dark, /bgcolor="#ffffff"/, 'the newsletter markup itself is untouched');
+	const light = createArticleFrameDocument(newsletter, 'light');
+	assert.match(light, /<html lang="en" data-theme="light">/);
+});
+
+test('Settings Appearance can return the app to following the system theme', async () => {
+	const { elements, localStorageState } = await createBrowserHarness({ fetchImpl: createRedesignFetch(), storedTheme: 'dark' });
+	const select = elements.get('app-theme-select');
+	assert.equal(select?.value, 'dark');
+	select!.value = 'system';
+	await select?.dispatch('change');
+	assert.equal(localStorageState.has(THEME_STORAGE_KEY), false);
+	assert.equal(select?.value, 'system');
+	select!.value = 'light';
+	await select?.dispatch('change');
+	assert.equal(localStorageState.get(THEME_STORAGE_KEY), 'light');
+	assert.equal(elements.get('theme-toggle-button')?.getAttribute('aria-pressed'), 'false');
+	await elements.get('theme-toggle-button')?.dispatch('click');
+	assert.equal(select?.value, 'dark', 'the sidebar toggle is reflected in Settings');
+});
+
+test('signing out returns the narrow layout to the list and closes search', async () => {
+	const { elements } = await createBrowserHarness({ fetchImpl: createRedesignFetch() });
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByItemId(elements.get('articles-list'), '101')));
+	await findListButtonByItemId(elements.get('articles-list'), '101')?.dispatch('click');
+	await elements.get('search-button')?.dispatch('click');
+	assert.equal(elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'reader');
+	assert.equal(elements.get('article-query-controls')?.classList.contains('is-searching'), true);
+	await elements.get('logout-button')?.dispatch('click');
+	assert.equal(elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'stream');
+	assert.equal(elements.get('article-query-controls')?.classList.contains('is-searching'), false);
 });

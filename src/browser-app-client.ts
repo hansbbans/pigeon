@@ -224,29 +224,54 @@ export function createArticleFrameDocument(
       :root {
         color-scheme: light;
         --frame-page: #ffffff;
-        --frame-text: #1f2937;
-        --frame-link: #0f5cc0;
-        --frame-link-hover: #0a4a9a;
-        --frame-border: #d8dee6;
-        --frame-pre: #f8fafc;
-        --frame-quote: #4b5563;
-        --frame-muted: #6b7280;
+        --frame-text: #1c1c1e;
+        --frame-link: #3466b0;
+        --frame-link-hover: #234d8c;
+        --frame-border: #e4e4e7;
+        --frame-pre: #f5f5f6;
+        --frame-quote: #636366;
+        --frame-muted: #8e8e93;
       }
 
       html[data-theme="dark"] {
         color-scheme: dark;
-        --frame-page: #0f172a;
-        --frame-text: #e5e7eb;
-        --frame-link: #8ab4ff;
-        --frame-link-hover: #bfd3ff;
-        --frame-border: #334155;
-        --frame-pre: #111827;
-        --frame-quote: #cbd5e1;
-        --frame-muted: #94a3b8;
+        --frame-page: #1f1f21;
+        --frame-text: #dcdcdf;
+        --frame-link: #8fb3e8;
+        --frame-link-hover: #b5cdf0;
+        --frame-border: #3a3a3e;
+        --frame-pre: #262629;
+        --frame-quote: #b4b4b9;
+        --frame-muted: #8e8e93;
       }
 
       html {
         background: var(--frame-page);
+        scrollbar-gutter: stable both-edges;
+      }
+
+      /* Newsletters paint their own white backgrounds and dark text; in dark mode those give way. */
+      html[data-theme="dark"] body {
+        background: var(--frame-page) !important;
+        color: var(--frame-text) !important;
+      }
+
+      /* :where() keeps this catch-all at the specificity of "html[data-theme] body", so the link and
+         code rules below, also important, win by source order. */
+      html[data-theme="dark"] body :where(:not(img, picture, video, svg, svg *)) {
+        background-color: transparent !important;
+        color: inherit !important;
+        border-color: var(--frame-border) !important;
+      }
+
+      html[data-theme="dark"] body a,
+      html[data-theme="dark"] body a :where(:not(img, picture, video, svg, svg *)) {
+        color: var(--frame-link) !important;
+      }
+
+      html[data-theme="dark"] body pre,
+      html[data-theme="dark"] body code {
+        background-color: var(--frame-pre) !important;
       }
 
       body {
@@ -771,6 +796,28 @@ export function normalizeBrowserItemId(itemId: string): string {
 	return itemId;
 }
 
+/** Short, Reeder-style time for article rows: "9:40 AM" today, "Yesterday", "Oct 30", or "Oct 30, 2025". */
+export function formatArticleListTime(timestampSeconds: number | null | undefined, nowMs: number = Date.now()): string {
+	if (!timestampSeconds || !Number.isFinite(timestampSeconds)) {
+		return '';
+	}
+	const date = new Date(timestampSeconds * 1000);
+	const now = new Date(nowMs);
+	// Calendar boundaries, so 23- and 25-hour daylight-saving days still split at local midnight.
+	const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+	const startOfTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+	const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime();
+	const time = date.getTime();
+	if (time >= startOfToday && time < startOfTomorrow) {
+		return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+	}
+	if (time >= startOfYesterday && time < startOfToday) {
+		return 'Yesterday';
+	}
+	const sameYear = date.getFullYear() === now.getFullYear();
+	return date.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 export function renderBrowserAppClientScript(): string {
 	return `
 function __name(target) { return target; }
@@ -798,6 +845,7 @@ ${sanitizeArticleHtml.toString()}
 ${createArticleFrameDocument.toString()}
 ${selectArticleHeroImageUrl.toString()}
 ${normalizeBrowserItemId.toString()}
+${formatArticleListTime.toString()}
 
 window.__PIGEON_BROWSER_CLIENT__ = {
   AUTH_STORAGE_KEY: ${JSON.stringify(AUTH_STORAGE_KEY)},
@@ -809,6 +857,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   createLoggedOutSession,
   createSessionFromToken,
   normalizeBrowserTheme,
+  formatArticleListTime,
   applyUnauthorizedState,
   sortSubscriptionsByTitle,
   buildFeedViews,

@@ -57,10 +57,41 @@ test('reading preferences persist typed bounded settings and unique keyboard sho
 
 test('frame CSS uses only safe enum fonts/colors and bounded numbers; system theme follows media preference',()=>{
  const state=fixture();const css=state.api.frameCSS({theme:'system',font:'url(https://evil.test/font)',fontSize:'18;@import x',width:'NaN',margins:-10});
- assert.match(css,/@media\(prefers-color-scheme:dark\)/);assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
+ assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
  assert.doesNotMatch(css,/@import|https:\/\/|javascript:|url\(/);
  const failing={getItem:()=>{throw new Error('denied');},setItem:()=>{throw new Error('denied');}};
- assert.equal(state.api.readPreferences(failing).theme,'light');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
+ assert.equal(state.api.readPreferences(failing).theme,'app');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
+});
+
+test('Match app is the default article theme',()=>{
+ const state=fixture();
+ assert.equal(state.api.normalizePreferences({}).theme,'app');
+ assert.equal(state.api.frameTheme({},'dark',false),'dark');
+});
+
+test('frame theme follows the article theme choice; only sepia paints its own palette',()=>{
+ const state=fixture();
+ assert.equal(state.api.frameTheme({theme:'app'},'dark',false),'dark');
+ assert.equal(state.api.frameTheme({theme:'app'},'light',true),'light');
+ assert.equal(state.api.frameTheme({theme:'dark'},'light',false),'dark');
+ assert.equal(state.api.frameTheme({theme:'light'},'dark',true),'light');
+ assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');
+ assert.equal(state.api.frameTheme({theme:'system'},'dark',false),'light');
+ assert.equal(state.api.frameTheme({theme:'sepia'},'dark',true),'light');
+ for(const theme of ['app','light','dark','system']) assert.doesNotMatch(state.api.frameCSS({theme}),/color-scheme|background:#|!important/);
+ assert.match(state.api.frameCSS({theme:'sepia'}),/:root\{color-scheme:light;color:#40362c;background:#f4ecd8\}/);
+});
+
+test('a light theme saved under the old light default reads as Match app once, then sticks when chosen again',()=>{
+ const state=fixture();
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({theme:'light',fontSize:20}));
+ assert.equal(state.api.readPreferences().theme,'app');
+ assert.equal(state.api.readPreferences().fontSize,20);
+ state.api.savePreferences({theme:'light',fontSize:20});
+ assert.equal(JSON.parse(state.values.get('pigeon.browser.reading.v1')!).schema,2);
+ assert.equal(state.api.readPreferences().theme,'light');
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({theme:'sepia'}));
+ assert.equal(state.api.readPreferences().theme,'sepia');
 });
 
 test('ask policy strips all network resource channels while retaining inert image metadata and safe text links',async()=>{
