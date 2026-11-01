@@ -90,19 +90,16 @@ struct ArticleRowView: View {
 		}
 		.frame(maxWidth: .infinity, alignment: .leading)
 		.accessibilityElement(children: .combine)
-		.accessibilityValue(article.isRead ? "Read" : "Unread")
+		.accessibilityValue(accessibilityValue)
 	}
 
 	private var storyText: some View {
 		VStack(alignment: .leading, spacing: density == .compact ? 2 : 4) {
 			HStack(alignment: .firstTextBaseline, spacing: 7) {
-				Text(article.title)
+				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
 					.font(.body.weight(.semibold))
 					.lineLimit(density == .titleOnly ? 1 : 2)
 				Spacer(minLength: 4)
-				if density == .titleOnly, article.isPaywalled == true {
-					PaywallLabel()
-				}
 				if article.sampleCount > 0 || article.score > 0 {
 					ScoreBadge(score: article.score)
 				}
@@ -121,9 +118,6 @@ struct ArticleRowView: View {
 					Text(article.receivedAt, format: .relative(presentation: .named))
 						.font(.caption)
 						.foregroundStyle(.secondary)
-					if article.isPaywalled == true {
-						PaywallLabel()
-					}
 					Spacer()
 				Image(systemName: "star.fill")
 					.font(.caption)
@@ -143,6 +137,11 @@ struct ArticleRowView: View {
 					.accessibilityLabel("Why this is here: \(article.explanation)")
 			}
 		}
+	}
+
+	private var accessibilityValue: String {
+		let state = article.isRead ? "Read" : "Unread"
+		return article.isPaywalled == true ? "\(state), \(PaywallLabel.accessibilityValue)" : state
 	}
 
 	private var shouldShowExplanation: Bool {

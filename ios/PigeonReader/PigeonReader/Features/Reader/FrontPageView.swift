@@ -191,7 +191,7 @@ struct FrontPageStoryView: View {
 					.tracking(0.9)
 					.foregroundStyle(FrontPageKickerPalette.color(for: article.feedKey))
 					.lineLimit(1)
-				Text(article.title)
+				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
 					.font(role == .lead
 						? .custom("Bookerly-Bold", size: 27, relativeTo: .title)
 						: ReaderTypography.storyTitle)
@@ -206,9 +206,6 @@ struct FrontPageStoryView: View {
 				}
 				HStack(spacing: 6) {
 					Text(article.receivedAt, format: .relative(presentation: .named))
-					if article.isPaywalled == true {
-						PaywallLabel()
-					}
 					if article.isStarred {
 						Image(systemName: "star.fill")
 							.foregroundStyle(.orange)
@@ -240,8 +237,10 @@ struct FrontPageStoryView: View {
 	}
 
 	private var accessibilityValue: String {
-		let state = article.isRead ? "Read" : "Unread"
-		return article.isStarred ? "\(state), Starred" : state
+		var parts = [article.isRead ? "Read" : "Unread"]
+		if article.isStarred { parts.append("Starred") }
+		if article.isPaywalled == true { parts.append(PaywallLabel.accessibilityValue) }
+		return parts.joined(separator: ", ")
 	}
 
 	/// Images follow the shared thumbnail pipeline, which only loads publisher

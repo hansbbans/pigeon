@@ -33,9 +33,6 @@ struct ArticleReaderHeaderView: View {
 				Text(article.source)
 					.font(.subheadline.weight(.semibold))
 					.foregroundStyle(.tint)
-				if article.isPaywalled == true {
-					PaywallLabel()
-				}
 				Spacer(minLength: 12)
 				Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
 					.font(.subheadline)
@@ -49,12 +46,18 @@ struct ArticleReaderHeaderView: View {
 					.textSelection(.enabled)
 			}
 
-			Text(article.title)
+			PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
 				.font(ReaderTypography.articleTitle(textScale: textScale))
 				.bold()
 				.fixedSize(horizontal: false, vertical: true)
 				.frame(maxWidth: .infinity, alignment: .leading)
 				.textSelection(.enabled)
+				// Selectable text ignores label overrides and would read the paywall
+				// flag as part of the title, so expose the title as its own element.
+				.accessibilityElement(children: .ignore)
+				.accessibilityLabel(article.title)
+				.accessibilityValue(article.isPaywalled == true ? PaywallLabel.accessibilityValue : "")
+				.accessibilityAddTraits([.isStaticText, .isHeader])
 
 			HStack(spacing: 10) {
 				Menu {
