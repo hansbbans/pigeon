@@ -27,6 +27,28 @@ struct ArticleReaderHeaderView: View {
 		self.onOpenOriginal = onOpenOriginal
 	}
 
+	@ViewBuilder
+	private var title: some View {
+		let text = PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
+			.font(ReaderTypography.articleTitle(textScale: textScale))
+			.bold()
+			.fixedSize(horizontal: false, vertical: true)
+			.frame(maxWidth: .infinity, alignment: .leading)
+			.textSelection(.enabled)
+		if article.isPaywalled == true {
+			// Selectable text ignores label overrides and would read the paywall
+			// flag as part of the title, so expose the title as its own element.
+			// Other articles keep the selectable element for VoiceOver.
+			text
+				.accessibilityElement(children: .ignore)
+				.accessibilityLabel(article.title)
+				.accessibilityValue(PaywallLabel.accessibilityValue)
+				.accessibilityAddTraits(.isStaticText)
+		} else {
+			text
+		}
+	}
+
 	var body: some View {
 		VStack(alignment: .leading, spacing: 12) {
 			HStack(alignment: .firstTextBaseline) {
@@ -46,18 +68,7 @@ struct ArticleReaderHeaderView: View {
 					.textSelection(.enabled)
 			}
 
-			PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-				.font(ReaderTypography.articleTitle(textScale: textScale))
-				.bold()
-				.fixedSize(horizontal: false, vertical: true)
-				.frame(maxWidth: .infinity, alignment: .leading)
-				.textSelection(.enabled)
-				// Selectable text ignores label overrides and would read the paywall
-				// flag as part of the title, so expose the title as its own element.
-				.accessibilityElement(children: .ignore)
-				.accessibilityLabel(article.title)
-				.accessibilityValue(article.isPaywalled == true ? PaywallLabel.accessibilityValue : "")
-				.accessibilityAddTraits([.isStaticText, .isHeader])
+			title
 
 			HStack(spacing: 10) {
 				Menu {
