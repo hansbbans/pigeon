@@ -60,7 +60,16 @@ test('frame CSS uses only safe enum fonts/colors and bounded numbers; system the
  assert.match(css,/@media\(prefers-color-scheme:dark\)/);assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
  assert.doesNotMatch(css,/@import|https:\/\/|javascript:|url\(/);
  const failing={getItem:()=>{throw new Error('denied');},setItem:()=>{throw new Error('denied');}};
- assert.equal(state.api.readPreferences(failing).theme,'light');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
+ assert.equal(state.api.readPreferences(failing).theme,'app');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
+});
+
+test('Match app article theme follows the app theme attribute on the frame document',()=>{
+ const state=fixture();const css=state.api.frameCSS({});
+ assert.equal(state.api.normalizePreferences({}).theme,'app');
+ assert.match(css,/:root\{color-scheme:light;color:#1c1c1e;background:#fff\}/);
+ assert.match(css,/html\[data-theme="dark"\]\{color-scheme:dark;color:#dcdcdf;background:#1f1f21\}/);
+ assert.match(css,/html\[data-theme="dark"\] a\{color:#8fb3e8\}/);
+ assert.doesNotMatch(css,/@media\(prefers-color-scheme:dark\)/);
 });
 
 test('ask policy strips all network resource channels while retaining inert image metadata and safe text links',async()=>{

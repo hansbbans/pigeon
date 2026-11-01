@@ -5,6 +5,7 @@ import { renderBrowserReadingScript } from './browser-reading-preferences';
 import { renderBrowserReadabilityScript } from './browser-readability';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
+import { renderBrowserAppStyles } from './browser-app-styles';
 
 export interface BrowserAppShell {
 	html: string;
@@ -71,1390 +72,15 @@ function buildBrowserAppHtml(baseUrl: string): string {
   <head>
     <meta charset="utf-8" />
     <link rel="manifest" href="/app/manifest.webmanifest" />
-    <meta name="theme-color" content="#f5f5f2" />
+    <meta name="theme-color" content="#f5f5f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#19191b" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Pigeon" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Pigeon</title>
     <script>${escapeScript(themeBootstrapScript)}</script>
     <style>
-      :root {
-        color-scheme: light;
-        --page: #edf1f5;
-        --surface: #ffffff;
-        --surface-muted: #f7f8fa;
-        --surface-subtle: #f2f5f8;
-        --surface-emphasis: #e8edf3;
-        --surface-strong: #eef2f7;
-        --border: #d8dfe7;
-        --border-strong: #c5cdd8;
-        --text: #111827;
-        --muted: #6b7280;
-        --accent: #1d74f5;
-        --accent-strong: #0f65ea;
-        --accent-muted: #eaf3ff;
-        --danger: #b42318;
-        --frame: #ffffff;
-        --shadow: 0 24px 64px rgba(15, 23, 42, 0.08);
-      }
-
-      html[data-theme="dark"] {
-        color-scheme: dark;
-        --page: #0b1220;
-        --surface: #111827;
-        --surface-muted: #0f172a;
-        --surface-subtle: #162032;
-        --surface-emphasis: #1e293b;
-        --surface-strong: #202d41;
-        --border: #334155;
-        --border-strong: #475569;
-        --text: #e5e7eb;
-        --muted: #94a3b8;
-        --accent: #60a5fa;
-        --accent-strong: #3b82f6;
-        --accent-muted: #16233d;
-        --danger: #fca5a5;
-        --frame: #0f172a;
-        --shadow: 0 28px 72px rgba(2, 6, 23, 0.45);
-      }
-
-      html {
-        background: var(--page);
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        color: var(--text);
-        background: var(--page);
-      }
-
-      button,
-      input,
-      select,
-      textarea {
-        font: inherit;
-      }
-
-      button {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
-        color: var(--text);
-        cursor: pointer;
-        padding: 0.55rem 0.85rem;
-        transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-      }
-
-      button:hover {
-        background: var(--surface-subtle);
-        border-color: var(--border-strong);
-      }
-
-      button[disabled] {
-        cursor: default;
-        opacity: 0.72;
-      }
-
-      input {
-        width: 100%;
-        padding: 0.72rem 0.85rem;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        color: var(--text);
-      }
-
-      #app {
-        min-height: 100vh;
-        padding: 1rem;
-      }
-
-      .hidden {
-        display: none !important;
-      }
-
-      .login-shell {
-        min-height: calc(100vh - 2.5rem);
-        display: grid;
-        place-items: center;
-      }
-
-      .login-card {
-        width: min(28rem, 100%);
-        padding: 1.6rem;
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        background: var(--surface);
-        box-shadow: var(--shadow);
-      }
-
-      .login-card h1,
-      .reader-brand h1 {
-        margin: 0 0 0.5rem;
-        font-size: clamp(1.5rem, 2.5vw, 2rem);
-        letter-spacing: 0;
-      }
-
-      .login-card p,
-      .reader-brand p,
-      .panel-note,
-      .status-meta,
-      .article-meta,
-      .feed-meta {
-        color: var(--muted);
-      }
-
-      #login-form {
-        display: grid;
-        gap: 0.75rem;
-        margin-top: 1rem;
-      }
-
-      .login-server {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
-        gap: 0.75rem;
-        align-items: center;
-        padding: 0.7rem 0.8rem;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface-muted);
-      }
-
-      .login-server span,
-      .login-help {
-        color: var(--muted);
-        font-size: 0.86rem;
-      }
-
-      .login-server strong {
-        min-width: 0;
-        overflow-wrap: anywhere;
-        text-align: right;
-      }
-
-      .login-field {
-        display: grid;
-        gap: 0.4rem;
-      }
-
-      .login-field-label {
-        font-size: 0.9rem;
-        font-weight: 650;
-      }
-
-      .login-help {
-        margin: 0;
-        line-height: 1.45;
-      }
-
-      #login-button {
-        background: var(--text);
-        border-color: var(--text);
-        color: #ffffff;
-      }
-
-      #login-button:hover {
-        background: #000000;
-        border-color: #000000;
-      }
-
-      #login-error {
-        min-height: 1.2rem;
-        color: var(--danger);
-      }
-
-      .session-recovery {
-        display: grid;
-        gap: 0.55rem;
-        margin-top: 1rem;
-        padding-top: 1rem;
-        border-top: 1px solid var(--border);
-      }
-
-      #clear-session-button,
-      #logout-button {
-        border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
-        color: var(--danger);
-      }
-
-      .reader-shell {
-        width: min(100%, 100rem);
-        margin: 0 auto;
-      }
-
-      .reader-window {
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        overflow: hidden;
-        background: var(--surface);
-        box-shadow: var(--shadow);
-      }
-
-      #reader-toolbar {
-        display: flex;
-        justify-content: space-between;
-        gap: 1rem;
-        align-items: center;
-        padding: 0.8rem 1rem;
-        border-bottom: 1px solid var(--border);
-        background: var(--surface);
-      }
-
-      .reader-brand {
-        display: grid;
-        gap: 0.2rem;
-      }
-
-      .reader-brand p {
-        margin: 0;
-        font-size: 0.75rem;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .reader-brand h1 {
-        margin-bottom: 0;
-        font-size: 1.05rem;
-      }
-
-      .toolbar-actions,
-      .reader-pane-actions {
-        display: flex;
-        gap: 0.5rem;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-
-      .icon-button {
-        width: 2rem;
-        height: 2rem;
-        display: inline-grid;
-        place-items: center;
-        padding: 0;
-        border-radius: 999px;
-      }
-
-      .icon-button svg {
-        width: 1rem;
-        height: 1rem;
-        stroke: currentColor;
-      }
-
-      .toolbar-pill,
-      .secondary-button {
-        background: var(--surface);
-        color: var(--text);
-        border-color: var(--border);
-      }
-
-      .toolbar-pill:hover,
-      .secondary-button:hover {
-        background: var(--surface-subtle);
-      }
-
-      .toolbar-pill[data-presentational-control="true"] {
-        color: var(--muted);
-      }
-
-      .toolbar-pill[data-control-tone="subtle"] {
-        background: var(--surface-muted);
-        color: var(--muted);
-        border-color: var(--border);
-      }
-
-      #theme-toggle-button[aria-pressed="true"],
-      #article-list-mode-button[aria-pressed="true"] {
-        background: var(--accent-muted);
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-
-      .toolbar-pill[data-control-tone="subtle"][disabled] {
-        opacity: 0.72;
-      }
-
-      .toolbar-pill[data-control-tone="subtle"][disabled]:hover {
-        background: var(--surface-muted);
-        color: var(--muted);
-        border-color: var(--border);
-      }
-
-      .reader-grid {
-        display: grid;
-        --sidebar-column-width: 26rem;
-        --stream-column-width: 32.75rem;
-        grid-template-columns:
-          minmax(16rem, var(--sidebar-column-width))
-          0.45rem
-          minmax(24rem, var(--stream-column-width))
-          0.45rem
-          minmax(0, 1fr);
-        grid-template-areas: "sidebar sidebar-resizer stream stream-resizer reader";
-        min-height: calc(100vh - 8.1rem);
-      }
-
-      .panel {
-        min-height: 18rem;
-        display: flex;
-        flex-direction: column;
-        padding: 0;
-        border: 0;
-        border-right: 1px solid var(--border);
-        background: var(--surface);
-      }
-
-      #feeds-panel {
-        grid-area: sidebar;
-      }
-
-      #articles-panel {
-        grid-area: stream;
-      }
-
-      #reader-panel {
-        grid-area: reader;
-        border-right: 0;
-      }
-
-      .column-resizer {
-        position: relative;
-        z-index: 3;
-        border: 0;
-        border-radius: 0;
-        padding: 0;
-        background: var(--surface);
-        color: transparent;
-        cursor: col-resize;
-        touch-action: none;
-      }
-
-      .column-resizer::before {
-        content: "";
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 50%;
-        width: 1px;
-        transform: translateX(-50%);
-        background: var(--border);
-      }
-
-      .column-resizer:hover::before,
-      .column-resizer.is-dragging::before {
-        width: 3px;
-        background: var(--accent);
-      }
-
-      .column-resizer:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: -2px;
-      }
-
-      .column-resizer[data-resizer="sidebar"] {
-        grid-area: sidebar-resizer;
-      }
-
-      .column-resizer[data-resizer="stream"] {
-        grid-area: stream-resizer;
-      }
-
-      .panel h2,
-      .reader-copy h2 {
-        margin: 0 0 0.25rem;
-        font-size: 0.78rem;
-        color: var(--muted);
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      .section-kicker {
-        display: inline-flex;
-        margin: 0 0 0.35rem;
-        padding: 0;
-        color: var(--muted);
-        font-size: 0.72rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .sidebar-section,
-      .pane-header {
-        display: grid;
-        gap: 0.25rem;
-      }
-
-      .sidebar-top {
-        display: grid;
-        gap: 0.8rem;
-        padding: 1rem;
-        border-bottom: 1px solid var(--border);
-        background: var(--surface);
-      }
-
-      .sidebar-top-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 0.75rem;
-      }
-
-      .sidebar-app-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        letter-spacing: 0;
-      }
-
-      .sidebar-current {
-        display: grid;
-        gap: 0.25rem;
-      }
-
-      .article-pane-heading {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 0.75rem;
-      }
-
-      .article-pane-heading .sidebar-current {
-        min-width: 0;
-      }
-      .sidebar-current strong {
-        font-size: 1.05rem;
-        line-height: 1.25;
-      }
-
-      .sidebar-current p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 0.84rem;
-      }
-
-      .sidebar-section {
-        padding: 0.9rem 0 0.25rem;
-      }
-
-      .sidebar-divider {
-        height: 1px;
-        margin: 0;
-        background: var(--border);
-      }
-
-      .list-shell {
-        flex: 1;
-        display: grid;
-        align-content: start;
-        overflow: auto;
-      }
-
-      #article-page-controls {
-        flex: none;
-        display: flex;
-        gap: 0.5rem;
-        padding: 0.65rem 1rem;
-        border-bottom: 1px solid var(--border);
-        background: var(--surface);
-      }
-
-      .list-reset {
-        display: grid;
-        align-content: start;
-        gap: 0;
-        padding: 0;
-        margin: 0;
-        list-style: none;
-      }
-
-      .list-button {
-        width: 100%;
-        border: 0;
-        border-radius: 0;
-        border-bottom: 1px solid var(--surface-emphasis);
-        background: transparent;
-        color: var(--text);
-        padding: 0.72rem 1rem;
-        text-align: left;
-      }
-
-      .list-button:hover {
-        background: var(--surface-subtle);
-        color: var(--text);
-      }
-
-      .list-button.is-active {
-        background: var(--accent);
-        color: #ffffff;
-      }
-
-      .list-button.is-active:hover {
-        background: var(--accent-strong);
-        color: #ffffff;
-      }
-
-      .list-button.is-child {
-        padding-left: 1.95rem;
-      }
-
-      .list-button.is-child .feed-title {
-        font-size: 0.88rem;
-      }
-
-      .feed-row {
-        display: flex;
-        justify-content: space-between;
-        gap: 0.75rem;
-        align-items: center;
-      }
-
-      .feed-title-line {
-        display: inline-flex;
-        gap: 0.55rem;
-        align-items: center;
-        min-width: 0;
-      }
-
-      .feed-title,
-      .article-title {
-        display: block;
-        font-weight: 700;
-        letter-spacing: -0.01em;
-      }
-
-      .feed-title {
-        font-size: 0.9rem;
-      }
-
-      .feed-count {
-        min-width: 2rem;
-        color: var(--muted);
-        font-size: 0.78rem;
-        font-weight: 600;
-        text-align: center;
-      }
-
-      .list-button.is-active .feed-count,
-      .list-button.is-active .feed-meta,
-      .list-button.is-active .article-meta,
-      .list-button.is-active .article-preview {
-        color: rgba(255, 255, 255, 0.82);
-      }
-
-      .feed-meta,
-      .article-preview,
-      .article-meta {
-        display: block;
-        margin-top: 0.25rem;
-      }
-
-      .feed-meta {
-        color: var(--muted);
-        font-size: 0.78rem;
-      }
-
-      .article-card {
-        width: 100%;
-        display: grid;
-        gap: 0.45rem;
-        border: 0;
-        border-radius: 0;
-        border-bottom: 1px solid var(--surface-emphasis);
-        background: var(--surface);
-        color: var(--text);
-        padding: 0.85rem 1rem;
-        text-align: left;
-      }
-
-      .article-card:hover {
-        background: var(--surface-subtle);
-        color: var(--text);
-      }
-
-      .article-card.is-active {
-        background: var(--accent);
-        color: #ffffff;
-      }
-
-      .article-card-grid {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr);
-        gap: 0.85rem;
-        align-items: start;
-      }
-
-      .article-card.has-hero-image .article-card-grid {
-        grid-template-columns: minmax(0, 1fr) 8rem;
-      }
-
-      .article-card-copy {
-        display: grid;
-        gap: 0.35rem;
-        min-width: 0;
-      }
-
-      .article-title {
-        font-size: 0.98rem;
-        line-height: 1.3;
-        letter-spacing: 0;
-      }
-
-      .article-preview {
-        margin-top: 0;
-        color: var(--muted);
-        font-size: 0.84rem;
-        line-height: 1.45;
-      }
-
-      .article-meta {
-        margin-top: 0;
-        color: var(--muted);
-        font-size: 0.74rem;
-        letter-spacing: 0.02em;
-      }
-
-      .article-hero {
-        width: 100%;
-        aspect-ratio: 4 / 3;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        background: var(--surface-subtle);
-        object-fit: cover;
-      }
-
-      #reader-panel {
-        display: flex;
-      }
-
-      .reader-pane-surface {
-        display: grid;
-        grid-template-rows: auto auto auto minmax(0, 1fr);
-        gap: 0;
-        min-height: 100%;
-        width: 100%;
-        background: var(--surface);
-      }
-
-      #reader-pane-toolbar {
-        display: flex;
-        justify-content: space-between;
-        gap: 0.75rem;
-        align-items: center;
-        padding: 0.8rem 1.1rem;
-        border-bottom: 1px solid var(--border);
-        background: var(--surface-muted);
-      }
-
-      .reader-pane-toolbar-copy {
-        display: grid;
-        gap: 0.2rem;
-      }
-
-      .reader-pane-label {
-        margin: 0;
-        font-size: 0.74rem;
-        color: var(--muted);
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .reader-pane-note {
-        margin: 0;
-        color: var(--muted);
-        font-size: 0.84rem;
-        line-height: 1.4;
-      }
-
-      #reader-action-status:empty, #reader-reading-status:empty {
-        display: none;
-      }
-
-      .article-card.is-read:not(.is-active) .article-card-copy {
-        opacity: 0.6;
-      }
-
-      .article-card.is-read .article-title {
-        font-weight: 500;
-      }
-
-      .article-star {
-        color: var(--accent-strong);
-        margin-right: 0.4rem;
-      }
-
-      .article-card.is-active .article-star {
-        color: inherit;
-      }
-
-      .article-paywall {
-        display: inline-block;
-        margin-left: 0.45rem;
-        padding: 0.05rem 0.4rem;
-        border: 1px solid currentColor;
-        border-radius: 999px;
-        color: var(--muted);
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        vertical-align: 0.12em;
-      }
-
-      .article-card.is-active .article-paywall {
-        color: inherit;
-      }
-
-      .reading-preferences {
-        display: grid;
-        gap: 0.5rem;
-        margin-bottom: 1rem;
-      }
-
-      .reading-preferences select {
-        width: 100%;
-        padding: 0.6rem;
-        color: var(--text);
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-      }
-
-      #library-panel {
-        position: fixed;
-        z-index: 20;
-        top: 5.25rem;
-        right: 1.25rem;
-        width: min(42rem, calc(100vw - 2.5rem));
-        max-height: calc(100vh - 6.5rem);
-        overflow: auto;
-        padding: 1.2rem;
-        box-shadow: var(--shadow);
-      }
-
-      #library-panel > header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-      }
-
-      #library-content section {
-        border-top: 1px solid var(--border);
-        margin-top: 1rem;
-        padding-top: 0.5rem;
-      }
-
-      #library-content label, #library-content summary {
-        display: block;
-        margin: 0.5rem 0;
-      }
-
-      #library-content label > span, #library-content label > input:not([type="checkbox"]), #library-content textarea {
-        display: block;
-        width: 100%;
-      }
-
-      #library-content input:not([type="checkbox"]), #library-content textarea {
-        padding: 0.55rem;
-        background: var(--surface);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 5px;
-      }
-
-      #library-content button {
-        margin: 0.25rem 0.4rem 0.25rem 0;
-      }
-
-      .article-query-controls {
-        display: grid;
-        gap: 0.6rem;
-        padding: 0.8rem 1.1rem;
-        border-bottom: 1px solid var(--border);
-      }
-
-      .article-query-search, .article-query-options, .article-bulk-controls {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: end;
-        gap: 0.5rem;
-      }
-
-      .article-query-search input, .article-query-options label, .article-bulk-controls label {
-        flex: 1 1 8rem;
-        min-width: 0;
-      }
-
-      .article-query-controls input, .article-query-controls select {
-        width: 100%;
-        padding: 0.5rem;
-        color: var(--text);
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 5px;
-      }
-
-      .article-query-options label, .article-bulk-controls label {
-        display: grid;
-        gap: 0.3rem;
-        font-size: 0.78rem;
-        color: var(--muted);
-      }
-
-      .reader-copy {
-        display: grid;
-        gap: 0.55rem;
-        padding: 1.1rem 1.25rem 0;
-      }
-
-      .reader-copy strong {
-        font-size: clamp(1.55rem, 2.2vw, 2rem);
-        line-height: 1.2;
-        letter-spacing: 0;
-      }
-
-      .reader-copy h2 {
-        margin-bottom: 0;
-      }
-
-      .reader-player-shell {
-        display: grid;
-        gap: 0.55rem;
-        padding: 1rem 1.25rem 0;
-      }
-
-      .reader-player-label {
-        margin: 0;
-        color: var(--muted);
-        font-size: 0.74rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-
-      .reader-player-container {
-        width: 100%;
-        min-width: 200px;
-        min-height: 200px;
-        aspect-ratio: 16 / 9;
-        background: #000;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        overflow: hidden;
-      }
-
-      .reader-player-frame {
-        display: block;
-        width: 100%;
-        height: 100%;
-        min-width: 200px;
-        min-height: 200px;
-        border: 0;
-      }
-
-      .reader-player-fallback {
-        width: fit-content;
-      }
-
-      #reader-meta {
-        margin: 0;
-        font-size: 0.92rem;
-        line-height: 1.55;
-        letter-spacing: 0.01em;
-      }
-
-      .reader-frame-shell {
-        flex: 1;
-        padding: 1rem 1.25rem 1.25rem;
-      }
-
-      #reader-frame {
-        width: 100%;
-        min-height: 60vh;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--frame);
-      }
-
-      #image-zoom-panel {position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.9);padding:1rem;overflow:auto;}
-      #zoom-image {display:block;max-width:100%;max-height:85vh;margin:auto;}
-      #settings-panel {
-        position: fixed;
-        top: 1.5rem;
-        right: 1.5rem;
-        width: min(24rem, calc(100vw - 3rem));
-        min-height: auto;
-        max-height: calc(100vh - 3rem);
-        overflow: auto;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--surface);
-        z-index: 20;
-        box-shadow: var(--shadow);
-      }
-
-      #settings-panel h2 {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 0.75rem;
-      }
-
-      #settings-content dl {
-        display: grid;
-        gap: 0.5rem;
-        margin: 0;
-      }
-
-      #settings-content dt {
-        font-weight: 700;
-      }
-
-      #settings-content dd {
-        margin: 0;
-        color: var(--muted);
-      }
-
-	  .sync-health {
-		display: grid;
-		gap: 0.75rem;
-		margin-top: 1.25rem;
-		padding-top: 1rem;
-		border-top: 1px solid var(--border);
-	  }
-
-	  .sync-health h3,
-	  .sync-feed strong,
-	  .sync-feed p {
-		margin: 0;
-	  }
-
-	  .sync-feed {
-		display: grid;
-		gap: 0.45rem;
-		padding: 0.75rem;
-		border: 1px solid var(--border);
-		border-radius: 7px;
-		background: var(--frame);
-	  }
-
-	  .sync-feed p {
-		color: var(--muted);
-		font-size: 0.84rem;
-		line-height: 1.45;
-	  }
-
-	  .sync-feed button {
-		justify-self: start;
-	  }
-
-      /* Feedbin-inspired density and spacing. Keep these late in the cascade so they tune the existing reader components. */
-      #app {
-        padding: 1.25rem;
-      }
-
-      .reader-shell {
-        width: min(100%, 118rem);
-      }
-
-      .reader-grid {
-        --sidebar-column-width: 26rem;
-        --stream-column-width: 32.75rem;
-      }
-
-      .reader-brand p {
-        display: none;
-      }
-
-      .reader-brand h1,
-      .sidebar-app-title {
-        font-size: 1rem;
-        font-weight: 700;
-      }
-
-      .sidebar-top {
-        padding: 1.35rem 1.4rem 1rem;
-        border-bottom: 0;
-      }
-
-      #feeds-panel .sidebar-top {
-        padding-top: 2.6rem;
-      }
-
-      .sidebar-current strong,
-      #articles-heading {
-        font-size: 1.86rem;
-        line-height: 1.05;
-        letter-spacing: -0.035em;
-      }
-
-      .sidebar-current p,
-      .status-meta {
-        font-size: 0.98rem;
-        line-height: 1.35;
-      }
-
-      .pane-header {
-        padding: 0 1.4rem 0.35rem;
-      }
-
-      .pane-header h2,
-      .panel h2 {
-        margin: 0;
-        font-size: 0.86rem;
-        font-weight: 700;
-        letter-spacing: 0;
-        text-transform: none;
-      }
-
-      .sidebar-section {
-        padding: 0.8rem 0 0.2rem;
-      }
-
-      .list-button {
-        border-bottom: 0;
-        border-radius: 4px;
-        margin: 0 0.55rem;
-        width: calc(100% - 1.1rem);
-        padding: 0.45rem 0.75rem;
-      }
-
-      .list-button.is-child {
-        padding-left: 2.2rem;
-      }
-
-      .folder-list-item {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: start;
-        gap: 0.35rem;
-        padding: 0 0.55rem;
-      }
-
-      .folder-list-item > .list-button {
-        width: 100%;
-        margin: 0;
-      }
-
-      .feed-title {
-        font-size: 1rem;
-        font-weight: 500;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .feed-count {
-        font-size: 1rem;
-        font-weight: 400;
-        text-align: right;
-      }
-
-      .feed-meta {
-        margin-top: 0.12rem;
-        font-size: 0.72rem;
-        letter-spacing: 0;
-        text-transform: uppercase;
-      }
-
-      .feed-disclosure {
-        width: 1rem;
-        color: currentColor;
-        font-size: 1rem;
-        line-height: 1;
-        display: inline-grid;
-        place-items: center;
-      }
-
-      .folder-toggle {
-        width: 1.8rem;
-        height: 2.35rem;
-        padding: 0;
-        border-radius: 4px;
-      }
-
-      .folder-toggle .feed-disclosure {
-        width: 100%;
-      }
-
-      .feed-icon {
-        border-radius: 3px;
-      }
-
-      .article-card {
-        padding: 0.78rem 0.72rem 0.78rem 1.55rem;
-      }
-
-      .article-card.has-hero-image .article-card-grid {
-        grid-template-columns: minmax(0, 1fr);
-      }
-
-      .article-title {
-        font-size: 1.05rem;
-        line-height: 1.25;
-      }
-
-      .article-preview {
-        font-size: 1rem;
-        line-height: 1.36;
-      }
-
-      .article-meta {
-        font-size: 0.96rem;
-      }
-
-      .article-hero {
-        aspect-ratio: 16 / 9;
-        border: 0;
-      }
-
-      .article-card.is-active .article-preview,
-      .article-card.is-active .article-meta {
-        color: rgba(255, 255, 255, 0.82);
-      }
-
-      #reader-pane-toolbar {
-        padding: 0.75rem 1.35rem;
-        background: var(--surface);
-      }
-
-      .reader-pane-label {
-        font-size: 1rem;
-        color: var(--text);
-        letter-spacing: 0;
-        text-transform: none;
-      }
-
-      .reader-copy {
-        padding: 1.4rem 1.35rem 0;
-      }
-
-      .reader-copy strong {
-        font-size: clamp(1.35rem, 2vw, 2rem);
-        line-height: 1.08;
-        letter-spacing: -0.035em;
-      }
-
-      #reader-meta {
-        color: var(--muted);
-        font-size: 1.13rem;
-        line-height: 1.38;
-      }
-
-      .reader-frame-shell {
-        padding: 1rem 0.25rem 1.25rem;
-      }
-
-      #reader-frame {
-        border: 0;
-        border-radius: 0;
-      }
-
-      @media (min-width: 901px) {
-        /* Desktop: fill the whole browser window instead of a centered, padded card. */
-        #app {
-          padding: 0;
-        }
-
-        .login-shell {
-          min-height: 100vh;
-        }
-
-        .reader-shell {
-          width: 100%;
-        }
-
-        .reader-window {
-          height: 100dvh;
-          display: flex;
-          flex-direction: column;
-          border: 0;
-          border-radius: 0;
-          box-shadow: none;
-        }
-
-        .reader-grid {
-          flex: 1 1 auto;
-          min-height: 0;
-        }
-
-        .panel,
-        .list-shell {
-          min-height: 0;
-        }
-
-        #feeds-panel {
-          overflow: auto;
-        }
-
-        .reader-pane-surface {
-          height: 100%;
-          min-height: 0;
-          grid-template-rows: auto auto auto minmax(12rem, 1fr);
-          overflow: auto;
-        }
-
-        .reader-frame-shell {
-          grid-row: 4;
-          min-height: 0;
-        }
-
-        #reader-frame {
-          display: block;
-          height: 100%;
-          min-height: 0;
-        }
-      }
-
-      @media (max-width: 1100px) {
-        #reader-toolbar {
-          padding: 0.85rem;
-        }
-
-        .reader-grid {
-          --sidebar-column-width: 16rem;
-          --stream-column-width: 23rem;
-          grid-template-columns:
-            minmax(14rem, var(--sidebar-column-width))
-            0.45rem
-            minmax(21rem, var(--stream-column-width))
-            0.45rem
-            minmax(0, 1fr);
-        }
-      }
-
-      @media (max-width: 900px) {
-        #app {
-          padding: 0.75rem;
-        }
-
-        .reader-window {
-          border-radius: 12px;
-        }
-
-        #reader-toolbar {
-          flex-direction: column;
-          align-items: stretch;
-          gap: 0.75rem;
-          padding: 0.8rem 0.85rem;
-        }
-
-        .toolbar-actions {
-          width: 100%;
-          justify-content: flex-start;
-        }
-
-        .toolbar-actions button {
-          flex: 1 1 auto;
-          min-width: 0;
-        }
-
-        #reader-pane-toolbar {
-          flex-direction: column;
-          align-items: stretch;
-          gap: 0.75rem;
-          padding: 0.75rem 0.85rem;
-        }
-
-        .article-pane-heading {
-          flex-direction: column;
-        }
-
-        .reader-pane-actions {
-          width: 100%;
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 0.5rem;
-        }
-
-        .toolbar-pill {
-          padding: 0.6rem 0.75rem;
-        }
-
-        .reader-grid {
-          grid-template-columns: 1fr;
-          grid-template-areas: "sidebar" "stream" "reader";
-        }
-
-        .column-resizer {
-          display: none;
-        }
-
-        .article-card.has-hero-image .article-card-grid {
-          grid-template-columns: 1fr;
-        }
-
-        .reader-copy {
-          padding: 0.9rem 1rem 0;
-          gap: 0.45rem;
-        }
-
-        .reader-copy strong {
-          font-size: clamp(1.25rem, 5vw, 1.65rem);
-        }
-
-        #reader-meta {
-          font-size: 0.88rem;
-        }
-
-        .reader-frame-shell {
-          padding: 0.9rem 1rem 1rem;
-        }
-
-        #reader-frame {
-          min-height: 50vh;
-        }
-
-        .panel {
-          border-right: 0;
-          border-bottom: 1px solid var(--border);
-        }
-
-        #reader-panel {
-          border-bottom: 0;
-        }
-
-        #settings-panel {
-          top: auto;
-          right: 0.75rem;
-          bottom: 0.75rem;
-          left: 0.75rem;
-          width: auto;
-          max-height: min(28rem, calc(100vh - 1.5rem));
-          border-radius: 8px;
-        }
-      }
-
-      @media (max-width: 640px) {
-        #app {
-          padding: 0.5rem;
-        }
-
-        .reader-window {
-          border-radius: 6px;
-        }
-
-        .reader-brand h1 {
-          font-size: 1.1rem;
-        }
-
-        .reader-pane-actions {
-          grid-template-columns: 1fr;
-        }
-
-        .toolbar-actions button,
-        .toolbar-pill {
-          padding: 0.6rem 0.75rem;
-        }
-
-        #reader-frame {
-          min-height: 54vh;
-        }
-      }
+${renderBrowserAppStyles()}
     </style>
   </head>
   <body>
@@ -1473,24 +99,23 @@ function buildBrowserAppHtml(baseUrl: string): string {
     <div id="app" data-base-url="${escapeHtml(baseUrl)}">
       <section class="login-shell" id="login-screen">
         <div class="login-card">
-          <h1>Sign in to Pigeon</h1>
-          <p>Enter the same Pigeon password you use in your reader apps.</p>
+          <h1>Pigeon</h1>
+          <p>Sign in with your Pigeon password.</p>
+          <form id="login-form">
+            <input name="Email" type="text" autocomplete="username" value="pigeon" hidden />
+            <label class="login-field" for="password-input">
+              <span class="login-field-label">Password</span>
+              <input id="password-input" name="Passwd" type="password" autocomplete="current-password" placeholder="Pigeon password" />
+            </label>
+            <button id="login-button" type="submit">Sign In</button>
+            <div id="login-error" aria-live="polite"></div>
+            <p class="login-help">In Reeder Classic, use the username <strong>pigeon</strong> and this same password.</p>
+          </form>
           <div class="login-server">
             <span>Server</span>
             <strong>${escapeHtml(serverLabel)}</strong>
           </div>
-          <form id="login-form">
-            <input name="Email" type="text" autocomplete="username" value="pigeon" hidden />
-            <label class="login-field" for="password-input">
-              <span class="login-field-label">Pigeon password</span>
-              <input id="password-input" name="Passwd" type="password" autocomplete="current-password" placeholder="Enter your Pigeon password" />
-            </label>
-            <p class="login-help"><strong>Reeder Classic:</strong> use username <strong>pigeon</strong> and this same password.</p>
-            <button id="login-button" type="submit">Sign In</button>
-            <div id="login-error" aria-live="polite"></div>
-          </form>
           <div class="session-recovery">
-            <p class="login-help">If the reader is stuck or showing errors, clear its saved session and sign in again.</p>
             <button class="secondary-button" id="clear-session-button" type="button">Clear Saved Session</button>
           </div>
         </div>
@@ -1498,76 +123,53 @@ function buildBrowserAppHtml(baseUrl: string): string {
 
       <section class="reader-shell hidden" id="reader-shell" tabindex="-1">
         <div class="reader-window">
-          <header id="reader-toolbar">
-            <div class="reader-brand">
-              <p>Private reader</p>
-              <h1>Pigeon</h1>
-            </div>
-            <div class="toolbar-actions">
-              <button class="toolbar-pill" id="theme-toggle-button" type="button" aria-pressed="false">Dark mode: Off</button>
-              <button class="toolbar-pill" id="article-list-mode-button" type="button" aria-pressed="false">Title-only list: Off</button>
-              <button class="secondary-button" id="settings-button" type="button">Settings</button>
-              <button class="secondary-button" id="library-button" type="button" aria-controls="library-panel" aria-expanded="false">Library</button>
-              <button id="logout-button" type="button">Sign Out</button>
-            </div>
-          </header>
-
-          <div class="reader-grid" id="reader-grid">
-            <aside class="panel" id="feeds-panel">
+          <div class="reader-grid" id="reader-grid" data-mobile-pane="stream">
+            <aside class="panel" id="feeds-panel" aria-label="Feeds">
               <div class="sidebar-top">
-                <div class="sidebar-top-row">
-                  <span class="sidebar-app-title">Reader</span>
-                  <button
-                    class="icon-button toolbar-pill"
-                    id="search-button"
-                    type="button"
-                    aria-label="Search"
-                    data-control-tone="subtle"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <circle cx="11" cy="11" r="7" stroke-width="1.8"></circle>
-                      <path d="M20 20l-3.5-3.5" stroke-width="1.8" stroke-linecap="round"></path>
-                    </svg>
-                  </button>
-                </div>
-                <div class="sidebar-current">
-                  <strong id="sidebar-current-title">All items</strong>
-                  <p id="sidebar-current-meta">Choose a stream to load article previews.</p>
-                </div>
+                <h1 class="sidebar-brand">Pigeon</h1>
+              </div>
+              <div class="sidebar-current">
+                <strong id="sidebar-current-title">All items</strong>
+                <p id="sidebar-current-meta">Choose a stream to load article previews.</p>
               </div>
 
-              <section class="sidebar-section" id="real-views-section">
-                <div class="pane-header">
-                  <h2>Unread / Recently Read</h2>
-                </div>
-                <div class="list-shell">
-                  <ul class="list-reset" id="views-list"></ul>
-                </div>
-              </section>
+              <div class="sidebar-scroll">
+                <section class="sidebar-section" id="real-views-section">
+                  <div class="pane-header">
+                    <h2>Views</h2>
+                  </div>
+                  <div class="list-shell">
+                    <ul class="list-reset" id="views-list"></ul>
+                  </div>
+                </section>
 
-              <div class="sidebar-divider" aria-hidden="true"></div>
+                <section class="sidebar-section" id="folder-views-section">
+                  <div class="pane-header">
+                    <h2>Folders</h2>
+                    <p class="status-meta" id="folders-status">Tagged feeds appear here.</p>
+                  </div>
+                  <div class="list-shell">
+                    <ul class="list-reset" id="folders-list"></ul>
+                  </div>
+                </section>
 
-              <section class="sidebar-section" id="folder-views-section">
-                <div class="pane-header">
-                  <h2>Tags / Folders</h2>
-                  <p class="status-meta" id="folders-status">Tagged feeds appear here.</p>
-                </div>
-                <div class="list-shell">
-                  <ul class="list-reset" id="folders-list"></ul>
-                </div>
-              </section>
+                <section class="sidebar-section" id="real-feeds-section">
+                  <div class="pane-header">
+                    <h2>Feeds</h2>
+                    <p class="status-meta" id="feeds-status">Uncategorized feeds appear here after login.</p>
+                  </div>
+                  <div class="list-shell">
+                    <ul class="list-reset" id="feeds-list"></ul>
+                  </div>
+                </section>
+              </div>
 
-              <div class="sidebar-divider" aria-hidden="true"></div>
-
-              <section class="sidebar-section" id="real-feeds-section">
-                <div class="pane-header">
-                  <h2>Feeds</h2>
-                  <p class="status-meta" id="feeds-status">Uncategorized feeds appear here after login.</p>
-                </div>
-                <div class="list-shell">
-                  <ul class="list-reset" id="feeds-list"></ul>
-                </div>
-              </section>
+              <div class="sidebar-footer">
+                <button class="icon-button" id="settings-button" type="button" data-icon="gear" title="Settings">Settings</button>
+                <button class="icon-button" id="library-button" type="button" data-icon="library" title="Library" aria-controls="library-panel" aria-expanded="false">Library</button>
+                <button class="icon-button" id="theme-toggle-button" type="button" data-icon="theme" title="Dark mode" aria-pressed="false">Dark mode: Off</button>
+                <button class="icon-button" id="logout-button" type="button" data-icon="logout" title="Sign out">Sign Out</button>
+              </div>
             </aside>
 
             <button
@@ -1579,44 +181,53 @@ function buildBrowserAppHtml(baseUrl: string): string {
               aria-orientation="vertical"
               aria-valuemin="224"
               aria-valuemax="520"
-              aria-valuenow="416"
+              aria-valuenow="224"
               role="separator"
               data-resizer="sidebar"
             ></button>
 
-            <section class="panel" id="articles-panel">
-              <div class="sidebar-top">
-                <div class="article-pane-heading">
+            <section class="panel" id="articles-panel" aria-label="Articles">
+              <div class="stream-header">
+                <div class="stream-title-row article-pane-heading">
+                  <button class="icon-button" id="stream-back-button" type="button" data-icon="back" title="Feeds">Feeds</button>
                   <div class="sidebar-current">
                     <strong id="articles-heading">All items</strong>
                     <p class="status-meta" id="articles-status" role="status" aria-live="polite">Choose a feed to load article previews.</p>
                   </div>
                   <button
-                    class="secondary-button hidden"
+                    class="icon-button hidden"
                     id="mark-all-as-read-button"
                     type="button"
+                    data-icon="check-all"
+                    title="Mark all as read"
                     aria-label="Mark all items in the selected feed or folder as read"
                   >Mark all as read</button>
+                  <button class="icon-button" id="search-button" type="button" data-icon="search" title="Search" aria-label="Search" aria-expanded="false" aria-controls="article-query-form">Search</button>
+                  <details class="menu" id="article-options-menu">
+                    <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
+                    <div class="menu-panel">
+                      <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
+                      <label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                      <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
+                      <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
+                      <hr />
+                      <p class="menu-heading">Mark as read</p>
+                      <div class="menu-bulk article-bulk-controls">
+                        <select id="article-bulk-select" aria-label="Which articles to mark read"><option value="above">Above selected article</option><option value="below">Below selected article</option><option value="age-1">Older than 1 day</option><option value="age-7">Older than 7 days</option><option value="age-30">Older than 30 days</option></select>
+                        <button class="secondary-button" id="article-bulk-button" type="button">Mark read</button>
+                      </div>
+                    </div>
+                  </details>
                 </div>
-              </div>
-              <div class="article-query-controls">
-                <p id="offline-mode-banner" class="hidden" role="status" aria-live="polite"></p><form id="article-query-form" class="article-query-search" role="search">
-                  <input id="article-search-input" type="search" maxlength="200" aria-label="Search articles" placeholder="Search articles" />
-                  <button class="secondary-button" type="submit">Search</button>
-                  <button class="secondary-button" id="clear-article-search-button" type="button">Clear</button>
-                </form>
-                <div class="article-query-options">
-                  <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
-                  <button class="secondary-button" id="refresh-view-button" type="button">Refresh view</button><label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                <div class="article-query-controls" id="article-query-controls">
+                  <p id="offline-mode-banner" class="hidden" role="status" aria-live="polite"></p>
+                  <form id="article-query-form" class="article-query-search" role="search">
+                    <input id="article-search-input" type="search" maxlength="200" aria-label="Search articles" placeholder="Search" />
+                    <button class="search-submit" type="submit">Search</button>
+                    <button class="icon-button" id="clear-article-search-button" type="button" data-icon="close" title="Clear search">Clear</button>
+                  </form>
+                  <p id="article-query-status" class="status-meta" role="status" aria-live="polite"></p>
                 </div>
-                <details class="article-bulk-menu">
-                  <summary>Bulk reading actions</summary>
-                  <div class="article-bulk-controls">
-                  <label>Mark read<select id="article-bulk-select"><option value="above">Above selected article</option><option value="below">Below selected article</option><option value="age-1">Older than 1 day</option><option value="age-7">Older than 7 days</option><option value="age-30">Older than 30 days</option></select></label>
-                    <button class="secondary-button" id="article-bulk-button" type="button">Apply</button>
-                  </div>
-                </details>
-                <p id="article-query-status" class="status-meta" role="status" aria-live="polite"></p>
               </div>
               <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
                 <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
@@ -1637,46 +248,56 @@ function buildBrowserAppHtml(baseUrl: string): string {
               aria-orientation="vertical"
               aria-valuemin="288"
               aria-valuemax="640"
-              aria-valuenow="524"
+              aria-valuenow="340"
               role="separator"
               data-resizer="stream"
             ></button>
 
-            <article class="panel" id="reader-panel">
+            <article class="panel" id="reader-panel" aria-label="Article">
               <div class="reader-pane-surface">
                 <div id="notification-action-panel" class="hidden" role="status"><p id="notification-action-text"></p><button id="notification-confirm-button" type="button">Confirm article action</button><button id="notification-cancel-button" type="button">Cancel</button></div>
                 <div id="reader-pane-toolbar">
-                  <div class="reader-pane-toolbar-copy">
-                    <p class="reader-pane-label" id="reader-source-label">Source</p>
-                    <p class="reader-pane-note" id="reader-source-note">A plain article view with preserved links.</p>
-                    <p class="reader-pane-note" id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
-                  </div>
+                  <button class="icon-button" id="reader-back-button" type="button" data-icon="back" title="Articles">Articles</button>
+                  <button class="icon-button" id="sidebar-toggle-button" type="button" data-icon="sidebar" title="Hide sidebar" aria-controls="feeds-panel" aria-expanded="true">Toggle sidebar</button>
+                  <p class="reader-pane-note" id="reader-action-status" role="status" aria-live="polite" aria-atomic="true"></p>
                   <div class="reader-pane-actions" aria-label="Article actions">
-                    <button class="toolbar-pill" id="mark-unread-button" type="button" aria-label="Mark selected article as read" aria-keyshortcuts="M" data-control-tone="subtle" disabled>Mark read</button>
-                    <button class="toolbar-pill" id="more-like-button" type="button" disabled>More like this</button>
-                    <button class="toolbar-pill" id="not-interested-button" type="button" disabled>Not interested</button>
-                    <button class="toolbar-pill" id="star-article-button" type="button" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
-                    <button class="toolbar-pill hidden" id="undo-article-button" type="button" data-control-tone="subtle" disabled>Undo</button>
-                    <label>View<select id="reader-mode-select"><option value="newsletter">Newsletter</option><option value="reader">Reader</option><option value="website">Website</option></select></label>
-                    <button class="toolbar-pill" id="share-article-button" type="button">Share</button>
-                    <details><summary>Readwise</summary><label>Readwise token (this session only)<input id="readwise-token-input" type="password" autocomplete="off"></label><button id="readwise-save-button" type="button">Save to Readwise</button></details>
-                    <button class="toolbar-pill" id="load-images-button" type="button" hidden>Load images for this article</button>
-                    <button class="toolbar-pill" id="open-original-button" type="button" data-control-tone="subtle" disabled>Open original</button>
+                    <button class="icon-button hidden" id="undo-article-button" type="button" data-icon="undo" title="Undo" data-control-tone="subtle" disabled>Undo</button>
+                    <button class="icon-button" id="mark-unread-button" type="button" data-icon="check" title="Read (M)" aria-label="Mark selected article as read" aria-keyshortcuts="M" data-control-tone="subtle" disabled>Mark read</button>
+                    <button class="icon-button" id="star-article-button" type="button" data-icon="star" title="Star (S)" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
+                    <button class="icon-button" id="share-article-button" type="button" data-icon="share" title="Share">Share</button>
+                    <button class="icon-button" id="open-original-button" type="button" data-icon="open" title="Open original" data-control-tone="subtle" disabled>Open original</button>
+                    <details class="menu" id="article-actions-menu">
+                      <summary class="icon-button" data-icon="more" title="More" aria-label="More article actions">More article actions</summary>
+                      <div class="menu-panel">
+                        <label>View<select id="reader-mode-select"><option value="newsletter">Newsletter</option><option value="reader">Reader</option><option value="website">Website</option></select></label>
+                        <hr />
+                        <button class="menu-item" id="more-like-button" type="button" disabled>More like this</button>
+                        <button class="menu-item" id="not-interested-button" type="button" disabled>Not interested</button>
+                        <hr />
+                        <details><summary>Save to Readwise</summary><label>Readwise token (this session only)<input id="readwise-token-input" type="password" autocomplete="off"></label><button id="readwise-save-button" type="button">Save to Readwise</button></details>
+                      </div>
+                    </details>
                   </div>
                 </div>
-                <div class="reader-copy">
-                  <span class="section-kicker">Reading Pane</span>
-                  <h2>Selected article</h2>
-                  <strong id="reader-title">Select an article</strong>
-                  <p id="reader-reading-status" role="status" aria-live="polite"></p><p class="panel-note" id="reader-meta">Full article content stays isolated inside the reader frame.</p>
-                </div>
-                <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
-                  <p class="reader-player-label">Video</p>
-                  <div class="reader-player-container" id="reader-player-container"></div>
-                  <a class="reader-player-fallback" id="reader-player-fallback" href="" target="_blank" rel="noopener">Open in YouTube</a>
-                </section>
-                <div class="reader-frame-shell">
-                  <iframe id="reader-frame" title="Article content" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin" srcdoc=""></iframe>
+                <div class="reader-scroll" id="reader-scroll">
+                  <div class="reader-copy" id="reader-copy">
+                    <div class="reader-kicker">
+                      <p class="reader-pane-label" id="reader-source-label">Source</p>
+                      <p class="reader-pane-note" id="reader-source-note"></p>
+                    </div>
+                    <strong id="reader-title">Select an article</strong>
+                    <p class="panel-note" id="reader-meta"></p>
+                    <p id="reader-reading-status" role="status" aria-live="polite"></p>
+                    <button class="secondary-button" id="load-images-button" type="button" hidden>Load images for this article</button>
+                  </div>
+                  <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
+                    <p class="reader-player-label">Video</p>
+                    <div class="reader-player-container" id="reader-player-container"></div>
+                    <a class="reader-player-fallback" id="reader-player-fallback" href="" target="_blank" rel="noopener">Open in YouTube</a>
+                  </section>
+                  <div class="reader-frame-shell">
+                    <iframe id="reader-frame" title="Article content" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin" srcdoc=""></iframe>
+                  </div>
                 </div>
               </div>
             </article>
@@ -1684,45 +305,48 @@ function buildBrowserAppHtml(baseUrl: string): string {
         </div>
       </section>
 
-      <aside class="panel hidden" id="settings-panel">
-        <h2>
-          <span>Settings</span>
-          <button class="secondary-button" id="close-settings-button" type="button">Close</button>
-        </h2>
-        <div class="reading-preferences">
-          <label for="auto-read-select">Mark articles read</label>
-          <select id="auto-read-select">
-            <option value="manual">Manually</option>
-            <option value="opened">When opened</option>
-            <option value="progress">After reading 60%</option>
-          </select>
-          <p class="status-meta">Your preference is saved in this browser. M toggles read status; S toggles a star. Marking unread keeps that article unread until you mark it read or sign out.</p>
+      <aside class="panel sheet hidden" id="settings-panel" aria-label="Settings">
+        <header class="sheet-header">
+          <h2>Settings</h2>
+          <button class="icon-button" id="close-settings-button" type="button" data-icon="close" title="Close">Close</button>
+        </header>
+        <section class="settings-group reading-preferences">
+          <h3>Reading</h3>
+          <div class="settings-row">
+            <label for="auto-read-select">Mark articles read</label>
+            <select id="auto-read-select">
+              <option value="manual">Manually</option>
+              <option value="opened">When opened</option>
+              <option value="progress">After reading 60%</option>
+            </select>
+          </div>
+          <p class="status-meta">M toggles read, S toggles star. An article you mark unread stays unread until you mark it read.</p>
           <p class="status-meta" id="reading-preference-status" role="status" aria-live="polite"></p>
-        </div>
-        <details><summary>Reading appearance and shortcuts</summary><form id="reading-settings-form">
-          <label>Reading theme<select id="reading-theme"><option value="light">Light</option><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="system">System</option></select></label>
+        </section>
+        <details open><summary>Appearance and shortcuts</summary><form id="reading-settings-form">
+          <label>Article theme<select id="reading-theme"><option value="app">Match app</option><option value="light">Light</option><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="system">System</option></select></label>
           <label>Typeface<select id="reading-font"><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
           <label>Font size<input id="reading-fontSize" type="number" min="14" max="28"></label>
           <label>Line height<input id="reading-lineHeight" type="number" min="1.2" max="2.2" step="0.05"></label>
           <label>Article width<input id="reading-width" type="number" min="480" max="960"></label>
           <label>Margins<input id="reading-margins" type="number" min="0" max="64"></label>
           <label>Density<select id="reading-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
-          <label>Images in previews and articles<select id="reading-imagePolicy"><option value="load">Load directly</option><option value="ask">Ask first</option><option value="proxy">Private proxy</option></select></label>
+          <label>Images<select id="reading-imagePolicy"><option value="load">Load directly</option><option value="ask">Ask first</option><option value="proxy">Private proxy</option></select></label>
           <label>Next shortcut<input id="shortcut-next" maxlength="1"></label><label>Previous shortcut<input id="shortcut-previous" maxlength="1"></label><label>Read shortcut<input id="shortcut-read" maxlength="1"></label><label>Star shortcut<input id="shortcut-star" maxlength="1"></label>
-          <button type="submit">Save reading settings</button><p id="reading-settings-status" role="status"></p>
+          <button type="submit">Save</button><p id="reading-settings-status" role="status"></p>
         </form></details>
-        <details><summary>Offline library</summary><p>Save articles on this device. Offline results include only locally saved stories. Read and star changes wait here until they sync.</p>
+        <details><summary>Offline</summary><p>Save articles on this device. Offline search covers saved stories only. Read and star changes wait here until they sync.</p>
         <button id="offline-enable-button" type="button">Save library offline</button><button id="offline-sync-button" type="button">Sync now</button>
         <button id="offline-free-button" type="button">Free read, unstarred bodies older than 30 days</button>
         <label><input id="offline-clear-confirm" type="checkbox">Confirm clearing read, unstarred cached bodies</label><button id="offline-clear-button" type="button">Clear eligible cached bodies</button>
         <p id="offline-status" role="status" aria-live="polite">Offline storage has not been enabled for this account.</p></details>
         <section id="notifications-content" aria-label="Notifications"></section>
         <section id="personalization-content" aria-label="Personalization"></section>
-        <div class="status-meta" id="settings-content">Open settings to load status.</div>
+        <section class="settings-group"><h3>Status</h3><div class="status-meta" id="settings-content">Open settings to load status.</div></section>
       </aside>
       <div id="image-zoom-panel" class="hidden" role="dialog" aria-label="Article image"><button id="close-image-zoom" type="button">Close image</button><img id="zoom-image" alt=""></div>
-      <aside class="panel hidden" id="library-panel" aria-label="Library" tabindex="-1">
-        <header><h2>Library</h2><button class="secondary-button" id="close-library-button" type="button">Close</button></header>
+      <aside class="panel sheet hidden" id="library-panel" aria-label="Library" tabindex="-1">
+        <header class="sheet-header"><h2>Library</h2><button class="icon-button" id="close-library-button" type="button" data-icon="close" title="Close">Close</button></header>
         <div id="library-content"></div>
       </aside>
     </div>
@@ -1783,6 +407,14 @@ export function renderBrowserAppRuntimeScript(): string {
   const autoReadSelect = document.getElementById('auto-read-select');
   const readingPreferenceStatus = document.getElementById('reading-preference-status');
   const searchButton = document.getElementById('search-button');
+  const articleQueryControls = document.getElementById('article-query-controls');
+  const sidebarToggleButton = document.getElementById('sidebar-toggle-button');
+  const streamBackButton = document.getElementById('stream-back-button');
+  const readerBackButton = document.getElementById('reader-back-button');
+  const readerCopy = document.getElementById('reader-copy');
+  const readerScroll = document.getElementById('reader-scroll');
+  const popoverMenus = [document.getElementById('article-options-menu'), document.getElementById('article-actions-menu')];
+  const sidebarCollapsedStorageKey = 'pigeon.browser.sidebar-collapsed';
   const articleQueryForm = document.getElementById('article-query-form');
   const articleSearchInput = document.getElementById('article-search-input');
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
@@ -1913,11 +545,24 @@ export function renderBrowserAppRuntimeScript(): string {
     window.sessionStorage.removeItem(storageKey);
   }
 
+  function getSystemTheme() {
+    return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function hasStoredTheme() {
+    try {
+      return window.localStorage.getItem(themeStorageKey) !== null;
+    } catch (_error) {
+      return false;
+    }
+  }
+
   function getStoredTheme() {
     try {
-      return client.normalizeBrowserTheme(window.localStorage.getItem(themeStorageKey));
+      const storedTheme = window.localStorage.getItem(themeStorageKey);
+      return storedTheme === null ? getSystemTheme() : client.normalizeBrowserTheme(storedTheme);
     } catch (_error) {
-      return 'light';
+      return getSystemTheme();
     }
   }
 
@@ -2258,7 +903,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderArticleListModeToggle() {
-    articleListModeButton.textContent = articleListMode === 'titles' ? 'Title-only list: On' : 'Title-only list: Off';
+    articleListModeButton.textContent = 'Show titles only';
     articleListModeButton.setAttribute('aria-pressed', articleListMode === 'titles' ? 'true' : 'false');
   }
 
@@ -3012,7 +1657,9 @@ export function renderBrowserAppRuntimeScript(): string {
       return '';
     }
 
-    return new Date(timestampSeconds * 1000).toLocaleString();
+    return new Date(timestampSeconds * 1000).toLocaleString(undefined, {
+      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
   }
 
   function getActiveView() {
@@ -3492,9 +2139,11 @@ export function renderBrowserAppRuntimeScript(): string {
       attributes: {
         type: 'button',
         'data-view-id': view.id,
+        'data-view-kind': view.kind || '',
       },
     });
     button.addEventListener('click', () => {
+      setMobilePane('stream');
       void selectView(view.id);
     });
 
@@ -3541,7 +2190,7 @@ export function renderBrowserAppRuntimeScript(): string {
         'data-folder-toggle-id': folderView.id,
       },
     });
-    button.appendChild(createNode('span', { classNames: ['feed-disclosure'], text: isExpanded ? 'v' : '>' }));
+    button.appendChild(createNode('span', { classNames: ['feed-disclosure'], attributes: { 'aria-hidden': 'true' } }));
     button.addEventListener('click', () => {
       const nextExpanded = !expandedFolderIds.has(folderView.id);
       if (nextExpanded) {
@@ -3665,6 +2314,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderArticleQueryControls() {
     const view = getActiveView();
+    if (articleSearchQuery) setSearchOpen(true);
     articleReadFilterSelect.value = getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
     articleSortSelect.value = view?.kind === 'recommended' ? recommendationSort : articleSortOrder;
@@ -3758,6 +2408,7 @@ export function renderBrowserAppRuntimeScript(): string {
         },
       });
       button.addEventListener('click', () => {
+        setMobilePane('reader');
         void selectArticle(entry.id);
       });
 
@@ -3778,9 +2429,12 @@ export function renderBrowserAppRuntimeScript(): string {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       if (articleListMode !== 'titles') {
-        const metaParts = [entry.feedTitle, formatTimestamp(entry.published)].filter(Boolean);
-        if (metaParts.length > 0) {
-          copy.appendChild(createNode('span', { classNames: ['article-meta'], text: metaParts.join(' · ') }));
+        const listTime = client.formatArticleListTime(entry.published);
+        if (entry.feedTitle || listTime) {
+          const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
+          if (entry.feedTitle) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
+          if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
+          copy.appendChild(meta);
         }
       }
       cardGrid.appendChild(copy);
@@ -3996,7 +2650,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(!requestBelongsToCurrentSession(generation,token)||id!==selectedItemId)return;
     const mode=readingData.modes[readingFeedId(item)]||'newsletter';readerModeSelect.value=mode;
     const original=item.content?.content || item.summary?.content || '';
-    const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original]);
+    const key=JSON.stringify([generation,id,mode,readingPreferences,consentItemId===id,original,theme]);
     if(preparedReaderKey===key)return;
     preparedReaderKey=key; const request=++readingRenderRequest;
     const preparedObjectURLs=new Set();
@@ -4018,8 +2672,8 @@ export function renderBrowserAppRuntimeScript(): string {
       const result=await readingTools.applyImagePolicy(html,{policy:readingPreferences.imagePolicy,loadOnce:consentItemId===id,baseURL,
         authenticatedFetch,registerObjectURL:url=>{readingObjectURLs.add(url);preparedObjectURLs.add(url);},isCurrent:current});
       if(!current()){for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}return;}
-      let documentHtml=client.createArticleFrameDocument(result.html,readingPreferences.theme==='dark'?'dark':'light');
-      documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
+      let documentHtml=client.createArticleFrameDocument(result.html,readingPreferences.theme==='dark'?'dark':readingPreferences.theme==='app'?theme:'light');
+      documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'html{scrollbar-gutter:stable both-edges}body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
       if(renderedReaderItemId!==id) {
         const fraction=Number(readingData.positions[id]);
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
@@ -4074,13 +2728,14 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderReader() {
     renderArticleActions();
+    setReaderEmpty(!selectedItemId);
     if (!selectedItemId) {
-      readerSourceLabel.textContent = 'Source';
-      readerSourceNote.textContent = 'A plain article view with preserved links.';
+      readerSourceLabel.textContent = '';
+      readerSourceNote.textContent = '';
       openOriginalButton.disabled = true;
       openOriginalButton.setAttribute('data-href', '');
       readerTitle.textContent = 'Select an article';
-      readerMeta.textContent = 'Full article content stays isolated inside the reader frame.';
+      readerMeta.textContent = '';
       renderReaderFrame(null, client.createArticleFrameDocument('', theme));
       clearYouTubePlayer();
       return;
@@ -4088,12 +2743,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const item = loadedItemsById[selectedItemId];
     if (!item) {
-      readerSourceLabel.textContent = 'Source';
-      readerSourceNote.textContent = 'Loading article details.';
+      readerSourceLabel.textContent = '';
+      readerSourceNote.textContent = '';
       openOriginalButton.disabled = true;
       openOriginalButton.setAttribute('data-href', '');
       readerTitle.textContent = 'Loading article…';
-      readerMeta.textContent = 'Loading the full article body.';
+      readerMeta.textContent = '';
       renderReaderFrame(
         selectedItemId,
         client.createArticleFrameDocument('<p class="pigeon-empty">Loading article content…</p>', theme),
@@ -4114,14 +2769,14 @@ export function renderBrowserAppRuntimeScript(): string {
     ].filter(Boolean);
 
     readerSourceLabel.textContent = sourceTitle;
-    readerSourceNote.textContent = sourceNoteParts.join(' · ') || 'A plain article view with preserved links.';
+    readerSourceNote.textContent = sourceNoteParts.join(' · ');
     openOriginalButton.disabled = !articleHref;
     openOriginalButton.setAttribute('data-href', articleHref);
     readerTitle.textContent = item.title || 'Untitled article';
     if (item.isPaywalled) readerTitle.appendChild(createNode('span', {
       classNames: ['article-paywall'], text: 'Paywall', attributes: { title: 'Teaser only: the full article is behind a paywall' },
     }));
-    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
+    readerMeta.textContent = [item.author && item.author !== sourceTitle ? item.author : '']
       .filter(Boolean)
       .join(' · ');
     if (!hasFullArticle) {
@@ -4915,6 +3570,8 @@ export function renderBrowserAppRuntimeScript(): string {
     markUnreadButton.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     markUnreadButton.setAttribute('aria-busy', isPending && pendingArticleMutation.field === 'read' ? 'true' : 'false');
     markUnreadButton.setAttribute('aria-label', 'Mark selected article as ' + (isRead ? 'unread' : 'read'));
+    markUnreadButton.setAttribute('data-read', isRead ? 'true' : 'false');
+    markUnreadButton.setAttribute('title', (isRead ? 'Mark unread' : 'Mark read') + ' (' + String(markUnreadButton.getAttribute('aria-keyshortcuts') || 'M').toUpperCase() + ')');
     markUnreadButton.textContent = isPending && pendingArticleMutation.field === 'read'
       ? 'Saving…' : isRead ? 'Mark unread' : 'Mark read';
     starArticleButton.disabled = disabled;
@@ -5627,9 +4284,17 @@ export function renderBrowserAppRuntimeScript(): string {
   markUnreadButton.addEventListener('click', () => {
     void toggleSelectedArticleState('read');
   });
-  searchButton.addEventListener('click', () => { articleSearchInput.focus(); });
+  searchButton.addEventListener('click', () => {
+    const isOpen = articleQueryControls.classList.contains('is-searching');
+    if (isOpen && !articleSearchQuery) {
+      setSearchOpen(false);
+      return;
+    }
+    setSearchOpen(true);
+    articleSearchInput.focus();
+  });
   articleQueryForm.addEventListener('submit', (event) => { event.preventDefault(); void changeArticleQuery(); });
-  clearArticleSearchButton.addEventListener('click', () => { articleSearchInput.value = ''; void changeArticleQuery(); });
+  clearArticleSearchButton.addEventListener('click', () => { articleSearchInput.value = ''; setSearchOpen(false); void changeArticleQuery(); });
   articleReadFilterSelect.addEventListener('change', () => { void changeArticleQuery(); });
   articleSortSelect.addEventListener('change', () => { void changeArticleQuery(); });
   articleBulkSelect.addEventListener('change', renderArticleQueryControls);
@@ -5667,7 +4332,70 @@ export function renderBrowserAppRuntimeScript(): string {
 
   readerFrame.addEventListener('load', handleReaderFrameLoad);
 
+  function setSearchOpen(isOpen) {
+    articleQueryControls.classList.toggle('is-searching', isOpen);
+    searchButton.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+
+  function setMobilePane(pane) {
+    readerGrid.setAttribute('data-mobile-pane', pane);
+  }
+
+  function setReaderEmpty(isEmpty) {
+    readerCopy.classList.toggle('is-empty', isEmpty);
+    readerScroll.classList.toggle('is-empty', isEmpty);
+  }
+
+  function closePopoverMenus(except) {
+    for (const menu of popoverMenus) {
+      if (menu && menu !== except && menu.open) menu.open = false;
+    }
+  }
+
+  function applySidebarCollapsed(isCollapsed) {
+    readerGrid.classList.toggle('is-sidebar-collapsed', isCollapsed);
+    sidebarToggleButton.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+    sidebarToggleButton.setAttribute('title', isCollapsed ? 'Show sidebar' : 'Hide sidebar');
+  }
+
+  function getStoredSidebarCollapsed() {
+    try {
+      return window.localStorage.getItem(sidebarCollapsedStorageKey) === 'true';
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  sidebarToggleButton.addEventListener('click', () => {
+    const isCollapsed = !readerGrid.classList.contains('is-sidebar-collapsed');
+    applySidebarCollapsed(isCollapsed);
+    try {
+      window.localStorage.setItem(sidebarCollapsedStorageKey, isCollapsed ? 'true' : 'false');
+    } catch (_error) {}
+  });
+  streamBackButton.addEventListener('click', () => { setMobilePane('sidebar'); });
+  readerBackButton.addEventListener('click', () => { setMobilePane('stream'); });
+  for (const menu of popoverMenus) {
+    if (!menu) continue;
+    menu.addEventListener('toggle', () => { if (menu.open) closePopoverMenus(menu); });
+    menu.addEventListener('click', (event) => {
+      const target = event.target;
+      if (target && target.classList && target.classList.contains('menu-item')) menu.open = false;
+    });
+  }
+  document.addEventListener('pointerdown', (event) => {
+    const target = event.target;
+    for (const menu of popoverMenus) {
+      if (menu && menu.open && !(typeof menu.contains === 'function' && menu.contains(target))) menu.open = false;
+    }
+  });
+  applySidebarCollapsed(getStoredSidebarCollapsed());
+
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && popoverMenus.some((menu) => menu && menu.open)) {
+      closePopoverMenus(null);
+      return;
+    }
     handleArticleNavigationKeydown(event);
   });
 
@@ -5710,6 +4438,17 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   applyTheme(getStoredTheme());
+  if (typeof window.matchMedia === 'function') {
+    const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    if (systemThemeQuery && typeof systemThemeQuery.addEventListener === 'function') {
+      systemThemeQuery.addEventListener('change', () => {
+        if (hasStoredTheme()) return;
+        applyTheme(getSystemTheme());
+        renderArticles();
+        renderReader();
+      });
+    }
+  }
   try { autoReadPolicy = normalizeAutoReadPolicy(window.localStorage.getItem(autoReadStorageKey)); }
   catch (_error) { autoReadPolicy = 'manual'; }
   autoReadSelect.value = autoReadPolicy;
@@ -5753,7 +4492,9 @@ function renderBrowserAppThemeBootstrapScript(): string {
 (() => {
   try {
     const storedTheme = window.localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});
-    document.documentElement.setAttribute('data-theme', storedTheme === 'dark' ? 'dark' : 'light');
+    const systemDark = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = storedTheme === null ? (systemDark ? 'dark' : 'light') : storedTheme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
   } catch (_error) {
     document.documentElement.setAttribute('data-theme', 'light');
   }

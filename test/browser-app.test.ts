@@ -279,17 +279,18 @@ test('GET /app returns an HTML shell', async () => {
 	const html = await response.text();
 	assert.match(html, /id="app"/);
 	assert.match(html, /id="login-form"/);
-	assert.match(html, /Enter the same Pigeon password you use in your reader apps/);
+	assert.match(html, /Sign in with your Pigeon password\./);
 	assert.match(html, /name="Email" type="text" autocomplete="username" value="pigeon"/);
-	assert.match(html, /<span class="login-field-label">Pigeon password<\/span>/);
-	assert.match(html, /<strong>Reeder Classic:<\/strong> use username <strong>pigeon<\/strong> and this same password/);
+	assert.match(html, /<span class="login-field-label">Password<\/span>/);
+	assert.match(html, /In Reeder Classic, use the username <strong>pigeon<\/strong> and this same password/);
 	assert.match(html, /<strong>pigeon\.example<\/strong>/);
 	assert.match(html, /id="clear-session-button"/);
-	assert.match(html, /id="reader-toolbar"/);
+	assert.doesNotMatch(html, /id="reader-toolbar"/);
+	assert.match(html, /class="sidebar-footer"/);
 	assert.match(html, /id="theme-toggle-button"/);
 	assert.match(html, /id="article-list-mode-button"/);
 	assert.match(html, /id="logout-button"/);
-	assert.match(html, /id="logout-button" type="button">Sign Out<\/button>/);
+	assert.match(html, /id="logout-button" type="button" data-icon="logout" title="Sign out">Sign Out<\/button>/);
 	assert.match(html, /id="feeds-panel"/);
 	assert.match(html, /id="articles-panel"/);
 	assert.match(html, /id="reader-panel"/);
@@ -298,10 +299,10 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="reader-grid"/);
 	assert.match(html, /id="sidebar-column-resizer"/);
 	assert.match(html, /id="stream-column-resizer"/);
-	assert.match(html, /id="sidebar-column-resizer"[\s\S]*?aria-controls="feeds-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="224"[\s\S]*?aria-valuemax="520"[\s\S]*?aria-valuenow="416"/);
-	assert.match(html, /id="stream-column-resizer"[\s\S]*?aria-controls="articles-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="288"[\s\S]*?aria-valuemax="640"[\s\S]*?aria-valuenow="524"/);
+	assert.match(html, /id="sidebar-column-resizer"[\s\S]*?aria-controls="feeds-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="224"[\s\S]*?aria-valuemax="520"[\s\S]*?aria-valuenow="224"/);
+	assert.match(html, /id="stream-column-resizer"[\s\S]*?aria-controls="articles-panel"[\s\S]*?aria-orientation="vertical"[\s\S]*?aria-valuemin="288"[\s\S]*?aria-valuemax="640"[\s\S]*?aria-valuenow="340"/);
 	assert.match(html, /id="reader-pane-toolbar"/);
-	assert.match(html, /id="mark-unread-button"[^>]+type="button"[^>]+aria-label="Mark selected article as read"[^>]+disabled>Mark read<\/button>/);
+	assert.match(html, /id="mark-unread-button"[^>]+type="button"[^>]+data-icon="check"[^>]+aria-label="Mark selected article as read"[^>]+disabled>Mark read<\/button>/);
 	assert.match(html, /id="star-article-button"[^>]+aria-pressed="false"/);
 	assert.match(html, /id="undo-article-button"/);
 	assert.match(html, /<select id="auto-read-select">/);
@@ -315,27 +316,24 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="settings-panel"/);
 	assert.match(html, /id="reader-shell" tabindex="-1"/);
 	assert.match(html, /"baseUrl":"https:\/\/pigeon\.example"/);
-	assert.match(html, /--sidebar-column-width:\s*26rem;/);
-	assert.match(html, /--stream-column-width:\s*32\.75rem;/);
+	assert.match(html, /--sidebar-column-width:\s*224px;/);
+	assert.match(html, /--stream-column-width:\s*340px;/);
 	assert.match(html, /grid-template-areas:\s*"sidebar sidebar-resizer stream stream-resizer reader";/);
 	assert.match(html, /data-resizer="sidebar"/);
 	assert.match(html, /data-resizer="stream"/);
-	assert.match(html, /@media \(max-width: 1100px\)/);
-	assert.match(html, /@media \(max-width: 900px\)/);
-	assert.doesNotMatch(html, /@media \(max-width: 960px\)/);
 	assert.match(
 		html,
-		/@media \(max-width: 900px\)\s*\{[\s\S]*?\.reader-grid\s*\{[\s\S]*?grid-template-columns:\s*1fr;[\s\S]*?grid-template-areas:\s*"sidebar"\s*"stream"\s*"reader";/,
+		/@media \(max-width: 760px\)\s*\{[\s\S]*?grid-template-columns:\s*1fr;[\s\S]*?grid-template-areas:\s*"pane";[\s\S]*?\.reader-grid\[data-mobile-pane="reader"\] > #reader-panel/,
 	);
-	assert.match(
-		html,
-		/@media \(max-width: 900px\)\s*\{[\s\S]*?#settings-panel\s*\{[\s\S]*?top:\s*auto;[\s\S]*?right:\s*0\.75rem;[\s\S]*?bottom:\s*0\.75rem;[\s\S]*?left:\s*0\.75rem;[\s\S]*?width:\s*auto;/,
-	);
+	assert.match(html, /id="reader-grid" data-mobile-pane="stream"/);
+	assert.match(html, /id="settings-panel" aria-label="Settings"/);
+	assert.doesNotMatch(html, /feed-disclosure[^"]*"[^>]*>[>v]</);
 	assert.match(html, /window\.__PIGEON_BROWSER_CLIENT__ =/);
 	assert.match(html, /localStorage\.getItem\("pigeon\.browser\.theme"\)/);
 	assert.match(html, /pigeon\.browser\.article-list-mode/);
 	assert.match(html, /pigeon\.browser\.column-widths/);
-	assert.match(html, /document\.documentElement\.setAttribute\('data-theme', storedTheme === 'dark' \? 'dark' : 'light'\)/);
+	assert.match(html, /const theme = storedTheme === null \? \(systemDark \? 'dark' : 'light'\) : storedTheme === 'dark' \? 'dark' : 'light';/);
+	assert.match(html, /matchMedia\('\(prefers-color-scheme: dark\)'\)/);
 	assert.match(html, /\/reader\/api\/0\/subscription\/list/);
 	assert.match(html, /\/reader\/api\/0\/unread-count/);
 	assert.match(html, /\/reader\/api\/0\/stream\/items\/ids/);
@@ -353,10 +351,10 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="library-button"[^>]+aria-controls="library-panel"/);
 	assert.match(html, /id="library-panel"[^>]+aria-label="Library"/);
 	assert.match(html, /__PIGEON_LIBRARY_MANAGEMENT__/);
-	assert.match(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]:hover\s*\{/);
+	assert.match(html, /\.icon-button\[disabled\]:hover\s*\{/);
 	assert.match(html, /html\[data-theme="dark"\]\s*\{/);
-	assert.match(html, /#theme-toggle-button\[aria-pressed="true"\],[\s\S]*?#article-list-mode-button\[aria-pressed="true"\]\s*\{/);
-	assert.doesNotMatch(html, /\.toolbar-pill\[data-control-tone="subtle"\]\[disabled\]\s*\{[^}]*opacity:\s*1;/);
+	assert.match(html, /\[data-icon="theme"\]\[aria-pressed="true"\]\s*\{/);
+	assert.match(html, /\.menu-item\[aria-pressed="true"\]::after\s*\{/);
 	assert.doesNotMatch(html, /radial-gradient/);
 	assert.doesNotMatch(html, /id="reader-window-bar"/);
 	assert.doesNotMatch(html, /reader-window-address/);

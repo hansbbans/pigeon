@@ -8,6 +8,10 @@ All notable changes to Pigeon are documented in this file.
 
 - Newsletters that arrive as a paywalled teaser (Substack, beehiiv, and Ghost paid posts sent to a free subscriber) carry a Paywall label beside the title in the iOS list, Front Page, and article header, and in the web reader. Full copies sent to paying subscribers are not labeled.
 
+### Changed
+
+- The web reader has a quieter design: three hairline-separated columns, icon toolbars instead of rows of word buttons, a short source-and-time line on each story, and a neutral graphite dark mode in place of the navy one. Dark mode follows the system until you pick one. Sort, filters, titles-only and bulk mark-read live in the list's ⋯ menu; More like this, Not interested, View and Readwise live in the article's ⋯ menu. The sidebar can be hidden, and narrow windows show one column at a time. Articles now match the app theme by default (Settings → Appearance → Article theme).
+
 ## [0.1.8.0] - 2026-10-26
 
 ### Added
