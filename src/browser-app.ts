@@ -4118,7 +4118,10 @@ export function renderBrowserAppRuntimeScript(): string {
     openOriginalButton.disabled = !articleHref;
     openOriginalButton.setAttribute('data-href', articleHref);
     readerTitle.textContent = item.title || 'Untitled article';
-    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published), item.isPaywalled ? 'Paywall: teaser only' : '']
+    if (item.isPaywalled) readerTitle.appendChild(createNode('span', {
+      classNames: ['article-paywall'], text: 'Paywall', attributes: { title: 'Teaser only: the full article is behind a paywall' },
+    }));
+    readerMeta.textContent = [item.origin && item.origin.title ? item.origin.title : '', formatTimestamp(item.published)]
       .filter(Boolean)
       .join(' · ');
     if (!hasFullArticle) {

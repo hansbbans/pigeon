@@ -6,7 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Added
 
-- Newsletters that arrive as a paywalled teaser (Substack, beehiiv, and Ghost paid posts sent to a free subscriber) carry a Paywall label in the iOS list, Front Page, and article header, and in the web reader. Full copies sent to paying subscribers are not labeled.
+- Newsletters that arrive as a paywalled teaser (Substack, beehiiv, and Ghost paid posts sent to a free subscriber) carry a Paywall label beside the title in the iOS list, Front Page, and article header, and in the web reader. Full copies sent to paying subscribers are not labeled.
 
 ## [0.1.8.0] - 2026-10-26
 
