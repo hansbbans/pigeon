@@ -563,6 +563,7 @@ ${iconVariables()}
       }
 
       .menu-panel { max-width: calc(100vw - 1rem); }
+      .context-menu { position: fixed; top: 0; left: 0; right: auto; z-index: 40; min-width: 12rem; }
       .menu-panel > label, .menu-bulk > label { white-space: nowrap; }
 
       .menu-panel > label, .menu-bulk > label, .menu-row {
