@@ -189,7 +189,7 @@ async function drainSync(env: never, limit: number) {
 test('incremental sync caps a page by article body size, not just event count', async () => {
 	const state = fixture();
 	// Long newsletters like the ones that pushed a 50-event page past the
-	// Free-plan CPU limit: each body is a third of the budget.
+	// Free-plan CPU limit: html plus text make each article a third of the budget.
 	const bodyLength = Math.floor(SYNC_PAGE_BODY_BUDGET / 6);
 	insertLargeArticles(state.database, Array.from({ length: 12 }, () => bodyLength));
 
