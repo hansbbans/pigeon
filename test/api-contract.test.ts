@@ -18,7 +18,7 @@
  * never regenerated here. The iOS suite pins its encoders to them.
  */
 import * as assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 
@@ -29,6 +29,9 @@ import { MONITORED_TOPICS_META_KEY } from '../src/topic-preferences';
 
 const FIXTURES = new URL('./fixtures/api-contract/', import.meta.url);
 const UPDATE = process.env.UPDATE_CONTRACT_FIXTURES === '1';
+if (UPDATE && process.env.CI) {
+	throw new Error('UPDATE_CONTRACT_FIXTURES must not be set in CI: regenerating fixtures would make every contract check pass.');
+}
 const PASSWORD = 'contract-password';
 const BASE_URL = 'https://pigeon.example';
 /** Wall clock for every request. SQLite `datetime('now')` values are pinned separately. */
@@ -323,4 +326,17 @@ test('server status with sync health', async (t) => {
 test('stale feeds', async (t) => {
 	const state = await library(t);
 	await assertMatchesFixture(await state.request('/api/v1/stale-feeds?days=90'), 'stale-feeds.response.json');
+});
+
+test('every contract fixture is checked by the iOS contract suite', () => {
+	// The iOS suite names each fixture as a string literal. A fixture it never loads
+	// would let a Worker change pass the native job without iOS decoding it.
+	const swift = readFileSync(
+		new URL('../ios/PigeonReader/PigeonReaderTests/Core/APIContractTests.swift', import.meta.url),
+		'utf8',
+	);
+	const fixtures = readdirSync(FIXTURES).filter((name) => name !== 'README.md');
+	assert.ok(fixtures.length > 0, 'no contract fixtures found');
+	const unchecked = fixtures.filter((name) => !swift.includes(`"${name}"`));
+	assert.deepEqual(unchecked, [], 'fixtures not referenced by APIContractTests.swift');
 });

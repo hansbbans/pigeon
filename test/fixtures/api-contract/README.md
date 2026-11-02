@@ -8,6 +8,9 @@ Both sides test against them:
 - `ios/PigeonReader/PigeonReaderTests/Core/APIContractTests.swift` (native job) decodes
   every response fixture with the app's production `PigeonAPIClient`, and checks that
   the app still encodes the `*.request.json` bodies.
+- The Worker job also fails if a fixture in this folder is not named in
+  `APIContractTests.swift`, so a new fixture can't skip the iOS check. The Worker job
+  refuses `UPDATE_CONTRACT_FIXTURES=1` when `CI` is set.
 
 **Changing a fixture is an API change.** The build on TestFlight (and in users' hands)
 was compiled against the current fixtures, and a Worker deploy reaches it immediately.
