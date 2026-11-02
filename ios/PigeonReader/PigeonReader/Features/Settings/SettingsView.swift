@@ -89,6 +89,13 @@ struct SettingsView: View {
 						),
 					)
 					LabeledContent("Waiting to sync", value: model.offlineStorageStats.pendingMutationCount.formatted())
+					if let lastError = model.offlineStorageStats.lastError, lastError.isEmpty == false {
+						LabeledContent("Last sync error") {
+							Text(lastError)
+								.multilineTextAlignment(.trailing)
+								.textSelection(.enabled)
+						}
+					}
 					if let lastSuccessAt = model.offlineStorageStats.lastSuccessAt {
 						LabeledContent("Last successful sync") {
 							Text(lastSuccessAt, style: .relative)
