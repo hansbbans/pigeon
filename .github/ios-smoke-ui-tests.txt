@@ -1,0 +1,18 @@
+# Smoke UI tests for pull requests and pushes to main.
+# CI runs all PigeonReaderTests plus only these UI tests; nightly, on-demand
+# full runs, and TestFlight releases run every UI test.
+#
+# One xcodebuild -only-testing identifier per line: Target/Class/testMethod.
+# Blank lines and lines starting with # are ignored. CI fails if an entry no
+# longer matches a test method in ios/PigeonReader/PigeonReaderUITests, or if
+# xcodebuild does not report every entry as run. Rename or remove a test here
+# in the same change that renames or removes it in Swift.
+
+PigeonReaderUITests/PigeonReaderRealStartupUITests/testCachedStartupShowsSavedHomeAndRestoresStories
+PigeonReaderUITests/PigeonReaderUITests/testTodayLoadsWithoutRefreshAndShowsLiveUnreadCount
+PigeonReaderUITests/PigeonReaderUITests/testBackFromOpenedArticleReturnsToTheFeed
+PigeonReaderUITests/PigeonReaderUITests/testArticleReaderKeepsActionsOnTheBottomBar
+PigeonReaderUITests/PigeonReaderUITests/testSidebarAddFeedOpensTheSubscribeSheet
+PigeonReaderUITests/PigeonNavigationMotionUITests/testCachedFeedOpensImmediatelyAndSupportsNativeBack
+PigeonReaderUITests/PigeonNavigationMotionUITests/testExpandingAndCollapsingKeepsTheFolderInPlace
+PigeonReaderUITests/PigeonDeepLinkUITests/testRealURLsOpenFeedFolderAndArticle
