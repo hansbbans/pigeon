@@ -593,6 +593,28 @@ struct OfflineLibraryStoreTests {
 		) == 1)
 	}
 
+	@Test func failedFullRebuildRecordsTheRealErrorAndStaysInRepair() async throws {
+		// Settings showed "A full offline rebuild is in progress." after a rebuild
+		// had already failed on a Cloudflare 1102, hiding the actual cause.
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		let startedAt = Date(timeIntervalSince1970: 1_000)
+		let failedAt = Date(timeIntervalSince1970: 2_000)
+		try await store.beginFullRebuild(accountID: accountID, at: startedAt)
+		try await store.abandonFullRebuild(accountID: accountID, startedAt: startedAt)
+
+		try await store.recordSynchronizationFailure(
+			accountID: accountID,
+			message: "Cloudflare 1102: Worker exceeded resource limits",
+			at: failedAt,
+		)
+
+		let stats = try await store.storageStats(accountID: accountID)
+		#expect(stats.cacheState == .needsRepair)
+		#expect(stats.lastError == "Cloudflare 1102: Worker exceeded resource limits")
+		#expect(stats.lastAttemptAt == failedAt)
+	}
+
 	@Test func staleRebuildTokenCannotAbandonNewGeneration() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let accountID = "account-a"

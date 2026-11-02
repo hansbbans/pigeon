@@ -623,7 +623,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	func recordSynchronizationFailure(accountID: String, message: String, at date: Date = .now) async throws {
 		let database = try openDatabase()
 		let previous = try loadCacheIntegrity(accountID: accountID, database: database)
-		guard previous.state != .needsRepair else { return }
+		// Keep the state, including a pending repair, but record why this attempt
+		// failed. Otherwise a failed rebuild keeps reporting itself as in progress.
 		try saveCacheIntegrity(
 			OfflineCacheIntegrity(
 				formatVersion: previous.formatVersion,

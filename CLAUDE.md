@@ -16,14 +16,23 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 ## iOS
 - `xcodegen generate` in `ios/PigeonReader` after adding or removing files.
 - Tests: `xcodebuild test -project ios/PigeonReader/PigeonReader.xcodeproj -scheme PigeonReader -destination 'platform=iOS Simulator,name=Pigeon Claude' -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO`. Boot `Pigeon Claude` first; never use the shared `iPhone 17 Pro`.
+- Fast local loop: add `-only-testing:PigeonReaderTests` plus `-only-testing:PigeonReaderUITests/<Class>` for only the UI test classes you touched. The full UI suite (77 tests, about 28 minutes) is CI's job: nightly, `CI` dispatched with `ui_suite: full`, or the release.
+- Do not rename or remove a test in `.github/ios-smoke-ui-tests.txt` without updating the list.
 - Design rule: the reader must not look like Mail. No sender/subject/preview rows, no swipe-to-triage as the main interaction, no unread dots as the organizing idea. Lean editorial or magazine. Before proposing a redesign, ask what Hans dislikes about the current screen.
 
 ## CI and the shared Mac
-- The iOS job takes about 40 minutes and runs on the self-hosted Mac behind a cross-repo iOS runner lock. Never `gh run cancel` an iOS job: a cancelled job leaves `xcodebuild` orphans that push the load average into the hundreds. If the Mac is slow, `ps -Ao pid,etime,command | grep "xcodebuild test"`, kill only orphans from finished runs, then `gh run rerun <id> --failed`.
+- Suites (details in `docs/ci-validation.md`): PRs and pushes to `main` run all iOS unit tests plus the smoke UI tests in `.github/ios-smoke-ui-tests.txt`. The nightly run (08:00 UTC, skipped when `main` has not changed since its last full run) and `gh workflow run ci.yml --ref main -f ui_suite=full` run every UI test. A TestFlight release reuses CI only from a green full-suite run of the exact commit; otherwise it runs every test itself.
+- A full iOS job takes about 35 minutes (28 of them UI tests) and runs on the self-hosted Mac behind a cross-repo iOS runner lock. Never `gh run cancel` an iOS job: a cancelled job leaves `xcodebuild` orphans that push the load average into the hundreds. If the Mac is slow, `ps -Ao pid,etime,command | grep "xcodebuild test"`, kill only orphans from finished runs, then `gh run rerun <id> --failed`.
 - Scope filters: Worker-only changes (`src/`, `test/`, `migrations/`, npm manifests) skip the iOS job; documentation skips both; unknown paths run everything.
 - Merging needs `CI required validation` plus the `Workstream reviewed head` status on the exact head. Post that status only after reviewing the PR (`/code-review` or a self-review subagent) and fixing what it found:
   `gh api repos/hansbbans/pigeon/statuses/<sha> -f state=success -f context="Workstream reviewed head" -f description="Reviewed by Claude: <one-line summary>"`.
   Then merge with a merge commit and confirm `main` is green.
+
+## Working across web and iOS
+- Web-only PRs (`src/`, `test/`) never use the Mac, so run web and iOS work in parallel worktrees.
+- For cross-platform features, build API, then web, then iOS.
+- Batch `.github`/CI edits into one PR: any change under `.github` runs the native iOS job on the shared Mac.
+- Keep the API backward compatible with the build currently on TestFlight.
 
 ## Release
 - **release** / **testflight**: from a clean `main`, `node scripts/release-new-build-to-testflight.mjs --monitor-state /tmp/pigeon-release-request.json --monitor-receipt /tmp/pigeon-release-receipt.json`. It dispatches `Release to TestFlight` for the exact remote `main` SHA, waits for the upload and App Store Connect verification, and prints a receipt with version and build. Resume an interrupted wait with `--resume-monitor` on the same state file; never dispatch twice. The workflow tags the released commit `testflight/<build>` (best effort: a failed tag push does not fail the release).

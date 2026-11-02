@@ -4502,7 +4502,12 @@ final class ReaderAppModel {
 			return isOffline ? "Cached · not yet updated" : "Not yet updated"
 		}
 		let age = freshness.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .wide))
-		let source = freshness.isCached || isOffline ? "Cached" : "Live"
+		guard freshness.isCached || isOffline else { return "Live · updated \(age)" }
+		// Cached rows after a failed sync are not just old: say so, or a broken
+		// sync reads like a quiet feed.
+		let source = offlineLibraryStatus == .syncFailed || offlineLibraryStatus == .needsRepair
+			? "Sync failed"
+			: "Cached"
 		return "\(source) · updated \(age)"
 	}
 
@@ -5528,7 +5533,8 @@ final class ReaderAppModel {
 			&& cursor != nil
 			&& offlineCacheIntegrity.usesWarmIncrementalPath
 			&& hasLoadedNavigation
-		var requestLimit = fullRebuild ? 50 : 200
+		let preferredLimit = fullRebuild ? 50 : 200
+		var requestLimit = preferredLimit
 		var seenCursors = Set<String>()
 		var receivedChanges = false
 		var receivedChangesList: [IncrementalSyncChange] = []
@@ -5544,7 +5550,9 @@ final class ReaderAppModel {
 				initialLimit: requestLimit,
 			)
 			let page = response.page
-			requestLimit = response.limit
+			// A smaller page only gets past the heavy stretch that failed. Grow back
+			// gradually so the rest of the sync does not crawl at the reduced size.
+			requestLimit = min(response.limit * 2, preferredLimit)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
