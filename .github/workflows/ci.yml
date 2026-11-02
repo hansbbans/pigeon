@@ -47,6 +47,7 @@ jobs:
         run: |
           bash .github/scripts/test-ios-runner-lock.sh
           bash .github/scripts/test-kill-orphaned-xcodebuild.sh
+          bash .github/scripts/test-run-ios-tests.sh
 
   worker:
     needs: scope
@@ -114,16 +115,15 @@ jobs:
         run: |
           set -o pipefail
           test_log="$RUNNER_TEMP/pigeon-xcode-test.log"
-          xcodebuild test \
+          .github/scripts/run-ios-tests.sh "$test_log" \
             -jobs 2 \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination "${{ steps.simulator.outputs.destination }}" \
             -parallel-testing-enabled NO \
             -derivedDataPath "$DERIVED_DATA_PATH" \
-            -resultBundlePath "$TEST_RESULT_BUNDLE" \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$test_log"
+            CODE_SIGNING_REQUIRED=NO
           .github/scripts/fail-on-first-party-warnings.sh "$test_log"
       - name: Upload native test result bundle
         if: failure()

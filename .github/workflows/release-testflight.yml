@@ -160,7 +160,7 @@ jobs:
         if: steps.ci_evidence.outputs.reuse_ci != 'true'
         run: |
           set -o pipefail
-          xcodebuild test \
+          .github/scripts/run-ios-tests.sh "$RUNNER_TEMP/pigeon-release-test.log" \
             -jobs 2 \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
