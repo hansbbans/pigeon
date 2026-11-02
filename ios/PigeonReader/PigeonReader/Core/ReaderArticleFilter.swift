@@ -1,6 +1,6 @@
 import Foundation
 
-enum ReaderArticleFilter: String, CaseIterable, Hashable, Identifiable, Sendable {
+nonisolated enum ReaderArticleFilter: String, CaseIterable, Hashable, Identifiable, Sendable {
 	case all
 	case unread
 	case read
@@ -19,12 +19,14 @@ enum ReaderArticleFilter: String, CaseIterable, Hashable, Identifiable, Sendable
 		guard self != .all else {
 			return articles
 		}
-		return articles.filter { article in
-			switch self {
-			case .all: true
-			case .unread: article.isRead == false
-			case .read: article.isRead
-			}
+		return articles.filter(includes)
+	}
+
+	func includes(_ article: Recommendation) -> Bool {
+		switch self {
+		case .all: true
+		case .unread: article.isRead == false
+		case .read: article.isRead
 		}
 	}
 }

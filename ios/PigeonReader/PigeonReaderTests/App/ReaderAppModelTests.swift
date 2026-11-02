@@ -1049,7 +1049,9 @@ struct ReaderAppModelTests {
 
 		await model.recordExplicitOpen(for: first)
 
-		#expect(model.articles(for: collection).map(\.id) == [middle.id, last.id])
+		// The read story stays in place until the list is deliberately re-filtered.
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
+		#expect(model.articles(for: collection).first?.isRead == true)
 		#expect(model.selectedArticleID == first.id)
 		#expect(model.canNavigateArticle(.next))
 		#expect(model.navigateArticle(.next)?.id == middle.id)
@@ -1057,11 +1059,15 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: true)
 
-		#expect(model.articles(for: collection).map(\.id) == [last.id])
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
 		#expect(model.navigateArticle(.next)?.id == last.id)
 		#expect(model.navigateArticle(.next) == nil)
 		#expect(model.selectedArticleID == last.id)
-		#expect(model.navigateArticle(.previous) == nil)
+		#expect(model.navigateArticle(.previous)?.id == middle.id)
+
+		model.setArticleFilter(.all, for: collection)
+		model.setArticleFilter(.unread, for: collection)
+		#expect(model.articles(for: collection).map(\.id) == [last.id])
 	}
 
 	@Test func articleShortcutsSkipAStoryHiddenByTheReadFilter() async throws {
@@ -1081,8 +1087,16 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: false)
 
-		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
+		// The story marked unread stays in place until the list is re-filtered.
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
 		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.previous)?.id == middle.id)
+
+		model.setArticleFilter(.all, for: collection)
+		model.setArticleFilter(.read, for: collection)
+		model.select(article: last)
+
+		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
 		#expect(model.navigateArticle(.previous)?.id == first.id)
 	}
 
@@ -1218,7 +1232,9 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: true)
 
-		#expect(model.displayedSearchResults.map(\.id) == [previous.id, next.id])
+		// The read result stays in place until the search changes.
+		#expect(model.displayedSearchResults.map(\.id) == [previous.id, middle.id, next.id])
+		#expect(model.displayedSearchResults[1].isRead)
 		#expect(model.navigateArticle(.previous, from: middle)?.id == previous.id)
 		#expect(model.navigateArticle(.next, from: middle)?.id == next.id)
 	}
@@ -5952,7 +5968,8 @@ struct ReaderAppModelTests {
 
 		let readMutation = Task { await model.setRead(article, read: true) }
 		let readRequest = await controlled.nextRequest()
-		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.articles(for: collection).map(\.id) == [article.id])
+		#expect(model.articles(for: collection).first?.isRead == true)
 		#expect(model.selectedArticleID == article.id)
 		#expect(model.selectedArticle?.isRead == true)
 		#expect(model.allArticles(for: collection).first?.isRead == true)
@@ -10321,7 +10338,8 @@ struct ReaderAppModelTests {
 
 		await model.setRead(article, read: true, offersUndo: true)
 		let undo = try #require(model.articleUndo)
-		#expect(model.articles.isEmpty)
+		#expect(model.articles.map(\.id) == [article.id])
+		#expect(model.articles.first?.isRead == true)
 		#expect(undo.message == "Marked read")
 		await model.undoArticleAction(id: undo.id)
 

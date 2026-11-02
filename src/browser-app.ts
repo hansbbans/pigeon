@@ -428,7 +428,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
   const articleSortSelect = document.getElementById('article-sort-select');
-  document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';void revalidateActiveView({refreshUnread:true});});
+  document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';clearKeptItemIds();renderArticles();void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
   const articleContextMenu = document.getElementById('article-context-menu');
@@ -505,6 +505,8 @@ export function renderBrowserAppRuntimeScript(): string {
   const articleStateMutations = new Map();
   let undoArticleMutation = null;
   let heldReaderArticle = null;
+  // Snapshot list: rows of the open view that left its read filter stay until a deliberate refresh.
+  let keptItemIds = { queryKey: '', ids: new Set() };
   let autoReadPolicy = 'manual';
   let autoReadAttempt = '';
   let queuedAutoRead = null;
@@ -1002,6 +1004,51 @@ export function renderBrowserAppRuntimeScript(): string {
     return JSON.stringify([viewId, getArticleQuery(viewId)]);
   }
 
+  function getKeptItemIds(state) {
+    return state && keptItemIds.queryKey === state.queryKey && state.queryKey === getViewQueryKey(activeViewId)
+      ? keptItemIds.ids : null;
+  }
+
+  function compareViewItems(state, left, right) {
+    if (views.find((view) => view.id === state.viewId)?.kind === 'recommended') {
+      if (state.query.sort === 'score') return (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
+      if (state.query.sort === 'recommended') return (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
+    }
+    return (state.query.sort === 'oldest' ? -1 : 1) *
+      ((loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) || Number(right) - Number(left));
+  }
+
+  // Reinserts kept rows that a membership rebuild dropped, at their sorted
+  // position. A row sorting past an unfinished page waits for that page.
+  function withKeptItemIds(state, ids, continuation) {
+    const kept = getKeptItemIds(state);
+    if (!kept?.size) return ids;
+    const result = [...ids];
+    const present = new Set(result);
+    for (const keptId of kept) {
+      if (present.has(keptId)) continue;
+      const index = result.findIndex((id) => compareViewItems(state, keptId, id) < 0);
+      if (index === -1 && continuation) continue;
+      result.splice(index === -1 ? result.length : index, 0, keptId);
+      present.add(keptId);
+    }
+    return result;
+  }
+
+  // Deliberate list events re-filter the snapshot: kept rows leave the list,
+  // and an open kept article stays in the reader as a held selection.
+  function clearKeptItemIds() {
+    const { queryKey, ids } = keptItemIds;
+    keptItemIds = { queryKey: '', ids: new Set() };
+    const state = ids.size ? viewStates.get(queryKey) : null;
+    if (!state) return;
+    state.itemIds = state.itemIds.filter((id) => !ids.has(id));
+    for (const id of ids) { state.locallyRemovedIds.add(id); state.confirmedItemIds.delete(id); }
+    if (state.queryKey !== getViewQueryKey(activeViewId)) return;
+    itemIds = itemIds.filter((id) => !ids.has(id));
+    if (ids.has(selectedItemId)) heldReaderArticle = { itemId: selectedItemId, viewId: activeViewId, queryKey };
+  }
+
   function createViewState(viewId) {
     return {
       viewId, query: getArticleQuery(viewId), queryKey: getViewQueryKey(viewId),
@@ -1251,6 +1298,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleStateMutations.clear();
     undoArticleMutation = null;
     heldReaderArticle = null;
+    keptItemIds = { queryKey: '', ids: new Set() };
     readyReaderItemId = null;
     manuallyUnreadItemIds.clear();
     autoReadAttempt = '';
@@ -1761,6 +1809,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function reconcileArticleQueryBoundary() {
     if (!getActiveView() || !activeLoadedQueryKey || activeLoadedQueryKey === getViewQueryKey(activeViewId)) return;
     activeLoadedQueryKey = getViewQueryKey(activeViewId);
+    keptItemIds = { queryKey: '', ids: new Set() };
     const state = getViewState(activeViewId);
     activeViewRequestId += 1;
     itemIds = [...state.itemIds];
@@ -1784,11 +1833,12 @@ export function renderBrowserAppRuntimeScript(): string {
   function reconcileTodayMembershipBoundary() {
     if (!isTodayView() || isLoadingItemIdsPage || !hasReachedTodayBoundary()) return;
     const state = getViewState(activeViewId);
-    if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id))) return;
+    const kept = getKeptItemIds(state);
+    if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id) || kept?.has(id))) return;
     // The ordered current root has reached yesterday, so all of today's IDs
     // are confirmed even when the server still has older pages. Cached tails
     // must no longer retain removed stories or their previous ordering.
-    itemIds = [...state.confirmedItemIds];
+    itemIds = withKeptItemIds(state, [...state.confirmedItemIds], '');
     state.itemIds = [...itemIds];
     state.continuation = '';
     nextItemIdsContinuation = '';
@@ -2374,6 +2424,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function changeArticleQuery() {
     if (pendingArticleMutation?.kind === 'bulk') return;
+    clearKeptItemIds();
     saveActiveViewState();
     const query = articleSearchInput.value.trim();
     const filter = ['unread', 'read'].includes(articleReadFilterSelect.value) ? articleReadFilterSelect.value : 'all';
@@ -3069,6 +3120,7 @@ export function renderBrowserAppRuntimeScript(): string {
       state.continuation = '';
     }
     if (isContinuationPage && !continuation) state.itemIds = [...state.confirmedItemIds];
+    state.itemIds = withKeptItemIds(state, state.itemIds, state.continuation);
     state.hasMembership = true;
     const memberIds = new Set(state.itemIds);
     for (const id of state.publicationDates.keys()) {
@@ -3334,8 +3386,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const visible = getVisibleItemIds();
     const state = getViewState(activeViewId);
+    const kept = getKeptItemIds(state);
     return createPendingContentPlan(null).length > 0 ||
-      ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id))) &&
+      ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id) && !kept?.has(id))) &&
         !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
   }
 
@@ -3464,6 +3517,7 @@ export function renderBrowserAppRuntimeScript(): string {
       // Retained cached rows are provisional until this root's complete
       // pagination confirms membership. A repeated cursor is not completion.
       if (!returnedContinuation) itemIds = [...activeState.confirmedItemIds];
+      itemIds = withKeptItemIds(activeState, itemIds, nextItemIdsContinuation);
       const previousSelection = selectedItemId;
       if (!hasHeldReaderSelection() && selectedItemId && !itemIds.includes(selectedItemId)) {
         selectedItemId = getVisibleItemIds()[0] || null;
@@ -3642,20 +3696,28 @@ export function renderBrowserAppRuntimeScript(): string {
           !['unread', 'recent'].includes(view.kind) && state.query.filter === 'all')) continue;
       const read = field === 'read' ? target : getArticleState(article, 'read');
       const starred = field === 'starred' ? target : getArticleState(article, 'starred');
-      const belongs = !(view.kind==='recommended'&&recommendationExclusions.has(itemId)) && (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read) &&
-        (view.kind !== 'starred' || starred);
+      const inScope = !(view.kind==='recommended'&&recommendationExclusions.has(itemId)) && (view.kind !== 'starred' || starred);
+      const readMatches = (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read);
+      const belongs = inScope && readMatches;
+      // A row of the open list that only left its read filter stays in place;
+      // bulk marks, Starred membership and For You exclusions still remove it.
+      const keepsRow = inScope && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
+        state.queryKey === getViewQueryKey(activeViewId) && state.itemIds.includes(itemId);
       const scopeMatches = ['all', 'unread', 'recent', 'starred'].includes(view.kind) ||
         (view.kind === 'feed' && article?.origin?.streamId === view.streamId) ||
         (view.kind === 'folder' && article?.categories?.includes(view.streamId));
       if (belongs && state.hasMembership && !state.itemIds.includes(itemId) &&
           (state.locallyRemovedIds.has(itemId) || (!state.query.q && scopeMatches))) {
         state.itemIds.push(itemId);
-        if (view.kind === 'recommended' && ['score','recommended'].includes(state.query.sort)) state.itemIds.sort((left,right)=>state.query.sort==='score' ? (recommendationDetails.get(right)?.score||0)-(recommendationDetails.get(left)?.score||0) : (recommendationDetails.get(left)?.rank||0)-(recommendationDetails.get(right)?.rank||0));
-        else state.itemIds.sort((left, right) => (state.query.sort === 'oldest' ? -1 : 1) *
-          ((loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) || Number(right) - Number(left)));
+        state.itemIds.sort((left, right) => compareViewItems(state, left, right));
         state.confirmedItemIds.add(itemId);
         state.locallyRemovedIds.delete(itemId);
-      } else if (!belongs) {
+      } else if (belongs) {
+        getKeptItemIds(state)?.delete(itemId);
+      } else if (keepsRow) {
+        if (keptItemIds.queryKey !== state.queryKey) keptItemIds = { queryKey: state.queryKey, ids: new Set() };
+        keptItemIds.ids.add(itemId);
+      } else {
         if (state.itemIds.includes(itemId)) state.locallyRemovedIds.add(itemId);
         state.itemIds = state.itemIds.filter((id) => id !== itemId);
         state.confirmedItemIds.delete(itemId);
@@ -3665,7 +3727,7 @@ export function renderBrowserAppRuntimeScript(): string {
       state.appliedRootRequestId = 0;
       if (state.queryKey === getViewQueryKey(activeViewId)) {
         activeAffected = true;
-        if (!belongs && selectedItemId === itemId) heldReaderArticle = { itemId, viewId, queryKey: state.queryKey };
+        if (!belongs && !keepsRow && selectedItemId === itemId) heldReaderArticle = { itemId, viewId, queryKey: state.queryKey };
         if (belongs && heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
         itemIds = [...state.itemIds];
         activeItemIdsPageRequest = null;
@@ -3921,6 +3983,8 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticleActions();
     renderMarkAllAsReadAction();
     if (request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
+      clearKeptItemIds();
+      renderArticles();
       void revalidateActiveView({ refreshUnread: false });
     }
     maybeAutoMarkRead();
@@ -4105,6 +4169,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function selectView(viewId) {
     heldReaderArticle = null;
+    clearKeptItemIds();
     articleQueryStatus.textContent = '';
     if (viewId === activeViewId) {
       void revalidateActiveView();
