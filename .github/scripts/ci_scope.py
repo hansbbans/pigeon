@@ -84,9 +84,20 @@ def changed_paths(event_name, event):
     return [p.decode("utf-8") for p in payload.split(b"\0") if p]
 
 
+def ui_suite(event_name, event):
+    """Pull requests and main pushes run smoke UI tests; anything else runs every UI test."""
+    if event_name in ("pull_request", "push"):
+        return "smoke"
+    if event_name == "workflow_dispatch" and (event.get("inputs") or {}).get("ui_suite") == "smoke":
+        return "smoke"
+    return "full"
+
+
 def scope(repo):
+    suite = "full"
     try:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+        suite = ui_suite(os.environ["GITHUB_EVENT_NAME"], event)
         paths = changed_paths(os.environ["GITHUB_EVENT_NAME"], event)
         result = classify(repo, paths)
         reason = "Changed paths classified conservatively."
@@ -95,10 +106,10 @@ def scope(repo):
         paths = []
         reason = f"Full validation: baseline unavailable ({type(error).__name__})."
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-        output.write(f"native={str(result['native']).lower()}\nworker={str(result['worker']).lower()}\n")
+        output.write(f"native={str(result['native']).lower()}\nworker={str(result['worker']).lower()}\nui_suite={suite}\n")
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
         summary.write("### CI validation scope\n\n" + reason + "\n\n")
-        summary.write(f"Native validation: **{result['native']}**. Worker validation: **{result['worker']}**.\n\n")
+        summary.write(f"Native validation: **{result['native']}** ({suite} UI tests). Worker validation: **{result['worker']}**.\n\n")
         # JSON keeps newlines/control characters in filenames out of Markdown.
         summary.write("Changed paths: `" + json.dumps(paths).replace("`", "\\u0060") + "`\n")
     print(json.dumps(result))
@@ -110,6 +121,8 @@ def validate_gate(repo, needs):
         if needs.get(job, {}).get("result") != "success":
             errors.append(f"{job} must succeed")
     outputs = needs.get("scope", {}).get("outputs", {})
+    if repo == "pigeon" and outputs.get("ui_suite") not in ("full", "smoke"):
+        errors.append("Missing/invalid ui_suite classification")
     for job in (["native", "worker"] if repo == "pigeon" else ["native"]):
         required = outputs.get(job)
         result = needs.get(job, {}).get("result")

@@ -1,9 +1,25 @@
 name: CI
 
+# Pull requests and pushes to main run all iOS unit tests plus the smoke UI
+# tests in .github/ios-smoke-ui-tests.txt. The nightly schedule and full-suite
+# dispatches run every UI test; TestFlight releases reuse only such a full run.
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Nightly full suite on main; skipped when main's HEAD already passed it.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      ui_suite:
+        description: UI tests to run (full runs every UI test and counts as TestFlight release evidence on main)
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - smoke
 
 permissions:
   contents: read
@@ -17,9 +33,14 @@ jobs:
     name: Classify validation scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      native: ${{ steps.scope.outputs.native }}
-      worker: ${{ steps.scope.outputs.worker }}
+      # A nightly run whose commit already passed the full suite skips both suites.
+      native: ${{ steps.nightly.outputs.full_suite_exists == 'true' && 'false' || steps.scope.outputs.native }}
+      worker: ${{ steps.nightly.outputs.full_suite_exists == 'true' && 'false' || steps.scope.outputs.worker }}
+      ui_suite: ${{ steps.scope.outputs.ui_suite }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -27,6 +48,18 @@ jobs:
       - name: Classify complete change range
         id: scope
         run: python3 .github/scripts/ci_scope.py scope --repo pigeon
+      - uses: actions/setup-node@v5
+        if: github.event_name == 'schedule'
+        with:
+          node-version: 22
+      # Only run the nightly full suite when main changed since the last full run.
+      # Unreadable evidence answers false, so the nightly runs.
+      - name: Check for an earlier full-suite run of this commit
+        id: nightly
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/testflight-ci-gate.mjs --full-suite-exists
 
   tooling:
     name: CI and release tooling fixtures
@@ -43,6 +76,10 @@ jobs:
         run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
       - name: Verify simulator ownership guards
         run: python3 .github/scripts/test_ios_simulator_session.py
+      - name: Verify iOS smoke UI test list
+        run: |
+          python3 .github/scripts/test_ios_smoke_tests.py
+          python3 .github/scripts/ios_smoke_tests.py check
       - name: Verify shared runner helpers
         run: |
           bash .github/scripts/test-ios-runner-lock.sh
@@ -105,26 +142,28 @@ jobs:
       - name: Select simulator
         id: simulator
         run: .github/scripts/select-ios-simulator.sh
-      - name: Run unit and UI tests
+      # Exactly one of the next two steps runs. The step names are release
+      # evidence: scripts/testflight-ci-gate.mjs reuses a CI run for TestFlight
+      # only when "Run unit and full UI tests" succeeded. Do not rename them
+      # without updating the gate and its tests.
+      - name: Run unit and smoke UI tests
+        if: needs.scope.outputs.ui_suite == 'smoke'
         timeout-minutes: 60
         env:
+          DESTINATION: ${{ steps.simulator.outputs.destination }}
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
           TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
         shell: bash
-        run: |
-          set -o pipefail
-          test_log="$RUNNER_TEMP/pigeon-xcode-test.log"
-          xcodebuild test \
-            -jobs 2 \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -destination "${{ steps.simulator.outputs.destination }}" \
-            -parallel-testing-enabled NO \
-            -derivedDataPath "$DERIVED_DATA_PATH" \
-            -resultBundlePath "$TEST_RESULT_BUNDLE" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO 2>&1 | tee "$test_log"
-          .github/scripts/fail-on-first-party-warnings.sh "$test_log"
+        run: .github/scripts/run-ios-tests.sh smoke
+      - name: Run unit and full UI tests
+        if: needs.scope.outputs.ui_suite != 'smoke'
+        timeout-minutes: 60
+        env:
+          DESTINATION: ${{ steps.simulator.outputs.destination }}
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          TEST_RESULT_BUNDLE: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+        shell: bash
+        run: .github/scripts/run-ios-tests.sh full
       - name: Upload native test result bundle
         if: failure()
         uses: actions/upload-artifact@v4

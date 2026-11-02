@@ -10,7 +10,7 @@ import sys
 sys.dont_write_bytecode = True
 from unittest.mock import patch
 
-from ci_scope import classify, changed_paths, scope, validate_gate
+from ci_scope import classify, changed_paths, scope, ui_suite, validate_gate
 
 
 class ScopeTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class ScopeTests(unittest.TestCase):
                     self.assertEqual(result["worker"], repo == "pigeon")
 
     def test_pigeon_backend_only_runs_worker(self):
-        for path in ["src/greader.ts", "test/api-auth.test.ts", "test/fixtures/email.eml", "migrations/001.sql", "package.json", "package-lock.json"]:
+        for path in ["src/greader.ts", "test/api-auth.test.ts", "test/helpers/browser-app-client-harness.ts", "test/fixtures/email.eml", "migrations/001.sql", "package.json", "package-lock.json"]:
             result = classify("pigeon", [path, "README.md"])
             self.assertFalse(result["native"])
             self.assertTrue(result["worker"])
@@ -78,22 +78,40 @@ class ScopeTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def run_scope(self, event_name, payload):
+        with tempfile.TemporaryDirectory() as temp:
+            event = Path(temp, "event.json")
+            event.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+            output, summary = Path(temp, "output"), Path(temp, "summary")
+            env = {"GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
+            with patch.dict(os.environ, env):
+                scope("pigeon")
+            return output.read_text()
+
     def test_scheduled_or_unreadable_baselines_fail_closed(self):
-        for event_name, payload in [("schedule", {}), ("push", {"before": "0" * 40, "after": "a" * 40}), ("pull_request", {})]:
-            with tempfile.TemporaryDirectory() as temp:
-                event = Path(temp, "event.json")
-                event.write_text(json.dumps(payload))
-                output, summary = Path(temp, "output"), Path(temp, "summary")
-                env = {"GITHUB_EVENT_NAME": event_name, "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}
-                with patch.dict(os.environ, env):
-                    scope("pigeon")
-                self.assertIn("native=true", output.read_text())
-                self.assertIn("worker=true", output.read_text())
+        for event_name, payload in [("schedule", {}), ("workflow_dispatch", {"inputs": {"ui_suite": "full"}}), ("push", {"before": "0" * 40, "after": "a" * 40}), ("pull_request", {})]:
+            output = self.run_scope(event_name, payload)
+            self.assertIn("native=true", output)
+            self.assertIn("worker=true", output)
+
+    def test_ui_suite_is_smoke_only_for_pull_requests_pushes_and_explicit_smoke_dispatches(self):
+        self.assertEqual(ui_suite("pull_request", {}), "smoke")
+        self.assertEqual(ui_suite("push", {}), "smoke")
+        self.assertEqual(ui_suite("workflow_dispatch", {"inputs": {"ui_suite": "smoke"}}), "smoke")
+        for event_name, event in [("schedule", {}), ("workflow_dispatch", {"inputs": {"ui_suite": "full"}}), ("workflow_dispatch", {}),
+                                  ("workflow_dispatch", {"inputs": None}), ("workflow_dispatch", {"inputs": {"ui_suite": "SMOKE"}}), ("merge_group", {}), ("", {})]:
+            with self.subTest(event_name=event_name, event=event):
+                self.assertEqual(ui_suite(event_name, event), "full")
+
+    def test_scope_writes_ui_suite_and_unreadable_events_run_the_full_suite(self):
+        self.assertIn("ui_suite=full", self.run_scope("schedule", {}))
+        self.assertIn("ui_suite=smoke", self.run_scope("pull_request", {}))
+        self.assertIn("ui_suite=full", self.run_scope("pull_request", "not json"))
 
 
 class GateTests(unittest.TestCase):
-    def needs(self, native="true", worker="true"):
-        return {"scope": {"result": "success", "outputs": {"native": native, "worker": worker}},
+    def needs(self, native="true", worker="true", suite="smoke"):
+        return {"scope": {"result": "success", "outputs": {"native": native, "worker": worker, "ui_suite": suite}},
                 "tooling": {"result": "success"},
                 "native": {"result": "success" if native == "true" else "skipped"},
                 "worker": {"result": "success" if worker == "true" else "skipped"}}
@@ -119,6 +137,16 @@ class GateTests(unittest.TestCase):
             needs = self.needs()
             del needs[job]
             self.assertTrue(validate_gate("pigeon", needs))
+
+    def test_ui_suite_output_must_be_full_or_smoke(self):
+        for suite in ("full", "smoke"):
+            self.assertEqual(validate_gate("pigeon", self.needs(suite=suite)), [])
+        for suite in (None, "", "all", "Full"):
+            self.assertTrue(validate_gate("pigeon", self.needs(suite=suite)), suite)
+        needs = self.needs()
+        del needs["scope"]["outputs"]["ui_suite"]
+        self.assertTrue(validate_gate("pigeon", needs))
+        self.assertEqual(validate_gate("todomd", needs), [])
 
     def test_intentional_skips_cannot_mask_failed_suites(self):
         for job in ("native", "worker"):
