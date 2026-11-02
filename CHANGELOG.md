@@ -14,6 +14,11 @@ All notable changes to Pigeon are documented in this file.
 - The web reader has a quieter design: three hairline-separated columns, icon toolbars instead of rows of word buttons, a short source-and-time line on each story, and a neutral graphite dark mode in place of the navy one. Dark mode follows the system until you pick one. Sort, filters, titles-only and bulk mark-read live in the list's ⋯ menu; More like this, Not interested, View and Readwise live in the article's ⋯ menu. The sidebar can be hidden, and narrow windows show one column at a time. Articles now match the app theme by default (Settings → Appearance and shortcuts → Article theme); before, the article stayed light in dark mode because Light was the only default. A Light article theme saved under that old default switches to Match app once. Settings → Reading → Appearance chooses System, Light or Dark for the app.
 - The iPhone and iPad sidebar's folder arrow is smaller and lighter, so folder names lead the row.
 
+### Fixed
+
+- Offline sync no longer stalls on a run of long newsletters. The server caps each sync page by article size as well as count, because a page of long issues could exceed the Worker's CPU limit and fail every time, leaving an iPad on months-old cached stories. After a failed page shrinks its request, the app grows the page size back instead of finishing a full rebuild three changes at a time.
+- A feed whose cached stories are left over from a failed sync says "Sync failed · updated …" instead of "Cached", and Settings → Offline Library shows the last sync error.
+
 ## [0.1.8.0] - 2026-10-26
 
 ### Added
