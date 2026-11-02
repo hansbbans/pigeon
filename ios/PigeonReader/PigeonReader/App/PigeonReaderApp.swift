@@ -4,10 +4,19 @@ import SwiftUI
 struct PigeonReaderApp: App {
 	@State private var model: ReaderAppModel
 
+	#if DEBUG
+	/// UI tests pass this so XCTest does not wait for transitions to settle.
+	/// Motion tests omit it because they measure the real animations.
+	private static let disablesAnimations = ProcessInfo.processInfo.arguments.contains("-reader-disable-animations")
+	#endif
+
 	init() {
 		BackgroundRefreshManager.shared.register()
 		_ = ReaderNotificationManager.shared
 		#if DEBUG
+		if Self.disablesAnimations {
+			UIView.setAnimationsEnabled(false)
+		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-reset-reader-state") {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mode.dense-discovery")
 			UserDefaults.standard.removeObject(forKey: ReaderModeStore.defaultArticleViewKey)
@@ -71,6 +80,13 @@ struct PigeonReaderApp: App {
 		WindowGroup {
 			RootView()
 				.environment(model)
+				#if DEBUG
+				.transaction { transaction in
+					guard Self.disablesAnimations else { return }
+					transaction.disablesAnimations = true
+					transaction.animation = nil
+				}
+				#endif
 				.onOpenURL { url in
 					#if DEBUG
 					if ProcessInfo.processInfo.arguments.contains("-reader-mark-read-progress-fixture"),
