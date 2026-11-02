@@ -28,7 +28,12 @@ fi
 status="${PIPESTATUS[0]}"
 [[ "$status" -eq 0 ]] && exit 0
 
-if ! grep -q "$runner_start_failure" "$log"; then
+# xcodebuild reports each process-level error (a runner that never started, a
+# test host that crashed) as "<process> encountered an error". Retry only when
+# every one of them is the runner start failure, so a crash that prints no
+# per-test failure line can never be hidden by a passing UI rerun.
+process_errors="$(grep "encountered an error" "$log" || true)"
+if [[ -z "$process_errors" ]] || printf '%s\n' "$process_errors" | grep -qv "$runner_start_failure"; then
   exit "$status"
 fi
 if grep -qE "✘ Test |Test Case '.*' failed" "$log"; then

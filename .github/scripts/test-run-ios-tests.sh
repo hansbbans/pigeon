@@ -22,7 +22,10 @@ case "$outcome" in
       echo "PigeonReaderUITests-Runner (1) encountered an error (The test runner failed to initialize for UI testing. (Underlying Error: Timed out waiting for AX loaded notification))"
       echo "** TEST FAILED **"; exit 65 ;;
   ax-and-failure) echo "✘ Test syncWorks() recorded an issue"
-      echo "The test runner failed to initialize for UI testing."
+      echo "PigeonReaderUITests-Runner (1) encountered an error (The test runner failed to initialize for UI testing.)"
+      echo "** TEST FAILED **"; exit 65 ;;
+  ax-and-crash) echo "PigeonReader (2) encountered an error (Early unexpected exit, operation never finished bootstrapping)"
+      echo "PigeonReaderUITests-Runner (1) encountered an error (The test runner failed to initialize for UI testing.)"
       echo "** TEST FAILED **"; exit 65 ;;
   failure) echo "Test Case '-[PigeonReaderUITests.PigeonReaderUITests testX]' failed (1.0 seconds)."
       echo "** TEST FAILED **"; exit 65 ;;
@@ -52,6 +55,7 @@ run_case() {
 run_case "passing run is not retried" "ok" 0 1
 run_case "real test failure is not retried" "failure" 65 1
 run_case "runner start failure with a test failure is not retried" "ax-and-failure" 65 1
+run_case "runner start failure with a crashed test host is not retried" "ax-and-crash" 65 1
 run_case "runner start failure retries UI tests and passes" "ax ok" 0 2
 run_case "runner start failure retried once only" "ax ax" 65 2
 

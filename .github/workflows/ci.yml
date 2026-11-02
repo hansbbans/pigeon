@@ -130,7 +130,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+          path: |
+            ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+            ${{ runner.temp }}/PigeonReaderTests-${{ github.run_id }}-${{ github.run_attempt }}-ui-retry.xcresult
           if-no-files-found: ignore
           retention-days: 7
       - name: Clean Release build
