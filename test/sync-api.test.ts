@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 import { handleMutationBatch } from '../src/mutation-api';
 import { handleEngagementIngestion } from '../src/engagement';
-import { handleIncrementalSync } from '../src/sync-api';
+import { handleIncrementalSync, SYNC_PAGE_BODY_BUDGET } from '../src/sync-api';
 import { buildRssItemStatements, fetchAndStoreRssFeed } from '../src/rss-fetcher';
 import { handleCronTrigger } from '../src/cron-handler';
 import { handleStaleFeeds } from '../src/stale-feeds-api';
@@ -151,6 +151,80 @@ test('incremental sync uses bounded opaque cursors without overlap', async () =>
 
 	const emptyPage = await sync(state.env, cursor, 2);
 	assert.deepEqual((await emptyPage.json() as { changes: unknown[] }).changes, []);
+	state.database.close();
+});
+
+function insertLargeArticles(database: DatabaseSync, bodyLengths: number[]): void {
+	database.prepare(
+		`INSERT INTO feeds (rowid, feed_key, display_name, source_type)
+		 VALUES (9, 'long-reads', 'Long Reads', 'email')`,
+	).run();
+	bodyLengths.forEach((length, index) => {
+		const body = 'x'.repeat(length);
+		database.prepare(
+			`INSERT INTO items (id, feed_key, subject, html_content, text_content, message_id, received_at)
+			 VALUES (?, 'long-reads', ?, ?, ?, ?, '2026-10-31T12:00:00.000Z')`,
+		).run(`long-${index}`, `Issue ${index}`, `<p>${body}</p>`, body, `long-message-${index}`);
+	});
+}
+
+async function drainSync(env: never, limit: number) {
+	let cursor: string | undefined;
+	const pages: Array<Array<{ sequence: number; entityType: string; entityId: string; payload: unknown }>> = [];
+	for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+		const response = await sync(env, cursor, limit);
+		assert.equal(response.status, 200);
+		const body = await response.json() as {
+			cursor: string;
+			hasMore: boolean;
+			changes: Array<{ sequence: number; entityType: string; entityId: string; payload: unknown }>;
+		};
+		pages.push(body.changes);
+		cursor = body.cursor;
+		if (!body.hasMore) return pages;
+	}
+	throw new Error('sync did not finish');
+}
+
+test('incremental sync caps a page by article body size, not just event count', async () => {
+	const state = fixture();
+	// Long newsletters like the ones that pushed a 50-event page past the
+	// Free-plan CPU limit: each body is a third of the budget.
+	const bodyLength = Math.floor(SYNC_PAGE_BODY_BUDGET / 6);
+	insertLargeArticles(state.database, Array.from({ length: 12 }, () => bodyLength));
+
+	const pages = await drainSync(state.env, 200);
+
+	const bodyBytes = (changes: Array<{ entityType: string; payload: unknown }>) => changes
+		.filter((change) => change.entityType === 'article')
+		.reduce((total, change) => {
+			const payload = change.payload as { html: string; text: string | null };
+			return total + payload.html.length + (payload.text?.length ?? 0);
+		}, 0);
+	assert.ok(pages.length > 1, 'large bodies must split across pages');
+	for (const page of pages) {
+		assert.ok(page.length > 0, 'every page makes progress');
+		assert.ok(page.length === 1 || bodyBytes(page) <= SYNC_PAGE_BODY_BUDGET, 'page body stays within budget');
+	}
+	const delivered = pages.flat();
+	const sequences = delivered.map((change) => change.sequence);
+	assert.deepEqual(sequences, [...sequences].sort((a, b) => a - b));
+	assert.equal(new Set(sequences).size, sequences.length, 'no change is delivered twice');
+	const articleIDs = delivered.filter((change) => change.entityType === 'article').map((change) => change.entityId);
+	assert.deepEqual(articleIDs.sort(), Array.from({ length: 12 }, (_, index) => `long-${index}`).sort());
+	state.database.close();
+});
+
+test('incremental sync still delivers one article larger than the whole page budget', async () => {
+	const state = fixture();
+	insertLargeArticles(state.database, [100, SYNC_PAGE_BODY_BUDGET * 2, 100]);
+
+	const pages = await drainSync(state.env, 200);
+
+	const articlePages = pages.map((page) => page.filter((change) => change.entityType === 'article'));
+	const oversized = articlePages.find((page) => page.some((change) => change.entityId === 'long-1'));
+	assert.deepEqual(oversized?.map((change) => change.entityId), ['long-1'], 'the oversized article travels alone');
+	assert.deepEqual(articlePages.flat().map((change) => change.entityId).sort(), ['long-0', 'long-1', 'long-2']);
 	state.database.close();
 });
 
