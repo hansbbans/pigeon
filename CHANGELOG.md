@@ -7,6 +7,7 @@ All notable changes to Pigeon are documented in this file.
 ### Added
 
 - Newsletters that arrive as a paywalled teaser (Substack, beehiiv, and Ghost paid posts sent to a free subscriber) carry a Paywall label beside the title in the iOS list, Front Page, and article header, and in the web reader. Full copies sent to paying subscribers are not labeled.
+- In the web reader, right-click a story in the list to mark everything above it (or below it) as read without opening it. It follows the list's current feed, search, filter and sort, includes stories not loaded yet, and offers Undo. With the keyboard, focus a story and press Shift+F10, then use the arrow keys and Enter.
 
 ### Changed
 
