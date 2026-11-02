@@ -236,6 +236,10 @@ ${renderBrowserAppStyles()}
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
               </div>
+              <div class="menu-panel context-menu hidden" id="article-context-menu" role="menu" aria-label="Article list actions">
+                <button class="menu-item" id="context-mark-above-button" type="button" role="menuitem" tabindex="-1">Mark above as read</button>
+                <button class="menu-item" id="context-mark-below-button" type="button" role="menuitem" tabindex="-1">Mark below as read</button>
+              </div>
             </section>
 
             <button
@@ -427,6 +431,9 @@ export function renderBrowserAppRuntimeScript(): string {
   document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
+  const articleContextMenu = document.getElementById('article-context-menu');
+  const contextMarkAboveButton = document.getElementById('context-mark-above-button');
+  const contextMarkBelowButton = document.getElementById('context-mark-below-button');
   const articleQueryStatus = document.getElementById('article-query-status');
   const libraryButton = document.getElementById('library-button');
   const libraryPanel = document.getElementById('library-panel');
@@ -489,6 +496,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let loadedItemsById = {};
   let inFlightContentIds = [];
   let selectedItemId = null;
+  let articleContextTarget = null;
   let pendingArticleMutation = null;
   let readerActionTarget = '';
   let readerActionSelectionId = 0;
@@ -2451,6 +2459,7 @@ export function renderBrowserAppRuntimeScript(): string {
         setMobilePane('reader', true);
         void selectArticle(entry.id);
       });
+      button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event); });
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
       const copy = createNode('span', { classNames: ['article-card-copy'] });
@@ -3897,11 +3906,11 @@ export function renderBrowserAppRuntimeScript(): string {
     return { attempted, saved, failed: false };
   }
 
-  function createBulkRequest(mode) {
+  function createBulkRequest(mode, anchorItemId = selectedItemId) {
     const view = getActiveView();
     return { kind: 'bulk', field: 'read', mode, scope: mode.startsWith('age-') ? 'older' :
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
-      query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId,
+      query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
       dayBounds: client.getLocalDayBounds(), before: mode.startsWith('age-')
         ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null };
@@ -3920,12 +3929,12 @@ export function renderBrowserAppRuntimeScript(): string {
     maybeAutoMarkRead();
   }
 
-  async function markArticleRangeRead(requestedMode) {
+  async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId) {
     if (!getActiveView() || session.status !== 'authenticated' || pendingArticleMutation) return;
     const mode = requestedMode || articleBulkSelect.value;
     if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
-        (['above', 'below'].includes(mode) && !selectedItemId)) return;
-    const request = createBulkRequest(mode);
+        (['above', 'below'].includes(mode) && !anchorItemId)) return;
+    const request = createBulkRequest(mode, anchorItemId);
     pendingArticleMutation = request;
     renderArticleActions();
     renderMarkAllAsReadAction();
@@ -4352,6 +4361,13 @@ export function renderBrowserAppRuntimeScript(): string {
   articleSortSelect.addEventListener('change', () => { void changeArticleQuery(); });
   articleBulkSelect.addEventListener('change', renderArticleQueryControls);
   articleBulkButton.addEventListener('click', () => { void markArticleRangeRead(); });
+  contextMarkAboveButton.addEventListener('click', () => { runArticleContextAction('above'); });
+  contextMarkBelowButton.addEventListener('click', () => { runArticleContextAction('below'); });
+  // Like a native menu, hold the page still while it is open instead of closing on
+  // scroll: trackpad momentum delivers scroll events after the menu has opened.
+  document.addEventListener('wheel', (event) => {
+    if (isArticleContextMenuOpen() && typeof event.preventDefault === 'function') event.preventDefault();
+  }, { passive: false });
   starArticleButton.addEventListener('click', () => {
     void toggleSelectedArticleState('starred');
   });
@@ -4409,9 +4425,89 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function closePopoverMenus(except) {
+    closeArticleContextMenu(false);
     for (const menu of popoverMenus) {
       if (menu && menu !== except && menu.open) menu.open = false;
     }
+  }
+
+  // Right-click on a list row: bulk-mark around that row without opening it.
+  function openArticleContextMenu(itemId, row, event) {
+    if (typeof event?.preventDefault === 'function') event.preventDefault();
+    closePopoverMenus(null);
+    const candidates = getWindowCandidateIds();
+    const index = candidates.indexOf(itemId);
+    if (index < 0) return;
+    const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
+    contextMarkAboveButton.disabled = unavailable || index === 0;
+    contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !nextItemIdsContinuation);
+    articleContextTarget = { itemId, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
+    // The context-menu key and Shift+F10 report no pointer position; anchor to the row instead.
+    let left = Number(event?.clientX) || 0;
+    let top = Number(event?.clientY) || 0;
+    if (!left && !top && typeof row.getBoundingClientRect === 'function') {
+      const rect = row.getBoundingClientRect();
+      left = rect.left + 16;
+      top = rect.bottom;
+    }
+    articleContextMenu.style.setProperty('left', left + 'px');
+    articleContextMenu.style.setProperty('top', top + 'px');
+    articleContextMenu.classList.remove('hidden');
+    const rect = typeof articleContextMenu.getBoundingClientRect === 'function' ? articleContextMenu.getBoundingClientRect() : null;
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    if (rect && viewportWidth && left + rect.width > viewportWidth - 8) articleContextMenu.style.setProperty('left', Math.max(8, viewportWidth - rect.width - 8) + 'px');
+    if (rect && viewportHeight && top + rect.height > viewportHeight - 8) articleContextMenu.style.setProperty('top', Math.max(8, top - rect.height) + 'px');
+    getEnabledContextMenuItems()[0]?.focus();
+  }
+
+  function getEnabledContextMenuItems() {
+    return [contextMarkAboveButton, contextMarkBelowButton].filter((item) => !item.disabled);
+  }
+
+  function isArticleContextMenuOpen() {
+    return Boolean(articleContextTarget);
+  }
+
+  function closeArticleContextMenu(restoreFocus) {
+    if (!articleContextTarget) return;
+    const { itemId } = articleContextTarget;
+    articleContextTarget = null;
+    articleContextMenu.classList.add('hidden');
+    if (!restoreFocus) return;
+    // Rows are rebuilt on every render, so look the row up again by id.
+    for (const listItem of articlesList.children) {
+      const button = listItem.children[0];
+      if (button?.getAttribute('data-item-id') === itemId) { button.focus(); return; }
+    }
+  }
+
+  function handleArticleContextMenuKeydown(event) {
+    if (event.key === 'Escape') {
+      closeArticleContextMenu(true);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const items = getEnabledContextMenuItems();
+      if (items.length === 0) return true;
+      const current = items.indexOf(document.activeElement);
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(current + step + items.length) % items.length].focus();
+    } else if (event.key === 'Tab') {
+      closeArticleContextMenu(true);
+    } else {
+      // Enter and Space activate the focused item as a click; modifiers start a shortcut.
+      if (!['Enter', ' ', 'Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) closeArticleContextMenu(false);
+      return false;
+    }
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    return true;
+  }
+
+  function runArticleContextAction(mode) {
+    const target = articleContextTarget;
+    closeArticleContextMenu(true);
+    if (!target || target.generation !== accountGeneration || target.viewId !== activeViewId ||
+        target.queryKey !== getViewQueryKey(activeViewId) || !getWindowCandidateIds().includes(target.itemId)) return;
+    void markArticleRangeRead(mode, target.itemId);
   }
 
   function applySidebarCollapsed(isCollapsed) {
@@ -4448,6 +4544,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
   document.addEventListener('pointerdown', (event) => {
     const target = event.target;
+    if (isArticleContextMenuOpen() && !(typeof articleContextMenu.contains === 'function' && articleContextMenu.contains(target))) {
+      closeArticleContextMenu(false);
+    }
     for (const menu of popoverMenus) {
       if (menu && menu.open && !(typeof menu.contains === 'function' && menu.contains(target))) menu.open = false;
     }
@@ -4459,6 +4558,14 @@ export function renderBrowserAppRuntimeScript(): string {
   applySidebarCollapsed(getStoredSidebarCollapsed());
 
   document.addEventListener('keydown', (event) => {
+    if (isArticleContextMenuOpen() && handleArticleContextMenuKeydown(event)) return;
+    const keyTarget = event.target;
+    if ((event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) &&
+        keyTarget?.classList?.contains('article-card') && typeof keyTarget.getAttribute === 'function') {
+      // macOS browsers never turn these keys into a contextmenu event.
+      openArticleContextMenu(keyTarget.getAttribute('data-item-id'), keyTarget, { preventDefault: () => event.preventDefault() });
+      return;
+    }
     if (event.key === 'Escape' && popoverMenus.some((menu) => menu && menu.open)) {
       closePopoverMenus(null);
       return;

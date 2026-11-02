@@ -348,6 +348,9 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="article-read-filter"/);
 	assert.match(html, /id="article-sort-select"/);
 	assert.match(html, /id="article-bulk-button"/);
+	assert.match(html, /id="article-context-menu"[^>]+role="menu"/);
+	assert.match(html, /id="context-mark-above-button"[^>]+role="menuitem"[^>]*>Mark above as read</);
+	assert.match(html, /\.context-menu \{ position: fixed;/);
 	assert.match(html, /id="library-button"[^>]+aria-controls="library-panel"/);
 	assert.match(html, /id="library-panel"[^>]+aria-label="Library"/);
 	assert.match(html, /__PIGEON_LIBRARY_MANAGEMENT__/);

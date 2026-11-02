@@ -1028,6 +1028,9 @@ async function createBrowserHarness(options?: {
 		['article-bulk-select', createElement('above', [], 'select', registerFocus)],
 		['article-bulk-button', createElement('', [], 'button', registerFocus)],
 		['article-query-status', createElement('', [], 'p', registerFocus)],
+		['article-context-menu', createElement('', ['hidden'], 'div', registerFocus)],
+		['context-mark-above-button', createElement('', [], 'button', registerFocus)],
+		['context-mark-below-button', createElement('', [], 'button', registerFocus)],
 		['library-button', createElement('', [], 'button', registerFocus)],
 		['library-panel', createElement('', ['hidden'], 'aside', registerFocus)],
 		['close-library-button', createElement('', [], 'button', registerFocus)],
@@ -1257,7 +1260,7 @@ async function createBrowserHarness(options?: {
 		key: string,
 		target: Record<string, unknown> = (activeElement ??
 			elements.get('reader-shell')) as Record<string, unknown>,
-		options?: { metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean },
+		options?: { metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean },
 	) {
 		const handler = documentHandlers.get('keydown');
 		if (!handler) {
@@ -1271,6 +1274,7 @@ async function createBrowserHarness(options?: {
 			metaKey: options?.metaKey ?? false,
 			ctrlKey: options?.ctrlKey ?? false,
 			altKey: options?.altKey ?? false,
+			shiftKey: options?.shiftKey ?? false,
 			preventDefault() {
 				prevented = true;
 			},
@@ -5675,6 +5679,112 @@ test('bulk above follows the displayed oldest-first order and respects the curre
 	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-25'").get()!.is_read, 0);
 	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-26'").get()!.is_read, 0);
 	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 0, 'outside search');
+});
+
+function openArticleContextMenu(harness: Awaited<ReturnType<typeof createBrowserHarness>>, itemId: string, event: Record<string, unknown> = { clientX: 120, clientY: 240 }) {
+	let prevented = false;
+	findListButtonByItemId(harness.elements.get('articles-list'), itemId)!.dispatch('contextmenu', { ...event, preventDefault() { prevented = true; } });
+	return prevented;
+}
+
+async function finishContextBulkRead(harness: Awaited<ReturnType<typeof createBrowserHarness>>, buttonId: string) {
+	harness.elements.get(buttonId)!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('article-bulk-button')!.disabled === false, 1000);
+	await waitForBrowserCondition(() => {
+		const cache = harness.getCacheSizes();
+		return cache.active === 0 && cache.pending === 0 && cache.membership === 0;
+	}, 1000);
+}
+
+test('right-clicking a list row marks everything above it read without opening it, with Undo', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	const menu = harness.elements.get('article-context-menu')!;
+	assert.equal(openArticleContextMenu(harness, '60'), true, 'browser menu suppressed on article rows');
+	assert.equal(menu.classList.contains('hidden'), false);
+	assert.equal(menu.style.getPropertyValue('left'), '120px');
+	assert.equal(menu.style.getPropertyValue('top'), '240px');
+	assert.equal(harness.elements.get('context-mark-above-button')!.disabled, false);
+	assert.equal(harness.getActiveElement(), harness.elements.get('context-mark-above-button'));
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 66', 'right-click does not open the row');
+	await finishContextBulkRead(harness, 'context-mark-above-button');
+	assert.equal(menu.classList.contains('hidden'), true);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 66', 'open article unchanged');
+	for (const id of [61, 63, 66]) assert.equal(database.prepare(`SELECT is_read FROM items WHERE id='today-${id}'`).get()!.is_read, 1, 'above ' + id);
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-60'").get()!.is_read, 0, 'clicked row excluded');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-59'").get()!.is_read, 0, 'below untouched');
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Marked 6 articles read/);
+	await finishArticleMutation(harness, 'undo-article-button');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
+});
+
+test('right-click Mark below as read uses the clicked row, and the top row cannot mark above', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	findListButtonByItemId(harness.elements.get('articles-list'), '30')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 30');
+	openArticleContextMenu(harness, '66');
+	assert.equal(harness.elements.get('context-mark-above-button')!.disabled, true, 'nothing above the first row');
+	assert.equal(harness.elements.get('context-mark-below-button')!.disabled, false);
+	assert.equal(harness.getActiveElement(), harness.elements.get('context-mark-below-button'), 'focus skips the disabled item');
+	openArticleContextMenu(harness, '62');
+	await finishContextBulkRead(harness, 'context-mark-below-button');
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 30');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-62'").get()!.is_read, 0, 'clicked row excluded');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-63'").get()!.is_read, 0, 'above untouched');
+	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 1, 'beyond the loaded page');
+	assert.match(harness.elements.get('article-query-status')!.textContent, /Marked 62 articles read/);
+});
+
+test('the article context menu closes on Escape, outside clicks and query changes, holds scroll, and never writes stale', async (t) => {
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	const menu = harness.elements.get('article-context-menu')!;
+	const row = findListButtonByItemId(harness.elements.get('articles-list'), '60')!;
+	openArticleContextMenu(harness, '60');
+	assert.equal(harness.dispatchKeydown('Escape'), true);
+	assert.equal(menu.classList.contains('hidden'), true);
+	assert.equal(harness.getActiveElement(), row, 'focus returns to the row');
+	openArticleContextMenu(harness, '60');
+	harness.dispatchKeydown('ArrowDown');
+	assert.equal(harness.getActiveElement(), harness.elements.get('context-mark-below-button'));
+	harness.dispatchKeydown('ArrowUp');
+	assert.equal(harness.getActiveElement(), harness.elements.get('context-mark-above-button'));
+	for (const key of ['Enter', ' ', 'Shift']) {
+		assert.equal(harness.dispatchKeydown(key), false, key + ' is left to the focused menu item');
+		assert.equal(menu.classList.contains('hidden'), false, key + ' keeps the menu open so the item can activate');
+	}
+	harness.dispatchKeydown('j');
+	assert.equal(menu.classList.contains('hidden'), true, 'other keys dismiss it');
+	openArticleContextMenu(harness, '60');
+	harness.dispatchDocumentPointer('pointerdown', 10);
+	assert.equal(menu.classList.contains('hidden'), true);
+	openArticleContextMenu(harness, '60');
+	harness.elements.get('articles-list-shell')!.dispatch('scroll');
+	assert.equal(menu.classList.contains('hidden'), false, 'a late scroll event from before opening does not close it');
+	assert.equal(harness.dispatchDocumentPointer('wheel', 10), true, 'like a native menu, the list does not scroll under it');
+	harness.dispatchKeydown('Escape');
+	assert.equal(harness.dispatchDocumentPointer('wheel', 10), false, 'scrolling is untouched once it closes');
+	openArticleContextMenu(harness, '60', { clientX: 0, clientY: 0 });
+	assert.equal(menu.classList.contains('hidden'), false, 'a keyboard-triggered contextmenu event opens it too');
+	assert.equal(menu.style.getPropertyValue('top'), '900px', 'anchored to the row when there is no pointer position');
+	harness.dispatchKeydown('Escape');
+	// macOS Chrome never turns Shift+F10 into a contextmenu event, so the app handles it.
+	assert.equal(harness.dispatchKeydown('F10', row, { shiftKey: true }), true);
+	assert.equal(menu.classList.contains('hidden'), false, 'Shift+F10 on a focused row');
+	harness.dispatchKeydown('Escape');
+	assert.equal(harness.dispatchKeydown('ContextMenu', row), true);
+	assert.equal(menu.classList.contains('hidden'), false, 'context-menu key on a focused row');
+	harness.dispatchKeydown('Escape');
+	assert.equal(harness.dispatchKeydown('F10', harness.elements.get('reader-shell'), { shiftKey: true }), false, 'only on article rows');
+	assert.equal(menu.classList.contains('hidden'), true);
+	openArticleContextMenu(harness, '60');
+	await setBrowserQuery(harness, 'Story 6');
+	harness.elements.get('context-mark-above-button')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(menu.classList.contains('hidden'), true);
+	assert.equal(mutations.length, 0, 'a stale menu never writes');
+	assert.equal(database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read=1').get()!.count, 0);
 });
 
 test('bulk older-than 1, 7 and 30 days use exact age cutoffs and support Undo', async (t) => {
