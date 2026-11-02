@@ -107,7 +107,19 @@ class SmokeListTests(unittest.TestCase):
         skipped = "Test Case '-[PigeonReaderUITests.StartupUITests testStartsUp]' skipped (0.2 seconds).\n"
         started = "Test Case '-[PigeonReaderUITests.StartupUITests testStartsUp]' started.\n"
         failed = "Test Case '-[PigeonReaderUITests.StartupUITests testStartsUp]' failed (4.0 seconds).\n"
-        for body, ok in [(passed + skipped, True), (passed + started, False), (passed + failed, False), (passed, False), ("", False)]:
+        passed2 = "Test Case '-[PigeonReaderUITests.StartupUITests testStartsUp]' passed (2.0 seconds).\n"
+        units = "\u2714 Test run with 812 tests in 63 suites passed after 38.200 seconds.\n"
+        no_units = "\u2714 Test run with 0 tests in 0 suites passed after 0.001 seconds.\n"
+        for body, ok in [
+            (units + passed + passed2, True),
+            (units + passed + skipped, False),
+            (units + passed + started, False),
+            (units + passed + failed, False),
+            (units + passed, False),
+            (passed + passed2, False),
+            (no_units + passed + passed2, False),
+            ("", False),
+        ]:
             with self.subTest(body=body):
                 log.write_text(body)
                 self.assertEqual(smoke.verify_log(self.list, log)[2] == [], ok)

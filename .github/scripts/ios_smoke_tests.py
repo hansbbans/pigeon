@@ -86,11 +86,18 @@ def verify_log(list_path, log_path):
     entries, errors = read_entries(list_path)
     log = Path(log_path).read_text(errors="replace")
     # XCTest reports each case as: Test Case '-[Target.Class method]' passed (1.2 seconds).
-    # A skipped case still ran its body far enough to call XCTSkip, so it counts.
-    ran = set(re.findall(r"Test Case '-\[(\w+)\.(\w+) (test\w+)\]' (?:passed|skipped)", log))
+    # Only "passed" counts: a smoke test that skips itself (XCTSkip on an
+    # unexpected simulator size) proved nothing.
+    ran = set(re.findall(r"Test Case '-\[(\w+)\.(\w+) (test\w+)\]' passed", log))
     for entry in entries:
         if tuple(entry.split("/")) not in ran:
-            errors.append(f"xcodebuild did not report smoke UI test {entry} as run")
+            errors.append(f"xcodebuild did not report smoke UI test {entry} as passed")
+    # The unit tests use Swift Testing, which ends with one summary line:
+    # "Test run with 812 tests in 63 suites passed after 38.2 seconds."
+    # Require it with a nonzero count so a renamed target can't run zero tests.
+    unit_counts = [int(n) for n in re.findall(r"Test run with (\d+) tests?\b[^\n]* passed after", log)]
+    if not any(unit_counts):
+        errors.append(f"xcodebuild did not report a passing {UNIT_TEST_TARGET} run with at least one test")
     ui_ran = {case for case in ran if case[0] == UI_TEST_TARGET}
     return entries, ui_ran, errors
 
