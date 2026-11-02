@@ -34,14 +34,19 @@ nonisolated enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable 
 		guard self != .recommended else {
 			return articles
 		}
-		return articles.sorted { left, right in
-			if self == .score, left.score != right.score {
-				return left.score > right.score
-			}
-			if left.receivedAt != right.receivedAt {
-				return self == .oldest ? left.receivedAt < right.receivedAt : left.receivedAt > right.receivedAt
-			}
-			return left.id < right.id
+		return articles.sorted(by: areInIncreasingOrder)
+	}
+
+	/// The comparator behind `sorted`. Recommended has no key of its own, so it
+	/// never orders one story before another.
+	func areInIncreasingOrder(_ left: Recommendation, _ right: Recommendation) -> Bool {
+		guard self != .recommended else { return false }
+		if self == .score, left.score != right.score {
+			return left.score > right.score
 		}
+		if left.receivedAt != right.receivedAt {
+			return self == .oldest ? left.receivedAt < right.receivedAt : left.receivedAt > right.receivedAt
+		}
+		return left.id < right.id
 	}
 }

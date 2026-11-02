@@ -1009,12 +1009,14 @@ export function renderBrowserAppRuntimeScript(): string {
       ? keptItemIds.ids : null;
   }
 
-  function compareViewItems(state, left, right) {
+  function getViewItemComparator(state) {
+    const sort = state.query.sort;
     if (views.find((view) => view.id === state.viewId)?.kind === 'recommended') {
-      if (state.query.sort === 'score') return (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
-      if (state.query.sort === 'recommended') return (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
+      if (sort === 'score') return (left, right) => (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
+      if (sort === 'recommended') return (left, right) => (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
     }
-    return (state.query.sort === 'oldest' ? -1 : 1) *
+    const direction = sort === 'oldest' ? -1 : 1;
+    return (left, right) => direction *
       ((loadedItemsById[right]?.published || 0) - (loadedItemsById[left]?.published || 0) || Number(right) - Number(left));
   }
 
@@ -1025,9 +1027,10 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!kept?.size) return ids;
     const result = [...ids];
     const present = new Set(result);
+    const compare = getViewItemComparator(state);
     for (const keptId of kept) {
       if (present.has(keptId)) continue;
-      const index = result.findIndex((id) => compareViewItems(state, keptId, id) < 0);
+      const index = result.findIndex((id) => compare(keptId, id) < 0);
       if (index === -1 && continuation) continue;
       result.splice(index === -1 ? result.length : index, 0, keptId);
       present.add(keptId);
@@ -1809,7 +1812,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function reconcileArticleQueryBoundary() {
     if (!getActiveView() || !activeLoadedQueryKey || activeLoadedQueryKey === getViewQueryKey(activeViewId)) return;
     activeLoadedQueryKey = getViewQueryKey(activeViewId);
-    keptItemIds = { queryKey: '', ids: new Set() };
+    clearKeptItemIds();
     const state = getViewState(activeViewId);
     activeViewRequestId += 1;
     itemIds = [...state.itemIds];
@@ -3228,6 +3231,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!current()) return;
       if (type === 'not_interested') {
         recommendationExclusions.add(request.itemId);
+        keptItemIds.ids.delete(request.itemId);
         for (const state of viewStates.values()) if (state.viewId==='for-you') {
           state.itemIds=state.itemIds.filter(id=>id!==request.itemId); state.confirmedItemIds.delete(request.itemId);
           state.hasMembership=true; state.continuation=''; state.membershipEpoch++; state.rootRequestId=++membershipRootRequestId;
@@ -3709,7 +3713,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (belongs && state.hasMembership && !state.itemIds.includes(itemId) &&
           (state.locallyRemovedIds.has(itemId) || (!state.query.q && scopeMatches))) {
         state.itemIds.push(itemId);
-        state.itemIds.sort((left, right) => compareViewItems(state, left, right));
+        state.itemIds.sort(getViewItemComparator(state));
         state.confirmedItemIds.add(itemId);
         state.locallyRemovedIds.delete(itemId);
       } else if (belongs) {
@@ -3721,6 +3725,7 @@ export function renderBrowserAppRuntimeScript(): string {
         if (state.itemIds.includes(itemId)) state.locallyRemovedIds.add(itemId);
         state.itemIds = state.itemIds.filter((id) => id !== itemId);
         state.confirmedItemIds.delete(itemId);
+        getKeptItemIds(state)?.delete(itemId);
       }
       state.membershipEpoch += 1;
       state.rootRequestId = ++membershipRootRequestId;

@@ -5505,6 +5505,67 @@ test('a feed filtered to Read keeps an article marked unread in place', async (t
 	await waitForArticleRows(harness, ['3', '1']);
 });
 
+test('unstarring a kept read row in Starred filtered to Unread removes it for good', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser();
+	t.after(() => database.close());
+	await finishArticleMutation(harness, 'star-article-button');
+	findListButtonByViewId(harness.elements.get('views-list'), 'starred')!.dispatch('click');
+	await waitForArticleRows(harness, ['3']);
+	harness.elements.get('article-read-filter')!.value = 'unread';
+	harness.elements.get('article-read-filter')!.dispatch('change');
+	await waitForArticleRows(harness, ['3']);
+	await finishArticleMutation(harness, 'mark-unread-button');
+	await waitForArticleRows(harness, ['3']);
+	await finishArticleMutation(harness, 'star-article-button');
+	await waitForArticleRows(harness, []);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await waitForArticleRows(harness, []);
+});
+
+test('Not interested on a kept read row in For You filtered to Unread removes it for good', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/recommendations?')
+		? Response.json({ items: [recommendationFixture(1), recommendationFixture(2)], continuation: null }) : next() });
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('views-list'), 'for-you')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Recommended 1', 100);
+	harness.elements.get('article-read-filter')!.value = 'unread';
+	harness.elements.get('article-read-filter')!.dispatch('change');
+	await waitForArticleRows(harness, ['1', '2']);
+	await finishArticleMutation(harness, 'mark-unread-button');
+	await waitForArticleRows(harness, ['1', '2']);
+	harness.elements.get('not-interested-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-action-status')!.textContent === 'Preference saved: not interested.', 100);
+	await waitForArticleRows(harness, ['2']);
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await waitForArticleRows(harness, ['2']);
+});
+
+test('a Today day change re-filters kept read rows in the cached previous-day list', async (t) => {
+	let now = new Date(2026, 9, 12, 12).getTime();
+	const { database, harness } = await createStatefulArticleBrowser({ now: () => now });
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('views-list'), 'today')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Today');
+	harness.elements.get('article-read-filter')!.value = 'unread';
+	harness.elements.get('article-read-filter')!.dispatch('change');
+	await waitForArticleRows(harness, ['2', '1']);
+	findListButtonByItemId(harness.elements.get('articles-list'), '1')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 1');
+	await finishArticleMutation(harness, 'mark-unread-button');
+	await waitForArticleRows(harness, ['2', '1']);
+	now += 86_400_000;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	await waitForArticleRows(harness, ['3']);
+	harness.setOnline(false);
+	now -= 86_400_000;
+	harness.dispatchDocumentEvent('visibilitychange');
+	await flushBrowserTasks();
+	assert.deepEqual(renderedArticleIds(harness), ['2']);
+});
+
 test('a kept Unread row survives loading the next membership page at its sorted position', async (t) => {
 	const { database, harness } = await createStatefulArticleBrowser({ count: 60 });
 	t.after(() => database.close());

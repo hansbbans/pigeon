@@ -811,7 +811,7 @@ final class ReaderAppModel {
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
 			clearDetachedSelectedArticle()
-			resetKeptArticles()
+			resetKeptArticles(handingOffOpenStory: false)
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 			subscriptions = []
@@ -2333,7 +2333,7 @@ final class ReaderAppModel {
 			invalidateSpeculativeFeedWork()
 			automaticDisplaySuppressionCollectionID = nil
 			clearDetachedSelectedArticle()
-			resetKeptArticles()
+			resetKeptArticles(handingOffOpenStory: false)
 			temporarilyUnavailableSelectedCollection = nil
 			errorMessage = nil
 		}
@@ -3536,6 +3536,8 @@ final class ReaderAppModel {
 		guard await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs)) else { return nil }
 		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
+		keptArticles.removeAll { articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) }
+		keptSearchArticles.removeAll { articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) }
 		var changedCollectionIDs = Set(removedFeedIDs)
 		for folderID in affectedFolderIDs {
 			guard let cachedArticles = articleCache[folderID] else { continue }
@@ -3775,8 +3777,8 @@ final class ReaderAppModel {
 			return
 		}
 		articleStateGeneration = UUID()
-		sortOrders[collectionID] = newSortOrder
 		resetKeptArticles(for: collectionID)
+		sortOrders[collectionID] = newSortOrder
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(
 				canonicalArticles(for: collectionID, fallback: cachedArticles),
@@ -4045,9 +4047,9 @@ final class ReaderAppModel {
 		guard articleFilter(for: collectionID) != filter else {
 			return
 		}
+		resetKeptArticles(for: collectionID)
 		articleFilters[key] = filter
 		articleFilterStore.setFilter(filter, for: collectionID, session: session)
-		resetKeptArticles(for: collectionID)
 		reconcileSelection(for: collectionID)
 		if isApplyingRestoration == false,
 			isShowingBootstrapSnapshot,
@@ -4062,7 +4064,22 @@ final class ReaderAppModel {
 		guard keptArticles.applies(to: collectionID, filter: filter) else {
 			return filter.filtering(allArticles(for: collectionID))
 		}
-		return keptArticles.displayed(allArticles(for: collectionID), filter: filter, order: sortOrder(for: collectionID))
+		guard collectionID == ReaderSection.today.rawValue else {
+			return keptArticles.displayed(allArticles(for: collectionID), filter: filter, order: sortOrder(for: collectionID))
+		}
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		return keptArticles.displayed(
+			allArticles(for: collectionID),
+			filter: filter,
+			order: sortOrder(for: collectionID),
+			isEligible: { bounds.contains($0.receivedAt) },
+		)
+	}
+
+	/// Whether `article` is shown only because it was kept after leaving the
+	/// open list's filter. Such rows must not be written back into the cache.
+	func isKeptAfterLeavingFilter(_ article: Recommendation) -> Bool {
+		keptArticles.contains(article)
 	}
 
 	/// Records a story whose read state is about to flip so it would leave the
@@ -4086,13 +4103,30 @@ final class ReaderAppModel {
 	}
 
 	/// Re-filters the open list: kept rows that no longer match the filter leave.
-	private func resetKeptArticles(for collectionID: String? = nil) {
+	/// When the open story was one of them and no cache still holds it, the
+	/// reader keeps it as the detached selection with the list order it had.
+	private func resetKeptArticles(for collectionID: String? = nil, handingOffOpenStory: Bool = true) {
 		if collectionID == nil || keptArticles.collectionID == collectionID {
+			if handingOffOpenStory {
+				detachOpenKeptArticle()
+			}
 			keptArticles.reset()
 		}
 		if collectionID == nil || keptSearchArticles.collectionID == collectionID {
 			keptSearchArticles.reset()
 		}
+	}
+
+	private func detachOpenKeptArticle() {
+		let listID = selectedNavigationID
+		guard keptArticles.applies(to: listID, filter: articleFilter(for: listID)),
+			let selectedArticleID,
+			let kept = keptArticles.article(withID: selectedArticleID),
+			articleCache[listID]?.contains(where: { articlesMatch($0, kept) }) != true else {
+			return
+		}
+		detachedSelectedArticleOrdering = displayedArticles(for: listID)
+		detachedSelectedArticle = kept
 	}
 
 	private func updateKeptArticles(matching article: Recommendation, _ change: (inout Recommendation) -> Void) {
@@ -4128,6 +4162,7 @@ final class ReaderAppModel {
 		if selectedNavigationID == collectionID,
 			keptArticles.applies(to: collectionID, filter: articleFilter(for: collectionID)),
 			let kept = keptArticles.article(withID: rememberedID) {
+			clearDetachedSelectedArticle()
 			selectedArticleID = kept.id
 			selectedArticleIDs[collectionID] = kept.id
 			return
@@ -5405,6 +5440,9 @@ final class ReaderAppModel {
 		let previousItems = articleCache[forYouID] ?? []
 		let removedArticle = previousItems.contains(where: { articlesMatch($0, article) })
 		articleCache[forYouID]?.removeAll(where: { articlesMatch($0, article) })
+		if keptArticles.collectionID == forYouID {
+			keptArticles.remove(article)
+		}
 		if removedArticle {
 			let remainingUnread = articleCache[forYouID]?.count(where: { $0.isRead == false }) ?? 0
 			updateNavigationCount(for: forYouID, to: remainingUnread)
@@ -6194,7 +6232,7 @@ final class ReaderAppModel {
 		canonicalArticleOrder = [:]
 		articleFilters.removeAll()
 		selectedArticleIDs = [:]
-		resetKeptArticles()
+		resetKeptArticles(handingOffOpenStory: false)
 		resetStreamPagination()
 		resolvedPaginationCollections.removeAll()
 		restoredReaderModes = [:]
@@ -6293,6 +6331,9 @@ final class ReaderAppModel {
 			resetStreamPagination(for: todayID)
 		}
 		streamDayBounds[todayID] = bounds
+		if keptArticles.collectionID == todayID {
+			keptArticles.removeAll { bounds.contains($0.receivedAt) == false }
+		}
 		if droppedStale, let kept {
 			setArticles(kept, for: todayID, preserveOpenSelection: false)
 			updateNavigationCount(
@@ -7971,6 +8012,9 @@ final class ReaderAppModel {
 				|| starredArticles.contains(where: { $0.id == remembered && articlesMatch($0, article) })
 		} ?? false
 		articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		if keptArticles.collectionID == starredID {
+			keptArticles.remove(article)
+		}
 		if removedWasSelected {
 			selectedArticleIDs[starredID] = nil
 			if selectedNavigationID == starredID {

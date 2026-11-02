@@ -14,6 +14,11 @@ nonisolated struct ReaderKeptArticles: Sendable {
 	/// leaves the cache when the list order has no sortable key (Recommended).
 	private var entries: [Entry] = []
 	private var indicesByAlias: [String: Int] = [:]
+	/// Exact id/readerId strings each kept copy has carried. Cached rows take
+	/// their spelling from the same `setArticles` payloads that refresh these
+	/// copies, so the per-row display pass can match on raw strings instead of
+	/// normalizing every row of a large list on every read.
+	private var indicesBySpelling: [String: Int] = [:]
 
 	private struct Entry: Sendable {
 		var article: Recommendation
@@ -49,12 +54,13 @@ nonisolated struct ReaderKeptArticles: Sendable {
 			self.filter = filter
 		}
 		if let index = index(matching: article) {
-			entries[index].article = article
+			replace(at: index, with: article)
 			return
 		}
 		for alias in Self.aliases(of: article) {
 			indicesByAlias[alias] = entries.count
 		}
+		addSpellings(of: article, at: entries.count)
 		entries.append(Entry(article: article, position: position))
 	}
 
@@ -63,7 +69,7 @@ nonisolated struct ReaderKeptArticles: Sendable {
 		guard entries.isEmpty == false else { return }
 		for article in articles {
 			guard let index = index(matching: article) else { continue }
-			entries[index].article = article
+			replace(at: index, with: article)
 		}
 	}
 
@@ -72,33 +78,51 @@ nonisolated struct ReaderKeptArticles: Sendable {
 		change(&entries[index].article)
 	}
 
+	/// Drops a kept story that left the list for a reason other than its read
+	/// state (unstarred, Not Interested, unsubscribed, past local midnight).
+	mutating func remove(_ article: Recommendation) {
+		guard let index = index(matching: article) else { return }
+		entries.remove(at: index)
+		reindex()
+	}
+
+	mutating func removeAll(where shouldRemove: (Recommendation) -> Bool) {
+		let count = entries.count
+		entries.removeAll { shouldRemove($0.article) }
+		if entries.count != count { reindex() }
+	}
+
 	mutating func reset() {
 		collectionID = nil
 		filter = nil
 		entries.removeAll()
 		indicesByAlias.removeAll()
+		indicesBySpelling.removeAll()
 	}
 
 	/// The displayed list: `articles` (unfiltered, already in `order`) filtered
 	/// by `filter`, plus every kept story. A kept story still in `articles`
-	/// stays at its row; one that is gone is merged back at its sorted position.
+	/// stays at its row; one that is gone (a sync dropped it, or the Unread
+	/// section removed it) is merged back at its sorted position when it is
+	/// still `isEligible` for the list, such as Today's local-day bounds.
 	func displayed(
 		_ articles: [Recommendation],
 		filter: ReaderArticleFilter,
 		order: ArticleSortOrder,
+		isEligible: (Recommendation) -> Bool = { _ in true },
 	) -> [Recommendation] {
 		var present = Set<Int>()
 		var result: [Recommendation] = []
 		result.reserveCapacity(articles.count)
 		for article in articles {
-			if let index = index(matching: article) {
+			if let index = rowIndex(matching: article) {
 				present.insert(index)
 				result.append(article)
 			} else if filter.includes(article) {
 				result.append(article)
 			}
 		}
-		let missing = entries.indices.filter { present.contains($0) == false }
+		let missing = entries.indices.filter { present.contains($0) == false && isEligible(entries[$0].article) }
 		guard missing.isEmpty == false else { return result }
 		if order == .recommended {
 			for index in missing.sorted(by: { entries[$0].position < entries[$1].position }) {
@@ -106,11 +130,51 @@ nonisolated struct ReaderKeptArticles: Sendable {
 			}
 			return result
 		}
-		return order.sorted(result + missing.map { entries[$0].article })
+		// `result` is already in `order`; binary-search each missing story's row
+		// instead of re-sorting the whole list on every read.
+		for index in missing {
+			let article = entries[index].article
+			var low = 0
+			var high = result.count
+			while low < high {
+				let middle = (low + high) / 2
+				if order.areInIncreasingOrder(result[middle], article) {
+					low = middle + 1
+				} else {
+					high = middle
+				}
+			}
+			result.insert(article, at: low)
+		}
+		return result
 	}
 
-	/// Called for every row of the displayed list, so look up both identities
-	/// directly instead of building an alias set per row.
+	private mutating func replace(at index: Int, with article: Recommendation) {
+		entries[index].article = article
+		addSpellings(of: article, at: index)
+	}
+
+	private mutating func addSpellings(of article: Recommendation, at index: Int) {
+		for spelling in [article.id, article.readerId] where spelling.isEmpty == false {
+			indicesBySpelling[spelling] = index
+		}
+	}
+
+	private mutating func reindex() {
+		indicesByAlias.removeAll(keepingCapacity: true)
+		indicesBySpelling.removeAll(keepingCapacity: true)
+		for (index, entry) in entries.enumerated() {
+			for alias in Self.aliases(of: entry.article) {
+				indicesByAlias[alias] = index
+			}
+			addSpellings(of: entry.article, at: index)
+		}
+	}
+
+	private func rowIndex(matching article: Recommendation) -> Int? {
+		indicesBySpelling[article.readerId] ?? indicesBySpelling[article.id]
+	}
+
 	private func index(matching article: Recommendation) -> Int? {
 		guard indicesByAlias.isEmpty == false else { return nil }
 		let readerID = ReaderArticleIdentity.normalized(article.readerId)
