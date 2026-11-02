@@ -5736,6 +5736,32 @@ test('right-click Mark below as read uses the clicked row, and the top row canno
 	assert.match(harness.elements.get('article-query-status')!.textContent, /Marked 62 articles read/);
 });
 
+test('the article context menu tracks a pending write and never lets Enter fall through to the row', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 65 });
+	t.after(() => database.close());
+	const menu = harness.elements.get('article-context-menu')!;
+	const above = harness.elements.get('context-mark-above-button')!;
+	const below = harness.elements.get('context-mark-below-button')!;
+	openArticleContextMenu(harness, '40');
+	below.dispatch('click');
+	openArticleContextMenu(harness, '62');
+	assert.equal(above.disabled && below.disabled, true, 'both items wait for the running write');
+	const row = findListButtonByItemId(harness.elements.get('articles-list'), '62')!;
+	assert.equal(harness.dispatchKeydown('Enter', row), true, 'Enter is consumed, not passed to the row');
+	assert.equal(menu.classList.contains('hidden'), true);
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 66', 'the row did not open');
+	openArticleContextMenu(harness, '62');
+	await waitForBrowserCondition(() => harness.elements.get('article-bulk-button')!.disabled === false, 1000);
+	assert.equal(menu.classList.contains('hidden'), false);
+	assert.equal(above.disabled, false, 'items re-enable once the write finishes');
+	assert.equal(below.disabled, false);
+	harness.dispatchKeydown('Escape');
+	await waitForBrowserCondition(() => {
+		const cache = harness.getCacheSizes();
+		return cache.active === 0 && cache.pending === 0 && cache.membership === 0;
+	}, 1000);
+});
+
 test('the article context menu closes on Escape, outside clicks and query changes, holds scroll, and never writes stale', async (t) => {
 	const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 65 });
 	t.after(() => database.close());
@@ -5764,7 +5790,12 @@ test('the article context menu closes on Escape, outside clicks and query change
 	assert.equal(menu.classList.contains('hidden'), false, 'a late scroll event from before opening does not close it');
 	assert.equal(harness.dispatchDocumentPointer('wheel', 10), true, 'like a native menu, the list does not scroll under it');
 	harness.dispatchKeydown('Escape');
-	assert.equal(harness.dispatchDocumentPointer('wheel', 10), false, 'scrolling is untouched once it closes');
+	assert.throws(() => harness.dispatchDocumentPointer('wheel', 10), /No wheel handler/, 'no wheel listener once it closes, so scrolling stays off the main thread');
+	let nativePrevented = false;
+	openArticleContextMenu(harness, '60');
+	menu.dispatch('contextmenu', { preventDefault() { nativePrevented = true; } });
+	assert.equal(nativePrevented, true, 'a late native contextmenu (Windows Menu key keyup) does not stack on top');
+	harness.dispatchKeydown('Escape');
 	openArticleContextMenu(harness, '60', { clientX: 0, clientY: 0 });
 	assert.equal(menu.classList.contains('hidden'), false, 'a keyboard-triggered contextmenu event opens it too');
 	assert.equal(menu.style.getPropertyValue('top'), '900px', 'anchored to the row when there is no pointer position');

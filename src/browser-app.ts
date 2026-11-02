@@ -2394,13 +2394,8 @@ export function renderBrowserAppRuntimeScript(): string {
       keyboardRevealSelection = null;
       return;
     }
-    for (const row of articlesList.children) {
-      const button = row.children[0];
-      if (button?.getAttribute('data-item-id') === selectedItemId && typeof button.scrollIntoView === 'function') {
-        button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        return;
-      }
-    }
+    const button = findArticleRowButton(selectedItemId);
+    if (button && typeof button.scrollIntoView === 'function') button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   function renderArticles() {
@@ -2512,6 +2507,7 @@ export function renderBrowserAppRuntimeScript(): string {
     );
     restoreArticleScrollTop(preservedScrollTop);
     revealKeyboardSelectedRow();
+    refreshArticleContextMenu();
   }
 
   function clearYouTubePlayer() {
@@ -3600,6 +3596,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function renderArticleActions() {
+    refreshArticleContextMenu();
     renderArticleQueryControls();
     const target = JSON.stringify([activeViewId, selectedItemId, getViewQueryKey(activeViewId)]);
     if (readerActionTarget !== target) {
@@ -4363,11 +4360,10 @@ export function renderBrowserAppRuntimeScript(): string {
   articleBulkButton.addEventListener('click', () => { void markArticleRangeRead(); });
   contextMarkAboveButton.addEventListener('click', () => { runArticleContextAction('above'); });
   contextMarkBelowButton.addEventListener('click', () => { runArticleContextAction('below'); });
-  // Like a native menu, hold the page still while it is open instead of closing on
-  // scroll: trackpad momentum delivers scroll events after the menu has opened.
-  document.addEventListener('wheel', (event) => {
-    if (isArticleContextMenuOpen() && typeof event.preventDefault === 'function') event.preventDefault();
-  }, { passive: false });
+  // Like a native menu it holds wheel scrolling while open (see openArticleContextMenu) rather
+  // than closing on scroll: trackpad momentum delivers scroll events after it has opened.
+  // A late native contextmenu (Windows fires one on the Menu key's keyup) must not stack on it.
+  articleContextMenu.addEventListener('contextmenu', (event) => { event.preventDefault(); });
   starArticleButton.addEventListener('click', () => {
     void toggleSelectedArticleState('starred');
   });
@@ -4433,32 +4429,51 @@ export function renderBrowserAppRuntimeScript(): string {
 
   // Right-click on a list row: bulk-mark around that row without opening it.
   function openArticleContextMenu(itemId, row, event) {
-    if (typeof event?.preventDefault === 'function') event.preventDefault();
     closePopoverMenus(null);
-    const candidates = getWindowCandidateIds();
-    const index = candidates.indexOf(itemId);
-    if (index < 0) return;
-    const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
-    contextMarkAboveButton.disabled = unavailable || index === 0;
-    contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !nextItemIdsContinuation);
+    if (!getWindowCandidateIds().includes(itemId)) return;
+    if (typeof event?.preventDefault === 'function') event.preventDefault();
     articleContextTarget = { itemId, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
+    refreshArticleContextMenu();
     // The context-menu key and Shift+F10 report no pointer position; anchor to the row instead.
     let left = Number(event?.clientX) || 0;
     let top = Number(event?.clientY) || 0;
+    let flipTop = top;
     if (!left && !top && typeof row.getBoundingClientRect === 'function') {
-      const rect = row.getBoundingClientRect();
-      left = rect.left + 16;
-      top = rect.bottom;
+      const rowRect = row.getBoundingClientRect();
+      left = rowRect.left + 16;
+      top = rowRect.bottom;
+      flipTop = rowRect.top;
     }
     articleContextMenu.style.setProperty('left', left + 'px');
     articleContextMenu.style.setProperty('top', top + 'px');
     articleContextMenu.classList.remove('hidden');
+    document.addEventListener('wheel', holdScrollUnderArticleContextMenu, { passive: false });
     const rect = typeof articleContextMenu.getBoundingClientRect === 'function' ? articleContextMenu.getBoundingClientRect() : null;
     const viewportWidth = window.innerWidth || 0;
     const viewportHeight = window.innerHeight || 0;
     if (rect && viewportWidth && left + rect.width > viewportWidth - 8) articleContextMenu.style.setProperty('left', Math.max(8, viewportWidth - rect.width - 8) + 'px');
-    if (rect && viewportHeight && top + rect.height > viewportHeight - 8) articleContextMenu.style.setProperty('top', Math.max(8, top - rect.height) + 'px');
+    // Flip above the pointer, or above the row when opened from the keyboard, so the row stays visible.
+    if (rect && viewportHeight && top + rect.height > viewportHeight - 8) articleContextMenu.style.setProperty('top', Math.max(8, flipTop - rect.height) + 'px');
     getEnabledContextMenuItems()[0]?.focus();
+  }
+
+  // Runs on open and on every list or action render, so the items follow pending writes and new rows.
+  function refreshArticleContextMenu() {
+    if (!articleContextTarget) return;
+    const candidates = getWindowCandidateIds();
+    const index = candidates.indexOf(articleContextTarget.itemId);
+    if (index < 0 || articleContextTarget.viewId !== activeViewId || articleContextTarget.generation !== accountGeneration) {
+      closeArticleContextMenu(false);
+      return;
+    }
+    const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
+    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedTodayBoundary();
+    contextMarkAboveButton.disabled = unavailable || index === 0;
+    contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !moreBelow);
+  }
+
+  function holdScrollUnderArticleContextMenu(event) {
+    if (typeof event.preventDefault === 'function') event.preventDefault();
   }
 
   function getEnabledContextMenuItems() {
@@ -4469,21 +4484,27 @@ export function renderBrowserAppRuntimeScript(): string {
     return Boolean(articleContextTarget);
   }
 
+  function findArticleRowButton(itemId) {
+    for (const listItem of articlesList.children) {
+      const button = listItem.children[0];
+      if (button?.getAttribute('data-item-id') === itemId) return button;
+    }
+    return null;
+  }
+
   function closeArticleContextMenu(restoreFocus) {
     if (!articleContextTarget) return;
     const { itemId } = articleContextTarget;
     articleContextTarget = null;
     articleContextMenu.classList.add('hidden');
-    if (!restoreFocus) return;
+    document.removeEventListener('wheel', holdScrollUnderArticleContextMenu, { passive: false });
     // Rows are rebuilt on every render, so look the row up again by id.
-    for (const listItem of articlesList.children) {
-      const button = listItem.children[0];
-      if (button?.getAttribute('data-item-id') === itemId) { button.focus(); return; }
-    }
+    if (restoreFocus) findArticleRowButton(itemId)?.focus();
   }
 
   function handleArticleContextMenuKeydown(event) {
-    if (event.key === 'Escape') {
+    const focusedItem = getEnabledContextMenuItems().includes(document.activeElement);
+    if (event.key === 'Escape' || event.key === 'Tab') {
       closeArticleContextMenu(true);
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       const items = getEnabledContextMenuItems();
@@ -4491,7 +4512,8 @@ export function renderBrowserAppRuntimeScript(): string {
       const current = items.indexOf(document.activeElement);
       const step = event.key === 'ArrowDown' ? 1 : -1;
       items[(current + step + items.length) % items.length].focus();
-    } else if (event.key === 'Tab') {
+    } else if ((event.key === 'Enter' || event.key === ' ') && !focusedItem) {
+      // Nothing in the menu has focus (both items disabled), so the key would reach the row and open it.
       closeArticleContextMenu(true);
     } else {
       // Enter and Space activate the focused item as a click; modifiers start a shortcut.
