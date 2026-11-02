@@ -4,6 +4,11 @@ import { isPaywalledHtml } from './paywall';
 
 const DEFAULT_SYNC_LIMIT = 100;
 const MAX_SYNC_LIMIT = 200;
+// Article bodies dominate the Worker's CPU time: D1 hands them over as JSON and
+// the response serializes them again. Twelve long newsletters (about 0.6 MB)
+// exceeded the 10 ms Free-plan limit while six (about 0.2 MB) did not, so a page
+// also stops once its bodies reach this many characters.
+export const SYNC_PAGE_BODY_BUDGET = 192_000;
 const QUERY_CHUNK_SIZE = 80;
 const CURSOR_PREFIX = 'v1:';
 
@@ -86,7 +91,9 @@ export async function handleIncrementalSync(request: Request, env: Env): Promise
 		.bind(cursor, limit + 1)
 		.all<SyncEventRow>();
 
-	const pageEvents = results.slice(0, limit);
+	const candidates = results.slice(0, limit);
+	const pageEvents = await withinBodyBudget(env, candidates);
+	const hasMore = results.length > limit || pageEvents.length < candidates.length;
 	const payloads = await loadPayloads(env, pageEvents);
 	const changes = pageEvents.map((event) => {
 		const key = eventKey(event.entity_type, event.entity_id);
@@ -104,7 +111,7 @@ export async function handleIncrementalSync(request: Request, env: Env): Promise
 
 	return Response.json({
 		cursor: encodeCursor(nextSequence),
-		hasMore: results.length > limit,
+		hasMore,
 		changes,
 	});
 }
@@ -127,6 +134,25 @@ function parseLimit(value: string | null): number {
 	const parsed = Number.parseInt(value ?? String(DEFAULT_SYNC_LIMIT), 10);
 	if (!Number.isFinite(parsed)) return DEFAULT_SYNC_LIMIT;
 	return Math.min(Math.max(parsed, 1), MAX_SYNC_LIMIT);
+}
+
+/** Trims a page to the events whose article bodies fit the budget. The first
+ * event is always kept, so one oversized article still makes progress. */
+async function withinBodyBudget(env: Env, events: SyncEventRow[]): Promise<SyncEventRow[]> {
+	const sizes = new Map(
+		(await loadRows<{ id: string; size: number }>(
+			env.DB,
+			uniqueEntityIDs(events, 'article'),
+			`SELECT id, LENGTH(html_content) + COALESCE(LENGTH(text_content), 0) AS size
+			 FROM items WHERE id IN`,
+		)).map((row) => [row.id, row.size]),
+	);
+	let total = 0;
+	for (const [index, event] of events.entries()) {
+		total += event.entity_type === 'article' ? (sizes.get(event.entity_id) ?? 0) : 0;
+		if (index > 0 && total > SYNC_PAGE_BODY_BUDGET) return events.slice(0, index);
+	}
+	return events;
 }
 
 async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<string, unknown>> {
