@@ -15,6 +15,7 @@
 		04FB302B5767A59398188B5D /* SceneBackgroundTaskRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA0CD8EE68F38290B6C702D /* SceneBackgroundTaskRunner.swift */; };
 		059C0F36AF84A77036EB0A6C /* ReaderShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFE4401A0C1FFB61EA394441 /* ReaderShareSheet.swift */; };
 		06B62BD860A9C3630A8E425F /* PigeonSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 326129381F837CD3FA990C22 /* PigeonSession.swift */; };
+		0B7A9B40DAEEFCE6DB6BE7F2 /* APIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB535BF441CDA9CDC2B1E78D /* APIContractTests.swift */; };
 		0DA7E921007929B3B4218C69 /* RemoteArticleImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B307BACA7C3B968482FCA8 /* RemoteArticleImageView.swift */; };
 		1000CB2B87EF6D82E8292C2F /* ReaderAPIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D965837359F0C8DAD53B285 /* ReaderAPIModels.swift */; };
 		11D67FF5630033F12B6091A5 /* ReaderFeedThumbnailContentIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC407C1D088B779EBF2122A7 /* ReaderFeedThumbnailContentIdentity.swift */; };
@@ -263,6 +264,7 @@
 		EB9187FBF2C6400B38323FCA /* ReaderBoundarySwipeRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0A9632625EC7F0AA28E1099 /* ReaderBoundarySwipeRecognizer.swift */; };
 		ED04409F48BD1036D2886F3F /* ArticleReadingProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3ECAAFAB637EF7F367D8574 /* ArticleReadingProgress.swift */; };
 		EE53F06D78BA5556630B00E9 /* OPMLImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F70D606E92AC7789DD2887 /* OPMLImport.swift */; };
+		EF4C272D933F8D4D40AF3C2F /* api-contract in Resources */ = {isa = PBXBuildFile; fileRef = C8E3C588070FA8DE9337E093 /* api-contract */; };
 		EFA4AF0230A73836B6CCE643 /* ZoomableImageGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06F49687D735F83E5B18F74D /* ZoomableImageGeometryTests.swift */; };
 		F05EB1BFC345423694686064 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5D5B91D109739BFCB40CFE /* SessionStore.swift */; };
 		F2202D5C7D476BAE81CE7C03 /* MockHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A38F3C591A8FCEAA046CFD /* MockHTTPClient.swift */; };
@@ -546,6 +548,7 @@
 		C6E8701A33181654F7155130 /* EngagementAggregator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngagementAggregator.swift; sourceTree = "<group>"; };
 		C8BB9280CDCB8510EF8B00A3 /* ReaderArticleIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderArticleIdentity.swift; sourceTree = "<group>"; };
 		C8DAB3443559136FCC33A69B /* OutboundLinkChoiceState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundLinkChoiceState.swift; sourceTree = "<group>"; };
+		C8E3C588070FA8DE9337E093 /* api-contract */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "api-contract"; path = "../../test/fixtures/api-contract"; sourceTree = SOURCE_ROOT; };
 		C99F9370B4660963E3A83C81 /* OfflineLibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryStore.swift; sourceTree = "<group>"; };
 		C9B9CDBC34CB4EF4C2C8EFF5 /* AddFeedIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddFeedIntent.swift; sourceTree = "<group>"; };
 		C9F4737478BD29E32A34D335 /* ArticleReaderContentIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleReaderContentIdentity.swift; sourceTree = "<group>"; };
@@ -570,6 +573,7 @@
 		D879E858C8488F1A5C3F9EBB /* YouTubeChannelSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouTubeChannelSearchTests.swift; sourceTree = "<group>"; };
 		D8F70D606E92AC7789DD2887 /* OPMLImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OPMLImport.swift; sourceTree = "<group>"; };
 		D8FCA295F3622E76F7DA0690 /* ReaderDynamicTypeScale.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderDynamicTypeScale.swift; sourceTree = "<group>"; };
+		DB535BF441CDA9CDC2B1E78D /* APIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIContractTests.swift; sourceTree = "<group>"; };
 		DB947CED95B25256754B8759 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		DE057E004417D91A5F1C69CC /* ReaderNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationState.swift; sourceTree = "<group>"; };
 		DED463BB677BEDDB9441B157 /* ReaderNavigationLabelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationLabelView.swift; sourceTree = "<group>"; };
@@ -740,6 +744,7 @@
 		47EE6B02C3C0DF5BBBFE2E6D = {
 			isa = PBXGroup;
 			children = (
+				FEC26A72C1493F32EF594DDF /* ContractFixtures */,
 				6F2CA623135E5CE8A460FB1A /* PigeonReader */,
 				D7B59F14758CD5074289C282 /* PigeonReaderTests */,
 				544B96A92ED3D0B229438119 /* PigeonReaderUITests */,
@@ -937,6 +942,7 @@
 		A3FCB85640121AD8CF2260FB /* Core */ = {
 			isa = PBXGroup;
 			children = (
+				DB535BF441CDA9CDC2B1E78D /* APIContractTests.swift */,
 				707BD7255E2BE31C2D4C200F /* ArticleImagePolicyTests.swift */,
 				F71B0901D92E983F119A40A9 /* ArticleImageSizingTests.swift */,
 				68115AA211046675A2918A78 /* ArticleLeadImageRequestTests.swift */,
@@ -1090,6 +1096,14 @@
 			path = Shared;
 			sourceTree = "<group>";
 		};
+		FEC26A72C1493F32EF594DDF /* ContractFixtures */ = {
+			isa = PBXGroup;
+			children = (
+				C8E3C588070FA8DE9337E093 /* api-contract */,
+			);
+			name = ContractFixtures;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -1133,6 +1147,7 @@
 			buildConfigurationList = 934723321E0253C3836DACEF /* Build configuration list for PBXNativeTarget "PigeonReaderTests" */;
 			buildPhases = (
 				9F76F20C5D95E4D8D58E62AE /* Sources */,
+				3B062A09106B51AA3D67361C /* Resources */,
 			);
 			buildRules = (
 			);
@@ -1236,6 +1251,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		3B062A09106B51AA3D67361C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EF4C272D933F8D4D40AF3C2F /* api-contract in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		63DA5A25E26C78F8989CB85A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1468,6 +1491,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0B7A9B40DAEEFCE6DB6BE7F2 /* APIContractTests.swift in Sources */,
 				3197CB5AD3D1F7C67D3E620D /* ArticleImagePolicyTests.swift in Sources */,
 				1E450C4CBE15BE7BB6083AF1 /* ArticleImageSizingTests.swift in Sources */,
 				3F453F535AA0B700920CECCB /* ArticleLeadImageRequestTests.swift in Sources */,

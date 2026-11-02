@@ -1,0 +1,84 @@
+{
+	"exportedAt": "2026-11-01T12:00:00.000Z",
+	"monitoredTopics": [
+		"typography"
+	],
+	"policy": {
+		"plainLanguageSummary": "Pigeon ranks unread stories with freshness, topics you monitor, and confirmed reading and feedback activity stored on your Pigeon server. Topic matches can transfer across sources; source history is only a small tie-breaker. Bulk read actions are neutral.",
+		"confirmedSignals": [
+			{
+				"name": "More like this",
+				"effect": "Strong positive"
+			},
+			{
+				"name": "Not interested",
+				"effect": "Strong negative"
+			},
+			{
+				"name": "Star and continue to source",
+				"effect": "Positive"
+			},
+			{
+				"name": "Active reading and scroll depth",
+				"effect": "Modest positive"
+			},
+			{
+				"name": "Single-story read",
+				"effect": "Very small positive"
+			},
+			{
+				"name": "Bulk read actions",
+				"effect": "Neutral"
+			}
+		],
+		"confirmationRule": "Only actions accepted by the server become ranking signals. Pending, failed, cancelled, and duplicate offline actions do not add confirmed evidence.",
+		"retention": "Confirmed signal history and monitored topics stay on your Pigeon server until you delete an entry or reset all preferences. Export and delete controls are available here."
+	},
+	"history": [
+		{
+			"id": "5a1d0c3e-0005-4b00-9000-000000000005",
+			"itemId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"type": "not_interested",
+			"feedKey": "morning-brief",
+			"occurredAt": "2026-11-01T10:06:00.000Z",
+			"title": "Your Sunday brief",
+			"source": "Morning Brief"
+		},
+		{
+			"id": "5a1d0c3e-0004-4b00-9000-000000000004",
+			"itemId": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+			"type": "outbound_link",
+			"feedKey": "design-weekly",
+			"occurredAt": "2026-11-01T10:05:00.000Z",
+			"title": "Notes on margins",
+			"source": "Design Weekly"
+		},
+		{
+			"id": "5a1d0c3e-0003-4b00-9000-000000000003",
+			"itemId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"type": "scroll_depth",
+			"feedKey": "design-weekly",
+			"occurredAt": "2026-11-01T10:03:00.000Z",
+			"title": "Typography for a durable reader",
+			"source": "Design Weekly"
+		},
+		{
+			"id": "5a1d0c3e-0002-4b00-9000-000000000002",
+			"itemId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"type": "active_reading",
+			"feedKey": "design-weekly",
+			"occurredAt": "2026-11-01T10:02:00.000Z",
+			"title": "Typography for a durable reader",
+			"source": "Design Weekly"
+		},
+		{
+			"id": "5a1d0c3e-0001-4b00-9000-000000000001",
+			"itemId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"type": "explicit_open",
+			"feedKey": "design-weekly",
+			"occurredAt": "2026-11-01T10:00:00.000Z",
+			"title": "Typography for a durable reader",
+			"source": "Design Weekly"
+		}
+	]
+}

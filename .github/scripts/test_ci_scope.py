@@ -45,6 +45,13 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(classify("pigeon", ["package.json", "ios/PigeonReader/App.swift"])["native"])
         self.assertTrue(classify("pigeon", ["ios/PigeonReader/package.json"])["native"])
 
+    def test_pigeon_api_contract_fixtures_run_worker_and_native(self):
+        for path in ["test/fixtures/api-contract/sync.response.json", "test/fixtures/api-contract/README.md"]:
+            with self.subTest(path=path):
+                self.assertEqual(classify("pigeon", [path, "src/greader.ts"]), {"native": True, "worker": True, "unknown": []})
+                self.assertEqual(classify("pigeon", [path]), {"native": True, "worker": True, "unknown": []})
+        self.assertTrue(classify("pigeon", ["test/fixtures/api-contract/../email.eml"])["native"])
+
     def test_empty_and_forced_scope_run_full_validation(self):
         for repo in ("pigeon", "todomd", "swole"):
             for paths, force in [([], False), (["README.md"], True)]:
