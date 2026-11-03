@@ -2,7 +2,7 @@
 	"configuredBaseUrl": "https://pigeon.example",
 	"currentOrigin": "https://pigeon.example",
 	"healthUrl": "https://pigeon.example/health",
-	"schemaVersion": "15",
+	"schemaVersion": "16",
 	"feeds": {
 		"activeCount": 3,
 		"emailCount": 1,

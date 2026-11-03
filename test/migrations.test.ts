@@ -511,6 +511,26 @@ class LegacySchemaDb {
 			return;
 		}
 
+		if (statements[0]?.sql.startsWith('CREATE TABLE IF NOT EXISTS item_transcripts')) {
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE TABLE IF NOT EXISTS item_transcripts')) {
+					this.state.operations.push('create-item_transcripts');
+				} else if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_items_')) {
+					this.state.operations.push('create-v16-index');
+				} else if (snapshot.sql.startsWith('CREATE TRIGGER IF NOT EXISTS trg_sync_article_update')) {
+					this.state.operations.push('recreate-article-sync-trigger');
+				} else if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					if (nextValue === '16' && this.state.schemaVersion === String(snapshot.values[1] ?? '')) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:16');
+					}
+				}
+			}
+			return;
+		}
+
 		if (statements[0]?.sql === 'DROP TRIGGER IF EXISTS trg_items_update_status') {
 			for (const statement of statements) {
 				const snapshot = statement.snapshot();
@@ -633,7 +653,7 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '15');
+	assert.equal(db.state.schemaVersion, '16');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
@@ -669,7 +689,7 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '15');
+	assert.equal(db.state.schemaVersion, '16');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -701,7 +721,7 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '15');
+	assert.equal(db.state.schemaVersion, '16');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -728,7 +748,7 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	);
 
 	assert.equal(firstResponse.status, 200);
-	assert.equal(persistedState.schemaVersion, '15');
+	assert.equal(persistedState.schemaVersion, '16');
 	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
 
 	persistedState.operations.length = 0;
@@ -839,7 +859,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
 	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
-	assert.equal(winner.batches.length, 4);
+	assert.equal(winner.batches.length, 5);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
@@ -877,7 +897,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
 	).get() as { value: string };
-	assert.equal(schemaVersion.value, '15');
+	assert.equal(schemaVersion.value, '16');
 
 	const indexMigrationBatch = winner.batches[1];
 	assert.equal(
@@ -1030,7 +1050,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'15',
+		'16',
 	);
 	assert.deepEqual(db.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 	assert.deepEqual(db.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
@@ -1040,7 +1060,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		),
 		false,
 	);
-	assert.equal(db.batches.length, 3);
+	assert.equal(db.batches.length, 4);
 	assert.equal(
 		db.batches[0][0]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
@@ -1085,6 +1105,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 	]);
 	assert.deepEqual(db.batches[2].at(-1)?.values, ['15', '14']);
+	assert.deepEqual(db.batches[3].at(-1)?.values, ['16', '15']);
 	assert.ok(
 		db.executedSql.some((statement) => statement.sql === 'ALTER TABLE items ADD COLUMN content_version INTEGER NOT NULL DEFAULT 0'),
 	);
@@ -1164,7 +1185,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	]);
 
 	for (const wrapper of [firstDb, secondDb]) {
-		assert.equal(wrapper.batches.length, 3);
+		assert.equal(wrapper.batches.length, 4);
 		assert.deepEqual(wrapper.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 		assert.deepEqual(wrapper.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 		assert.equal(
@@ -1176,7 +1197,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	}
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'15',
+		'16',
 	);
 	assert.equal(
 		database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_state'").get() !== undefined,
@@ -1241,7 +1262,7 @@ test('SQLite v13 migration recreates the status trigger so plain writes clear mu
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'15',
+		'16',
 	);
 	database.exec("UPDATE items SET is_read = 1 WHERE id = 'article-a'");
 	assert.deepEqual(
@@ -1281,10 +1302,11 @@ test('SQLite v14 migration adds content_version and a covering unread feed index
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'15',
+		'16',
 	);
-	assert.equal(db.batches.length, 3);
+	assert.equal(db.batches.length, 4);
 	assert.deepEqual(db.batches[2].at(-1)?.values, ['15', '14']);
+	assert.deepEqual(db.batches[3].at(-1)?.values, ['16', '15']);
 	assert.deepEqual(
 		{ ...(database.prepare("SELECT content_version FROM items WHERE id = 'article-a'").get() as object) },
 		{ content_version: 0 },
@@ -1295,6 +1317,124 @@ test('SQLite v14 migration adds content_version and a covering unread feed index
 	const plan = database.prepare(`EXPLAIN QUERY PLAN ${UNREAD_COUNT_SQL}`).all() as Array<{ detail: string }>;
 	assert.match(plan.map(({ detail }) => detail).join('\n'), /COVERING INDEX idx_items_unread_feed_date/);
 	database.close();
+});
+
+const V16_ITEM_COLUMNS = [
+	'word_count',
+	'media_kind',
+	'duration_seconds',
+	'author',
+	'published_at',
+	'image_url',
+	'site_name',
+	'extraction_state',
+];
+
+function createSqliteV15Fixture(): DatabaseSync {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec(`
+		DROP INDEX idx_items_video_duration_pending;
+		DROP TABLE item_transcripts;
+		${V16_ITEM_COLUMNS.map((column) => `ALTER TABLE items DROP COLUMN ${column};`).join('\n')}
+		DROP TRIGGER trg_sync_article_update;
+		CREATE TRIGGER trg_sync_article_update
+		AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at ON items
+		BEGIN
+		  INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+		END;
+		UPDATE _meta SET value = '15' WHERE key = 'schema_version';
+		INSERT INTO feeds (feed_key, display_name) VALUES ('feed-a', 'Feed A');
+		INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+		VALUES ('article-a', 'feed-a', 'A', '<p>A</p>', 'message-a', '2026-08-01T00:00:00.000Z');
+	`);
+	return database;
+}
+
+function articleSyncChangeCount(database: DatabaseSync, id: string): number {
+	return (database
+		.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = 'article' AND entity_id = ?")
+		.get(id) as { count: number }).count;
+}
+
+test('SQLite v15 migration adds reading-length metadata, transcripts, and backfill indexes', async () => {
+	const database = createSqliteV15Fixture();
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'16',
+	);
+	assert.deepEqual(db.batches.at(-1)?.at(-1)?.values, ['16', '15']);
+	const row = database.prepare(`SELECT ${V16_ITEM_COLUMNS.join(', ')} FROM items WHERE id = 'article-a'`).get() as Record<string, unknown>;
+	for (const column of V16_ITEM_COLUMNS) assert.equal(row[column], null, column);
+	const tables = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
+	assert.equal(tables.includes('item_transcripts'), true);
+	const indexes = (database.prepare("PRAGMA index_list('items')").all() as Array<{ name: string }>).map(({ name }) => name);
+	assert.equal(indexes.includes('idx_items_video_duration_pending'), true);
+	database.close();
+});
+
+test('v16 tags existing YouTube feed items as video without adding sync events', async () => {
+	const database = createSqliteV15Fixture();
+	database.exec(`
+		INSERT INTO feeds (feed_key, display_name, source_type, source_url)
+		VALUES ('yt', 'Channel', 'rss', 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv'),
+		       ('links', 'Link blog', 'rss', 'https://daringfireball.net/feeds/main');
+		INSERT INTO items (id, feed_key, subject, html_content, original_url, message_id, received_at)
+		VALUES ('video-a', 'yt', 'V', '<p>V</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'yt:video:dQw4w9WgXcQ', '2026-08-01T00:00:00.000Z'),
+		       ('email-a', 'feed-a', 'E', '<p>E</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'email-yt', '2026-08-01T00:00:00.000Z'),
+		       ('link-a', 'links', 'L', '<p>L</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'link-yt', '2026-08-01T00:00:00.000Z');
+	`);
+	const before = (database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count;
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	const kinds = Object.fromEntries((database.prepare("SELECT id, media_kind FROM items WHERE id IN ('video-a', 'email-a', 'link-a', 'article-a')").all() as Array<{ id: string; media_kind: string | null }>)
+		.map(({ id, media_kind }) => [id, media_kind]));
+	assert.deepEqual(kinds, { 'video-a': 'video', 'email-a': null, 'link-a': null, 'article-a': null });
+	assert.equal((database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count, before);
+	database.close();
+});
+
+test('v16 article sync trigger records metadata updates but not status changes', async () => {
+	const database = createSqliteV15Fixture();
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	const before = articleSyncChangeCount(database, 'article-a');
+	database.exec("UPDATE items SET word_count = 120 WHERE id = 'article-a'");
+	assert.equal(articleSyncChangeCount(database, 'article-a'), before + 1);
+	database.exec("UPDATE items SET duration_seconds = 60 WHERE id = 'article-a'");
+	assert.equal(articleSyncChangeCount(database, 'article-a'), before + 2);
+	database.exec("UPDATE items SET is_read = 1 WHERE id = 'article-a'");
+	assert.equal(articleSyncChangeCount(database, 'article-a'), before + 2);
+	database.close();
+});
+
+test('the fresh SCHEMA.sql article trigger matches the migrated v16 trigger', () => {
+	const fresh = new DatabaseSync(':memory:');
+	fresh.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	fresh.exec(`
+		INSERT INTO feeds (feed_key, display_name) VALUES ('feed-a', 'Feed A');
+		INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at)
+		VALUES ('article-a', 'feed-a', 'A', '<p>A</p>', 'message-a', '2026-08-01T00:00:00.000Z');
+	`);
+	const before = articleSyncChangeCount(fresh, 'article-a');
+	fresh.exec("UPDATE items SET word_count = 120, media_kind = 'text' WHERE id = 'article-a'");
+	assert.equal(articleSyncChangeCount(fresh, 'article-a'), before + 1);
+	fresh.close();
 });
 
 test('a fresh SCHEMA.sql database is already at the required version and runs no migration work', async () => {
@@ -1314,7 +1454,7 @@ test('a fresh SCHEMA.sql database is already at the required version and runs no
 	]);
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'15',
+		'16',
 	);
 	database.close();
 });

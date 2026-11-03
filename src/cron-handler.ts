@@ -1,5 +1,6 @@
 /** Durable, fair, bounded scheduler for external feed refreshes. */
 
+import { runYouTubeDurationBackfill } from './item-metadata-backfill';
 import { fetchAndStoreRssFeed, RefreshQueryBudget, type FeedToFetch } from './rss-fetcher';
 import { safeHost, selectFeedsFairly } from './refresh-policy';
 import type { Env } from './types';
@@ -196,6 +197,13 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 		await dispatchBrowserPush(env, budget);
 	} catch {
 		console.warn('[Web Push] Background notification cycle failed');
+	}
+	// Last, so feed refreshes and push always get the budget first.
+	try {
+		const timed = await runYouTubeDurationBackfill(env.DB, budget, env.YOUTUBE_API_KEY, now);
+		if (timed) console.log(`[Cron] Filled durations for ${timed} videos`);
+	} catch (error) {
+		console.error('[Cron] YouTube duration backfill failed', error instanceof Error ? error.message : String(error));
 	}
 }
 

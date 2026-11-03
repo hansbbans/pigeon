@@ -1,3 +1,8 @@
+import { countWordsInHtml } from './word-count';
+import { extractYouTubeVideoId } from './youtube';
+
+export { extractYouTubeVideoId };
+
 export const AUTH_STORAGE_KEY = 'pigeon.browser.auth';
 export const THEME_STORAGE_KEY = 'pigeon.browser.theme';
 export const INITIAL_ITEM_ID_LIMIT = 50;
@@ -65,6 +70,11 @@ export interface BrowserLoadedItem {
 	};
 	contentVersion?: string;
 	isPaywalled?: boolean;
+	wordCount?: number;
+	// Counted locally from the body when the server has no better count.
+	estimatedWordCount?: number;
+	mediaKind?: 'text' | 'video';
+	durationSeconds?: number;
 }
 
 export interface BrowserArticleListEntry {
@@ -76,49 +86,53 @@ export interface BrowserArticleListEntry {
 	heroImageUrl: string | null;
 	isPaywalled: boolean;
 	isLoaded: boolean;
+	readingLength: string | null;
 }
 
 /**
- * Recognize only official YouTube URL shapes before constructing an embed.
- * This helper is duplicated in the emitted browser script so the reader can
- * make the same decision without permitting arbitrary iframe destinations.
+ * "12 min read" or "18 min video", or null when the length is unknown or is
+ * 10 minutes or less (only longer items are worth flagging). Text reads at
+ * 238 words per minute, rounded up, preferring the server's count (a reader
+ * extraction or saved page) over the local estimate from the body.
+ * Self-contained: emitted via toString().
  */
-export function extractYouTubeVideoId(originalUrl: string | undefined | null): string | null {
-	if (!originalUrl) return null;
-
-	let url: URL;
-	try {
-		url = new URL(originalUrl);
-	} catch {
-		return null;
+export function formatReadingLength(item: {
+	wordCount?: number | null;
+	estimatedWordCount?: number | null;
+	mediaKind?: string | null;
+	durationSeconds?: number | null;
+}): string | null {
+	const minimumLabelledMinutes = 11;
+	if (item.mediaKind === 'video') {
+		const seconds = item.durationSeconds;
+		if (typeof seconds !== 'number' || !(seconds > 0)) return null;
+		const minutes = Math.max(1, Math.ceil(seconds / 60));
+		if (minutes < minimumLabelledMinutes) return null;
+		if (minutes < 60) return `${minutes} min video`;
+		const hours = Math.floor(minutes / 60);
+		const rest = minutes % 60;
+		return rest === 0 ? `${hours} hr video` : `${hours} hr ${rest} min video`;
 	}
-	if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-	if (url.username || url.password || url.port) return null;
+	const words = typeof item.wordCount === 'number' ? item.wordCount : item.estimatedWordCount;
+	if (typeof words !== 'number' || !(words > 0)) return null;
+	const minutes = Math.max(1, Math.ceil(words / 238));
+	return minutes < minimumLabelledMinutes ? null : `${minutes} min read`;
+}
 
-	const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
-	const pageHosts = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
-	const shortHosts = new Set(['youtu.be']);
-	if (!pageHosts.has(hostname) && !shortHosts.has(hostname)) return null;
-
-	const parts = url.pathname.split('/').filter(Boolean);
-	let candidate: string | null = null;
-	if (shortHosts.has(hostname)) {
-		candidate = parts.length === 1 ? parts[0] ?? null : null;
-	} else {
-		switch (parts[0]?.toLowerCase()) {
-			case 'watch':
-				candidate = parts.length === 1 ? url.searchParams.get('v') : null;
-				break;
-			case 'shorts':
-			case 'embed':
-			case 'live':
-			case 'v':
-				candidate = parts.length === 2 ? parts[1] ?? null : null;
-				break;
-		}
-	}
-
-	return candidate && /^[A-Za-z0-9_-]{11}$/.test(candidate) ? candidate : null;
+/**
+ * Reader mode reports Defuddle's count when the stored one looks like a feed
+ * snippet: unknown, or at least 1.5x shorter than the extracted article.
+ * Self-contained: emitted via toString().
+ */
+export function shouldReportWordCount(
+	stored: number | null | undefined,
+	extracted: number | null | undefined,
+	mediaKind: string | null | undefined,
+): boolean {
+	if (mediaKind === 'video') return false;
+	if (typeof extracted !== 'number' || !Number.isSafeInteger(extracted) || extracted < 50) return false;
+	if (typeof stored !== 'number' || stored <= 0) return true;
+	return extracted >= stored * 1.5;
 }
 
 export function createYouTubeEmbedUrl(originalUrl: string | undefined | null): string | null {
@@ -592,6 +606,7 @@ export function buildArticleListEntries(options: {
 				heroImageUrl: null,
 				isPaywalled: false,
 				isLoaded: false,
+				readingLength: null,
 			};
 		}
 
@@ -604,6 +619,7 @@ export function buildArticleListEntries(options: {
 			heroImageUrl: selectArticleHeroImageUrl(loadedItem.content?.content),
 			isPaywalled: loadedItem.isPaywalled === true,
 			isLoaded: true,
+			readingLength: formatReadingLength(loadedItem),
 		};
 	});
 }
@@ -887,6 +903,9 @@ ${looksLikeHtmlPreview.toString()}
 ${stripArticlePreviewMarkup.toString()}
 ${cleanArticlePreviewText.toString()}
 ${createArticlePreview.toString()}
+${countWordsInHtml.toString()}
+${formatReadingLength.toString()}
+${shouldReportWordCount.toString()}
 ${buildArticleListEntries.toString()}
 ${extractYouTubeVideoId.toString()}
 ${createYouTubeEmbedUrl.toString()}
@@ -919,6 +938,9 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   limitInitialItemIds,
   createContentLoadPlan,
   buildArticleListEntries,
+  countWordsInHtml,
+  formatReadingLength,
+  shouldReportWordCount,
   extractYouTubeVideoId,
   createYouTubeEmbedUrl,
   sanitizeArticleHtml,

@@ -1,10 +1,31 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '15';
+const REQUIRED_SCHEMA_VERSION = '16';
 const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 const LEGACY_SYNC_SCHEMA_VERSION = 12;
 const RETENTION_INDEX_SCHEMA_VERSION = 13;
 const STATUS_TRIGGER_SCHEMA_VERSION = 14;
+const CONTENT_VERSION_SCHEMA_VERSION = 15;
+
+// v16 adds the reading-length and saved-item metadata columns to the article
+// trigger. Their writers are single items (a reported count, a fetched video
+// duration, a saved page), so the body each event resends stays small.
+const ARTICLE_UPDATE_SYNC_TRIGGER_V16 = `CREATE TRIGGER IF NOT EXISTS trg_sync_article_update
+		 AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at,
+		   word_count, media_kind, duration_seconds, author, published_at, image_url, site_name, extraction_state ON items BEGIN
+		   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
+		 END`;
+
+const ITEM_METADATA_COLUMNS_V16 = [
+	'word_count INTEGER',
+	'media_kind TEXT',
+	'duration_seconds INTEGER',
+	'author TEXT',
+	'published_at TEXT',
+	'image_url TEXT',
+	'site_name TEXT',
+	'extraction_state TEXT',
+];
 
 // A status write without a mutation id must not report the previous mutation's
 // id; the mutation path sets mutation_id after updating items.
@@ -438,7 +459,47 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
-			.bind(REQUIRED_SCHEMA_VERSION, String(STATUS_TRIGGER_SCHEMA_VERSION)),
+			.bind(String(CONTENT_VERSION_SCHEMA_VERSION), String(STATUS_TRIGGER_SCHEMA_VERSION)),
+	]);
+
+	// v16: reading-length and saved-item metadata, transcripts fetched on
+	// request, and a partial index for the YouTube duration backfill.
+	for (const column of ITEM_METADATA_COLUMNS_V16) {
+		await addColumnIfMissing(db, itemColumns, 'items', column);
+	}
+	await db.batch([
+		db.prepare(
+			`CREATE TABLE IF NOT EXISTS item_transcripts (
+			   item_id TEXT PRIMARY KEY,
+			   language TEXT,
+			   html TEXT NOT NULL,
+			   text TEXT NOT NULL,
+			   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			   FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
+			 )`,
+		),
+		db.prepare(
+			"CREATE INDEX IF NOT EXISTS idx_items_video_duration_pending ON items(received_at DESC) WHERE media_kind = 'video' AND duration_seconds IS NULL",
+		),
+		// Tag existing YouTube feed items so the duration backfill finds them.
+		// YouTube Atom entries are stored with canonical watch URLs. This runs
+		// before the trigger gains media_kind, so it adds no sync events.
+		db.prepare(
+			`UPDATE items SET media_kind = 'video'
+			 WHERE media_kind IS NULL AND content_pruned_at IS NULL
+			   AND original_url LIKE 'https://www.youtube.com/watch?v=%'
+			   AND feed_key IN (
+			     SELECT feed_key FROM feeds
+			     WHERE source_type = 'rss' AND source_url LIKE 'https://www.youtube.com/feeds/videos.xml?%'
+			   )`,
+		),
+		db.prepare('DROP TRIGGER IF EXISTS trg_sync_article_update'),
+		db.prepare(ARTICLE_UPDATE_SYNC_TRIGGER_V16),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, String(CONTENT_VERSION_SCHEMA_VERSION)),
 	]);
 }
 

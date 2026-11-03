@@ -1,3 +1,4 @@
+import { readingLengthFields } from './reading-length';
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import { isPaywalledHtml } from './paywall';
@@ -50,6 +51,9 @@ interface ArticleSyncRow {
 	is_read: number;
 	is_starred: number;
 	content_pruned_at: string | null;
+	word_count: number | null;
+	media_kind: string | null;
+	duration_seconds: number | null;
 }
 
 interface StatusSyncRow {
@@ -182,7 +186,8 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			        COALESCE(f.custom_title, f.display_name) AS source,
 			        i.subject AS title, ${ARTICLE_AUTHOR_SQL} AS author, i.html_content,
 			        i.text_content, i.original_url, i.received_at,
-			        i.is_read, i.is_starred, i.content_pruned_at
+			        i.is_read, i.is_starred, i.content_pruned_at,
+			        i.word_count, i.media_kind, i.duration_seconds
 			 FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE i.id IN`,
 		),
 		loadRows<StatusSyncRow>(
@@ -228,6 +233,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			isStarred: article.is_starred === 1,
 			isBodyPruned: article.content_pruned_at !== null,
 			isPaywalled: isPaywalledHtml(article.html_content),
+			...readingLengthFields(article),
 		});
 	}
 

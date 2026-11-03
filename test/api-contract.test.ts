@@ -142,23 +142,24 @@ async function library(t: TestContext): Promise<Library> {
 	`);
 	const insertItem = database.prepare(
 		`INSERT INTO items (rowid, id, feed_key, from_name, from_email, subject, html_content, text_content, original_url,
-		  message_id, received_at, is_read, is_starred, content_pruned_at, content_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  message_id, received_at, is_read, is_starred, content_pruned_at, content_version,
+		  word_count, media_kind, duration_seconds)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	insertItem.run(1, ITEM.durable, 'design-weekly', 'Ada Lovelace', null, 'Typography for a durable reader',
 		'<p>Typography decides whether a long read stays readable.</p>', 'Typography decides whether a long read stays readable.',
-		'https://example.com/durable-reader', 'rss-durable', '2026-11-01T09:00:00.000Z', 0, 0, null, 2);
+		'https://example.com/durable-reader', 'rss-durable', '2026-11-01T09:00:00.000Z', 0, 0, null, 2, 2380, 'text', null);
 	insertItem.run(2, ITEM.typography, 'design-weekly', null, null, 'Notes on margins',
 		'<p>Margins give text room.</p>', 'Margins give text room.',
-		'https://example.com/margins', 'rss-margins', '2026-10-30T08:00:00.000Z', 1, 1, null, 1);
+		'https://example.com/margins', 'rss-margins', '2026-10-30T08:00:00.000Z', 1, 1, null, 1, 40, 'video', 1100);
 	insertItem.run(3, ITEM.brief, 'morning-brief', 'Morning Brief', 'brief@news.example.com', 'Your Sunday brief',
 		'<p>This week in brief.</p><div data-component-name="Paywall"><p>Keep reading with a paid subscription.</p></div>', null,
-		null, 'email-brief', '2026-11-01T06:30:00.000Z', 0, 0, null, 0);
+		null, 'email-brief', '2026-11-01T06:30:00.000Z', 0, 0, null, 0, null, null, null);
 	insertItem.run(4, ITEM.stale, 'quiet-blog', null, null, 'Last post for a while',
 		'', 'A short goodbye.', 'https://quiet.example.org/last', 'rss-last', '2025-01-15T00:00:00.000Z', 1, 0,
-		'2025-06-01T00:00:00.000Z', 1);
+		'2025-06-01T00:00:00.000Z', 1, null, null, null);
 	insertItem.run(5, ITEM.removed, 'morning-brief', null, null, 'Retracted', '<p>Gone</p>', null, null, 'email-gone',
-		'2026-10-31T06:30:00.000Z', 0, 0, null, 0);
+		'2026-10-31T06:30:00.000Z', 0, 0, null, 0, null, null, null);
 	database.prepare('DELETE FROM items WHERE id = ?').run(ITEM.removed);
 
 	const db = new SqliteD1(database);

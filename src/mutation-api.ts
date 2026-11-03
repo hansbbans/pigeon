@@ -8,6 +8,7 @@ const MAX_TITLE_LENGTH = 200;
 const MAX_FOLDER_LENGTH = 80;
 // Leave room under the Free-plan D1 query cap for schema checks and recovery.
 const MAX_MUTATION_QUERIES = 40;
+const MAX_REPORTED_WORD_COUNT = 2_000_000;
 
 type MutationKind =
 	| 'set_read'
@@ -17,7 +18,8 @@ type MutationKind =
 	| 'rename_feed'
 	| 'move_feed'
 	| 'unsubscribe_feed'
-	| 'restore_feed';
+	| 'restore_feed'
+	| 'set_word_count';
 
 interface ClientMutation {
 	id: string;
@@ -29,6 +31,7 @@ interface ClientMutation {
 	title?: string;
 	folders?: string[];
 	scope?: 'single' | 'all' | 'above' | 'below' | 'older';
+	wordCount?: number;
 }
 
 interface ItemTarget {
@@ -158,6 +161,18 @@ function validateMutationBatch(value: unknown): ClientMutation[] {
 			}
 			mutation.feedback = raw.feedback;
 		}
+		if (kind === 'set_word_count') {
+			if (itemIds.length !== 1) throw new Error(`mutations[${index}].itemIds must contain one item`);
+			if (
+				typeof raw.wordCount !== 'number'
+				|| !Number.isSafeInteger(raw.wordCount)
+				|| raw.wordCount < 1
+				|| raw.wordCount > MAX_REPORTED_WORD_COUNT
+			) {
+				throw new Error(`mutations[${index}].wordCount must be an integer from 1 to ${MAX_REPORTED_WORD_COUNT}`);
+			}
+			mutation.wordCount = raw.wordCount;
+		}
 		if (kind === 'rename_feed' || kind === 'move_feed' || kind === 'unsubscribe_feed' || kind === 'restore_feed') {
 			mutation.feedId = requiredString(raw.feedId, `mutations[${index}].feedId`, 300);
 		}
@@ -195,6 +210,18 @@ async function mutationStatements(
 		return statusMutationStatements(env, mutation, 'is_starred', mutation.value === true, appliedAt);
 	case 'feedback':
 		return feedbackMutationStatements(env, mutation, appliedAt);
+	case 'set_word_count': {
+		// A client reports the extracted length of a snippet-only article.
+		// Write only on change so a repeat report adds no sync event, and
+		// never for videos, whose length is their duration.
+		const [item] = await resolveItems(env.DB, mutation.itemIds);
+		return [
+			env.DB.prepare(
+				`UPDATE items SET word_count = ?, content_version = content_version + 1
+				 WHERE rowid = ? AND word_count IS NOT ? AND media_kind IS NOT 'video'`,
+			).bind(mutation.wordCount, item.rowid, mutation.wordCount),
+		];
+	}
 	case 'rename_feed': {
 		const feed = await resolveFeed(env.DB, mutation.feedId as string);
 		return [env.DB.prepare('UPDATE feeds SET custom_title = ? WHERE feed_key = ?').bind(mutation.title, feed.feed_key)];
@@ -372,6 +399,7 @@ function isMutationKind(value: string): value is MutationKind {
 		'move_feed',
 		'unsubscribe_feed',
 		'restore_feed',
+		'set_word_count',
 	].includes(value);
 }
 

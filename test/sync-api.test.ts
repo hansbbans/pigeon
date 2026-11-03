@@ -675,7 +675,9 @@ for (const scenario of ['small', 'large', 'expanded']) {
 				statement.bind = (...values) => {
 					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
 					if (sql.startsWith('INSERT INTO items')) {
-						assert.equal(values.length, 92);
+						// Ten columns per row plus two lease bindings, under D1's 100-parameter cap.
+						assert.equal((values.length - 2) % 10, 0);
+						assert.ok(values.length <= 100);
 						groupedInserts += 1;
 					}
 					return bind(...values);
@@ -690,7 +692,7 @@ for (const scenario of ['small', 'large', 'expanded']) {
 			assert.equal(result.outcome, 'success');
 			assert.equal(result.itemsProcessed, 50);
 			assert.ok(limits.queries <= 40);
-			assert.equal(groupedInserts, 5);
+			assert.equal(groupedInserts, 6);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 51);
 			assert.equal((state.database.prepare('SELECT item_count FROM feeds WHERE feed_key = ?').get('design-weekly') as { item_count: number }).item_count, 51);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = ?').get('article') as { count: number }).count, 52);
@@ -1861,5 +1863,97 @@ test('refetching an unchanged RSS item does not log another article change', asy
 	).get() as { html_content: string; content_pruned_at: string | null };
 	assert.equal(restored.content_pruned_at, null);
 	assert.match(restored.html_content, /Edited body/);
+	state.database.close();
+});
+
+test('sync article payloads carry reading length only when the columns are set', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const articlePayloads = async () => {
+		const changes: Array<Record<string, unknown>> = [];
+		let cursor: string | undefined;
+		for (;;) {
+			const body = await (await sync(state.env, cursor, 50)).json() as {
+				changes: Array<Record<string, unknown>>;
+				cursor: string;
+				hasMore: boolean;
+			};
+			changes.push(...body.changes);
+			if (!body.hasMore) break;
+			cursor = body.cursor;
+		}
+		return changes
+			.filter((change) => change.entityType === 'article' && change.operation === 'upsert')
+			.map((change) => change.payload as Record<string, unknown>);
+	};
+
+	const [before] = await articlePayloads();
+	assert.ok(before);
+	for (const key of ['wordCount', 'mediaKind', 'durationSeconds']) assert.equal(key in before, false, key);
+
+	state.database.exec("UPDATE items SET word_count = 500, media_kind = 'text' WHERE rowid = 11");
+	const [after] = await articlePayloads();
+	assert.equal(after?.wordCount, 500);
+	assert.equal(after?.mediaKind, 'text');
+	assert.equal('durationSeconds' in (after ?? {}), false);
+});
+
+function wordCountMutation(id: string, wordCount: unknown, itemIds = ['tag:google.com,2005:reader/item/000000000000000b']) {
+	return new Request('https://pigeon.example/api/v1/mutations', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ mutations: [{ id, kind: 'set_word_count', itemIds, wordCount }] }),
+	});
+}
+
+test('set_word_count writes a changed count once and a repeat adds no sync change', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const row = () => ({ ...(state.database.prepare('SELECT word_count, content_version FROM items WHERE rowid = 11').get() as object) });
+	const articleEvents = () => (state.database
+		.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = 'article'")
+		.get() as { count: number }).count;
+	const resultStatus = async (response: Response) =>
+		(await response.json() as { results: Array<{ status: string }> }).results[0].status;
+
+	const eventsBefore = articleEvents();
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-1', 1200), state.env)), 'applied');
+	assert.deepEqual(row(), { word_count: 1200, content_version: 1 });
+	assert.equal(articleEvents(), eventsBefore + 1);
+
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-2', 1200), state.env)), 'applied');
+	assert.deepEqual(row(), { word_count: 1200, content_version: 1 });
+	assert.equal(articleEvents(), eventsBefore + 1);
+
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-1', 1200), state.env)), 'already_applied');
+	assert.equal(
+		(state.database.prepare("SELECT COUNT(*) AS count FROM item_statuses WHERE mutation_id LIKE 'wc-%'").get() as { count: number }).count,
+		0,
+	);
+	state.database.close();
+});
+
+test('set_word_count rejects invalid counts and multi-item targets', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	for (const value of [undefined, 0, 2.5, 2_000_001, '1200']) {
+		const response = await handleMutationBatch(wordCountMutation(`bad-${String(value)}`, value), state.env);
+		assert.equal(response.status, 400, String(value));
+	}
+	const twoItems = await handleMutationBatch(
+		wordCountMutation('bad-two', 1200, ['tag:google.com,2005:reader/item/000000000000000b', 'tag:google.com,2005:reader/item/000000000000000c']),
+		state.env,
+	);
+	assert.equal(twoItems.status, 400);
+	state.database.close();
+});
+
+test('set_word_count leaves video items alone', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	state.database.exec("UPDATE items SET media_kind = 'video' WHERE rowid = 11");
+	const response = await handleMutationBatch(wordCountMutation('wc-video', 1200), state.env);
+	assert.equal((await response.json() as { results: Array<{ status: string }> }).results[0].status, 'applied');
+	assert.equal((state.database.prepare('SELECT word_count FROM items WHERE rowid = 11').get() as { word_count: number | null }).word_count, null);
 	state.database.close();
 });

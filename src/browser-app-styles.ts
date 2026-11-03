@@ -682,6 +682,9 @@ ${iconVariables()}
 
       .article-source { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
       .article-time { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+      .article-length { flex: none; margin-left: auto; }
+      .article-length + .article-time { margin-left: 0; }
+      .article-length + .article-time::before { content: '·'; margin-right: 0.5rem; }
 
       .article-title { position: relative; display: block; font-size: 0.92rem; font-weight: 600; line-height: 1.3; letter-spacing: -0.003em; }
 

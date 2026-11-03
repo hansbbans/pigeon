@@ -150,7 +150,7 @@ class SqliteD1Database {
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
 			);
-			INSERT INTO _meta (key, value) VALUES ('schema_version', '15');
+			INSERT INTO _meta (key, value) VALUES ('schema_version', '16');
 			CREATE TABLE refresh_activity (
 				id TEXT PRIMARY KEY,
 				feed_key TEXT NOT NULL,
@@ -174,6 +174,8 @@ class SqliteD1Database {
 				html_content TEXT NOT NULL,
 				text_content TEXT,
 				original_url TEXT,
+				word_count INTEGER,
+				media_kind TEXT,
 				message_id TEXT UNIQUE,
 				received_at TEXT NOT NULL,
 				is_read INTEGER DEFAULT 0,

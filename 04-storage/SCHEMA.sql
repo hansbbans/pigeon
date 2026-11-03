@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v15
+-- D1 Schema v16
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '15');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '16');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -86,10 +86,37 @@ CREATE TABLE IF NOT EXISTS items (
   content_pruned_at TEXT,
   is_read INTEGER DEFAULT 0,
   is_starred INTEGER DEFAULT 0,
-  -- Bumped by every writer that changes html_content, text_content, or
-  -- content_pruned_at; read and star changes leave it alone.
+  -- Bumped by every writer that changes html_content, text_content,
+  -- content_pruned_at, or a reported word count or fetched duration; read
+  -- and star changes leave it alone.
   content_version INTEGER NOT NULL DEFAULT 0,
+  -- v16 reading-length and saved-item metadata (all optional). word_count is
+  -- set only when it beats the body: a reader-mode report or a saved page;
+  -- otherwise clients estimate from the body they hold.
+  word_count INTEGER,
+  media_kind TEXT,
+  duration_seconds INTEGER,
+  author TEXT,
+  published_at TEXT,
+  image_url TEXT,
+  site_name TEXT,
+  extraction_state TEXT,
   FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
+);
+
+-- Videos still waiting for the v16 cron duration backfill.
+CREATE INDEX IF NOT EXISTS idx_items_video_duration_pending
+  ON items(received_at DESC)
+  WHERE media_kind = 'video' AND duration_seconds IS NULL;
+
+-- YouTube transcripts, fetched only on request (v16).
+CREATE TABLE IF NOT EXISTS item_transcripts (
+  item_id TEXT PRIMARY KEY,
+  language TEXT,
+  html TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_feed_key_date ON items(feed_key, received_at DESC);
@@ -261,7 +288,8 @@ BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_sync_article_update
-AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at ON items
+AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at,
+  word_count, media_kind, duration_seconds, author, published_at, image_url, site_name, extraction_state ON items
 BEGIN
   INSERT INTO sync_changes (entity_type, entity_id) VALUES ('article', NEW.id);
 END;

@@ -28,7 +28,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '15',
+		schemaVersion: '16',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,
@@ -97,6 +97,14 @@ export function createCurrentSchemaState(): SchemaState {
 			'is_read',
 			'is_starred',
 			'content_version',
+			'word_count',
+			'media_kind',
+			'duration_seconds',
+			'author',
+			'published_at',
+			'image_url',
+			'site_name',
+			'extraction_state',
 		]),
 		operations: [],
 	};
@@ -135,7 +143,19 @@ export function createLegacySchemaState(): SchemaState {
 	}
 	state.itemColumns.delete('original_url');
 	state.itemColumns.delete('content_pruned_at');
-	state.itemColumns.delete('content_version');
+	for (const column of [
+		'content_version',
+		'word_count',
+		'media_kind',
+		'duration_seconds',
+		'author',
+		'published_at',
+		'image_url',
+		'site_name',
+		'extraction_state',
+	]) {
+		state.itemColumns.delete(column);
+	}
 	return state;
 }
 

@@ -21,6 +21,7 @@ import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 import { decodeHtmlTextEntities } from './preview-text';
 import type { Env } from './types';
+import { mediaKindForFeedItem } from './youtube';
 
 export interface FeedToFetch {
 	feed_key: string;
@@ -126,8 +127,8 @@ class RefreshFailure extends Error {
 
 const MAX_ITEMS_PER_FETCH = 50;
 const MAX_CONTENT_SIZE = 900_000;
-// Nine item columns plus two ownership bindings stay below D1's 100-parameter limit.
-const MAX_ITEMS_PER_INSERT = 10;
+// Ten item columns plus two ownership bindings stay below D1's 100-parameter limit.
+const MAX_ITEMS_PER_INSERT = 9;
 /** Maximum stored plain-text excerpt used by topic matching. */
 export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
 /** Maximum HTML source inspected when deriving a plain-text excerpt. */
@@ -176,13 +177,13 @@ export async function buildRssItemStatements(
 	let bufferedSql = '';
 	const flushRows = () => {
 		if (bufferedRows.length === 0) return;
-		const placeholders = bufferedRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+		const placeholders = bufferedRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
 		const source = options.leaseToken
-			? `SELECT column1, column2, column3, column4, column5, column6, column7, column8, column9
+			? `SELECT column1, column2, column3, column4, column5, column6, column7, column8, column9, column10
 			   FROM (VALUES ${placeholders})
 			   WHERE EXISTS (SELECT 1 FROM feeds WHERE feed_key = ? AND refresh_lease_token = ?)`
 			: `VALUES ${placeholders}`;
-		const sql = bufferedSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', source);
+		const sql = bufferedSql.replace('VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', source);
 		const values = bufferedRows.flat();
 		if (options.leaseToken) values.push(feedKey, options.leaseToken);
 		statements.push(db.prepare(sql).bind(...values));
@@ -213,8 +214,9 @@ export async function buildRssItemStatements(
 		const insertSql = options.updateExisting
 			? `INSERT INTO items (
 					id, message_id, feed_key, subject,
-					from_name, received_at, html_content, text_content, original_url
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+					from_name, received_at, html_content, text_content, original_url,
+					media_kind
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(message_id) DO UPDATE SET
 						from_name = excluded.from_name,
 						from_email = NULL,
@@ -222,6 +224,14 @@ export async function buildRssItemStatements(
 						text_content = excluded.text_content,
 						content_pruned_at = NULL,
 						content_version = items.content_version + 1,
+						-- A body change drops a client-reported count so clients
+						-- estimate from the new body again.
+						word_count = CASE
+							WHEN items.html_content IS NOT excluded.html_content THEN NULL
+							ELSE items.word_count
+						END,
+						-- An item's kind comes from its feed and never changes.
+						media_kind = COALESCE(items.media_kind, excluded.media_kind),
 					original_url = CASE
 							WHEN excluded.original_url IS NOT NULL
 							  AND (
@@ -250,8 +260,9 @@ export async function buildRssItemStatements(
 					)`
 			: `INSERT OR IGNORE INTO items (
 					id, message_id, feed_key, subject,
-					from_name, received_at, html_content, text_content, original_url
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+					from_name, received_at, html_content, text_content, original_url,
+					media_kind
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 		const values = [
 			identity.id,
@@ -263,6 +274,7 @@ export async function buildRssItemStatements(
 			content,
 			textContent,
 			boundedStoredUrl(originalUrl),
+			mediaKindForFeedItem(parsed.sourceUrl, originalUrl),
 		];
 		if (bufferedRows.length === MAX_ITEMS_PER_INSERT) flushRows();
 		bufferedSql = insertSql;

@@ -115,7 +115,9 @@
 				"isRead": false,
 				"isStarred": false,
 				"isBodyPruned": false,
-				"isPaywalled": false
+				"isPaywalled": false,
+				"wordCount": 2380,
+				"mediaKind": "text"
 			}
 		},
 		{
@@ -153,7 +155,10 @@
 				"isRead": true,
 				"isStarred": true,
 				"isBodyPruned": false,
-				"isPaywalled": false
+				"isPaywalled": false,
+				"wordCount": 40,
+				"mediaKind": "video",
+				"durationSeconds": 1100
 			}
 		},
 		{
