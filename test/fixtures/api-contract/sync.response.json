@@ -16,6 +16,7 @@
 				"siteURL": "https://example.com",
 				"iconURL": "https://example.com/icon.png",
 				"isActive": true,
+				"sourceType": "rss",
 				"folders": [
 					"Design"
 				]
@@ -35,6 +36,7 @@
 				"siteURL": null,
 				"iconURL": null,
 				"isActive": true,
+				"sourceType": "email",
 				"folders": []
 			}
 		},
@@ -52,6 +54,7 @@
 				"siteURL": "https://quiet.example.org",
 				"iconURL": null,
 				"isActive": true,
+				"sourceType": "rss",
 				"folders": [
 					"Blogs"
 				]
@@ -71,6 +74,7 @@
 				"siteURL": "https://example.com",
 				"iconURL": "https://example.com/icon.png",
 				"isActive": true,
+				"sourceType": "rss",
 				"folders": [
 					"Design"
 				]
@@ -90,6 +94,7 @@
 				"siteURL": "https://quiet.example.org",
 				"iconURL": null,
 				"isActive": true,
+				"sourceType": "rss",
 				"folders": [
 					"Blogs"
 				]

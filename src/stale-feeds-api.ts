@@ -34,7 +34,7 @@ async function listStaleFeeds(request: Request, env: Env): Promise<Response> {
 		        f.last_success_at, f.last_http_status, f.stale_archived
 		   FROM feeds f
 		   LEFT JOIN items i ON i.feed_key = f.feed_key
-		  WHERE f.is_active = 1
+		  WHERE f.is_active = 1 AND f.source_type <> 'saved'
 		  GROUP BY f.feed_key
 		 HAVING datetime(COALESCE(MAX(i.received_at), f.first_seen_at)) <= datetime(?)
 		     OR f.stale_archived = 1

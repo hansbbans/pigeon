@@ -7,6 +7,7 @@ import { handleImageProxy } from './image-proxy';
 import { handlePersonalization } from './personalization-api';
 import { handleStaleFeeds } from './stale-feeds-api';
 import { handleBrowserArticles } from './browser-library-api';
+import { handleSavedRequest } from './saved-items';
 import { handleBrowserReaderSource, handleBrowserReadwiseSave } from './browser-reading-api';
 import type { Env } from './types';
 import { handleBrowserPush } from './web-push';
@@ -63,6 +64,7 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 		return handleBrowserArticles(request, env);
 	}
 	if (path === '/api/v1/browser/push/subscription') return handleBrowserPush(request, env);
+	if (path === '/api/v1/saved' || path.startsWith('/api/v1/saved/')) return handleSavedRequest(request, env);
 
 	return new Response('Not found', { status: 404 });
 }

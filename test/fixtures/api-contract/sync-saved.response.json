@@ -1,0 +1,61 @@
+{
+	"cursor": "v1:23",
+	"hasMore": false,
+	"changes": [
+		{
+			"sequence": 17,
+			"entityType": "feed",
+			"entityId": "pigeon:saved",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "pigeon:saved",
+				"streamId": "feed/4",
+				"title": "Read It Later",
+				"feedURL": null,
+				"siteURL": null,
+				"iconURL": null,
+				"isActive": true,
+				"sourceType": "saved",
+				"folders": []
+			}
+		},
+		{
+			"sequence": 20,
+			"entityType": "article",
+			"entityId": "abde2a43-22dc-8734-9049-5cd424e03007",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "abde2a43-22dc-8734-9049-5cd424e03007",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000005",
+				"feedKey": "pigeon:saved",
+				"source": "Read It Later",
+				"title": "Slow software, and why it lasts",
+				"author": "Ada Lovelace",
+				"html": "<article><h1>Slow software</h1><p>Software that waits for you.</p></article>",
+				"text": null,
+				"originalURL": "https://example.com/essays/slow-software",
+				"receivedAt": "2026-11-01T12:00:00.000Z",
+				"isRead": false,
+				"isStarred": false,
+				"isBodyPruned": false,
+				"isPaywalled": false,
+				"wordCount": 2650,
+				"mediaKind": "text",
+				"extractionState": "done",
+				"publishedAt": "2026-10-28T08:30:00.000Z",
+				"imageURL": "https://example.com/images/slow.jpg",
+				"siteName": "Example Essays"
+			}
+		},
+		{
+			"sequence": 23,
+			"entityType": "article",
+			"entityId": "7e2c62ab-a567-8d88-8bbf-f2a458af63eb",
+			"operation": "delete",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": null
+		}
+	]
+}

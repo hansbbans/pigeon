@@ -617,7 +617,12 @@ async function loadCandidateExcerpts(env: Env, itemIds: string[]): Promise<Map<s
 	return excerpts;
 }
 
+/** Every view leaves out Read It Later items: they live only in their own section. */
 function candidateWhere(view: RecommendationView): string {
+	return `AND f.source_type <> 'saved' ${candidateViewWhere(view)}`;
+}
+
+function candidateViewWhere(view: RecommendationView): string {
 	return view === 'for-you'
 		? `AND i.is_read = 0
 		   AND NOT EXISTS (
@@ -659,7 +664,7 @@ async function loadRecommendationCandidates(
 	const feedRows = await env.DB.prepare(
 		`SELECT feed_key
 		   FROM feeds
-		  WHERE is_active = 1
+		  WHERE is_active = 1 AND source_type <> 'saved'
 		  ORDER BY COALESCE(last_item_at, first_seen_at, '') DESC, feed_key
 		  LIMIT ?`,
 	)

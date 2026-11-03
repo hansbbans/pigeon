@@ -64,3 +64,8 @@ export async function createCanonicalItemUuid(params: {
 		.join('');
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
+
+/** The long-form Google Reader item ID the sync API returns as `readerId`. */
+export function googleReaderItemId(rowid: number): string {
+	return `${GOOGLE_ITEM_PREFIX}${rowid.toString(16).padStart(16, '0')}`;
+}

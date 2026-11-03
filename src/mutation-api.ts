@@ -1,4 +1,5 @@
 import { parseGoogleReaderItemRowid } from './item-identity';
+import { SAVED_FEED_KEY } from './saved-items';
 import type { Env } from './types';
 import { apiTimestamp } from './timestamps';
 
@@ -19,7 +20,8 @@ type MutationKind =
 	| 'move_feed'
 	| 'unsubscribe_feed'
 	| 'restore_feed'
-	| 'set_word_count';
+	| 'set_word_count'
+	| 'remove_saved';
 
 interface ClientMutation {
 	id: string;
@@ -84,7 +86,7 @@ export async function handleMutationBatch(request: Request, env: Env): Promise<R
 		// Every action resolves one target query, commits an atomic batch, and
 		// may need one receipt lookup after a concurrent retry or failed write.
 		const worstCaseQueries = mutation.kind === 'set_read' || mutation.kind === 'set_read_batch'
-			|| mutation.kind === 'set_starred' || mutation.kind === 'move_feed' ? 6 : 4;
+			|| mutation.kind === 'set_starred' || mutation.kind === 'move_feed' || mutation.kind === 'remove_saved' ? 6 : 4;
 		if (budgetReached || queryCount + worstCaseQueries > MAX_MUTATION_QUERIES) {
 			budgetReached = true;
 			results.push({ mutationId: mutation.id, status: 'failed', error: 'Request query budget reached; retry this mutation' });
@@ -161,6 +163,9 @@ function validateMutationBatch(value: unknown): ClientMutation[] {
 			}
 			mutation.feedback = raw.feedback;
 		}
+		if (kind === 'remove_saved' && itemIds.length === 0) {
+			throw new Error(`mutations[${index}].itemIds must not be empty`);
+		}
 		if (kind === 'set_word_count') {
 			if (itemIds.length !== 1) throw new Error(`mutations[${index}].itemIds must contain one item`);
 			if (
@@ -222,6 +227,8 @@ async function mutationStatements(
 			).bind(mutation.wordCount, item.rowid, mutation.wordCount),
 		];
 	}
+	case 'remove_saved':
+		return removeSavedStatements(env, mutation);
 	case 'rename_feed': {
 		const feed = await resolveFeed(env.DB, mutation.feedId as string);
 		return [env.DB.prepare('UPDATE feeds SET custom_title = ? WHERE feed_key = ?').bind(mutation.title, feed.feed_key)];
@@ -279,6 +286,34 @@ async function statusMutationStatements(
 			itemId: item.id,
 			feedKey: item.feed_key,
 		})))),
+	];
+}
+
+/**
+ * Hard-deletes Read It Later items. The items delete trigger appends an
+ * article `delete` event to sync_changes, which reaches every client; the
+ * statuses and transcripts cascade. The item's engagement events go too:
+ * they reference the row without a cascade. Items already gone are skipped,
+ * so a client retrying under a new mutation id still succeeds.
+ */
+async function removeSavedStatements(env: Env, mutation: ClientMutation): Promise<D1PreparedStatement[]> {
+	const identities = mutation.itemIds.map((id) => ({ id, rowid: parseGoogleReaderItemRowid(id) }));
+	const { results } = await env.DB.prepare(
+		`SELECT items.id, items.feed_key
+		 FROM json_each(?) AS requested
+		 JOIN items ON
+		   (json_extract(requested.value, '$.rowid') IS NOT NULL
+		    AND items.rowid = json_extract(requested.value, '$.rowid'))
+		   OR (json_extract(requested.value, '$.rowid') IS NULL
+		       AND items.id = json_extract(requested.value, '$.id'))`,
+	).bind(JSON.stringify(identities)).all<{ id: string; feed_key: string }>();
+	const notSaved = results.find((item) => item.feed_key !== SAVED_FEED_KEY);
+	if (notSaved) throw new Error(`Item ${notSaved.id} is not a saved item`);
+	if (results.length === 0) return [];
+	const ids = JSON.stringify([...new Set(results.map((item) => item.id))]);
+	return [
+		env.DB.prepare('DELETE FROM engagement_events WHERE item_id IN (SELECT value FROM json_each(?))').bind(ids),
+		env.DB.prepare('DELETE FROM items WHERE feed_key = ? AND id IN (SELECT value FROM json_each(?))').bind(SAVED_FEED_KEY, ids),
 	];
 }
 
@@ -400,6 +435,7 @@ function isMutationKind(value: string): value is MutationKind {
 		'unsubscribe_feed',
 		'restore_feed',
 		'set_word_count',
+		'remove_saved',
 	].includes(value);
 }
 

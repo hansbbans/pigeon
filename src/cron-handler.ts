@@ -317,12 +317,14 @@ function utcDay(now: Date): string {
 	return now.toISOString().slice(0, 10);
 }
 
+// Read It Later items are kept whole, read or not: the saved feed never enters
+// retention, so its bodies are never pruned.
 async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | null, budget?: RefreshQueryBudget): Promise<MaintenanceFeedRow[]> {
 	const limit = MAINTENANCE_FEED_BATCH_SIZE + 1;
 	if (cursorFeedKey !== null) {
 		reserveMaintenanceStatements(budget, 1);
 		const { results } = await db
-			.prepare('SELECT feed_key FROM feeds WHERE feed_key > ? ORDER BY feed_key LIMIT ?')
+			.prepare(`SELECT feed_key FROM feeds WHERE feed_key > ? AND source_type <> 'saved' ORDER BY feed_key LIMIT ?`)
 			.bind(cursorFeedKey, limit)
 			.all<MaintenanceFeedRow>();
 		if (results.length > 0) {
@@ -332,7 +334,7 @@ async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | nu
 
 	reserveMaintenanceStatements(budget, 1);
 	const { results } = await db
-		.prepare('SELECT feed_key FROM feeds ORDER BY feed_key LIMIT ?')
+		.prepare(`SELECT feed_key FROM feeds WHERE source_type <> 'saved' ORDER BY feed_key LIMIT ?`)
 		.bind(limit)
 		.all<MaintenanceFeedRow>();
 	return results;

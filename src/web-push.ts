@@ -136,7 +136,7 @@ export async function handleBrowserPush(request: Request, env: Env): Promise<Res
   if (p256dh.length > 100 || auth.length > 32 || unbase64url(auth).length !== 16 || unbase64url(p256dh).length !== 65 || unbase64url(p256dh)[0] !== 4) throw new Error();
   await crypto.subtle.importKey('raw', unbase64url(p256dh), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
  } catch { return json({ error: 'Invalid subscription keys' }, 400); }
- const found = await env.DB.prepare('SELECT COUNT(*) AS count FROM feeds WHERE is_active = 1 AND feed_key IN (SELECT value FROM json_each(?))').bind(JSON.stringify(feedKeys)).first<{ count: number }>();
+ const found = await env.DB.prepare("SELECT COUNT(*) AS count FROM feeds WHERE is_active = 1 AND source_type <> 'saved' AND feed_key IN (SELECT value FROM json_each(?))").bind(JSON.stringify(feedKeys)).first<{ count: number }>();
  if (found?.count !== feedKeys.length) return json({ error: 'Unknown feed' }, 400);
  await env.DB.prepare(PUSH_SCHEMA).run();
  const now = new Date().toISOString();
@@ -177,7 +177,7 @@ export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBud
    FROM sync_changes c JOIN items i ON i.id = c.entity_id JOIN feeds f ON f.feed_key = i.feed_key
    WHERE c.entity_type = 'article' AND c.operation = 'upsert' AND c.sequence > ? AND c.sequence <= ?
     AND c.sequence = (SELECT MIN(first.sequence) FROM sync_changes first WHERE first.entity_type = 'article' AND first.entity_id = c.entity_id)
-    AND datetime(i.created_at) >= datetime(?) AND f.is_active = 1 AND i.is_read = 0
+    AND datetime(i.created_at) >= datetime(?) AND f.is_active = 1 AND f.source_type <> 'saved' AND i.is_read = 0
     AND i.feed_key IN (SELECT value FROM json_each(?)) ORDER BY c.sequence DESC LIMIT 1`)
    .bind(subscription.cursor, head, new Date(now.getTime() - 24 * 3600_000).toISOString(), subscription.feed_keys).first<{ row_id: number; subject: string; feed_key: string; feed_title: string }>();
   // Advance before delivery: provider/network failures cannot create repeat or catch-up floods.
