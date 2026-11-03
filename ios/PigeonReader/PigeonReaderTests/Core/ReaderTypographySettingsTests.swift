@@ -119,4 +119,21 @@ struct ReaderTypographySettingsTests {
 		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .sepia, isCompactReader: true).usesPreferredColorScheme)
 		#expect(ReaderThemeColorSchemePlacement.resolve(theme: .system, isCompactReader: true).usesPreferredColorScheme == false)
 	}
+
+	@Test
+	func showReadingTimeDefaultsOnAndPersists() throws {
+		let suiteName = "pigeon-reader-reading-time-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let settings = ReaderTypographySettings(defaults: defaults)
+		#expect(settings.showsReadingTime)
+
+		settings.showsReadingTime = false
+		#expect(ReaderTypographySettings(defaults: defaults).showsReadingTime == false)
+		// Resetting the reading controls only touches typography.
+		settings.reset()
+		#expect(settings.showsReadingTime == false)
+		settings.showsReadingTime = true
+		#expect(ReaderTypographySettings(defaults: defaults).showsReadingTime)
+	}
 }

@@ -148,6 +148,9 @@ struct SettingsView: View {
 							Text(behavior.title).tag(behavior)
 						}
 					}
+					Toggle("Show reading time", isOn: $typography.showsReadingTime)
+						.accessibilityHint("Shows the length of articles and videos over 10 minutes.")
+						.accessibilityIdentifier("show-reading-time-toggle")
 					LabeledContent("Text size") {
 						Text(typography.textScale, format: .percent.precision(.fractionLength(0)))
 							.foregroundStyle(.secondary)

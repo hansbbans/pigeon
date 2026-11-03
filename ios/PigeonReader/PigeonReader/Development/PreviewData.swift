@@ -286,7 +286,8 @@ enum PreviewData {
 			confidence: 0.82,
 			sampleCount: 14,
 			explanation: "You often finish and save stories from this source.",
-			learningState: "High confidence"
+			learningState: "High confidence",
+			length: ArticleLength(wordCount: 2856, mediaKind: "text", durationSeconds: nil)
 		),
 		Recommendation(
 			id: "preview-2",
@@ -347,6 +348,7 @@ enum PreviewData {
 			sampleCount: 7,
 			explanation: "A recent video from a source you follow.",
 			learningState: "Learning your interests",
+			length: ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 1100),
 		),
 	]
 

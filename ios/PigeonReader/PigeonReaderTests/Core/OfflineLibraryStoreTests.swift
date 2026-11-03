@@ -247,6 +247,51 @@ struct OfflineLibraryStoreTests {
 		#expect(article.isPaywalled == true)
 	}
 
+	@Test func syncedReadingLengthSurvivesLaterChangesWithoutIt() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveArticles([makeArticle(html: "<p>Old</p>")], collectionID: "feed/7", accountID: "account-a")
+		func page(cursor: Int, extra: String) throws -> IncrementalSyncPage {
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:\(cursor)",
+				  "hasMore": false,
+				  "changes": [
+				    {
+				      "sequence": \(cursor),
+				      "entityType": "article",
+				      "entityId": "article-1",
+				      "operation": "upsert",
+				      "changedAt": "2026-11-03T12:00:00.000Z",
+				      "payload": {
+				        "id": "article-1",
+				        "readerId": "reader-1",
+				        "feedKey": "daily",
+				        "source": "Daily",
+				        "title": "A video",
+				        "html": "<p>Description</p>",
+				        "receivedAt": "2026-11-03T11:00:00.000Z",
+				        "isRead": false,
+				        "isStarred": false,
+				        "isBodyPruned": false\(extra)
+				      }
+				    }
+				  ]
+				}
+				"""
+			)
+		}
+
+		try await store.apply(page(cursor: 2, extra: #", "wordCount": 500, "mediaKind": "video", "durationSeconds": 1100"#), accountID: "account-a")
+		var article = try #require(try await store.loadSnapshot(accountID: "account-a").articlesByCollection["feed/7"]?.first)
+		#expect(article.length == ArticleLength(wordCount: 500, mediaKind: "video", durationSeconds: 1100))
+
+		// An older server (or a change that carries no length) keeps what was known.
+		try await store.apply(page(cursor: 3, extra: ""), accountID: "account-a")
+		article = try #require(try await store.loadSnapshot(accountID: "account-a").articlesByCollection["feed/7"]?.first)
+		#expect(article.length?.durationSeconds == 1100)
+	}
+
 	@Test func scopedSnapshotIsolatesMembershipsAndIncludesRequestedEmptyCollections() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let navigation = ReaderNavigationState(

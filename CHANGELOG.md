@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Added
 
+- Articles and videos longer than 10 minutes show their length ("12 min read", "1 hr 5 min video") on list rows, the Front Page and the article header, on iOS and web. Settings → Reading → Show reading time turns it off. Text length is estimated from the article; for a feed that sends only a teaser, opening it in reader mode records the full article's length. YouTube durations are fetched hourly. The Worker moves to schema v16.
 - Newsletters that arrive as a paywalled teaser (Substack, beehiiv, and Ghost paid posts sent to a free subscriber) carry a Paywall label beside the title in the iOS list, Front Page, and article header, and in the web reader. Full copies sent to paying subscribers are not labeled.
 - In the web reader, right-click a story in the list to mark everything above it (or below it) as read without opening it. It follows the list's current feed, search, filter and sort, includes stories not loaded yet, and offers Undo. With the keyboard, focus a story and press Shift+F10, then use the arrow keys and Enter.
 

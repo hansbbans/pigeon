@@ -167,6 +167,7 @@ struct FrontPageStoryView: View {
 	let select: () -> Void
 
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.showsReadingTime) private var showsReadingTime
 	@Environment(\.displayScale) private var displayScale
 	@State private var image: CGImage?
 	@State private var imageRequestID: String?
@@ -206,6 +207,9 @@ struct FrontPageStoryView: View {
 				}
 				HStack(spacing: 6) {
 					Text(article.receivedAt, format: .relative(presentation: .named))
+					if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
+						Text("· \(readingLength)")
+					}
 					if article.isStarred {
 						Image(systemName: "star.fill")
 							.foregroundStyle(.orange)
@@ -240,6 +244,7 @@ struct FrontPageStoryView: View {
 		var parts = [article.isRead ? "Read" : "Unread"]
 		if article.isStarred { parts.append("Starred") }
 		if article.isPaywalled == true { parts.append(PaywallLabel.accessibilityValue) }
+		if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) { parts.append(readingLength) }
 		return parts.joined(separator: ", ")
 	}
 

@@ -436,6 +436,52 @@ struct ReaderAppModelTests {
 			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
 		}
 
+	@Test func readerViewReportsASnippetsRealLengthOnceAndNeverForVideosOrFeedFallbacks() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let extractor = ScriptedReaderViewExtractor(
+			urlDocument: try ReaderViewDocument(contentHTML: "<p>Full article</p>", wordCount: 3000, extractor: .defuddle),
+			htmlDocument: try ReaderViewDocument(contentHTML: "<p>From feed</p>", wordCount: 4000),
+		)
+		let model = try makeModel(
+			httpClient: MockHTTPClient(shouldFail: true),
+			readerViewExtractor: extractor,
+			offlineStore: store,
+			offlineSynchronizationEnabled: false,
+		)
+		let accountID = try #require(model.session).storageIdentity
+		func pendingReports() async throws -> [OfflineMutation] {
+			try await store.pendingMutations(accountID: accountID, limit: 100).map(\.mutation).filter { $0.kind == .setWordCount }
+		}
+		func waitForReports(_ count: Int) async throws {
+			for _ in 0..<200 {
+				if try await pendingReports().count >= count { return }
+				try await Task.sleep(for: .milliseconds(5))
+			}
+		}
+
+		let snippet = makeArticle(id: "snippet", html: "<p>Just the first lines.</p>", originalURL: URL(string: "https://example.com/full"))
+		_ = try await model.loadReaderView(for: snippet)
+		try await waitForReports(1)
+		var reports = try await pendingReports()
+		#expect(reports.count == 1)
+		#expect(reports.first?.itemIds == [snippet.readerId])
+		#expect(reports.first?.wordCount == 3000)
+
+		// A second open (even past the document cache) does not report again.
+		_ = try await model.loadReaderView(for: makeArticle(id: "snippet", html: "<p>Just the first lines, edited.</p>", originalURL: URL(string: "https://example.com/full")))
+
+		var video = makeArticle(id: "video", html: "<p>Description</p>", originalURL: URL(string: "https://example.com/watch"))
+		video.length = ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 1100)
+		_ = try await model.loadReaderView(for: video)
+
+		extractor.urlError = ReaderViewError.httpStatus(404)
+		_ = try await model.loadReaderView(for: makeArticle(id: "expired", html: "<p>Feed body</p>", originalURL: URL(string: "https://example.com/gone")))
+
+		try await Task.sleep(for: .milliseconds(50))
+		reports = try await pendingReports()
+		#expect(reports.count == 1)
+	}
+
 	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
 		let extractor = ScriptedReaderViewExtractor(
 			urlError: ReaderViewError.httpStatus(404),
@@ -11698,13 +11744,15 @@ private actor ScriptedSearchOfflineLibraryStore: OfflineLibraryStoring {
 @MainActor
 private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 	var urlError: Error?
+	var urlDocument: ReaderViewDocument?
 	var htmlDocument: ReaderViewDocument?
 	var htmlError: Error?
 	private(set) var extractedHTML: String?
 	private(set) var htmlExtractionCount = 0
 
-	init(urlError: Error? = nil, htmlDocument: ReaderViewDocument? = nil, htmlError: Error? = nil) {
+	init(urlError: Error? = nil, urlDocument: ReaderViewDocument? = nil, htmlDocument: ReaderViewDocument? = nil, htmlError: Error? = nil) {
 		self.urlError = urlError
+		self.urlDocument = urlDocument
 		self.htmlDocument = htmlDocument
 		self.htmlError = htmlError
 	}
@@ -11713,7 +11761,7 @@ private final class ScriptedReaderViewExtractor: ReaderViewExtracting {
 		if let urlError {
 			throw urlError
 		}
-		return try ReaderViewDocument(contentHTML: "<p>From URL</p>")
+		return try urlDocument ?? ReaderViewDocument(contentHTML: "<p>From URL</p>")
 	}
 
 	func extract(html: String, title: String?, baseURL: URL?) async throws -> ReaderViewDocument {

@@ -39,6 +39,10 @@ struct APIContractTests {
 		#expect(article.payload?.author == "Ada Lovelace")
 		#expect(article.payload?.receivedAt == Self.date("2026-11-01T09:00:00Z"))
 		#expect(article.payload?.originalURL?.host() == "example.com")
+		#expect(article.payload?.length == ArticleLength(wordCount: 2380, mediaKind: "text", durationSeconds: nil))
+		let video = try #require(page.changes.first { $0.payload?.length?.isVideo == true }?.payload)
+		#expect(video.length?.durationSeconds == 1100)
+		#expect(page.changes.contains { $0.entityType == .article && $0.payload != nil && $0.payload?.length == nil })
 		let paywalled = try #require(page.changes.first { $0.payload?.isPaywalled == true }?.payload)
 		#expect(paywalled.feedKey == "morning-brief")
 		#expect(page.changes.contains { $0.payload?.isBodyPruned == true })
@@ -65,6 +69,7 @@ struct APIContractTests {
 			OfflineMutation(id: "8f0e1b2c-0005-4a00-8000-000000000005", kind: .renameFeed, feedId: "feed/1", title: "Design Weekly Digest"),
 			OfflineMutation(id: "8f0e1b2c-0006-4a00-8000-000000000006", kind: .moveFeed, feedId: "feed/2", folders: ["News"]),
 			OfflineMutation(id: "8f0e1b2c-0007-4a00-8000-000000000007", kind: .unsubscribeFeed, feedId: "feed/3"),
+			OfflineMutation(id: "8f0e1b2c-0008-4a00-8000-000000000008", kind: .setWordCount, itemIds: [thirdItem], wordCount: 2600),
 		]
 
 		let applied = try await client.sendMutations(mutations)
@@ -238,6 +243,10 @@ struct APIContractTests {
 		#expect(starred.author == nil)
 		#expect(byID["4"]?.isBodyPruned == true)
 		#expect(byID["3"]?.alternate.isEmpty == true)
+		#expect(byID["1"]?.length == ArticleLength(wordCount: 2380, mediaKind: "text", durationSeconds: nil))
+		#expect(starred.length?.isVideo == true)
+		#expect(starred.length?.durationSeconds == 1100)
+		#expect(byID["3"]?.length == nil)
 	}
 
 	@Test func quickAddFixtureDecodes() async throws {

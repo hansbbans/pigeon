@@ -142,6 +142,8 @@ final class ReaderAppModel {
 	}
 
 	var session: PigeonSession?
+	/// Articles whose reader-mode word count was already reported this launch.
+	private var reportedWordCountIDs: Set<String> = []
 	var serverURLText = ""
 	var password = ""
 	private(set) var selectedNavigationID = ReaderSection.forYou.rawValue
@@ -2249,6 +2251,7 @@ final class ReaderAppModel {
 				try Task.checkCancellation()
 				guard generation == libraryGeneration, accountID == session?.storageIdentity else { throw CancellationError() }
 				readerPreparation.cacheReaderDocument(document, for: article)
+				reportExtractedWordCount(document.wordCount, for: article)
 				return document
 			} catch is CancellationError {
 				throw CancellationError()
@@ -2279,6 +2282,26 @@ final class ReaderAppModel {
 		}
 
 		throw primaryError ?? ReaderViewError.extractionFailed
+	}
+
+	/// Snippet-only feeds give a short body; tell the server the real length of
+	/// the original page once per article, so every client labels it correctly.
+	/// Only extractions of the original page count: the feed-body fallback
+	/// would just measure the snippet again.
+	private func reportExtractedWordCount(_ extracted: Int?, for article: Recommendation) {
+		guard reportedWordCountIDs.contains(article.readerId) == false,
+			ReadingLength.shouldReport(
+				stored: ReadingLength.knownWordCount(for: article),
+				extracted: extracted,
+				mediaKind: article.length?.mediaKind,
+			),
+			let extracted else { return }
+		reportedWordCountIDs.insert(article.readerId)
+		let mutation = OfflineMutation(kind: .setWordCount, itemIds: [article.readerId], wordCount: extracted)
+		Task {
+			guard await enqueueOfflineMutation(mutation) else { return }
+			await replayPendingMutations()
+		}
 	}
 
 	func select(section: ReaderSection) {
@@ -3921,6 +3944,8 @@ final class ReaderAppModel {
 			// instead of refetching the placeholder on every visit.
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 			isPaywalled: preserveBody || incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
+			// For You and other thin payloads omit length; keep what was known.
+			length: incoming.length ?? existing.length,
 		)
 	}
 
@@ -3951,6 +3976,7 @@ final class ReaderAppModel {
 			isBodyPruned: incoming.isBodyPruned,
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 			isPaywalled: incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
+			length: incoming.length ?? existing.length,
 		)
 	}
 
@@ -3977,6 +4003,7 @@ final class ReaderAppModel {
 			isBodyPruned: merged.isBodyPruned,
 			contentVersion: merged.contentVersion,
 			isPaywalled: merged.isPaywalled,
+			length: merged.length,
 		)
 	}
 

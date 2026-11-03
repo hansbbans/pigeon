@@ -44,6 +44,12 @@
 			"kind": "unsubscribe_feed",
 			"itemIds": [],
 			"feedId": "feed/3"
+		},
+		{
+			"id": "8f0e1b2c-0008-4a00-8000-000000000008",
+			"kind": "set_word_count",
+			"itemIds": ["tag:google.com,2005:reader/item/0000000000000003"],
+			"wordCount": 2600
 		}
 	]
 }

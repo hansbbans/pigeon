@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ArticleReaderHeaderView: View {
+	@Environment(\.showsReadingTime) private var showsReadingTime
 	let article: Recommendation
 	let selectedMode: ReaderMode
 	let hasOriginalURL: Bool
@@ -59,6 +60,12 @@ struct ArticleReaderHeaderView: View {
 				Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
 					.font(.subheadline)
 					.foregroundStyle(.secondary)
+				if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
+					Text("· \(readingLength)")
+						.font(.subheadline)
+						.foregroundStyle(.secondary)
+						.accessibilityIdentifier("article-reading-length")
+				}
 			}
 
 			if let author = article.displayAuthor {

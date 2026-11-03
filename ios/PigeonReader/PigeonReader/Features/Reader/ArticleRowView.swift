@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ArticleRowView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.showsReadingTime) private var showsReadingTime
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
@@ -118,6 +119,12 @@ struct ArticleRowView: View {
 					Text(article.receivedAt, format: .relative(presentation: .named))
 						.font(.caption)
 						.foregroundStyle(.secondary)
+					if let readingLength {
+						Text("· \(readingLength)")
+							.font(.caption)
+							.foregroundStyle(.secondary)
+							.lineLimit(1)
+					}
 					Spacer()
 				Image(systemName: "star.fill")
 					.font(.caption)
@@ -139,9 +146,15 @@ struct ArticleRowView: View {
 		}
 	}
 
+	private var readingLength: String? {
+		article.readingLengthLabel(showsReadingTime: showsReadingTime)
+	}
+
 	private var accessibilityValue: String {
-		let state = article.isRead ? "Read" : "Unread"
-		return article.isPaywalled == true ? "\(state), \(PaywallLabel.accessibilityValue)" : state
+		var parts = [article.isRead ? "Read" : "Unread"]
+		if article.isPaywalled == true { parts.append(PaywallLabel.accessibilityValue) }
+		if let readingLength { parts.append(readingLength) }
+		return parts.joined(separator: ", ")
 	}
 
 	private var shouldShowExplanation: Bool {

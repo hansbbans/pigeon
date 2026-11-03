@@ -50,6 +50,13 @@ nonisolated struct IncrementalSyncPayload: Codable, Equatable, Sendable {
 	let isStarred: Bool?
 	let isBodyPruned: Bool?
 	var isPaywalled: Bool? = nil
+	var wordCount: Int? = nil
+	var mediaKind: String? = nil
+	var durationSeconds: Int? = nil
+
+	var length: ArticleLength? {
+		ArticleLength(wordCount: wordCount, mediaKind: mediaKind, durationSeconds: durationSeconds)
+	}
 
 	let itemId: String?
 	let updatedAt: Date?
@@ -66,6 +73,7 @@ nonisolated enum OfflineMutationKind: String, Codable, Sendable {
 	case moveFeed = "move_feed"
 	case unsubscribeFeed = "unsubscribe_feed"
 	case restoreFeed = "restore_feed"
+	case setWordCount = "set_word_count"
 }
 
 nonisolated enum OfflineMutationScope: String, Codable, Sendable {
@@ -86,6 +94,8 @@ nonisolated struct OfflineMutation: Codable, Equatable, Identifiable, Sendable {
 	var title: String?
 	var folders: [String]?
 	var scope: OfflineMutationScope?
+	/// For `set_word_count`: the reader-mode extraction's word count.
+	var wordCount: Int?
 
 	init(
 		id: String = UUID().uuidString.lowercased(),
@@ -97,6 +107,7 @@ nonisolated struct OfflineMutation: Codable, Equatable, Identifiable, Sendable {
 		title: String? = nil,
 		folders: [String]? = nil,
 		scope: OfflineMutationScope? = nil,
+		wordCount: Int? = nil,
 	) {
 		self.id = id
 		self.kind = kind
@@ -107,6 +118,7 @@ nonisolated struct OfflineMutation: Codable, Equatable, Identifiable, Sendable {
 		self.title = title
 		self.folders = folders
 		self.scope = scope
+		self.wordCount = wordCount
 	}
 }
 
