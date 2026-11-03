@@ -5,6 +5,8 @@ import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 import { BROWSER_READABILITY_SOURCE, escapeBrowserReadabilityScript, renderBrowserReadabilityScript } from '../src/browser-readability';
 import { renderBrowserAppClientScript } from '../src/browser-app-client';
+import { DEFUDDLE_SOURCE } from '../src/browser-defuddle-source';
+import { JSDOM } from 'jsdom';
 
 test('browser Readability preserves the exact native source and complete Apache notice', () => {
 	assert.equal(BROWSER_READABILITY_SOURCE, readFileSync(new URL('../ios/PigeonReader/PigeonReader/Resources/Readability.js', import.meta.url), 'utf8'));
@@ -76,4 +78,98 @@ test('CUA browser smoke extracts known article with no source resource requests'
 	assert.ok(!/javascript:|onerror=|onclick=|data-pigeon-resource/i.test(report.content));
 	assert.equal(report.executed, false); assert.equal(report.unsafeCount, 0);
 	assert.deepEqual(probes.filter((path) => path.includes('probe')), [], 'inert source parsing must not request resource probes');
+});
+
+// Real-DOM extraction tests run the emitted reading-tools script, the browser
+// client sanitizer and the vendored Defuddle bundle inside a jsdom window.
+// (happy-dom makes Defuddle fail internally and return the whole page.)
+function readingWindow(options: { defuddle?: boolean } = {}) {
+	const { window } = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://pigeon.example/app', runScripts: 'outside-only' });
+	(window as any).TextEncoder = TextEncoder;
+	let fetchCalls = 0;
+	(window as any).fetch = () => { fetchCalls += 1; throw new Error('No network allowed'); };
+	window.eval(renderBrowserAppClientScript());
+	window.eval(renderBrowserReadabilityScript());
+	if (options.defuddle !== false) window.eval(DEFUDDLE_SOURCE);
+	return { window: window as any, fetchCalls: () => fetchCalls };
+}
+const readerFixture = (name: string) => readFileSync(new URL(`./fixtures/reader/${name}.html`, import.meta.url), 'utf8');
+const essayURL = 'https://essays.example/2025/restoring-libraries';
+
+test('extract prefers Defuddle and returns metadata', () => {
+	const { window, fetchCalls } = readingWindow();
+	const result = window.__PIGEON_READING_TOOLS__.extract(readerFixture('essay-footnotes'), essayURL);
+	assert.equal(result.extractor, 'defuddle');
+	assert.ok(result.wordCount > 300, `wordCount ${result.wordCount}`);
+	assert.equal(result.published, '2025-04-02T00:00:00.000Z');
+	assert.equal(result.site, 'Example Essays');
+	assert.equal(result.byline, 'Ada Reader');
+	assert.equal(result.image, 'https://essays.example/images/library.jpg');
+	assert.equal(result.url, essayURL);
+	assert.match(result.content, /volunteers over many seasons/);
+	assert.doesNotMatch(result.content, /Get new essays by email/);
+	assert.equal(window.__PIGEON_READING_TOOLS__.hasDefuddle(), true);
+	assert.equal(fetchCalls(), 0, 'no network during extraction');
+});
+
+test('footnote links stay in-page', () => {
+	const { window } = readingWindow();
+	const { content } = window.__PIGEON_READING_TOOLS__.extract(readerFixture('essay-footnotes'), essayURL);
+	assert.match(content, /href="#fn:1"/);
+	assert.doesNotMatch(content, /href="https?:[^"]*#fn/);
+	assert.match(content, /id="fn:1"/);
+	assert.match(content, /id="fnref:1"/);
+	const probe = window.document.createElement('template');
+	probe.innerHTML = content;
+	for (const link of probe.content.querySelectorAll('a[href^="#"]')) assert.equal(link.getAttribute('target'), '_self');
+});
+
+test('code language survives', () => {
+	const { window } = readingWindow();
+	const { content } = window.__PIGEON_READING_TOOLS__.extract(readerFixture('code-post'), 'https://code.example/dates');
+	assert.match(content, /data-lang="python"|class="language-python"/);
+	assert.match(content, /fromisoformat/);
+});
+
+test('falls back to Readability when Defuddle is absent', () => {
+	const { window } = readingWindow({ defuddle: false });
+	const result = window.__PIGEON_READING_TOOLS__.extract(readerFixture('substack-post'), 'https://ledger.example/p/shipping');
+	assert.equal(window.__PIGEON_READING_TOOLS__.hasDefuddle(), false);
+	assert.equal(result.extractor, 'readability');
+	assert.match(result.content, /Underwriters price each voyage/);
+	assert.ok(result.wordCount > 100);
+	assert.equal(result.published, '2026-10-28T13:00:00.000Z');
+});
+
+test('falls back to Readability when Defuddle throws or returns thin text', () => {
+	for (const Fake of [
+		class { parse(): never { throw new Error('boom'); } },
+		class { parse() { return { content: '<p>hi</p>' }; } },
+		// Defuddle catches its own internal errors and returns the whole page.
+		class { parse() { return { content: `<p>${'whole page '.repeat(40)}</p>`, debug: { errors: ['TypeError: x'] } }; } },
+	]) {
+		const { window } = readingWindow({ defuddle: false });
+		window.Defuddle = Fake;
+		const result = window.__PIGEON_READING_TOOLS__.extract(readerFixture('essay-footnotes'), essayURL);
+		assert.equal(result.extractor, 'readability');
+		assert.match(result.content, /volunteers over many seasons/);
+	}
+});
+
+test('size and element caps run before Defuddle', () => {
+	const { window } = readingWindow({ defuddle: false });
+	let parseCalls = 0;
+	window.Defuddle = class { parse() { parseCalls += 1; return { content: '' }; } };
+	const tools = window.__PIGEON_READING_TOOLS__;
+	assert.throws(() => tools.extract('x'.repeat(5_000_001), essayURL), /too large/);
+	assert.throws(() => tools.extract('<p>a</p>'.repeat(10_001), essayURL), /too many elements/);
+	assert.equal(parseCalls, 0);
+});
+
+test('Defuddle still exposes the internal error set the fallback relies on', () => {
+	const { window } = readingWindow();
+	const doc = window.document.implementation.createHTMLDocument('');
+	const instance = new window.Defuddle(doc, { url: essayURL });
+	instance.parse();
+	assert.ok(instance._parseErrors instanceof window.Set || instance._parseErrors instanceof Set, 'upgrade check: Defuddle _parseErrors moved');
 });

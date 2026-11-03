@@ -21,8 +21,9 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",
+    "@types/jsdom": "30.0.0",
     "defuddle": "0.19.6",
-    "happy-dom": "21.0.4",
+    "jsdom": "29.1.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.115.0"

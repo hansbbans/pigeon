@@ -1,0 +1,18 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Parsing dates in Python</title>
+<meta name="author" content="Grace Coder"><meta property="og:site_name" content="Code Notes"></head><body>
+<nav><a href="/">Code Notes</a> <a href="/archive">Archive</a></nav><main><article><h1>Parsing dates in Python</h1>
+<p>Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. Dates are surprisingly hard to parse correctly, and the standard library gives you several tools for it. </p>
+<h2>Use fromisoformat</h2>
+<p>For timestamps that already follow ISO 8601, the simplest tool is also the fastest one to reach for. For timestamps that already follow ISO 8601, the simplest tool is also the fastest one to reach for. For timestamps that already follow ISO 8601, the simplest tool is also the fastest one to reach for. For timestamps that already follow ISO 8601, the simplest tool is also the fastest one to reach for. For timestamps that already follow ISO 8601, the simplest tool is also the fastest one to reach for. </p>
+<pre><code class="language-python">from datetime import datetime
+
+stamp = datetime.fromisoformat("2025-04-02T09:30:00+00:00")
+print(stamp.isoformat())</code></pre>
+<p>It handles offsets, fractional seconds, and the trailing Z that many APIs send back to you. It handles offsets, fractional seconds, and the trailing Z that many APIs send back to you. It handles offsets, fractional seconds, and the trailing Z that many APIs send back to you. It handles offsets, fractional seconds, and the trailing Z that many APIs send back to you. It handles offsets, fractional seconds, and the trailing Z that many APIs send back to you. </p>
+<h2>Store UTC</h2>
+<p>Always store timestamps in UTC and convert only when displaying them to a person in a particular place. Always store timestamps in UTC and convert only when displaying them to a person in a particular place. Always store timestamps in UTC and convert only when displaying them to a person in a particular place. Always store timestamps in UTC and convert only when displaying them to a person in a particular place. Always store timestamps in UTC and convert only when displaying them to a person in a particular place. Always store timestamps in UTC and convert only when displaying them to a person in a particular place. </p>
+<pre><code class="language-python">from datetime import timezone
+
+utc = stamp.astimezone(timezone.utc)</code></pre>
+<p>That one habit removes a whole family of daylight saving bugs before they ever reach production. That one habit removes a whole family of daylight saving bugs before they ever reach production. That one habit removes a whole family of daylight saving bugs before they ever reach production. That one habit removes a whole family of daylight saving bugs before they ever reach production. That one habit removes a whole family of daylight saving bugs before they ever reach production. </p>
+</article></main><footer><p>Code Notes, written by Grace Coder.</p></footer></body></html>
