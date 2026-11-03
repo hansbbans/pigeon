@@ -21,6 +21,8 @@
 			"contentVersion": "2",
 			"isBodyPruned": false,
 			"isPaywalled": false,
+			"wordCount": 2380,
+			"mediaKind": "text",
 			"alternate": [
 				{
 					"href": "https://example.com/durable-reader"
@@ -53,6 +55,9 @@
 			"contentVersion": "1",
 			"isBodyPruned": false,
 			"isPaywalled": false,
+			"wordCount": 40,
+			"mediaKind": "video",
+			"durationSeconds": 1100,
 			"alternate": [
 				{
 					"href": "https://example.com/margins"

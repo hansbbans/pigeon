@@ -1865,3 +1865,35 @@ test('refetching an unchanged RSS item does not log another article change', asy
 	assert.match(restored.html_content, /Edited body/);
 	state.database.close();
 });
+
+test('sync article payloads carry reading length only when the columns are set', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const articlePayloads = async () => {
+		const changes: Array<Record<string, unknown>> = [];
+		let cursor: string | undefined;
+		for (;;) {
+			const body = await (await sync(state.env, cursor, 50)).json() as {
+				changes: Array<Record<string, unknown>>;
+				cursor: string;
+				hasMore: boolean;
+			};
+			changes.push(...body.changes);
+			if (!body.hasMore) break;
+			cursor = body.cursor;
+		}
+		return changes
+			.filter((change) => change.entityType === 'article' && change.operation === 'upsert')
+			.map((change) => change.payload as Record<string, unknown>);
+	};
+
+	const [before] = await articlePayloads();
+	assert.ok(before);
+	for (const key of ['wordCount', 'mediaKind', 'durationSeconds']) assert.equal(key in before, false, key);
+
+	state.database.exec("UPDATE items SET word_count = 500, media_kind = 'text' WHERE rowid = 11");
+	const [after] = await articlePayloads();
+	assert.equal(after?.wordCount, 500);
+	assert.equal(after?.mediaKind, 'text');
+	assert.equal('durationSeconds' in (after ?? {}), false);
+});

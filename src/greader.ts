@@ -1,3 +1,4 @@
+import { readingLengthFields } from './reading-length';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -728,6 +729,9 @@ interface ResponseItemRow {
 	is_read: number;
 	is_starred: number;
 	content_version: number;
+	word_count?: number | null;
+	media_kind?: string | null;
+	duration_seconds?: number | null;
 }
 
 interface ResponseItemBody {
@@ -754,6 +758,9 @@ async function loadResponseItems(
 		contentVersion: string;
 		isBodyPruned: boolean;
 		isPaywalled: boolean;
+		wordCount?: number;
+		mediaKind?: 'text' | 'video';
+		durationSeconds?: number;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -771,7 +778,7 @@ async function loadResponseItems(
 		};
 		const statements = (originalUrlExpression: string) => [
 			env.DB.prepare(
-				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version
+				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds
 				 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 			).bind(rowidPage),
 			env.DB.prepare(
@@ -840,6 +847,7 @@ async function loadResponseItems(
 					contentVersion: String(item.content_version),
 					isBodyPruned: item.content_pruned_at != null,
 					isPaywalled: isPaywalledHtml(item.html_content),
+					...readingLengthFields(item),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],
