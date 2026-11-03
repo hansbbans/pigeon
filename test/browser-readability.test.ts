@@ -212,3 +212,31 @@ test('named note anchors survive as scroll targets and never gain an href', () =
 	const target = probe.content.querySelector('[id="f1n"], [name="f1n"]');
 	assert.equal(target?.hasAttribute('href'), false, 'a name-only anchor must not become a link');
 });
+
+test('a script-rendered page with no article fails instead of showing the page title', () => {
+	const { window } = readingWindow();
+	assert.throws(() => window.__PIGEON_READING_TOOLS__.extract(readerFixture('thin-script-page'), 'https://app.example/'), /No readable article content/);
+});
+
+test('fragment links whose target did not survive extraction keep pointing at the original page', () => {
+	const url = 'https://essays.example/post';
+	const text = 'Curiosity drives the best work, sustained over years of patient effort and delight. '.repeat(10);
+	const { window } = readingWindow({ defuddle: false });
+	window.Defuddle = class { parse() { return { content: `<p>${text}<a href="#comments">comments</a> <a href="${url}#footnote-1">1</a> <a href="#kept">kept</a></p><h2 title="pigeon-in-page-target:kept">Kept</h2><p title="pigeon-in-page-target:evil&quot; x">x</p>` }; } };
+	const { content } = window.__PIGEON_READING_TOOLS__.extract(`<p id="kept">k</p><p id="evil" x">e</p><a href="#kept">k</a>`, url);
+	assert.match(content, /href="https:\/\/essays\.example\/post#comments"/);
+	assert.match(content, /href="https:\/\/essays\.example\/post#footnote-1"/);
+	assert.match(content, /href="#kept"[^>]*target="_self"/);
+	assert.match(content, /<h2 id="kept">/);
+	assert.doesNotMatch(content, /evil/);
+});
+
+test('odd fragment characters cannot break extraction', () => {
+	const url = 'https://essays.example/post';
+	const text = 'Curiosity drives the best work, sustained over years of patient effort and delight. '.repeat(10);
+	const { window } = readingWindow({ defuddle: false });
+	window.Defuddle = class { parse() { return { content: `<p>${text}<a href="#a%0Ab">x</a> <a href="#a]b&quot;">y</a> <a href="#%E0%A4%A">z</a></p>` }; } };
+	const { content, extractor } = window.__PIGEON_READING_TOOLS__.extract('<p>source</p>', url);
+	assert.equal(extractor, 'defuddle');
+	assert.match(content, /Curiosity drives/);
+});

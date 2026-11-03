@@ -90,7 +90,14 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		const textLength = (markup: string): number => {
 			const probe = document.createElement('template');
 			probe.innerHTML = markup;
+			for (const node of Array.from(probe.content.querySelectorAll('title, meta') as any[])) node.remove();
 			return (probe.content.textContent || '').trim().length;
+		};
+		const pageURL = base.split('#')[0];
+		const fragmentOf = (href: string): string | null => {
+			const value = (href || '').trim();
+			if (value.startsWith('#')) return value.slice(1) || null;
+			return value.startsWith(pageURL + '#') ? value.slice(pageURL.length + 1) || null : null;
 		};
 		const wordTotal = (text: string): number => (text.match(/\S+/g) || []).length;
 		let extracted: any = null;
@@ -101,7 +108,7 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 				// Defuddle keeps only allowlisted attributes, and id is not one of them
 				// outside debug mode. Carry in-page link targets through in title.
 				const working = parsed.cloneNode(true);
-				const referenced = new Set(Array.from(working.querySelectorAll('a[href^="#"]') as any[]).map((link: any) => link.getAttribute('href').slice(1)).filter(Boolean));
+				const referenced = new Set(Array.from(working.querySelectorAll('a[href]') as any[]).map((link: any) => fragmentOf(link.getAttribute('href'))).filter(Boolean));
 				for (const target of Array.from(working.querySelectorAll('[id], a[name]') as any[])) {
 					const key = target.getAttribute('id') || target.getAttribute('name');
 					if (referenced.has(key) && !target.hasAttribute('title')) target.setAttribute('title', TARGET_MARKER + key);
@@ -133,7 +140,7 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			reader._fixLazyImages = function () {};
 			reader._unwrapNoscriptImages = function () {};
 			const article = reader.parse();
-			if (!article || !article.content || !article.textContent?.trim()) throw new Error('No readable article content found.');
+			if (!article || !article.content || textLength(article.content) < 80) throw new Error('No readable article content found.');
 			extracted = {
 				title: article.title || null,
 				byline: article.byline || null,
@@ -154,14 +161,24 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		// Browsers resolve hrefs against the <base> above, so Defuddle may hand back
 		// same-page fragments as absolute links to the original site.
 		for (const target of Array.from(output.content.querySelectorAll('[title^="' + TARGET_MARKER + '"]') as any[])) {
-			target.setAttribute('id', target.getAttribute('title').slice(TARGET_MARKER.length));
+			const key = target.getAttribute('title').slice(TARGET_MARKER.length);
 			target.removeAttribute('title');
+			if (/^[A-Za-z0-9_:.-]{1,128}$/.test(key) && !target.getAttribute('id')) target.setAttribute('id', key);
 		}
-		const pageURL = base.split('#')[0];
+		// Keep a link in-page only when its target survived extraction; otherwise
+		// point it at that anchor on the original page, as before.
+		const anchors = new Set<string>();
+		for (const element of Array.from(output.content.querySelectorAll('[id], a[name]') as any[])) {
+			if (element.getAttribute('id')) anchors.add(element.getAttribute('id'));
+			if (element.localName === 'a' && element.getAttribute('name')) anchors.add(element.getAttribute('name'));
+		}
 		for (const link of Array.from(output.content.querySelectorAll('a[href]') as any[])) {
-			const href = link.getAttribute('href') || '';
-			if (href.startsWith(pageURL + '#') && href.length > pageURL.length + 1) link.setAttribute('href', href.slice(pageURL.length));
-			if ((link.getAttribute('href') || '').startsWith('#')) link.setAttribute('target', '_self');
+			const fragment = fragmentOf(link.getAttribute('href'));
+			if (!fragment) continue;
+			let id = fragment;
+			try { id = decodeURIComponent(fragment); } catch { /* keep raw */ }
+			if (anchors.has(id) || anchors.has(fragment)) { link.setAttribute('href', '#' + fragment); link.setAttribute('target', '_self'); }
+			else { link.setAttribute('href', pageURL + '#' + fragment); link.removeAttribute('target'); }
 		}
 		return { ...extracted, content: client.sanitizeArticleHtml(output.innerHTML), url: base };
 	}, hasDefuddle(): boolean { return typeof root.Defuddle === 'function'; } };
