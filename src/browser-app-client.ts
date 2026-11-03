@@ -818,6 +818,55 @@ export function formatArticleListTime(timestampSeconds: number | null | undefine
 	return date.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+// Article frames are srcdoc documents, whose relative URLs resolve against the
+// app page: a plain "#note" link would load the app inside the frame. Handle
+// in-page links by scrolling instead. Returns true when the click was handled.
+export function followInPageLink(event: any): boolean {
+	const link = event?.target?.closest?.('a[href]');
+	const href = (link?.getAttribute('href') || '').trim();
+	if (!href.startsWith('#')) return false;
+	event.preventDefault();
+	let id = href.slice(1);
+	try { id = decodeURIComponent(id); } catch { /* keep the raw fragment */ }
+	if (!id) return true;
+	const doc = link.ownerDocument;
+	const target = doc.getElementById(id) || doc.getElementsByName(id)[0];
+	target?.scrollIntoView?.({ block: 'start' });
+	return true;
+}
+
+// Loads a classic script for callers that can carry on without it (reader
+// mode falls back to Readability). Each call waits at most timeoutMs. A slow
+// script keeps loading in the background and later calls see it; a failed one
+// is retried on the next call rather than disabled for the session.
+export function createScriptLoader(doc: any, src: string, timeoutMs: number): () => Promise<boolean> {
+	let state: 'idle' | 'loading' | 'loaded' = 'idle';
+	let loaded: Promise<boolean> | null = null;
+	return function load(): Promise<boolean> {
+		if (state === 'loaded') return Promise.resolve(true);
+		if (state === 'idle') {
+			state = 'loading';
+			loaded = new Promise<boolean>((resolve) => {
+				try {
+					const script = doc.createElement('script');
+					script.async = true;
+					script.onload = () => { state = 'loaded'; resolve(true); };
+					script.onerror = () => { state = 'idle'; script.remove?.(); resolve(false); };
+					script.src = src;
+					doc.head.appendChild(script);
+				} catch {
+					state = 'idle';
+					resolve(false);
+				}
+			});
+		}
+		return new Promise<boolean>((resolve) => {
+			const timer = setTimeout(() => resolve(false), timeoutMs);
+			loaded!.then((ok) => { clearTimeout(timer); resolve(ok); });
+		});
+	};
+}
+
 export function renderBrowserAppClientScript(): string {
 	return `
 function __name(target) { return target; }
@@ -846,6 +895,8 @@ ${createArticleFrameDocument.toString()}
 ${selectArticleHeroImageUrl.toString()}
 ${normalizeBrowserItemId.toString()}
 ${formatArticleListTime.toString()}
+${createScriptLoader.toString()}
+${followInPageLink.toString()}
 
 window.__PIGEON_BROWSER_CLIENT__ = {
   AUTH_STORAGE_KEY: ${JSON.stringify(AUTH_STORAGE_KEY)},
@@ -854,6 +905,8 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   CONTENT_CHUNK_SIZE: ${CONTENT_CHUNK_SIZE},
   PIGEON_CLIENT_ID: ${JSON.stringify(PIGEON_CLIENT_ID)},
   extractAuthToken,
+  createScriptLoader,
+  followInPageLink,
   createLoggedOutSession,
   createSessionFromToken,
   normalizeBrowserTheme,

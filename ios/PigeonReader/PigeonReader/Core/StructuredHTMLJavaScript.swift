@@ -30,7 +30,7 @@ enum StructuredHTMLJavaScript {
 		// resource-bearing path before anything can enter the WebView document.
 		const blockedTags = new Set([
 			"applet", "audio", "base", "button", "canvas", "embed", "form", "frame", "frameset", "iframe", "input", "link",
-			"meta", "object", "option", "portal", "script", "select", "source", "style", "svg", "template", "textarea", "track", "video",
+			"object", "option", "portal", "script", "select", "source", "style", "svg", "template", "textarea", "track", "video",
 		]);
 		const removedAttributes = new Set([
 			"action", "background", "data", "formaction", "ping", "poster", "srcdoc", "xlink:href",
@@ -40,6 +40,18 @@ enum StructuredHTMLJavaScript {
 			const tag = element.tagName.toLowerCase();
 			if (blockedTags.has(tag)) {
 				element.remove();
+				continue;
+			}
+			// Metadata (author, site, dates) feeds the extractors; refresh and other
+			// http-equiv directives do not survive, and only inert attributes remain.
+			if (tag === "meta") {
+				if (element.hasAttribute("http-equiv")) {
+					element.remove();
+					continue;
+				}
+				for (const attribute of Array.from(element.attributes)) {
+					if (!["name", "property", "itemprop", "content"].includes(attribute.name.toLowerCase())) element.removeAttribute(attribute.name);
+				}
 				continue;
 			}
 

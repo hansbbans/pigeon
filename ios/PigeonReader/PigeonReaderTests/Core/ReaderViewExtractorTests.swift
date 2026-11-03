@@ -204,3 +204,85 @@ private final class RecordingURLSchemeHandler: NSObject, WKURLSchemeHandler {
 		urls
 	}
 }
+
+@MainActor
+struct ReaderViewDefuddleTests {
+	private static func fixture(_ name: String) throws -> String {
+		let repoRoot = URL(fileURLWithPath: #filePath)
+			.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+			.deletingLastPathComponent().deletingLastPathComponent()
+		return try String(contentsOf: repoRoot.appending(path: "test/fixtures/reader/\(name).html"), encoding: .utf8)
+	}
+
+	private static let essayURL = URL(string: "https://essays.example/2025/restoring-libraries")!
+
+	@Test
+	func defuddleIsPreferredAndReturnsMetadata() async throws {
+		let document = try await ReaderViewExtractor().extract(html: try Self.fixture("essay-footnotes"), title: nil, baseURL: Self.essayURL)
+
+		#expect(document.extractor == .defuddle)
+		#expect((document.wordCount ?? 0) > 300)
+		#expect(document.siteName == "Example Essays")
+		#expect(document.byline == "Ada Reader")
+		#expect(document.publishedAt == ISO8601DateFormatter().date(from: "2025-04-02T00:00:00Z"))
+		#expect(document.contentHTML.contains("volunteers over many seasons"))
+		#expect(document.contentHTML.contains("Get new essays by email") == false)
+	}
+
+	@Test
+	func codeBlocksSurviveDefuddle() async throws {
+		let document = try await ReaderViewExtractor().extract(html: try Self.fixture("code-post"), title: nil, baseURL: URL(string: "https://code.example/dates"))
+
+		#expect(document.extractor == .defuddle)
+		#expect(document.contentHTML.contains("<pre>"))
+		#expect(document.contentHTML.contains("fromisoformat"))
+	}
+
+	@Test
+	func fallsBackToReadabilityWhenDefuddleResourceMissing() async throws {
+		let extractor = ReaderViewExtractor(defuddleSourceProvider: { nil })
+		let document = try await extractor.extract(html: try Self.fixture("substack-post"), title: nil, baseURL: URL(string: "https://ledger.example/p/shipping"))
+
+		#expect(document.extractor == .readability)
+		#expect(document.contentHTML.contains("Underwriters price each voyage"))
+		#expect((document.wordCount ?? 0) > 100)
+	}
+
+	@Test
+	func fallsBackToReadabilityWhenDefuddleReturnsThinContentOrRecordsAnError() async throws {
+		for fake in [
+			"window.Defuddle = class { parse() { return { content: '<p>hi</p>' }; } };",
+			"window.Defuddle = class { constructor() { this._parseErrors = new Set(['TypeError']); } parse() { return { content: '<p>' + 'whole page '.repeat(40) + '</p>' }; } };",
+			"window.Defuddle = class { parse() { throw new Error('boom'); } };",
+		] {
+			let extractor = ReaderViewExtractor(defuddleSourceProvider: { fake })
+			let document = try await extractor.extract(html: try Self.fixture("essay-footnotes"), title: nil, baseURL: Self.essayURL)
+			#expect(document.extractor == .readability, "\(fake)")
+			#expect(document.contentHTML.contains("volunteers over many seasons"))
+		}
+	}
+
+	@Test
+	func scriptRenderedPageStillFailsCleanly() async throws {
+		await #expect(throws: ReaderViewError.self) {
+			_ = try await ReaderViewExtractor().extract(html: try Self.fixture("thin-script-page"), title: nil, baseURL: URL(string: "https://app.example/"))
+		}
+	}
+
+	@Test
+	func metadataTagsReachTheExtractorButRefreshMetaCannotRequest() async throws {
+		let handler = RecordingURLSchemeHandler()
+		let extractor = ReaderViewExtractor(
+			httpClient: MockHTTPClient(),
+			sessionFactory: { ReaderViewExtractionSession(urlSchemeHandlers: ["pigeon-test": handler]) },
+		)
+		let html = try Self.fixture("essay-footnotes").replacingOccurrences(
+			of: "<meta charset=\"utf-8\">",
+			with: "<meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=pigeon-test://tracker/refresh\">",
+		)
+		let document = try await extractor.extract(html: html, title: nil, baseURL: URL(string: "pigeon-test://essays/story")!)
+
+		#expect(document.byline == "Ada Reader")
+		#expect(handler.requestedURLs().isEmpty)
+	}
+}

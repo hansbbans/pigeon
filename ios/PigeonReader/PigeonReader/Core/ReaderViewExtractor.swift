@@ -15,13 +15,16 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 
 	private let httpClient: any HTTPClient
 	private let sessionFactory: ReaderViewExtractionSessionFactory
+	private let defuddleSourceProvider: @MainActor () -> String?
 
 	init(
 		httpClient: any HTTPClient = URLSessionHTTPClient(),
 		sessionFactory: @escaping ReaderViewExtractionSessionFactory = { ReaderViewExtractionSession() },
+		defuddleSourceProvider: @escaping @MainActor () -> String? = { ReaderViewExtractor.bundledDefuddleSource() },
 	) {
 		self.httpClient = httpClient
 		self.sessionFactory = sessionFactory
+		self.defuddleSourceProvider = defuddleSourceProvider
 		super.init()
 	}
 
@@ -68,6 +71,11 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 		try Task.checkCancellation()
 		let readabilitySource = try Self.readabilitySource()
 		try await session.evaluateScript(readabilitySource + "\nwindow.__PigeonReadability = Readability;\nnull;")
+		// Defuddle is preferred; without it (or if it fails to load) Readability runs alone.
+		if let defuddleSource = defuddleSourceProvider() {
+			try? await session.evaluateScript(defuddleSource + "\nwindow.__PigeonDefuddle = Defuddle;\nnull;")
+		}
+		try Task.checkCancellation()
 		guard let serializedPayload = try await session.evaluateJavaScript(Self.extractionScript(html: wrappedHTML, baseURL: extractionBaseURL)),
 			let payloadData = serializedPayload.data(using: .utf8),
 			let payloadObject = try? JSONSerialization.jsonObject(with: payloadData, options: [.fragmentsAllowed]),
@@ -102,13 +110,27 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 		"""
 	}
 
+	private static let defuddleSource = bundledScript(named: "Defuddle")
+	private static let readabilityScript = bundledScript(named: "Readability")
+
+	/// The bundled Defuddle.js, read from disk once per process.
+	static func bundledDefuddleSource() -> String? {
+		defuddleSource
+	}
+
 	private static func readabilitySource() throws -> String {
-		let bundles = [Bundle(for: ResourceBundleMarker.self), Bundle.main]
-		guard let url = bundles.compactMap({ $0.url(forResource: "Readability", withExtension: "js") }).first,
-			let source = try? String(contentsOf: url, encoding: .utf8) else {
+		guard let readabilityScript else {
 			throw ReaderViewError.readabilityUnavailable
 		}
-		return source
+		return readabilityScript
+	}
+
+	private static func bundledScript(named name: String) -> String? {
+		let bundles = [Bundle(for: ResourceBundleMarker.self), Bundle.main]
+		guard let url = bundles.compactMap({ $0.url(forResource: name, withExtension: "js") }).first else {
+			return nil
+		}
+		return try? String(contentsOf: url, encoding: .utf8)
 	}
 
 	private static func extractionScript(html: String, baseURL: URL) throws -> String {
@@ -131,7 +153,42 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 			__pigeonPrepareSource(source.documentElement);
 			const working = document.implementation.createHTMLDocument("");
 			working.documentElement.replaceWith(working.importNode(source.documentElement, true));
-			let article = new window.__PigeonReadability(working, { debug: false, charThreshold: 0 }).parse();
+			const textLength = (markup) => { const probe = working.createElement("template"); probe.innerHTML = markup; return (probe.content.textContent || "").trim().length; };
+			let article = null;
+			if (typeof window.__PigeonDefuddle === "function") {
+				try {
+					// Defuddle catches its own internal errors and returns the whole page body;
+					// it records them in _parseErrors (debug.errors only in debug mode, which logs).
+					const defuddle = new window.__PigeonDefuddle(working.cloneNode(true), { url: baseURL });
+					const result = defuddle.parse();
+					const failed = (defuddle._parseErrors && defuddle._parseErrors.size > 0)
+						|| Boolean(result && result.debug && result.debug.errors && result.debug.errors.length);
+					if (!failed && result && typeof result.content === "string" && textLength(result.content) >= 80) {
+						article = {
+							title: result.title || null,
+							byline: result.author || null,
+							excerpt: result.description || null,
+							content: result.content,
+							wordCount: Number.isFinite(result.wordCount) ? result.wordCount : null,
+							published: typeof result.published === "string" ? result.published : null,
+							site: result.site || null,
+							image: result.image ? __pigeonSafeURL(result.image, baseURL) : null,
+							extractor: "defuddle",
+						};
+					}
+				} catch (_) {
+					article = null;
+				}
+			}
+			if (!article) {
+				article = new window.__PigeonReadability(working, { debug: false, charThreshold: 0 }).parse();
+				if (article) {
+					article.wordCount = ((article.textContent || "").match(/\\S+/g) || []).length;
+					article.published = article.publishedTime || null;
+					article.site = article.siteName || null;
+					article.extractor = "readability";
+				}
+			}
 			if (!article || !article.content) {
 				const fallbackRoot = working.querySelector("article, [role='main'], main, .post-content, .article-content, .entry-content, .prose, .beehiiv-post");
 				const fallbackText = fallbackRoot && (fallbackRoot.innerText || "").trim();
@@ -141,6 +198,10 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 						byline: null,
 						excerpt: null,
 						content: fallbackRoot.outerHTML,
+						wordCount: (fallbackText.match(/\\S+/g) || []).length,
+						published: null,
+						site: null,
+						extractor: "readability",
 					};
 				}
 			}
@@ -155,7 +216,11 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 				byline: article.byline || null,
 				excerpt: article.excerpt || null,
 				content: output.innerHTML,
-				leadImageURL: metadataImage || contentImage || null,
+				leadImageURL: metadataImage || article.image || contentImage || null,
+				wordCount: article.wordCount,
+				published: article.published,
+				site: article.site,
+				extractor: article.extractor,
 			};
 		})()
 		"""

@@ -3,6 +3,7 @@ import { renderBrowserOfflineScript } from './browser-offline';
 import { renderBrowserNotificationsScript } from './browser-notifications';
 import { renderBrowserReadingScript } from './browser-reading-preferences';
 import { renderBrowserReadabilityScript } from './browser-readability';
+import { DEFUDDLE_VERSION } from './browser-defuddle-source';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
 import { renderBrowserAppStyles } from './browser-app-styles';
@@ -369,6 +370,7 @@ export function renderBrowserAppRuntimeScript(): string {
 (() => {
   const config = window.__PIGEON_CONFIG__ || {};
   const client = window.__PIGEON_BROWSER_CLIENT__;
+  const loadDefuddle = client.createScriptLoader(document, ${JSON.stringify('/app/defuddle.js?v=' + DEFUDDLE_VERSION)}, 3000);
   const storageKey = client.AUTH_STORAGE_KEY;
   const themeStorageKey = client.THEME_STORAGE_KEY;
   const columnStorageKey = 'pigeon.browser.column-widths';
@@ -2106,6 +2108,7 @@ export function renderBrowserAppRuntimeScript(): string {
     activeFrameDocument.removeEventListener('keydown', handleArticleNavigationKeydown);
     activeFrameDocument.removeEventListener('scroll', handleReaderProgress);
     activeFrameDocument.removeEventListener('click', zoomReadingImage);
+    activeFrameDocument.removeEventListener('click', client.followInPageLink);
     activeFrameDocument = null;
   }
 
@@ -2125,6 +2128,7 @@ export function renderBrowserAppRuntimeScript(): string {
     frameDocument.addEventListener('keydown', handleArticleNavigationKeydown);
     frameDocument.addEventListener('scroll', handleReaderProgress);
     frameDocument.addEventListener('click', zoomReadingImage);
+    frameDocument.addEventListener('click', client.followInPageLink);
     activeFrameDocument = frameDocument;
   }
 
@@ -2761,9 +2765,9 @@ export function renderBrowserAppRuntimeScript(): string {
       if(mode==='reader') {
         if(!href)throw new Error('No original website URL is available.');
         let extracted=extractedArticles.get(id);
-        if(!extracted) {const source=await authenticatedJson('/api/v1/browser/reader-source?url='+encodeURIComponent(href));if(!current())return;
+        if(!extracted) {const [source]=await Promise.all([authenticatedJson('/api/v1/browser/reader-source?url='+encodeURIComponent(href)),loadDefuddle()]);if(!current())return;
           extracted=window.__PIGEON_READING_TOOLS__?.extract(source.html,source.url);if(!extracted?.content)throw new Error('Reader extraction unavailable.');
-          extractedArticles.set(id,extracted);while(extractedArticles.size>20)extractedArticles.delete(extractedArticles.keys().next().value);}
+          if(extracted.extractor!=='readability'||window.__PIGEON_READING_TOOLS__?.hasDefuddle?.())extractedArticles.set(id,extracted);while(extractedArticles.size>20)extractedArticles.delete(extractedArticles.keys().next().value);}
         html=extracted.content;baseURL=extracted.url;message='Reader view extracted from the original website.';
       } else if(mode==='website') html='<p>Open this story on its website using Open original. The website opens in a separate tab.</p>';
     } catch(error) {if(!current())return;message='Reader extraction unavailable. Showing the newsletter body; try again or open the original.';}

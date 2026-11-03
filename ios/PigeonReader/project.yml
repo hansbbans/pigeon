@@ -23,6 +23,7 @@ targets:
       - path: PigeonReader
     resources:
       - path: PigeonReader/Resources/Readability.js
+      - path: PigeonReader/Resources/Defuddle.js
     dependencies:
       - sdk: libsqlite3.tbd
       - target: PigeonWidgets
