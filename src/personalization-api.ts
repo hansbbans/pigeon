@@ -1,4 +1,5 @@
 import type { Env } from './types';
+import { apiTimestamp } from './timestamps';
 import {
 	loadMonitoredTopics,
 	MONITORED_TOPICS_META_KEY,
@@ -52,7 +53,16 @@ export interface PersonalizationSnapshot {
 const HISTORY_SCREEN_LIMIT = 500;
 const EXPORT_PAGE_SIZE = 250;
 
-async function loadHistoryPage(env: Env, limit: number, cursor?: { occurredAt: string; id: string }): Promise<PersonalizationSnapshot['history']> {
+type HistoryEntry = PersonalizationSnapshot['history'][number];
+type HistoryCursor = { occurredAt: string; id: string };
+
+interface HistoryPage {
+	entries: HistoryEntry[];
+	/** Where the next page starts, or undefined after the last page. */
+	next?: HistoryCursor;
+}
+
+async function loadHistoryPage(env: Env, limit: number, cursor?: HistoryCursor): Promise<HistoryPage> {
 	const statement = env.DB.prepare(
 		`SELECT e.id, e.item_id, e.event_type, e.feed_key, e.occurred_at,
 		        i.subject AS title, COALESCE(f.custom_title, f.display_name) AS source
@@ -64,39 +74,52 @@ async function loadHistoryPage(env: Env, limit: number, cursor?: { occurredAt: s
 		  ORDER BY e.occurred_at DESC, e.id DESC
 		  LIMIT ?`,
 	);
-	const result = await (cursor
+	const { results } = await (cursor
 		? statement.bind(cursor.occurredAt, cursor.id, limit)
 		: statement.bind(limit)).all<HistoryRow>();
-	return result.results.map((row) => ({
-		id: row.id,
-		itemId: row.item_id,
-		type: row.event_type,
-		feedKey: row.feed_key,
-		occurredAt: row.occurred_at,
-		title: row.title,
-		source: row.source,
-	}));
+	const last = results.at(-1);
+	return {
+		// The app decodes occurredAt as an ISO 8601 date, so an event without a
+		// readable time is left out rather than failing the whole response.
+		entries: results.flatMap((row) => {
+			const occurredAt = apiTimestamp(row.occurred_at);
+			return occurredAt ? [{
+				id: row.id,
+				itemId: row.item_id,
+				type: row.event_type,
+				feedKey: row.feed_key,
+				occurredAt,
+				title: row.title,
+				source: row.source,
+			}] : [];
+		}),
+		// Page on the stored values, which are what the query orders by.
+		next: last && results.length === limit ? { occurredAt: last.occurred_at, id: last.id } : undefined,
+	};
 }
 
-async function buildSnapshot(env: Env, historyLimit = HISTORY_SCREEN_LIMIT): Promise<PersonalizationSnapshot> {
+async function buildSnapshot(env: Env, historyLimit = HISTORY_SCREEN_LIMIT): Promise<{ snapshot: PersonalizationSnapshot; next?: HistoryCursor }> {
 	const [history, monitoredTopics] = await Promise.all([
 		loadHistoryPage(env, historyLimit),
 		loadMonitoredTopics(env),
 	]);
 
 	return {
-		exportedAt: new Date().toISOString(),
-		monitoredTopics,
-		policy: POLICY,
-		history,
+		snapshot: {
+			exportedAt: new Date().toISOString(),
+			monitoredTopics,
+			policy: POLICY,
+			history: history.entries,
+		},
+		next: history.next,
 	};
 }
 
-function streamExport(env: Env, snapshot: PersonalizationSnapshot): ReadableStream<Uint8Array> {
+function streamExport(env: Env, snapshot: PersonalizationSnapshot, firstNext: HistoryCursor | undefined): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
 	const { history, ...metadata } = snapshot;
-	let page: PersonalizationSnapshot['history'] | null = history;
-	let cursor: { occurredAt: string; id: string } | undefined;
+	let page: HistoryPage | null = { entries: history, next: firstNext };
+	let cursor: HistoryCursor | undefined;
 	let hasEntries = false;
 	let cancelled = false;
 	return new ReadableStream<Uint8Array>({
@@ -104,20 +127,19 @@ function streamExport(env: Env, snapshot: PersonalizationSnapshot): ReadableStre
 			controller.enqueue(encoder.encode(`${JSON.stringify(metadata).slice(0, -1)},"history":[`));
 		},
 		async pull(controller) {
-			const entries = page ?? await loadHistoryPage(env, EXPORT_PAGE_SIZE, cursor);
+			const { entries, next } = page ?? await loadHistoryPage(env, EXPORT_PAGE_SIZE, cursor);
 			if (cancelled) return;
 			if (entries.length > 0) {
 				const serialized = JSON.stringify(entries).slice(1, -1);
 				controller.enqueue(encoder.encode(`${hasEntries ? ',' : ''}${serialized}`));
 				hasEntries = true;
 			}
-			if (entries.length < EXPORT_PAGE_SIZE) {
+			if (!next) {
 				controller.enqueue(encoder.encode(']}'));
 				controller.close();
 				return;
 			}
-			const last = entries.at(-1)!;
-			cursor = { occurredAt: last.occurredAt, id: last.id };
+			cursor = next;
 			page = null;
 		},
 		cancel() { cancelled = true; },
@@ -128,9 +150,9 @@ export async function handlePersonalization(request: Request, env: Env): Promise
 	const url = new URL(request.url);
 	if (request.method === 'GET') {
 		const isDownload = url.searchParams.get('download') === '1';
-		const payload = await buildSnapshot(env, isDownload ? EXPORT_PAGE_SIZE : HISTORY_SCREEN_LIMIT);
+		const { snapshot, next } = await buildSnapshot(env, isDownload ? EXPORT_PAGE_SIZE : HISTORY_SCREEN_LIMIT);
 		if (isDownload) {
-			return new Response(streamExport(env, payload), {
+			return new Response(streamExport(env, snapshot, next), {
 				headers: {
 					'Cache-Control': 'no-store',
 					'Content-Disposition': 'attachment; filename="pigeon-personalization.json"',
@@ -138,7 +160,7 @@ export async function handlePersonalization(request: Request, env: Env): Promise
 				},
 			});
 		}
-		return Response.json(payload, { headers: { 'Cache-Control': 'no-store' } });
+		return Response.json(snapshot, { headers: { 'Cache-Control': 'no-store' } });
 	}
 
 	if (request.method === 'PUT') {
@@ -165,7 +187,7 @@ export async function handlePersonalization(request: Request, env: Env): Promise
 		}
 		try {
 			await saveMonitoredTopics(env, monitoredTopics);
-			return Response.json(await buildSnapshot(env), { headers: { 'Cache-Control': 'no-store' } });
+			return Response.json((await buildSnapshot(env)).snapshot, { headers: { 'Cache-Control': 'no-store' } });
 		} catch (error) {
 			console.error('[Personalization] Could not save monitored topics', error instanceof Error ? error.message : String(error));
 			return Response.json({ error: 'Could not save monitored topics' }, { status: 503 });

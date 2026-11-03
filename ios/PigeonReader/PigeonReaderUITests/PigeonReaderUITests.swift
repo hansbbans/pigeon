@@ -1561,15 +1561,21 @@ final class PigeonDeepLinkUITests: XCTestCase {
 
 	private func openDeepLink(_ text: String, fromBackground: Bool = true) throws {
 		let url = try XCTUnwrap(URL(string: text))
+		// Assert on SpringBoard's visible UI rather than XCUIApplication.state: under heavy
+		// load the state report lags well behind the screen (CI run 41638484393 timed out
+		// waiting for .runningBackground while the Home screen was already showing).
+		let homeScreen = springboard.otherElements["Home screen icons"]
 		if fromBackground {
 			XCUIDevice.shared.press(.home)
-			XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
+			XCTAssertTrue(homeScreen.waitForExistence(timeout: 30), "Pressing Home should show the Home screen")
 		}
 		// Dispatch through the OS's registered URL handler. Safari's own animation
 		// quiescence can otherwise add repeated minute-long waits to routing tests.
 		// Do not activate Pigeon directly: the destination assertions prove URL delivery.
 		XCUIDevice.shared.system.open(url)
-		XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), "Pigeon should receive the system URL handoff")
+		if fromBackground {
+			XCTAssertTrue(homeScreen.waitForNonExistence(timeout: 30), "Pigeon should replace the Home screen after the system URL handoff")
+		}
 	}
 
 	private func attachScreenshot(_ name: String) {

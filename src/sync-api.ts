@@ -1,6 +1,7 @@
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import { isPaywalledHtml } from './paywall';
+import { toISO8601 } from './timestamps';
 
 const DEFAULT_SYNC_LIMIT = 100;
 const MAX_SYNC_LIMIT = 200;
@@ -265,15 +266,6 @@ function eventKey(type: SyncEventRow['entity_type'], id: string): string {
 
 function toGoogleItemID(rowid: number): string {
 	return `tag:google.com,2005:reader/item/${rowid.toString(16).padStart(16, '0')}`;
-}
-
-function toISO8601(value: string): string {
-	const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
-		? `${value.replace(' ', 'T')}Z`
-		: value;
-	const date = new Date(normalized);
-	if (Number.isNaN(date.getTime())) throw new Error(`Invalid database timestamp: ${value}`);
-	return date.toISOString();
 }
 
 function chunk<T>(values: T[], size: number): T[][] {

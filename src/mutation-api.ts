@@ -1,5 +1,6 @@
 import { parseGoogleReaderItemRowid } from './item-identity';
 import type { Env } from './types';
+import { apiTimestamp } from './timestamps';
 
 const MAX_MUTATIONS_PER_REQUEST = 100;
 const MAX_TOTAL_ITEM_IDS = 200;
@@ -42,6 +43,7 @@ interface FeedTarget {
 }
 
 interface MutationReceiptRow {
+	applied_at: string;
 	result_json: string;
 }
 
@@ -304,7 +306,7 @@ async function resolveFeed(db: D1Database, feedID: string): Promise<FeedTarget> 
 
 async function receiptFor(db: D1Database, mutationID: string): Promise<{ appliedAt: string } | null> {
 	const receipt = await db.prepare(
-		`SELECT result_json FROM mutation_receipts
+		`SELECT applied_at, result_json FROM mutation_receipts
 		 WHERE account_id = 'default' AND mutation_id = ?`,
 	)
 		.bind(mutationID)
@@ -315,19 +317,28 @@ async function receiptFor(db: D1Database, mutationID: string): Promise<{ applied
 
 async function receiptsFor(db: D1Database, mutationIDs: string[]): Promise<Map<string, { appliedAt: string }>> {
 	const { results } = await db.prepare(
-		`SELECT mutation_id, result_json FROM mutation_receipts
+		`SELECT mutation_id, applied_at, result_json FROM mutation_receipts
 		 WHERE account_id = 'default' AND mutation_id IN (SELECT value FROM json_each(?))`,
 	).bind(JSON.stringify(mutationIDs)).all<MutationReceiptRow & { mutation_id: string }>();
 	return new Map(results.map((receipt) => [receipt.mutation_id, parseReceipt(receipt)]));
 }
 
+/**
+ * The app decodes appliedAt as an ISO 8601 date. A receipt whose stored result
+ * is unreadable falls back to the receipt row's own applied_at, and a receipt
+ * with no readable time at all reports when this replay confirmed it.
+ */
 function parseReceipt(receipt: MutationReceiptRow): { appliedAt: string } {
+	let stored: unknown;
 	try {
-		const parsed = JSON.parse(receipt.result_json) as { appliedAt?: unknown };
-		return { appliedAt: typeof parsed.appliedAt === 'string' ? parsed.appliedAt : '' };
+		stored = (JSON.parse(receipt.result_json) as { appliedAt?: unknown } | null)?.appliedAt;
 	} catch {
-		return { appliedAt: '' };
+		stored = undefined;
 	}
+	const appliedAt = (typeof stored === 'string' ? apiTimestamp(stored) : null)
+		?? apiTimestamp(receipt.applied_at)
+		?? new Date().toISOString();
+	return { appliedAt };
 }
 
 function optionalScope(value: unknown): ClientMutation['scope'] {
