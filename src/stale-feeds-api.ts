@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { MAX_IDENTIFIER_BYTES } from './content-size';
+import { apiTimestamp } from './timestamps';
 
 const MAX_BULK_FEEDS = 100;
 
@@ -49,8 +50,8 @@ async function listStaleFeeds(request: Request, env: Env): Promise<Response> {
 			sourceType: feed.source_type,
 			sourceURL: feed.source_url,
 			siteURL: feed.site_url,
-			lastArticleAt: feed.last_article_at,
-			lastSuccessAt: feed.last_success_at,
+			lastArticleAt: apiTimestamp(feed.last_article_at),
+			lastSuccessAt: apiTimestamp(feed.last_success_at),
 			httpStatus: feed.last_http_status,
 			archived: feed.stale_archived === 1,
 		})),

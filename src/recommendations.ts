@@ -14,6 +14,7 @@ import {
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import { isPaywalledHtml } from './paywall';
+import { apiTimestamp } from './timestamps';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
 
@@ -654,7 +655,7 @@ async function loadRecommendationCandidates(
 	// The fast global slice is enough for the common case. When it fills, add a
 	// small indexed slice per active feed so a quiet publisher older than the
 	// newest 100 items can still compete for a relevant topic.
-	if (view !== 'for-you' || initial.results.length < CANDIDATE_POOL_SIZE) return initial.results;
+	if (view !== 'for-you' || initial.results.length < CANDIDATE_POOL_SIZE) return datedCandidates(initial.results);
 	const feedRows = await env.DB.prepare(
 		`SELECT feed_key
 		   FROM feeds
@@ -686,7 +687,20 @@ async function loadRecommendationCandidates(
 	const unique = new Map<string, RecommendationCandidate>();
 	for (const candidate of initial.results) unique.set(candidate.id, candidate);
 	for (const candidate of feedCandidatePages.flatMap((page) => page.results)) unique.set(candidate.id, candidate);
-	return [...unique.values()];
+	return datedCandidates([...unique.values()]);
+}
+
+/**
+ * Candidates with ISO 8601 UTC received_at values. The app decodes receivedAt
+ * as an ISO 8601 date and ranking reads it as freshness, so a legacy SQLite
+ * datetime is converted and an item without a readable time is left out.
+ */
+function datedCandidates(candidates: RecommendationCandidate[]): RecommendationCandidate[] {
+	return candidates.flatMap((candidate) => {
+		const receivedAt = apiTimestamp(candidate.received_at);
+		if (!receivedAt) return [];
+		return [receivedAt === candidate.received_at ? candidate : { ...candidate, received_at: receivedAt }];
+	});
 }
 
 async function loadRecommendationContent(
@@ -780,8 +794,11 @@ async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], 
 		).bind(page.membership, capacity).all<RecommendationPageRow>();
 		for (const row of results) {
 			const entry = entries[page.offset + row.ordinal];
+			// Ranking already left out undated items; this guards a row rewritten since.
+			const receivedAt = apiTimestamp(row.received_at);
+			if (!receivedAt) continue;
 			items.push({ ...entry, readerId: toGoogleItemId(row.rowid), feedKey: row.feed_key, source: row.source,
-				author: row.author, title: row.title, originalURL: row.original_url, receivedAt: row.received_at,
+				author: row.author, title: row.title, originalURL: row.original_url, receivedAt,
 				isRead: row.is_read === 1, isStarred: row.is_starred === 1,
 				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null,
 				isPaywalled: isPaywalledHtml(row.html_content) });
