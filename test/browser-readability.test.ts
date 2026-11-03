@@ -173,3 +173,42 @@ test('Defuddle still exposes the internal error set the fallback relies on', () 
 	instance.parse();
 	assert.ok(instance._parseErrors instanceof window.Set || instance._parseErrors instanceof Set, 'upgrade check: Defuddle _parseErrors moved');
 });
+
+test('unknown presentational tags are unwrapped, not deleted with their text', () => {
+	const { window } = readingWindow();
+	const essay = 'Great work comes from curiosity, delight, and the desire to do something impressive over many years. '.repeat(20);
+	const html = `<html><head><title>How to Do Great Work</title></head><body><table><tr><td><font size="2" face="verdana">${essay}<br><br><center><font>${essay}</font></center></font></td></tr></table><style>.x{color:red}</style><custom-widget>${'Widget text stays readable for the reader here. '.repeat(3)}</custom-widget></body></html>`;
+	const result = window.__PIGEON_READING_TOOLS__.extract(html, 'https://essays.example/greatwork');
+	assert.ok(result.wordCount > 300, `wordCount ${result.wordCount} via ${result.extractor}`);
+	assert.match(result.content, /desire to do something impressive/);
+	assert.doesNotMatch(result.content, /<font|<center|color:red/);
+});
+
+test('same-page links that Defuddle made absolute become in-page fragments again', () => {
+	// In browsers the wrapper's <base href> makes a.href absolute and Defuddle
+	// copies it, turning footnotes like PG's #f1n into links to the original site.
+	const url = 'https://essays.example/greatwork.html';
+	const text = 'Curiosity drives the best work, sustained over years of patient effort and delight. '.repeat(10);
+	const { window } = readingWindow({ defuddle: false });
+	window.Defuddle = class { parse() { return { content: `<p>${text}[<a href="${url}#f1n">1</a>] <a href="${url}?ref=x#f2n">2</a> <a href="https://essays.example/other.html#f1n">other</a></p><p><a name="f1n">1</a> A note.</p>` }; } };
+	const { content, extractor } = window.__PIGEON_READING_TOOLS__.extract('<p>source</p>', url);
+	assert.equal(extractor, 'defuddle');
+	assert.doesNotMatch(content, /href="https:\/\/essays\.example\/greatwork\.html#/);
+	assert.match(content, /href="#f1n"[^>]*target="_self"|target="_self"[^>]*href="#f1n"/);
+	// Different page, or same path with a different query: stays external.
+	assert.match(content, /href="https:\/\/essays\.example\/greatwork\.html\?ref=x#f2n"/);
+	assert.match(content, /href="https:\/\/essays\.example\/other\.html#f1n"/);
+});
+
+test('named note anchors survive as scroll targets and never gain an href', () => {
+	const { window } = readingWindow();
+	const body = 'Curiosity drives the best work, sustained over years of patient effort and delight. '.repeat(25);
+	const html = `<html><head><title>Great Work</title></head><body><table><tr><td><font size="2">${body}[<a href="#f1n"><font color="#999999">1</font></a>] ${body}<br><br><b>Notes</b><br><br>[<a name="f1n"><font color="#000000">1</font></a>] A note about curiosity.</font></td></tr></table></body></html>`;
+	const { content, extractor } = window.__PIGEON_READING_TOOLS__.extract(html, 'https://essays.example/greatwork.html');
+	assert.equal(extractor, 'defuddle');
+	assert.match(content, /<a[^>]*\b(id|name)="f1n"/, 'note target kept');
+	const probe = window.document.createElement('template');
+	probe.innerHTML = content;
+	const target = probe.content.querySelector('[id="f1n"], [name="f1n"]');
+	assert.equal(target?.hasAttribute('href'), false, 'a name-only anchor must not become a link');
+});

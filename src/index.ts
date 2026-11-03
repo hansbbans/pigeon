@@ -1,3 +1,4 @@
+import { DEFUDDLE_SOURCE } from './browser-defuddle-source';
 import type { Env } from './types';
 import { handleIncomingEmail } from './email-handler';
 import { generateAtomFeed } from './feed';
@@ -25,6 +26,13 @@ export default {
 		}
 		if (path === '/app/manifest.webmanifest' || path === '/app/icon.png' || path === '/app/icon-192.png' || path === '/app/icon-512.png') {
 			return handleBrowserInstallationAsset(request);
+		}
+		if (path === '/app/defuddle.js' && request.method === 'GET') {
+			// Static, versioned by ?v=; no parsing or auth, so no CPU cost beyond the copy.
+			return new Response(DEFUDDLE_SOURCE, { headers: {
+				'Content-Type': 'text/javascript; charset=utf-8',
+				'Cache-Control': 'public, max-age=31536000, immutable',
+			} });
 		}
 		if (path === '/app/sw.js' && request.method === 'GET') {
 			return new Response(renderBrowserServiceWorker(), { headers: {

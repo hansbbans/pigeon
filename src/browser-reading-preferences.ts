@@ -64,9 +64,12 @@ export function renderBrowserReadingScript(): string {
     if(!allowed.has(tag)) {element.replaceWith.apply(element,Array.from(element.childNodes));continue;}
     var attributes={}; Array.from(element.attributes).forEach(function(attr){attributes[attr.name.toLowerCase()]=attr.value;element.removeAttribute(attr.name);});
     ['title','lang'].forEach(function(name){if(attributes[name])element.setAttribute(name,attributes[name].slice(0,300));});
+    if(/^[A-Za-z0-9_:.-]{1,128}$/.test(attributes.id || ''))element.setAttribute('id',attributes.id);
+    if(['code','pre'].includes(tag) && /^[A-Za-z0-9_+#.-]{1,40}$/.test(attributes['data-lang'] || ''))element.setAttribute('data-lang',attributes['data-lang']);
     if(['ltr','rtl','auto'].includes(attributes.dir))element.setAttribute('dir',attributes.dir);
     ['colspan','rowspan'].forEach(function(name){if(['td','th'].includes(tag) && /^[1-9][0-9]{0,2}$/.test(attributes[name] || ''))element.setAttribute(name,String(Math.min(100,Number(attributes[name]))));});
-    if(tag==='a') {var href=safeURL(attributes.href,base,true);if(href){element.setAttribute('href',href);element.setAttribute('target','_blank');element.setAttribute('rel','noopener noreferrer');element.setAttribute('referrerpolicy','no-referrer');}}
+    if(tag==='a' && /^#[^\s\u0000-\u001f"<>]{1,256}$/.test((attributes.href||'').trim())) {element.setAttribute('href',attributes.href.trim());element.setAttribute('target','_self');}
+    else if(tag==='a') {var href=safeURL(attributes.href,base,true);if(href){element.setAttribute('href',href);element.setAttribute('target','_blank');element.setAttribute('rel','noopener noreferrer');element.setAttribute('referrerpolicy','no-referrer');}}
     if(tag!=='img') continue;
     var raw=attributes.src || attributes['data-src'] || (attributes.srcset || '').split(',')[0].trim().split(/\s+/)[0];
     var original=inlineImage(raw) ? raw : safeURL(raw,base,false); var alt=String(attributes.alt || '').slice(0,500);

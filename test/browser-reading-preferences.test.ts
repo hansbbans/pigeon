@@ -220,3 +220,21 @@ test('CUA real DOM smoke verifies image consent, proxy blobs and stale-render cl
  assert.equal(report.staleCommitted,false);assert.match(report.staleError,/session changed/);assert.equal(report.staleCalls,2);assert.equal(report.staleURLs.length,1);assert.ok(report.revoked.includes(report.staleURLs[0]));assert.deepEqual(report.staleProbes,['/probe/image-load']);
  assert.deepEqual(probes,['/probe/image-load'],'only the explicitly consented image may reach the fixture server');
 });
+
+test('in-page fragment links stay fragments that scroll the frame',async()=>{
+ const state=fixture();
+ const html='<p>Story[<a href="#f1n">1</a>] <a href="https://other.test/page#x">other</a></p><p><a name="f1n">1</a> Note.</p>';
+ const result=await state.api.applyImagePolicy(html,{policy:'ask',baseURL:'https://essays.test/greatwork.html',isCurrent:()=>true});
+ assert.match(result.html,/<a href="#f1n" target="_self">/);
+ assert.doesNotMatch(result.html,/href="https:\/\/essays.test\/greatwork.html#f1n"/);
+ assert.match(result.html,/href="https:\/\/other.test\/page#x" target="_blank"/);
+});
+
+test('link targets keep safe ids and code keeps its language',async()=>{
+ const state=fixture();
+ const html='<p>Story<sup id="fnref:1"><a href="#fn:1">1</a></sup></p><ol><li id="fn:1">Note</li></ol><a id="f1n">1</a><p id="bad id&quot;x">x</p><pre><code data-lang="python" class="language-python">print(1)</code></pre>';
+ const result=await state.api.applyImagePolicy(html,{policy:'ask',baseURL:'https://essays.test/a',isCurrent:()=>true});
+ assert.match(result.html,/<li id="fn:1">/);assert.match(result.html,/<sup id="fnref:1">/);assert.match(result.html,/<a id="f1n">/);
+ assert.doesNotMatch(result.html,/bad id/);
+ assert.match(result.html,/<code data-lang="python">/);
+});

@@ -36,12 +36,16 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		const resources = new Map<string, Record<string, string>>();
 		const tags = new Set('a abbr article aside audio b blockquote br caption cite code col colgroup dd del details dfn div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 header hr i img kbd li main mark meta ol p picture pre q s samp section small source span strong sub summary sup table tbody td th thead time title tr u ul var video'.split(' '));
 		const attributes = new Set('alt title lang dir class id colspan rowspan width height role aria-label name property content charset datetime controls data-lang'.split(' '));
+		const TARGET_MARKER = 'pigeon-in-page-target:';
+		const dropped = new Set('script style noscript template iframe frame frameset object embed applet link base svg math canvas form input button select textarea option dialog portal'.split(' '));
 		function clean(fragment: any, restore: boolean): void {
 			const elements = Array.from(fragment.querySelectorAll('*') as any[]);
 			if (elements.length > 10_000) throw new Error('Article contains too many elements.');
 			for (const element of elements) {
 				const tag = element.localName.toLowerCase();
-				if (!tags.has(tag) || (tag === 'meta' && element.hasAttribute('http-equiv'))) { element.remove(); continue; }
+				if (dropped.has(tag) || (tag === 'meta' && element.hasAttribute('http-equiv'))) { element.remove(); continue; }
+				// Presentational or unknown wrappers (font, center, custom elements) keep their text.
+				if (!tags.has(tag)) { element.replaceWith(...Array.from(element.childNodes as any[])); continue; }
 				const incomingMarker = restore ? element.getAttribute('data-pigeon-resource') : null;
 				const media: Record<string, string> = {};
 				if (!restore && ['img', 'audio', 'video', 'source'].includes(tag)) {
@@ -54,7 +58,9 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 				}
 				const rawHref = tag === 'a' ? (element.getAttribute('href') || '').trim() : '';
 				// In-page fragments (footnotes) stay fragments; everything else resolves against the article URL.
-				const href = tag === 'a' ? (/^#[^\s\u0000-\u001f"<>]{1,256}$/.test(rawHref) ? rawHref : safeURL(rawHref, base)) : null;
+				const href = tag === 'a' && rawHref ? (/^#[^\s\u0000-\u001f"<>]{1,256}$/.test(rawHref) ? rawHref : safeURL(rawHref, base)) : null;
+				// Old-style note targets (<a name="f1n">) become ids: Defuddle drops name.
+				if (!restore && tag === 'a' && !element.getAttribute('id') && /^[^\s"<>]{1,256}$/.test(element.getAttribute('name') || '')) element.setAttribute('id', element.getAttribute('name'));
 				for (const attribute of Array.from(element.attributes as any[])) {
 					const name = attribute.name.toLowerCase();
 					if (!attributes.has(name)) element.removeAttribute(attribute.name);
@@ -92,7 +98,15 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			try {
 				// Defuddle reads the document it is given; parse a copy so a failed
 				// attempt cannot leave Readability a mutated tree.
-				const defuddle = new root.Defuddle(parsed.cloneNode(true), { url: base });
+				// Defuddle keeps only allowlisted attributes, and id is not one of them
+				// outside debug mode. Carry in-page link targets through in title.
+				const working = parsed.cloneNode(true);
+				const referenced = new Set(Array.from(working.querySelectorAll('a[href^="#"]') as any[]).map((link: any) => link.getAttribute('href').slice(1)).filter(Boolean));
+				for (const target of Array.from(working.querySelectorAll('[id], a[name]') as any[])) {
+					const key = target.getAttribute('id') || target.getAttribute('name');
+					if (referenced.has(key) && !target.hasAttribute('title')) target.setAttribute('title', TARGET_MARKER + key);
+				}
+				const defuddle = new root.Defuddle(working, { url: base });
 				const result = defuddle.parse();
 				// Defuddle catches its own internal errors and returns the whole page body.
 				// It records them in _parseErrors (debug.errors only in debug mode, which logs).
@@ -137,7 +151,18 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		clean(output.content, true);
 		// The article frame sets <base target="_blank">; in-page links such as
 		// footnotes must scroll the frame rather than open a new tab.
-		for (const link of Array.from(output.content.querySelectorAll('a[href^="#"]') as any[])) link.setAttribute('target', '_self');
+		// Browsers resolve hrefs against the <base> above, so Defuddle may hand back
+		// same-page fragments as absolute links to the original site.
+		for (const target of Array.from(output.content.querySelectorAll('[title^="' + TARGET_MARKER + '"]') as any[])) {
+			target.setAttribute('id', target.getAttribute('title').slice(TARGET_MARKER.length));
+			target.removeAttribute('title');
+		}
+		const pageURL = base.split('#')[0];
+		for (const link of Array.from(output.content.querySelectorAll('a[href]') as any[])) {
+			const href = link.getAttribute('href') || '';
+			if (href.startsWith(pageURL + '#') && href.length > pageURL.length + 1) link.setAttribute('href', href.slice(pageURL.length));
+			if ((link.getAttribute('href') || '').startsWith('#')) link.setAttribute('target', '_self');
+		}
 		return { ...extracted, content: client.sanitizeArticleHtml(output.innerHTML), url: base };
 	}, hasDefuddle(): boolean { return typeof root.Defuddle === 'function'; } };
 }
