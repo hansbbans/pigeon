@@ -142,7 +142,7 @@ final class ReaderAppModel {
 	}
 
 	var session: PigeonSession?
-	/// Articles whose reader-mode word count was already reported this launch.
+	/// Account-scoped article IDs whose reader-mode word count was reported this launch.
 	private var reportedWordCountIDs: Set<String> = []
 	var serverURLText = ""
 	var password = ""
@@ -2288,19 +2288,37 @@ final class ReaderAppModel {
 	/// the original page once per article, so every client labels it correctly.
 	/// Only extractions of the original page count: the feed-body fallback
 	/// would just measure the snippet again.
+	///
+	/// The report is a best-effort hint, so it is sent on its own and never
+	/// joins the durable mutation queue: a Worker that predates
+	/// `set_word_count` rejects it, and that must not hold up read/star sync.
 	private func reportExtractedWordCount(_ extracted: Int?, for article: Recommendation) {
-		guard reportedWordCountIDs.contains(article.readerId) == false,
+		guard let apiClient, let session else { return }
+		let reportKey = "\(session.storageIdentity)|\(ReaderArticleIdentity.normalized(article.readerId))"
+		guard reportedWordCountIDs.contains(reportKey) == false,
 			ReadingLength.shouldReport(
 				stored: ReadingLength.knownWordCount(for: article),
 				extracted: extracted,
 				mediaKind: article.length?.mediaKind,
 			),
 			let extracted else { return }
-		reportedWordCountIDs.insert(article.readerId)
+		reportedWordCountIDs.insert(reportKey)
+		applyReportedWordCount(extracted, to: article)
 		let mutation = OfflineMutation(kind: .setWordCount, itemIds: [article.readerId], wordCount: extracted)
-		Task {
-			guard await enqueueOfflineMutation(mutation) else { return }
-			await replayPendingMutations()
+		Task { _ = try? await apiClient.sendMutations([mutation]) }
+	}
+
+	/// Shows the reported length right away; the next sync brings the server's copy.
+	private func applyReportedWordCount(_ wordCount: Int, to article: Recommendation) {
+		for (collectionID, articles) in articleCache where articles.contains(where: { articlesMatch($0, article) }) {
+			articleCache[collectionID] = articles.map { cached in
+				guard articlesMatch(cached, article) else { return cached }
+				var updated = cached
+				var length = cached.length ?? ArticleLength(wordCount: nil, mediaKind: "text", durationSeconds: nil)
+				length?.wordCount = wordCount
+				updated.length = length
+				return updated
+			}
 		}
 	}
 

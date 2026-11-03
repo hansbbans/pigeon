@@ -81,7 +81,6 @@ struct PigeonReaderApp: App {
 		WindowGroup {
 			RootView()
 				.environment(model)
-				.environment(\.showsReadingTime, model.readerTypography.showsReadingTime)
 				#if DEBUG
 				.transaction { transaction in
 					guard Self.disablesAnimations else { return }

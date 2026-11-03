@@ -41,6 +41,8 @@ struct ReadingLengthTests {
 		#expect(ReadingLength.shouldReport(stored: nil, extracted: 900, mediaKind: "video") == false)
 		#expect(ReadingLength.shouldReport(stored: 0, extracted: 900, mediaKind: nil))
 		#expect(ReadingLength.shouldReport(stored: nil, extracted: nil, mediaKind: nil) == false)
+		#expect(ReadingLength.shouldReport(stored: nil, extracted: 2_000_000, mediaKind: nil))
+		#expect(ReadingLength.shouldReport(stored: nil, extracted: 2_000_001, mediaKind: nil) == false)
 	}
 
 	@Test
@@ -71,11 +73,16 @@ struct ReadingLengthTests {
 		#expect(ReadingLength.countWords(inHTML: "<p>a < b and more</p>") == 5)
 		#expect(ReadingLength.countWords(inHTML: "<p>ends with a <") == 4)
 		#expect(ReadingLength.countWords(inHTML: "<!-- unterminated comment <p>two words</p>") == 2)
+		// Case folding applies to letters only: a control byte is not a "-".
+		#expect(ReadingLength.countWords(inHTML: "<!-- x -\r> hidden --><p>shown</p>") == 1)
 	}
 
 	@Test
 	func capsTheScanAndStaysLinearOnMalformedMarkup() {
 		#expect(ReadingLength.countWords(inHTML: "<p>" + String(repeating: "word ", count: 200_000) + "</p>") == 60_000)
+		// The limit counts UTF-16 units like the web, not UTF-8 bytes.
+		#expect(ReadingLength.countWords(inHTML: String(repeating: "слово ", count: 50_000)) == 50_000)
+		#expect(ReadingLength.countWords(inHTML: String(repeating: "😀", count: 150_001)) == 1)
 		for html in [
 			String(repeating: "<a", count: 150_000),
 			String(repeating: "<!--x>", count: 50_000),
@@ -104,6 +111,14 @@ struct ReadingLengthTests {
 		var reported = Self.article(id: "reported", html: "<p>short snippet</p>")
 		reported.length = ArticleLength(wordCount: 5000, mediaKind: "text", durationSeconds: nil)
 		#expect(reported.readingLengthLabel(showsReadingTime: true) == "22 min read")
+
+		var pruned = Self.article(id: "pruned", html: "")
+		pruned = Recommendation(
+			id: pruned.id, readerId: pruned.readerId, feedKey: pruned.feedKey, source: pruned.source, title: pruned.title,
+			html: "", text: String(repeating: "word ", count: 3000), originalURL: pruned.originalURL, receivedAt: pruned.receivedAt,
+			isRead: true, isStarred: false, score: 0, confidence: 0, sampleCount: 0, explanation: "", learningState: "",
+		)
+		#expect(pruned.readingLengthLabel(showsReadingTime: true) == "13 min read")
 
 		var video = Self.article(id: "video", html: body)
 		video.length = ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 3900)

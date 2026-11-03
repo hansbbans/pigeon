@@ -37,6 +37,8 @@ test('shouldReportWordCount reports unknown or much shorter stored counts', () =
 	assert.equal(shouldReportWordCount(null, 49, 'text'), false);
 	assert.equal(shouldReportWordCount(null, 900, 'video'), false);
 	assert.equal(shouldReportWordCount(0, 900, undefined), true);
+	assert.equal(shouldReportWordCount(null, 2_000_000, 'text'), true);
+	assert.equal(shouldReportWordCount(null, 2_000_001, 'text'), false);
 });
 
 function seedLengths(database: DatabaseSync) {

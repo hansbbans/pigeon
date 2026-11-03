@@ -43,8 +43,9 @@ nonisolated enum ReadingLength {
 
 	/// Reader mode reports Defuddle's count when the known one looks like a
 	/// feed snippet: unknown, or at least 1.5x shorter than the extraction.
+	/// The server accepts 1...2,000,000.
 	static func shouldReport(stored: Int?, extracted: Int?, mediaKind: String?) -> Bool {
-		guard mediaKind != "video", let extracted, extracted >= 50 else { return false }
+		guard mediaKind != "video", let extracted, (50...2_000_000).contains(extracted) else { return false }
 		guard let stored, stored > 0 else { return true }
 		return extracted * 2 >= stored * 3
 	}
@@ -67,28 +68,47 @@ nonisolated enum ReadingLength {
 		article.length?.wordCount ?? estimatedWordCount(for: article)
 	}
 
+	/// Estimated from the HTML body, or from the kept plain text once the
+	/// body has been pruned.
 	@MainActor static func estimatedWordCount(for article: Recommendation) -> Int? {
-		guard article.html.isEmpty == false else { return nil }
-		let key = "\(article.id)#\(article.contentVersion ?? "")#\(article.html.utf8.count)"
+		let body = article.html.isEmpty ? (article.text ?? "") : article.html
+		guard body.isEmpty == false else { return nil }
+		let key = "\(article.id)#\(article.contentVersion ?? "")#\(article.html.isEmpty ? "t" : "h")\(body.utf8.count)"
 		if let cached = estimateCache[key] { return cached }
-		let count = countWords(inHTML: article.html)
+		let count = countWords(inHTML: body)
 		if estimateCache.count >= 4_000 { estimateCache.removeAll(keepingCapacity: true) }
 		estimateCache[key] = count
 		return count
 	}
 
+	/// Same limit as the web: 300 000 UTF-16 code units.
 	static let sourceLimit = 300_000
 
 	/// Port of `countWordsInHtml` (src/word-count.ts): one linear scan over at
-	/// most 300 000 UTF-8 bytes. Tags are word boundaries; head, script, style
-	/// and template content and comments are skipped unless their closer is
-	/// missing, and a missing closer is remembered so the scan never repeats.
+	/// most 300 000 UTF-16 code units of the body, read as UTF-8 bytes in place.
+	/// Tags are word boundaries; head, script, style and template content and
+	/// comments are skipped unless their closer is missing, and a missing closer
+	/// is remembered so the scan never repeats.
 	static func countWords(inHTML html: String) -> Int {
-		let bytes = Array(html.utf8.prefix(sourceLimit))
+		var source = html
+		if html.utf16.count > sourceLimit {
+			// Back off one unit rather than split a surrogate pair.
+			let prefix = html.utf16.prefix(sourceLimit)
+			source = String(prefix) ?? String(prefix.dropLast()) ?? ""
+		}
+		source.makeContiguousUTF8()
+		if let count = source.utf8.withContiguousStorageIfAvailable({ countWords(in: $0) }) { return count }
+		return Array(source.utf8).withUnsafeBufferPointer { countWords(in: $0) }
+	}
+
+	private static let rawTextElements: [[UInt8]] = ["head", "script", "style", "template"].map { Array($0.utf8) }
+	private static let spaceEntities: [[UInt8]] = ["&nbsp;", "&#160;", "&#xa0;"].map { Array($0.utf8) }
+
+	private static func countWords(in bytes: UnsafeBufferPointer<UInt8>) -> Int {
 		let length = bytes.count
 		var noTagCloseFrom = length
 		var noCommentCloseFrom = length
-		var noRawCloseFrom: [String: Int] = [:]
+		var noRawCloseFrom = [Int](repeating: length, count: rawTextElements.count)
 		var count = 0
 		var inWord = false
 		var index = 0
@@ -101,34 +121,38 @@ nonisolated enum ReadingLength {
 			}
 			return nil
 		}
+		/// ASCII case folding applies to letters only, like a case-insensitive regex.
+		func folded(_ byte: UInt8) -> UInt8 {
+			byte >= 0x41 && byte <= 0x5A ? byte | 0x20 : byte
+		}
 		func matches(_ text: [UInt8], at position: Int) -> Bool {
 			guard position + text.count <= length else { return false }
-			for offset in 0..<text.count where bytes[position + offset] | 0x20 != text[offset] | 0x20 { return false }
+			for offset in 0..<text.count where folded(bytes[position + offset]) != text[offset] { return false }
 			return true
 		}
-		/// Start of the next "</name" + optional whitespace + ">" and the index after it.
+		func isSpace(_ byte: UInt8) -> Bool {
+			byte == 0x20 || (byte >= 0x09 && byte <= 0x0D)
+		}
+		/// The index after the next "</name" + optional whitespace + ">".
 		func findCloser(_ name: [UInt8], from start: Int) -> Int? {
 			var position = start
 			while let open = find(0x3C, from: position) {
 				if open + 1 < length, bytes[open + 1] == 0x2F, matches(name, at: open + 2) {
 					var end = open + 2 + name.count
-					while end < length, bytes[end] <= 0x20 { end += 1 }
+					while end < length, isSpace(bytes[end]) { end += 1 }
 					if end < length, bytes[end] == 0x3E { return end + 1 }
 				}
 				position = open + 1
 			}
 			return nil
 		}
-
 		let commentOpen: [UInt8] = Array("<!--".utf8)
 		let commentClose: [UInt8] = Array("-->".utf8)
-		let rawTextElements = ["head", "script", "style", "template"]
-		let spaceEntities: [[UInt8]] = ["&nbsp;", "&#160;", "&#xa0;"].map { Array($0.utf8) }
 
 		while index < length {
 			let byte = bytes[index]
 			if byte == 0x3C, index + 1 < length {
-				let next = bytes[index + 1] | 0x20
+				let next = folded(bytes[index + 1])
 				let opensTag = (next >= 0x61 && next <= 0x7A) || next == 0x2F || next == 0x21 || next == 0x3F
 				if opensTag {
 					let close = index + 1 >= noTagCloseFrom ? nil : find(0x3E, from: index + 1)
@@ -150,18 +174,19 @@ nonisolated enum ReadingLength {
 						}
 						var nameEnd = index + 1
 						while nameEnd < length, nameEnd - index <= 10 {
-							let letter = bytes[nameEnd] | 0x20
+							let letter = folded(bytes[nameEnd])
 							if letter < 0x61 || letter > 0x7A { break }
 							nameEnd += 1
 						}
-						let name = String(decoding: bytes[(index + 1)..<nameEnd], as: UTF8.self).lowercased()
-						if rawTextElements.contains(name), bytes[close - 1] != 0x2F {
+						let nameLength = nameEnd - index - 1
+						if let element = rawTextElements.firstIndex(where: { $0.count == nameLength && matches($0, at: index + 1) }),
+							bytes[close - 1] != 0x2F {
 							var resume = close + 1
-							if close + 1 < noRawCloseFrom[name, default: length] {
-								if let end = findCloser(Array(name.utf8), from: close + 1) {
+							if close + 1 < noRawCloseFrom[element] {
+								if let end = findCloser(rawTextElements[element], from: close + 1) {
 									resume = end
 								} else {
-									noRawCloseFrom[name] = close + 1
+									noRawCloseFrom[element] = close + 1
 								}
 							}
 							index = resume

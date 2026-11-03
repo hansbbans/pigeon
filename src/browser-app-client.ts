@@ -130,7 +130,8 @@ export function shouldReportWordCount(
 	mediaKind: string | null | undefined,
 ): boolean {
 	if (mediaKind === 'video') return false;
-	if (typeof extracted !== 'number' || !Number.isSafeInteger(extracted) || extracted < 50) return false;
+	// The server accepts 1 to 2,000,000.
+	if (typeof extracted !== 'number' || !Number.isSafeInteger(extracted) || extracted < 50 || extracted > 2_000_000) return false;
 	if (typeof stored !== 'number' || stored <= 0) return true;
 	return extracted >= stored * 1.5;
 }

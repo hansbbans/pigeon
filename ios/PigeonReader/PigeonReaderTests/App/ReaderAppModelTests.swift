@@ -436,36 +436,37 @@ struct ReaderAppModelTests {
 			#expect(requests.contains(where: { $0.url.path == "/api/v1/engagement" }))
 		}
 
-	@Test func readerViewReportsASnippetsRealLengthOnceAndNeverForVideosOrFeedFallbacks() async throws {
+	@Test func readerViewReportsASnippetsRealLengthOnceOutsideTheMutationQueue() async throws {
 		let store = OfflineLibraryStore.inMemory()
+		let mock = MockHTTPClient()
 		let extractor = ScriptedReaderViewExtractor(
 			urlDocument: try ReaderViewDocument(contentHTML: "<p>Full article</p>", wordCount: 3000, extractor: .defuddle),
 			htmlDocument: try ReaderViewDocument(contentHTML: "<p>From feed</p>", wordCount: 4000),
 		)
-		let model = try makeModel(
-			httpClient: MockHTTPClient(shouldFail: true),
-			readerViewExtractor: extractor,
-			offlineStore: store,
-			offlineSynchronizationEnabled: false,
-		)
-		let accountID = try #require(model.session).storageIdentity
-		func pendingReports() async throws -> [OfflineMutation] {
-			try await store.pendingMutations(accountID: accountID, limit: 100).map(\.mutation).filter { $0.kind == .setWordCount }
-		}
-		func waitForReports(_ count: Int) async throws {
-			for _ in 0..<200 {
-				if try await pendingReports().count >= count { return }
-				try await Task.sleep(for: .milliseconds(5))
-			}
+		let model = try makeModel(httpClient: mock, readerViewExtractor: extractor, offlineStore: store, offlineSynchronizationEnabled: false)
+		func reports() async throws -> [OfflineMutation] {
+			try await mock.requests()
+				.filter { $0.url.path == "/api/v1/mutations" }
+				.compactMap(\.body)
+				.flatMap { try JSONDecoder().decode(OfflineMutationEnvelope.self, from: $0).mutations }
+				.filter { $0.kind == .setWordCount }
 		}
 
 		let snippet = makeArticle(id: "snippet", html: "<p>Just the first lines.</p>", originalURL: URL(string: "https://example.com/full"))
+		model.setArticles([snippet], for: .forYou)
 		_ = try await model.loadReaderView(for: snippet)
-		try await waitForReports(1)
-		var reports = try await pendingReports()
-		#expect(reports.count == 1)
-		#expect(reports.first?.itemIds == [snippet.readerId])
-		#expect(reports.first?.wordCount == 3000)
+		for _ in 0..<200 {
+			if try await reports().isEmpty == false { break }
+			try await Task.sleep(for: .milliseconds(5))
+		}
+		var sent = try await reports()
+		#expect(sent.count == 1)
+		#expect(sent.first?.itemIds == [snippet.readerId])
+		#expect(sent.first?.wordCount == 3000)
+		// The label updates at once, and the hint never enters the durable queue.
+		#expect(model.allArticles(for: .forYou).first?.length?.wordCount == 3000)
+		let accountID = try #require(model.session).storageIdentity
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
 
 		// A second open (even past the document cache) does not report again.
 		_ = try await model.loadReaderView(for: makeArticle(id: "snippet", html: "<p>Just the first lines, edited.</p>", originalURL: URL(string: "https://example.com/full")))
@@ -478,8 +479,8 @@ struct ReaderAppModelTests {
 		_ = try await model.loadReaderView(for: makeArticle(id: "expired", html: "<p>Feed body</p>", originalURL: URL(string: "https://example.com/gone")))
 
 		try await Task.sleep(for: .milliseconds(50))
-		reports = try await pendingReports()
-		#expect(reports.count == 1)
+		sent = try await reports()
+		#expect(sent.count == 1)
 	}
 
 	@Test func loadReaderViewFallsBackToFeedHTMLWhenTheOriginalPageFails() async throws {
