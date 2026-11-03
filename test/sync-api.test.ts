@@ -1897,3 +1897,53 @@ test('sync article payloads carry reading length only when the columns are set',
 	assert.equal(after?.mediaKind, 'text');
 	assert.equal('durationSeconds' in (after ?? {}), false);
 });
+
+function wordCountMutation(id: string, wordCount: unknown, itemIds = ['tag:google.com,2005:reader/item/000000000000000b']) {
+	return new Request('https://pigeon.example/api/v1/mutations', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ mutations: [{ id, kind: 'set_word_count', itemIds, wordCount }] }),
+	});
+}
+
+test('set_word_count writes a changed count once and a repeat adds no sync change', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	const row = () => ({ ...(state.database.prepare('SELECT word_count, content_version FROM items WHERE rowid = 11').get() as object) });
+	const articleEvents = () => (state.database
+		.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = 'article'")
+		.get() as { count: number }).count;
+	const resultStatus = async (response: Response) =>
+		(await response.json() as { results: Array<{ status: string }> }).results[0].status;
+
+	const eventsBefore = articleEvents();
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-1', 1200), state.env)), 'applied');
+	assert.deepEqual(row(), { word_count: 1200, content_version: 1 });
+	assert.equal(articleEvents(), eventsBefore + 1);
+
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-2', 1200), state.env)), 'applied');
+	assert.deepEqual(row(), { word_count: 1200, content_version: 1 });
+	assert.equal(articleEvents(), eventsBefore + 1);
+
+	assert.equal(await resultStatus(await handleMutationBatch(wordCountMutation('wc-1', 1200), state.env)), 'already_applied');
+	assert.equal(
+		(state.database.prepare("SELECT COUNT(*) AS count FROM item_statuses WHERE mutation_id LIKE 'wc-%'").get() as { count: number }).count,
+		0,
+	);
+	state.database.close();
+});
+
+test('set_word_count rejects invalid counts and multi-item targets', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	for (const value of [undefined, 0, 2.5, 2_000_001, '1200']) {
+		const response = await handleMutationBatch(wordCountMutation(`bad-${String(value)}`, value), state.env);
+		assert.equal(response.status, 400, String(value));
+	}
+	const twoItems = await handleMutationBatch(
+		wordCountMutation('bad-two', 1200, ['tag:google.com,2005:reader/item/000000000000000b', 'tag:google.com,2005:reader/item/000000000000000c']),
+		state.env,
+	);
+	assert.equal(twoItems.status, 400);
+	state.database.close();
+});

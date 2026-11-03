@@ -141,7 +141,7 @@
 
 **Files:**
 - Modify: `src/mutation-api.ts` (`MutationKind` :12, `ClientMutation` gains `wordCount?: number`, `validateMutationBatch` :122, `mutationStatements` :185, `isMutationKind` :365, `worstCaseQueries` :83)
-- Modify: `test/fixtures/api-contract/mutations.request.json` (add one `set_word_count` entry; regenerate the response fixtures)
+- *(Moved to Task 9.)* The shared `mutations.request.json` fixture gains `set_word_count` in the iOS PR. iOS compares its encoded request against that fixture exactly, so adding it here would break the iOS contract test on `main`. Target item 2 there, so item 1's status event (asserted at `APIContractTests.swift:90`) is not compacted away.
 - Test: `test/sync-api.test.ts` (mutation section :238-435)
 
 **Interfaces:**
