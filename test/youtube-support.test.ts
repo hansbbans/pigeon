@@ -242,6 +242,8 @@ class SqliteD1Database {
 				html_content TEXT NOT NULL,
 				text_content TEXT,
 				original_url TEXT,
+				word_count INTEGER,
+				media_kind TEXT,
 				content_pruned_at TEXT
 			);
 			CREATE TABLE feed_url_aliases (

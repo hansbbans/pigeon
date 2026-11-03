@@ -174,6 +174,8 @@ class SqliteD1Database {
 				html_content TEXT NOT NULL,
 				text_content TEXT,
 				original_url TEXT,
+				word_count INTEGER,
+				media_kind TEXT,
 				message_id TEXT UNIQUE,
 				received_at TEXT NOT NULL,
 				is_read INTEGER DEFAULT 0,

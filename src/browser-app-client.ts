@@ -1,3 +1,7 @@
+import { extractYouTubeVideoId } from './youtube';
+
+export { extractYouTubeVideoId };
+
 export const AUTH_STORAGE_KEY = 'pigeon.browser.auth';
 export const THEME_STORAGE_KEY = 'pigeon.browser.theme';
 export const INITIAL_ITEM_ID_LIMIT = 50;
@@ -76,49 +80,6 @@ export interface BrowserArticleListEntry {
 	heroImageUrl: string | null;
 	isPaywalled: boolean;
 	isLoaded: boolean;
-}
-
-/**
- * Recognize only official YouTube URL shapes before constructing an embed.
- * This helper is duplicated in the emitted browser script so the reader can
- * make the same decision without permitting arbitrary iframe destinations.
- */
-export function extractYouTubeVideoId(originalUrl: string | undefined | null): string | null {
-	if (!originalUrl) return null;
-
-	let url: URL;
-	try {
-		url = new URL(originalUrl);
-	} catch {
-		return null;
-	}
-	if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-	if (url.username || url.password || url.port) return null;
-
-	const hostname = url.hostname.toLowerCase().replace(/\.$/, '');
-	const pageHosts = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com']);
-	const shortHosts = new Set(['youtu.be']);
-	if (!pageHosts.has(hostname) && !shortHosts.has(hostname)) return null;
-
-	const parts = url.pathname.split('/').filter(Boolean);
-	let candidate: string | null = null;
-	if (shortHosts.has(hostname)) {
-		candidate = parts.length === 1 ? parts[0] ?? null : null;
-	} else {
-		switch (parts[0]?.toLowerCase()) {
-			case 'watch':
-				candidate = parts.length === 1 ? url.searchParams.get('v') : null;
-				break;
-			case 'shorts':
-			case 'embed':
-			case 'live':
-			case 'v':
-				candidate = parts.length === 2 ? parts[1] ?? null : null;
-				break;
-		}
-	}
-
-	return candidate && /^[A-Za-z0-9_-]{11}$/.test(candidate) ? candidate : null;
 }
 
 export function createYouTubeEmbedUrl(originalUrl: string | undefined | null): string | null {

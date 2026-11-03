@@ -514,7 +514,7 @@ test('fetchAndStoreRssFeed preserves the original item URL for imported RSS item
 	const insert = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
 	assert.ok(insert);
 	assert.match(insert.sql, /original_url/);
-	assert.equal(insert.values[insert.values.length - 1], 'https://example.com/posts/first-item');
+	assert.equal(insert.values[8], 'https://example.com/posts/first-item');
 });
 
 test('fetchAndStoreRssFeed unwraps FeedBlitz item and content links to the original destinations', async () => {
@@ -538,7 +538,7 @@ test('fetchAndStoreRssFeed unwraps FeedBlitz item and content links to the origi
 	assert.ok(insert);
 	assert.match(insert.sql, /excluded\.feed_key LIKE '%feedblitz%'/);
 	assert.equal(
-		insert.values[insert.values.length - 1],
+		insert.values[8],
 		'https://marginalrevolution.com/?p=93071',
 	);
 	assert.match(insert.values[6] as string, /href="https:\/\/x\.com\/patrickc\/status\/2058931538029662435"/);
@@ -568,7 +568,7 @@ test('fetchAndStoreRssFeed resolves relative RSS item and content links against 
 
 	const insert = db.batches[0]?.find((statement) => statement.sql.includes('INSERT INTO items'));
 	assert.ok(insert);
-	assert.equal(insert.values[insert.values.length - 1], 'https://example.com/blog/posts/relative-item');
+	assert.equal(insert.values[8], 'https://example.com/blog/posts/relative-item');
 	assert.match(insert.values[6] as string, /href="https:\/\/example\.com\/blog\/about"/);
 	assert.match(insert.values[6] as string, /src="https:\/\/example\.com\/blog\/images\/hero\.jpg"/);
 });

@@ -675,7 +675,9 @@ for (const scenario of ['small', 'large', 'expanded']) {
 				statement.bind = (...values) => {
 					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
 					if (sql.startsWith('INSERT INTO items')) {
-						assert.equal(values.length, 92);
+						// Eleven columns per row plus two lease bindings, under D1's 100-parameter cap.
+						assert.equal((values.length - 2) % 11, 0);
+						assert.ok(values.length <= 100);
 						groupedInserts += 1;
 					}
 					return bind(...values);
@@ -690,7 +692,7 @@ for (const scenario of ['small', 'large', 'expanded']) {
 			assert.equal(result.outcome, 'success');
 			assert.equal(result.itemsProcessed, 50);
 			assert.ok(limits.queries <= 40);
-			assert.equal(groupedInserts, 5);
+			assert.equal(groupedInserts, 7);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 51);
 			assert.equal((state.database.prepare('SELECT item_count FROM feeds WHERE feed_key = ?').get('design-weekly') as { item_count: number }).item_count, 51);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = ?').get('article') as { count: number }).count, 52);
