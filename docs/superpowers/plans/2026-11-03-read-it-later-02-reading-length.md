@@ -167,7 +167,7 @@
 - Consumes: `countItemWords`, `mediaKindForUrl`, `extractYouTubeVideoId` (Task 2); `RefreshQueryBudget` (`src/rss-fetcher.ts:39`); `fetchBoundedFeedResource` (`src/feed-network.ts:41`).
 - Produces:
   - `export const BACKFILL_CANDIDATE_LIMIT = 100`
-  - `export const BACKFILL_BYTE_BUDGET = 1_000_000`
+  - `export const BACKFILL_BYTE_BUDGET = 500_000` (halved from the first draft: it shares the 10 ms cron CPU with five feed refreshes)
   - `export const YOUTUBE_DURATION_BATCH = 50`
   - `export async function runWordCountBackfill(db: D1Database, budget: RefreshQueryBudget): Promise<number>`: returns the number of rows updated. Three queries:
     1. `SELECT id, original_url, length(html_content) AS html_len, length(text_content) AS text_len` over the pending index, `ORDER BY received_at DESC LIMIT 100`.
@@ -183,7 +183,7 @@
 - [ ] **Step 1: Write the failing tests:**
   - `parseYouTubeDuration`: `'PT1H2M3S'` → 3723, `'PT18M20S'` → 1100, `'P0D'` → 0, `'P1DT2H'` → 93600, `'garbage'` → null.
   - Backfill fills `word_count`/`media_kind` newest first and skips pruned rows.
-  - **Byte budget:** with three 600 KB items it updates exactly one per run, and three runs finish them all.
+  - **Byte budget:** with three 300 KB items it updates exactly one per run, and three runs finish them all.
   - **Zero words:** an image-only item stores 0 and is not selected on the next run.
   - It reserves 3 budget units and does nothing when `budget.reserve` fails.
   - Duration: the stubbed fetch returns two of three ids, so the third stores 0.
