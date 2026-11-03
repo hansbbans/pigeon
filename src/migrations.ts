@@ -8,7 +8,8 @@ const STATUS_TRIGGER_SCHEMA_VERSION = 14;
 const CONTENT_VERSION_SCHEMA_VERSION = 15;
 
 // v16 adds the reading-length and saved-item metadata columns to the article
-// trigger so clients learn backfilled values through the normal sync feed.
+// trigger. Their writers are single items (a reported count, a fetched video
+// duration, a saved page), so the body each event resends stays small.
 const ARTICLE_UPDATE_SYNC_TRIGGER_V16 = `CREATE TRIGGER IF NOT EXISTS trg_sync_article_update
 		 AFTER UPDATE OF feed_key, subject, from_name, html_content, text_content, original_url, received_at, content_pruned_at,
 		   word_count, media_kind, duration_seconds, author, published_at, image_url, site_name, extraction_state ON items BEGIN
@@ -462,7 +463,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 	]);
 
 	// v16: reading-length and saved-item metadata, transcripts fetched on
-	// request, and partial indexes that keep the cron backfills cheap.
+	// request, and a partial index for the YouTube duration backfill.
 	for (const column of ITEM_METADATA_COLUMNS_V16) {
 		await addColumnIfMissing(db, itemColumns, 'items', column);
 	}
@@ -478,10 +479,16 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			 )`,
 		),
 		db.prepare(
-			'CREATE INDEX IF NOT EXISTS idx_items_word_count_pending ON items(received_at DESC) WHERE word_count IS NULL AND content_pruned_at IS NULL',
-		),
-		db.prepare(
 			"CREATE INDEX IF NOT EXISTS idx_items_video_duration_pending ON items(received_at DESC) WHERE media_kind = 'video' AND duration_seconds IS NULL",
+		),
+		// Tag existing YouTube feed items so the duration backfill finds them.
+		// YouTube Atom entries are stored with canonical watch URLs. This runs
+		// before the trigger gains media_kind, so it adds no sync events.
+		db.prepare(
+			`UPDATE items SET media_kind = 'video'
+			 WHERE media_kind IS NULL AND content_pruned_at IS NULL
+			   AND original_url LIKE 'https://www.youtube.com/watch?v=%'
+			   AND feed_key IN (SELECT feed_key FROM feeds WHERE source_type = 'rss')`,
 		),
 		db.prepare('DROP TRIGGER IF EXISTS trg_sync_article_update'),
 		db.prepare(ARTICLE_UPDATE_SYNC_TRIGGER_V16),

@@ -1,3 +1,4 @@
+import { countWordsInHtml } from './word-count';
 import { extractYouTubeVideoId } from './youtube';
 
 export { extractYouTubeVideoId };
@@ -70,6 +71,8 @@ export interface BrowserLoadedItem {
 	contentVersion?: string;
 	isPaywalled?: boolean;
 	wordCount?: number;
+	// Counted locally from the body when the server has no better count.
+	estimatedWordCount?: number;
 	mediaKind?: 'text' | 'video';
 	durationSeconds?: number;
 }
@@ -89,10 +92,13 @@ export interface BrowserArticleListEntry {
 /**
  * "12 min read" or "18 min video", or null when the length is unknown or is
  * 10 minutes or less (only longer items are worth flagging). Text reads at
- * 238 words per minute, rounded up. Self-contained: emitted via toString().
+ * 238 words per minute, rounded up, preferring the server's count (a reader
+ * extraction or saved page) over the local estimate from the body.
+ * Self-contained: emitted via toString().
  */
 export function formatReadingLength(item: {
 	wordCount?: number | null;
+	estimatedWordCount?: number | null;
 	mediaKind?: string | null;
 	durationSeconds?: number | null;
 }): string | null {
@@ -107,7 +113,7 @@ export function formatReadingLength(item: {
 		const rest = minutes % 60;
 		return rest === 0 ? `${hours} hr video` : `${hours} hr ${rest} min video`;
 	}
-	const words = item.wordCount;
+	const words = typeof item.wordCount === 'number' ? item.wordCount : item.estimatedWordCount;
 	if (typeof words !== 'number' || !(words > 0)) return null;
 	const minutes = Math.max(1, Math.ceil(words / 238));
 	return minutes < minimumLabelledMinutes ? null : `${minutes} min read`;
@@ -897,6 +903,7 @@ ${looksLikeHtmlPreview.toString()}
 ${stripArticlePreviewMarkup.toString()}
 ${cleanArticlePreviewText.toString()}
 ${createArticlePreview.toString()}
+${countWordsInHtml.toString()}
 ${formatReadingLength.toString()}
 ${shouldReportWordCount.toString()}
 ${buildArticleListEntries.toString()}
@@ -931,6 +938,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   limitInitialItemIds,
   createContentLoadPlan,
   buildArticleListEntries,
+  countWordsInHtml,
   formatReadingLength,
   shouldReportWordCount,
   extractYouTubeVideoId,

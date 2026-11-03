@@ -1,5 +1,4 @@
 import PostalMime from 'postal-mime';
-import { countItemWords } from './word-count';
 import type { Env } from './types';
 import { resolveFeedKey, resolveFeedDisplayName } from './normalize';
 import { applyRoutingRules } from './routing-rules';
@@ -211,10 +210,9 @@ export async function handleIncomingEmail(
 			env.DB.prepare(
 				`INSERT INTO items (
 					id, feed_key, from_name, from_email, subject,
-					html_content, text_content, original_url, message_id, received_at, content_size,
-					word_count, media_kind
+					html_content, text_content, original_url, message_id, received_at, content_size
 				 )
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'text')
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(message_id) DO UPDATE SET
 				   original_url = excluded.original_url,
 				   content_version = items.content_version + 1
@@ -231,7 +229,6 @@ export async function handleIncomingEmail(
 				messageId,
 				receivedAt,
 				contentSize,
-				countItemWords(htmlContent || null, textContent || null),
 			),
 			env.DB.prepare(
 				`UPDATE feeds

@@ -152,8 +152,5 @@ test('handleIncomingEmail stores the best-effort original article URL for newsle
 	assert.equal(
 		itemInsert.values[7],
 		'https://substack.com/app-link/post?publication_id=289208&post_id=172818809',
-	);	// Reading length: the rendered HTML has 15 words, and email is always text.
-	assert.match(itemInsert.sql, /word_count, media_kind/);
-	assert.match(itemInsert.sql, /'text'\)/);
-	assert.equal(itemInsert.values[11], 15);
+	);
 });

@@ -22,6 +22,8 @@
 - Setting "Show reading time", default **on**, only hides the label.
 - Two PRs. PR A (Worker + web, `src/`, `test/`, `04-storage/`, `docs/`) never touches the Mac. PR B (iOS) is cut from `main` after PR A merges.
 
+> **Revised after the PR #159 review.** The server no longer counts words for feed items: there is no ingest count and no word-count backfill. Clients estimate from the body they hold, and `word_count` is stored only from reader-mode reports (and saved pages in step 3). The Task 2 and Task 5 sections below describe the first draft; the spec's "Reading length" section and the code are current. Task 8 (iOS) gains a Swift port of `countWordsInHtml`, which estimates when an article is cached.
+
 ## Decisions taken here (builder's calls the spec left open)
 
 - **The saved feed is not created in v16.** `feeds.source_type` has no CHECK constraint, so step 3 creates `pigeon:saved` lazily on the first save. That keeps an empty "Read It Later" feed off older clients until step 3 ships.

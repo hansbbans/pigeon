@@ -1,17 +1,13 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-	WORD_COUNT_SOURCE_LIMIT,
-	countItemWords,
-	countWordsInHtml,
-	countWordsInText,
-} from '../src/word-count';
+import { WORD_COUNT_SOURCE_LIMIT, countWordsInHtml } from '../src/word-count';
 import { mediaKindForUrl } from '../src/youtube';
 
 test('counts words in HTML, with tags acting as word boundaries', () => {
 	assert.equal(countWordsInHtml('<p>Hello <b>big</b> world</p>'), 3);
 	assert.equal(countWordsInHtml('<p>one</p><p>two</p>'), 2);
 	assert.equal(countWordsInHtml('<p>in<b>line</b></p>'), 2);
+	assert.equal(countWordsInHtml('plain text without tags'), 4);
 	assert.equal(countWordsInHtml(''), 0);
 });
 
@@ -22,31 +18,30 @@ test('skips head, style, script, template and comments', () => {
 	assert.equal(countWordsInHtml(html), 3);
 });
 
+test('an unclosed raw-text element or a stray bracket does not swallow the body', () => {
+	assert.equal(countWordsInHtml('<html><head><meta charset="utf-8"><body><p>three body words</p></body>'), 3);
+	assert.equal(countWordsInHtml('<head/><p>two words</p>'), 2);
+	assert.equal(countWordsInHtml('<style>p{}<p>still counted here</p>'), 4);
+	assert.equal(countWordsInHtml('<p>a < b and more</p>'), 5);
+	assert.equal(countWordsInHtml('<p>ends with a <'), 4);
+	assert.equal(countWordsInHtml('<!-- unterminated comment <p>two words</p>'), 2);
+});
+
 test('treats non-breaking space entities as whitespace and other entities as letters', () => {
 	assert.equal(countWordsInHtml('a&nbsp;b'), 2);
 	assert.equal(countWordsInHtml('a&#160;b&#xa0;c'), 3);
 	assert.equal(countWordsInHtml('caf&eacute; &amp; bar'), 3);
 });
 
-test('counts whitespace-separated words in plain text', () => {
-	assert.equal(countWordsInText('  one\ntwo\tthree '), 3);
-	assert.equal(countWordsInText(''), 0);
-});
-
-test('caps the scan so a huge newsletter stays inside the CPU budget', () => {
+test('caps the scan so a huge newsletter stays cheap', () => {
 	const html = `<p>${'word '.repeat(200_000)}</p>`;
-	const started = performance.now();
-	const count = countWordsInHtml(html);
-	const elapsed = performance.now() - started;
-	assert.equal(count, countWordsInHtml(html.slice(0, WORD_COUNT_SOURCE_LIMIT)));
-	assert.equal(count, 60_000);
-	assert.ok(elapsed < 50, `scan took ${elapsed} ms`);
+	assert.equal(countWordsInHtml(html), countWordsInHtml(html.slice(0, WORD_COUNT_SOURCE_LIMIT)));
+	assert.equal(countWordsInHtml(html), 60_000);
 });
 
-test('countItemWords prefers HTML, falls back to text, and handles missing bodies', () => {
-	assert.equal(countItemWords('<p>three html words</p>', 'two text'), 3);
-	assert.equal(countItemWords('', 'two words'), 2);
-	assert.equal(countItemWords(null, null), 0);
+test('countWordsInHtml is self-contained so the browser client can emit it', () => {
+	const emitted = new Function(`return (${countWordsInHtml.toString()})`)() as typeof countWordsInHtml;
+	assert.equal(emitted('<head><title>x</title></head><p>Hello <b>big</b> world</p>'), 3);
 });
 
 test('mediaKindForUrl marks YouTube video links as video', () => {

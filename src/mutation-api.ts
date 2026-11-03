@@ -212,12 +212,13 @@ async function mutationStatements(
 		return feedbackMutationStatements(env, mutation, appliedAt);
 	case 'set_word_count': {
 		// A client reports the extracted length of a snippet-only article.
-		// Write only on change so a repeat report adds no sync event.
+		// Write only on change so a repeat report adds no sync event, and
+		// never for videos, whose length is their duration.
 		const [item] = await resolveItems(env.DB, mutation.itemIds);
 		return [
 			env.DB.prepare(
 				`UPDATE items SET word_count = ?, content_version = content_version + 1
-				 WHERE rowid = ? AND word_count IS NOT ?`,
+				 WHERE rowid = ? AND word_count IS NOT ? AND media_kind IS NOT 'video'`,
 			).bind(mutation.wordCount, item.rowid, mutation.wordCount),
 		];
 	}

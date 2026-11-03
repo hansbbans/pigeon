@@ -1,12 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { handleCronTrigger } from '../src/cron-handler';
-import {
-	BACKFILL_BYTE_BUDGET,
-	parseYouTubeDuration,
-	runWordCountBackfill,
-	runYouTubeDurationBackfill,
-} from '../src/item-metadata-backfill';
+import { parseYouTubeDuration, runYouTubeDurationBackfill } from '../src/item-metadata-backfill';
 import { RefreshQueryBudget } from '../src/rss-fetcher';
 import { articleSyncChanges, createSchemaDatabase } from './helpers/sqlite-d1';
 
@@ -58,56 +53,6 @@ test('parseYouTubeDuration reads ISO 8601 durations', () => {
 	assert.equal(parseYouTubeDuration('garbage'), null);
 });
 
-test('word-count backfill fills newest items first, tags video, and skips pruned bodies', async () => {
-	const state = setup();
-	insertItem(state, 'old', '2026-10-01T00:00:00.000Z', '<p>one two three</p>');
-	insertItem(state, 'new', '2026-11-01T00:00:00.000Z', '', { text: 'plain text body', url: 'https://youtu.be/dQw4w9WgXcQ' });
-	insertItem(state, 'pruned', '2026-11-02T00:00:00.000Z', '', { pruned: true });
-	insertItem(state, 'done', '2026-11-03T00:00:00.000Z', '<p>x</p>', { wordCount: 900, mediaKind: 'text' });
-	const before = articleSyncChanges(state.database);
-
-	assert.equal(await runWordCountBackfill(state.db as never, new RefreshQueryBudget(47)), 2);
-
-	assert.deepEqual(item(state, 'old'), { word_count: 3, media_kind: 'text', duration_seconds: null, content_version: 1 });
-	assert.deepEqual(item(state, 'new'), { word_count: 3, media_kind: 'video', duration_seconds: null, content_version: 1 });
-	assert.equal(item(state, 'pruned').word_count, null);
-	assert.deepEqual(item(state, 'done'), { word_count: 900, media_kind: 'text', duration_seconds: null, content_version: 0 });
-	assert.equal(articleSyncChanges(state.database), before + 2);
-});
-
-test('word-count backfill stays inside its byte budget across runs', async () => {
-	const state = setup();
-	const body = `<p>${'word '.repeat(60_000)}</p>`; // 300 007 characters, counted up to the scan cap
-	assert.ok(body.length * 2 > BACKFILL_BYTE_BUDGET);
-	for (const [index, day] of ['01', '02', '03'].entries()) insertItem(state, `big-${index}`, `2026-11-${day}T00:00:00.000Z`, body);
-
-	for (const expectedRemaining of [2, 1, 0]) {
-		assert.equal(await runWordCountBackfill(state.db as never, new RefreshQueryBudget(47)), 1);
-		const remaining = (state.database.prepare('SELECT COUNT(*) AS count FROM items WHERE word_count IS NULL').get() as { count: number }).count;
-		assert.equal(remaining, expectedRemaining);
-	}
-	assert.equal(item(state, 'big-2').word_count, 60_000);
-});
-
-test('an image-only item stores zero words and is not selected again', async () => {
-	const state = setup();
-	insertItem(state, 'image', '2026-11-01T00:00:00.000Z', '<p><img src="https://example.com/a.png"></p>');
-	assert.equal(await runWordCountBackfill(state.db as never, new RefreshQueryBudget(47)), 1);
-	assert.equal(item(state, 'image').word_count, 0);
-	const before = articleSyncChanges(state.database);
-	assert.equal(await runWordCountBackfill(state.db as never, new RefreshQueryBudget(47)), 0);
-	assert.equal(articleSyncChanges(state.database), before);
-});
-
-test('the word-count backfill does nothing without three queries of budget', async () => {
-	const state = setup();
-	insertItem(state, 'a', '2026-11-01T00:00:00.000Z', '<p>words</p>');
-	const budget = new RefreshQueryBudget(2);
-	assert.equal(await runWordCountBackfill(state.db as never, budget), 0);
-	assert.equal(budget.reserve(2), true);
-	assert.equal(item(state, 'a').word_count, null);
-});
-
 function stubYouTube(durations: Record<string, string>, status = 200) {
 	const requests: URL[] = [];
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -121,10 +66,11 @@ function stubYouTube(durations: Record<string, string>, status = 200) {
 	return requests;
 }
 
-function insertVideo(state: State, id: string, videoId: string, day: string) {
-	insertItem(state, id, `2026-11-${day}T00:00:00.000Z`, '<p>description</p>', {
+const NOW = new Date('2026-11-04T00:00:00.000Z');
+
+function insertVideo(state: State, id: string, videoId: string, receivedAt: string) {
+	insertItem(state, id, receivedAt.length === 2 ? `2026-11-${receivedAt}T00:00:00.000Z` : receivedAt, '<p>description</p>', {
 		url: `https://www.youtube.com/watch?v=${videoId}`,
-		wordCount: 1,
 		mediaKind: 'video',
 	});
 }
@@ -136,13 +82,13 @@ test('duration backfill stores durations from one API call and zero for missing 
 	insertVideo(state, 'v3', 'ccccccccccc', '03');
 	const requests = stubYouTube({ aaaaaaaaaaa: 'PT18M20S', bbbbbbbbbbb: 'PT1H5M' });
 
-	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key'), 3);
+	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key', NOW), 3);
 
 	assert.equal(requests.length, 1);
 	assert.equal(requests[0]?.searchParams.get('part'), 'contentDetails');
 	assert.deepEqual([item(state, 'v1').duration_seconds, item(state, 'v2').duration_seconds, item(state, 'v3').duration_seconds], [1100, 3900, 0]);
 	assert.equal(item(state, 'v1').content_version, 1);
-	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key'), 0);
+	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key', NOW), 0);
 	assert.equal(requests.length, 1);
 });
 
@@ -151,21 +97,34 @@ test('duration backfill writes nothing on an API error and makes no call without
 	insertVideo(state, 'v1', 'aaaaaaaaaaa', '01');
 	const requests = stubYouTube({ aaaaaaaaaaa: 'PT1M' }, 500);
 
-	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key'), 0);
+	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key', NOW), 0);
 	assert.equal(item(state, 'v1').duration_seconds, null);
 	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), undefined), 0);
 	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), '  '), 0);
 	assert.equal(requests.length, 1);
 });
 
-test('the cron runs both backfills when no feed is due', async () => {
+test('a premiere or live stream (P0D) is retried for a week, then settles on zero', async () => {
 	const state = setup();
-	insertItem(state, 'a', '2026-11-01T00:00:00.000Z', '<p>four words right here</p>');
+	insertVideo(state, 'fresh', 'aaaaaaaaaaa', '2026-11-02T00:00:00.000Z');
+	insertVideo(state, 'stale', 'bbbbbbbbbbb', '2026-10-20T00:00:00.000Z');
+	stubYouTube({ aaaaaaaaaaa: 'P0D', bbbbbbbbbbb: 'P0D' });
+
+	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key', NOW), 1);
+	assert.equal(item(state, 'fresh').duration_seconds, null);
+	assert.equal(item(state, 'stale').duration_seconds, 0);
+
+	stubYouTube({ aaaaaaaaaaa: 'PT1H30M' });
+	assert.equal(await runYouTubeDurationBackfill(state.db as never, new RefreshQueryBudget(47), 'test-key', NOW), 1);
+	assert.equal(item(state, 'fresh').duration_seconds, 5400);
+});
+
+test('the cron fills durations even when no feed is due', async () => {
+	const state = setup();
 	insertVideo(state, 'v1', 'aaaaaaaaaaa', '02');
 	stubYouTube({ aaaaaaaaaaa: 'PT12M' });
 
 	await handleCronTrigger({ DB: state.db, YOUTUBE_API_KEY: 'test-key' } as never);
 
-	assert.equal(item(state, 'a').word_count, 4);
 	assert.equal(item(state, 'v1').duration_seconds, 720);
 });

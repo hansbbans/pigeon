@@ -675,8 +675,8 @@ for (const scenario of ['small', 'large', 'expanded']) {
 				statement.bind = (...values) => {
 					for (const value of values) if (typeof value === 'string') assert.ok(new Blob([value]).size <= 900_000);
 					if (sql.startsWith('INSERT INTO items')) {
-						// Eleven columns per row plus two lease bindings, under D1's 100-parameter cap.
-						assert.equal((values.length - 2) % 11, 0);
+						// Ten columns per row plus two lease bindings, under D1's 100-parameter cap.
+						assert.equal((values.length - 2) % 10, 0);
 						assert.ok(values.length <= 100);
 						groupedInserts += 1;
 					}
@@ -692,7 +692,7 @@ for (const scenario of ['small', 'large', 'expanded']) {
 			assert.equal(result.outcome, 'success');
 			assert.equal(result.itemsProcessed, 50);
 			assert.ok(limits.queries <= 40);
-			assert.equal(groupedInserts, 7);
+			assert.equal(groupedInserts, 6);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 51);
 			assert.equal((state.database.prepare('SELECT item_count FROM feeds WHERE feed_key = ?').get('design-weekly') as { item_count: number }).item_count, 51);
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = ?').get('article') as { count: number }).count, 52);
@@ -1945,5 +1945,15 @@ test('set_word_count rejects invalid counts and multi-item targets', async () =>
 		state.env,
 	);
 	assert.equal(twoItems.status, 400);
+	state.database.close();
+});
+
+test('set_word_count leaves video items alone', async () => {
+	const state = fixture();
+	insertLibrary(state.database);
+	state.database.exec("UPDATE items SET media_kind = 'video' WHERE rowid = 11");
+	const response = await handleMutationBatch(wordCountMutation('wc-video', 1200), state.env);
+	assert.equal((await response.json() as { results: Array<{ status: string }> }).results[0].status, 'applied');
+	assert.equal((state.database.prepare('SELECT word_count FROM items WHERE rowid = 11').get() as { word_count: number | null }).word_count, null);
 	state.database.close();
 });

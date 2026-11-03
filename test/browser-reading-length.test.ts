@@ -58,6 +58,27 @@ test('list rows and the reader header show reading time for long articles only',
 	harness.elements.get('logout-button')!.dispatch('click');
 });
 
+test('without a server count, the label comes from the body the client already has', async (t) => {
+	const longBody = `<p>${'word '.repeat(3000)}</p>`;
+	const { database, harness } = await createStatefulArticleBrowser({
+		seed: (db) => {
+			db.prepare("UPDATE items SET html_content = ?, word_count = NULL WHERE id = 'today-3'").run(longBody);
+			db.exec("UPDATE items SET word_count = 900 WHERE id = 'today-2'");
+		},
+	});
+	t.after(() => database.close());
+
+	assert.equal(lengthLabel(harness, '3'), '13 min read');
+	assert.equal(lengthLabel(harness, '2'), null);
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('formatReadingLength prefers the server count over the estimate', () => {
+	assert.equal(formatReadingLength({ wordCount: 5000, estimatedWordCount: 10 }), '22 min read');
+	assert.equal(formatReadingLength({ estimatedWordCount: 3000 }), '13 min read');
+	assert.equal(formatReadingLength({ wordCount: 0, estimatedWordCount: 3000 }), null);
+});
+
 test('the Show reading time setting hides labels, persists, and re-renders when toggled', async (t) => {
 	const { database, harness } = await createStatefulArticleBrowser({ seed: seedLengths, storedShowReadingTime: '0' });
 	t.after(() => database.close());

@@ -29,20 +29,20 @@ async function store(state: ReturnType<typeof setup>, items: ParsedItem[], updat
 	await state.db.batch(statements as never);
 }
 
-function row(state: ReturnType<typeof setup>, guidLink = 'https://example.com/posts/1') {
+function row(state: ReturnType<typeof setup>, guidLink = 'https://example.com/posts/1'): { word_count: number | null; media_kind: string | null } {
 	return { ...(state.database.prepare('SELECT word_count, media_kind FROM items WHERE original_url = ?').get(guidLink) as object) };
 }
 
-test('RSS ingest stores a word count and text media kind', async () => {
+test('RSS ingest stores a text media kind and leaves word count to the clients', async () => {
 	const state = setup();
 	await store(state, [item()]);
-	assert.deepEqual(row(state), { word_count: 4, media_kind: 'text' });
+	assert.deepEqual(row(state), { word_count: null, media_kind: 'text' });
 });
 
 test('RSS ingest marks YouTube items as video', async () => {
 	const state = setup();
 	await store(state, [item({ guid: 'yt:video:dQw4w9WgXcQ', link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })]);
-	assert.deepEqual(row(state, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'), { word_count: 4, media_kind: 'video' });
+	assert.deepEqual(row(state, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'), { word_count: null, media_kind: 'video' });
 });
 
 test('an unchanged RSS refresh rewrites nothing and adds no sync change', async () => {
@@ -53,18 +53,26 @@ test('an unchanged RSS refresh rewrites nothing and adds no sync change', async 
 	assert.equal(articleSyncChanges(state.database), before);
 });
 
-test('a changed RSS body recounts, but an unchanged body keeps a client-reported count', async () => {
+test('a reported count survives metadata refreshes and is dropped when the body changes', async () => {
 	const state = setup();
 	await store(state, [item()]);
 	state.database.exec("UPDATE items SET word_count = 3000 WHERE original_url = 'https://example.com/posts/1'");
 	await store(state, [item({ author: 'Ada' })]);
-	assert.equal((row(state) as { word_count: number }).word_count, 3000);
+	assert.equal(row(state).word_count, 3000);
 	await store(state, [item({ content: '<p>Now there are six words here</p>' })]);
-	assert.equal((row(state) as { word_count: number }).word_count, 6);
+	assert.equal(row(state).word_count, null);
 });
 
-test('the insert-only RSS path stores reading length too', async () => {
+test('media kind follows the stored link when a refresh brings a different one', async () => {
+	const state = setup();
+	await store(state, [item()]);
+	await store(state, [item({ link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', content: '<p>changed</p>' })]);
+	const rows = state.database.prepare('SELECT original_url, media_kind FROM items').all() as Array<{ original_url: string; media_kind: string }>;
+	assert.deepEqual(rows.map((stored) => ({ ...stored })), [{ original_url: 'https://example.com/posts/1', media_kind: 'text' }]);
+});
+
+test('the insert-only RSS path stores media kind too', async () => {
 	const state = setup();
 	await store(state, [item()], false);
-	assert.deepEqual(row(state), { word_count: 4, media_kind: 'text' });
+	assert.deepEqual(row(state), { word_count: null, media_kind: 'text' });
 });

@@ -1,6 +1,6 @@
 /** Durable, fair, bounded scheduler for external feed refreshes. */
 
-import { runWordCountBackfill, runYouTubeDurationBackfill } from './item-metadata-backfill';
+import { runYouTubeDurationBackfill } from './item-metadata-backfill';
 import { fetchAndStoreRssFeed, RefreshQueryBudget, type FeedToFetch } from './rss-fetcher';
 import { safeHost, selectFeedsFairly } from './refresh-policy';
 import type { Env } from './types';
@@ -200,11 +200,10 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 	}
 	// Last, so feed refreshes and push always get the budget first.
 	try {
-		const counted = await runWordCountBackfill(env.DB, budget);
-		const timed = await runYouTubeDurationBackfill(env.DB, budget, env.YOUTUBE_API_KEY);
-		if (counted || timed) console.log(`[Cron] Backfilled reading length for ${counted} items and ${timed} videos`);
+		const timed = await runYouTubeDurationBackfill(env.DB, budget, env.YOUTUBE_API_KEY, now);
+		if (timed) console.log(`[Cron] Filled durations for ${timed} videos`);
 	} catch (error) {
-		console.error('[Cron] Reading-length backfill failed', error instanceof Error ? error.message : String(error));
+		console.error('[Cron] YouTube duration backfill failed', error instanceof Error ? error.message : String(error));
 	}
 }
 

@@ -87,10 +87,12 @@ CREATE TABLE IF NOT EXISTS items (
   is_read INTEGER DEFAULT 0,
   is_starred INTEGER DEFAULT 0,
   -- Bumped by every writer that changes html_content, text_content,
-  -- content_pruned_at, or the reading-length metadata below; read and star
-  -- changes leave it alone.
+  -- content_pruned_at, or a reported word count or fetched duration; read
+  -- and star changes leave it alone.
   content_version INTEGER NOT NULL DEFAULT 0,
-  -- v16 reading-length and saved-item metadata (all optional).
+  -- v16 reading-length and saved-item metadata (all optional). word_count is
+  -- set only when it beats the body: a reader-mode report or a saved page;
+  -- otherwise clients estimate from the body they hold.
   word_count INTEGER,
   media_kind TEXT,
   duration_seconds INTEGER,
@@ -102,11 +104,7 @@ CREATE TABLE IF NOT EXISTS items (
   FOREIGN KEY (feed_key) REFERENCES feeds(feed_key)
 );
 
--- Pending rows for the v16 cron backfills (word counts, YouTube durations).
-CREATE INDEX IF NOT EXISTS idx_items_word_count_pending
-  ON items(received_at DESC)
-  WHERE word_count IS NULL AND content_pruned_at IS NULL;
-
+-- Videos still waiting for the v16 cron duration backfill.
 CREATE INDEX IF NOT EXISTS idx_items_video_duration_pending
   ON items(received_at DESC)
   WHERE media_kind = 'video' AND duration_seconds IS NULL;

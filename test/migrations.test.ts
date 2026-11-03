@@ -1334,7 +1334,6 @@ function createSqliteV15Fixture(): DatabaseSync {
 	const database = new DatabaseSync(':memory:');
 	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
 	database.exec(`
-		DROP INDEX idx_items_word_count_pending;
 		DROP INDEX idx_items_video_duration_pending;
 		DROP TABLE item_transcripts;
 		${V16_ITEM_COLUMNS.map((column) => `ALTER TABLE items DROP COLUMN ${column};`).join('\n')}
@@ -1377,8 +1376,29 @@ test('SQLite v15 migration adds reading-length metadata, transcripts, and backfi
 	const tables = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
 	assert.equal(tables.includes('item_transcripts'), true);
 	const indexes = (database.prepare("PRAGMA index_list('items')").all() as Array<{ name: string }>).map(({ name }) => name);
-	assert.equal(indexes.includes('idx_items_word_count_pending'), true);
 	assert.equal(indexes.includes('idx_items_video_duration_pending'), true);
+	database.close();
+});
+
+test('v16 tags existing YouTube feed items as video without adding sync events', async () => {
+	const database = createSqliteV15Fixture();
+	database.exec(`
+		INSERT INTO feeds (feed_key, display_name, source_type) VALUES ('yt', 'Channel', 'rss');
+		INSERT INTO items (id, feed_key, subject, html_content, original_url, message_id, received_at)
+		VALUES ('video-a', 'yt', 'V', '<p>V</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'yt:video:dQw4w9WgXcQ', '2026-08-01T00:00:00.000Z'),
+		       ('email-a', 'feed-a', 'E', '<p>E</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'email-yt', '2026-08-01T00:00:00.000Z');
+	`);
+	const before = (database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count;
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	const kinds = Object.fromEntries((database.prepare("SELECT id, media_kind FROM items WHERE id IN ('video-a', 'email-a', 'article-a')").all() as Array<{ id: string; media_kind: string | null }>)
+		.map(({ id, media_kind }) => [id, media_kind]));
+	assert.deepEqual(kinds, { 'video-a': 'video', 'email-a': null, 'article-a': null });
+	assert.equal((database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count, before);
 	database.close();
 });
 

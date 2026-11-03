@@ -116,12 +116,11 @@ The builder may adjust names. The constraints are: additive only, mirrored in `S
 
 - Reading speed is 238 words per minute, rounded up to whole minutes with a minimum of 1. *(Claude's call.)*
 - Video shows its duration instead.
-- **Where `word_count` comes from:**
-  - Saved items and Defuddle-extracted RSS items: Defuddle's `wordCount`.
-  - Email and RSS ingest: a cheap count over `text_content` (or stripped HTML), bounded so it stays inside the CPU budget.
-  - Existing items: a cron backfill in small batches. Until it reaches them, the client hides length (no placeholder).
-- **RSS items that only carry a snippet.** The ingest count would measure only the snippet. When a client extracts such an article in reader mode, it reports Defuddle's word count through a small mutation (for example `set_word_count`). The mutation writes only when the value changes, to avoid no-op updates; last writer wins. It sends only the count, not the content. *(Claude's call.)*
-- **YouTube items from feeds.** The cron backfill fetches their duration in batches using the existing `YOUTUBE_API_KEY`.
+- **Where `word_count` comes from** *(revised during step 2 after review)*:
+  - Feed items (email and RSS): each client estimates from the body it already holds, with the same linear scanner (`src/word-count.ts`, ported to Swift for iOS). The server does not count them. Counting at RSS ingest cost about 20 ms per 50-item refresh, against the 10 ms CPU limit. A server backfill would have fired a sync event per item, re-sending about 270 MB of bodies to every client (6,258 unpruned items in production on 2026-11-03).
+  - The server stores `word_count` only when it beats the body: Defuddle's count from a reader-mode report, or from a saved page in step 3. The client prefers it over its estimate.
+- **RSS items that only carry a snippet.** The local estimate measures only the snippet. When a client extracts such an article in reader mode, it reports Defuddle's word count through a small mutation (for example `set_word_count`). The mutation writes only when the value changes, to avoid no-op updates; last writer wins. It sends only the count, not the content. *(Claude's call.)*
+- **YouTube items from feeds.** RSS ingest stores `media_kind = 'video'`, and the v16 migration tags the existing ones. The cron fetches their duration in batches using the existing `YOUTUBE_API_KEY`. Premieres and live streams (`P0D`) are retried for a week.
 - Sync and list APIs return `word_count`, `media_kind` and `duration_seconds` as new optional fields. Older clients ignore them.
 - **Only lengths over 10 minutes are labelled** (Hans, 2026-11-03). Shorter articles and videos show no label; filters and sorts still use every stored length.
 - **Setting:** "Show reading time", on web and iOS, default **on**. It only hides or shows the label. The length filters and sorts in Read It Later still work when it's off. *(Claude's call on the default.)*

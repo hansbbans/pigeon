@@ -1157,6 +1157,7 @@ export function renderBrowserAppRuntimeScript(): string {
       alternate: alternateHref ? [{ href: alternateHref }] : undefined,
       summary: summaryContent ? { content: summaryContent.slice(0, 4000) } : undefined,
       wordCount: item.wordCount,
+      estimatedWordCount: item.estimatedWordCount,
       mediaKind: item.mediaKind,
       durationSeconds: item.durationSeconds,
     };
@@ -1231,6 +1232,9 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     }
 
+    // Estimate once per body so list renders never rescan it.
+    const body = item.content && typeof item.content.content === 'string' ? item.content.content : '';
+    if (body && typeof item.estimatedWordCount !== 'number') item = { ...item, estimatedWordCount: client.countWordsInHtml(body) };
     articleMetadataCache.delete(itemId);
     articleMetadataCache.set(itemId, createArticleMetadata(item));
     articleCache.delete(itemId);
@@ -2773,7 +2777,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // Snippet-only feeds store a short count; tell the server the real length
   // once per item per visit. Best effort: a failed report is simply dropped.
   function reportExtractedWordCount(item,selectionId,wordCount) {
-    if(!item||reportedWordCounts.has(item.id)||!client.shouldReportWordCount(item.wordCount,wordCount,item.mediaKind))return;
+    if(!item||reportedWordCounts.has(item.id)||!client.shouldReportWordCount(item.wordCount??item.estimatedWordCount,wordCount,item.mediaKind))return;
     reportedWordCounts.add(item.id);
     for(const key of new Set([item.id,selectionId]))for(const cached of [loadedItemsById[key],articleCache.get(key),articleMetadataCache.get(key)]) if(cached) cached.wordCount=wordCount;
     item.wordCount=wordCount;
