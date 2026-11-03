@@ -12,14 +12,17 @@
     "deploy:recommendations": "wrangler deploy --config wrangler.recommendations.toml",
     "deploy:main": "wrangler deploy --config wrangler.toml",
     "tail": "wrangler tail",
-	"test": "tsx --test test/*.test.ts",
-	"test:testflight": "node --test test/app-store-connect-verify.test.mjs",
-	"typecheck": "tsc --noEmit",
-	"audit": "npm audit --audit-level=high",
-	"check": "npm test && npm run typecheck && npm run audit"
+    "test": "tsx --test test/*.test.ts",
+    "test:testflight": "node --test test/app-store-connect-verify.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "audit": "npm audit --audit-level=high",
+    "check": "npm test && npm run typecheck && npm run audit",
+    "vendor:defuddle": "node scripts/vendor-defuddle.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",
+    "defuddle": "0.19.6",
+    "happy-dom": "21.0.4",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.115.0"
