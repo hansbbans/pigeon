@@ -328,6 +328,10 @@ ${renderBrowserAppStyles()}
               <option value="progress">After reading 60%</option>
             </select>
           </div>
+          <div class="settings-row">
+            <label for="show-reading-time">Show reading time</label>
+            <input id="show-reading-time" type="checkbox" checked>
+          </div>
           <p class="status-meta">M toggles read, S toggles star. An article you mark unread stays unread until you mark it read.</p>
           <p class="status-meta" id="reading-preference-status" role="status" aria-live="polite"></p>
         </section>
@@ -376,6 +380,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const columnStorageKey = 'pigeon.browser.column-widths';
   const articleListModeStorageKey = 'pigeon.browser.article-list-mode';
   const autoReadStorageKey = 'pigeon.browser.auto-read';
+  const showReadingTimeStorageKey = 'pigeon.browser.show-reading-time';
   const loginScreen = document.getElementById('login-screen');
   const readerShell = document.getElementById('reader-shell');
   const readerGrid = document.getElementById('reader-grid');
@@ -414,6 +419,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const starArticleButton = document.getElementById('star-article-button');
   const undoArticleButton = document.getElementById('undo-article-button');
   const autoReadSelect = document.getElementById('auto-read-select');
+  const showReadingTimeCheckbox = document.getElementById('show-reading-time');
   const readingPreferenceStatus = document.getElementById('reading-preference-status');
   const searchButton = document.getElementById('search-button');
   const articleQueryControls = document.getElementById('article-query-controls');
@@ -510,6 +516,9 @@ export function renderBrowserAppRuntimeScript(): string {
   // Snapshot list: rows of the open view that left its read filter stay until a deliberate refresh.
   let keptItemIds = { queryKey: '', ids: new Set() };
   let autoReadPolicy = 'manual';
+  let showReadingTime = true;
+  // Items whose reader-mode word count was already reported this session.
+  const reportedWordCounts = new Set();
   let autoReadAttempt = '';
   let queuedAutoRead = null;
   let readyReaderItemId = null;
@@ -1147,6 +1156,9 @@ export function renderBrowserAppRuntimeScript(): string {
       origin: item.origin ? { title: item.origin.title, streamId: item.origin.streamId } : undefined,
       alternate: alternateHref ? [{ href: alternateHref }] : undefined,
       summary: summaryContent ? { content: summaryContent.slice(0, 4000) } : undefined,
+      wordCount: item.wordCount,
+      mediaKind: item.mediaKind,
+      durationSeconds: item.durationSeconds,
     };
   }
 
@@ -2532,9 +2544,11 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       if (articleListMode !== 'titles') {
         const listTime = client.formatArticleListTime(entry.published);
-        if (entry.feedTitle || listTime) {
+        const readingLength = showReadingTime ? entry.readingLength : null;
+        if (entry.feedTitle || listTime || readingLength) {
           const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
           if (entry.feedTitle) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
+          if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
           if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
           copy.appendChild(meta);
         }
@@ -2747,6 +2761,28 @@ export function renderBrowserAppRuntimeScript(): string {
       persistReadingData();
     },250);
   }
+  function readerSourceNoteText(item) {
+    const activeView = getActiveView();
+    return [
+      activeView && activeView.kind === 'folder' ? activeView.title : '',
+      formatTimestamp(item.published),
+      showReadingTime ? client.formatReadingLength(item) : '',
+    ].filter(Boolean).join(' · ');
+  }
+
+  // Snippet-only feeds store a short count; tell the server the real length
+  // once per item per visit. Best effort: a failed report is simply dropped.
+  function reportExtractedWordCount(item,selectionId,wordCount) {
+    if(!item||reportedWordCounts.has(item.id)||!client.shouldReportWordCount(item.wordCount,wordCount,item.mediaKind))return;
+    reportedWordCounts.add(item.id);
+    for(const key of new Set([item.id,selectionId]))for(const cached of [loadedItemsById[key],articleCache.get(key),articleMetadataCache.get(key)]) if(cached) cached.wordCount=wordCount;
+    item.wordCount=wordCount;
+    renderArticles();
+    if(selectedItemId===selectionId) readerSourceNote.textContent=readerSourceNoteText(item);
+    void authenticatedFetch('/api/v1/mutations',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mutations:[{id:crypto.randomUUID(),kind:'set_word_count',itemIds:[item.id],wordCount}]})}).catch(()=>{});
+  }
+
   async function prepareReadingFrame(item,href) {
     const id=selectedItemId,generation=accountGeneration,token=session.token;
     await loadReadingIdentity();
@@ -2769,6 +2805,7 @@ export function renderBrowserAppRuntimeScript(): string {
           extracted=window.__PIGEON_READING_TOOLS__?.extract(source.html,source.url);if(!extracted?.content)throw new Error('Reader extraction unavailable.');
           if(extracted.extractor!=='readability'||window.__PIGEON_READING_TOOLS__?.hasDefuddle?.())extractedArticles.set(id,extracted);while(extractedArticles.size>20)extractedArticles.delete(extractedArticles.keys().next().value);}
         html=extracted.content;baseURL=extracted.url;message='Reader view extracted from the original website.';
+        reportExtractedWordCount(item,id,extracted.wordCount);
       } else if(mode==='website') html='<p>Open this story on its website using Open original. The website opens in a separate tab.</p>';
     } catch(error) {if(!current())return;message='Reader extraction unavailable. Showing the newsletter body; try again or open the original.';}
     try {
@@ -2866,13 +2903,9 @@ export function renderBrowserAppRuntimeScript(): string {
       item.alternate && item.alternate[0] && item.alternate[0].href ? item.alternate[0].href : '';
     const activeView = getActiveView();
     const sourceTitle = item.origin && item.origin.title ? item.origin.title : 'Source';
-    const sourceNoteParts = [
-      activeView && activeView.kind === 'folder' ? activeView.title : '',
-      formatTimestamp(item.published),
-    ].filter(Boolean);
 
     readerSourceLabel.textContent = sourceTitle;
-    readerSourceNote.textContent = sourceNoteParts.join(' · ');
+    readerSourceNote.textContent = readerSourceNoteText(item);
     openOriginalButton.disabled = !articleHref;
     openOriginalButton.setAttribute('data-href', articleHref);
     readerTitle.textContent = item.title || 'Untitled article';
@@ -4444,6 +4477,17 @@ export function renderBrowserAppRuntimeScript(): string {
   undoArticleButton.addEventListener('click', () => {
     void undoLastArticleMutation();
   });
+  showReadingTimeCheckbox.addEventListener('change', () => {
+    showReadingTime = showReadingTimeCheckbox.checked === true;
+    try {
+      window.localStorage.setItem(showReadingTimeStorageKey, showReadingTime ? '1' : '0');
+      readingPreferenceStatus.textContent = 'Reading preference saved.';
+    } catch (_error) {
+      readingPreferenceStatus.textContent = 'Preference changed for this visit, but could not be saved.';
+    }
+    renderArticles();
+    renderReader();
+  });
   autoReadSelect.addEventListener('change', () => {
     autoReadPolicy = normalizeAutoReadPolicy(autoReadSelect.value);
     autoReadSelect.value = autoReadPolicy;
@@ -4725,6 +4769,9 @@ export function renderBrowserAppRuntimeScript(): string {
   try { autoReadPolicy = normalizeAutoReadPolicy(window.localStorage.getItem(autoReadStorageKey)); }
   catch (_error) { autoReadPolicy = 'manual'; }
   autoReadSelect.value = autoReadPolicy;
+  try { showReadingTime = window.localStorage.getItem(showReadingTimeStorageKey) !== '0'; }
+  catch (_error) { showReadingTime = true; }
+  showReadingTimeCheckbox.checked = showReadingTime;
   applyArticleListMode(getStoredArticleListMode());
   updateColumnResizerState();
 

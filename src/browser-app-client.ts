@@ -69,6 +69,9 @@ export interface BrowserLoadedItem {
 	};
 	contentVersion?: string;
 	isPaywalled?: boolean;
+	wordCount?: number;
+	mediaKind?: 'text' | 'video';
+	durationSeconds?: number;
 }
 
 export interface BrowserArticleListEntry {
@@ -80,6 +83,50 @@ export interface BrowserArticleListEntry {
 	heroImageUrl: string | null;
 	isPaywalled: boolean;
 	isLoaded: boolean;
+	readingLength: string | null;
+}
+
+/**
+ * "12 min read" or "18 min video", or null when the length is unknown or is
+ * 10 minutes or less (only longer items are worth flagging). Text reads at
+ * 238 words per minute, rounded up. Self-contained: emitted via toString().
+ */
+export function formatReadingLength(item: {
+	wordCount?: number | null;
+	mediaKind?: string | null;
+	durationSeconds?: number | null;
+}): string | null {
+	const minimumLabelledMinutes = 11;
+	if (item.mediaKind === 'video') {
+		const seconds = item.durationSeconds;
+		if (typeof seconds !== 'number' || !(seconds > 0)) return null;
+		const minutes = Math.max(1, Math.round(seconds / 60));
+		if (minutes < minimumLabelledMinutes) return null;
+		if (minutes < 60) return `${minutes} min video`;
+		const hours = Math.floor(minutes / 60);
+		const rest = minutes % 60;
+		return rest === 0 ? `${hours} hr video` : `${hours} hr ${rest} min video`;
+	}
+	const words = item.wordCount;
+	if (typeof words !== 'number' || !(words > 0)) return null;
+	const minutes = Math.max(1, Math.ceil(words / 238));
+	return minutes < minimumLabelledMinutes ? null : `${minutes} min read`;
+}
+
+/**
+ * Reader mode reports Defuddle's count when the stored one looks like a feed
+ * snippet: unknown, or at least 1.5x shorter than the extracted article.
+ * Self-contained: emitted via toString().
+ */
+export function shouldReportWordCount(
+	stored: number | null | undefined,
+	extracted: number | null | undefined,
+	mediaKind: string | null | undefined,
+): boolean {
+	if (mediaKind === 'video') return false;
+	if (typeof extracted !== 'number' || !Number.isSafeInteger(extracted) || extracted < 50) return false;
+	if (typeof stored !== 'number' || stored <= 0) return true;
+	return extracted >= stored * 1.5;
 }
 
 export function createYouTubeEmbedUrl(originalUrl: string | undefined | null): string | null {
@@ -553,6 +600,7 @@ export function buildArticleListEntries(options: {
 				heroImageUrl: null,
 				isPaywalled: false,
 				isLoaded: false,
+				readingLength: null,
 			};
 		}
 
@@ -565,6 +613,7 @@ export function buildArticleListEntries(options: {
 			heroImageUrl: selectArticleHeroImageUrl(loadedItem.content?.content),
 			isPaywalled: loadedItem.isPaywalled === true,
 			isLoaded: true,
+			readingLength: formatReadingLength(loadedItem),
 		};
 	});
 }
@@ -848,6 +897,8 @@ ${looksLikeHtmlPreview.toString()}
 ${stripArticlePreviewMarkup.toString()}
 ${cleanArticlePreviewText.toString()}
 ${createArticlePreview.toString()}
+${formatReadingLength.toString()}
+${shouldReportWordCount.toString()}
 ${buildArticleListEntries.toString()}
 ${extractYouTubeVideoId.toString()}
 ${createYouTubeEmbedUrl.toString()}
@@ -880,6 +931,8 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   limitInitialItemIds,
   createContentLoadPlan,
   buildArticleListEntries,
+  formatReadingLength,
+  shouldReportWordCount,
   extractYouTubeVideoId,
   createYouTubeEmbedUrl,
   sanitizeArticleHtml,

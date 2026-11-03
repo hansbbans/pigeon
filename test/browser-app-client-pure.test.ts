@@ -357,6 +357,7 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				heroImageUrl: null,
 				isPaywalled: false,
 				isLoaded: true,
+				readingLength: null,
 			},
 			{
 				id: 'pending-item',
@@ -367,6 +368,7 @@ test('buildArticleListEntries only renders previews from already-loaded content'
 				heroImageUrl: null,
 				isPaywalled: false,
 				isLoaded: false,
+				readingLength: null,
 			},
 		],
 	);

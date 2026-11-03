@@ -275,6 +275,7 @@ export async function createBrowserHarness(options?: {
 	storedTheme?: string | null;
 	storedArticleListMode?: string | null;
 	storedAutoReadPolicy?: string | null;
+	storedShowReadingTime?: '0' | '1';
 	storedSidebarCollapsed?: string | null;
 	offlineTools?: any;
 	locationHref?: string;
@@ -362,6 +363,7 @@ export async function createBrowserHarness(options?: {
 		['star-article-button', createElement('', [], 'button', registerFocus)],
 		['undo-article-button', createElement('', ['hidden'], 'button', registerFocus)],
 		['auto-read-select', createElement('manual', [], 'select', registerFocus)],
+		['show-reading-time', createElement('', [], 'input', registerFocus)],
 		['reading-preference-status', createElement('', [], 'p', registerFocus)],
 		['search-button', createElement('', [], 'button', registerFocus)],
 		['article-query-controls', createElement('', [], 'div', registerFocus)],
@@ -430,6 +432,7 @@ export async function createBrowserHarness(options?: {
 		localStorageState.set('pigeon.browser.article-list-mode', options.storedArticleListMode);
 	}
 	if (options?.storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', options.storedAutoReadPolicy);
+	if (options?.storedShowReadingTime) localStorageState.set('pigeon.browser.show-reading-time', options.storedShowReadingTime);
 	if (options?.storedSidebarCollapsed) localStorageState.set('pigeon.browser.sidebar-collapsed', options.storedSidebarCollapsed);
 	if (options?.storedColumnWidths) {
 		localStorageState.set('pigeon.browser.column-widths', JSON.stringify(options.storedColumnWidths));
@@ -843,14 +846,18 @@ export async function createStatefulArticleBrowser(options?: {
 	policy?: string; offlineTools?: any; locationHref?:string; readingTools?: any; extractReader?: (html:string,url:string)=>any; frameHeight?: number; viewportHeight?: number; count?: number;
 	now?: number | (() => number);
 	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
+	seed?: (database: DatabaseSync) => void;
+	storedShowReadingTime?: '0' | '1';
 }) {
 	const browserNow = typeof options?.now === 'function' ? options.now() : options?.now ?? new Date(2026, 9, 12, 12).getTime();
 	const state = createLargeTodaySqliteLibrary(browserNow, options?.count ?? 2);
+	options?.seed?.(state.database);
 	const token = await generateApiToken('today-test-password');
 	const mutations: Array<{ itemId: string; itemIds: string[]; add: string | null; remove: string | null }> = [];
 	const harness = await createBrowserHarness({
 		now: options?.now ?? browserNow,
 		storedAutoReadPolicy: options?.policy,
+		storedShowReadingTime: options?.storedShowReadingTime,
 		readingTools:options?.readingTools,extractReader:options?.extractReader,offlineTools:options?.offlineTools,locationHref:options?.locationHref,
 		frameScrollHeight: options?.frameHeight,
 		frameViewportHeight: options?.viewportHeight,
