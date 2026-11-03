@@ -20,3 +20,12 @@ test('allows up to one day in the future', () => {
 	assert.equal(normalizePublishedDate('2026-11-04T11:00:00Z', now), '2026-11-04T11:00:00.000Z');
 	assert.equal(normalizePublishedDate('2026-11-05T00:00:00Z', now), null);
 });
+
+test('reads naive and long-form dates as UTC, like iOS, and rejects loose text', () => {
+	assert.equal(normalizePublishedDate('2025-04-02T10:00:00', now), '2025-04-02T10:00:00.000Z');
+	assert.equal(normalizePublishedDate('April 2, 2025', now), '2025-04-02T00:00:00.000Z');
+	assert.equal(normalizePublishedDate('2 April 2025', now), '2025-04-02T00:00:00.000Z');
+	for (const value of ['Updated 2025', 'Tue 2021', '2025', 'Posted on 2025-04-02 by Ada']) {
+		assert.equal(normalizePublishedDate(value, now), null, value);
+	}
+});

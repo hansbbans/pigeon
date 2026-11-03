@@ -240,3 +240,32 @@ test('odd fragment characters cannot break extraction', () => {
 	assert.equal(extractor, 'defuddle');
 	assert.match(content, /Curiosity drives/);
 });
+
+test('images survive Defuddle extraction with their original sources', () => {
+	const { window } = readingWindow();
+	const text = '<p>' + 'The library was restored by volunteers over many seasons of careful work. '.repeat(15) + '</p>';
+	const html = `<html><head><title>Photos</title></head><body><article><h1>Photos</h1>${text}<figure><img src="/images/one.jpg" alt="One" title="First photo"><figcaption>One</figcaption></figure>${text}<img data-src="https://cdn.example/two.jpg" alt="Two">${text}</article></body></html>`;
+	const result = window.__PIGEON_READING_TOOLS__.extract(html, 'https://essays.example/photos');
+	assert.equal(result.extractor, 'defuddle');
+	assert.match(result.content, /<img[^>]*src="https:\/\/essays\.example\/images\/one\.jpg"/);
+	assert.match(result.content, /<img[^>]*src="https:\/\/cdn\.example\/two\.jpg"/);
+	assert.match(result.content, /title="First photo"/);
+	assert.doesNotMatch(result.content, /pigeon\.invalid|pigeon-in-page-target|data-pigeon-resource/);
+});
+
+test('image-led posts with little text still extract', () => {
+	const { window } = readingWindow();
+	const html = '<html><head><title>Comic 123</title></head><body><article><h1>Comic 123</h1><img src="/comics/123.png" alt="Comic"><p>Short caption.</p></article></body></html>';
+	const result = window.__PIGEON_READING_TOOLS__.extract(html, 'https://comics.example/123');
+	assert.match(result.content, /comics\/123\.png/);
+});
+
+test('footnote targets that already have a title keep their id and their title', () => {
+	const { window } = readingWindow();
+	const text = 'Curiosity drives the best work, sustained over years of patient effort and delight. '.repeat(12);
+	const html = `<html><head><title>Notes</title></head><body><article><h1>Notes</h1><p>${text}<a href="#note-a">a</a></p><p>${text}</p><p id="note-a" title="Note one">The note.</p></article></body></html>`;
+	const { content } = window.__PIGEON_READING_TOOLS__.extract(html, 'https://essays.example/post');
+	assert.match(content, /href="#note-a"[^>]*target="_self"/);
+	assert.match(content, /<p[^>]*id="note-a"/);
+	assert.match(content, /title="Note one"/);
+});

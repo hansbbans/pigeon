@@ -44,11 +44,20 @@ test('script loader injects once and resolves true on load', async () => {
 	assert.equal(appended[0].async, true);
 });
 
-test('script loader resolves false on error without throwing and does not retry', async () => {
+test('script loader resolves false on error without throwing and retries on the next call', async () => {
 	const { doc, appended } = fakeDocument('error');
 	const load = createScriptLoader(doc, '/app/defuddle.js?v=1', 10_000);
 	assert.equal(await load(), false);
 	assert.equal(await load(), false);
+	assert.equal(appended.length, 2, 'a transient failure must not disable Defuddle for the session');
+});
+
+test('a slow script that finishes after the timeout is used by later calls without reinjecting', async () => {
+	const { doc, appended } = fakeDocument('never');
+	const load = createScriptLoader(doc, '/app/defuddle.js?v=1', 20);
+	assert.equal(await load(), false);
+	appended[0].onload();
+	assert.equal(await load(), true);
 	assert.equal(appended.length, 1);
 });
 

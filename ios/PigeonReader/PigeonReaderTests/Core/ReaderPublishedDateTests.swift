@@ -32,4 +32,22 @@ struct ReaderPublishedDateTests {
 		#expect(ReaderPublishedDate.normalize("2026-11-04T11:00:00Z", now: now) == iso("2026-11-04T11:00:00Z"))
 		#expect(ReaderPublishedDate.normalize("2026-11-05T00:00:00Z", now: now) == nil)
 	}
+
+	@Test
+	func readsNaiveAndLongFormDatesAsUTCLikeTheWebAndRejectsLooseText() {
+		#expect(ReaderPublishedDate.normalize("2025-04-02T10:00:00", now: now) == iso("2025-04-02T10:00:00Z"))
+		#expect(ReaderPublishedDate.normalize("April 2, 2025", now: now) == iso("2025-04-02T00:00:00Z"))
+		#expect(ReaderPublishedDate.normalize("2 April 2025", now: now) == iso("2025-04-02T00:00:00Z"))
+		for value in ["Updated 2025", "Tue 2021", "2025", "Posted on 2025-04-02 by Ada"] {
+			#expect(ReaderPublishedDate.normalize(value, now: now) == nil, "\(value)")
+		}
+	}
+
+	@Test @MainActor
+	func defuddleSourceIsReadOnceAndShared() {
+		let first = ReaderViewExtractor.bundledDefuddleSource()
+		#expect(first?.isEmpty == false)
+		#expect(ReaderViewExtractor.bundledDefuddleSource() == first)
+	}
 }
+

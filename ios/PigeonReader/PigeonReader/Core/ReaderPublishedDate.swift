@@ -19,11 +19,17 @@ nonisolated enum ReaderPublishedDate {
 
 	private static func parse(_ value: String) -> Date? {
 		let iso = ISO8601DateFormatter()
-		for options: ISO8601DateFormatter.Options in [
+		iso.timeZone = TimeZone(identifier: "UTC")
+		var isoOptions: [ISO8601DateFormatter.Options] = [
 			[.withInternetDateTime, .withFractionalSeconds],
 			[.withInternetDateTime],
-			[.withFullDate],
-		] {
+			[.withFullDate, .withTime, .withColonSeparatorInTime, .withDashSeparatorInDate],
+		]
+		// Date-only parsing would otherwise accept a date-time and drop its time.
+		if value.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil {
+			isoOptions = [[.withFullDate]]
+		}
+		for options in isoOptions {
 			iso.formatOptions = options
 			if let date = iso.date(from: value) { return date }
 		}

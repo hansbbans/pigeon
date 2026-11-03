@@ -110,21 +110,27 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 		"""
 	}
 
+	private static let defuddleSource = bundledScript(named: "Defuddle")
+	private static let readabilityScript = bundledScript(named: "Readability")
+
+	/// The bundled Defuddle.js, read from disk once per process.
 	static func bundledDefuddleSource() -> String? {
-		let bundles = [Bundle(for: ResourceBundleMarker.self), Bundle.main]
-		guard let url = bundles.compactMap({ $0.url(forResource: "Defuddle", withExtension: "js") }).first else {
-			return nil
-		}
-		return try? String(contentsOf: url, encoding: .utf8)
+		defuddleSource
 	}
 
 	private static func readabilitySource() throws -> String {
-		let bundles = [Bundle(for: ResourceBundleMarker.self), Bundle.main]
-		guard let url = bundles.compactMap({ $0.url(forResource: "Readability", withExtension: "js") }).first,
-			let source = try? String(contentsOf: url, encoding: .utf8) else {
+		guard let readabilityScript else {
 			throw ReaderViewError.readabilityUnavailable
 		}
-		return source
+		return readabilityScript
+	}
+
+	private static func bundledScript(named name: String) -> String? {
+		let bundles = [Bundle(for: ResourceBundleMarker.self), Bundle.main]
+		guard let url = bundles.compactMap({ $0.url(forResource: name, withExtension: "js") }).first else {
+			return nil
+		}
+		return try? String(contentsOf: url, encoding: .utf8)
 	}
 
 	private static func extractionScript(html: String, baseURL: URL) throws -> String {

@@ -835,27 +835,35 @@ export function followInPageLink(event: any): boolean {
 	return true;
 }
 
-// Loads a classic script at most once. Resolves false on error or timeout so
-// callers can carry on without it (reader mode falls back to Readability).
+// Loads a classic script for callers that can carry on without it (reader
+// mode falls back to Readability). Each call waits at most timeoutMs. A slow
+// script keeps loading in the background and later calls see it; a failed one
+// is retried on the next call rather than disabled for the session.
 export function createScriptLoader(doc: any, src: string, timeoutMs: number): () => Promise<boolean> {
-	let pending: Promise<boolean> | null = null;
+	let state: 'idle' | 'loading' | 'loaded' = 'idle';
+	let loaded: Promise<boolean> | null = null;
 	return function load(): Promise<boolean> {
-		if (pending) return pending;
-		pending = new Promise<boolean>((resolve) => {
+		if (state === 'loaded') return Promise.resolve(true);
+		if (state === 'idle') {
+			state = 'loading';
+			loaded = new Promise<boolean>((resolve) => {
+				try {
+					const script = doc.createElement('script');
+					script.async = true;
+					script.onload = () => { state = 'loaded'; resolve(true); };
+					script.onerror = () => { state = 'idle'; script.remove?.(); resolve(false); };
+					script.src = src;
+					doc.head.appendChild(script);
+				} catch {
+					state = 'idle';
+					resolve(false);
+				}
+			});
+		}
+		return new Promise<boolean>((resolve) => {
 			const timer = setTimeout(() => resolve(false), timeoutMs);
-			try {
-				const script = doc.createElement('script');
-				script.async = true;
-				script.onload = () => { clearTimeout(timer); resolve(true); };
-				script.onerror = () => { clearTimeout(timer); resolve(false); };
-				script.src = src;
-				doc.head.appendChild(script);
-			} catch {
-				clearTimeout(timer);
-				resolve(false);
-			}
+			loaded!.then((ok) => { clearTimeout(timer); resolve(ok); });
 		});
-		return pending;
 	};
 }
 

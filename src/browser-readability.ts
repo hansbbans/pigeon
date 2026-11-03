@@ -37,6 +37,8 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		const tags = new Set('a abbr article aside audio b blockquote br caption cite code col colgroup dd del details dfn div dl dt em figcaption figure h1 h2 h3 h4 h5 h6 header hr i img kbd li main mark meta ol p picture pre q s samp section small source span strong sub summary sup table tbody td th thead time title tr u ul var video'.split(' '));
 		const attributes = new Set('alt title lang dir class id colspan rowspan width height role aria-label name property content charset datetime controls data-lang'.split(' '));
 		const TARGET_MARKER = 'pigeon-in-page-target:';
+		const MEDIA_PLACEHOLDER = 'https://pigeon.invalid/';
+		const savedTitles = new Map<string, string>();
 		const dropped = new Set('script style noscript template iframe frame frameset object embed applet link base svg math canvas form input button select textarea option dialog portal'.split(' '));
 		function clean(fragment: any, restore: boolean): void {
 			const elements = Array.from(fragment.querySelectorAll('*') as any[]);
@@ -111,7 +113,14 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 				const referenced = new Set(Array.from(working.querySelectorAll('a[href]') as any[]).map((link: any) => fragmentOf(link.getAttribute('href'))).filter(Boolean));
 				for (const target of Array.from(working.querySelectorAll('[id], a[name]') as any[])) {
 					const key = target.getAttribute('id') || target.getAttribute('name');
-					if (referenced.has(key) && !target.hasAttribute('title')) target.setAttribute('title', TARGET_MARKER + key);
+					if (!referenced.has(key)) continue;
+					if (target.hasAttribute('title')) savedTitles.set(key, target.getAttribute('title'));
+					target.setAttribute('title', TARGET_MARKER + key);
+				}
+				// Media sources are parked in the resources map behind data-pigeon-resource,
+				// which Defuddle drops; carry the marker in an inert placeholder src instead.
+				for (const media of Array.from(working.querySelectorAll('[data-pigeon-resource]') as any[])) {
+					media.setAttribute('src', MEDIA_PLACEHOLDER + media.getAttribute('data-pigeon-resource'));
 				}
 				const defuddle = new root.Defuddle(working, { url: base });
 				const result = defuddle.parse();
@@ -140,7 +149,10 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			reader._fixLazyImages = function () {};
 			reader._unwrapNoscriptImages = function () {};
 			const article = reader.parse();
-			if (!article || !article.content || textLength(article.content) < 80) throw new Error('No readable article content found.');
+			// Readability is the last resort: accept any body text or media (comics,
+			// photo posts), but not a page whose only text is its <title>.
+			const hasMedia = (markup: string): boolean => /<(img|video|picture)\b/i.test(markup);
+			if (!article || !article.content || (textLength(article.content) === 0 && !hasMedia(article.content))) throw new Error('No readable article content found.');
 			extracted = {
 				title: article.title || null,
 				byline: article.byline || null,
@@ -155,6 +167,10 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		}
 		const output = document.createElement('template');
 		output.innerHTML = extracted.content;
+		for (const media of Array.from(output.content.querySelectorAll('[src^="' + MEDIA_PLACEHOLDER + '"]') as any[])) {
+			media.setAttribute('data-pigeon-resource', media.getAttribute('src').slice(MEDIA_PLACEHOLDER.length));
+			media.removeAttribute('src');
+		}
 		clean(output.content, true);
 		// The article frame sets <base target="_blank">; in-page links such as
 		// footnotes must scroll the frame rather than open a new tab.
@@ -163,6 +179,7 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 		for (const target of Array.from(output.content.querySelectorAll('[title^="' + TARGET_MARKER + '"]') as any[])) {
 			const key = target.getAttribute('title').slice(TARGET_MARKER.length);
 			target.removeAttribute('title');
+			if (savedTitles.has(key)) target.setAttribute('title', savedTitles.get(key));
 			if (/^[A-Za-z0-9_:.-]{1,128}$/.test(key) && !target.getAttribute('id')) target.setAttribute('id', key);
 		}
 		// Keep a link in-page only when its target survived extraction; otherwise
