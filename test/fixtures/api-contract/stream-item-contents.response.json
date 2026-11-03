@@ -1,0 +1,123 @@
+{
+	"id": "user/-/state/com.google/reading-list",
+	"updated": 1793534400,
+	"items": [
+		{
+			"id": "tag:google.com,2005:reader/item/0000000000000001",
+			"categories": [
+				"user/-/state/com.google/reading-list",
+				"user/-/label/Design"
+			],
+			"title": "Typography for a durable reader",
+			"published": 1793523600,
+			"updated": 1793523600,
+			"crawlTimeMsec": "1793523600000",
+			"timestampUsec": "1793523600000000",
+			"author": "Ada Lovelace",
+			"content": {
+				"direction": "ltr",
+				"content": "<p>Typography decides whether a long read stays readable.</p>"
+			},
+			"contentVersion": "2",
+			"isBodyPruned": false,
+			"isPaywalled": false,
+			"alternate": [
+				{
+					"href": "https://example.com/durable-reader"
+				}
+			],
+			"origin": {
+				"streamId": "feed/1",
+				"title": "Design Weekly",
+				"htmlUrl": "https://example.com"
+			}
+		},
+		{
+			"id": "tag:google.com,2005:reader/item/0000000000000002",
+			"categories": [
+				"user/-/state/com.google/reading-list",
+				"user/-/state/com.google/read",
+				"user/-/state/com.google/starred",
+				"user/-/label/Design"
+			],
+			"title": "Notes on margins",
+			"published": 1793347200,
+			"updated": 1793347200,
+			"crawlTimeMsec": "1793347200000",
+			"timestampUsec": "1793347200000000",
+			"author": "",
+			"content": {
+				"direction": "ltr",
+				"content": "<p>Margins give text room.</p>"
+			},
+			"contentVersion": "1",
+			"isBodyPruned": false,
+			"isPaywalled": false,
+			"alternate": [
+				{
+					"href": "https://example.com/margins"
+				}
+			],
+			"origin": {
+				"streamId": "feed/1",
+				"title": "Design Weekly",
+				"htmlUrl": "https://example.com"
+			}
+		},
+		{
+			"id": "tag:google.com,2005:reader/item/0000000000000003",
+			"categories": [
+				"user/-/state/com.google/reading-list"
+			],
+			"title": "Your Sunday brief",
+			"published": 1793514600,
+			"updated": 1793514600,
+			"crawlTimeMsec": "1793514600000",
+			"timestampUsec": "1793514600000000",
+			"author": "Morning Brief",
+			"content": {
+				"direction": "ltr",
+				"content": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>"
+			},
+			"contentVersion": "0",
+			"isBodyPruned": false,
+			"isPaywalled": true,
+			"origin": {
+				"streamId": "feed/2",
+				"title": "Morning Brief",
+				"htmlUrl": "https://pigeon.example"
+			}
+		},
+		{
+			"id": "tag:google.com,2005:reader/item/0000000000000004",
+			"categories": [
+				"user/-/state/com.google/reading-list",
+				"user/-/state/com.google/read",
+				"user/-/label/Blogs"
+			],
+			"title": "Last post for a while",
+			"published": 1736899200,
+			"updated": 1736899200,
+			"crawlTimeMsec": "1736899200000",
+			"timestampUsec": "1736899200000000",
+			"author": "",
+			"content": {
+				"direction": "ltr",
+				"content": "<div data-pigeon-rendered=\"plain-text\" style=\"text-align:left\"><p>A short goodbye.</p></div>"
+			},
+			"contentVersion": "1",
+			"isBodyPruned": true,
+			"isPaywalled": false,
+			"alternate": [
+				{
+					"href": "https://quiet.example.org/last"
+				}
+			],
+			"origin": {
+				"streamId": "feed/3",
+				"title": "Quiet Blog",
+				"htmlUrl": "https://quiet.example.org"
+			}
+		}
+	]
+}

@@ -1,0 +1,7 @@
+{
+	"query": "https://notes.example.net/feed.xml",
+	"numResults": 1,
+	"streamId": "feed/4",
+	"streamName": "Field Notes",
+	"isNew": true
+}

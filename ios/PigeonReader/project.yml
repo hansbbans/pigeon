@@ -126,6 +126,11 @@ targets:
     platform: iOS
     sources:
       - path: PigeonReaderTests
+      # Worker/iOS API contract fixtures, shared with test/api-contract.test.ts.
+      - path: ../../test/fixtures/api-contract
+        type: folder
+        buildPhase: resources
+        group: ContractFixtures
     dependencies:
       - target: PigeonReader
     settings:

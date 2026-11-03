@@ -1,0 +1,318 @@
+{
+	"cursor": "v1:25",
+	"hasMore": false,
+	"changes": [
+		{
+			"sequence": 1,
+			"entityType": "feed",
+			"entityId": "design-weekly",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "design-weekly",
+				"streamId": "feed/1",
+				"title": "Design Weekly Digest",
+				"feedURL": "https://feeds.example.com/design.xml",
+				"siteURL": "https://example.com",
+				"iconURL": "https://example.com/icon.png",
+				"isActive": true,
+				"folders": [
+					"Design"
+				]
+			}
+		},
+		{
+			"sequence": 2,
+			"entityType": "feed",
+			"entityId": "morning-brief",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "morning-brief",
+				"streamId": "feed/2",
+				"title": "Morning Brief",
+				"feedURL": null,
+				"siteURL": null,
+				"iconURL": null,
+				"isActive": true,
+				"folders": [
+					"News"
+				]
+			}
+		},
+		{
+			"sequence": 3,
+			"entityType": "feed",
+			"entityId": "quiet-blog",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "quiet-blog",
+				"streamId": "feed/3",
+				"title": "Quiet Blog",
+				"feedURL": "https://quiet.example.org/feed",
+				"siteURL": "https://quiet.example.org",
+				"iconURL": null,
+				"isActive": false,
+				"folders": [
+					"Blogs"
+				]
+			}
+		},
+		{
+			"sequence": 4,
+			"entityType": "feed",
+			"entityId": "design-weekly",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "design-weekly",
+				"streamId": "feed/1",
+				"title": "Design Weekly Digest",
+				"feedURL": "https://feeds.example.com/design.xml",
+				"siteURL": "https://example.com",
+				"iconURL": "https://example.com/icon.png",
+				"isActive": true,
+				"folders": [
+					"Design"
+				]
+			}
+		},
+		{
+			"sequence": 5,
+			"entityType": "feed",
+			"entityId": "quiet-blog",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "quiet-blog",
+				"streamId": "feed/3",
+				"title": "Quiet Blog",
+				"feedURL": "https://quiet.example.org/feed",
+				"siteURL": "https://quiet.example.org",
+				"iconURL": null,
+				"isActive": false,
+				"folders": [
+					"Blogs"
+				]
+			}
+		},
+		{
+			"sequence": 6,
+			"entityType": "article",
+			"entityId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+				"feedKey": "design-weekly",
+				"source": "Design Weekly Digest",
+				"title": "Typography for a durable reader",
+				"author": "Ada Lovelace",
+				"html": "<p>Typography decides whether a long read stays readable.</p>",
+				"text": "Typography decides whether a long read stays readable.",
+				"originalURL": "https://example.com/durable-reader",
+				"receivedAt": "2026-11-01T09:00:00.000Z",
+				"isRead": true,
+				"isStarred": true,
+				"isBodyPruned": false,
+				"isPaywalled": false
+			}
+		},
+		{
+			"sequence": 8,
+			"entityType": "article",
+			"entityId": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000002",
+				"feedKey": "design-weekly",
+				"source": "Design Weekly Digest",
+				"title": "Notes on margins",
+				"author": null,
+				"html": "<p>Margins give text room.</p>",
+				"text": "Margins give text room.",
+				"originalURL": "https://example.com/margins",
+				"receivedAt": "2026-10-30T08:00:00.000Z",
+				"isRead": true,
+				"isStarred": true,
+				"isBodyPruned": false,
+				"isPaywalled": false
+			}
+		},
+		{
+			"sequence": 9,
+			"entityType": "status",
+			"entityId": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"itemId": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+				"isRead": true,
+				"isStarred": true,
+				"updatedAt": "2026-11-01T11:00:00.000Z",
+				"version": 1,
+				"mutationId": null
+			}
+		},
+		{
+			"sequence": 10,
+			"entityType": "article",
+			"entityId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000003",
+				"feedKey": "morning-brief",
+				"source": "Morning Brief",
+				"title": "Your Sunday brief",
+				"author": "Morning Brief",
+				"html": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>",
+				"text": null,
+				"originalURL": null,
+				"receivedAt": "2026-11-01T06:30:00.000Z",
+				"isRead": true,
+				"isStarred": false,
+				"isBodyPruned": false,
+				"isPaywalled": true
+			}
+		},
+		{
+			"sequence": 12,
+			"entityType": "article",
+			"entityId": "3e6fad85-8a4b-4cbf-ad84-4c5a6f7e8d94",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "3e6fad85-8a4b-4cbf-ad84-4c5a6f7e8d94",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000004",
+				"feedKey": "quiet-blog",
+				"source": "Quiet Blog",
+				"title": "Last post for a while",
+				"author": null,
+				"html": "",
+				"text": "A short goodbye.",
+				"originalURL": "https://quiet.example.org/last",
+				"receivedAt": "2025-01-15T00:00:00.000Z",
+				"isRead": true,
+				"isStarred": false,
+				"isBodyPruned": true,
+				"isPaywalled": false
+			}
+		},
+		{
+			"sequence": 13,
+			"entityType": "status",
+			"entityId": "3e6fad85-8a4b-4cbf-ad84-4c5a6f7e8d94",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"itemId": "3e6fad85-8a4b-4cbf-ad84-4c5a6f7e8d94",
+				"isRead": true,
+				"isStarred": false,
+				"updatedAt": "2026-11-01T11:00:00.000Z",
+				"version": 1,
+				"mutationId": null
+			}
+		},
+		{
+			"sequence": 16,
+			"entityType": "article",
+			"entityId": "4f7abe96-9b5c-4dc0-be95-5d6b7a8f9ea5",
+			"operation": "delete",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": null
+		},
+		{
+			"sequence": 20,
+			"entityType": "status",
+			"entityId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"itemId": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+				"isRead": true,
+				"isStarred": true,
+				"updatedAt": "2026-11-01T12:00:00.000Z",
+				"version": 3,
+				"mutationId": "8f0e1b2c-0002-4a00-8000-000000000002"
+			}
+		},
+		{
+			"sequence": 22,
+			"entityType": "status",
+			"entityId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"itemId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+				"isRead": true,
+				"isStarred": false,
+				"updatedAt": "2026-11-01T12:00:00.000Z",
+				"version": 2,
+				"mutationId": "8f0e1b2c-0003-4a00-8000-000000000003"
+			}
+		},
+		{
+			"sequence": 23,
+			"entityType": "feed",
+			"entityId": "design-weekly",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "design-weekly",
+				"streamId": "feed/1",
+				"title": "Design Weekly Digest",
+				"feedURL": "https://feeds.example.com/design.xml",
+				"siteURL": "https://example.com",
+				"iconURL": "https://example.com/icon.png",
+				"isActive": true,
+				"folders": [
+					"Design"
+				]
+			}
+		},
+		{
+			"sequence": 24,
+			"entityType": "feed",
+			"entityId": "morning-brief",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "morning-brief",
+				"streamId": "feed/2",
+				"title": "Morning Brief",
+				"feedURL": null,
+				"siteURL": null,
+				"iconURL": null,
+				"isActive": true,
+				"folders": [
+					"News"
+				]
+			}
+		},
+		{
+			"sequence": 25,
+			"entityType": "feed",
+			"entityId": "quiet-blog",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"feedKey": "quiet-blog",
+				"streamId": "feed/3",
+				"title": "Quiet Blog",
+				"feedURL": "https://quiet.example.org/feed",
+				"siteURL": "https://quiet.example.org",
+				"iconURL": null,
+				"isActive": false,
+				"folders": [
+					"Blogs"
+				]
+			}
+		}
+	]
+}

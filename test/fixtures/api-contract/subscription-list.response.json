@@ -1,0 +1,41 @@
+{
+	"subscriptions": [
+		{
+			"id": "feed/1",
+			"title": "Design Weekly",
+			"categories": [
+				{
+					"id": "user/-/label/Design",
+					"label": "Design"
+				}
+			],
+			"url": "https://pigeon.example/feed/design-weekly",
+			"sourceUrl": "https://feeds.example.com/design.xml",
+			"htmlUrl": "https://example.com",
+			"iconUrl": "https://example.com/icon.png"
+		},
+		{
+			"id": "feed/2",
+			"title": "Morning Brief",
+			"categories": [],
+			"url": "https://pigeon.example/feed/morning-brief",
+			"sourceUrl": null,
+			"htmlUrl": "https://pigeon.example",
+			"iconUrl": ""
+		},
+		{
+			"id": "feed/3",
+			"title": "Quiet Blog",
+			"categories": [
+				{
+					"id": "user/-/label/Blogs",
+					"label": "Blogs"
+				}
+			],
+			"url": "https://pigeon.example/feed/quiet-blog",
+			"sourceUrl": "https://quiet.example.org/feed",
+			"htmlUrl": "https://quiet.example.org",
+			"iconUrl": ""
+		}
+	]
+}

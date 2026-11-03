@@ -1,0 +1,98 @@
+{
+	"configuredBaseUrl": "https://pigeon.example",
+	"currentOrigin": "https://pigeon.example",
+	"healthUrl": "https://pigeon.example/health",
+	"schemaVersion": "15",
+	"feeds": {
+		"activeCount": 3,
+		"emailCount": 1,
+		"rssCount": 2,
+		"failingRssCount": 1,
+		"failing": [
+			{
+				"feedKey": "quiet-blog",
+				"title": "Quiet Blog",
+				"error": "HTTP 503 Service Unavailable",
+				"lastFetchedAt": null
+			}
+		]
+	},
+	"items": {
+		"totalCount": 4,
+		"unreadCount": 2,
+		"starredCount": 1,
+		"newestAt": "2026-11-01T09:00:00.000Z",
+		"newestEmailAt": "2026-11-01T06:30:00.000Z",
+		"newestRssAt": "2026-11-01T09:00:00.000Z"
+	},
+	"rss": {
+		"latestFetchAttemptAt": null
+	},
+	"syncHealth": {
+		"generatedAt": "2026-11-01T12:00:00.000Z",
+		"dueCount": 0,
+		"backedOffCount": 1,
+		"leasedCount": 0,
+		"healthyCount": 1,
+		"feeds": [
+			{
+				"feedKey": "quiet-blog",
+				"title": "Quiet Blog",
+				"host": "quiet.example.org",
+				"state": "backing_off",
+				"lastAttemptAt": "2026-11-01T10:00:00.000Z",
+				"lastSuccessAt": "2025-01-15T00:00:00.000Z",
+				"nextFetchAt": "2026-11-01T14:00:00.000Z",
+				"retryAt": "2026-11-01T14:00:00.000Z",
+				"consecutiveFailures": 3,
+				"httpStatus": 503,
+				"outcome": "http_error",
+				"durationMs": 1500,
+				"error": "HTTP 503 Service Unavailable",
+				"canRetry": false
+			},
+			{
+				"feedKey": "design-weekly",
+				"title": "Design Weekly",
+				"host": "feeds.example.com",
+				"state": "healthy",
+				"lastAttemptAt": "2026-11-01T11:30:00.000Z",
+				"lastSuccessAt": "2026-11-01T11:30:00.000Z",
+				"nextFetchAt": "2026-11-01T12:30:00.000Z",
+				"retryAt": null,
+				"consecutiveFailures": 0,
+				"httpStatus": 200,
+				"outcome": "success",
+				"durationMs": 412,
+				"error": null,
+				"canRetry": true
+			}
+		],
+		"recentActivity": [
+			{
+				"feedKey": "design-weekly",
+				"title": "Design Weekly",
+				"attemptedAt": "2026-11-01T11:30:00.000Z",
+				"outcome": "success",
+				"httpStatus": 200,
+				"durationMs": 412,
+				"itemsProcessed": 2,
+				"errorCode": null,
+				"error": null,
+				"retryAt": null
+			},
+			{
+				"feedKey": "quiet-blog",
+				"title": "Quiet Blog",
+				"attemptedAt": "2026-11-01T10:00:00.000Z",
+				"outcome": "http_error",
+				"httpStatus": 503,
+				"durationMs": 1500,
+				"itemsProcessed": 0,
+				"errorCode": "http_503",
+				"error": "HTTP 503 Service Unavailable",
+				"retryAt": "2026-11-01T14:00:00.000Z"
+			}
+		]
+	}
+}

@@ -1,0 +1,39 @@
+{
+	"exportedAt": "2026-11-01T12:00:00.000Z",
+	"monitoredTopics": [
+		"Typography",
+		"Climate policy"
+	],
+	"policy": {
+		"plainLanguageSummary": "Pigeon ranks unread stories with freshness, topics you monitor, and confirmed reading and feedback activity stored on your Pigeon server. Topic matches can transfer across sources; source history is only a small tie-breaker. Bulk read actions are neutral.",
+		"confirmedSignals": [
+			{
+				"name": "More like this",
+				"effect": "Strong positive"
+			},
+			{
+				"name": "Not interested",
+				"effect": "Strong negative"
+			},
+			{
+				"name": "Star and continue to source",
+				"effect": "Positive"
+			},
+			{
+				"name": "Active reading and scroll depth",
+				"effect": "Modest positive"
+			},
+			{
+				"name": "Single-story read",
+				"effect": "Very small positive"
+			},
+			{
+				"name": "Bulk read actions",
+				"effect": "Neutral"
+			}
+		],
+		"confirmationRule": "Only actions accepted by the server become ranking signals. Pending, failed, cancelled, and duplicate offline actions do not add confirmed evidence.",
+		"retention": "Confirmed signal history and monitored topics stay on your Pigeon server until you delete an entry or reset all preferences. Export and delete controls are available here."
+	},
+	"history": []
+}

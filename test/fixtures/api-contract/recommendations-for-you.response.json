@@ -1,0 +1,33 @@
+{
+	"generatedAt": "2026-11-01T12:00:00.000Z",
+	"view": "for-you",
+	"continuation": null,
+	"totalCount": 1,
+	"items": [
+		{
+			"id": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+			"feedKey": "design-weekly",
+			"source": "Design Weekly",
+			"author": "Ada Lovelace",
+			"title": "Typography for a durable reader",
+			"originalURL": "https://example.com/durable-reader",
+			"receivedAt": "2026-11-01T09:00:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"matchedTopics": [
+				"typography"
+			],
+			"topicStrength": 40,
+			"score": 89,
+			"confidence": 0.15351827510938598,
+			"sampleCount": 1,
+			"explanation": "Matches your monitored topic: typography.",
+			"learningState": "Learning from 1 signal",
+			"html": "<p>Typography decides whether a long read stays readable.</p>",
+			"text": "Typography decides whether a long read stays readable.",
+			"isBodyPruned": false,
+			"isPaywalled": false
+		}
+	]
+}

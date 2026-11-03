@@ -1,0 +1,17 @@
+{
+	"cutoff": "2026-08-03T12:00:00.000Z",
+	"feeds": [
+		{
+			"feedKey": "quiet-blog",
+			"streamId": "feed/3",
+			"title": "Quiet Blog",
+			"sourceType": "rss",
+			"sourceURL": "https://quiet.example.org/feed",
+			"siteURL": "https://quiet.example.org",
+			"lastArticleAt": "2025-01-15T00:00:00.000Z",
+			"lastSuccessAt": "2025-01-15T00:00:00.000Z",
+			"httpStatus": 503,
+			"archived": false
+		}
+	]
+}

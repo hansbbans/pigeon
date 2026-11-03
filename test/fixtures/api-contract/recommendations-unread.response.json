@@ -1,0 +1,54 @@
+{
+	"generatedAt": "2026-11-01T12:00:00.000Z",
+	"view": "unread",
+	"items": [
+		{
+			"id": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+			"feedKey": "design-weekly",
+			"source": "Design Weekly",
+			"author": "Ada Lovelace",
+			"title": "Typography for a durable reader",
+			"originalURL": "https://example.com/durable-reader",
+			"receivedAt": "2026-11-01T09:00:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"matchedTopics": [
+				"typography"
+			],
+			"topicStrength": 40,
+			"score": 89,
+			"confidence": 0.15351827510938598,
+			"sampleCount": 1,
+			"explanation": "Matches your monitored topic: typography.",
+			"learningState": "Learning from 1 signal",
+			"html": "<p>Typography decides whether a long read stays readable.</p>",
+			"text": "Typography decides whether a long read stays readable.",
+			"isBodyPruned": false,
+			"isPaywalled": false
+		},
+		{
+			"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000003",
+			"feedKey": "morning-brief",
+			"source": "Morning Brief",
+			"author": "Morning Brief",
+			"title": "Your Sunday brief",
+			"originalURL": null,
+			"receivedAt": "2026-11-01T06:30:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"matchedTopics": [],
+			"topicStrength": 0,
+			"score": 49,
+			"confidence": 0,
+			"sampleCount": 0,
+			"explanation": "It is fresh, with a small boost from your reading history.",
+			"learningState": "Starting with recency",
+			"html": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>",
+			"text": null,
+			"isBodyPruned": false,
+			"isPaywalled": true
+		}
+	]
+}

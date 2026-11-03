@@ -1,0 +1,19 @@
+{
+	"itemRefs": [
+		{
+			"id": "1",
+			"timestampUsec": "1793523600000000",
+			"read": false,
+			"starred": false,
+			"contentVersion": "2"
+		},
+		{
+			"id": "3",
+			"timestampUsec": "1793514600000000",
+			"read": false,
+			"starred": false,
+			"contentVersion": "0"
+		}
+	],
+	"continuation": "v1:eyJ2IjoxLCJzdHJlYW1JZCI6InVzZXIvLS9zdGF0ZS9jb20uZ29vZ2xlL3JlYWRpbmctbGlzdCIsInh0IjoiIiwib3QiOiIiLCJyZWNlaXZlZEF0IjoiMjAyNi0xMS0wMVQwNjozMDowMC4wMDBaIiwicm93aWQiOjN9"
+}

@@ -1,0 +1,49 @@
+{
+	"mutations": [
+		{
+			"id": "8f0e1b2c-0001-4a00-8000-000000000001",
+			"kind": "set_read",
+			"itemIds": ["tag:google.com,2005:reader/item/0000000000000001"],
+			"value": true
+		},
+		{
+			"id": "8f0e1b2c-0002-4a00-8000-000000000002",
+			"kind": "set_starred",
+			"itemIds": ["tag:google.com,2005:reader/item/0000000000000001"],
+			"value": true
+		},
+		{
+			"id": "8f0e1b2c-0003-4a00-8000-000000000003",
+			"kind": "set_read_batch",
+			"itemIds": ["tag:google.com,2005:reader/item/0000000000000003"],
+			"value": true,
+			"scope": "above"
+		},
+		{
+			"id": "8f0e1b2c-0004-4a00-8000-000000000004",
+			"kind": "feedback",
+			"itemIds": ["tag:google.com,2005:reader/item/0000000000000003"],
+			"feedback": "more_like_this"
+		},
+		{
+			"id": "8f0e1b2c-0005-4a00-8000-000000000005",
+			"kind": "rename_feed",
+			"itemIds": [],
+			"feedId": "feed/1",
+			"title": "Design Weekly Digest"
+		},
+		{
+			"id": "8f0e1b2c-0006-4a00-8000-000000000006",
+			"kind": "move_feed",
+			"itemIds": [],
+			"feedId": "feed/2",
+			"folders": ["News"]
+		},
+		{
+			"id": "8f0e1b2c-0007-4a00-8000-000000000007",
+			"kind": "unsubscribe_feed",
+			"itemIds": [],
+			"feedId": "feed/3"
+		}
+	]
+}

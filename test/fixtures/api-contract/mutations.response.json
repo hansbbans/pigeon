@@ -1,0 +1,39 @@
+{
+	"results": [
+		{
+			"mutationId": "8f0e1b2c-0001-4a00-8000-000000000001",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0002-4a00-8000-000000000002",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0003-4a00-8000-000000000003",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0004-4a00-8000-000000000004",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0005-4a00-8000-000000000005",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0006-4a00-8000-000000000006",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		},
+		{
+			"mutationId": "8f0e1b2c-0007-4a00-8000-000000000007",
+			"status": "applied",
+			"appliedAt": "2026-11-01T12:00:00.000Z"
+		}
+	]
+}
