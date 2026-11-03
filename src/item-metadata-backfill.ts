@@ -66,7 +66,6 @@ export async function runYouTubeDurationBackfill(
 		const url = new URL(YOUTUBE_VIDEOS_API_URL);
 		url.searchParams.set('part', 'contentDetails');
 		url.searchParams.set('id', videoIds.join(','));
-		url.searchParams.set('maxResults', String(YOUTUBE_DURATION_BATCH));
 		try {
 			const resource = await fetchBoundedFeedResource(url, {
 				headers: { Accept: 'application/json', 'x-goog-api-key': key },

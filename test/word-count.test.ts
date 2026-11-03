@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WORD_COUNT_SOURCE_LIMIT, countWordsInHtml } from '../src/word-count';
-import { mediaKindForUrl } from '../src/youtube';
+import { mediaKindForFeedItem } from '../src/youtube';
 
 test('counts words in HTML, with tags acting as word boundaries', () => {
 	assert.equal(countWordsInHtml('<p>Hello <b>big</b> world</p>'), 3);
@@ -44,10 +44,20 @@ test('countWordsInHtml is self-contained so the browser client can emit it', () 
 	assert.equal(emitted('<head><title>x</title></head><p>Hello <b>big</b> world</p>'), 3);
 });
 
-test('mediaKindForUrl marks YouTube video links as video', () => {
-	assert.equal(mediaKindForUrl('https://youtu.be/dQw4w9WgXcQ'), 'video');
-	assert.equal(mediaKindForUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'video');
-	assert.equal(mediaKindForUrl('https://www.youtube.com/@channel'), 'text');
-	assert.equal(mediaKindForUrl('https://example.com/a'), 'text');
-	assert.equal(mediaKindForUrl(null), 'text');
+test('only videos from a YouTube channel feed count as video', () => {
+	const channelFeed = 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv';
+	assert.equal(mediaKindForFeedItem(channelFeed, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'video');
+	assert.equal(mediaKindForFeedItem(channelFeed, 'https://www.youtube.com/@channel'), 'text');
+	// A link blog pointing at a talk is still something to read.
+	assert.equal(mediaKindForFeedItem('https://daringfireball.net/feeds/main', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'text');
+	assert.equal(mediaKindForFeedItem(null, 'https://youtu.be/dQw4w9WgXcQ'), 'text');
+});
+
+test('malformed markup never makes the scan quadratic', () => {
+	for (const html of ['<a'.repeat(150_000), '<!--x>'.repeat(50_000), '<script x>'.repeat(30_000), '<style>'.repeat(40_000)]) {
+		const started = performance.now();
+		countWordsInHtml(html);
+		const elapsed = performance.now() - started;
+		assert.ok(elapsed < 200, `${html.slice(0, 10)}… took ${elapsed} ms`);
+	}
 });

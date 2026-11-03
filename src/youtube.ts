@@ -151,7 +151,12 @@ export function extractYouTubeVideoId(originalUrl: string | undefined | null): s
 
 export type MediaKind = 'text' | 'video';
 
-/** Items whose link is a YouTube video play as video; everything else reads. */
-export function mediaKindForUrl(url: string | null | undefined): MediaKind {
-	return extractYouTubeVideoId(url) ? 'video' : 'text';
+/**
+ * Items from a YouTube channel feed that link to a video are videos. Other
+ * feeds that merely link to YouTube (link blogs) stay text: their length is
+ * the commentary the reader reads.
+ */
+export function mediaKindForFeedItem(feedSourceUrl: string | null | undefined, itemUrl: string | null | undefined): MediaKind {
+	const fromYouTubeFeed = Boolean(feedSourceUrl && canonicalizeYouTubeFeedUrl(feedSourceUrl));
+	return fromYouTubeFeed && extractYouTubeVideoId(itemUrl) ? 'video' : 'text';
 }

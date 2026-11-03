@@ -488,7 +488,10 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			`UPDATE items SET media_kind = 'video'
 			 WHERE media_kind IS NULL AND content_pruned_at IS NULL
 			   AND original_url LIKE 'https://www.youtube.com/watch?v=%'
-			   AND feed_key IN (SELECT feed_key FROM feeds WHERE source_type = 'rss')`,
+			   AND feed_key IN (
+			     SELECT feed_key FROM feeds
+			     WHERE source_type = 'rss' AND source_url LIKE 'https://www.youtube.com/feeds/videos.xml?%'
+			   )`,
 		),
 		db.prepare('DROP TRIGGER IF EXISTS trg_sync_article_update'),
 		db.prepare(ARTICLE_UPDATE_SYNC_TRIGGER_V16),

@@ -1383,10 +1383,13 @@ test('SQLite v15 migration adds reading-length metadata, transcripts, and backfi
 test('v16 tags existing YouTube feed items as video without adding sync events', async () => {
 	const database = createSqliteV15Fixture();
 	database.exec(`
-		INSERT INTO feeds (feed_key, display_name, source_type) VALUES ('yt', 'Channel', 'rss');
+		INSERT INTO feeds (feed_key, display_name, source_type, source_url)
+		VALUES ('yt', 'Channel', 'rss', 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv'),
+		       ('links', 'Link blog', 'rss', 'https://daringfireball.net/feeds/main');
 		INSERT INTO items (id, feed_key, subject, html_content, original_url, message_id, received_at)
 		VALUES ('video-a', 'yt', 'V', '<p>V</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'yt:video:dQw4w9WgXcQ', '2026-08-01T00:00:00.000Z'),
-		       ('email-a', 'feed-a', 'E', '<p>E</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'email-yt', '2026-08-01T00:00:00.000Z');
+		       ('email-a', 'feed-a', 'E', '<p>E</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'email-yt', '2026-08-01T00:00:00.000Z'),
+		       ('link-a', 'links', 'L', '<p>L</p>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'link-yt', '2026-08-01T00:00:00.000Z');
 	`);
 	const before = (database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count;
 	const db = new SqliteMigrationDatabase(database, {
@@ -1395,9 +1398,9 @@ test('v16 tags existing YouTube feed items as video without adding sync events',
 	});
 	await ensureDatabaseSchema({ DB: db } as never);
 
-	const kinds = Object.fromEntries((database.prepare("SELECT id, media_kind FROM items WHERE id IN ('video-a', 'email-a', 'article-a')").all() as Array<{ id: string; media_kind: string | null }>)
+	const kinds = Object.fromEntries((database.prepare("SELECT id, media_kind FROM items WHERE id IN ('video-a', 'email-a', 'link-a', 'article-a')").all() as Array<{ id: string; media_kind: string | null }>)
 		.map(({ id, media_kind }) => [id, media_kind]));
-	assert.deepEqual(kinds, { 'video-a': 'video', 'email-a': null, 'article-a': null });
+	assert.deepEqual(kinds, { 'video-a': 'video', 'email-a': null, 'link-a': null, 'article-a': null });
 	assert.equal((database.prepare('SELECT COUNT(*) AS count FROM sync_changes').get() as { count: number }).count, before);
 	database.close();
 });

@@ -1232,8 +1232,20 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     }
 
+    // Some sources (For You, the offline store) omit length fields; keep
+    // what an earlier copy of the same article knew.
+    const known = articleCache.get(itemId) || articleMetadataCache.get(itemId);
+    if (known) {
+      const carried = {};
+      for (const field of ['wordCount', 'mediaKind', 'durationSeconds']) {
+        if (item[field] === undefined && known[field] !== undefined) carried[field] = known[field];
+      }
+      if (Object.keys(carried).length) item = { ...item, ...carried };
+    }
     // Estimate once per body so list renders never rescan it.
-    const body = item.content && typeof item.content.content === 'string' ? item.content.content : '';
+    const body = item.content && typeof item.content.content === 'string' && item.content.content
+      ? item.content.content
+      : item.summary && typeof item.summary.content === 'string' ? item.summary.content : '';
     if (body && typeof item.estimatedWordCount !== 'number') item = { ...item, estimatedWordCount: client.countWordsInHtml(body) };
     articleMetadataCache.delete(itemId);
     articleMetadataCache.set(itemId, createArticleMetadata(item));

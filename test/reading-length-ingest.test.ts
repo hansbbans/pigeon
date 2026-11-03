@@ -39,10 +39,15 @@ test('RSS ingest stores a text media kind and leaves word count to the clients',
 	assert.deepEqual(row(state), { word_count: null, media_kind: 'text' });
 });
 
-test('RSS ingest marks YouTube items as video', async () => {
+test('RSS ingest marks videos from a YouTube channel feed as video, but not link-blog posts', async () => {
 	const state = setup();
-	await store(state, [item({ guid: 'yt:video:dQw4w9WgXcQ', link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' })]);
+	const video = item({ guid: 'yt:video:dQw4w9WgXcQ', link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' });
+	const channelFeed = { link: 'https://www.youtube.com/@channel', sourceUrl: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv' };
+	await state.db.batch(await buildRssItemStatements(state.db as never, 'blog', channelFeed, [video], '2026-11-01T00:00:00.000Z', { updateExisting: true }) as never);
 	assert.deepEqual(row(state, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'), { word_count: null, media_kind: 'video' });
+
+	await store(state, [item({ guid: 'link-post', link: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' })]);
+	assert.deepEqual(row(state, 'https://www.youtube.com/watch?v=aaaaaaaaaaa'), { word_count: null, media_kind: 'text' });
 });
 
 test('an unchanged RSS refresh rewrites nothing and adds no sync change', async () => {
@@ -63,7 +68,7 @@ test('a reported count survives metadata refreshes and is dropped when the body 
 	assert.equal(row(state).word_count, null);
 });
 
-test('media kind follows the stored link when a refresh brings a different one', async () => {
+test('an item keeps its media kind when a refresh brings a different link', async () => {
 	const state = setup();
 	await store(state, [item()]);
 	await store(state, [item({ link: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', content: '<p>changed</p>' })]);

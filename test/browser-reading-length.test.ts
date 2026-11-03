@@ -5,6 +5,7 @@ import { formatReadingLength, shouldReportWordCount } from '../src/browser-app-c
 import {
 	createStatefulArticleBrowser,
 	findDescendantByClass,
+	findListButtonByViewId,
 	findListButtonByItemId,
 	flushBrowserTasks,
 	waitForBrowserCondition,
@@ -17,11 +18,14 @@ test('formatReadingLength labels only items longer than 10 minutes', () => {
 	assert.equal(formatReadingLength({ wordCount: 2856 }), '12 min read');
 	assert.equal(formatReadingLength({ wordCount: 0 }), null);
 	assert.equal(formatReadingLength({}), null);
-	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 1100 }), '18 min video');
+	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 1080 }), '18 min video');
+	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 1100 }), '19 min video');
 	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 600 }), null);
-	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 660 }), '11 min video');
+	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 601 }), '11 min video');
+	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 625 }), '11 min video');
 	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 20 }), null);
 	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 3900 }), '1 hr 5 min video');
+	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 3901 }), '1 hr 6 min video');
 	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 7200 }), '2 hr video');
 	assert.equal(formatReadingLength({ mediaKind: 'video', durationSeconds: 0, wordCount: 9000 }), null);
 });
@@ -195,4 +199,27 @@ test('a reader-mode choice survives a render that resets the select while settin
 	modeSelect.value = 'newsletter';
 	await waitForBrowserCondition(() => browser.harness.elements.get('reader-frame')!.srcdoc.includes('Extracted story'), 100);
 	browser.harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('For You does not erase a video length the feed view already loaded', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({
+		seed: (db) => { db.exec("UPDATE items SET media_kind = 'video', duration_seconds = 1080 WHERE id = 'today-3'"); },
+		fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/recommendations?')
+			// The recommendations payload carries no reading-length fields.
+			? Response.json({ items: [{
+				readerId: 'tag:google.com,2005:reader/item/0000000000000003', id: 'today-3', feedKey: 'today-source',
+				source: 'Today source', title: 'Story 3', author: '', receivedAt: '2026-10-12T12:00:00.000Z',
+				originalURL: null, html: '<p>Body 3</p>', text: 'Body 3', isRead: false, isStarred: false,
+				score: 20, explanation: 'Matches your interests', matchedTopics: [],
+			}], continuation: null })
+			: next(),
+	});
+	t.after(() => database.close());
+	assert.equal(lengthLabel(harness, '3'), '18 min video');
+
+	findListButtonByViewId(harness.elements.get('views-list'), 'for-you')!.dispatch('click');
+	await waitForBrowserCondition(() => findListButtonByItemId(harness.elements.get('articles-list'), '3') !== null, 200);
+	await flushBrowserTasks();
+	assert.equal(lengthLabel(harness, '3'), '18 min video');
+	harness.elements.get('logout-button')!.dispatch('click');
 });

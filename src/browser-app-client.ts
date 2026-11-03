@@ -106,7 +106,7 @@ export function formatReadingLength(item: {
 	if (item.mediaKind === 'video') {
 		const seconds = item.durationSeconds;
 		if (typeof seconds !== 'number' || !(seconds > 0)) return null;
-		const minutes = Math.max(1, Math.round(seconds / 60));
+		const minutes = Math.max(1, Math.ceil(seconds / 60));
 		if (minutes < minimumLabelledMinutes) return null;
 		if (minutes < 60) return `${minutes} min video`;
 		const hours = Math.floor(minutes / 60);

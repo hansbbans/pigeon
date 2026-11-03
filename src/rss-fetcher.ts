@@ -21,7 +21,7 @@ import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 import { decodeHtmlTextEntities } from './preview-text';
 import type { Env } from './types';
-import { mediaKindForUrl } from './youtube';
+import { mediaKindForFeedItem } from './youtube';
 
 export interface FeedToFetch {
 	feed_key: string;
@@ -230,17 +230,8 @@ export async function buildRssItemStatements(
 							WHEN items.html_content IS NOT excluded.html_content THEN NULL
 							ELSE items.word_count
 						END,
-						-- Follow whichever link is stored (same rule as original_url).
-						media_kind = CASE
-							WHEN excluded.original_url IS NOT NULL
-							  AND (
-								items.original_url IS NULL
-								OR items.original_url LIKE 'https://feeds.feedblitz.com/%'
-								OR excluded.feed_key LIKE '%feedblitz%'
-							  )
-							THEN excluded.media_kind
-							ELSE items.media_kind
-						END,
+						-- An item's kind comes from its feed and never changes.
+						media_kind = COALESCE(items.media_kind, excluded.media_kind),
 					original_url = CASE
 							WHEN excluded.original_url IS NOT NULL
 							  AND (
@@ -283,7 +274,7 @@ export async function buildRssItemStatements(
 			content,
 			textContent,
 			boundedStoredUrl(originalUrl),
-			mediaKindForUrl(originalUrl),
+			mediaKindForFeedItem(parsed.sourceUrl, originalUrl),
 		];
 		if (bufferedRows.length === MAX_ITEMS_PER_INSERT) flushRows();
 		bufferedSql = insertSql;
