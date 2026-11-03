@@ -2827,8 +2827,10 @@ export function renderBrowserAppRuntimeScript(): string {
   }
   let pendingReaderPosition=null;
   readerModeSelect.addEventListener('change',async()=>{
+    // Read the choice before awaiting: a render in flight resets the select to the stored mode.
+    const requested=readerModeSelect.value;
     const id=selectedItemId,generation=accountGeneration;await loadReadingIdentity();if(id!==selectedItemId||generation!==accountGeneration)return;
-    const mode=['newsletter','reader','website'].includes(readerModeSelect.value)?readerModeSelect.value:'newsletter';
+    const mode=['newsletter','reader','website'].includes(requested)?requested:'newsletter';
     readingData.modes[readingFeedId(loadedItemsById[id])]=mode;persistReadingData();preparedReaderKey='';renderReader();
   });
   loadImagesButton.addEventListener('click',()=>{consentItemId=selectedItemId;preparedReaderKey='';renderReader();});

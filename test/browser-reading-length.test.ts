@@ -132,7 +132,11 @@ test('reader mode reports a much longer extracted count once and updates the lab
 	assert.equal(reports.length, 1);
 	assert.equal(reports[0]?.wordCount, 3000);
 	assert.equal(reports[0]?.itemIds.length, 1);
-	assert.equal((database.prepare("SELECT word_count FROM items WHERE id = 'today-3'").get() as { word_count: number }).word_count, 3000);
+	// The report is fire-and-forget; wait for the write to land.
+	await waitForBrowserCondition(
+		() => (database.prepare("SELECT word_count FROM items WHERE id = 'today-3'").get() as { word_count: number }).word_count === 3000,
+		1_000,
+	);
 	assert.equal(lengthLabel(harness, '3'), '13 min read');
 	assert.match(harness.elements.get('reader-source-note')!.textContent, /13 min read/);
 
@@ -151,4 +155,23 @@ test('reader mode does not report a count close to the stored one', async (t) =>
 	assert.equal(reports.length, 0);
 	assert.equal((database.prepare("SELECT word_count FROM items WHERE id = 'today-3'").get() as { word_count: number }).word_count, 40);
 	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('a reader-mode choice survives a render that resets the select while settings load', async (t) => {
+	const browser = await createStatefulArticleBrowser({
+		readingTools: readingTools(),
+		seed: (database) => { database.exec("UPDATE items SET original_url = 'https://example.com/story-3' WHERE id = 'today-3'"); },
+		extractReader: () => ({ content: '<p>Extracted story</p>', url: 'https://example.com/story-3', wordCount: 100 }),
+		fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/browser/reader-source?')
+			? Response.json({ url: 'https://example.com/story-3', html: '<article>Source</article>' })
+			: next(),
+	});
+	t.after(() => browser.database.close());
+	const modeSelect = browser.harness.elements.get('reader-mode-select')!;
+	modeSelect.value = 'reader';
+	modeSelect.dispatch('change');
+	// What an in-flight prepareReadingFrame does before the handler resumes.
+	modeSelect.value = 'newsletter';
+	await waitForBrowserCondition(() => browser.harness.elements.get('reader-frame')!.srcdoc.includes('Extracted story'), 100);
+	browser.harness.elements.get('logout-button')!.dispatch('click');
 });
