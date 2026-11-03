@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Every article in Pigeon carries a reading length ("12 min read", "18 min video") that web and iOS show on list rows and the article header, behind a "Show reading time" setting that defaults to on.
+**Goal:** Every article in Pigeon carries a reading length; web and iOS label the ones over 10 minutes ("12 min read", "18 min video") on list rows and the article header, behind a "Show reading time" setting that defaults to on.
 
 **Architecture:** Schema v16 adds nullable metadata columns to `items` (plus `item_transcripts` for step 5). The Worker counts words at ingest with a cheap linear scanner. An hourly cron backfills existing items within a byte budget, and fills YouTube durations through one `videos.list` call per run. Sync and GReader payloads gain optional `wordCount`, `mediaKind` and `durationSeconds`. Clients format the label locally. When reader mode extracts a much longer article than the stored count (snippet-only RSS), the client reports Defuddle's count through a `set_word_count` mutation.
 
@@ -35,6 +35,7 @@
   - Text: `"<n> min read"`.
   - Video: `"<m> min video"` with `m = max(1, round(s/60))`. At 60 minutes or more, `"<h> hr <r> min video"`, or `"<h> hr video"` when `r` is 0.
   - A missing or zero value shows no label.
+  - **Only lengths over 10 minutes get a label** (Hans, 2026-11-03): text needs 11+ minutes (`wordCount > 2380`), video needs `m >= 11`. Shorter items show nothing. The stored values are unaffected, so step 3's length filters and sorts still see every item.
 
 ## Review Focus
 
@@ -217,16 +218,16 @@
   - `export function shouldReportWordCount(stored: number | null | undefined, extracted: number | null | undefined, mediaKind: string | null | undefined): boolean`.
 
 - [ ] **Step 1: Write the failing pure tests:**
-  - `formatReadingLength({wordCount: 1})` → `'1 min read'`.
-  - `{wordCount: 238}` → `'1 min read'`; `{wordCount: 239}` → `'2 min read'`; `{wordCount: 2856}` → `'12 min read'`.
+  - `formatReadingLength({wordCount: 1})` → null; `{wordCount: 2380}` (exactly 10 min) → null.
+  - `{wordCount: 2381}` → `'11 min read'`; `{wordCount: 2856}` → `'12 min read'`.
   - `{wordCount: 0}` → null; `{}` → null.
   - `{mediaKind: 'video', durationSeconds: 1100}` → `'18 min video'`.
-  - `{mediaKind: 'video', durationSeconds: 20}` → `'1 min video'`.
+  - `{mediaKind: 'video', durationSeconds: 600}` → null; `{mediaKind: 'video', durationSeconds: 660}` → `'11 min video'`; `{mediaKind: 'video', durationSeconds: 20}` → null.
   - `{mediaKind: 'video', durationSeconds: 3900}` → `'1 hr 5 min video'`; `{mediaKind: 'video', durationSeconds: 7200}` → `'2 hr video'`.
   - `{mediaKind: 'video', durationSeconds: 0, wordCount: 900}` → null.
   - `shouldReportWordCount(null, 600, 'text')` → true; `(100, 149, 'text')` → false; `(100, 150, 'text')` → true; `(null, 49, 'text')` → false; `(null, 900, 'video')` → false.
 - [ ] **Step 2: Write the failing harness tests:**
-  - A list row for an item with `wordCount: 2856` shows `12 min read` in `.article-length`.
+  - A list row for an item with `wordCount: 2856` shows `12 min read` in `.article-length`; a row with `wordCount: 900` has no `.article-length`.
   - With `localStorageState['pigeon.browser.show-reading-time'] = '0'`, no `.article-length` appears and the reader source note has no label.
   - Toggling `#show-reading-time` stores `'0'`/`'1'` and re-renders.
   - The reader header shows the label.

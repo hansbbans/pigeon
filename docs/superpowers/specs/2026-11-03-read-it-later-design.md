@@ -123,6 +123,7 @@ The builder may adjust names. The constraints are: additive only, mirrored in `S
 - **RSS items that only carry a snippet.** The ingest count would measure only the snippet. When a client extracts such an article in reader mode, it reports Defuddle's word count through a small mutation (for example `set_word_count`). The mutation writes only when the value changes, to avoid no-op updates; last writer wins. It sends only the count, not the content. *(Claude's call.)*
 - **YouTube items from feeds.** The cron backfill fetches their duration in batches using the existing `YOUTUBE_API_KEY`.
 - Sync and list APIs return `word_count`, `media_kind` and `duration_seconds` as new optional fields. Older clients ignore them.
+- **Only lengths over 10 minutes are labelled** (Hans, 2026-11-03). Shorter articles and videos show no label; filters and sorts still use every stored length.
 - **Setting:** "Show reading time", on web and iOS, default **on**. It only hides or shows the label. The length filters and sorts in Read It Later still work when it's off. *(Claude's call on the default.)*
 
 ### Save API (Worker)
