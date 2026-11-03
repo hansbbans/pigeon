@@ -70,7 +70,7 @@ class FakePreparedStatement {
 
 	async first<T>(): Promise<T | null> {
 		if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-			return { value: '15' } as T;
+			return { value: '16' } as T;
 		}
 
 		if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -311,7 +311,7 @@ function createReaderApiEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '15' } as T;
+				return { value: '16' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -514,7 +514,7 @@ function createEditTagEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '15' } as T;
+				return { value: '16' } as T;
 			}
 
 			throw new Error(`Unexpected SQL in first(): ${this.sql}`);
@@ -592,7 +592,7 @@ function createSubscriptionEditEnv() {
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '15' } as T;
+				return { value: '16' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
@@ -666,7 +666,7 @@ function createMarkAllAsReadEnv(
 
 		async first<T>(): Promise<T | null> {
 			if (this.sql === "SELECT value FROM _meta WHERE key = 'schema_version'") {
-				return { value: '15' } as T;
+				return { value: '16' } as T;
 			}
 
 			if (this.sql.includes('SELECT feed_key FROM feeds WHERE rowid = ?')) {
