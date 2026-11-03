@@ -3,6 +3,7 @@
 import { runYouTubeDurationBackfill } from './item-metadata-backfill';
 import { fetchAndStoreRssFeed, RefreshQueryBudget, type FeedToFetch } from './rss-fetcher';
 import { safeHost, selectFeedsFairly } from './refresh-policy';
+import { notSavedFeedSql } from './saved-items';
 import type { Env } from './types';
 import { dispatchBrowserPush } from './web-push';
 
@@ -324,7 +325,7 @@ async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | nu
 	if (cursorFeedKey !== null) {
 		reserveMaintenanceStatements(budget, 1);
 		const { results } = await db
-			.prepare(`SELECT feed_key FROM feeds WHERE feed_key > ? AND source_type <> 'saved' ORDER BY feed_key LIMIT ?`)
+			.prepare(`SELECT feed_key FROM feeds WHERE feed_key > ? AND ${notSavedFeedSql()} ORDER BY feed_key LIMIT ?`)
 			.bind(cursorFeedKey, limit)
 			.all<MaintenanceFeedRow>();
 		if (results.length > 0) {
@@ -334,7 +335,7 @@ async function selectMaintenanceFeeds(db: D1Database, cursorFeedKey: string | nu
 
 	reserveMaintenanceStatements(budget, 1);
 	const { results } = await db
-		.prepare(`SELECT feed_key FROM feeds WHERE source_type <> 'saved' ORDER BY feed_key LIMIT ?`)
+		.prepare(`SELECT feed_key FROM feeds WHERE ${notSavedFeedSql()} ORDER BY feed_key LIMIT ?`)
 		.bind(limit)
 		.all<MaintenanceFeedRow>();
 	return results;

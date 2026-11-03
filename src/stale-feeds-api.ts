@@ -1,5 +1,6 @@
 import type { Env } from './types';
 import { MAX_IDENTIFIER_BYTES } from './content-size';
+import { notSavedFeedSql } from './saved-items';
 import { apiTimestamp } from './timestamps';
 
 const MAX_BULK_FEEDS = 100;
@@ -34,7 +35,7 @@ async function listStaleFeeds(request: Request, env: Env): Promise<Response> {
 		        f.last_success_at, f.last_http_status, f.stale_archived
 		   FROM feeds f
 		   LEFT JOIN items i ON i.feed_key = f.feed_key
-		  WHERE f.is_active = 1 AND f.source_type <> 'saved'
+		  WHERE f.is_active = 1 AND ${notSavedFeedSql('f.source_type')}
 		  GROUP BY f.feed_key
 		 HAVING datetime(COALESCE(MAX(i.received_at), f.first_seen_at)) <= datetime(?)
 		     OR f.stale_archived = 1

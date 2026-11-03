@@ -10,6 +10,7 @@ import { matchesBrowserAppEtag, renderBrowserAppShell } from './browser-app';
 import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
+import { notSavedFeedSql } from './saved-items';
 import { handleFeedDiscovery } from './feed-discovery';
 import { handleYouTubeChannelSearch } from './youtube-channel-search';
 import { handleReadwiseTokenRequest } from './readwise-token-api';
@@ -179,7 +180,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 	// Get feed metadata
 	const feed = await env.DB.prepare(
 		// Atom feeds are public by key; the Read It Later feed has a fixed key, so it is never served.
-		"SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1 AND source_type <> 'saved'",
+		`SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1 AND ${notSavedFeedSql()}`,
 	)
 		.bind(feedKey)
 		.first<{
@@ -268,7 +269,7 @@ async function hashFeedCacheInput(value: unknown): Promise<string> {
 async function handleFeedList(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
 		`SELECT feed_key, display_name, from_email, source_type, source_url, site_url, icon_url, item_count, last_item_at, custom_title, category
-		 FROM feeds WHERE is_active = 1 AND source_type <> 'saved' ORDER BY last_item_at DESC`,
+		 FROM feeds WHERE is_active = 1 AND ${notSavedFeedSql()} ORDER BY last_item_at DESC`,
 	).all<{
 		feed_key: string;
 		display_name: string;
@@ -307,7 +308,7 @@ async function handleOpml(env: Env): Promise<Response> {
 	const { results } = await env.DB.prepare(
 		`SELECT f.feed_key, f.display_name, f.custom_title, f.category, f.site_url,
 		        (SELECT json_group_array(ft.label) FROM feed_tags ft WHERE ft.feed_key = f.feed_key) AS folders_json
-		 FROM feeds f WHERE f.is_active = 1 AND f.source_type <> 'saved'`,
+		 FROM feeds f WHERE f.is_active = 1 AND ${notSavedFeedSql('f.source_type')}`,
 	).all<{
 		feed_key: string;
 		display_name: string;

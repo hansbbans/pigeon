@@ -12,13 +12,9 @@ import {
 	type ClientFamily,
 } from './engagement';
 import { ensureDatabaseSchema } from './migrations';
-import { parseGoogleReaderItemRowid } from './item-identity';
+import { googleReaderItemId, parseGoogleReaderItemRowid } from './item-identity';
 
 // --- ID conversion utilities ---
-
-function toGoogleItemId(rowid: number): string {
-	return 'tag:google.com,2005:reader/item/' + rowid.toString(16).padStart(16, '0');
-}
 
 function isMissingColumnError(error: unknown, columnName: string): boolean {
 	const message = error instanceof Error ? error.message : String(error);
@@ -843,7 +839,7 @@ async function loadResponseItems(
 			return [
 				item.rowid,
 				{
-					id: toGoogleItemId(item.rowid),
+					id: googleReaderItemId(item.rowid),
 					categories,
 					title: item.subject,
 					published: ts,

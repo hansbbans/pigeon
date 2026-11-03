@@ -14,6 +14,15 @@ import { extractYouTubeVideoId, type MediaKind } from './youtube';
 export const SAVED_FEED_KEY = 'pigeon:saved';
 export const SAVED_SOURCE_TYPE = 'saved';
 export const SAVED_FEED_TITLE = 'Read It Later';
+
+/**
+ * SQL condition that leaves out the Read It Later feed, for every list that
+ * is about subscriptions (Today, All, folders, refresh, retention, push).
+ * Pass the qualified column, e.g. `notSavedFeedSql('f.source_type')`.
+ */
+export function notSavedFeedSql(column = 'source_type'): string {
+	return `${column} <> '${SAVED_SOURCE_TYPE}'`;
+}
 /** Same body budget as email and RSS ingest: leaves room under D1's 1 MB row cap. */
 export const MAX_SAVED_HTML_BYTES = 900_000;
 /** A request carrying a full body plus metadata; JSON escaping can inflate HTML. */
@@ -61,17 +70,31 @@ export function normalizeSavedUrl(input: unknown): NormalizedSavedUrl {
 	if (videoId) return { url: `https://www.youtube.com/watch?v=${videoId}`, mediaKind: 'video' };
 
 	url.hash = '';
-	const isYouTube = YOUTUBE_HOSTS.has(url.hostname.replace(/\.$/, ''));
-	for (const key of [...url.searchParams.keys()]) {
-		const lower = key.toLowerCase();
-		if (lower.startsWith('utm_') || TRACKING_PARAMS.has(lower) || (isYouTube && YOUTUBE_TRACKING_PARAMS.has(lower))) {
-			url.searchParams.delete(key);
-		}
-	}
-	if (url.searchParams.size === 0) url.search = '';
+	url.search = withoutTrackingParams(url.search, YOUTUBE_HOSTS.has(url.hostname.replace(/\.$/, '')));
 	const normalized = url.href;
 	if (normalized.length > MAX_SAVED_URL_LENGTH) throw new BadRequest(`url must be at most ${MAX_SAVED_URL_LENGTH} characters`);
 	return { url: normalized, mediaKind: 'text' };
+}
+
+/**
+ * Drops tracking pairs from the raw query and keeps every other pair's text
+ * verbatim, so the key is the same whether or not anything was removed
+ * (URLSearchParams would re-encode `%20` as `+`, `/` as `%2F`, `flag` as `flag=`).
+ * Empty pairs (`a=1&&b=2`, a trailing `&`) are dropped in every case.
+ */
+function withoutTrackingParams(search: string, isYouTube: boolean): string {
+	const pairs = search.replace(/^\?/, '').split('&').filter((pair) => {
+		if (!pair) return false;
+		const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
+		let key: string;
+		try {
+			key = decodeURIComponent(rawKey).toLowerCase();
+		} catch {
+			key = rawKey.toLowerCase();
+		}
+		return !(key.startsWith('utm_') || TRACKING_PARAMS.has(key) || (isYouTube && YOUTUBE_TRACKING_PARAMS.has(key)));
+	});
+	return pairs.length > 0 ? `?${pairs.join('&')}` : '';
 }
 
 /** `saved:` plus the hex SHA-256 of the normalized URL; the items.message_id dedupe key. */
@@ -92,6 +115,8 @@ export interface SavedContent {
 	html: string | null;
 	htmlBytes: number;
 	htmlTooLarge: boolean;
+	/** Plain text of the extraction, for search; capped so html plus text fit the body budget. */
+	text?: string;
 	title?: string;
 	wordCount?: number;
 	author?: string;
@@ -121,6 +146,12 @@ export function parseSavedContent(value: unknown, urlMediaKind: MediaKind = 'tex
 		}
 	}
 	const content: SavedContent = { html, htmlBytes: html === null ? 0 : htmlBytes, htmlTooLarge };
+	if (value.text !== undefined && value.text !== null) {
+		if (typeof value.text !== 'string') throw new BadRequest('content.text must be a string');
+		const budget = MAX_SAVED_HTML_BYTES - content.htmlBytes;
+		const text = value.text.trim() && budget > 0 ? truncateUtf8(value.text, budget) : '';
+		if (text) content.text = text;
+	}
 	const title = optionalLabel(value.title, 'content.title', MAX_TITLE_BYTES);
 	if (title) content.title = title;
 	const author = optionalLabel(value.author, 'content.author', MAX_LABEL_BYTES);
@@ -227,10 +258,11 @@ async function handleSave(request: Request, env: Env): Promise<Response> {
 				 (id, feed_key, subject, html_content, text_content, original_url, message_id, received_at,
 				  is_read, is_starred, content_size, content_version, word_count, media_kind, duration_seconds,
 				  author, published_at, image_url, site_name, extraction_state)
-				 VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
 				 RETURNING rowid`,
 			).bind(
-				id, SAVED_FEED_KEY, content?.title ?? givenTitle ?? fallbackSavedTitle(url), content?.html ?? '', url,
+				id, SAVED_FEED_KEY, content?.title ?? givenTitle ?? fallbackSavedTitle(url), content?.html ?? '',
+				content?.text ?? null, url,
 				messageId, receivedAt, content?.htmlBytes ?? 0, content?.wordCount ?? null, mediaKind,
 				content?.durationSeconds ?? null, content?.author ?? null, content?.publishedAt ?? null,
 				content?.imageUrl ?? null, content?.siteName ?? null, state,
@@ -261,7 +293,7 @@ async function handleSave(request: Request, env: Env): Promise<Response> {
 		}
 		if (givenTitle && state === 'pending') changes.set('subject', givenTitle);
 	}
-	await env.DB.batch([ensureSavedFeedStatement(env.DB), changes.statement(env.DB, row.id, Boolean(content))]);
+	await env.DB.batch([ensureSavedFeedStatement(env.DB), changes.statement(env.DB, row.id)]);
 	return Response.json(savedResult(row, url, state, { created: false, contentTooLarge: content?.htmlTooLarge }));
 }
 
@@ -286,7 +318,7 @@ async function handleContentUpload(request: Request, env: Env, rawId: string): P
 	const content = parseSavedContent(body, urlMediaKind);
 	const changes = new ColumnChanges();
 	const state = applyContent(changes, row, content, urlMediaKind);
-	const result = await changes.statement(env.DB, row.id, true).run();
+	const result = await changes.statement(env.DB, row.id).run();
 	return Response.json({
 		...savedResult(row, url, state, { contentTooLarge: content.htmlTooLarge }),
 		updated: Number(result.meta?.changes ?? 0) > 0,
@@ -299,7 +331,7 @@ function applyContent(changes: ColumnChanges, row: SavedRow, content: SavedConte
 	let state: ExtractionState;
 	if (content.html !== null) {
 		changes.set('html_content', content.html);
-		changes.set('text_content', null);
+		changes.set('text_content', content.text ?? null);
 		changes.set('content_size', content.htmlBytes);
 		state = 'done';
 	} else if (mediaKind === 'video') {
@@ -308,6 +340,7 @@ function applyContent(changes: ColumnChanges, row: SavedRow, content: SavedConte
 		// Oversize: keep a body that is already stored; otherwise the item stays a bare link.
 		state = row.has_html === 1 ? currentState(row) : 'pending';
 	}
+	if (content.html === null && content.text) changes.set('text_content', content.text);
 	changes.set('extraction_state', state);
 	changes.set('media_kind', mediaKind);
 	if (content.title) changes.set('subject', content.title);
@@ -323,6 +356,8 @@ function applyContent(changes: ColumnChanges, row: SavedRow, content: SavedConte
 /**
  * One UPDATE that writes only when at least one column differs, so a repeat
  * upload or re-save adds no sync event (see the sync compaction notes).
+ * content_version (GReader clients refetch on it) goes up only when a column
+ * other than the saved time or the read flag changes.
  */
 class ColumnChanges {
 	private readonly values = new Map<string, string | number | null>();
@@ -331,13 +366,18 @@ class ColumnChanges {
 		this.values.set(column, value);
 	}
 
-	statement(db: D1Database, id: string, bumpContentVersion: boolean): D1PreparedStatement {
+	statement(db: D1Database, id: string): D1PreparedStatement {
 		const entries = [...this.values.entries()];
+		const bodyEntries = entries.filter(([column]) => column !== 'received_at' && column !== 'is_read');
+		const differs = (list: typeof entries) => list.map(([column]) => `${column} IS NOT ?`).join(' OR ');
 		const assignments = entries.map(([column]) => `${column} = ?`);
-		if (bumpContentVersion) assignments.push('content_version = content_version + 1');
-		const differs = entries.map(([column]) => `${column} IS NOT ?`).join(' OR ');
-		return db.prepare(`UPDATE items SET ${assignments.join(', ')} WHERE id = ? AND feed_key = ? AND (${differs})`)
-			.bind(...entries.map(([, value]) => value), id, SAVED_FEED_KEY, ...entries.map(([, value]) => value));
+		// SET expressions read the row as it was before the update.
+		if (bodyEntries.length > 0) {
+			assignments.push(`content_version = content_version + CASE WHEN ${differs(bodyEntries)} THEN 1 ELSE 0 END`);
+		}
+		const values = (list: typeof entries) => list.map(([, value]) => value);
+		return db.prepare(`UPDATE items SET ${assignments.join(', ')} WHERE id = ? AND feed_key = ? AND (${differs(entries)})`)
+			.bind(...values(entries), ...values(bodyEntries), id, SAVED_FEED_KEY, ...values(entries));
 	}
 }
 
@@ -396,9 +436,22 @@ async function readJsonBody(request: Request): Promise<unknown> {
 	if (Number.isFinite(declared) && declared > MAX_SAVE_REQUEST_BYTES) {
 		throw new PayloadTooLarge(`Request body must be at most ${MAX_SAVE_REQUEST_BYTES} bytes`);
 	}
-	const text = await request.text();
-	// Characters bound bytes from below; a body this long is too large either way.
-	if (text.length > MAX_SAVE_REQUEST_BYTES) throw new PayloadTooLarge(`Request body must be at most ${MAX_SAVE_REQUEST_BYTES} bytes`);
+	// Count bytes as they arrive: a chunked request has no Content-Length to trust.
+	const decoder = new TextDecoder();
+	let text = '';
+	let received = 0;
+	const reader = request.body?.getReader();
+	while (reader) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		received += value.byteLength;
+		if (received > MAX_SAVE_REQUEST_BYTES) {
+			await reader.cancel().catch(() => undefined);
+			throw new PayloadTooLarge(`Request body must be at most ${MAX_SAVE_REQUEST_BYTES} bytes`);
+		}
+		text += decoder.decode(value, { stream: true });
+	}
+	text += decoder.decode();
 	try {
 		return JSON.parse(text) as unknown;
 	} catch {

@@ -48,7 +48,8 @@ Request:
 URL normalization (this is the dedupe key):
 
 - Lower-cased host, default port dropped, fragment dropped.
-- Removed query parameters: every `utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref_src`, `igshid` (case-insensitive); on YouTube hosts also `si` and `feature`.
+- Removed query parameters: every `utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref_src`, `igshid` (case-insensitive, matched on the decoded key); on YouTube hosts also `si` and `feature`.
+- The remaining pairs keep their original text and order (`q=b%20c`, `path=/x`, a bare `flag` stay as sent), so a URL normalizes the same with or without tracking parameters. Empty pairs (`&&`, a trailing `&`) are dropped.
 - YouTube video links (`youtube.com/watch?v=`, `m.youtube.com`, `youtu.be/ID`, `/shorts/ID`, `/embed/ID`, `/live/ID`) become `https://www.youtube.com/watch?v=ID` and the item is a video (`mediaKind: "video"`). Other parameters such as `t` are dropped.
 - `message_id = "saved:" + sha256_hex(normalized URL)`; the item id is a UUID derived from it, so the same URL always maps to the same `id`.
 
@@ -82,7 +83,8 @@ Upload body: the content object itself (same shape as `POST`'s `content`).
 ```json
 { "html": "<article>…</article>", "title": "Slow software, and why it lasts", "wordCount": 2650,
   "author": "Ada Lovelace", "published": "2026-10-28T09:30:00+01:00",
-  "image": "https://example.com/images/slow.jpg", "site": "Example Essays", "mediaKind": "text" }
+  "image": "https://example.com/images/slow.jpg", "site": "Example Essays", "mediaKind": "text",
+  "text": "Software that waits for you." }
 ```
 
 Failure body: exactly `{ "failed": true }`. It sets `failed` unless the item is already `done` (a failure never downgrades a finished extraction). Clients send it after their last retry (the spec says 3 attempts).
@@ -101,6 +103,7 @@ Response:
 | Field | Type | Stored as | Rule |
 | --- | --- | --- | --- |
 | `html` | string | `html_content` | Required unless the item is a video. Capped at 900 000 UTF-8 bytes (`MAX_SAVED_HTML_BYTES`, the same budget as email and RSS). Over the cap: not stored, `contentTooLarge: true`, and the item stays `pending` (or keeps its earlier body and `done` state). |
+| `text` | string | `text_content` | Optional plain text of the extraction (Defuddle's text output, or the article element's `textContent`). Clients should send it: `browser/articles` search (`q`) matches titles, authors, feed names and this text, never HTML. Truncated so that `html` plus `text` stay within 900 000 bytes. An upload that stores new `html` without `text` clears the old text. |
 | `title` | string | `subject` | Whitespace collapsed, at most 1 000 bytes. |
 | `wordCount` | number | `word_count` | 0 to 2 000 000, rounded. Otherwise dropped. |
 | `author` | string | `author` | At most 500 bytes. Sync and GReader return it as `author`. |
@@ -112,7 +115,7 @@ Response:
 
 Wrong types for `content`, `html` or a string field are `400`. Unusable metadata values are dropped silently, because extractors pass them through. A field that is absent leaves the stored value alone.
 
-After a successful upload, `extraction_state = 'done'`, `text_content` is cleared, `content_version` goes up by one (GReader clients refetch).
+After a successful upload, `extraction_state = 'done'` and `text_content` holds the uploaded `text` (or null). `content_version` goes up by one only when a stored field other than the saved time and read flag actually changes, so GReader clients refetch only real edits; a re-save with identical content just moves the item up.
 
 ### Errors
 
@@ -122,7 +125,7 @@ After a successful upload, `extraction_state = 'done'`, `text_content` is cleare
 | `401` | Missing or wrong token. |
 | `404` `{ "error": "Saved item not found" }` | `PUT` for an unknown id or an item outside the saved feed. |
 | `405` | Wrong method (`POST /api/v1/saved`, `PUT …/content` only). |
-| `413` | Request body over 2 000 000 bytes. |
+| `413` | Request body over 2 000 000 bytes, counted as it streams in (chunked bodies without `Content-Length` included). |
 | `503` | Database unavailable or migration failed. Retry. |
 
 ### Removal: the `remove_saved` mutation
@@ -134,6 +137,7 @@ Sent through the existing `POST /api/v1/mutations`, so it gets receipts, idempot
 ```
 
 - `itemIds` must not be empty; it counts toward the 200-item batch limit.
+- `itemIds` must be item ids (the UUID `id`), **not** reader ids. A reader id is a rowid, and SQLite reuses the rowid of a deleted newest row, so a retried removal by reader id could delete a different item. Any reader id in the list makes the whole request `400` (`must be item ids, not reader ids`).
 - Every listed item that still exists must be in the saved feed, otherwise the mutation is `failed` with `Item … is not a saved item` and nothing is deleted.
 - Items that no longer exist are skipped, so a retry under a new mutation id is `applied`. A replay of the same id is `already_applied`.
 - Effect: the item row is deleted; its `item_statuses` and `item_transcripts` rows cascade; its `engagement_events` are deleted (they reference the row without a cascade, and a removed save should not keep shaping recommendations).
@@ -146,7 +150,7 @@ How it reaches clients: the delete trigger appends `('article', <id>, 'delete')`
 
 Earlier events for that item are compacted behind it. Saving the same URL again later recreates the item with the same `id` (an `article` upsert, then a `status` upsert). GReader clients simply stop seeing the item in id lists.
 
-Known limit: `items` has no `AUTOINCREMENT`, so if the removed item held the highest rowid, the next item inserted by any writer reuses that rowid, and therefore that GReader reader id. Pigeon clients key on `id` and apply the delete first, so they are unaffected. A third-party GReader client that had already fetched the removed save under that reader id could show the old item in place of the new one. The window is a save followed by its removal before any other item arrives. A fix needs a table rebuild or an insert trigger, so it is left for a later schema change (see Follow-ups).
+Known limit: `items` has no `AUTOINCREMENT`, so if the removed item held the highest rowid, the next item inserted by any writer reuses that rowid, and therefore that GReader reader id. Pigeon clients key on `id` and apply the delete first, so they are unaffected, and `remove_saved` refuses reader ids for the same reason. A third-party GReader client that had already fetched the removed save under that reader id could show the old item in place of the new one. The window is a save followed by its removal before any other item arrives. A fix needs a table rebuild or an insert trigger, so it is left for a later schema change (see Follow-ups).
 
 ## Sync payload fields (`GET /api/v1/sync`)
 
@@ -178,9 +182,9 @@ GReader `stream/items/contents` items gain the same optional fields, named in th
 | Recommendations (For You, unread, starred) | Excluded | Server-side. Reading a saved item still records the usual `read` engagement event, which can inform the topic profile; saved items are never candidates. |
 | Sync (`/api/v1/sync`) | Included | New clients exclude them from Today / All / folders **client-side** using `feedKey`/`sourceType`. |
 | GReader API (`subscription/list`, `unread-count`, `stream/*`) | Included, as an ordinary feed called "Read It Later" | For older clients and third-party readers (spec). New web code must skip the saved feed when it builds Today/All counts from `unread-count`. |
-| Web push | Never notifies | Push subscriptions cannot select the saved feed (`Unknown feed`), and dispatch skips it. |
+| Web push | Never notifies | A subscription request that includes `pigeon:saved` succeeds for its other feeds; the saved key is dropped and never stored. Dispatch skips the saved feed too. The web notification picker should hide it (see Web PR). |
 | Retention cron | Never pruned | The saved feed never enters the daily retention rotation. |
-| RSS refresh, stale feeds, `/app/status` RSS health | Never | The refresh scheduler only selects `source_type = 'rss'`; stale feeds skip `saved`. |
+| RSS refresh, stale feeds, `/app/status` | Never | The refresh scheduler only selects `source_type = 'rss'`; stale feeds skip `saved`; `/app/status` leaves the saved feed out of the active feed count and saved items out of the unread count and newest-article time (its total and starred counts still include them). |
 | `/feeds`, `/feeds/opml`, public Atom `/feed/<key>` | Never | The reading list has a fixed, guessable key, so its Atom feed is a `404`. |
 
 Transitional behaviour for older clients (accepted by the spec): the TestFlight iOS build and GReader clients show saved items in Today/All, and their "mark all as read" in those views archives them.
@@ -191,7 +195,8 @@ Transitional behaviour for older clients (accepted by the spec): the TestFlight 
 - `src/native-api.ts`, `src/index.ts`: routes `/api/v1/saved` and `/api/v1/saved/*`.
 - `src/mutation-api.ts`: `remove_saved` (one lookup, then one batch: receipt, engagement delete, item delete).
 - `src/sync-api.ts`, `src/greader.ts`: `sourceType` and the saved metadata fields. `src/article-author.ts`: `author` falls back to `items.author`.
-- Exclusions: `src/browser-library-api.ts`, `src/recommendations.ts`, `src/cron-handler.ts` (retention), `src/stale-feeds-api.ts`, `src/web-push.ts`, `src/index.ts` (`/feeds`, OPML, Atom).
+- Exclusions all use `notSavedFeedSql()` from `src/saved-items.ts`: `src/browser-library-api.ts`, `src/recommendations.ts`, `src/cron-handler.ts` (retention), `src/stale-feeds-api.ts`, `src/web-push.ts`, `src/status.ts`, `src/index.ts` (`/feeds`, OPML, Atom).
+- Reader ids come from one helper, `googleReaderItemId` in `src/item-identity.ts` (sync, GReader, recommendations, saves).
 - Every write is a single conditional `UPDATE … WHERE (col IS NOT ? OR …)`, so repeats add no sync events. A save or re-save is two D1 round trips (a lookup, then one batch); a save that loses an insert race to a concurrent save of the same URL takes two more and is answered as a re-save.
 - Tests: `test/saved-items.test.ts` (normalization, dedupe, save/re-save, upload, size cap, failure state, YouTube, validation, archive, removal through sync, retention exemption, no RSS refresh, exclusions). Contract fixtures: `saved-create.*`, `saved-content.*`, `saved-remove.request.json`, `sync-saved.response.json`; existing sync and subscription-list fixtures gained only `sourceType`.
 
@@ -199,12 +204,15 @@ Transitional behaviour for older clients (accepted by the spec): the TestFlight 
 
 ### Web PR
 
+- **The default All view and the unread badges must drop saved items.** All + Newest does not use `browser/articles` today (`usesBrowserArticlesQuery()` is false there): it reads GReader `stream/contents` and `unread-count`, and both include the saved feed. Either filter `origin.streamId` / the saved feed's entry out client-side, or route All through `browser/articles` (which already excludes saved items).
+- Hide the saved feed in the web notification picker. The server ignores it in a subscription request, but listing it is misleading.
+
 - Read It Later sidebar entry under Starred, with an unread count (`stream=saved&filter=unread`, or the saved feed's entry in `unread-count`). Exclude the saved feed from the Today/All counts built from `unread-count`, and hide it from the feed list (`sourceType == "saved"` in `subscription/list`).
 - List: `stream=saved` ids, bodies and metadata through `stream/items/contents` (`imageUrl`, `siteName`, `wordCount`, `mediaKind`, `durationSeconds`, `extractionState`).
 - Filters and sorts: Unread/Archive map to `filter`. Text/Video, length buckets, and shortest/longest are client-side over the loaded saved list. If saved lists grow past a few hundred items, add server-side `kind`, length and `sort=shortest|longest` to `stream=saved`.
 - Right-click "Read It Later" in the article frame: `POST /api/v1/saved` with `{ url }`, then a toast.
-- Pending items: extract on open (reader-source proxy plus Defuddle), then `PUT …/content`; after 3 failures send `{ "failed": true }`. Treat `contentTooLarge` as a failure.
-- Remove: `remove_saved` through the existing mutation path (offline queue included). Archive is the existing read toggle.
+- Pending items: extract on open (reader-source proxy plus Defuddle), then `PUT …/content` with `html` **and** `text`; after 3 failures send `{ "failed": true }`. Treat `contentTooLarge` as a failure.
+- Remove: `remove_saved` through the existing mutation path (offline queue included), with the item `id` (`payload.id` / the save response `id`), never the reader id. Archive is the existing read toggle.
 - Remove the web Readwise button in the same release that ships right-click saving.
 
 ### iOS PR
@@ -212,8 +220,8 @@ Transitional behaviour for older clients (accepted by the spec): the TestFlight 
 - Decode `sourceType` (feed) and `extractionState`, `publishedAt`, `imageURL`, `siteName` (article), all optional.
 - Exclude `pigeon:saved` items from Today, All and folders; show them in the Read It Later section. Hide the saved feed from the feed list.
 - Name the new fixtures in `APIContractTests.swift` and empty `AWAITING_IOS_CONTRACT_TESTS` in `test/api-contract.test.ts`; add a `remove_saved` encoder test against `saved-remove.request.json`.
-- Save flows (long-press, share extension, offline queue) call `POST /api/v1/saved`; the pending sweep uses `PUT …/content` and `{ "failed": true }` after 3 attempts.
-- Removal: queue `remove_saved`; apply the sync `delete` as today.
+- Save flows (long-press, share extension, offline queue) call `POST /api/v1/saved`; the pending sweep uses `PUT …/content` (send `html` and `text`) and `{ "failed": true }` after 3 attempts.
+- Removal: queue `remove_saved` with the item `id` (UUID), never the reader id; apply the sync `delete` as today.
 - Remove "Share to Reader" and the Readwise keychain token.
 
 ### Worker, later

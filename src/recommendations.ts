@@ -1,4 +1,6 @@
 import { scoreRecommendation, type ScoringEventType, type SignalSummary } from './scoring';
+import { googleReaderItemId } from './item-identity';
+import { notSavedFeedSql } from './saved-items';
 import {
 	buildTopicProfile,
 	extractTopicFeatures,
@@ -422,10 +424,6 @@ function expiredContinuation(): Response {
 	}, { status: 410 });
 }
 
-function toGoogleItemId(rowid: number): string {
-	return `tag:google.com,2005:reader/item/${rowid.toString(16).padStart(16, '0')}`;
-}
-
 function chunkValues<T>(values: T[], size: number): T[][] {
 	const chunks: T[][] = [];
 	for (let i = 0; i < values.length; i += size) {
@@ -619,7 +617,7 @@ async function loadCandidateExcerpts(env: Env, itemIds: string[]): Promise<Map<s
 
 /** Every view leaves out Read It Later items: they live only in their own section. */
 function candidateWhere(view: RecommendationView): string {
-	return `AND f.source_type <> 'saved' ${candidateViewWhere(view)}`;
+	return `AND ${notSavedFeedSql('f.source_type')} ${candidateViewWhere(view)}`;
 }
 
 function candidateViewWhere(view: RecommendationView): string {
@@ -664,7 +662,7 @@ async function loadRecommendationCandidates(
 	const feedRows = await env.DB.prepare(
 		`SELECT feed_key
 		   FROM feeds
-		  WHERE is_active = 1 AND source_type <> 'saved'
+		  WHERE is_active = 1 AND ${notSavedFeedSql()}
 		  ORDER BY COALESCE(last_item_at, first_seen_at, '') DESC, feed_key
 		  LIMIT ?`,
 	)
@@ -802,7 +800,7 @@ async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], 
 			// Ranking already left out undated items; this guards a row rewritten since.
 			const receivedAt = apiTimestamp(row.received_at);
 			if (!receivedAt) continue;
-			items.push({ ...entry, readerId: toGoogleItemId(row.rowid), feedKey: row.feed_key, source: row.source,
+			items.push({ ...entry, readerId: googleReaderItemId(row.rowid), feedKey: row.feed_key, source: row.source,
 				author: row.author, title: row.title, originalURL: row.original_url, receivedAt,
 				isRead: row.is_read === 1, isStarred: row.is_starred === 1,
 				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null,
@@ -903,7 +901,7 @@ export async function handleRecommendations(request: Request, env: Env, sessions
 
 		return {
 			id: candidate.id,
-			readerId: toGoogleItemId(candidate.rowid),
+			readerId: googleReaderItemId(candidate.rowid),
 			feedKey: candidate.feed_key,
 			source: candidate.source,
 			author: candidate.author,

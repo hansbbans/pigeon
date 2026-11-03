@@ -1,4 +1,5 @@
 import { readingLengthFields } from './reading-length';
+import { googleReaderItemId } from './item-identity';
 import { savedMetadataFields } from './saved-items';
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
@@ -228,7 +229,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 	for (const article of articles) {
 		payloads.set(eventKey('article', article.id), {
 			id: article.id,
-			readerId: toGoogleItemID(article.rowid),
+			readerId: googleReaderItemId(article.rowid),
 			feedKey: article.feed_key,
 			source: article.source,
 			title: article.title,
@@ -277,10 +278,6 @@ function uniqueEntityIDs(events: SyncEventRow[], type: SyncEventRow['entity_type
 
 function eventKey(type: SyncEventRow['entity_type'], id: string): string {
 	return `${type}\u0000${id}`;
-}
-
-function toGoogleItemID(rowid: number): string {
-	return `tag:google.com,2005:reader/item/${rowid.toString(16).padStart(16, '0')}`;
 }
 
 function chunk<T>(values: T[], size: number): T[][] {

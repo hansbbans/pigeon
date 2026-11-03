@@ -83,6 +83,24 @@ test('normalizeSavedUrl drops fragments and tracking parameters but keeps real o
 	assert.equal(normalizeSavedUrl('https://example.com/a').mediaKind, 'text');
 });
 
+test('normalizeSavedUrl keeps the remaining query text verbatim whether or not it removed anything', () => {
+	const pairs: Array<[string, string]> = [
+		['https://example.com/s?q=b%20c', 'https://example.com/s?q=b%20c&utm_source=t'],
+		['https://example.com/s?path=/x', 'https://example.com/s?fbclid=1&path=/x'],
+		['https://example.com/s?flag', 'https://example.com/s?flag&gclid=1'],
+		['https://example.com/s?a=1+2&b=%2F', 'https://example.com/s?utm_medium=x&a=1+2&b=%2F#frag'],
+		['https://example.com/s?a=1', 'https://example.com/s?a=1&&utm_campaign=z&'],
+	];
+	for (const [clean, tracked] of pairs) {
+		assert.equal(normalizeSavedUrl(tracked).url, normalizeSavedUrl(clean).url, tracked);
+	}
+	assert.equal(normalizeSavedUrl('https://example.com/s?q=b%20c&utm_source=t').url, 'https://example.com/s?q=b%20c');
+	assert.equal(normalizeSavedUrl('https://example.com/s?flag&gclid=1').url, 'https://example.com/s?flag');
+	assert.equal(normalizeSavedUrl('https://example.com/s?path=/x&fbclid=1').url, 'https://example.com/s?path=/x');
+	// Encoded tracking keys are still tracking keys.
+	assert.equal(normalizeSavedUrl('https://example.com/s?utm%5Fsource=x&id=1').url, 'https://example.com/s?id=1');
+});
+
 test('normalizeSavedUrl collapses YouTube video links to the canonical watch URL', () => {
 	const canonical = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 	for (const input of [
@@ -261,6 +279,27 @@ test('a save with content stores the extraction and its metadata', async () => {
 	assert.equal(greaderItem.publishedAt, '2026-10-01T08:00:00.000Z');
 });
 
+test('extracted plain text is stored for search, within the body budget', async () => {
+	const state = await setup();
+	const saved = await state.save({
+		url: 'https://example.com/searchable',
+		content: { html: ARTICLE_HTML, text: 'A long essay about patience and quiet tools.' },
+	});
+	const id = saved.body.id as string;
+	assert.equal(state.item(id)!.text_content, 'A long essay about patience and quiet tools.');
+	const search = await state.request('/api/v1/browser/articles?stream=saved&q=quiet%20tools');
+	assert.equal((await search.json() as { itemIds: string[] }).itemIds.length, 1);
+	// A later upload without text clears it with the body it described.
+	await state.putContent(id, { html: '<p>New body</p>' });
+	assert.equal(state.item(id)!.text_content, null);
+	// html plus text never exceed the body budget.
+	const html = `<p>${'a'.repeat(MAX_SAVED_HTML_BYTES - 10)}</p>`;
+	await state.putContent(id, { html, text: 'b'.repeat(1000) });
+	const row = state.item(id)!;
+	assert.equal(new TextEncoder().encode(row.html_content as string).byteLength + (row.text_content as string).length, MAX_SAVED_HTML_BYTES);
+	assert.equal((await state.putContent(id, { html: ARTICLE_HTML, text: 5 })).status, 400);
+});
+
 test('unusable metadata is dropped rather than rejected', async () => {
 	const state = await setup();
 	const { status, body } = await state.save({
@@ -325,6 +364,21 @@ test('content upload completes a pending item; an identical upload writes nothin
 	const byReaderId = await state.putContent(saved.body.readerId as string, { html: ARTICLE_HTML, wordCount: 901 });
 	assert.equal(byReaderId.body.updated, true);
 	assert.equal(state.item(id)!.word_count, 901);
+});
+
+test('a re-save with identical content moves the item up without bumping content_version', async (t) => {
+	const state = await setup();
+	t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-01T10:00:00.000Z') });
+	const content = { html: ARTICLE_HTML, title: 'Same', wordCount: 10 };
+	const saved = await state.save({ url: 'https://example.com/same', content });
+	const id = saved.body.id as string;
+	const version = state.item(id)!.content_version;
+	t.mock.timers.setTime(Date.parse('2026-11-02T10:00:00.000Z'));
+	await state.save({ url: 'https://example.com/same', content });
+	assert.equal(state.item(id)!.received_at, '2026-11-02T10:00:00.000Z');
+	assert.equal(state.item(id)!.content_version, version);
+	await state.save({ url: 'https://example.com/same', content: { ...content, html: '<p>Edited</p>' } });
+	assert.equal(state.item(id)!.content_version, (version as number) + 1);
 });
 
 test('a re-save with content updates the stored extraction', async () => {
@@ -395,6 +449,22 @@ test('save and content requests are validated', async () => {
 	const huge = await state.send('POST', '/api/v1/saved', JSON.stringify({ url: 'https://example.com/x', content: { html: 'a'.repeat(2_000_001) } }));
 	assert.equal(huge.status, 413);
 	assert.equal((await state.send('GET', '/api/v1/saved', undefined)).status, 405);
+	// A chunked body has no Content-Length; the cap is counted as it streams in.
+	let pulls = 0;
+	const chunk = new TextEncoder().encode('a'.repeat(256 * 1024));
+	const stream = new ReadableStream<Uint8Array>({
+		pull(controller) {
+			pulls += 1;
+			if (pulls === 1) controller.enqueue(new TextEncoder().encode('{"url":"https://example.com/x","content":{"html":"'));
+			else if (pulls < 40) controller.enqueue(chunk);
+			else controller.close();
+		},
+	});
+	const chunked = await state.request('/api/v1/saved', {
+		method: 'POST', headers: { 'Content-Type': 'application/json' }, body: stream, duplex: 'half',
+	} as RequestInit);
+	assert.equal(chunked.status, 413);
+	assert.ok(pulls < 40, 'stopped reading once past the cap');
 	assert.equal((await state.db.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 0);
 
 	const saved = await state.save({ url: 'https://example.com/ok' });
@@ -435,7 +505,7 @@ test('remove_saved deletes the item and sync tells every client', async () => {
 	const synced = await state.sync();
 	const eventsBefore = state.syncCount();
 
-	const removed = await state.mutate([{ id: 'remove-1', kind: 'remove_saved', itemIds: [drop.body.readerId] }]);
+	const removed = await state.mutate([{ id: 'remove-1', kind: 'remove_saved', itemIds: [dropId] }]);
 	assert.equal(removed.results[0].status, 'applied');
 	assert.equal(state.item(dropId), undefined);
 	assert.ok(state.item(keep.body.id as string));
@@ -478,6 +548,20 @@ test('remove_saved refuses items outside Read It Later', async () => {
 	assert.ok(state.item(saved.body.id as string));
 	const empty = await state.send('POST', '/api/v1/mutations', { mutations: [{ id: 'remove-none', kind: 'remove_saved', itemIds: [] }] });
 	assert.equal(empty.status, 400);
+});
+
+test('remove_saved accepts only item ids, never reader ids', async () => {
+	// Reader ids are rowids; after the newest row is deleted SQLite hands its rowid
+	// to the next insert, so a retried removal by reader id could hit another item.
+	const state = await setup();
+	const saved = await state.save({ url: 'https://example.com/keep' });
+	const rowid = String(Number.parseInt((saved.body.readerId as string).slice(-16), 16));
+	for (const readerId of [saved.body.readerId, rowid, (saved.body.readerId as string).slice(-16)]) {
+		const response = await state.send('POST', '/api/v1/mutations', { mutations: [{ id: `remove-${readerId}`, kind: 'remove_saved', itemIds: [readerId] }] });
+		assert.equal(response.status, 400, String(readerId));
+		assert.match((await response.json() as { error: string }).error, /item ids, not reader ids/);
+	}
+	assert.ok(state.item(saved.body.id as string));
 });
 
 test('retention never prunes Read It Later bodies', async () => {
@@ -560,6 +644,14 @@ test('saved items stay out of Today, All, folders, starred, recommendations, sta
 	const opml = await (await state.request('/feeds/opml')).text();
 	assert.equal(opml.includes('Read It Later'), false);
 	assert.equal(opml.includes('Blog'), true);
+
+	// Server status counts subscriptions and ingested articles, not saves.
+	const status = await (await state.request('/app/status', { headers: { Accept: 'application/json' } })).json() as {
+		feeds: { activeCount: number }; items: { unreadCount: number; newestAt: string };
+	};
+	assert.equal(status.feeds.activeCount, 1);
+	assert.equal(status.items.unreadCount, 1);
+	assert.equal(status.items.newestAt, '2020-01-01T00:00:00.000Z');
 
 	// Older Google Reader clients still see it as an ordinary feed.
 	const subscriptions = await (await state.request('/reader/api/0/subscription/list')).json() as { subscriptions: Array<{ title: string; sourceType: string }> };

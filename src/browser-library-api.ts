@@ -1,5 +1,5 @@
 import { ARTICLE_AUTHOR_SQL } from './article-author';
-import { SAVED_FEED_KEY } from './saved-items';
+import { notSavedFeedSql, SAVED_FEED_KEY } from './saved-items';
 import type { Env } from './types';
 
 const ALL = 'user/-/state/com.google/reading-list';
@@ -64,7 +64,7 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 			where.push('f.feed_key = ?');
 			binds.push(SAVED_FEED_KEY);
 		} else if (!query.stream.startsWith('feed/')) {
-			where.push("f.source_type <> 'saved'");
+			where.push(notSavedFeedSql('f.source_type'));
 		}
 		if (query.stream === READ) where.push('i.is_read = 1');
 		else if (query.stream === STARRED) where.push('i.is_starred = 1');

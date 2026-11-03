@@ -1,4 +1,4 @@
-import { parseGoogleReaderItemRowid } from './item-identity';
+import { hasStoredItemId, parseGoogleReaderItemRowid } from './item-identity';
 import { SAVED_FEED_KEY } from './saved-items';
 import type { Env } from './types';
 import { apiTimestamp } from './timestamps';
@@ -163,8 +163,11 @@ function validateMutationBatch(value: unknown): ClientMutation[] {
 			}
 			mutation.feedback = raw.feedback;
 		}
-		if (kind === 'remove_saved' && itemIds.length === 0) {
-			throw new Error(`mutations[${index}].itemIds must not be empty`);
+		if (kind === 'remove_saved') {
+			if (itemIds.length === 0) throw new Error(`mutations[${index}].itemIds must not be empty`);
+			// Reader ids are rowids, and SQLite reuses the rowid of a deleted newest row:
+			// a retried removal by reader id could delete a different item.
+			if (!itemIds.every(hasStoredItemId)) throw new Error(`mutations[${index}].itemIds must be item ids, not reader ids`);
 		}
 		if (kind === 'set_word_count') {
 			if (itemIds.length !== 1) throw new Error(`mutations[${index}].itemIds must contain one item`);
@@ -297,20 +300,11 @@ async function statusMutationStatements(
  * so a client retrying under a new mutation id still succeeds.
  */
 async function removeSavedStatements(env: Env, mutation: ClientMutation): Promise<D1PreparedStatement[]> {
-	const identities = mutation.itemIds.map((id) => ({ id, rowid: parseGoogleReaderItemRowid(id) }));
-	const { results } = await env.DB.prepare(
-		`SELECT items.id, items.feed_key
-		 FROM json_each(?) AS requested
-		 JOIN items ON
-		   (json_extract(requested.value, '$.rowid') IS NOT NULL
-		    AND items.rowid = json_extract(requested.value, '$.rowid'))
-		   OR (json_extract(requested.value, '$.rowid') IS NULL
-		       AND items.id = json_extract(requested.value, '$.id'))`,
-	).bind(JSON.stringify(identities)).all<{ id: string; feed_key: string }>();
-	const notSaved = results.find((item) => item.feed_key !== SAVED_FEED_KEY);
+	const items = await resolveItems(env.DB, mutation.itemIds, { skipMissing: true });
+	const notSaved = items.find((item) => item.feed_key !== SAVED_FEED_KEY);
 	if (notSaved) throw new Error(`Item ${notSaved.id} is not a saved item`);
-	if (results.length === 0) return [];
-	const ids = JSON.stringify([...new Set(results.map((item) => item.id))]);
+	if (items.length === 0) return [];
+	const ids = JSON.stringify([...new Set(items.map((item) => item.id))]);
 	return [
 		env.DB.prepare('DELETE FROM engagement_events WHERE item_id IN (SELECT value FROM json_each(?))').bind(ids),
 		env.DB.prepare('DELETE FROM items WHERE feed_key = ? AND id IN (SELECT value FROM json_each(?))').bind(SAVED_FEED_KEY, ids),
@@ -339,7 +333,8 @@ async function feedbackMutationStatements(
 	];
 }
 
-async function resolveItems(db: D1Database, itemIDs: string[]): Promise<ItemTarget[]> {
+/** Resolves item ids or reader ids in request order; unknown ids throw unless skipMissing. */
+async function resolveItems(db: D1Database, itemIDs: string[], options: { skipMissing?: boolean } = {}): Promise<ItemTarget[]> {
 	const identities = itemIDs.map((id) => ({ id, rowid: parseGoogleReaderItemRowid(id) }));
 	const { results } = await db.prepare(
 		`SELECT items.rowid, items.id, items.feed_key
@@ -351,6 +346,7 @@ async function resolveItems(db: D1Database, itemIDs: string[]): Promise<ItemTarg
 		       AND items.id = json_extract(requested.value, '$.id'))
 		 ORDER BY CAST(requested.key AS INTEGER)`,
 	).bind(JSON.stringify(identities)).all<ItemTarget>();
+	if (options.skipMissing) return results.filter((item) => item.id);
 	for (let index = 0; index < results.length; index++) {
 		if (!results[index].id) throw new Error(`Unknown item ${itemIDs[index]}`);
 	}
