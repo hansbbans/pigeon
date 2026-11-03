@@ -107,6 +107,8 @@ Pigeon includes two authenticated Reader clients backed by the Google Reader sty
 - `/app` is the browser Reader. It supports read/unread and stars with Undo, Starred and Today views, full-library search, read filters, chronological sorting, and scoped bulk read actions with Undo. Library management includes feed discovery, YouTube lookup, multiple folders, OPML preview/import, and stale-feed cleanup. For You adds recommendation scores, explanations, feedback, monitored topics, and personalization history/export/reset.
 - `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, a dedicated Unread view with global counts, long-press multi-folder feed organization, leading-edge swipe back to the feed, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, bulk Mark Above/Below triage, and direct Readwise saves.
 
+`extension/` is a browser extension for Chrome, Dia and Vivaldi that saves the current page (extracted with Defuddle on the live tab) or a link to Read It Later through `POST /api/v1/saved`. See `extension/README.md`.
+
 The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
 
 The browser reader offers newsletter content, extracted Reader mode, and a Website mode linking to the original in a separate tab. Reading settings include light/dark/sepia/system themes, typography, density, width, margins, keyboard shortcuts, and direct/ask/proxy image policies. Image policy applies to previews as well as article bodies. Readwise uses a token held only in the current page session and clears it on sign-out; a rejected Readwise token does not sign out of Pigeon.
@@ -290,6 +292,7 @@ If you are changing the public hostname itself, commit the `wrangler.toml` route
 - `src/browser-app.ts`: authenticated browser Reader shell and client
 - `ios/PigeonReader/project.yml`: authoritative native iOS project definition
 - `ios/PigeonReader/PigeonReader/`: native Reader app
+- `extension/`: Chromium browser extension (save to Read It Later)
 - `04-storage/SCHEMA.sql`: current schema
 - `09-deployment/DEPLOYMENT.md`: older deployment notes
 

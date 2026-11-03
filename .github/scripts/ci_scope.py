@@ -57,8 +57,11 @@ def classify(repo, paths, force_full=False):
         # These backend inputs cannot change the native app. Other dependencies
         # and configuration are deliberately outside this narrow allowlist; the
         # root npm manifests are in it because only the Worker job runs npm.
+        # The browser extension (extension/, its own npm package) is Node-only:
+        # the Worker job builds and tests it, and nothing in it reaches iOS.
         backend = valid and repo == "pigeon" and (
             path in {"package.json", "package-lock.json"} or
+            path.startswith("extension/") or
             (path.startswith("src/") and path.endswith(".ts")) or
             (path.startswith("test/") and (path.endswith(".ts") or path.startswith("test/fixtures/"))) or
             (path.startswith("migrations/") and path.endswith(".sql"))

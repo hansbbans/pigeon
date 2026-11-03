@@ -97,8 +97,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            extension/package-lock.json
       - run: npm ci
+      # The step name "Run npm run check" is release evidence (scripts/testflight-ci-gate.mjs).
       - run: npm run check
+      # The browser extension is its own npm package and Node-only, so it rides the Worker job.
+      - name: Install browser extension dependencies
+        working-directory: extension
+        run: npm ci
+      - name: Test, typecheck, build, and audit the browser extension
+        working-directory: extension
+        run: npm run check
 
   native:
     needs: scope

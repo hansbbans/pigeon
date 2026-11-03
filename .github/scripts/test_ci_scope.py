@@ -45,6 +45,19 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(classify("pigeon", ["package.json", "ios/PigeonReader/App.swift"])["native"])
         self.assertTrue(classify("pigeon", ["ios/PigeonReader/package.json"])["native"])
 
+    def test_pigeon_browser_extension_runs_worker_only(self):
+        for path in ["extension/src/background/index.ts", "extension/package.json", "extension/package-lock.json",
+                     "extension/manifests/chromium.json", "extension/static/options.html", "extension/static/icons/icon-16.png",
+                     "extension/README.md", "extension/scripts/build.mjs", "extension/test/save.test.ts"]:
+            with self.subTest(path=path):
+                self.assertEqual(classify("pigeon", [path]), {"native": False, "worker": True, "unknown": []})
+        self.assertTrue(classify("pigeon", ["extension/src/a.ts", "ios/PigeonReader/App.swift"])["native"])
+        for path in ["extension/../ios/PigeonReader/App.swift", "extensions/a.ts", "ios/extension/a.swift"]:
+            with self.subTest(path=path):
+                self.assertTrue(classify("pigeon", [path])["native"])
+        # Other repositories have no extension; the prefix is not special there.
+        self.assertTrue(classify("todomd", ["extension/a.ts"])["native"])
+
     def test_pigeon_api_contract_fixtures_run_worker_and_native(self):
         for path in ["test/fixtures/api-contract/sync.response.json", "test/fixtures/api-contract/README.md"]:
             with self.subTest(path=path):
