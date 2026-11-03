@@ -1,5 +1,16 @@
 import XCTest
 
+extension XCUIApplication {
+	/// Launches with UIKit and SwiftUI animations off so XCTest does not wait
+	/// for transitions to settle. Motion tests keep animations and call launch().
+	func launchWithoutAnimations() {
+		if launchArguments.contains("-reader-disable-animations") == false {
+			launchArguments.append("-reader-disable-animations")
+		}
+		launch()
+	}
+}
+
 @MainActor
 final class PigeonReaderUITests: XCTestCase {
 	private var app: XCUIApplication!
@@ -11,12 +22,17 @@ final class PigeonReaderUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		// Each test launches once. Tests that need another fixture replace or
+		// extend these arguments; the rest call launchShowingArticle().
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-article",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+	}
+
+	private func launchShowingArticle() {
+		app.launchWithoutAnimations()
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 	}
 
@@ -36,13 +52,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testTodayLoadsWithoutRefreshAndShowsLiveUnreadCount() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-today-data",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let list = articleList
 		XCTAssertTrue(list.waitForExistence(timeout: 10))
@@ -76,6 +91,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLinkedImageAndExistingLinkChoice() throws {
+		launchShowingArticle()
 		try tapLinkedImage()
 		attachScreenshot(named: "linked-image-dialog")
 
@@ -88,12 +104,11 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testFolderMarkAllReadClearsEveryFeedBadge() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data", "-reader-folder-read-data",
 			"-reader-show-sidebar", "-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let firstFeed = app.buttons["Dense Discovery"]
 		let secondFeed = app.buttons["Marginal Revolution"]
@@ -138,12 +153,11 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	private func verifyMarkAllReadProgress(isFeed: Bool) throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data", "-reader-folder-read-data", "-reader-mark-read-progress-fixture",
 			"-reader-show-sidebar", "-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 		let feed = app.buttons["Dense Discovery"]
 		XCTAssertTrue(revealSidebar(containing: feed))
 		if isFeed { feed.tap() } else { app.staticTexts["Design"].tap() }
@@ -168,12 +182,11 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testFeedMarkReadIsAvailableInNavigationAndCanBeUndone() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data", "-reader-folder-read-data",
 			"-reader-show-sidebar", "-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let feed = app.buttons["Dense Discovery"]
 		XCTAssertTrue(revealSidebar(containing: feed))
@@ -219,6 +232,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLinkedImageOpensZoomViewer() throws {
+		launchShowingArticle()
 		try tapLinkedImage()
 		app.buttons["View image"].tap()
 		XCTAssertTrue(app.navigationBars["Article image"].waitForExistence(timeout: 5))
@@ -226,9 +240,8 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testImageViewerZoomAndCloseAreAvailableWithoutGestures() throws {
-		app.terminate()
 		app.launchArguments += ["-reader-image-fixture"]
-		app.launch()
+		app.launchWithoutAnimations()
 		try tapLinkedImage()
 		app.buttons["View image"].tap()
 		let close = app.buttons["image-viewer-close"]
@@ -247,9 +260,8 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testImageViewerDoubleTapZoomsAndFittedImageCanDismissDownward() throws {
-		app.terminate()
 		app.launchArguments += ["-reader-image-fixture"]
-		app.launch()
+		app.launchWithoutAnimations()
 		try tapLinkedImage()
 		app.buttons["View image"].tap()
 		let image = app.descendants(matching: .any)["image-viewer-image"]
@@ -267,6 +279,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testNormalLinkUsesExistingLinkChoice() throws {
+		launchShowingArticle()
 		try tapNormalLink()
 		attachScreenshot(named: "normal-link-choice")
 		XCTAssertTrue(app.buttons["Open in Browser"].waitForExistence(timeout: 5))
@@ -274,6 +287,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testModeMenuWebsiteAndBackToFeedContent() throws {
+		launchShowingArticle()
 		let mode = app.buttons["Feed Content"]
 		XCTAssertTrue(mode.waitForExistence(timeout: 5))
 		mode.tap()
@@ -308,14 +322,13 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReaderViewSuccess() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-article",
 			"-reader-reset-reader-state",
 			"-reader-reader-success",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		app.buttons["Feed Content"].tap()
 		app.buttons["Reader View"].tap()
@@ -327,13 +340,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testUnreadSmartViewShowsItsCountAndOnlyUnreadStories() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let unread = app.descendants(matching: .any)["reader-sidebar-item-unread"].firstMatch
 		if unread.waitForExistence(timeout: 2) == false {
@@ -354,6 +366,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReaderViewExplicitFallback() throws {
+		launchShowingArticle()
 		app.buttons["Feed Content"].tap()
 		app.buttons["Reader View"].tap()
 		// The original page fixture is empty, but feed HTML is still readable.
@@ -364,13 +377,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testYouTubeArticleShowsEmbeddedPlayerAndOpenFallback() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-youtube",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		XCTAssertTrue(app.staticTexts["A practical guide to making better videos"].waitForExistence(timeout: 15))
 		XCTAssertTrue(app.otherElements["youtube-player-dQw4w9WgXcQ"].waitForExistence(timeout: 10))
@@ -385,13 +397,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testAddFeedSearchSelectsAndSavesYouTubeChannel() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-add-feed",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 10))
 		let field = app.textFields["add-feed-url"]
@@ -561,13 +572,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testSidebarAddFeedOpensTheSubscribeSheet() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let addFeed = app.descendants(matching: .any)["add-feed"]
 		XCTAssertTrue(revealSidebar(containing: addFeed))
@@ -582,13 +592,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLongPressFeedAssignsExistingAndCreatesNewFolder() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let feed = app.staticTexts["Stratechery"]
 		XCTAssertTrue(revealSidebar(containing: feed))
@@ -614,13 +623,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLongPressFolderRenamesAndDeletesFromTheSidebar() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let folder = app.staticTexts["Design"]
 		XCTAssertTrue(revealSidebar(containing: folder))
@@ -636,7 +644,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
 		XCTAssertEqual(nameField.value as? String, "Design")
 		app.buttons["Cancel"].tap()
-		XCTAssertFalse(app.navigationBars["Rename Folder"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.navigationBars["Rename Folder"].waitForNonExistence(timeout: 5))
 
 		XCTAssertTrue(folder.waitForExistence(timeout: 5))
 		folder.press(forDuration: 1.2)
@@ -649,19 +657,18 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5))
 		confirmDelete.tap()
 
-		XCTAssertFalse(app.staticTexts["Design"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["Design"].waitForNonExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["Dense Discovery"].waitForExistence(timeout: 5))
 		attachScreenshot(named: "folder-sidebar-actions")
 	}
 
 	func testRenameFolderValidationErrorStaysVisibleInTheSheet() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let folder = app.staticTexts["Design"]
 		XCTAssertTrue(revealSidebar(containing: folder))
@@ -688,13 +695,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLongPressFeedOffersRenameAndUnsubscribe() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let feed = app.staticTexts["Stratechery"]
 		XCTAssertTrue(revealSidebar(containing: feed))
@@ -710,7 +716,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(nameField.waitForExistence(timeout: 5))
 		XCTAssertEqual(nameField.value as? String, "Stratechery")
 		app.buttons["Cancel"].tap()
-		XCTAssertFalse(app.navigationBars["Rename Feed"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.navigationBars["Rename Feed"].waitForNonExistence(timeout: 5))
 
 		XCTAssertTrue(feed.waitForExistence(timeout: 5))
 		feed.press(forDuration: 1.2)
@@ -723,14 +729,13 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(confirm.waitForExistence(timeout: 5))
 		confirm.tap()
 
-		XCTAssertFalse(app.staticTexts["Stratechery"].waitForExistence(timeout: 2))
+		XCTAssertTrue(app.staticTexts["Stratechery"].waitForNonExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["For You"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["Design"].waitForExistence(timeout: 5))
 		attachScreenshot(named: "feed-sidebar-actions")
 	}
 
 	func testAccessibilityTextKeepsCoreReadingActionsReachable() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-article",
@@ -738,7 +743,7 @@ final class PigeonReaderUITests: XCTestCase {
 			"-UIPreferredContentSizeCategoryName",
 			"UICTContentSizeCategoryAccessibilityXL",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		XCTAssertFalse(app.buttons["Find in Article"].exists)
@@ -757,21 +762,15 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "accessibility-large-text-reader")
 	}
 
-	func testFeedRowLeadingSwipeKeepsReadAction() throws {
-		try launchFeedList()
-
-		let article = app.staticTexts["Designing calmer tools for people who read every day"]
-		XCTAssertTrue(article.waitForExistence(timeout: 10))
-		article.swipeRight()
-
-		XCTAssertTrue(app.buttons["Mark Read"].waitForExistence(timeout: 5))
-	}
-
 	func testManualReadOffersUndoAndRestoresTheStory() throws {
 		try launchFeedList()
 		let title = "Designing calmer tools for people who read every day"
+		XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 10))
+		// The leading swipe keeps the read action.
 		app.staticTexts[title].swipeRight()
-		app.buttons["Mark Read"].tap()
+		let markRead = app.buttons["Mark Read"]
+		XCTAssertTrue(markRead.waitForExistence(timeout: 5))
+		markRead.tap()
 		let undo = app.buttons["reader-undo-action"]
 		XCTAssertTrue(undo.waitForExistence(timeout: 5))
 		XCTAssertTrue(app.staticTexts["Marked read"].exists)
@@ -781,6 +780,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReaderStarCanBeUndoneWithoutLeavingTheStory() throws {
+		launchShowingArticle()
 		app.buttons["article-reader-more"].tap()
 		let unstar = app.buttons["Unstar"]
 		XCTAssertTrue(unstar.waitForExistence(timeout: 5))
@@ -827,13 +827,13 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	private func launchPagingFixture() {
-		app.terminate()
 		app.launchArguments = ["-reader-sample-data", "-reader-paging-fixture", "-reader-reset-reader-state"]
-		app.launch()
+		app.launchWithoutAnimations()
 		XCTAssertTrue(app.staticTexts["Paging story 1"].waitForExistence(timeout: 10))
 	}
 
 	func testArticleReaderKeepsActionsOnTheBottomBar() throws {
+		launchShowingArticle()
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		XCTAssertTrue(app.descendants(matching: .any)["article-reader-controls"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Share"].exists)
@@ -844,24 +844,17 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "article-bottom-controls")
 	}
 
-	func testFeedRowTrailingSwipeOffersSaveAndStarActions() throws {
-		try launchFeedList()
-
-		let article = app.staticTexts["Designing calmer tools for people who read every day"]
-		XCTAssertTrue(article.waitForExistence(timeout: 10))
-		article.swipeLeft()
-
-		XCTAssertTrue(app.buttons["Save to Reader"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Unstar"].exists)
-	}
-
 	func testFeedRowSaveErrorIsVisible() throws {
 		try launchFeedList()
 
 		let article = app.staticTexts["Designing calmer tools for people who read every day"]
 		XCTAssertTrue(article.waitForExistence(timeout: 10))
+		// The trailing swipe offers both save and star actions.
 		article.swipeLeft()
-		app.buttons["Save to Reader"].tap()
+		let save = app.buttons["Save to Reader"]
+		XCTAssertTrue(save.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Unstar"].exists)
+		save.tap()
 
 		XCTAssertTrue(app.staticTexts["Add a Readwise access token in Settings before saving links."].waitForExistence(timeout: 5))
 	}
@@ -964,9 +957,8 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testInlineSuccessfulSaveDoesNotInterruptReading() throws {
-		app.terminate()
 		app.launchArguments += ["-reader-save-success"]
-		app.launch()
+		app.launchWithoutAnimations()
 		try tapNormalLink()
 		app.buttons["Share to Reader"].tap()
 
@@ -976,6 +968,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReadingControlsSheetReturnsToTheOpenArticle() throws {
+		launchShowingArticle()
 		app.buttons["reader-reading-controls"].tap()
 		XCTAssertTrue(app.navigationBars["Reading controls"].waitForExistence(timeout: 5))
 		app.buttons["Increase text size"].tap()
@@ -988,6 +981,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReaderMoreMenuProvidesAnAlternativeToThePullGesture() throws {
+		launchShowingArticle()
 		app.buttons["article-reader-more"].tap()
 		app.buttons["Next story"].tap()
 		let reader = app.scrollViews["article-reader-scroll-view"]
@@ -995,12 +989,11 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testSearchSurvivesOpeningAnArticleOnCompact() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		let forYou = app.staticTexts["For You"]
 		if forYou.waitForExistence(timeout: 3) {
@@ -1031,6 +1024,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testBackFromOpenedArticleReturnsToTheFeed() throws {
+		launchShowingArticle()
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 15))
 		let back = app.descendants(matching: .any)["article-back-to-feed"]
 		XCTAssertTrue(back.waitForExistence(timeout: 5))
@@ -1042,6 +1036,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLeadingEdgeSwipeFromOpenedArticleReturnsToTheFeed() throws {
+		launchShowingArticle()
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
 		XCTAssertTrue(app.descendants(matching: .any)["article-back-to-feed"].waitForExistence(timeout: 5))
@@ -1059,6 +1054,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testReaderBoundarySwipeMovesWithinDisplayedCollection() throws {
+		launchShowingArticle()
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
 		// On iPad, the article list remains visible beside the reader. Scope the
@@ -1095,6 +1091,7 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testArticleBackSwipeReturnsToFeedView() throws {
+		launchShowingArticle()
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
 
@@ -1110,12 +1107,11 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testLongArticleMarksReadOnlyAfterScrollingWithAfterSixtyPercentSetting() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data", "-reader-show-article",
 			"-reader-reset-reader-state", "-reader-mark-read-on-scroll",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 		let reader = app.scrollViews["article-reader-scroll-view"]
 		XCTAssertTrue(reader.waitForExistence(timeout: 5))
 		XCTAssertTrue(reader.staticTexts["The quiet craft of a good reading surface"].waitForExistence(timeout: 10))
@@ -1129,14 +1125,13 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	func testShortArticleMarksReadAfterBodyLayoutWithAfterSixtyPercentSetting() throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-short-article",
 			"-reader-reset-reader-state",
 			"-reader-mark-read-on-scroll",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 
 		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 15))
 		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
@@ -1161,14 +1156,13 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	private func launchFeedList(additionalArguments: [String] = []) throws {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
 		app.launchArguments += additionalArguments
-		app.launch()
+		app.launchWithoutAnimations()
 
 		if app.navigationBars["For You"].exists == false {
 			let forYou = app.buttons["reader-sidebar-item-forYou"]
@@ -1180,13 +1174,12 @@ final class PigeonReaderUITests: XCTestCase {
 	}
 
 	private func openSettings() {
-		app.terminate()
 		app.launchArguments = [
 			"-reader-sample-data",
 			"-reader-show-sidebar",
 			"-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 		let settings = app.descendants(matching: .any)["Settings"]
 		XCTAssertTrue(revealSidebar(containing: settings))
 		settings.tap()
@@ -1432,7 +1425,7 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 			"-reader-real-startup", "-reader-real-startup-cached-selected-list",
 			"-reader-delay-initial-snapshot", "-reader-reset-reader-state",
 		]
-		app.launch()
+		app.launchWithoutAnimations()
 		attachScreenshot(named: "cached-startup-saved-home")
 
 		let loading = app.descendants(matching: .any)["library-startup-loading"].firstMatch
@@ -1490,7 +1483,7 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 			arguments.append(extraArgument)
 		}
 		app.launchArguments = arguments
-		app.launch()
+		app.launchWithoutAnimations()
 	}
 
 	private func attachScreenshot(named name: String) {
@@ -1513,7 +1506,7 @@ final class PigeonDeepLinkUITests: XCTestCase {
 		}
 		app = XCUIApplication()
 		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state"]
-		app.launch()
+		app.launchWithoutAnimations()
 		XCTAssertTrue(app.buttons["reader-sidebar-item-forYou"].waitForExistence(timeout: 15))
 	}
 

@@ -230,6 +230,11 @@ final class ReaderAppModel {
 	private var selectedArticleIDs: [String: String] = [:]
 	private var detachedSelectedArticle: Recommendation?
 	private var detachedSelectedArticleOrdering: [Recommendation] = []
+	/// Rows that left the open list's read filter after being displayed. They stay
+	/// in place until a deliberate re-filter (see `resetKeptArticles`).
+	private var keptArticles = ReaderKeptArticles()
+	private var keptSearchArticles = ReaderKeptArticles()
+	private var inactiveSince: Date?
 	private var loadingCollections: Set<String> = []
 	private var activeLoadIDs: [String: UUID] = [:]
 	private var streamContinuations: [String: String] = [:]
@@ -302,7 +307,11 @@ final class ReaderAppModel {
 	private(set) var articleListMutationRevision: UInt64 = 0
 	private(set) var articleListMutationArticleID: String?
 	var displayedSearchResults: [Recommendation] {
-		articleFilter.filtering(searchResults)
+		let filter = articleFilter
+		guard keptSearchArticles.applies(to: selectedNavigationID, filter: filter) else {
+			return filter.filtering(searchResults)
+		}
+		return searchResults.filter { filter.includes($0) || keptSearchArticles.contains($0) }
 	}
 	var isSearchFilterEmpty: Bool {
 		articleFilter != .all
@@ -323,6 +332,9 @@ final class ReaderAppModel {
 	private var lastOfflinePreparationFailureAt: Date?
 	private var lastOfflinePreparationFailureAccountID: String?
 	private static let lifecycleRetryInterval: TimeInterval = 60
+	/// Coming back after this long is a fresh session: stories kept in place
+	/// after being read leave the list.
+	static let keptArticlesForegroundResetInterval: TimeInterval = 15 * 60
 	private let sceneBackgroundTasks: any SceneBackgroundTaskRunning
 	private var sceneBackgroundFlushTask: Task<Void, Never>?
 	private var sceneBackgroundTaskID: SceneBackgroundTaskID?
@@ -799,6 +811,7 @@ final class ReaderAppModel {
 			articleFilters.removeAll()
 			selectedArticleIDs = [:]
 			clearDetachedSelectedArticle()
+			resetKeptArticles(handingOffOpenStory: false)
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 			subscriptions = []
@@ -1228,16 +1241,23 @@ final class ReaderAppModel {
 	/// Scene-phase callbacks must return immediately. Heavy refresh, snapshot
 	/// building, and persistence run on unstructured tasks so a background
 	/// scene-update cannot stall on the main actor.
-	func handleScenePhase(_ phase: ScenePhase) {
+	func handleScenePhase(_ phase: ScenePhase, now: Date = .now) {
 		switch SceneLifecyclePolicy.action(for: phase) {
 		case .becomeActive:
+			if let inactiveSince,
+				now.timeIntervalSince(inactiveSince) >= Self.keptArticlesForegroundResetInterval {
+				resetKeptArticles()
+			}
+			inactiveSince = nil
 			setApplicationActive(true)
 			consumePendingFeedRequest()
 			let appearanceTask = Task { await self.handleForegroundAppearance() }
 			foregroundAppearanceTask = appearanceTask
 		case .resignActive:
+			inactiveSince = inactiveSince ?? now
 			setApplicationActive(false)
 		case .flushInBackground:
+			inactiveSince = inactiveSince ?? now
 			setApplicationActive(false)
 			startSceneBackgroundFlush()
 		}
@@ -2313,6 +2333,7 @@ final class ReaderAppModel {
 			invalidateSpeculativeFeedWork()
 			automaticDisplaySuppressionCollectionID = nil
 			clearDetachedSelectedArticle()
+			resetKeptArticles(handingOffOpenStory: false)
 			temporarilyUnavailableSelectedCollection = nil
 			errorMessage = nil
 		}
@@ -2468,7 +2489,14 @@ final class ReaderAppModel {
 		isInitialLibraryLoading = false
 	}
 
+	/// A user refresh (pull-to-refresh or the Refresh command) is a deliberate
+	/// re-filter of the open list, so stories kept after being read leave it.
 	func refresh(collection: ReaderNavigationItem) async {
+		defer { resetKeptArticles(for: collection.id) }
+		await refreshCollection(collection)
+	}
+
+	private func refreshCollection(_ collection: ReaderNavigationItem) async {
 		guard let context = accountContext(), Task.isCancelled == false else { return }
 		if selectedNavigationID == collection.id {
 			errorMessage = nil
@@ -2545,7 +2573,7 @@ final class ReaderAppModel {
 			cachedCollectionHasMissingBodies(collection.id) == false {
 			// Re-entering a prepared feed needs an authoritative membership check,
 			// but a complete cached page does not need its bodies downloaded again.
-			await refresh(collection: collection)
+			await refreshCollection(collection)
 		} else {
 			await load(collection: collection, now: now)
 		}
@@ -3508,6 +3536,8 @@ final class ReaderAppModel {
 		guard await hydrateCachedCollections(removedFeedIDs.union(affectedFolderIDs)) else { return nil }
 		let wasSelectedFeed = removedFeedIDs.contains(selectedNavigationID)
 		subscriptions.removeAll { $0.id == subscription.id }
+		keptArticles.removeAll { articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) }
+		keptSearchArticles.removeAll { articleBelongsToFeed($0, streamID: subscription.id, feedKey: subscription.feedKey) }
 		var changedCollectionIDs = Set(removedFeedIDs)
 		for folderID in affectedFolderIDs {
 			guard let cachedArticles = articleCache[folderID] else { continue }
@@ -3747,6 +3777,7 @@ final class ReaderAppModel {
 			return
 		}
 		articleStateGeneration = UUID()
+		resetKeptArticles(for: collectionID)
 		sortOrders[collectionID] = newSortOrder
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(
@@ -3780,6 +3811,8 @@ final class ReaderAppModel {
 		articleStateGeneration = UUID()
 		let incomingArticles = applyPendingArticleStates(newArticles)
 		let canonicalized = canonicalizedArticles(incomingArticles, for: collectionID)
+		keptArticles.update(from: canonicalized)
+		keptSearchArticles.update(from: canonicalized)
 		if ReaderSection(rawValue: collectionID) == .forYou {
 			canonicalArticleOrder[collectionID] = canonicalized.map(ReaderArticleIdentity.key(for:))
 		}
@@ -4014,6 +4047,7 @@ final class ReaderAppModel {
 		guard articleFilter(for: collectionID) != filter else {
 			return
 		}
+		resetKeptArticles(for: collectionID)
 		articleFilters[key] = filter
 		articleFilterStore.setFilter(filter, for: collectionID, session: session)
 		reconcileSelection(for: collectionID)
@@ -4026,7 +4060,78 @@ final class ReaderAppModel {
 	}
 
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
-		articleFilter(for: collectionID).filtering(allArticles(for: collectionID))
+		let filter = articleFilter(for: collectionID)
+		guard keptArticles.applies(to: collectionID, filter: filter) else {
+			return filter.filtering(allArticles(for: collectionID))
+		}
+		guard collectionID == ReaderSection.today.rawValue else {
+			return keptArticles.displayed(allArticles(for: collectionID), filter: filter, order: sortOrder(for: collectionID))
+		}
+		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
+		return keptArticles.displayed(
+			allArticles(for: collectionID),
+			filter: filter,
+			order: sortOrder(for: collectionID),
+			isEligible: { bounds.contains($0.receivedAt) },
+		)
+	}
+
+	/// Whether `article` is shown only because it was kept after leaving the
+	/// open list's filter. Such rows must not be written back into the cache.
+	func isKeptAfterLeavingFilter(_ article: Recommendation) -> Bool {
+		keptArticles.contains(article)
+	}
+
+	/// Records a story whose read state is about to flip so it would leave the
+	/// open list (the Unread filter or section, or the Read filter). It stays in
+	/// place, with read styling, until the list is deliberately re-filtered.
+	private func keepArticleLeavingDisplayedList(_ article: Recommendation, read: Bool) {
+		let collectionID = selectedNavigationID
+		let filter = articleFilter(for: collectionID)
+		let leavesUnreadSection = read && collectionID == ReaderSection.unread.rawValue
+		let leavesFilter = (filter == .unread && read) || (filter == .read && read == false)
+		guard leavesUnreadSection || leavesFilter else { return }
+		var kept = article
+		kept.isRead = read
+		if activeSearchScope != nil,
+			let position = displayedSearchResults.firstIndex(where: { articlesMatch($0, article) }) {
+			keptSearchArticles.keep(kept, in: collectionID, filter: filter, at: position)
+		}
+		if let position = displayedArticles(for: collectionID).firstIndex(where: { articlesMatch($0, article) }) {
+			keptArticles.keep(kept, in: collectionID, filter: filter, at: position)
+		}
+	}
+
+	/// Re-filters the open list: kept rows that no longer match the filter leave.
+	/// When the open story was one of them and no cache still holds it, the
+	/// reader keeps it as the detached selection with the list order it had.
+	private func resetKeptArticles(for collectionID: String? = nil, handingOffOpenStory: Bool = true) {
+		if collectionID == nil || keptArticles.collectionID == collectionID {
+			if handingOffOpenStory {
+				detachOpenKeptArticle()
+			}
+			keptArticles.reset()
+		}
+		if collectionID == nil || keptSearchArticles.collectionID == collectionID {
+			keptSearchArticles.reset()
+		}
+	}
+
+	private func detachOpenKeptArticle() {
+		let listID = selectedNavigationID
+		guard keptArticles.applies(to: listID, filter: articleFilter(for: listID)),
+			let selectedArticleID,
+			let kept = keptArticles.article(withID: selectedArticleID),
+			articleCache[listID]?.contains(where: { articlesMatch($0, kept) }) != true else {
+			return
+		}
+		detachedSelectedArticleOrdering = displayedArticles(for: listID)
+		detachedSelectedArticle = kept
+	}
+
+	private func updateKeptArticles(matching article: Recommendation, _ change: (inout Recommendation) -> Void) {
+		keptArticles.update(article, change)
+		keptSearchArticles.update(article, change)
 	}
 
 	private func allArticles(for collectionID: String) -> [Recommendation] {
@@ -4051,6 +4156,15 @@ final class ReaderAppModel {
 			clearDetachedSelectedArticle()
 			selectedArticleID = cached.id
 			selectedArticleIDs[collectionID] = cached.id
+			return
+		}
+
+		if selectedNavigationID == collectionID,
+			keptArticles.applies(to: collectionID, filter: articleFilter(for: collectionID)),
+			let kept = keptArticles.article(withID: rememberedID) {
+			clearDetachedSelectedArticle()
+			selectedArticleID = kept.id
+			selectedArticleIDs[collectionID] = kept.id
 			return
 		}
 
@@ -4332,6 +4446,7 @@ final class ReaderAppModel {
 		}
 
 		let searchID = UUID()
+		keptSearchArticles.reset()
 		activeSearchID = searchID
 		activeSearchScope = scope
 		activeSearchCollectionID = collection.id
@@ -4371,6 +4486,7 @@ final class ReaderAppModel {
 
 	func clearArticleSearch() {
 		let hadActiveSearch = activeSearchID != nil
+		keptSearchArticles.reset()
 		activeSearchID = nil
 		activeSearchScope = nil
 		activeSearchCollectionID = nil
@@ -4386,7 +4502,12 @@ final class ReaderAppModel {
 			return isOffline ? "Cached · not yet updated" : "Not yet updated"
 		}
 		let age = freshness.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .wide))
-		let source = freshness.isCached || isOffline ? "Cached" : "Live"
+		guard freshness.isCached || isOffline else { return "Live · updated \(age)" }
+		// Cached rows after a failed sync are not just old: say so, or a broken
+		// sync reads like a quiet feed.
+		let source = offlineLibraryStatus == .syncFailed || offlineLibraryStatus == .needsRepair
+			? "Sync failed"
+			: "Cached"
 		return "\(source) · updated \(age)"
 	}
 
@@ -5324,6 +5445,9 @@ final class ReaderAppModel {
 		let previousItems = articleCache[forYouID] ?? []
 		let removedArticle = previousItems.contains(where: { articlesMatch($0, article) })
 		articleCache[forYouID]?.removeAll(where: { articlesMatch($0, article) })
+		if keptArticles.collectionID == forYouID {
+			keptArticles.remove(article)
+		}
 		if removedArticle {
 			let remainingUnread = articleCache[forYouID]?.count(where: { $0.isRead == false }) ?? 0
 			updateNavigationCount(for: forYouID, to: remainingUnread)
@@ -5409,7 +5533,8 @@ final class ReaderAppModel {
 			&& cursor != nil
 			&& offlineCacheIntegrity.usesWarmIncrementalPath
 			&& hasLoadedNavigation
-		var requestLimit = fullRebuild ? 50 : 200
+		let preferredLimit = fullRebuild ? 50 : 200
+		var requestLimit = preferredLimit
 		var seenCursors = Set<String>()
 		var receivedChanges = false
 		var receivedChangesList: [IncrementalSyncChange] = []
@@ -5425,7 +5550,9 @@ final class ReaderAppModel {
 				initialLimit: requestLimit,
 			)
 			let page = response.page
-			requestLimit = response.limit
+			// A smaller page only gets past the heavy stretch that failed. Grow back
+			// gradually so the rest of the sync does not crawl at the reduced size.
+			requestLimit = min(response.limit * 2, preferredLimit)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
@@ -6113,6 +6240,7 @@ final class ReaderAppModel {
 		canonicalArticleOrder = [:]
 		articleFilters.removeAll()
 		selectedArticleIDs = [:]
+		resetKeptArticles(handingOffOpenStory: false)
 		resetStreamPagination()
 		resolvedPaginationCollections.removeAll()
 		restoredReaderModes = [:]
@@ -6211,6 +6339,9 @@ final class ReaderAppModel {
 			resetStreamPagination(for: todayID)
 		}
 		streamDayBounds[todayID] = bounds
+		if keptArticles.collectionID == todayID {
+			keptArticles.removeAll { bounds.contains($0.receivedAt) == false }
+		}
 		if droppedStale, let kept {
 			setArticles(kept, for: todayID, preserveOpenSelection: false)
 			updateNavigationCount(
@@ -7629,6 +7760,8 @@ final class ReaderAppModel {
 		undoTitle: String,
 	) async {
 		guard targets.isEmpty == false else { return }
+		// A bulk mark-read clears the list as before, kept rows included.
+		resetKeptArticles()
 		bulkReadUndo = BulkReadUndo(articles: targets, title: undoTitle, collectionID: collection.id)
 		bulkReadUndoTitle = undoTitle
 		await updateReadStateForArticles(targets, read: true, scope: scope)
@@ -7681,6 +7814,11 @@ final class ReaderAppModel {
 			searchResults = updatedSearchResults
 		}
 
+		if keptArticles.isEmpty == false || keptSearchArticles.isEmpty == false {
+			for target in targets {
+				updateKeptArticles(matching: target) { $0.isRead = read }
+			}
+		}
 		if read == false {
 			restoreUnreadMembership(for: targets, cachedLookups: cachedLookups)
 		}
@@ -7808,8 +7946,12 @@ final class ReaderAppModel {
 		guard await enqueueOfflineMutation(mutation) else { return }
 		rememberPendingArticleStates(mutation)
 
+		if field == .read {
+			keepArticleLeavingDisplayedList(current, read: value)
+		}
 		var changedCollections = Set<String>()
 		withAnimation(animation) {
+			updateKeptArticles(matching: current) { $0[keyPath: keyPath] = value }
 			for collectionID in articleCache.keys {
 				guard let index = articleCache[collectionID]?.firstIndex(where: { articlesMatch($0, current) }) else { continue }
 				articleCache[collectionID]?[index][keyPath: keyPath] = value
@@ -7878,6 +8020,9 @@ final class ReaderAppModel {
 				|| starredArticles.contains(where: { $0.id == remembered && articlesMatch($0, article) })
 		} ?? false
 		articleCache[starredID] = starredArticles.filter { articlesMatch($0, article) == false }
+		if keptArticles.collectionID == starredID {
+			keptArticles.remove(article)
+		}
 		if removedWasSelected {
 			selectedArticleIDs[starredID] = nil
 			if selectedNavigationID == starredID {
@@ -7946,9 +8091,11 @@ final class ReaderAppModel {
 						($0.id == remembered || $0.readerId == remembered) && articlesMatch($0, article)
 					}
 			} ?? false
+			let isKeptInList = keptArticles.collectionID == unreadID && keptArticles.contains(article)
 			let keepsOpenSelection = removedWasSelected
 				&& selectedNavigationID == unreadID
 				&& preferredCompactColumn == .detail
+				&& isKeptInList == false
 			if keepsOpenSelection {
 				var detached = unreadArticles.first(where: { articlesMatch($0, article) }) ?? article
 				detached.isRead = true
@@ -7958,7 +8105,7 @@ final class ReaderAppModel {
 				selectedArticleIDs[unreadID] = detached.id
 			}
 			articleCache[unreadID] = unreadArticles.filter { articlesMatch($0, article) == false }
-			if removedWasSelected && keepsOpenSelection == false {
+			if removedWasSelected && keepsOpenSelection == false && isKeptInList == false {
 				selectedArticleIDs[unreadID] = nil
 			}
 			return

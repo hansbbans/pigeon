@@ -197,3 +197,16 @@ Merged to `main` in PR #137 (`b46ae87`) on 2026-10-25. Not yet on TestFlight.
   - Simulator screenshots checked in light, dark, XXXL and AX5 text sizes. The AX5 dateline wrapping was fixed.
 - Not verified: real account feeds, Today, an empty feed, search on Front Page, rapid repeated layout flips, iPad (where Front Page is intentionally off).
 - Follow-up in the same PR: the bulk read/undo timing test flaked because undo took ~1.9s against a 2s budget. Pending-status overlay matching now uses a direct alias lookup, and `ReaderArticleIdentity.matches` compares ids without building Sets. Undo now takes ~1.3s and bulk read ~0.89s. The remaining cost is about 1,800 per-article SQLite upserts in `persistCollections`.
+
+# Keep read stories in Unread lists (2026-11-02)
+
+Branch `claude/sticky-read`, worktree `~/code/pigeon-sticky-read`. Opening a story in an Unread-filtered list made its row vanish at once.
+
+- [x] Research other readers (NetNewsWire, Unread, NewsBlur, FreshRSS, Miniflux, Gmail): snapshot list re-filtered on deliberate events is the common fix.
+- [x] iOS: `ReaderKeptArticles` keeps rows that left the read filter; reset on collection switch, filter/sort change, pull-to-refresh, bulk mark read, account change, 15 min away.
+- [x] Web: `keptItemIds` for the active view's query; same reset events (view switch, query change, refresh button, bulk mark).
+- [x] Tests first on both clients; `npm run check` green, `PigeonReaderTests` 833/833.
+
+## Review
+- Unstarring in Starred still removes the row immediately (out of scope).
+- Not exercised on a device yet; unit tests only.

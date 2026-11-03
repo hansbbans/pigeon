@@ -1049,7 +1049,9 @@ struct ReaderAppModelTests {
 
 		await model.recordExplicitOpen(for: first)
 
-		#expect(model.articles(for: collection).map(\.id) == [middle.id, last.id])
+		// The read story stays in place until the list is deliberately re-filtered.
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
+		#expect(model.articles(for: collection).first?.isRead == true)
 		#expect(model.selectedArticleID == first.id)
 		#expect(model.canNavigateArticle(.next))
 		#expect(model.navigateArticle(.next)?.id == middle.id)
@@ -1057,11 +1059,15 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: true)
 
-		#expect(model.articles(for: collection).map(\.id) == [last.id])
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
 		#expect(model.navigateArticle(.next)?.id == last.id)
 		#expect(model.navigateArticle(.next) == nil)
 		#expect(model.selectedArticleID == last.id)
-		#expect(model.navigateArticle(.previous) == nil)
+		#expect(model.navigateArticle(.previous)?.id == middle.id)
+
+		model.setArticleFilter(.all, for: collection)
+		model.setArticleFilter(.unread, for: collection)
+		#expect(model.articles(for: collection).map(\.id) == [last.id])
 	}
 
 	@Test func articleShortcutsSkipAStoryHiddenByTheReadFilter() async throws {
@@ -1081,8 +1087,16 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: false)
 
-		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
+		// The story marked unread stays in place until the list is re-filtered.
+		#expect(model.articles(for: collection).map(\.id) == [first.id, middle.id, last.id])
 		#expect(model.navigateArticle(.next)?.id == last.id)
+		#expect(model.navigateArticle(.previous)?.id == middle.id)
+
+		model.setArticleFilter(.all, for: collection)
+		model.setArticleFilter(.read, for: collection)
+		model.select(article: last)
+
+		#expect(model.articles(for: collection).map(\.id) == [first.id, last.id])
 		#expect(model.navigateArticle(.previous)?.id == first.id)
 	}
 
@@ -1218,7 +1232,9 @@ struct ReaderAppModelTests {
 
 		await model.setRead(middle, read: true)
 
-		#expect(model.displayedSearchResults.map(\.id) == [previous.id, next.id])
+		// The read result stays in place until the search changes.
+		#expect(model.displayedSearchResults.map(\.id) == [previous.id, middle.id, next.id])
+		#expect(model.displayedSearchResults[1].isRead)
 		#expect(model.navigateArticle(.previous, from: middle)?.id == previous.id)
 		#expect(model.navigateArticle(.next, from: middle)?.id == next.id)
 	}
@@ -4315,6 +4331,46 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test func syncLimitGrowsBackAfterATransientFailure() async throws {
+		// One heavy page used to shrink every later request for the rest of the
+		// sync: a 75,000-change rebuild crawled three changes at a time.
+		let cpuLimit = Data(#"{"error_code":1102,"error_name":"worker_exceeded_resources"}"#.utf8)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [
+				.init(data: cpuLimit, statusCode: 503),
+				.init(data: cpuLimit, statusCode: 503),
+				.init(data: continuingSyncPage(cursor: "page-2"), statusCode: 200),
+				.init(data: continuingSyncPage(cursor: "page-3"), statusCode: 200),
+				.init(data: continuingSyncPage(cursor: "page-4"), statusCode: 200),
+				.init(data: emptySyncPage(cursor: "page-5"), statusCode: 200),
+			],
+		)
+		let model = try await makeWarmPreparationModel(httpClient: client)
+
+		await model.prepareOfflineLibrary()
+
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == ["warm-cursor", "warm-cursor", "warm-cursor", "page-2", "page-3", "page-4"])
+		#expect(syncRequests.map { $0.query["limit"] } == ["200", "100", "50", "100", "200", "200"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
+	@Test func collectionStatusSaysSyncFailedInsteadOfCachedAfterAFailedSync() async throws {
+		// A failed sync left an iPad showing "Cached · updated 3 months ago" for
+		// months, which read like an old article rather than a broken sync.
+		let starred = ReaderNavigationItem.smart(.starred)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: Data(#"{"error":"boom"}"#.utf8), statusCode: 500)],
+		)
+		let model = try await makeWarmPreparationModel(httpClient: client, alsoCached: [starred])
+
+		await model.prepareOfflineLibrary()
+
+		#expect(model.offlineLibraryStatus == .syncFailed)
+		#expect(model.collectionStatusText(for: starred).hasPrefix("Sync failed · updated"))
+		#expect(model.offlineStorageStats.lastError?.isEmpty == false)
+	}
+
 	@Test func completeCacheWithoutAuthoritativeNavigationIsNotShownAsUpToDate() async throws {
 		let session = try makeSession(token: "unverified-navigation-token")
 		let store = OfflineLibraryStore.inMemory()
@@ -5952,7 +6008,8 @@ struct ReaderAppModelTests {
 
 		let readMutation = Task { await model.setRead(article, read: true) }
 		let readRequest = await controlled.nextRequest()
-		#expect(model.articles(for: collection).isEmpty)
+		#expect(model.articles(for: collection).map(\.id) == [article.id])
+		#expect(model.articles(for: collection).first?.isRead == true)
 		#expect(model.selectedArticleID == article.id)
 		#expect(model.selectedArticle?.isRead == true)
 		#expect(model.allArticles(for: collection).first?.isRead == true)
@@ -10052,7 +10109,10 @@ struct ReaderAppModelTests {
 		return (session, store, subscription, folder, cachedArticle)
 	}
 
-	private func makeWarmPreparationModel(httpClient: any HTTPClient) async throws -> ReaderAppModel {
+	private func makeWarmPreparationModel(
+		httpClient: any HTTPClient,
+		alsoCached otherCollections: [ReaderNavigationItem] = [],
+	) async throws -> ReaderAppModel {
 		let session = try makeSession(token: "warm-preparation-token")
 		let store = OfflineLibraryStore.inMemory()
 		let collection = ReaderNavigationItem.smart(.forYou, unreadCount: 1)
@@ -10074,6 +10134,13 @@ struct ReaderAppModelTests {
 			collectionID: collection.id,
 			accountID: session.storageIdentity,
 		)
+		for other in otherCollections {
+			try await store.saveArticles(
+				[makeArticle(id: "cached-\(other.id)")],
+				collectionID: other.id,
+				accountID: session.storageIdentity,
+			)
+		}
 		try await store.saveRestoration(
 			ReaderRestorationState(
 				selectedNavigationID: collection.id,
@@ -10321,7 +10388,8 @@ struct ReaderAppModelTests {
 
 		await model.setRead(article, read: true, offersUndo: true)
 		let undo = try #require(model.articleUndo)
-		#expect(model.articles.isEmpty)
+		#expect(model.articles.map(\.id) == [article.id])
+		#expect(model.articles.first?.isRead == true)
 		#expect(undo.message == "Marked read")
 		await model.undoArticleAction(id: undo.id)
 
@@ -10754,6 +10822,10 @@ struct ReaderAppModelTests {
 			"{\"mutationId\":\"\(mutation.id)\",\"status\":\"applied\",\"appliedAt\":\"2026-09-06T12:00:00Z\",\"error\":null}"
 		}.joined(separator: ",")
 		return Data("{\"results\":[\(results)]}".utf8)
+	}
+
+	private func continuingSyncPage(cursor: String) -> Data {
+		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":true,\"changes\":[]}".utf8)
 	}
 
 	private func emptySyncPage(cursor: String) -> Data {
