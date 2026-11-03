@@ -142,6 +142,8 @@ final class ReaderAppModel {
 	}
 
 	var session: PigeonSession?
+	/// Account-scoped article IDs whose reader-mode word count was reported this launch.
+	private var reportedWordCountIDs: Set<String> = []
 	var serverURLText = ""
 	var password = ""
 	private(set) var selectedNavigationID = ReaderSection.forYou.rawValue
@@ -2249,6 +2251,7 @@ final class ReaderAppModel {
 				try Task.checkCancellation()
 				guard generation == libraryGeneration, accountID == session?.storageIdentity else { throw CancellationError() }
 				readerPreparation.cacheReaderDocument(document, for: article)
+				reportExtractedWordCount(document.wordCount, for: article)
 				return document
 			} catch is CancellationError {
 				throw CancellationError()
@@ -2279,6 +2282,44 @@ final class ReaderAppModel {
 		}
 
 		throw primaryError ?? ReaderViewError.extractionFailed
+	}
+
+	/// Snippet-only feeds give a short body; tell the server the real length of
+	/// the original page once per article, so every client labels it correctly.
+	/// Only extractions of the original page count: the feed-body fallback
+	/// would just measure the snippet again.
+	///
+	/// The report is a best-effort hint, so it is sent on its own and never
+	/// joins the durable mutation queue: a Worker that predates
+	/// `set_word_count` rejects it, and that must not hold up read/star sync.
+	private func reportExtractedWordCount(_ extracted: Int?, for article: Recommendation) {
+		guard let apiClient, let session else { return }
+		let reportKey = "\(session.storageIdentity)|\(ReaderArticleIdentity.normalized(article.readerId))"
+		guard reportedWordCountIDs.contains(reportKey) == false,
+			ReadingLength.shouldReport(
+				stored: ReadingLength.knownWordCount(for: article),
+				extracted: extracted,
+				mediaKind: article.length?.mediaKind,
+			),
+			let extracted else { return }
+		reportedWordCountIDs.insert(reportKey)
+		applyReportedWordCount(extracted, to: article)
+		let mutation = OfflineMutation(kind: .setWordCount, itemIds: [article.readerId], wordCount: extracted)
+		Task { _ = try? await apiClient.sendMutations([mutation]) }
+	}
+
+	/// Shows the reported length right away; the next sync brings the server's copy.
+	private func applyReportedWordCount(_ wordCount: Int, to article: Recommendation) {
+		for (collectionID, articles) in articleCache where articles.contains(where: { articlesMatch($0, article) }) {
+			articleCache[collectionID] = articles.map { cached in
+				guard articlesMatch(cached, article) else { return cached }
+				var updated = cached
+				var length = cached.length ?? ArticleLength(wordCount: nil, mediaKind: "text", durationSeconds: nil)
+				length?.wordCount = wordCount
+				updated.length = length
+				return updated
+			}
+		}
 	}
 
 	func select(section: ReaderSection) {
@@ -3921,6 +3962,8 @@ final class ReaderAppModel {
 			// instead of refetching the placeholder on every visit.
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 			isPaywalled: preserveBody || incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
+			// For You and other thin payloads omit length; keep what was known.
+			length: incoming.length ?? existing.length,
 		)
 	}
 
@@ -3951,6 +3994,7 @@ final class ReaderAppModel {
 			isBodyPruned: incoming.isBodyPruned,
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 			isPaywalled: incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
+			length: incoming.length ?? existing.length,
 		)
 	}
 
@@ -3977,6 +4021,7 @@ final class ReaderAppModel {
 			isBodyPruned: merged.isBodyPruned,
 			contentVersion: merged.contentVersion,
 			isPaywalled: merged.isPaywalled,
+			length: merged.length,
 		)
 	}
 

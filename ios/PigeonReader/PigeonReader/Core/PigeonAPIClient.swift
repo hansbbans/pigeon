@@ -632,6 +632,7 @@ struct PigeonAPIClient: Sendable {
 			isBodyPruned: item.isBodyPruned,
 			contentVersion: item.contentVersion,
 			isPaywalled: item.isPaywalled,
+			length: item.length,
 		)
 	}
 

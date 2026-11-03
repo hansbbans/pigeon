@@ -1039,6 +1039,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					confidence: article.confidence, sampleCount: article.sampleCount,
 					explanation: article.explanation, learningState: article.learningState,
 					isPaywalled: article.isPaywalled,
+					length: article.length,
 				)
 				try execute(
 					"UPDATE cached_articles SET payload = ?, body_pruned = 1 WHERE account_id = ? AND id = ?",
@@ -1313,6 +1314,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				learningState: existing?.article.learningState ?? "Synced article",
 				// The flag describes the body, so it follows whichever body is kept.
 				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
+				length: payload.length ?? existing?.article.length,
 				)),
 				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
 			)
@@ -1550,6 +1552,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
 			isPaywalled: article.isPaywalled,
+			length: article.length,
 		)
 	}
 
@@ -1856,6 +1859,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
 			isPaywalled: article.isPaywalled,
+			length: article.length,
 		)
 	}
 

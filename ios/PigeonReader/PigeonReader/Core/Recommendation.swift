@@ -23,6 +23,8 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	var contentVersion: String? = nil
 	/// True when the server saw only the publisher's paywalled teaser of this article.
 	var isPaywalled: Bool? = nil
+	/// Server reading-length metadata; nil for older servers and caches.
+	var length: ArticleLength? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -82,6 +84,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			isBodyPruned: isBodyPruned,
 			contentVersion: contentVersion,
 			isPaywalled: isPaywalled,
+			length: length,
 		)
 	}
 }

@@ -206,6 +206,10 @@ actor OfflineMutationReplayer {
 			guard let feedID = mutation.feedId, feedID.isEmpty == false, feedID.count <= 300 else {
 				return "The feed mutation is invalid."
 			}
+		case .setWordCount:
+			guard mutation.itemIds.count == 1, let wordCount = mutation.wordCount, (1...2_000_000).contains(wordCount) else {
+				return "The word-count report is invalid."
+			}
 		}
 		return nil
 	}

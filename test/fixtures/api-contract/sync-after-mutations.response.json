@@ -1,5 +1,5 @@
 {
-	"cursor": "v1:25",
+	"cursor": "v1:26",
 	"hasMore": false,
 	"changes": [
 		{
@@ -164,29 +164,6 @@
 			}
 		},
 		{
-			"sequence": 10,
-			"entityType": "article",
-			"entityId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
-			"operation": "upsert",
-			"changedAt": "2026-11-01T11:00:00.000Z",
-			"payload": {
-				"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
-				"readerId": "tag:google.com,2005:reader/item/0000000000000003",
-				"feedKey": "morning-brief",
-				"source": "Morning Brief",
-				"title": "Your Sunday brief",
-				"author": "Morning Brief",
-				"html": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>",
-				"text": null,
-				"originalURL": null,
-				"receivedAt": "2026-11-01T06:30:00.000Z",
-				"isRead": true,
-				"isStarred": false,
-				"isBodyPruned": false,
-				"isPaywalled": true
-			}
-		},
-		{
 			"sequence": 12,
 			"entityType": "article",
 			"entityId": "3e6fad85-8a4b-4cbf-ad84-4c5a6f7e8d94",
@@ -248,21 +225,6 @@
 			}
 		},
 		{
-			"sequence": 22,
-			"entityType": "status",
-			"entityId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
-			"operation": "upsert",
-			"changedAt": "2026-11-01T11:00:00.000Z",
-			"payload": {
-				"itemId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
-				"isRead": true,
-				"isStarred": false,
-				"updatedAt": "2026-11-01T12:00:00.000Z",
-				"version": 2,
-				"mutationId": "8f0e1b2c-0003-4a00-8000-000000000003"
-			}
-		},
-		{
 			"sequence": 23,
 			"entityType": "feed",
 			"entityId": "design-weekly",
@@ -317,6 +279,30 @@
 				"folders": [
 					"Blogs"
 				]
+			}
+		},
+		{
+			"sequence": 26,
+			"entityType": "article",
+			"entityId": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000003",
+				"feedKey": "morning-brief",
+				"source": "Morning Brief",
+				"title": "Your Sunday brief",
+				"author": "Morning Brief",
+				"html": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>",
+				"text": null,
+				"originalURL": null,
+				"receivedAt": "2026-11-01T06:30:00.000Z",
+				"isRead": true,
+				"isStarred": false,
+				"isBodyPruned": false,
+				"isPaywalled": true,
+				"wordCount": 2600
 			}
 		}
 	]

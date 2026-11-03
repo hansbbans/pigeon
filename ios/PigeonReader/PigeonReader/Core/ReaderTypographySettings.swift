@@ -102,6 +102,7 @@ final class ReaderTypographySettings {
 	private let densityKey = "pigeon.reader.timeline-density"
 	private let markReadBehaviorKey = "pigeon.reader.mark-read-behavior"
 	static let homeLayoutKey = "pigeon.reader.home-layout.v1"
+	static let showsReadingTimeKey = "pigeon.reader.shows-reading-time"
 	private var storedTextScale: Double
 	private var storedLineHeight: Double
 	private var storedHorizontalMargin: Double
@@ -111,6 +112,7 @@ final class ReaderTypographySettings {
 	private var storedDensity: ReaderTimelineDensity
 	private var storedMarkReadBehavior: ReaderMarkReadBehavior
 	private var storedHomeLayout: ReaderHomeLayout
+	private var storedShowsReadingTime: Bool
 
 	init(defaults: UserDefaults = .standard) {
 		self.defaults = defaults
@@ -135,6 +137,7 @@ final class ReaderTypographySettings {
 		storedDensity = defaults.string(forKey: densityKey).flatMap(ReaderTimelineDensity.init(rawValue:)) ?? .comfortable
 		storedMarkReadBehavior = defaults.string(forKey: markReadBehaviorKey).flatMap(ReaderMarkReadBehavior.init(rawValue:)) ?? .onOpen
 		storedHomeLayout = defaults.string(forKey: Self.homeLayoutKey).flatMap(ReaderHomeLayout.init(rawValue:)) ?? .classic
+		storedShowsReadingTime = defaults.object(forKey: Self.showsReadingTimeKey) as? Bool ?? true
 	}
 
 	var textScale: Double {
@@ -206,6 +209,15 @@ final class ReaderTypographySettings {
 		set {
 			storedHomeLayout = newValue
 			defaults.set(newValue.rawValue, forKey: Self.homeLayoutKey)
+		}
+	}
+
+	/// Shows "12 min read" / "1 hr 5 min video" on articles over 10 minutes.
+	var showsReadingTime: Bool {
+		get { storedShowsReadingTime }
+		set {
+			storedShowsReadingTime = newValue
+			defaults.set(newValue, forKey: Self.showsReadingTimeKey)
 		}
 	}
 
