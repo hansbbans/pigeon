@@ -2,6 +2,7 @@ import { requireApiAuth } from './api-auth';
 import { ensureDatabaseSchema } from './migrations';
 import type { Env } from './types';
 import { redactRefreshError } from './refresh-policy';
+import { apiTimestamp } from './timestamps';
 
 interface FeedCountsRow {
 	active_feed_count: number | null;
@@ -200,6 +201,19 @@ export async function handleStatusRequest(
 
 	const feedCounts = feedCountsResults[0];
 	const itemCounts = itemCountsResults[0];
+	// The app decodes these as ISO 8601 dates: unreadable optional times become
+	// null, and an activity entry without a readable attempt time is left out.
+	const feedHealthRows = feedHealth.map((feed) => ({
+		...feed,
+		last_attempt_at: apiTimestamp(feed.last_attempt_at),
+		last_success_at: apiTimestamp(feed.last_success_at),
+		next_fetch_at: apiTimestamp(feed.next_fetch_at),
+		retry_after_at: apiTimestamp(feed.retry_after_at),
+	}));
+	const activityRows = recentActivity.flatMap((activity) => {
+		const attemptedAt = apiTimestamp(activity.attempted_at);
+		return attemptedAt ? [{ ...activity, attempted_at: attemptedAt, retry_at: apiTimestamp(activity.retry_at) }] : [];
+	});
 
 	return Response.json({
 		configuredBaseUrl: env.BASE_URL,
@@ -215,19 +229,19 @@ export async function handleStatusRequest(
 				feedKey: feed.feed_key,
 				title: feed.title,
 				error: redactRefreshError(feed.fetch_error),
-				lastFetchedAt: feed.last_fetched_at,
+				lastFetchedAt: apiTimestamp(feed.last_fetched_at),
 			})),
 		},
 		items: {
 			totalCount: asCount(itemCounts?.total_item_count),
 			unreadCount: asCount(itemCounts?.unread_item_count),
 			starredCount: asCount(itemCounts?.starred_item_count),
-			newestAt: itemCounts?.newest_item_at ?? null,
-			newestEmailAt: newestEmailItem?.value ?? null,
-			newestRssAt: newestRssItem?.value ?? null,
+			newestAt: apiTimestamp(itemCounts?.newest_item_at),
+			newestEmailAt: apiTimestamp(newestEmailItem?.value),
+			newestRssAt: apiTimestamp(newestRssItem?.value),
 		},
 		rss: {
-			latestFetchAttemptAt: latestFetchAttempt?.value ?? null,
+			latestFetchAttemptAt: apiTimestamp(latestFetchAttempt?.value),
 		},
 		syncHealth: {
 			generatedAt: now,
@@ -235,7 +249,7 @@ export async function handleStatusRequest(
 			backedOffCount: asCount(syncHealthCountsResults[0]?.backed_off_count),
 			leasedCount: asCount(syncHealthCountsResults[0]?.leased_count),
 			healthyCount: asCount(syncHealthCountsResults[0]?.healthy_count),
-			feeds: feedHealth.map((feed) => ({
+			feeds: feedHealthRows.map((feed) => ({
 				feedKey: feed.feed_key,
 				title: feed.title,
 				host: redactedHost(feed.source_url),
@@ -251,7 +265,7 @@ export async function handleStatusRequest(
 				error: feed.fetch_error ? redactRefreshError(feed.fetch_error) : null,
 				canRetry: !feed.retry_after_at || feed.retry_after_at <= now,
 			})),
-			recentActivity: recentActivity.map((activity) => ({
+			recentActivity: activityRows.map((activity) => ({
 				feedKey: activity.feed_key,
 				title: activity.title,
 				attemptedAt: activity.attempted_at,
