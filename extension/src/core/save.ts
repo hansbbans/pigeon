@@ -4,6 +4,7 @@
  * even when extraction fails, so every path ends in a stored link or a queued one.
  */
 
+import { hasHostAccess, type HostAccessCheck } from './access';
 import { postSave, type Fetch, type RetryCause, type SaveResponseBody } from './api';
 import { isSaveableUrl } from './config';
 import { buildSaveAttempts, type PageExtraction, type SaveRequestBody } from './payload';
@@ -13,6 +14,12 @@ import { loadSettings, markNeedsSignIn, type KeyValueStore } from './session';
 export interface SaveDeps {
 	fetch: Fetch;
 	store: KeyValueStore;
+	/**
+	 * `permissions.contains` for the Pigeon origin. Asked only after a request
+	 * failed like a network error, to tell "no access" from "unreachable":
+	 * Safari may not report access granted in its own UI, so it never stops a request.
+	 */
+	hasHostAccess?: HostAccessCheck;
 }
 
 export type SaveOutcome =
@@ -20,6 +27,8 @@ export type SaveOutcome =
 	| { status: 'saved'; withContent: boolean; response: SaveResponseBody }
 	/** Not signed in, or the token stopped working; the save waits in the queue. */
 	| { status: 'needsSignIn'; queued: number }
+	/** The browser has not allowed the extension to reach Pigeon (Safari asks per site); the save waits in the queue. */
+	| { status: 'needsAccess'; queued: number; origin: string }
 	/** Pigeon unreachable; the save waits in the queue. */
 	| { status: 'queued'; queued: number; message: string }
 	/** Not a web page (chrome://, file://, …). Nothing to save. */
@@ -121,12 +130,18 @@ async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promis
 			return { status: 'needsSignIn', queued: (await readQueue(deps.store)).length };
 		case 'retry':
 			if (countsAgainstRequest(result.cause)) await recordFailure(deps.store, queued.id, MAX_FULL_SAVE_FAILURES);
+			if (await lacksAccess(result.cause, settings.origin, deps)) return { status: 'needsAccess', queued: (await readQueue(deps.store)).length, origin: settings.origin };
 			return { status: 'queued', queued: (await readQueue(deps.store)).length, message: result.message };
 	}
 }
 
 function countsAgainstRequest(cause: RetryCause): boolean {
 	return cause === 'timeout' || cause === 'server';
+}
+
+/** A request without host access fails like being offline; only then is it worth asking the browser. */
+async function lacksAccess(cause: RetryCause, origin: string, deps: SaveDeps): Promise<boolean> {
+	return cause === 'offline' && !(await hasHostAccess(origin, deps.hasHostAccess));
 }
 
 /** True while a save or a flush is talking to Pigeon (the background keeps the worker alive meanwhile). */
@@ -141,7 +156,7 @@ export interface FlushResult {
 	/** Could not get through this time; still queued for the next retry. */
 	passedOver: number;
 	remaining: number;
-	stoppedBy?: 'signedOut' | 'unauthorized' | 'unreachable';
+	stoppedBy?: 'signedOut' | 'unauthorized' | 'unreachable' | 'noAccess';
 }
 
 let flushing: Promise<FlushResult> | null = null;
@@ -184,6 +199,10 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 			return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unauthorized' };
 		}
 		if (attempt.status === 'retry') {
+			// Without access every request fails the same way: stop and ask for access.
+			if (await lacksAccess(attempt.cause, settings.origin, deps)) {
+				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'noAccess' };
+			}
 			result.passedOver++;
 			if (++streak >= UNREACHABLE_STREAK) {
 				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unreachable' };

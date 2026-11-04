@@ -48,15 +48,28 @@ test('runRetry schedules a backing-off alarm while Pigeon is unreachable and cle
 	assert.equal(alarms.alarms.has(RETRY_ALARM), false);
 });
 
-test('waiting for sign-in clears the alarm; a new queued save schedules one without resetting the backoff', async () => {
+test('a rejected token clears the alarm; a new queued save schedules one without resetting the backoff', async () => {
 	const store = new MemoryStore();
 	const alarms = new FakeAlarms();
 	await enqueue(store, [{ url: 'https://example.com/a' }]);
-	await runRetry(false, { store, alarms, flush: async () => ({ sent: 0, dropped: 0, passedOver: 0, remaining: 1, stoppedBy: 'signedOut' }) });
+	alarms.alarms.set(RETRY_ALARM, 4);
+	await runRetry(false, { store, alarms, flush: async () => ({ sent: 0, dropped: 0, passedOver: 0, remaining: 1, stoppedBy: 'unauthorized' }) });
 	assert.equal(alarms.alarms.has(RETRY_ALARM), false);
 	await ensureRetryScheduled({ store, alarms });
 	assert.equal(alarms.alarms.get(RETRY_ALARM), 1);
 	alarms.alarms.set(RETRY_ALARM, 8);
 	await ensureRetryScheduled({ store, alarms });
 	assert.equal(alarms.alarms.get(RETRY_ALARM), 8);
+});
+
+test('a flush that finds no token (as one can mid sign-in) leaves the scheduled retry alone', async () => {
+	const store = new MemoryStore();
+	const alarms = new FakeAlarms();
+	await enqueue(store, [{ url: 'https://example.com/a' }]);
+	alarms.alarms.set(RETRY_ALARM, 4);
+	await store.set({ pigeonRetryDelayMs: 4 * 60_000 });
+	const signedOut: FlushResult = { sent: 0, dropped: 0, passedOver: 0, remaining: 1, stoppedBy: 'signedOut' };
+	assert.deepEqual(await runRetry(true, { store, alarms, flush: async () => signedOut }), signedOut);
+	assert.equal(alarms.alarms.get(RETRY_ALARM), 4);
+	assert.equal((await store.get('pigeonRetryDelayMs')).pigeonRetryDelayMs, 4 * 60_000);
 });

@@ -15,7 +15,9 @@ export const MAX_RETRY_DELAY_MS = 30 * 60_000;
 /**
  * The wait before the next retry, or null when none is needed: the queue is
  * empty, or it waits for the user to sign in. Doubles while Pigeon stays
- * unreachable; saves that were only passed over retry after the minimum.
+ * unreachable; saves that were only passed over retry after the minimum, and
+ * so do saves waiting for host access (granting it takes the user a moment,
+ * and Safari may not report a grant made in its own UI).
  */
 export function nextRetryDelay(previousMs: number | null | undefined, result: FlushResult): number | null {
 	if (result.remaining === 0 || result.stoppedBy === 'signedOut' || result.stoppedBy === 'unauthorized') return null;
@@ -50,6 +52,10 @@ export async function runRetry(force: boolean, deps: RetryDeps): Promise<FlushRe
 		return null;
 	}
 	const result = await deps.flush();
+	// Signed out: leave any scheduled retry alone. A flush can run in the middle
+	// of signing in (the host permission is granted before the token is stored);
+	// clearing the alarm then would strand the queue if the sign-in's own flush failed.
+	if (result.stoppedBy === 'signedOut') return result;
 	const previous = force ? null : (await deps.store.get(RETRY_DELAY_KEY))[RETRY_DELAY_KEY];
 	const delay = nextRetryDelay(typeof previous === 'number' ? previous : null, result);
 	if (delay === null) await clearRetry(deps);

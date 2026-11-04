@@ -10,7 +10,7 @@ function deps(store: MemoryStore, fetch: typeof globalThis.fetch, grant = true) 
 }
 
 test('default state: production address, signed out', async () => {
-	assert.deepEqual(await optionsState(new MemoryStore()), { origin: 'https://pigeon.hanscho.com', signedIn: false, needsSignIn: false, queued: 0 });
+	assert.deepEqual(await optionsState(new MemoryStore()), { origin: 'https://pigeon.hanscho.com', signedIn: false, needsSignIn: false, queued: 0, missingAccess: null });
 });
 
 test('sign-in stores the token and the origin, never the password', async () => {
@@ -22,7 +22,7 @@ test('sign-in stores the token and the origin, never the password', async () => 
 	assert.equal(requests[0].url, 'https://pigeon.hanscho.com/accounts/ClientLogin');
 	assert.deepEqual(Object.fromEntries(store.data), { pigeonOrigin: 'https://pigeon.hanscho.com', pigeonAuth: 'pigeon/t', pigeonNeedsSignIn: false });
 	assert.ok(!JSON.stringify([...store.data]).includes('hunter2'));
-	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.hanscho.com', signedIn: true, needsSignIn: false, queued: 0 });
+	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.hanscho.com', signedIn: true, needsSignIn: false, queued: 0, missingAccess: null });
 });
 
 test('a custom address asks for its host permission; refusing stops before the password is sent', async () => {
@@ -55,11 +55,11 @@ test('a 401 shows the re-sign-in notice; signing in again clears it; sign-out ke
 	const ok = () => new Response('Auth=pigeon/t2');
 	await signIn('https://pigeon.example.dev', 'pw', deps(store, mockFetch(ok).fetch).deps);
 	await markNeedsSignIn(store, (await store.get("pigeonAuth")).pigeonAuth as string);
-	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: true, queued: 0 });
+	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: true, queued: 0, missingAccess: null });
 	await signIn('https://pigeon.example.dev', 'pw', deps(store, mockFetch(ok).fetch).deps);
 	assert.equal((await optionsState(store)).needsSignIn, false);
 	await signOut(store);
-	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: false, queued: 0 });
+	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: false, queued: 0, missingAccess: null });
 });
 
 function form() {

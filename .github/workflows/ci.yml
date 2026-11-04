@@ -41,6 +41,7 @@ jobs:
       native: ${{ steps.nightly.outputs.full_suite_exists == 'true' && 'false' || steps.scope.outputs.native }}
       worker: ${{ steps.nightly.outputs.full_suite_exists == 'true' && 'false' || steps.scope.outputs.worker }}
       ui_suite: ${{ steps.scope.outputs.ui_suite }}
+      safari: ${{ steps.nightly.outputs.full_suite_exists == 'true' && 'false' || steps.scope.outputs.safari }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -110,6 +111,42 @@ jobs:
       - name: Test, typecheck, build, and audit the browser extension
         working-directory: extension
         run: npm run check
+
+  # The Safari container app (extension/safari/) is a small macOS app, not
+  # part of the iOS app. It builds on a GitHub-hosted Mac (free: the repo is
+  # public), so it never waits for or loads the shared self-hosted Mac and its
+  # iOS runner lock. ci_scope.py runs it only when extension/safari/,
+  # extension/scripts/build-safari.sh or CI itself changes, and on full runs.
+  safari:
+    needs: scope
+    if: needs.scope.outputs.safari == 'true'
+    name: Safari container app build
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: Install xcodegen
+        run: command -v xcodegen || brew install xcodegen
+      - name: Install browser extension dependencies
+        working-directory: extension
+        run: npm ci
+      - name: Build the web extension and the ad-hoc signed container app
+        working-directory: extension
+        run: |
+          xcodebuild -version
+          npm run build:safari
+      - name: Upload the xcodebuild log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-xcodebuild-log
+          path: extension/safari/build/xcodebuild.log
+          if-no-files-found: ignore
 
   native:
     needs: scope
@@ -222,7 +259,7 @@ jobs:
   required:
     name: CI required validation
     if: always()
-    needs: [scope, tooling, native, worker]
+    needs: [scope, tooling, native, worker, safari]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

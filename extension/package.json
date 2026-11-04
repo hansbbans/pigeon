@@ -2,10 +2,11 @@
   "name": "pigeon-extension",
   "version": "0.1.0",
   "private": true,
-  "description": "Save pages to Pigeon's Read It Later from Chrome, Dia and Vivaldi",
+  "description": "Save pages to Pigeon's Read It Later from Chrome, Dia, Vivaldi and Safari",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:safari": "scripts/build-safari.sh",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "audit": "npm audit --audit-level=high",

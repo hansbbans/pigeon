@@ -1,0 +1,83 @@
+# Safari container app for the browser extension. Generated into
+# PigeonSafari.xcodeproj by scripts/build-safari.sh (not committed).
+#
+# Safari Web Extensions ship inside a native app: the app's only job is to
+# carry the .appex, whose Resources/ hold the built web extension
+# (extension/dist/safari, copied in by a build phase). macOS only for now;
+# iOS and iPadOS Safari would need an iOS app and extension target.
+name: PigeonSafari
+options:
+  bundleIdPrefix: com.hans.pigeon
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    MARKETING_VERSION: "0.1.0" # build-safari.sh passes extension/package.json's version
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: YES
+    ENABLE_HARDENED_RUNTIME: YES
+    # Local builds are ad-hoc signed ("Sign to Run Locally"): Apple silicon
+    # will not run unsigned code, and Safari loads them only with
+    # Develop > Allow Unsigned Extensions. A Developer ID or App Store build
+    # sets DEVELOPMENT_TEAM and CODE_SIGN_STYLE: Automatic instead (README).
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    DEAD_CODE_STRIPPING: YES
+targets:
+  PigeonSafari:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    dependencies:
+      - target: PigeonSafariExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_NAME: Save to Pigeon
+        PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.safari
+        CODE_SIGN_ENTITLEMENTS: App/PigeonSafari.entitlements
+        INFOPLIST_KEY_CFBundleDisplayName: Save to Pigeon
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.news
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+  PigeonSafariExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Extension
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_NAME: Save to Pigeon Extension
+        PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.safari.extension
+        INFOPLIST_FILE: Extension/Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Save to Pigeon
+        CODE_SIGN_ENTITLEMENTS: Extension/PigeonSafariExtension.entitlements
+        # The copy phase reads ../dist/safari, outside the sandboxed inputs.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    postCompileScripts:
+      - name: Copy the web extension (dist/safari)
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          src="${SRCROOT}/../dist/safari"
+          if [ ! -f "${src}/manifest.json" ]; then
+            echo "error: ${src}/manifest.json is missing. Run 'npm run build:safari' (or 'node scripts/build.mjs --browser safari') in extension/ first."
+            exit 1
+          fi
+          dest="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          mkdir -p "${dest}"
+          # The appex has no other resources, so mirror the folder exactly (no stale files).
+          rsync -a --delete "${src}/" "${dest}/"
+schemes:
+  PigeonSafari:
+    build:
+      targets:
+        PigeonSafari: all
+        PigeonSafariExtension: all
