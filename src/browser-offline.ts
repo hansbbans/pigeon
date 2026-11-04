@@ -121,6 +121,7 @@ export function renderBrowserOfflineScript(): string {
    return { id: payload.id, decimalId: id, readerId: readerId, feedKey: payload.feedKey, title: payload.title || '', author: payload.author || '', source: payload.source || '', originalURL: payload.originalURL || null,
     receivedAt: payload.receivedAt, isRead: !!payload.isRead, isStarred: !!payload.isStarred, isBodyPruned: !!payload.isBodyPruned, isPaywalled: !!payload.isPaywalled,
     wordCount: payload.wordCount, mediaKind: payload.mediaKind, durationSeconds: payload.durationSeconds,
+    extractionState: payload.extractionState, imageURL: payload.imageURL, siteName: payload.siteName, publishedAt: payload.publishedAt,
     preview: String(payload.text || '').slice(0, 600), savedAt: new Date().toISOString() };
   }
   async function pending() { return (await all('outbox')).sort(function (a, b) { return a.order - b.order; }); }
@@ -167,7 +168,8 @@ export function renderBrowserOfflineScript(): string {
    return { id: article.readerId, nativeId: article.id, decimalId: article.decimalId, title: article.title, author: article.author, published: Math.floor(new Date(article.receivedAt).getTime()/1000), categories: categories,
     origin: { title: feed && feed.title || article.source, streamId: feed && feed.streamId || '' }, alternate: article.originalURL ? [{ href: article.originalURL }] : [],
     summary: { content: body && body.html || '<p>This article body has not been saved offline.</p>' }, contentVersion: body && body.contentVersion, offlineSaved: !!body, isBodyPruned: article.isBodyPruned, isPaywalled: !!article.isPaywalled,
-    wordCount: article.wordCount, mediaKind: article.mediaKind, durationSeconds: article.durationSeconds };
+    wordCount: article.wordCount, mediaKind: article.mediaKind, durationSeconds: article.durationSeconds,
+    extractionState: article.extractionState, imageUrl: article.imageURL, siteName: article.siteName, publishedAt: article.publishedAt };
   }
   async function doReplay() {
    var applied = 0;
@@ -226,11 +228,14 @@ export function renderBrowserOfflineScript(): string {
    query: function (options) { return operation(async function () {
     var query = options || {}; var outbox = await pending(); var feeds = await all('feeds'); var byFeed = new Map(feeds.map(function (feed) { return [feed.feedKey, feed]; }));
     var articles = await all('articles'); var matching = []; var needle = String(query.q || '').trim().toLocaleLowerCase(); var stream = query.stream || 'all';
-    if (!['all','reading-list','unread','read','starred','user/-/state/com.google/reading-list','user/-/state/com.google/read','user/-/state/com.google/starred'].includes(stream) && !/^feed\/[1-9][0-9]*$/.test(stream) && !(stream.indexOf('user/-/label/') === 0 && stream.slice('user/-/label/'.length).length > 0)) throw offlineError('query', 'This view is not supported in the locally saved library.');
+    if (!['all','reading-list','unread','read','starred','saved','user/-/state/com.google/reading-list','user/-/state/com.google/read','user/-/state/com.google/starred'].includes(stream) && !/^feed\/[1-9][0-9]*$/.test(stream) && !(stream.indexOf('user/-/label/') === 0 && stream.slice('user/-/label/'.length).length > 0)) throw offlineError('query', 'This view is not supported in the locally saved library.');
     if (needle.length > 200 || query.filter && !['all','read','unread'].includes(query.filter) || query.sort && !['newest','oldest'].includes(query.sort)) throw offlineError('query', 'Unsupported offline search, filter or sort.');
     for (var saved of articles) {
      var article = overlay(saved, outbox); var feed = byFeed.get(article.feedKey);
      if (feed && feed.isActive === false) continue;
+     // Read It Later lives in its own stream (and its feed/<id>); every other view leaves it out.
+     var isSaved = article.feedKey === 'pigeon:saved' || !!(feed && feed.sourceType === 'saved');
+     if (stream === 'saved' ? !isSaved : isSaved && stream.indexOf('feed/') !== 0 && !query.includeSaved) continue;
      if (stream === 'unread' && article.isRead) continue;
      if ((stream === 'read' || stream === 'user/-/state/com.google/read') && !article.isRead) continue;
      if ((stream === 'starred' || stream === 'user/-/state/com.google/starred') && !article.isStarred) continue;

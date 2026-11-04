@@ -228,6 +228,15 @@ ${renderBrowserAppStyles()}
                   </form>
                   <p id="article-query-status" class="status-meta" role="status" aria-live="polite"></p>
                 </div>
+                <div class="saved-filters hidden" id="saved-filters" role="group" aria-label="Read It Later filters">
+                  <div class="segmented" role="group" aria-label="Show">
+                    <button type="button" id="saved-status-unread" aria-pressed="true">Unread</button>
+                    <button type="button" id="saved-status-archive" aria-pressed="false">Archive</button>
+                  </div>
+                  <select id="saved-kind-filter" aria-label="Type"><option value="all">All</option><option value="text">Text</option><option value="video">Video</option></select>
+                  <select id="saved-length-filter" aria-label="Length"><option value="any">Any length</option><option value="short">Under 5 min</option><option value="medium">5–15 min</option><option value="long">15+ min</option></select>
+                  <select id="saved-sort-select" aria-label="Sort"><option value="newest">Newest saved</option><option value="oldest">Oldest saved</option><option value="shortest">Shortest</option><option value="longest">Longest</option></select>
+                </div>
               </div>
               <div id="article-page-controls" class="hidden" role="group" aria-label="Article pages">
                 <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
@@ -268,6 +277,8 @@ ${renderBrowserAppStyles()}
                     <button class="icon-button hidden" id="undo-article-button" type="button" data-icon="undo" title="Undo" data-control-tone="subtle" disabled>Undo</button>
                     <button class="icon-button" id="mark-unread-button" type="button" data-icon="check" title="Read (M)" aria-label="Mark selected article as read" aria-keyshortcuts="M" data-control-tone="subtle" disabled>Mark read</button>
                     <button class="icon-button" id="star-article-button" type="button" data-icon="star" title="Star (S)" aria-label="Star selected article" aria-keyshortcuts="S" aria-pressed="false" data-control-tone="subtle" disabled>Star</button>
+                    <button class="icon-button hidden" id="copy-link-button" type="button" data-icon="link" title="Copy link">Copy link</button>
+                    <button class="icon-button hidden" id="remove-saved-button" type="button" data-icon="trash" title="Remove from Read It Later">Remove from Read It Later</button>
                     <button class="icon-button" id="share-article-button" type="button" data-icon="share" title="Share">Share</button>
                     <button class="icon-button" id="open-original-button" type="button" data-icon="open" title="Open original" data-control-tone="subtle" disabled>Open original</button>
                     <details class="menu" id="article-actions-menu">
@@ -277,8 +288,6 @@ ${renderBrowserAppStyles()}
                         <hr />
                         <button class="menu-item" id="more-like-button" type="button" disabled>More like this</button>
                         <button class="menu-item" id="not-interested-button" type="button" disabled>Not interested</button>
-                        <hr />
-                        <details><summary>Save to Readwise</summary><label>Readwise token (this session only)<input id="readwise-token-input" type="password" autocomplete="off"></label><button id="readwise-save-button" type="button">Save to Readwise</button></details>
                       </div>
                     </details>
                   </div>
@@ -292,6 +301,13 @@ ${renderBrowserAppStyles()}
                     <strong id="reader-title" tabindex="-1">Select an article</strong>
                     <p class="panel-note" id="reader-meta"></p>
                     <p id="reader-reading-status" role="status" aria-live="polite"></p>
+                    <div class="saved-extraction hidden" id="saved-extraction-panel">
+                      <p id="saved-extraction-status" role="status" aria-live="polite"></p>
+                      <div class="saved-extraction-actions">
+                        <button class="secondary-button" id="saved-open-original-button" type="button">Open original</button>
+                        <button class="secondary-button" id="saved-retry-button" type="button">Try again</button>
+                      </div>
+                    </div>
                     <button class="secondary-button" id="load-images-button" type="button" hidden>Load images for this article</button>
                   </div>
                   <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
@@ -356,6 +372,12 @@ ${renderBrowserAppStyles()}
         <section id="personalization-content" aria-label="Personalization"></section>
         <section class="settings-group"><h3>Status</h3><div class="status-meta" id="settings-content">Open settings to load status.</div></section>
       </aside>
+      <div class="menu-panel context-menu hidden" id="link-context-menu" role="menu" aria-label="Link actions">
+        <button class="menu-item" id="link-save-button" type="button" role="menuitem" tabindex="-1">Read It Later</button>
+        <button class="menu-item" id="link-open-button" type="button" role="menuitem" tabindex="-1">Open in New Tab</button>
+        <button class="menu-item" id="link-copy-button" type="button" role="menuitem" tabindex="-1">Copy Link</button>
+      </div>
+      <div class="toast hidden" id="app-toast" role="status" aria-live="polite"></div>
       <div id="image-zoom-panel" class="hidden" role="dialog" aria-label="Article image"><button id="close-image-zoom" type="button">Close image</button><img id="zoom-image" alt=""></div>
       <aside class="panel sheet hidden" id="library-panel" aria-label="Library" tabindex="-1">
         <header class="sheet-header"><h2>Library</h2><button class="icon-button" id="close-library-button" type="button" data-icon="close" title="Close">Close</button></header>
@@ -485,9 +507,37 @@ export function renderBrowserAppRuntimeScript(): string {
   const extractedArticles = new Map(); const previewImages = new Map(); const readingObjectURLs = new Set();
   let frameObjectURLs=new Set();let visiblePreviewSources=new Set();
   const readerModeSelect = document.getElementById('reader-mode-select'); const readingStatus = document.getElementById('reader-reading-status');
-  const loadImagesButton = document.getElementById('load-images-button'); const readwiseTokenInput = document.getElementById('readwise-token-input');
-  const readwiseSaveButton = document.getElementById('readwise-save-button'); const zoomPanel = document.getElementById('image-zoom-panel');
-  const zoomImage = document.getElementById('zoom-image'); let readwiseSaving = false;
+  const loadImagesButton = document.getElementById('load-images-button'); const zoomPanel = document.getElementById('image-zoom-panel');
+  const zoomImage = document.getElementById('zoom-image');
+  // Read It Later.
+  const savedFiltersStorageKey = 'pigeon.browser.saved-filters';
+  const savedAttemptsStorageKey = 'pigeon.browser.saved-extraction-attempts';
+  const MAX_SAVED_EXTRACTION_ATTEMPTS = 3;
+  const savedFiltersBar = document.getElementById('saved-filters');
+  const savedStatusUnreadButton = document.getElementById('saved-status-unread');
+  const savedStatusArchiveButton = document.getElementById('saved-status-archive');
+  const savedKindFilter = document.getElementById('saved-kind-filter');
+  const savedLengthFilter = document.getElementById('saved-length-filter');
+  const savedSortSelect = document.getElementById('saved-sort-select');
+  const copyLinkButton = document.getElementById('copy-link-button');
+  const removeSavedButton = document.getElementById('remove-saved-button');
+  const savedExtractionPanel = document.getElementById('saved-extraction-panel');
+  const savedExtractionStatus = document.getElementById('saved-extraction-status');
+  const savedRetryButton = document.getElementById('saved-retry-button');
+  const savedOpenOriginalButton = document.getElementById('saved-open-original-button');
+  const linkContextMenu = document.getElementById('link-context-menu');
+  const linkSaveButton = document.getElementById('link-save-button');
+  const linkOpenButton = document.getElementById('link-open-button');
+  const linkCopyButton = document.getElementById('link-copy-button');
+  const appToast = document.getElementById('app-toast');
+  let savedFilters = client.normalizeSavedFilters(null);
+  let linkContextTarget = null;
+  let toastTimer = null;
+  // One request per URL at a time, so rapid repeated saves cannot race.
+  const inFlightSaves = new Map();
+  const savedExtractionJobs = new Map();
+  const savedExtractionErrors = new Map();
+  let pendingSavedRemoval = null;
   let recommendationSort = 'recommended';
   let recommendationEpoch = 0;
   let recommendationExclusions = new Set(); let acknowledgedResetGeneration = 0;
@@ -1002,6 +1052,10 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getArticleQuery(viewId = activeViewId) {
     const view = views.find((candidate) => candidate.id === viewId);
+    // Read It Later: Unread/Archive and the saved-time order come from the server;
+    // type, length and the length sorts are applied to the loaded list.
+    if (view?.kind === 'saved') return { q: articleSearchQuery, filter: savedFilters.status === 'archive' ? 'read' : 'unread',
+      sort: savedFilters.sort === 'oldest' ? 'oldest' : 'newest' };
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
       view?.kind === 'recent' ? 'read' : articleReadFilter, sort: view?.kind === 'recommended' ? recommendationSort : articleSortOrder };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
@@ -1160,6 +1214,11 @@ export function renderBrowserAppRuntimeScript(): string {
       estimatedWordCount: item.estimatedWordCount,
       mediaKind: item.mediaKind,
       durationSeconds: item.durationSeconds,
+      extractionState: item.extractionState,
+      imageUrl: item.imageUrl,
+      siteName: item.siteName,
+      author: item.author,
+      nativeId: item.nativeId,
     };
   }
 
@@ -1237,7 +1296,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const known = articleCache.get(itemId) || articleMetadataCache.get(itemId);
     if (known) {
       const carried = {};
-      for (const field of ['wordCount', 'mediaKind', 'durationSeconds']) {
+      for (const field of ['wordCount', 'mediaKind', 'durationSeconds', 'nativeId']) {
         if (item[field] === undefined && known[field] !== undefined) carried[field] = known[field];
       }
       if (Object.keys(carried).length) item = { ...item, ...carried };
@@ -1316,7 +1375,8 @@ export function renderBrowserAppRuntimeScript(): string {
     extractedArticles.clear(); previewImages.clear();
     for(const url of readingObjectURLs) URL.revokeObjectURL(url); readingObjectURLs.clear();
     frameObjectURLs.clear();visiblePreviewSources.clear();
-    readwiseTokenInput.value=''; readwiseSaving=false; readwiseSaveButton.disabled=false; zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
+    zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
+    closeLinkContextMenu(false); hideToast(); inFlightSaves.clear(); savedExtractionJobs.clear(); savedExtractionErrors.clear(); pendingSavedRemoval = null;
 
     if (personalizationService) personalizationService.destroy();
     personalizationService = null; personalizationPanel = null; pendingFeedback = null;
@@ -1420,6 +1480,8 @@ export function renderBrowserAppRuntimeScript(): string {
     return response.json();
   }
 
+  // Subscriptions minus the Read It Later feed: what feed settings and notifications list.
+  function getFeedSubscriptions(){return subscriptions.filter(subscription=>subscription.sourceType!=='saved');}
   function isOfflineReading(){return Boolean(offlineLibrary&&(offlineSession||window.navigator?.onLine===false));}
   function canReadOfflinePath(input){return String(input).startsWith('/reader/api/0/')||String(input).startsWith('/api/v1/browser/articles?');}
   async function offlineJSON(input,init) {
@@ -1427,11 +1489,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const guard=()=>{if(library!==offlineLibrary||!requestBelongsToCurrentSession(generation,token))throw new Error('Offline account changed.');};
     const url=new URL(input,config.baseUrl),params=url.searchParams;
     if(url.pathname.endsWith('/subscription/list')) {
-      const feeds=await library.feeds();guard();return {subscriptions:feeds.filter(feed=>feed.isActive!==false).map(feed=>({id:feed.streamId,title:feed.title,url:config.baseUrl+'/feed/'+encodeURIComponent(feed.feedKey),sourceUrl:feed.feedURL,categories:(feed.folders||[]).map(label=>({id:'user/-/label/'+label,label}))}))};
+      const feeds=await library.feeds();guard();return {subscriptions:feeds.filter(feed=>feed.isActive!==false).map(feed=>({id:feed.streamId,title:feed.title,url:config.baseUrl+'/feed/'+encodeURIComponent(feed.feedKey),sourceUrl:feed.feedURL,sourceType:feed.sourceType,categories:(feed.folders||[]).map(label=>({id:'user/-/label/'+label,label}))}))};
     }
     if(url.pathname.endsWith('/unread-count')) {
       const feeds=await library.feeds();guard();const counts=[];const folders=new Set();
-      counts.push({id:'user/-/state/com.google/reading-list',count:(await library.query({filter:'unread'})).total});
+      counts.push({id:'user/-/state/com.google/reading-list',count:(await library.query({filter:'unread',includeSaved:true})).total});
       for(const feed of feeds) {guard();counts.push({id:feed.streamId,count:(await library.query({stream:feed.streamId,filter:'unread'})).total});for(const folder of feed.folders||[])folders.add(folder);}
       for(const folder of folders){guard();counts.push({id:'user/-/label/'+folder,count:(await library.query({stream:'user/-/label/'+folder,filter:'unread'})).total});}
       guard();return {unreadcounts:counts};
@@ -1503,7 +1565,7 @@ export function renderBrowserAppRuntimeScript(): string {
   document.getElementById('offline-free-button').addEventListener('click',async()=>{if(!offlineLibrary)return;try {await offlineLibrary.freeOlderReadUnstarred(new Date(Date.now()-30*86400000).toISOString());await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
   document.getElementById('offline-clear-button').addEventListener('click',async()=>{if(!offlineLibrary||!document.getElementById('offline-clear-confirm').checked)return;try {await offlineLibrary.clearCache();await updateOfflineStatus();}catch(error){offlineStatus.textContent=error.message;}});
   function renderOfflineBanner(){const banner=document.getElementById('offline-mode-banner');banner.classList.toggle('hidden',!isOfflineReading()&&!offlineQueuedCount);banner.textContent=(isOfflineReading()?'Offline · saved articles only. ':'')+(offlineQueuedCount?offlineQueuedCount+' changes pending sync.':'');}
-  function mountNotifications(){if(notificationPanel){void notificationPanel.refresh();return;}if(window.PigeonNotifications)notificationPanel=window.PigeonNotifications.mount({container:document.getElementById('notifications-content'),authenticatedJson:onlineAuthenticatedJson,authenticatedFetch,getSubscriptions:()=>subscriptions,getSessionIdentity:()=>({token:session.token,generation:accountGeneration})});}
+  function mountNotifications(){if(notificationPanel){void notificationPanel.refresh();return;}if(window.PigeonNotifications)notificationPanel=window.PigeonNotifications.mount({container:document.getElementById('notifications-content'),authenticatedJson:onlineAuthenticatedJson,authenticatedFetch,getSubscriptions:getFeedSubscriptions,getSessionIdentity:()=>({token:session.token,generation:accountGeneration})});}
   function prepareNotificationAction() {
     if(!window.location?.href||pendingNotificationAction)return;
     const params=new URL(window.location.href).searchParams;const id=params.get('article'),action=params.get('notificationAction');
@@ -1815,6 +1877,21 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'today';
   }
 
+  function isSavedView() {
+    return getActiveView()?.kind === 'saved';
+  }
+
+  // Saved items live in the Read It Later feed; extractionState is only ever set on them.
+  function isSavedItem(item) {
+    if (!item) return false;
+    const feedStreamId = views.find((view) => view.kind === 'saved')?.feedStreamId;
+    return Boolean((feedStreamId && item.origin?.streamId === feedStreamId) || typeof item.extractionState === 'string');
+  }
+
+  function isVideoItem(item) {
+    return item?.mediaKind === 'video' || Boolean(client.extractYouTubeVideoId(item?.alternate?.[0]?.href));
+  }
+
   function getTodayCandidateIds() {
     const state = getViewState(activeViewId);
     const bounds = client.getLocalDayBounds();
@@ -1836,6 +1913,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getWindowCandidateIds() {
     reconcileArticleQueryBoundary();
+    if (isSavedView()) return client.filterSavedItemIds(itemIds, loadedItemsById, savedFilters);
     return isTodayView() ? getTodayCandidateIds() : itemIds;
   }
 
@@ -1976,7 +2054,8 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const activeView = getActiveView();
-    if (!activeView) {
+    // Archiving a whole reading list at once is not a Read It Later action.
+    if (!activeView || activeView.kind === 'saved') {
       markAllAsReadButton.classList.add('hidden');
       markAllAsReadButton.disabled = true;
       markAllAsReadButton.setAttribute('aria-disabled', 'true');
@@ -2137,7 +2216,14 @@ export function renderBrowserAppRuntimeScript(): string {
     activeFrameDocument.removeEventListener('scroll', handleReaderProgress);
     activeFrameDocument.removeEventListener('click', zoomReadingImage);
     activeFrameDocument.removeEventListener('click', client.followInPageLink);
+    activeFrameDocument.removeEventListener('contextmenu', handleFrameContextMenu);
+    activeFrameDocument.removeEventListener('pointerdown', handleFramePointerDown);
     activeFrameDocument = null;
+  }
+
+  // The parent document never sees pointer events inside the frame.
+  function handleFramePointerDown(event) {
+    if (event?.button !== 2) closeLinkContextMenu(false);
   }
 
   function attachFrameNavigationListener() {
@@ -2157,6 +2243,8 @@ export function renderBrowserAppRuntimeScript(): string {
     frameDocument.addEventListener('scroll', handleReaderProgress);
     frameDocument.addEventListener('click', zoomReadingImage);
     frameDocument.addEventListener('click', client.followInPageLink);
+    frameDocument.addEventListener('contextmenu', handleFrameContextMenu);
+    frameDocument.addEventListener('pointerdown', handleFramePointerDown);
     activeFrameDocument = frameDocument;
   }
 
@@ -2400,6 +2488,8 @@ export function renderBrowserAppRuntimeScript(): string {
       summaryParts.push('Read items');
     } else if (activeView.kind === 'starred') {
       summaryParts.push('Saved with a star');
+    } else if (activeView.kind === 'saved') {
+      summaryParts.push(savedFilters.status === 'archive' ? 'Archive' : 'Saved to read');
     } else if (activeView.kind === 'all') {
       summaryParts.push('Everything');
     }
@@ -2448,11 +2538,13 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderArticleQueryControls() {
     const view = getActiveView();
     if (articleSearchQuery) setSearchOpen(true);
-    articleReadFilterSelect.value = getArticleQuery().filter;
-    articleReadFilterSelect.disabled = !view || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
+    const savedView = view?.kind === 'saved';
+    articleReadFilterSelect.value = savedView ? articleReadFilter : getArticleQuery().filter;
+    articleReadFilterSelect.disabled = !view || savedView || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
     articleSortSelect.value = view?.kind === 'recommended' ? recommendationSort : articleSortOrder;
     for (const option of articleSortSelect.querySelectorAll('option')) option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
-    articleSortSelect.disabled = Boolean(pendingArticleMutation);
+    articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
+    renderSavedFilters();
     articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
       (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
   }
@@ -2507,6 +2599,9 @@ export function renderBrowserAppRuntimeScript(): string {
       articlesStatus.textContent =
         isTodayView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
           ? 'Loading articles…'
+          : activeView?.kind === 'saved'
+            ? (itemIds.length ? 'Nothing saved matches these filters.' : savedFilters.status === 'archive' ? 'Nothing archived yet.'
+              : 'Nothing saved yet. Right-click a link in an article and choose Read It Later.')
           : activeView
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
@@ -2516,7 +2611,8 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    articlesStatus.textContent = entries.length + ' article' + (entries.length === 1 ? '' : 's');
+    const savedView = isSavedView();
+    articlesStatus.textContent = entries.length + (savedView ? ' saved item' : ' article') + (entries.length === 1 ? '' : 's');
     for (const entry of entries) {
       const article = loadedItemsById[entry.id];
       const isRead = getArticleState(article, 'read');
@@ -2527,7 +2623,7 @@ export function renderBrowserAppRuntimeScript(): string {
           'article-card',
           isRead ? 'is-read' : '',
           entry.id === selectedItemId ? 'is-active' : '',
-          articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+          savedView && article ? 'saved-card' : articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
         attributes: {
           type: 'button',
@@ -2541,6 +2637,12 @@ export function renderBrowserAppRuntimeScript(): string {
         void selectArticle(entry.id);
       });
       button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event); });
+      if (savedView && article) {
+        appendSavedCard(button, article, entry);
+        listItem.appendChild(button);
+        articlesList.appendChild(listItem);
+        continue;
+      }
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
       const copy = createNode('span', { classNames: ['article-card-copy'] });
@@ -2596,6 +2698,432 @@ export function renderBrowserAppRuntimeScript(): string {
     restoreArticleScrollTop(preservedScrollTop);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
+  }
+
+  // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
+  function appendSavedCard(button, article, entry) {
+    const thumbnail = articleListMode === 'titles' ? null : client.savedThumbnailUrl(article);
+    const grid = createNode('span', { classNames: ['saved-card-grid'] });
+    if (thumbnail && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
+      const image = createNode('img', { classNames: ['saved-thumbnail'], attributes: {
+        ...(readingPreferences?.imagePolicy === 'proxy' ? {} : { src: thumbnail }), alt: '', loading: 'lazy', 'data-saved-thumbnail': 'true',
+      } });
+      grid.appendChild(image);
+      if (readingPreferences?.imagePolicy === 'proxy') void preparePreviewImage(image, thumbnail);
+    }
+    const copy = createNode('span', { classNames: ['saved-card-copy'] });
+    copy.appendChild(createNode('span', { classNames: ['article-title', 'saved-title'], text: entry.title }));
+    const meta = createNode('span', { classNames: ['saved-meta'] });
+    const source = client.savedSourceLabel(article);
+    const length = showReadingTime ? client.formatReadingLength(article) : null;
+    const age = client.formatSavedAge(article.published, Date.now());
+    if (source) meta.appendChild(createNode('span', { classNames: ['article-source'], text: source }));
+    if (length) meta.appendChild(createNode('span', { classNames: ['article-length'], text: length }));
+    if (age) meta.appendChild(createNode('span', { classNames: ['article-time'], text: age, attributes: { title: 'Saved ' + formatTimestamp(article.published) } }));
+    if (article.extractionState === 'failed') meta.appendChild(createNode('span', { classNames: ['saved-state'], text: 'Original only' }));
+    copy.appendChild(meta);
+    grid.appendChild(copy);
+    button.appendChild(grid);
+  }
+
+  function readStoredSavedFilters() {
+    try { return client.normalizeSavedFilters(JSON.parse(window.localStorage.getItem(savedFiltersStorageKey) || 'null')); }
+    catch (_error) { return client.normalizeSavedFilters(null); }
+  }
+
+  function renderSavedFilters() {
+    const visible = isSavedView();
+    savedFiltersBar.classList.toggle('hidden', !visible);
+    if (!visible) return;
+    savedStatusUnreadButton.setAttribute('aria-pressed', savedFilters.status === 'unread' ? 'true' : 'false');
+    savedStatusArchiveButton.setAttribute('aria-pressed', savedFilters.status === 'archive' ? 'true' : 'false');
+    savedKindFilter.value = savedFilters.kind;
+    savedLengthFilter.value = savedFilters.length;
+    savedSortSelect.value = savedFilters.sort;
+    const busy = pendingArticleMutation?.kind === 'bulk';
+    savedStatusUnreadButton.disabled = busy;
+    savedStatusArchiveButton.disabled = busy;
+  }
+
+  // Filter and sort choices persist per device. Unread/Archive and oldest/newest
+  // change the server query; type, length and the length sorts only re-render.
+  async function changeSavedFilters(next) {
+    if (pendingArticleMutation?.kind === 'bulk') return;
+    if (isSavedView()) saveActiveViewState();
+    const previousQueryKey = isSavedView() ? getViewQueryKey(activeViewId) : '';
+    savedFilters = client.normalizeSavedFilters({ ...savedFilters, ...next });
+    try { window.localStorage.setItem(savedFiltersStorageKey, JSON.stringify(savedFilters)); } catch (_error) {}
+    if (!isSavedView()) return;
+    if (getViewQueryKey(activeViewId) !== previousQueryKey) {
+      clearKeptItemIds();
+      heldReaderArticle = null;
+      renderSidebarSummary();
+      await loadActiveView();
+      return;
+    }
+    restoreArticleScrollTop(0);
+    getViewState(activeViewId).windowStart = 0;
+    renderSavedFilters();
+    renderArticles();
+    renderReader();
+    if (shouldContinueLoadingWindow()) void continueLoadingWindow(activeViewRequestId);
+  }
+
+  // Read It Later: toast, in-article link menu, saving, extraction and removal.
+  function hideToast() {
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = null;
+    appToast.classList.add('hidden');
+    appToast.textContent = '';
+  }
+
+  function showToast(message, tone) {
+    if (toastTimer) clearTimeout(toastTimer);
+    appToast.textContent = message;
+    appToast.setAttribute('data-tone', tone === 'error' ? 'error' : 'info');
+    appToast.classList.remove('hidden');
+    toastTimer = setTimeout(hideToast, tone === 'error' ? 5000 : 2500);
+  }
+
+  async function copyText(text) {
+    if (!window.navigator?.clipboard?.writeText) throw new Error('Clipboard unavailable');
+    await window.navigator.clipboard.writeText(text);
+  }
+
+  async function copyLinkWithToast(url) {
+    if (!url) return;
+    try { await copyText(url); showToast('Link copied'); }
+    catch (_error) { showToast('Could not copy the link.', 'error'); }
+  }
+
+  function openInNewTab(url) {
+    if (url && typeof window.open === 'function') window.open(url, '_blank', 'noopener');
+  }
+
+  // Link text makes a better placeholder title than host + path, unless it is
+  // a bare URL or a one-word "here"; extraction replaces it either way.
+  function savedTitleFromLinkText(text, url) {
+    const title = String(text || '').replace(/\\s+/g, ' ').trim();
+    if (title.length < 4 || title.length > 300 || !/\\s/.test(title) || /^https?:\\/\\//i.test(title) || title === url) return '';
+    return title;
+  }
+
+  function isLinkContextMenuOpen() {
+    return Boolean(linkContextTarget);
+  }
+
+  function closeLinkContextMenu(restoreFocus) {
+    if (!linkContextTarget) return;
+    linkContextTarget = null;
+    linkContextMenu.classList.add('hidden');
+    if (restoreFocus && typeof readerFrame.focus === 'function') readerFrame.focus();
+  }
+
+  function getLinkContextMenuItems() {
+    return [linkSaveButton, linkOpenButton, linkCopyButton].filter((item) => !item.disabled);
+  }
+
+  // Right-click on a link inside the article: Pigeon's menu. Shift keeps the browser's own.
+  function handleFrameContextMenu(event) {
+    if (event?.shiftKey) return;
+    const link = event?.target?.closest?.('a[href]');
+    if (!link) return;
+    let url = '';
+    try { url = new URL(link.href || link.getAttribute('href') || '').href; } catch (_error) { return; }
+    if (!/^https?:$/.test(new URL(url).protocol)) return;
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    const frameRect = typeof readerFrame.getBoundingClientRect === 'function' ? readerFrame.getBoundingClientRect() : { left: 0, top: 0 };
+    openLinkContextMenu({ url, title: link.textContent || '' }, (Number(frameRect.left) || 0) + (Number(event.clientX) || 0),
+      (Number(frameRect.top) || 0) + (Number(event.clientY) || 0));
+  }
+
+  function openLinkContextMenu(target, left, top) {
+    closePopoverMenus(null);
+    linkContextTarget = { ...target, generation: accountGeneration };
+    linkContextMenu.style.setProperty('left', left + 'px');
+    linkContextMenu.style.setProperty('top', top + 'px');
+    linkContextMenu.classList.remove('hidden');
+    const rect = typeof linkContextMenu.getBoundingClientRect === 'function' ? linkContextMenu.getBoundingClientRect() : null;
+    const viewportWidth = window.innerWidth || 0;
+    const viewportHeight = window.innerHeight || 0;
+    if (rect && viewportWidth && left + rect.width > viewportWidth - 8) linkContextMenu.style.setProperty('left', Math.max(8, viewportWidth - rect.width - 8) + 'px');
+    if (rect && viewportHeight && top + rect.height > viewportHeight - 8) linkContextMenu.style.setProperty('top', Math.max(8, top - rect.height) + 'px');
+    getLinkContextMenuItems()[0]?.focus();
+  }
+
+  function handleLinkContextMenuKeydown(event) {
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      closeLinkContextMenu(true);
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const items = getLinkContextMenuItems();
+      const current = items.indexOf(document.activeElement);
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      items[(current + step + items.length) % items.length]?.focus();
+    } else {
+      if (!['Enter', ' ', 'Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) closeLinkContextMenu(false);
+      return false;
+    }
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    return true;
+  }
+
+  function runLinkContextAction(action) {
+    const target = linkContextTarget;
+    closeLinkContextMenu(true);
+    if (!target || target.generation !== accountGeneration) return;
+    if (action === 'save') void saveLink(target.url, target.title);
+    else if (action === 'open') openInNewTab(target.url);
+    else void copyLinkWithToast(target.url);
+  }
+
+  // Saving never navigates or touches the reader; the server dedupes by URL.
+  function saveLink(url, linkText) {
+    if (isOfflineReading() || window.navigator?.onLine === false) {
+      showToast('You are offline. The link was not saved.', 'error');
+      return Promise.resolve(false);
+    }
+    const existing = inFlightSaves.get(url);
+    if (existing) return existing;
+    const generation = accountGeneration;
+    const token = session.token;
+    const job = Promise.resolve().then(async () => {
+      try {
+        const body = { url };
+        const title = savedTitleFromLinkText(linkText, url);
+        if (title) body.title = title;
+        const response = await authenticatedFetch('/api/v1/saved', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (!requestBelongsToCurrentSession(generation, token)) return false;
+        if (!response.ok) throw new Error('Save failed: ' + response.status);
+        showToast('Saved to Read It Later');
+        void refreshSavedNavigation(generation, token);
+        if (isSavedView()) void revalidateActiveView({ refreshUnread: false });
+        return true;
+      } catch (_error) {
+        if (requestBelongsToCurrentSession(generation, token)) showToast('Could not save the link. Try again.', 'error');
+        return false;
+      } finally {
+        if (inFlightSaves.get(url) === job) inFlightSaves.delete(url);
+      }
+    });
+    inFlightSaves.set(url, job);
+    return job;
+  }
+
+  // The first save creates the Read It Later feed; until the subscription list
+  // knows it, its unread count would land in All instead of Read It Later.
+  async function refreshSavedNavigation(generation, token) {
+    if (!subscriptions.some((subscription) => subscription.sourceType === 'saved')) {
+      try {
+        const payload = await authenticatedJson('/reader/api/0/subscription/list');
+        if (!requestBelongsToCurrentSession(generation, token) || !Array.isArray(payload?.subscriptions)) return;
+        subscriptions = payload.subscriptions;
+      } catch (_error) { return; }
+    }
+    await refreshUnreadCounts();
+  }
+
+  function readSavedAttempts() {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(savedAttemptsStorageKey) || '{}');
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    } catch (_error) { return {}; }
+  }
+
+  function writeSavedAttempts(attempts) {
+    const keys = Object.keys(attempts);
+    for (const key of keys.slice(0, Math.max(0, keys.length - 200))) delete attempts[key];
+    try { window.localStorage.setItem(savedAttemptsStorageKey, JSON.stringify(attempts)); } catch (_error) {}
+  }
+
+  function recordSavedAttempt(itemId) {
+    const attempts = readSavedAttempts();
+    const count = (Number(attempts[itemId]) || 0) + 1;
+    delete attempts[itemId];
+    attempts[itemId] = count;
+    writeSavedAttempts(attempts);
+    return count;
+  }
+
+  function forgetSavedAttempts(itemId) {
+    const attempts = readSavedAttempts();
+    if (!(itemId in attempts)) return;
+    delete attempts[itemId];
+    writeSavedAttempts(attempts);
+  }
+
+  function setLocalExtractionState(itemId, state) {
+    for (const cache of [articleCache, articleMetadataCache]) {
+      const cached = cache.get(itemId);
+      if (cached) cache.set(itemId, { ...cached, extractionState: state });
+    }
+    const current = articleCache.get(itemId) || articleMetadataCache.get(itemId);
+    if (current) loadedItemsById[itemId] = current;
+  }
+
+  // null when the saved body can be shown; otherwise why it cannot yet.
+  function getSavedExtractionView(itemId) {
+    const item = loadedItemsById[itemId];
+    if (!isSavedItem(item) || !item.extractionState || item.extractionState === 'done') return null;
+    if (savedExtractionJobs.has(itemId)) return 'loading';
+    if (item.extractionState === 'failed' || savedExtractionErrors.has(itemId)) return 'failed';
+    return 'pending';
+  }
+
+  function renderSavedExtractionPanel(itemId, view) {
+    const item = loadedItemsById[itemId];
+    const visible = Boolean(view) && !isVideoItem(item);
+    savedExtractionPanel.classList.toggle('hidden', !visible);
+    if (!visible) return;
+    const loading = view !== 'failed';
+    savedExtractionStatus.textContent = loading ? 'Getting a clean copy of this page…'
+      : savedExtractionErrors.get(itemId) || 'Pigeon could not get a clean copy of this page.';
+    savedRetryButton.classList.toggle('hidden', loading);
+    savedOpenOriginalButton.classList.toggle('hidden', loading);
+    savedRetryButton.disabled = isOfflineReading();
+  }
+
+  function savedContentFromExtraction(extracted, item) {
+    const content = { html: extracted.content, mediaKind: isVideoItem(item) ? 'video' : 'text' };
+    if (typeof extracted.text === 'string' && extracted.text) content.text = extracted.text;
+    for (const [field, value] of [['title', extracted.title], ['author', extracted.byline], ['published', extracted.published],
+      ['image', extracted.image], ['site', extracted.site]]) {
+      if (typeof value === 'string' && value.trim()) content[field] = value.trim();
+    }
+    if (Number.isFinite(extracted.wordCount) && extracted.wordCount > 0) content.wordCount = Math.round(extracted.wordCount);
+    return content;
+  }
+
+  async function putSavedContent(item, body) {
+    const response = await authenticatedFetch('/api/v1/saved/' + encodeURIComponent(item.nativeId || item.id) + '/content', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!response.ok) { const error = new Error('Saved content upload failed: ' + response.status); error.status = response.status; throw error; }
+    return response.json();
+  }
+
+  // A link saved without content is fetched through the reader-source proxy and
+  // cleaned with Defuddle here, then uploaded. Three failed attempts mark it failed.
+  function extractSavedItem(itemId) {
+    const existing = savedExtractionJobs.get(itemId);
+    if (existing) return existing;
+    const item = loadedItemsById[itemId];
+    const href = item?.alternate?.[0]?.href;
+    if (!item || !href) {
+      savedExtractionErrors.set(itemId, 'This saved item has no link to fetch.');
+      return Promise.resolve();
+    }
+    const generation = accountGeneration;
+    const token = session.token;
+    const current = () => requestBelongsToCurrentSession(generation, token);
+    savedExtractionErrors.delete(itemId);
+    const job = Promise.resolve().then(async () => {
+      let offline = false;
+      try {
+        if (isOfflineReading() || window.navigator?.onLine === false) { offline = true; throw new Error('Offline'); }
+        const [source] = await Promise.all([
+          onlineAuthenticatedJson('/api/v1/browser/reader-source?url=' + encodeURIComponent(href)),
+          loadDefuddle(),
+        ]);
+        if (!current()) return;
+        const extracted = window.__PIGEON_READING_TOOLS__?.extract(source.html, source.url || href);
+        if (!extracted?.content) throw new Error('No readable article content found.');
+        const result = await putSavedContent(item, savedContentFromExtraction(extracted, item));
+        if (!current()) return;
+        if (result?.contentTooLarge || result?.state !== 'done') throw new Error('The cleaned page was too large to store.');
+        forgetSavedAttempts(itemId);
+        await ensureArticleContent([itemId], { generation, token, refresh: true });
+      } catch (error) {
+        if (!current()) return;
+        if (!offline && error?.name === 'TypeError' && window.navigator?.onLine === false) offline = true;
+        savedExtractionErrors.set(itemId, offline ? 'You are offline. Try again when you are back online.'
+          : 'Pigeon could not get a clean copy of this page.');
+        if (!offline && recordSavedAttempt(itemId) >= MAX_SAVED_EXTRACTION_ATTEMPTS) {
+          try {
+            const result = await putSavedContent(item, { failed: true });
+            if (current() && result?.state === 'failed') { setLocalExtractionState(itemId, 'failed'); forgetSavedAttempts(itemId); }
+          } catch (_error) {
+            // The next failed attempt reports it again.
+          }
+        }
+      } finally {
+        if (savedExtractionJobs.get(itemId) === job) savedExtractionJobs.delete(itemId);
+        if (current()) {
+          renderArticles();
+          if (selectedItemId === itemId) renderReader();
+        }
+      }
+    });
+    savedExtractionJobs.set(itemId, job);
+    return job;
+  }
+
+  function forgetRemovedSavedItem(itemId) {
+    const visible = getVisibleItemIds();
+    const index = visible.indexOf(itemId);
+    const nextId = index < 0 ? null : visible[index + 1] || visible[index - 1] || null;
+    for (const state of viewStates.values()) {
+      if (!state.itemIds.includes(itemId) && !state.confirmedItemIds.has(itemId)) continue;
+      state.itemIds = state.itemIds.filter((id) => id !== itemId);
+      state.confirmedItemIds.delete(itemId);
+      state.contentLoadedIds.delete(itemId);
+      if (state.selectedItemId === itemId) state.selectedItemId = null;
+      // Membership pages already in flight still list the item; let them land as stale.
+      state.membershipEpoch += 1;
+      state.rootRequestId = ++membershipRootRequestId;
+      state.appliedRootRequestId = 0;
+    }
+    inFlightMembershipRequests.clear();
+    keptItemIds.ids.delete(itemId);
+    articleCache.delete(itemId);
+    articleMetadataCache.delete(itemId);
+    articleStateMutations.delete(itemId);
+    delete loadedItemsById[itemId];
+    savedExtractionErrors.delete(itemId);
+    extractedArticles.delete(itemId);
+    forgetSavedAttempts(itemId);
+    if (heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
+    if (undoArticleMutation?.itemId === itemId) undoArticleMutation = null;
+    itemIds = itemIds.filter((id) => id !== itemId);
+    activeItemIdsPageRequest = null;
+    isLoadingItemIdsPage = false;
+    if (selectedItemId === itemId) selectedItemId = nextId;
+    saveActiveViewState();
+    renderArticles();
+    renderReader();
+  }
+
+  // Removal is a hard delete by item UUID (reader ids can be reused), sent
+  // through the mutation API so a retry is idempotent.
+  async function removeSelectedSavedItem() {
+    const itemId = selectedItemId;
+    const item = loadedItemsById[itemId];
+    if (!isSavedItem(item) || pendingSavedRemoval || pendingArticleMutation) return;
+    if (isOfflineReading() || window.navigator?.onLine === false) { showToast('Removing needs a connection.', 'error'); return; }
+    if (!item.nativeId) { showToast('Could not remove this item. Refresh and try again.', 'error'); return; }
+    const request = { itemId, generation: accountGeneration, token: session.token };
+    const current = () => pendingSavedRemoval === request && requestBelongsToCurrentSession(request.generation, request.token);
+    pendingSavedRemoval = request;
+    renderArticleActions();
+    try {
+      const response = await authenticatedFetch('/api/v1/mutations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mutations: [{ id: crypto.randomUUID(), kind: 'remove_saved', itemIds: [item.nativeId] }] }),
+      });
+      const payload = response.ok ? await response.json() : null;
+      if (!current()) return;
+      if (!['applied', 'already_applied'].includes(payload?.results?.[0]?.status)) throw new Error('Removal was not applied');
+      pendingSavedRemoval = null;
+      forgetRemovedSavedItem(itemId);
+      showToast('Removed from Read It Later');
+      void refreshUnreadCounts();
+    } catch (_error) {
+      if (current()) showToast('Could not remove the item. Try again.', 'error');
+    } finally {
+      if (pendingSavedRemoval === request) pendingSavedRemoval = null;
+      if (requestBelongsToCurrentSession(request.generation, request.token)) renderArticleActions();
+    }
   }
 
   function clearYouTubePlayer() {
@@ -2857,17 +3385,6 @@ export function renderBrowserAppRuntimeScript(): string {
       if(id===selectedItemId&&generation===accountGeneration)readingStatus.textContent='Article link shared or copied.';
     }catch(error){if(id===selectedItemId&&generation===accountGeneration)readingStatus.textContent='Sharing unavailable. Use Open original to copy the website address.';}
   });
-  readwiseSaveButton.addEventListener('click',async()=>{
-    if(readwiseSaving)return;const id=selectedItemId,generation=accountGeneration,token=session.token;
-    const url=loadedItemsById[id]?.alternate?.[0]?.href,readwiseToken=readwiseTokenInput.value.trim();if(!url||!readwiseToken){readingStatus.textContent='Enter a Readwise token and select an article with an original URL.';return;}
-    readwiseSaving=true;readwiseSaveButton.disabled=true;readingStatus.textContent='Saving to Readwise…';
-    try {const response=await authenticatedFetch('/api/v1/browser/readwise/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,token:readwiseToken})});
-      const result=await response.json();if(!requestBelongsToCurrentSession(generation,token)||id!==selectedItemId)return;
-      if(!response.ok||result.saved!==true)throw new Error(result.code==='readwise_authentication_failed'?'Readwise rejected this token. Check it and try again.':result.code==='readwise_rate_limited'?'Readwise is busy. Try again later.':'Could not save to Readwise. Try again.');
-      readingStatus.textContent='Saved to Readwise.';
-    }catch(error){if(requestBelongsToCurrentSession(generation,token)&&id===selectedItemId)readingStatus.textContent=error instanceof Error?error.message:'Could not save to Readwise.';}
-    finally{if(requestBelongsToCurrentSession(generation,token)){readwiseSaving=false;readwiseSaveButton.disabled=false;}}
-  });
   const readingFields=['theme','font','fontSize','lineHeight','width','margins','density','imagePolicy'];
   if(readingPreferences) {
     for(const key of readingFields)document.getElementById('reading-'+key).value=String(readingPreferences[key]);
@@ -2887,6 +3404,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderReader() {
     renderArticleActions();
     setReaderEmpty(!selectedItemId);
+    savedExtractionPanel.classList.add('hidden');
     if (!selectedItemId) {
       readerSourceLabel.textContent = '';
       readerSourceNote.textContent = '';
@@ -2930,13 +3448,26 @@ export function renderBrowserAppRuntimeScript(): string {
     if (item.isPaywalled) readerTitle.appendChild(createNode('span', {
       classNames: ['article-paywall'], text: 'Paywall', attributes: { title: 'Teaser only: the full article is behind a paywall' },
     }));
-    readerMeta.textContent = [item.author && item.author !== sourceTitle ? item.author : '']
+    const savedArticle = isSavedItem(item);
+    if (savedArticle) readerSourceLabel.textContent = client.savedSourceLabel(item) || sourceTitle;
+    readerMeta.textContent = [item.author && item.author !== sourceTitle && item.author !== readerSourceLabel.textContent ? item.author : '']
       .filter(Boolean)
       .join(' · ');
     if (!hasFullArticle) {
       readerMeta.textContent = [readerMeta.textContent, 'Loading article content…'].filter(Boolean).join(' · ');
     }
     if (!readingPreferences || readingPreferences.imagePolicy === 'load') renderYouTubePlayer(articleHref, item.title || ''); else clearYouTubePlayer();
+    if (savedArticle && hasFullArticle && getSavedExtractionView(selectedItemId) === 'pending') void extractSavedItem(selectedItemId);
+    const savedExtraction = hasFullArticle ? getSavedExtractionView(selectedItemId) : null;
+    if (savedExtraction) {
+      // A saved link without a clean copy yet: never show the bare placeholder body.
+      renderSavedExtractionPanel(selectedItemId, savedExtraction);
+      const body = isVideoItem(item) ? item.content?.content || ''
+        : '<p class="pigeon-empty">' + (savedExtraction === 'failed' ? 'Open the original to read this page.' : 'Getting the article…') + '</p>';
+      renderReaderFrame(selectedItemId, client.createArticleFrameDocument(body, theme));
+      attachFrameNavigationListener();
+      return;
+    }
     if (readingTools && hasFullArticle) {void prepareReadingFrame(item,articleHref); return;}
     renderReaderFrame(
       selectedItemId,
@@ -3066,7 +3597,9 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  function usesBrowserArticlesQuery() {
+  function usesBrowserArticlesQuery(view) {
+    // Read It Later exists only as the browser/articles saved stream.
+    if (view?.kind === 'saved') return true;
     return Boolean(articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest');
   }
 
@@ -3084,7 +3617,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function buildStreamIdsUrl(view, continuation) {
-    if (usesBrowserArticlesQuery()) {
+    if (usesBrowserArticlesQuery(view)) {
       return buildBrowserArticlesUrl(view, continuation);
     }
     return '/reader/api/0/stream/items/ids?' + buildStreamParams(view, continuation).toString();
@@ -3113,7 +3646,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function buildBrowserArticlesUrl(view, continuation, options) {
     const query = options?.query || getArticleQuery(view.id);
     const params = new URLSearchParams({ stream: view.streamId, q: query.q, filter: query.filter,
-      sort: query.sort, limit: String(options?.limit || client.INITIAL_ITEM_ID_LIMIT) });
+      sort: query.sort, limit: String(options?.limit || (view.kind === 'saved' ? 100 : client.INITIAL_ITEM_ID_LIMIT)) });
     if (view.kind === 'today') {
       const bounds = options?.dayBounds || query.dayBounds || client.getLocalDayBounds();
       params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
@@ -3317,7 +3850,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!continuation) state.rootRequestId = rootRequestId;
     const stateVersion = articleStateMutationId;
     const querySnapshot = { ...getArticleQuery(view.id) };
-    const loadsBodies = Boolean(options?.initial) && !continuation && view.kind !== 'recommended' && !usesBrowserArticlesQuery();
+    const loadsBodies = Boolean(options?.initial) && !continuation && view.kind !== 'recommended' && !usesBrowserArticlesQuery(view);
     const requestPromise = (view.kind === 'recommended' ? loadRecommendations(view, querySnapshot, generation, token, stateVersion, rootRequestId)
       : loadsBodies ? loadStreamContentsPage(view, generation, token, stateVersion)
       : authenticatedJson(buildStreamIdsUrl(view, continuation)))
@@ -3452,7 +3985,8 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function shouldAutoLoadWindow() {
-    return isTodayView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
+    // Read It Later filters and length sorts run over the whole loaded list.
+    return isTodayView() || isSavedView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
   }
 
   async function continueLoadingWindow(requestId) {
@@ -3742,6 +4276,22 @@ export function renderBrowserAppRuntimeScript(): string {
     undoArticleButton.disabled = !undoArticleMutation || Boolean(pendingArticleMutation);
     undoArticleButton.setAttribute('aria-label', undoArticleMutation
       ? 'Undo ' + undoArticleMutation.action + ' for ' + undoArticleMutation.title : 'Undo article action');
+    const savedArticle = isSavedItem(article);
+    if (savedArticle) {
+      markUnreadButton.setAttribute('data-icon', 'archive');
+      markUnreadButton.setAttribute('aria-label', isRead ? 'Move back to Unread' : 'Archive');
+      markUnreadButton.setAttribute('title', (isRead ? 'Unarchive' : 'Archive') + ' (' + String(markUnreadButton.getAttribute('aria-keyshortcuts') || 'M').toUpperCase() + ')');
+      if (!(isPending && pendingArticleMutation.field === 'read')) markUnreadButton.textContent = isRead ? 'Unarchive' : 'Archive';
+    } else {
+      markUnreadButton.setAttribute('data-icon', 'check');
+    }
+    // Saved items never show in Starred, so a star there would do nothing visible.
+    starArticleButton.classList.toggle('hidden', savedArticle);
+    copyLinkButton.classList.toggle('hidden', !savedArticle);
+    copyLinkButton.disabled = !article?.alternate?.[0]?.href;
+    removeSavedButton.classList.toggle('hidden', !savedArticle);
+    removeSavedButton.disabled = disabled || Boolean(pendingSavedRemoval) || isOfflineReading();
+    removeSavedButton.setAttribute('aria-busy', pendingSavedRemoval?.itemId === selectedItemId ? 'true' : 'false');
     readerActionStatus.textContent = readerActionMessage;
   }
 
@@ -3762,7 +4312,9 @@ export function renderBrowserAppRuntimeScript(): string {
       // bulk marks, Starred membership and For You exclusions still remove it.
       const keepsRow = inScope && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
         state.queryKey === getViewQueryKey(activeViewId) && state.itemIds.includes(itemId);
-      const scopeMatches = ['all', 'unread', 'recent', 'starred'].includes(view.kind) ||
+      // Saved items belong to Read It Later only, never to All, Unread, Read or Starred.
+      const scopeMatches = (['all', 'unread', 'recent', 'starred'].includes(view.kind) && !isSavedItem(article)) ||
+        (view.kind === 'saved' && isSavedItem(article)) ||
         (view.kind === 'feed' && article?.origin?.streamId === view.streamId) ||
         (view.kind === 'folder' && article?.categories?.includes(view.streamId));
       if (belongs && state.hasMembership && !state.itemIds.includes(itemId) &&
@@ -3839,8 +4391,10 @@ export function renderBrowserAppRuntimeScript(): string {
       selectionId: readerActionSelectionId, previous: getArticleState(item, field),
       title: item.title || 'Untitled article',
     };
-    const action = field === 'read' ? 'mark ' + (target ? 'read' : 'unread') : target ? 'star' : 'unstar';
-    const success = field === 'read' ? 'Marked ' + (target ? 'read.' : 'unread.') : target ? 'Starred.' : 'Unstarred.';
+    const archive = field === 'read' && isSavedItem(item);
+    const action = archive ? (target ? 'archive' : 'unarchive') : field === 'read' ? 'mark ' + (target ? 'read' : 'unread') : target ? 'star' : 'unstar';
+    const success = archive ? (target ? 'Archived.' : 'Moved back to Unread.')
+      : field === 'read' ? 'Marked ' + (target ? 'read.' : 'unread.') : target ? 'Starred.' : 'Unstarred.';
     const isCurrentRequest = () => pendingArticleMutation === request &&
       requestBelongsToCurrentSession(request.generation, request.token);
     const showMessage = (message) => {
@@ -3850,7 +4404,7 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     };
     pendingArticleMutation = request;
-    showMessage(options?.undo ? 'Undoing article action…' : field === 'read'
+    showMessage(options?.undo ? 'Undoing article action…' : archive ? (target ? 'Archiving…' : 'Moving back to Unread…') : field === 'read'
       ? 'Marking article ' + (target ? 'read…' : 'unread…') : target ? 'Starring article…' : 'Removing star…');
     renderArticleActions();
     renderMarkAllAsReadAction();
@@ -4107,33 +4661,44 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function handleReaderProgress() {
+    closeLinkContextMenu(false);
     saveReadingPosition();
-    maybeAutoMarkRead();
+    maybeAutoMarkRead(true);
   }
 
-  function maybeAutoMarkRead() {
-    if (autoReadPolicy === 'manual' || pendingArticleMutation ||
+  // Saved items ignore the read policy: finishing one (scrolling to its end)
+  // archives it. Opening one, or a short page that never scrolls, does not.
+  function getAutoReadPolicy(item, fromScroll) {
+    if (!isSavedItem(item)) return autoReadPolicy;
+    return fromScroll && item.extractionState !== 'pending' && item.extractionState !== 'failed' ? 'end' : 'manual';
+  }
+
+  function maybeAutoMarkRead(fromScroll = false) {
+    const policy = getAutoReadPolicy(loadedItemsById[selectedItemId], fromScroll);
+    if (policy === 'manual' || pendingArticleMutation ||
         !isReaderVisible() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
         !articleCache.has(selectedItemId) || readyReaderItemId !== selectedItemId ||
         getArticleState(loadedItemsById[selectedItemId], 'read') || manuallyUnreadItemIds.has(selectedItemId)) return;
-    if (autoReadPolicy === 'progress') {
+    if (policy === 'progress' || policy === 'end') {
       try {
         const frameDocument = readerFrame.contentDocument;
         const height = Math.max(frameDocument?.documentElement?.scrollHeight || 0, frameDocument?.body?.scrollHeight || 0);
         const viewport = readerFrame.contentWindow?.innerHeight || frameDocument?.documentElement?.clientHeight || 0;
-        if (!height || !viewport || (readReaderFrameScrollTop() + viewport) / height < 0.6) return;
+        if (!height || !viewport) return;
+        if (policy === 'progress' && (readReaderFrameScrollTop() + viewport) / height < 0.6) return;
+        if (policy === 'end' && (height <= viewport || readReaderFrameScrollTop() + viewport < height - 48)) return;
       } catch (_error) { return; }
     }
-    const attempt = readerActionSelectionId + ':' + autoReadPolicy;
+    const attempt = readerActionSelectionId + ':' + policy;
     if (autoReadAttempt === attempt || queuedAutoRead) return;
-    const owner = { itemId: selectedItemId, selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token, policy: autoReadPolicy };
+    const owner = { itemId: selectedItemId, selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token, policy };
     queuedAutoRead = owner;
     Promise.resolve().then(() => {
       if (queuedAutoRead !== owner) return;
       queuedAutoRead = null;
       if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.itemId !== selectedItemId ||
           owner.selectionId !== readerActionSelectionId || manuallyUnreadItemIds.has(owner.itemId) ||
-          autoReadPolicy !== owner.policy || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
+          getAutoReadPolicy(loadedItemsById[owner.itemId], owner.policy === 'end') !== owner.policy || document.visibilityState === 'hidden' || window.navigator?.onLine === false ||
           readyReaderItemId !== owner.itemId || pendingArticleMutation || getArticleState(loadedItemsById[owner.itemId], 'read')) return;
       autoReadAttempt = attempt;
       void mutateArticleState(owner.itemId, 'read', true, { automatic: true });
@@ -4440,7 +5005,7 @@ export function renderBrowserAppRuntimeScript(): string {
         }
         if (heldReaderArticle?.viewId === oldId) {heldReaderArticle.viewId = newId;try {heldReaderArticle.queryKey=JSON.stringify([newId,JSON.parse(heldReaderArticle.queryKey)[1]]);}catch(_){heldReaderArticle=null;}}
       },
-      getSubscriptions: () => subscriptions,
+      getSubscriptions: getFeedSubscriptions,
       getSessionIdentity: () => accountGeneration + ':' + session.token,
       refreshLibrary: async () => {
         if (!isCurrent()) throw new Error('Library session changed.');
@@ -4465,6 +5030,23 @@ export function renderBrowserAppRuntimeScript(): string {
   markAllAsReadButton.addEventListener('click', () => {
     void markAllAsRead();
   });
+  linkSaveButton.addEventListener('click', () => { runLinkContextAction('save'); });
+  linkOpenButton.addEventListener('click', () => { runLinkContextAction('open'); });
+  linkCopyButton.addEventListener('click', () => { runLinkContextAction('copy'); });
+  copyLinkButton.addEventListener('click', () => { void copyLinkWithToast(loadedItemsById[selectedItemId]?.alternate?.[0]?.href); });
+  removeSavedButton.addEventListener('click', () => { void removeSelectedSavedItem(); });
+  savedOpenOriginalButton.addEventListener('click', () => { openInNewTab(loadedItemsById[selectedItemId]?.alternate?.[0]?.href); });
+  savedRetryButton.addEventListener('click', () => {
+    const itemId = selectedItemId;
+    if (!isSavedItem(loadedItemsById[itemId]) || savedExtractionJobs.has(itemId)) return;
+    void extractSavedItem(itemId);
+    renderReader();
+  });
+  savedStatusUnreadButton.addEventListener('click', () => { void changeSavedFilters({ status: 'unread' }); });
+  savedStatusArchiveButton.addEventListener('click', () => { void changeSavedFilters({ status: 'archive' }); });
+  savedKindFilter.addEventListener('change', () => { void changeSavedFilters({ kind: savedKindFilter.value }); });
+  savedLengthFilter.addEventListener('change', () => { void changeSavedFilters({ length: savedLengthFilter.value }); });
+  savedSortSelect.addEventListener('change', () => { void changeSavedFilters({ sort: savedSortSelect.value }); });
   markUnreadButton.addEventListener('click', () => {
     void toggleSelectedArticleState('read');
   });
@@ -4558,6 +5140,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function closePopoverMenus(except) {
     closeArticleContextMenu(false);
+    closeLinkContextMenu(false);
     for (const menu of popoverMenus) {
       if (menu && menu !== except && menu.open) menu.open = false;
     }
@@ -4702,6 +5285,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
   document.addEventListener('pointerdown', (event) => {
     const target = event.target;
+    if (isLinkContextMenuOpen() && !(typeof linkContextMenu.contains === 'function' && linkContextMenu.contains(target))) {
+      closeLinkContextMenu(false);
+    }
     if (isArticleContextMenuOpen() && !(typeof articleContextMenu.contains === 'function' && articleContextMenu.contains(target))) {
       closeArticleContextMenu(false);
     }
@@ -4717,6 +5303,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   document.addEventListener('keydown', (event) => {
     if (isArticleContextMenuOpen() && handleArticleContextMenuKeydown(event)) return;
+    if (isLinkContextMenuOpen() && handleLinkContextMenuKeydown(event)) return;
     const keyTarget = event.target;
     if ((event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) &&
         keyTarget?.classList?.contains('article-card') && typeof keyTarget.getAttribute === 'function') {
@@ -4790,6 +5377,7 @@ export function renderBrowserAppRuntimeScript(): string {
   try { showReadingTime = window.localStorage.getItem(showReadingTimeStorageKey) !== '0'; }
   catch (_error) { showReadingTime = true; }
   showReadingTimeCheckbox.checked = showReadingTime;
+  savedFilters = readStoredSavedFilters();
   applyArticleListMode(getStoredArticleListMode());
   updateColumnResizerState();
 

@@ -23,6 +23,8 @@ export interface BrowserSubscription {
 	url?: string;
 	sourceUrl?: string | null;
 	iconUrl?: string;
+	// 'email', 'rss' or 'saved' (the Read It Later feed).
+	sourceType?: string;
 	categories?: Array<{
 		id: string;
 		label?: string;
@@ -39,10 +41,12 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'recommended' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'saved' | 'recommended' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
+	// Read It Later: the saved feed's GReader stream id (feed/<rowid>), when it exists.
+	feedStreamId?: string;
 }
 
 export interface BrowserLocalDayBounds {
@@ -75,6 +79,19 @@ export interface BrowserLoadedItem {
 	estimatedWordCount?: number;
 	mediaKind?: 'text' | 'video';
 	durationSeconds?: number;
+	// Read It Later items only.
+	extractionState?: 'pending' | 'done' | 'failed';
+	imageUrl?: string;
+	siteName?: string;
+	author?: string;
+	nativeId?: string;
+}
+
+export interface BrowserSavedFilters {
+	status: 'unread' | 'archive';
+	kind: 'all' | 'text' | 'video';
+	length: 'any' | 'short' | 'medium' | 'long';
+	sort: 'newest' | 'oldest' | 'shortest' | 'longest';
 }
 
 export interface BrowserArticleListEntry {
@@ -134,6 +151,119 @@ export function shouldReportWordCount(
 	if (typeof extracted !== 'number' || !Number.isSafeInteger(extracted) || extracted < 50 || extracted > 2_000_000) return false;
 	if (typeof stored !== 'number' || stored <= 0) return true;
 	return extracted >= stored * 1.5;
+}
+
+/** Saved filter and sort choices, falling back to the defaults field by field. Self-contained. */
+export function normalizeSavedFilters(value: unknown): BrowserSavedFilters {
+	const source = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+	const pick = <T extends string>(raw: unknown, allowed: readonly T[]): T =>
+		(allowed as readonly unknown[]).includes(raw) ? (raw as T) : allowed[0];
+	return {
+		status: pick(source.status, ['unread', 'archive'] as const),
+		kind: pick(source.kind, ['all', 'text', 'video'] as const),
+		length: pick(source.length, ['any', 'short', 'medium', 'long'] as const),
+		sort: pick(source.sort, ['newest', 'oldest', 'shortest', 'longest'] as const),
+	};
+}
+
+/**
+ * Length in minutes (not rounded) for the Read It Later filters and sorts, or
+ * null when unknown. Unlike the labels, every known length counts here.
+ * Self-contained: emitted via toString().
+ */
+export function savedLengthMinutes(item: {
+	wordCount?: number | null;
+	estimatedWordCount?: number | null;
+	mediaKind?: string | null;
+	durationSeconds?: number | null;
+	extractionState?: string | null;
+}): number | null {
+	if (item.mediaKind === 'video') {
+		const seconds = item.durationSeconds;
+		return typeof seconds === 'number' && seconds > 0 ? seconds / 60 : null;
+	}
+	// A link that was never extracted has only a placeholder body to estimate from.
+	const extracted = item.extractionState !== 'pending' && item.extractionState !== 'failed';
+	const words = typeof item.wordCount === 'number' ? item.wordCount : extracted ? item.estimatedWordCount : null;
+	return typeof words === 'number' && words > 0 ? words / 238 : null;
+}
+
+/**
+ * Applies the client-side Read It Later filters (kind, length) and sorts
+ * (shortest, longest) to the loaded saved list. Newest/oldest keep the server
+ * order. Rows still loading stay in place so their bodies get fetched.
+ * Unknown lengths match only "Any" and sort last. Emitted with savedLengthMinutes.
+ */
+export function filterSavedItemIds(
+	itemIds: string[],
+	itemsById: Record<string, Parameters<typeof savedLengthMinutes>[0] | undefined>,
+	filters: { kind: string; length: string; sort: string },
+): string[] {
+	const minutesOf = (id: string): number | null => {
+		const item = itemsById[id];
+		return item ? savedLengthMinutes(item) : null;
+	};
+	const matches = itemIds.filter((id) => {
+		const item = itemsById[id];
+		if (!item) return true;
+		const isVideo = item.mediaKind === 'video';
+		if (filters.kind === 'text' && isVideo) return false;
+		if (filters.kind === 'video' && !isVideo) return false;
+		if (filters.length === 'any') return true;
+		const exact = minutesOf(id);
+		if (exact === null) return false;
+		const minutes = Math.max(1, Math.ceil(exact));
+		if (filters.length === 'short') return minutes < 5;
+		if (filters.length === 'medium') return minutes >= 5 && minutes < 15;
+		return minutes >= 15;
+	});
+	if (filters.sort !== 'shortest' && filters.sort !== 'longest') return matches;
+	const direction = filters.sort === 'shortest' ? 1 : -1;
+	return matches
+		.map((id, index) => ({ id, index, minutes: minutesOf(id) }))
+		.sort((left, right) => {
+			if (left.minutes === null || right.minutes === null) {
+				return left.minutes === right.minutes ? left.index - right.index : left.minutes === null ? 1 : -1;
+			}
+			return direction * (left.minutes - right.minutes) || left.index - right.index;
+		})
+		.map((entry) => entry.id);
+}
+
+/** "Just now", "12 min ago", "3 hr ago", "4 days ago", "2 wk ago", then a date. Self-contained. */
+export function formatSavedAge(timestampSeconds: number | null | undefined, nowMs: number = Date.now()): string {
+	if (!timestampSeconds || !Number.isFinite(timestampSeconds)) return '';
+	const minutes = Math.floor((nowMs - timestampSeconds * 1000) / 60_000);
+	if (minutes < 1) return 'Just now';
+	if (minutes < 60) return minutes + ' min ago';
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return hours + ' hr ago';
+	const days = Math.floor(hours / 24);
+	if (days === 1) return 'Yesterday';
+	if (days < 7) return days + ' days ago';
+	if (days < 35) return Math.floor(days / 7) + ' wk ago';
+	const date = new Date(timestampSeconds * 1000);
+	const sameYear = date.getFullYear() === new Date(nowMs).getFullYear();
+	return date.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** The list thumbnail: the lead image, else the YouTube thumbnail, else none. */
+export function savedThumbnailUrl(item: { imageUrl?: string | null; alternate?: Array<{ href?: string }> }): string | null {
+	const image = typeof item.imageUrl === 'string' ? item.imageUrl.trim() : '';
+	if (/^https?:\/\//i.test(image)) return image;
+	const videoId = extractYouTubeVideoId(item.alternate?.[0]?.href);
+	return videoId ? 'https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg' : null;
+}
+
+/** The list source line: the channel for videos, the site for text, else the host. */
+export function savedSourceLabel(item: {
+	mediaKind?: string | null; siteName?: string | null; author?: string | null; alternate?: Array<{ href?: string }>;
+}): string {
+	const site = (item.siteName || '').trim();
+	const author = (item.author || '').trim();
+	if (item.mediaKind === 'video' && author) return author;
+	if (site) return site;
+	try { return new URL(item.alternate?.[0]?.href || '').hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
 export function createYouTubeEmbedUrl(originalUrl: string | undefined | null): string | null {
@@ -406,13 +536,19 @@ export function buildFeedViews(
 		});
 	}
 
-	const feedUnreadCounts = unreadCounts.filter((entry) => entry.id.startsWith('feed/'));
+	// Read It Later has its own sidebar entry; it is not a feed and its items
+	// stay out of All, Unread and the folder counts.
+	const savedSubscription = subscriptions.find((subscription) => subscription.sourceType === 'saved');
+	const savedStreamId = savedSubscription?.id;
+	const feedUnreadCounts = unreadCounts.filter((entry) => entry.id.startsWith('feed/') && entry.id !== savedStreamId);
 	const unreadCountById = new Map(feedUnreadCounts.map((entry) => [entry.id, entry.count]));
 	const unreadCountByStreamId = new Map(unreadCounts.map((entry) => [entry.id, entry.count]));
-	const totalUnreadCount =
-		unreadCounts.find((entry) => entry.id === 'user/-/state/com.google/reading-list')?.count ??
-		feedUnreadCounts.reduce((sum, entry) => sum + entry.count, 0);
-	const sortedSubscriptions = sortSubscriptionsByTitle(subscriptions);
+	const savedUnreadCount = savedStreamId ? unreadCounts.find((entry) => entry.id === savedStreamId)?.count ?? 0 : 0;
+	const readingListCount = unreadCounts.find((entry) => entry.id === 'user/-/state/com.google/reading-list')?.count;
+	const totalUnreadCount = typeof readingListCount === 'number'
+		? Math.max(0, readingListCount - savedUnreadCount)
+		: feedUnreadCounts.reduce((sum, entry) => sum + entry.count, 0);
+	const sortedSubscriptions = sortSubscriptionsByTitle(subscriptions.filter((subscription) => subscription.sourceType !== 'saved'));
 	const folderUnreadCountById = new Map<string, number>();
 	const folderViewMap = new Map<string, BrowserFeedView>();
 	const feedViews: BrowserFeedView[] = [];
@@ -526,6 +662,15 @@ export function buildFeedViews(
 			unreadCount: 0,
 			kind: 'starred',
 			section: 'views',
+		},
+		{
+			id: 'saved',
+			title: 'Read It Later',
+			streamId: 'saved',
+			unreadCount: savedUnreadCount,
+			kind: 'saved',
+			section: 'views',
+			...(savedStreamId ? { feedStreamId: savedStreamId } : {}),
 		},
 		{ id: 'for-you', title: 'For You', streamId: 'for-you', unreadCount: 0, kind: 'recommended', section: 'views' },
 		...folderViews,
@@ -909,6 +1054,12 @@ ${formatReadingLength.toString()}
 ${shouldReportWordCount.toString()}
 ${buildArticleListEntries.toString()}
 ${extractYouTubeVideoId.toString()}
+${normalizeSavedFilters.toString()}
+${savedLengthMinutes.toString()}
+${filterSavedItemIds.toString()}
+${formatSavedAge.toString()}
+${savedThumbnailUrl.toString()}
+${savedSourceLabel.toString()}
 ${createYouTubeEmbedUrl.toString()}
 ${sanitizeArticleHtml.toString()}
 ${createArticleFrameDocument.toString()}
@@ -943,6 +1094,12 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   formatReadingLength,
   shouldReportWordCount,
   extractYouTubeVideoId,
+  normalizeSavedFilters,
+  savedLengthMinutes,
+  filterSavedItemIds,
+  formatSavedAge,
+  savedThumbnailUrl,
+  savedSourceLabel,
   createYouTubeEmbedUrl,
   sanitizeArticleHtml,
   createArticleFrameDocument,

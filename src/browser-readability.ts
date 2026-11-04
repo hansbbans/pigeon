@@ -197,7 +197,10 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			if (anchors.has(id) || anchors.has(fragment)) { link.setAttribute('href', '#' + fragment); link.setAttribute('target', '_self'); }
 			else { link.setAttribute('href', pageURL + '#' + fragment); link.removeAttribute('target'); }
 		}
-		return { ...extracted, content: client.sanitizeArticleHtml(output.innerHTML), url: base };
+		const content = client.sanitizeArticleHtml(output.innerHTML);
+		// Plain text of the cleaned article: Read It Later uploads it for search.
+		const text = (output.content.textContent || '').replace(/\s+/g, ' ').trim();
+		return { ...extracted, content, text, url: base };
 	}, hasDefuddle(): boolean { return typeof root.Defuddle === 'function'; } };
 }
 

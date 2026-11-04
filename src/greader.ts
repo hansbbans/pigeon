@@ -1,5 +1,5 @@
 import { readingLengthFields } from './reading-length';
-import { savedMetadataFields } from './saved-items';
+import { notSavedFeedSql, SAVED_FEED_KEY, savedMetadataFields } from './saved-items';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -28,6 +28,16 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 
 function isPigeonClient(request: Request): boolean {
 	return request.headers.has('X-Pigeon-Client');
+}
+
+/**
+ * The web app lists Read It Later in its own section, so its reading-list,
+ * read, starred and folder streams leave the saved feed out, matching
+ * /api/v1/browser/articles. Third-party readers and the iOS app (which reads
+ * sync) still see the saved feed as an ordinary feed.
+ */
+function excludesSavedFeed(request: Request): boolean {
+	return (request.headers.get('X-Pigeon-Client') ?? '').startsWith('pigeon-web/');
 }
 
 function labelFromStreamId(streamId: string | null): string | null {
@@ -612,12 +622,17 @@ async function selectStreamRowIds(options: {
 	excludeTag: string;
 	olderThanUnix: string;
 	continuation: string;
+	excludeSaved?: boolean;
 	env: Env;
 }): Promise<{ rows: StreamRow[]; continuation?: string }> {
 	let sql =
 		'SELECT i.rowid, i.received_at, i.is_read, i.is_starred, i.content_version FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE f.is_active = 1';
 	const binds: (string | number)[] = [];
 	const label = labelFromStreamId(options.streamId);
+	const isStateStream = options.streamId === 'user/-/state/com.google/starred' ||
+		options.streamId === 'user/-/state/com.google/read' ||
+		options.streamId === 'user/-/state/com.google/reading-list' || !options.streamId;
+	if (options.excludeSaved && (isStateStream || label)) sql += ` AND ${notSavedFeedSql('f.source_type')}`;
 
 	if (options.streamId === 'user/-/state/com.google/starred') {
 		sql += ' AND i.is_starred = 1';
@@ -768,6 +783,7 @@ async function loadResponseItems(
 		publishedAt?: string;
 		imageUrl?: string;
 		siteName?: string;
+		nativeId?: string;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -856,6 +872,8 @@ async function loadResponseItems(
 					isPaywalled: isPaywalledHtml(item.html_content),
 					...readingLengthFields(item),
 					...savedMetadataFields(item, 'imageUrl'),
+					// Removing a saved item takes its UUID, never the reusable reader id.
+					...(item.feed_key === SAVED_FEED_KEY ? { nativeId: item.id } : {}),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],
@@ -899,6 +917,7 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(request),
 		env,
 	});
 	// Pigeon clients use the read, starred, and contentVersion extensions to
@@ -1001,6 +1020,7 @@ async function handleStreamContents(request: Request, url: URL, env: Env): Promi
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(request),
 		env,
 	});
 	const items = await loadResponseItems(
