@@ -6,6 +6,8 @@ import WebKit
 struct YouTubePlayerView: View {
 	let video: YouTubeVideo
 	let playbackAllowed: Bool
+	/// Carries the playing time out (for the transcript) and seeks in.
+	var playback: YouTubePlaybackLink? = nil
 	let onOpenYouTube: () -> Void
 	let onOpenLink: (URL) -> Void
 
@@ -24,6 +26,7 @@ struct YouTubePlayerView: View {
 				YouTubeEmbeddedWebView(
 					video: video,
 					playbackAllowed: playbackAllowed,
+					playback: playback,
 					onReady: { playerFailed = false },
 					onFailure: { playerFailed = true },
 					onOpenYouTube: onOpenYouTube,
@@ -50,6 +53,7 @@ struct YouTubePlayerView: View {
 private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 	let video: YouTubeVideo
 	let playbackAllowed: Bool
+	let playback: YouTubePlaybackLink?
 	let onReady: () -> Void
 	let onFailure: () -> Void
 	let onOpenYouTube: () -> Void
@@ -85,6 +89,7 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 		webView.scrollView.alwaysBounceHorizontal = false
 		webView.accessibilityIdentifier = "youtube-webview-\(video.videoID)"
 		context.coordinator.webView = webView
+		context.coordinator.attach(playback)
 		context.coordinator.load(video: video)
 		if playbackAllowed == false {
 			context.coordinator.stop()
@@ -97,6 +102,7 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 		context.coordinator.onFailure = onFailure
 		context.coordinator.onOpenYouTube = onOpenYouTube
 		context.coordinator.onOpenLink = onOpenLink
+		context.coordinator.attach(playback)
 		context.coordinator.update(video: video)
 		if playbackAllowed == false {
 			context.coordinator.stop()
@@ -121,6 +127,7 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 		var onOpenLink: (URL) -> Void
 		private var videoID: String?
 		private var didReportFailure = false
+		private weak var playback: YouTubePlaybackLink?
 
 		init(
 			onReady: @escaping () -> Void,
@@ -135,9 +142,22 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 			super.init()
 		}
 
+		func attach(_ playback: YouTubePlaybackLink?) {
+			guard self.playback !== playback else { return }
+			self.playback?.detach(self)
+			self.playback = playback
+			playback?.attach(self) { [weak self] seconds in self?.seek(to: seconds) }
+		}
+
+		func seek(to seconds: Double) {
+			guard let script = YouTubePlayerHTML.seekScript(seconds: seconds) else { return }
+			webView?.evaluateJavaScript(script)
+		}
+
 		func load(video: YouTubeVideo) {
 			videoID = video.videoID
 			didReportFailure = false
+			playback?.reset()
 			webView?.loadHTMLString(
 				YouTubePlayerHTML.document(videoID: video.videoID),
 				baseURL: YouTubePlayerHTML.baseURL,
@@ -157,6 +177,8 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 		func teardown() {
 			stop()
 			webView?.stopLoading()
+			playback?.detach(self)
+			playback = nil
 		}
 
 		func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -168,6 +190,10 @@ private struct YouTubeEmbeddedWebView: UIViewRepresentable {
 				onReady()
 			case "error":
 				reportFailure()
+			case "time":
+				if let time = (payload["time"] as? NSNumber)?.doubleValue, time.isFinite, time >= 0 {
+					playback?.report(time: time)
+				}
 			default:
 				break
 			}
@@ -310,6 +336,11 @@ private enum YouTubePlayerHTML {
 		return url
 	}()
 
+	static func seekScript(seconds: Double) -> String? {
+		guard seconds.isFinite, seconds >= 0 else { return nil }
+		return "window.__pigeonSeekYouTube && window.__pigeonSeekYouTube(\(seconds));"
+	}
+
 	static func document(videoID: String) -> String {
 		let origin = baseURL.absoluteString.dropLast()
 		return """
@@ -322,10 +353,34 @@ private enum YouTubePlayerHTML {
 		<div id="player"></div>
 		<script>
 		window.__pigeonStopYouTube = function() { if (window.__pigeonPlayer) { window.__pigeonPlayer.stopVideo(); } };
+		window.__pigeonSeekYouTube = function(seconds) { var player = window.__pigeonPlayer; if (player && player.seekTo) { player.seekTo(seconds, true); } };
+		// The IFrame API's infoDelivery messages carry currentTime while the video
+		// plays; YT.Player has already subscribed with "listening". Only the
+		// player frame on https://www.youtube.com is read. Forwarded at most
+		// about five times a second, plus every jump (a seek).
+		(function() {
+			var lastTime = -1, lastPost = 0;
+			window.addEventListener('message', function(event) {
+				if (event.origin !== 'https://www.youtube.com') { return; }
+				var iframe = document.querySelector('iframe');
+				if (!iframe || event.source !== iframe.contentWindow) { return; }
+				var data = event.data;
+				if (typeof data === 'string') {
+					if (data.length > 100000) { return; }
+					try { data = JSON.parse(data); } catch (_) { return; }
+				}
+				var info = data && typeof data === 'object' ? data.info : null;
+				if (!info || typeof info !== 'object' || typeof info.currentTime !== 'number' || !isFinite(info.currentTime)) { return; }
+				var time = info.currentTime, now = Date.now(), jump = Math.abs(time - lastTime);
+				if (jump < 0.05 || (now - lastPost < 200 && jump < 1)) { return; }
+				lastTime = time; lastPost = now;
+				window.webkit.messageHandlers.pigeonYouTube.postMessage({kind:'time', time: time});
+			});
+		})();
 		function onYouTubeIframeAPIReady() {
 			window.__pigeonPlayer = new YT.Player('player', {
 				videoId: '\(videoID)',
-				playerVars: { autoplay: 0, controls: 1, fs: 1, playsinline: 1, rel: 0, origin: '\(origin)' },
+				playerVars: { autoplay: 0, controls: 1, enablejsapi: 1, fs: 1, playsinline: 1, rel: 0, origin: '\(origin)' },
 				events: {
 					onReady: function() {
 						var iframe = document.querySelector('iframe');
@@ -344,5 +399,45 @@ private enum YouTubePlayerHTML {
 		<script src="https://www.youtube.com/iframe_api"></script>
 		</body></html>
 		"""
+	}
+}
+
+/// Connects a player to the views that follow it (the transcript). The player
+/// reports its time; `seek(to:)` moves it. Observing `currentTime` is the only
+/// way to follow playback, and it changes a few times a second, so read it
+/// only in a small view.
+@MainActor
+@Observable
+final class YouTubePlaybackLink {
+	private(set) var currentTime: Double?
+	@ObservationIgnored private weak var owner: AnyObject?
+	@ObservationIgnored private var seekHandler: ((Double) -> Void)?
+
+	func attach(_ owner: AnyObject, seek: @escaping (Double) -> Void) {
+		self.owner = owner
+		seekHandler = seek
+	}
+
+	func detach(_ owner: AnyObject) {
+		guard self.owner === owner else { return }
+		self.owner = nil
+		seekHandler = nil
+	}
+
+	func report(time: Double) {
+		guard time.isFinite, time >= 0, currentTime != time else { return }
+		currentTime = time
+	}
+
+	func reset() {
+		if currentTime != nil { currentTime = nil }
+	}
+
+	/// Returns false when no player is attached (it failed or is not on screen).
+	@discardableResult
+	func seek(to seconds: Double) -> Bool {
+		guard seconds.isFinite, seconds >= 0, let seekHandler else { return false }
+		seekHandler(seconds)
+		return true
 	}
 }

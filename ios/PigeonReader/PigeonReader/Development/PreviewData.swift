@@ -143,6 +143,10 @@ enum PreviewData {
 				accountID: session.storageIdentity,
 			),
 			offlineSynchronizationEnabled: false,
+			// -reader-transcript-live fetches from YouTube for real, for manual checks.
+			transcriptFetcher: ProcessInfo.processInfo.arguments.contains("-reader-transcript-live")
+				? YouTubeTranscriptFetcher()
+				: PreviewTranscriptFetcher(),
 		)
 		model.setArticles(articles, for: .forYou)
 		model.setArticles(articles.filter { $0.isRead == false }, for: .unread)
@@ -417,7 +421,7 @@ enum PreviewData {
 			</article>
 			""",
 			text: "A practical guide to making better videos.",
-			originalURL: URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+			originalURL: URL(string: "https://www.youtube.com/watch?v=\(previewYouTubeVideoID)"),
 			receivedAt: Date(timeIntervalSince1970: 1_786_172_000),
 			isRead: false,
 			isStarred: false,
@@ -429,6 +433,12 @@ enum PreviewData {
 			length: ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 1100),
 		),
 	]
+
+	/// The live transcript check uses a video with captions and chapters
+	/// (3Blue1Brown, "But what is a neural network?").
+	private static var previewYouTubeVideoID: String {
+		ProcessInfo.processInfo.arguments.contains("-reader-transcript-live") ? "aircAruvnKk" : "dQw4w9WgXcQ"
+	}
 
 	private static var launchTodayArticles: [Recommendation] {
 		let startOfDay = Calendar.current.startOfDay(for: .now)

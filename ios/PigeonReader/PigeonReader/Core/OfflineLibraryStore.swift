@@ -1045,6 +1045,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					isPaywalled: article.isPaywalled,
 					length: article.length,
 					saved: article.saved,
+					hasTranscript: article.hasTranscript,
 				)
 				try execute(
 					"UPDATE cached_articles SET payload = ?, body_pruned = 1 WHERE account_id = ? AND id = ?",
@@ -1339,6 +1340,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
 				length: payload.length ?? existing?.article.length,
 				saved: payload.savedMetadata ?? existing?.article.saved,
+				// The server only ever sends `true`; a transcript, once stored, stays.
+				hasTranscript: payload.hasTranscript ?? existing?.article.hasTranscript,
 				)),
 				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
 			)
@@ -1578,6 +1581,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,
+			hasTranscript: article.hasTranscript,
 		)
 	}
 
@@ -1886,6 +1890,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,
+			hasTranscript: article.hasTranscript,
 		)
 	}
 

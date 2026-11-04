@@ -207,6 +207,8 @@ final class ReaderAppModel {
 	let readerTypography: ReaderTypographySettings
 	let keyboardShortcuts: ReaderKeyboardShortcutSettings
 	let readerPreparation = ReaderPreparationStore()
+	/// YouTube transcripts shown under the player.
+	let transcripts: YouTubeTranscriptStore
 	let listPositions = ReaderListPositionStore()
 	private(set) var articleUndo: ReaderArticleUndo?
 	private var articleMutationTask: Task<Void, Never>?
@@ -416,6 +418,7 @@ final class ReaderAppModel {
 		savedPreferencesDefaults: UserDefaults = .standard,
 		pendingSavedLinks: PendingSavedLinkQueue = .shared,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
+		transcriptFetcher: (any YouTubeTranscriptFetching)? = nil,
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
 			try await Task.sleep(nanoseconds: nanoseconds)
@@ -448,6 +451,7 @@ final class ReaderAppModel {
 		self.keyboardShortcuts = keyboardShortcuts ?? ReaderKeyboardShortcutSettings()
 		let extractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
 		self.readerViewExtractor = extractor
+		self.transcripts = YouTubeTranscriptStore(fetcher: transcriptFetcher ?? YouTubeTranscriptFetcher())
 		self.savedExtraction = SavedExtractionCoordinator(
 			extractor: extractor,
 			httpClient: httpClient,
@@ -798,6 +802,7 @@ final class ReaderAppModel {
 			foregroundAppearanceTask = nil
 			cancelSceneBackgroundFlush()
 			savedExtraction.cancelAll()
+			transcripts.reset()
 			savedPersistenceSyncID = nil
 			locallySavedArticles = [:]
 			pendingSavedRemovalIDs = []
@@ -1621,6 +1626,7 @@ final class ReaderAppModel {
 	}
 
 	private func configureSavedExtraction() {
+		transcripts.apiProvider = { [weak self] in self?.apiClient }
 		savedExtraction.uploaderProvider = { [weak self] in self?.apiClient }
 		savedExtraction.onOutcome = { [weak self] target, outcome in
 			self?.applySavedExtractionOutcome(outcome, for: target)
@@ -4157,6 +4163,7 @@ final class ReaderAppModel {
 			// For You and other thin payloads omit length; keep what was known.
 			length: incoming.length ?? existing.length,
 			saved: incoming.saved ?? existing.saved,
+			hasTranscript: incoming.hasTranscript ?? existing.hasTranscript,
 		)
 	}
 
@@ -4189,6 +4196,7 @@ final class ReaderAppModel {
 			isPaywalled: incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
 			length: incoming.length ?? existing.length,
 			saved: incoming.saved ?? existing.saved,
+			hasTranscript: incoming.hasTranscript ?? existing.hasTranscript,
 		)
 	}
 
@@ -4217,6 +4225,7 @@ final class ReaderAppModel {
 			isPaywalled: merged.isPaywalled,
 			length: merged.length,
 			saved: merged.saved,
+			hasTranscript: merged.hasTranscript,
 		)
 	}
 
@@ -6467,6 +6476,7 @@ final class ReaderAppModel {
 	}
 
 	private func resetInMemoryLibraryForAccountChange() {
+		transcripts.reset()
 		cancelPrewarmPersistence()
 		invalidateSpeculativeFeedWork()
 		collectionLoadCoordinator.removeAll()

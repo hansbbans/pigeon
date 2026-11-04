@@ -134,6 +134,11 @@ targets:
         type: folder
         buildPhase: resources
         group: ContractFixtures
+      # Defuddle transcript parser vectors, shared with test/browser-transcript.test.ts.
+      - path: ../../test/fixtures/transcript
+        type: folder
+        buildPhase: resources
+        group: TranscriptFixtures
     dependencies:
       - target: PigeonReader
     settings:

@@ -631,6 +631,50 @@ struct PigeonAPIClient: Sendable {
 		return try decoder.decode(SavedItemResponse.self, from: data)
 	}
 
+	// MARK: - YouTube transcripts
+
+	/// The stored transcript, or nil when the item has none (`transcript_not_found`).
+	/// Throws `YouTubeTranscriptFormatError` for a format version this build does not know.
+	func transcript(itemID: String) async throws -> StoredYouTubeTranscript? {
+		var request = makeAuthorizedRequest(url: try encodedEndpointURL(path: Self.transcriptPath(itemID: itemID)))
+		request.httpMethod = "GET"
+		request.timeoutInterval = 20
+		let (data, response) = try await httpClient.data(for: request)
+		if (response as? HTTPURLResponse)?.statusCode == 404,
+			PigeonError.serverCode(in: data) == "transcript_not_found" {
+			return nil
+		}
+		try Self.validate(response: response, data: data)
+		return try decoder.decode(StoredYouTubeTranscript.self, from: data)
+	}
+
+	/// Stores a transcript for a video item. Errors carry the Worker's `code`
+	/// (`PigeonError.serverCode`): 413 `transcript_too_large`, 422 `not_a_video`.
+	func uploadTranscript(itemID: String, transcript: YouTubeTranscript) async throws -> YouTubeTranscriptUploadResponse {
+		var request = makeAuthorizedRequest(url: try encodedEndpointURL(path: Self.transcriptPath(itemID: itemID)))
+		request.httpMethod = "PUT"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(transcript)
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		return try decoder.decode(YouTubeTranscriptUploadResponse.self, from: data)
+	}
+
+	private static func transcriptPath(itemID: String) -> String {
+		let encoded = itemID.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? itemID
+		return "api/v1/items/\(encoded)/transcript"
+	}
+
+	/// An endpoint whose path is already percent-encoded (reader ids contain `/` and `:`).
+	private func encodedEndpointURL(path: String) throws -> URL {
+		guard var components = URLComponents(url: session.baseURL, resolvingAgainstBaseURL: false) else {
+			throw PigeonError.invalidServerURL
+		}
+		let basePath = components.percentEncodedPath.hasSuffix("/") ? String(components.percentEncodedPath.dropLast()) : components.percentEncodedPath
+		components.percentEncodedPath = basePath + "/" + path
+		return try endpointURL(components: components)
+	}
+
 	func exportPersonalization() async throws -> String {
 		var components = try endpointComponents(path: "api/v1/personalization")
 		components.queryItems = [URLQueryItem(name: "download", value: "1")]
@@ -667,6 +711,7 @@ struct PigeonAPIClient: Sendable {
 			isPaywalled: item.isPaywalled,
 			length: item.length,
 			saved: item.savedMetadata,
+			hasTranscript: item.hasTranscript,
 		)
 	}
 
