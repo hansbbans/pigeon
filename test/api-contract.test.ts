@@ -348,6 +348,20 @@ test('Read It Later: save a link, upload its extraction, remove a save, then syn
 	await assertMatchesFixture(await state.request(`/api/v1/sync?limit=200&cursor=v1:${head}`), 'sync-saved.response.json');
 });
 
+test('YouTube transcript: store one for a video, read it back, then sync the signal', async (t) => {
+	const state = await library(t);
+	const head = (state.database.prepare('SELECT MAX(sequence) AS head FROM sync_changes').get() as { head: number }).head;
+	const path = `/api/v1/items/${ITEM.typography}/transcript`;
+	await assertMatchesFixture(
+		await state.request(path, json('PUT', requestFixture('transcript-upload.request.json'))),
+		'transcript-upload.response.json',
+	);
+	state.database.prepare('UPDATE item_transcripts SET created_at = ?').run(DB_NOW);
+	await assertMatchesFixture(await state.request(path), 'transcript.response.json');
+	state.pinDatabaseClock();
+	await assertMatchesFixture(await state.request(`/api/v1/sync?limit=200&cursor=v1:${head}`), 'sync-transcript.response.json');
+});
+
 /**
  * Fixtures the Worker already serves but the iOS suite does not decode yet.
  * The iOS Read It Later PR names them in APIContractTests.swift and empties
@@ -360,6 +374,11 @@ const AWAITING_IOS_CONTRACT_TESTS = new Set([
 	'saved-content.response.json',
 	'saved-remove.request.json',
 	'sync-saved.response.json',
+	// YouTube transcripts (step 5): named by the iOS transcript PR.
+	'transcript-upload.request.json',
+	'transcript-upload.response.json',
+	'transcript.response.json',
+	'sync-transcript.response.json',
 ]);
 
 test('every contract fixture is checked by the iOS contract suite', () => {

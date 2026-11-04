@@ -225,9 +225,16 @@ export function savedSourceLabel(item: {
 	try { return new URL(item.alternate?.[0]?.href || '').hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
-export function createYouTubeEmbedUrl(originalUrl: string | undefined | null): string | null {
+/**
+ * The embed URL with the IFrame API on (enablejsapi), so the transcript can
+ * follow and seek the player by postMessage. `origin` is the page's own
+ * origin, which YouTube uses as the target of its messages.
+ */
+export function createYouTubeEmbedUrl(originalUrl: string | undefined | null, origin?: string | null): string | null {
 	const videoId = extractYouTubeVideoId(originalUrl);
-	return videoId ? `https://www.youtube.com/embed/${videoId}?controls=1` : null;
+	if (!videoId) return null;
+	const safeOrigin = typeof origin === 'string' && /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?$/.test(origin) ? origin : '';
+	return `https://www.youtube.com/embed/${videoId}?controls=1&enablejsapi=1` + (safeOrigin ? '&origin=' + encodeURIComponent(safeOrigin) : '');
 }
 
 /**

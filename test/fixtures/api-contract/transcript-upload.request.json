@@ -1,0 +1,30 @@
+{
+	"version": 1,
+	"language": "en",
+	"segments": [
+		{
+			"start": 0,
+			"duration": 6.5,
+			"text": "Margins give text room to breathe."
+		},
+		{
+			"start": 6.5,
+			"duration": 9,
+			"text": "A wider measure tires the eye on long lines."
+		},
+		{
+			"start": 15.5,
+			"text": "So set the column first, then the type."
+		}
+	],
+	"chapters": [
+		{
+			"start": 0,
+			"title": "Why margins matter"
+		},
+		{
+			"start": 15.5,
+			"title": "Setting the column"
+		}
+	]
+}

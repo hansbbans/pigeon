@@ -8,7 +8,8 @@ import { handlePersonalization } from './personalization-api';
 import { handleStaleFeeds } from './stale-feeds-api';
 import { handleBrowserArticles } from './browser-library-api';
 import { handleSavedRequest } from './saved-items';
-import { handleBrowserReaderSource, handleBrowserReadwiseSave } from './browser-reading-api';
+import { handleBrowserReaderSource, handleBrowserReadwiseSave, handleBrowserYouTubeProxy } from './browser-reading-api';
+import { handleItemTranscriptRequest } from './item-transcripts';
 import type { Env } from './types';
 import { handleBrowserPush } from './web-push';
 
@@ -35,6 +36,7 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 		return handleImageProxy(request);
 	}
 	if (path === '/api/v1/browser/reader-source') return handleBrowserReaderSource(request);
+	if (path === '/api/v1/browser/youtube-proxy') return handleBrowserYouTubeProxy(request);
 	if (path === '/api/v1/browser/readwise/save') return handleBrowserReadwiseSave(request);
 	if (path === '/api/v1/browser/push/capabilities') return handleBrowserPush(request, env);
 
@@ -65,6 +67,8 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	}
 	if (path === '/api/v1/browser/push/subscription') return handleBrowserPush(request, env);
 	if (path === '/api/v1/saved' || path.startsWith('/api/v1/saved/')) return handleSavedRequest(request, env);
+	const transcript = /^\/api\/v1\/items\/([^/]+)\/transcript$/.exec(path);
+	if (transcript) return handleItemTranscriptRequest(request, env, transcript[1]);
 
 	return new Response('Not found', { status: 404 });
 }

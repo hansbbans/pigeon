@@ -16,6 +16,7 @@ import { handleGreaderRequest } from '../../src/greader';
 import { handleNativeApiRequest } from '../../src/native-api';
 import { renderBrowserPersonalizationScript } from '../../src/browser-personalization';
 import { renderBrowserLibraryManagementScript } from '../../src/browser-library-management';
+import { renderBrowserTranscriptScript } from '../../src/browser-transcript';
 import { generateApiToken } from '../../src/api-auth';
 
 export function createElement(
@@ -412,6 +413,9 @@ export async function createBrowserHarness(options?: {
 		['reader-player-shell', createElement('', ['hidden'], 'section', registerFocus)],
 		['reader-player-container', createElement('', [], 'div', registerFocus)],
 		['reader-player-fallback', createElement('', [], 'a', registerFocus)],
+		['transcript-button', createElement('', [], 'button', registerFocus)],
+		['transcript-status', createElement('', [], 'p', registerFocus)],
+		['reader-transcript', createElement('', ['hidden'], 'div', registerFocus)],
 		['reader-frame', createElement('', [], 'iframe', registerFocus)],
 		['settings-content', createElement('', [], 'div', registerFocus)],
 	]);
@@ -587,6 +591,7 @@ export async function createBrowserHarness(options?: {
 			createElement(tagName?: string) {
 				return createElement('', [], tagName, registerFocus, (id, options) => revealCalls.push({ id, ...options }));
 			},
+			implementation: { createHTMLDocument: () => ({ documentElement: null }) },
 			createTextNode(text: string) { const node = createElement(); node.textContent = text; return node; },
 			getElementById(id: string) {
 				const element = elements.get(id);
@@ -606,6 +611,8 @@ export async function createBrowserHarness(options?: {
 		console,
 		setTimeout,
 		clearTimeout,
+		setInterval,
+		clearInterval,
 		fetch: withLegacyMembershipFixtures(options?.fetchImpl ?? (async () => new Response('Error=BadAuthentication', { status: 401 }))),
 	};
 
@@ -619,6 +626,7 @@ export async function createBrowserHarness(options?: {
 	(context.window as any).PigeonReading = options?.readingTools;
 	(context.window as any).__PIGEON_READING_TOOLS__ = options?.extractReader ? {extract:options.extractReader} : undefined;
 	(context as any).TextEncoder=TextEncoder;
+	vm.runInNewContext(renderBrowserTranscriptScript(), context);
 	vm.runInNewContext(renderBrowserLibraryManagementScript(), context);
 	vm.runInNewContext(renderBrowserPersonalizationScript(), context);
 	const runtime = renderBrowserAppRuntimeScript().replace(/\}\)\(\);\s*$/, `

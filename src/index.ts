@@ -105,11 +105,13 @@ export default {
 			path === '/api/v1/stale-feeds' ||
 			path === '/api/v1/browser/articles' ||
 			path === '/api/v1/browser/reader-source' ||
+			path === '/api/v1/browser/youtube-proxy' ||
 			path === '/api/v1/browser/readwise/save' ||
 			path === '/api/v1/browser/push/capabilities' ||
 			path === '/api/v1/browser/push/subscription' ||
 			path === '/api/v1/saved' ||
-			path.startsWith('/api/v1/saved/')
+			path.startsWith('/api/v1/saved/') ||
+			path.startsWith('/api/v1/items/')
 		) {
 			return handleNativeApiRequest(request, env);
 		}
