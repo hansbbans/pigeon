@@ -164,27 +164,48 @@ export function createYouTubeProxyFetch(authenticatedFetch: (input: string, init
 /**
  * Runs Defuddle's YouTube extractor (parseAsync) on an empty document for the
  * watch URL, so every byte comes through `fetch`. Rejects on timeout or when
- * no transcript came back; never waits longer than `timeoutMs`.
+ * no transcript came back; never waits longer than `timeoutMs`. Every fetch
+ * carries this run's AbortSignal: when the run ends (timeout, failure or
+ * success) in-flight requests abort and later ones reject at once, so a retry
+ * never overlaps a previous run's network traffic.
  */
 export async function fetchYouTubeTranscript(options: {
-	Defuddle: any; doc: any; videoId: string; fetch: unknown; timeoutMs?: number; parse: (text: unknown, language?: unknown) => BrowserTranscript | null;
+	Defuddle: any; doc: any; videoId: string; fetch: unknown; timeoutMs?: number; signal?: AbortSignal; parse: (text: unknown, language?: unknown) => BrowserTranscript | null;
 }): Promise<BrowserTranscript> {
 	const { Defuddle, doc, videoId } = options;
 	if (typeof Defuddle !== 'function') throw new Error('Defuddle is unavailable');
 	if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw new Error('Not a YouTube video');
 	const url = 'https://www.youtube.com/watch?v=' + videoId;
+	const controller = new AbortController();
+	const baseFetch = options.fetch as (input: unknown, init?: any) => Promise<Response>;
+	const boundFetch = (input: unknown, init?: any) => {
+		if (controller.signal.aborted) return Promise.reject(Object.assign(new Error('The transcript request ended'), { name: 'AbortError' }));
+		const own = init?.signal;
+		// Defuddle sets its own per-request timeouts; either signal aborts the request.
+		const signal = own && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function' ? AbortSignal.any([own, controller.signal]) : controller.signal;
+		return baseFetch(input, { ...init, signal });
+	};
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let onAbort: (() => void) | null = null;
 	const timeout = new Promise<never>((_, reject) => {
 		timer = setTimeout(() => reject(new Error('The transcript request timed out')), options.timeoutMs ?? 25_000);
+		// The caller's signal (a newer run, or logging out) ends this run too.
+		if (options.signal) {
+			onAbort = () => reject(Object.assign(new Error('The transcript request was cancelled'), { name: 'AbortError' }));
+			if (options.signal.aborted) onAbort();
+			else options.signal.addEventListener('abort', onAbort, { once: true });
+		}
 	});
 	try {
 		const page = doc.implementation.createHTMLDocument('');
-		const result: any = await Promise.race([new Defuddle(page, { url, fetch: options.fetch, useAsync: true }).parseAsync(), timeout]);
+		const result: any = await Promise.race([new Defuddle(page, { url, fetch: boundFetch, useAsync: true }).parseAsync(), timeout]);
 		const transcript = options.parse(result?.variables?.transcript, result?.language);
 		if (!transcript) throw new Error('This video has no transcript');
 		return transcript;
 	} finally {
 		if (timer !== null) clearTimeout(timer);
+		if (onAbort && options.signal) options.signal.removeEventListener('abort', onAbort);
+		controller.abort();
 	}
 }
 
@@ -196,7 +217,7 @@ export async function fetchYouTubeTranscript(options: {
  */
 export function createTranscriptView(options: {
 	doc: any; win: any; container: any; transcript: BrowserTranscript;
-	getPlayerWindow: () => any; now?: () => number; cooldownMs?: number; pollMs?: number;
+	getPlayerWindow: () => any; now?: () => number; cooldownMs?: number; listenDelayMs?: number;
 	helpers: {
 		formatTranscriptTime: (seconds: number) => string;
 		activeTranscriptIndex: (starts: number[], time: number) => number;
@@ -251,8 +272,9 @@ export function createTranscriptView(options: {
 
 	let activeIndex = -1;
 	let lastUserScroll = -Infinity;
-	let expectedScrollTop = 0;
-	let lastMessageAt = -Infinity;
+	let expectedScrollTop = Number.NaN;
+	let answered = false;
+	let listenTimer: ReturnType<typeof setTimeout> | null = null;
 	let destroyed = false;
 
 	const post = (message: string) => {
@@ -291,9 +313,14 @@ export function createTranscriptView(options: {
 
 	const markUserScroll = () => { lastUserScroll = now(); };
 	const onScroll = () => {
-		// The one scroll event our own scrollTop write produces is not the reader's.
-		if (Math.abs((container.scrollTop || 0) - expectedScrollTop) > 2) markUserScroll();
+		// The scroll event our own scrollTop write produces is not the reader's;
+		// every other scroll (wheel, keyboard, scrollbar, touch) pauses auto-scroll.
+		if (Number.isFinite(expectedScrollTop) && Math.abs((container.scrollTop || 0) - expectedScrollTop) <= 2) {
+			expectedScrollTop = Number.NaN;
+			return;
+		}
 		expectedScrollTop = Number.NaN;
+		markUserScroll();
 	};
 	const onClick = (event: any) => {
 		let element = event.target;
@@ -312,7 +339,11 @@ export function createTranscriptView(options: {
 		if (!player || event.source !== player || event.origin !== PLAYER_ORIGIN) return;
 		const info = helpers.readYouTubePlayerMessage(event.data);
 		if (!info) return;
-		lastMessageAt = now();
+		if (!answered) {
+			answered = true;
+			if (listenTimer !== null) clearTimeout(listenTimer);
+			listenTimer = null;
+		}
 		if (info.currentTime !== undefined) update(info.currentTime);
 	};
 	container.addEventListener('scroll', onScroll);
@@ -320,15 +351,22 @@ export function createTranscriptView(options: {
 	container.addEventListener('touchmove', markUserScroll);
 	container.addEventListener('click', onClick);
 	win.addEventListener('message', onMessage);
-	// "listening" subscribes this page to the player's infoDelivery messages; repeat
-	// it until the player answers (it may still be loading), then ask for the time.
-	const tick = () => {
-		if (destroyed || doc.visibilityState === 'hidden') return;
-		if (now() - lastMessageAt > 2000) post(JSON.stringify({ event: 'listening', id: 'pigeon-transcript', channel: 'widget' }));
-		post(helpers.youtubePlayerCommand('getCurrentTime'));
+	// "listening" subscribes this page to the player's infoDelivery messages,
+	// which then carry currentTime while the video plays. The player may still
+	// be loading, so repeat it with backoff until the first answer, then stop:
+	// no timer runs while the transcript is simply showing.
+	let listenDelay = options.listenDelayMs ?? 250;
+	let listenAttempts = 0;
+	const listen = () => {
+		listenTimer = null;
+		if (destroyed || answered) return;
+		post(JSON.stringify({ event: 'listening', id: 'pigeon-transcript', channel: 'widget' }));
+		listenAttempts += 1;
+		if (listenAttempts >= 10) return;
+		listenTimer = setTimeout(listen, listenDelay);
+		listenDelay = Math.min(listenDelay * 2, 8000);
 	};
-	const poll = setInterval(tick, options.pollMs ?? 500);
-	tick();
+	listen();
 
 	return {
 		update,
@@ -337,7 +375,8 @@ export function createTranscriptView(options: {
 		destroy() {
 			if (destroyed) return;
 			destroyed = true;
-			clearInterval(poll);
+			if (listenTimer !== null) clearTimeout(listenTimer);
+			listenTimer = null;
 			container.removeEventListener('scroll', onScroll);
 			container.removeEventListener('wheel', markUserScroll);
 			container.removeEventListener('touchmove', markUserScroll);

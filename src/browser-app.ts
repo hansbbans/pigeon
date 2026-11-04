@@ -1397,7 +1397,7 @@ export function renderBrowserAppRuntimeScript(): string {
     frameObjectURLs.clear();visiblePreviewSources.clear();
     zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
     closeLinkContextMenu(false); hideToast(); inFlightSaves.clear(); savedExtractionJobs.clear(); savedExtractionErrors.clear(); pendingSavedRemoval = null;
-    hideTranscript(); transcriptStates.clear();
+    hideTranscript(); transcriptStates.clear(); if (transcriptFetchAbort) transcriptFetchAbort.abort(); transcriptFetchAbort = null;
 
     if (personalizationService) personalizationService.destroy();
     personalizationService = null; personalizationPanel = null; pendingFeedback = null;
@@ -3161,6 +3161,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const transcriptStates = new Map();
   let transcriptView = null;
   let transcriptItemKey = null;
+  let transcriptFetchAbort = null;
 
   function transcriptKeyFor(item) { return item ? String(item.nativeId || item.id || '') : ''; }
 
@@ -3194,10 +3195,15 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // Fetches only when asked to (the button); otherwise just reads a stored copy.
+  // States: checking (reading a stored copy), loading (the button's fetch),
+  // ready, failed (the fetch failed: message plus button), idle (no stored copy
+  // could be read: button only). failed and idle are terminal: nothing reloads
+  // on its own, only the button starts again.
   function loadTranscript(item, fetchIfMissing) {
     const key = transcriptKeyFor(item);
     const existing = transcriptStates.get(key);
-    if (existing && existing.status !== 'failed' && (existing.status !== 'checking' || !fetchIfMissing)) return existing.job;
+    const restartable = !existing || existing.status === 'failed' || existing.status === 'idle' || (existing.status === 'checking' && fetchIfMissing);
+    if (!restartable) return existing.job;
     const videoId = client.extractYouTubeVideoId(item?.alternate?.[0]?.href);
     const generation = accountGeneration;
     const token = session.token;
@@ -3211,23 +3217,32 @@ export function renderBrowserAppRuntimeScript(): string {
         const stored = await getStoredTranscript(key);
         if (!current()) return;
         if (stored) { state.status = 'ready'; state.transcript = stored; markItemHasTranscript(key); return; }
-        if (!fetchIfMissing) { transcriptStates.delete(key); return; }
+        if (!fetchIfMissing) { state.status = 'idle'; return; }
         const tools = window.PigeonTranscript;
         if (!videoId || !tools) throw new Error('Transcripts are unavailable here');
         await loadDefuddle();
         if (!current()) return;
-        const transcript = await tools.fetchYouTubeTranscript({
-          Defuddle: window.Defuddle, doc: document, videoId,
-          fetch: tools.createYouTubeProxyFetch(authenticatedFetch), timeoutMs: TRANSCRIPT_FETCH_TIMEOUT_MS,
-        });
+        // One Defuddle run at a time: a new run (or logging out) aborts the previous one's requests.
+        if (transcriptFetchAbort) transcriptFetchAbort.abort();
+        const abort = new AbortController();
+        transcriptFetchAbort = abort;
+        let transcript;
+        try {
+          transcript = await tools.fetchYouTubeTranscript({
+            Defuddle: window.Defuddle, doc: document, videoId, signal: abort.signal,
+            fetch: tools.createYouTubeProxyFetch(authenticatedFetch), timeoutMs: TRANSCRIPT_FETCH_TIMEOUT_MS,
+          });
+        } finally {
+          if (transcriptFetchAbort === abort) transcriptFetchAbort = null;
+        }
         if (!current()) return;
         state.status = 'ready';
         state.transcript = transcript;
-        // Shown either way; a failed upload only means the next visit fetches again.
-        try { await storeTranscript(key, transcript); if (current()) markItemHasTranscript(key); } catch (_error) {}
+        // Shown now; stored in the background. A failed upload only means the next visit fetches again.
+        void storeTranscript(key, transcript).then(() => { if (current()) markItemHasTranscript(key); }).catch(() => {});
       } catch (_error) {
         if (!current()) return;
-        if (fetchIfMissing) state.status = 'failed'; else transcriptStates.delete(key);
+        state.status = fetchIfMissing ? 'failed' : 'idle';
       } finally {
         if (requestBelongsToCurrentSession(generation, token) && transcriptItemKey === key) {
           const selected = loadedItemsById[selectedItemId];

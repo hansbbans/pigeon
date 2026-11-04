@@ -45,7 +45,7 @@ const TRANSCRIPT = {
 	chapters: [{ start: 0, title: 'Introduction' }, { start: 14, title: 'Why it matters' }],
 };
 
-test('pure transcript helpers: times, Defuddle text, active segment, player messages, scrolling', () => {
+test('pure transcript helpers: times, Defuddle text, active segment, player messages, scrolling', async () => {
 	assert.deepEqual([0, 4.9, 65, 3599, 3600, 3725, -3, Number.NaN].map(formatTranscriptTime), ['0:00', '0:04', '1:05', '59:59', '1:00:00', '1:02:05', '0:00', '0:00']);
 
 	const parsed = parseDefuddleTranscript(DEFUDDLE_TEXT, 'en');
@@ -59,7 +59,7 @@ test('pure transcript helpers: times, Defuddle text, active segment, player mess
 		chapters: [{ start: 4, title: 'Introduction example' }, { start: 3734, title: 'Neural networks' }],
 	});
 	// What the client builds is exactly what the Worker stores.
-	assert.deepEqual(parseTranscriptDocument(parsed).document, parsed);
+	assert.deepEqual((await parseTranscriptDocument(parsed)).document, parsed);
 	assert.equal(parseDefuddleTranscript('**0:01** · hi', 'not a tag')?.language, undefined);
 	for (const empty of [undefined, null, '', '   ', '### Only a heading', 'no timestamps here', 42]) assert.equal(parseDefuddleTranscript(empty), null);
 
@@ -143,7 +143,7 @@ test('the vendored Defuddle YouTube extractor, routed through the Worker proxy, 
 		chapters: [{ start: 4, title: 'Introduction' }, { start: 31, title: 'Layers' }],
 	});
 	assert.ok(youtube.requests.includes('/youtubei/v1/player') && youtube.requests.includes('/api/timedtext'), youtube.requests.join());
-	assert.deepEqual(parseTranscriptDocument(transcript).document, transcript);
+	assert.deepEqual((await parseTranscriptDocument(transcript)).document, transcript);
 
 	for (const blocked of [fakeYouTube({ status: 429 }), fakeYouTube({ captions: false })]) {
 		await assert.rejects(fetchYouTubeTranscript({
@@ -152,6 +152,62 @@ test('the vendored Defuddle YouTube extractor, routed through the Worker proxy, 
 		}), /no transcript/);
 	}
 	window.close();
+});
+
+test('the view sends "listening" with backoff until the player first answers, then runs no timer', (t) => {
+	t.mock.timers.enable({ apis: ['setTimeout'] });
+	const posted: string[] = [];
+	const player = { postMessage(message: string) { posted.push(JSON.parse(message).event); } };
+	let onMessage: ((event: unknown) => void) | undefined;
+	const win = { addEventListener: (_type: string, handler: (event: unknown) => void) => { onMessage = handler; }, removeEventListener() {} };
+	const doc = { createElement: (tag: string) => createElement('', [], tag) };
+	const view = createTranscriptView({ doc, win, container: createElement('', [], 'div'), transcript: TRANSCRIPT, getPlayerWindow: () => player, listenDelayMs: 100, helpers });
+	t.after(() => view.destroy());
+	assert.equal(posted.length, 1);
+	t.mock.timers.tick(99);
+	assert.equal(posted.length, 1);
+	t.mock.timers.tick(1);
+	assert.equal(posted.length, 2, 'retried after 100 ms');
+	t.mock.timers.tick(200);
+	assert.equal(posted.length, 3, 'then after 200 ms');
+	t.mock.timers.tick(399);
+	assert.equal(posted.length, 3, 'backing off');
+	onMessage!({ source: player, origin: 'https://www.youtube.com', data: '{"event":"initialDelivery","info":{"playerState":-1}}' });
+	for (let step = 0; step < 60; step += 1) t.mock.timers.tick(1_000);
+	assert.deepEqual(posted, ['listening', 'listening', 'listening'], 'nothing more once the player answered');
+	// A player that never answers gets ten tries, then the timer stops.
+	posted.length = 0;
+	const silent = createTranscriptView({ doc, win, container: createElement('', [], 'div'), transcript: TRANSCRIPT, getPlayerWindow: () => player, listenDelayMs: 100, helpers });
+	for (let step = 0; step < 120; step += 1) t.mock.timers.tick(5_000);
+	assert.equal(posted.length, 10);
+	silent.destroy();
+});
+
+test('fetchYouTubeTranscript aborts in-flight requests when it ends and rejects later ones', async () => {
+	const doc = { implementation: { createHTMLDocument: () => ({}) } };
+	const signals: AbortSignal[] = [];
+	let lateFetch: (() => Promise<unknown>) | undefined;
+	const hangingFetch = (_input: unknown, init: { signal: AbortSignal }) => {
+		signals.push(init.signal);
+		return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
+	};
+	class Fetching {
+		private readonly fetch: (input: unknown, init?: unknown) => Promise<unknown>;
+		constructor(_page: unknown, options: { fetch: (input: unknown, init?: unknown) => Promise<unknown> }) { this.fetch = options.fetch; }
+		parseAsync() { lateFetch = () => this.fetch('https://www.youtube.com/api/timedtext', {}); return this.fetch('https://www.youtube.com/youtubei/v1/player', { signal: new AbortController().signal }); }
+	}
+	await assert.rejects(fetchYouTubeTranscript({ Defuddle: Fetching, doc, videoId: VIDEO_ID, fetch: hangingFetch, parse: parseDefuddleTranscript, timeoutMs: 30 }), /timed out/);
+	assert.equal(signals.length, 1);
+	assert.equal(signals[0].aborted, true, 'the timeout aborted the request in flight');
+	await assert.rejects(lateFetch!(), /ended/);
+	assert.equal(signals.length, 1, 'a request after the run ended never reaches the network');
+
+	// The caller's signal ends a run early (a newer run, or logging out).
+	const caller = new AbortController();
+	const run = fetchYouTubeTranscript({ Defuddle: Fetching, doc, videoId: VIDEO_ID, fetch: hangingFetch, parse: parseDefuddleTranscript, timeoutMs: 10_000, signal: caller.signal });
+	caller.abort();
+	await assert.rejects(run, /cancelled/);
+	assert.equal(signals[1].aborted, true);
 });
 
 test('fetchYouTubeTranscript never waits past its deadline and refuses bad input', async () => {
@@ -182,7 +238,7 @@ function viewHarness() {
 	};
 	const doc = { visibilityState: 'visible', createElement: (tag: string) => createElement('', [], tag) };
 	const container = createElement('', [], 'div');
-	const view = createTranscriptView({ doc, win, container, transcript: TRANSCRIPT, getPlayerWindow: () => player, now: () => now, pollMs: 60_000, helpers });
+	const view = createTranscriptView({ doc, win, container, transcript: TRANSCRIPT, getPlayerWindow: () => player, now: () => now, listenDelayMs: 60_000, helpers });
 	// Lay the rows out 40px apart in a 120px box.
 	container.children.forEach((child: any, index: number) => { child.offsetTop = index * 40; child.offsetHeight = 40; });
 	Object.assign(container, { clientHeight: 120, scrollHeight: container.children.length * 40 });
@@ -198,9 +254,8 @@ test('the transcript view renders chapters as headings, follows the player, auto
 	const rows = container.children.filter((child: any) => child.tagName === 'P');
 	assert.equal(rows[0].children[0].tagName, 'BUTTON');
 	assert.equal(rows[0].children[0].getAttribute('aria-label'), 'Play from 0:04');
-	// It subscribes to the player at once: "listening", then a time request.
-	assert.deepEqual(posted.map((entry) => [entry.message.event, entry.message.func, entry.origin]),
-		[['listening', undefined, 'https://www.youtube.com'], ['command', 'getCurrentTime', 'https://www.youtube.com']]);
+	// It subscribes to the player at once with "listening", and polls nothing.
+	assert.deepEqual(posted.map((entry) => [entry.message.event, entry.origin]), [['listening', 'https://www.youtube.com']]);
 
 	message(JSON.stringify({ event: 'infoDelivery', info: { currentTime: 7 } }));
 	assert.equal(view.activeIndex(), 1);
@@ -230,6 +285,16 @@ test('the transcript view renders chapters as headings, follows the player, auto
 	advance(10);
 	message({ event: 'infoDelivery', info: { currentTime: 6 } });
 	assert.equal(container.scrollTop, 60, 'our own scroll event did not count as the reader scrolling');
+	// Regression: after our own scroll event, a keyboard or scrollbar scroll still pauses auto-scroll.
+	container.dispatch('scroll');
+	container.scrollTop = 5;
+	container.dispatch('scroll');
+	advance(10);
+	message({ event: 'infoDelivery', info: { currentTime: 15 } });
+	assert.equal(container.scrollTop, 5, 'a scroll that is not ours pauses auto-scroll');
+	advance(4000);
+	message({ event: 'infoDelivery', info: { currentTime: 4.5 } });
+	assert.equal(container.scrollTop, 20, 'and it resumes after the cooldown');
 
 	// Click the text of a row, or a chapter's time: seek there.
 	posted.length = 0;
@@ -248,7 +313,10 @@ test('the transcript view renders chapters as headings, follows the player, auto
 
 const ITEM_URL = '/api/v1/items/tag%3Agoogle.com%2C2005%3Areader%2Fitem%2F0000000000000065/transcript';
 
-async function videoReader(options: { hasTranscript?: boolean; stored?: unknown; defuddle?: (fetch: any) => Promise<unknown> } = {}) {
+async function videoReader(options: {
+	hasTranscript?: boolean; stored?: unknown; defuddle?: (fetch: any) => Promise<unknown>;
+	getTranscript?: () => Promise<Response>; putTranscript?: () => Promise<Response>;
+} = {}) {
 	const requests: Array<{ method: string; input: string; body?: string }> = [];
 	const harness = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
@@ -267,10 +335,11 @@ async function videoReader(options: { hasTranscript?: boolean; stored?: unknown;
 						origin: { title: '3Blue1Brown' }, content: { content: '<p>Words</p>' }, alternate: [{ href: 'https://example.com/essay' }] },
 				] });
 			}
+			if (input === ITEM_URL && method === 'GET' && options.getTranscript) return options.getTranscript();
 			if (input === ITEM_URL && method === 'GET') {
 				return options.stored ? Response.json({ itemId: 'x', updatedAt: '2026-11-01T11:00:00.000Z', transcript: options.stored }) : Response.json({ code: 'transcript_not_found' }, { status: 404 });
 			}
-			if (input === ITEM_URL && method === 'PUT') return Response.json({ updated: true });
+			if (input === ITEM_URL && method === 'PUT') return options.putTranscript ? options.putTranscript() : Response.json({ updated: true });
 			if (input.startsWith('/api/v1/browser/youtube-proxy?url=')) return Response.json({ error: 'blocked', code: 'youtube_unavailable' }, { status: 502 });
 			throw new Error(`Unexpected fetch: ${method} ${input}`);
 		},
@@ -389,5 +458,41 @@ test('web reader: an item with a stored transcript shows it directly, with no bu
 	await findListButtonByItemId(elements.get('articles-list'), '101')!.dispatch('click');
 	await waitForBrowserCondition(() => panel.children.length > 0, 60);
 	assert.equal(requests.filter((request) => request.input === ITEM_URL).length, 1);
+	await elements.get('logout-button')!.dispatch('click');
+});
+
+test('web reader: a stored copy that cannot be read falls back to the button once, with no reload loop', async () => {
+	for (const failure of [
+		async () => Response.json({ error: 'down' }, { status: 503 }),
+		async () => { throw new TypeError('Failed to fetch'); },
+		async () => Response.json({ code: 'transcript_not_found' }, { status: 404 }),
+		async () => Response.json({ transcript: { version: 9, segments: [] } }),
+	]) {
+		const { requests, elements } = await videoReader({ hasTranscript: true, getTranscript: failure });
+		const button = elements.get('transcript-button')!;
+		await waitForBrowserCondition(() => button.hidden === false, 60);
+		for (let tick = 0; tick < 20; tick += 1) await flushBrowserTasks();
+		assert.equal(requests.filter((request) => request.input === ITEM_URL).length, 1, 'one read, no retry loop');
+		assert.equal(elements.get('transcript-status')!.textContent, '');
+		assert.equal(elements.get('reader-transcript')!.classList.contains('hidden'), true);
+		await elements.get('logout-button')!.dispatch('click');
+	}
+});
+
+test('web reader: a fetched transcript shows at once while its upload is still in flight', async () => {
+	let finishUpload: (response: Response) => void = () => {};
+	const { requests, elements } = await videoReader({
+		defuddle: async () => ({ language: 'en', variables: { transcript: '**0:01** · Hello there.' } }),
+		putTranscript: () => new Promise<Response>((resolve) => { finishUpload = resolve; }),
+	});
+	const panel = elements.get('reader-transcript')!;
+	await elements.get('transcript-button')!.dispatch('click');
+	await waitForBrowserCondition(() => requests.some((request) => request.method === 'PUT'), 60);
+	await waitForBrowserCondition(() => panel.children.length === 1, 60);
+	assert.equal(panel.classList.contains('hidden'), false, 'shown before the upload answers');
+	assert.equal(elements.get('transcript-button')!.hidden, true);
+	finishUpload(Response.json({ updated: true }));
+	await flushBrowserTasks();
+	assert.equal(panel.children.length, 1);
 	await elements.get('logout-button')!.dispatch('click');
 });

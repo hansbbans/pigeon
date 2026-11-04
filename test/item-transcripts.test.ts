@@ -6,7 +6,10 @@ import { handleBrowserYouTubeProxy } from '../src/browser-reading-api';
 import app from '../src/index';
 import {
 	MAX_TRANSCRIPT_JSON_BYTES,
+	MAX_SEGMENT_TEXT_BYTES,
+	MAX_TRANSCRIPT_CHAPTERS,
 	MAX_TRANSCRIPT_REQUEST_BYTES,
+	MAX_TRANSCRIPT_SEGMENTS,
 	parseTranscriptDocument,
 } from '../src/item-transcripts';
 import type { Env } from '../src/types';
@@ -64,8 +67,8 @@ async function setup() {
 	return { database, env, request, put, get, articleEvents };
 }
 
-test('parseTranscriptDocument keeps the versioned format, sorts, drops blanks and unknown keys', () => {
-	const parsed = parseTranscriptDocument({
+test('parseTranscriptDocument keeps the versioned format, sorts, drops blanks and unknown keys', async () => {
+	const parsed = await parseTranscriptDocument({
 		version: 1, language: ' en-US ', extra: true,
 		segments: [{ start: 9.87654, text: '  second\n line ', speaker: 2 }, { start: 1, duration: 8.88888, text: 'first' }, { start: 3, text: '   ' }],
 		chapters: [{ start: 5, title: ' B ' }, { start: 0, title: 'A' }, { start: 1, title: '' }],
@@ -77,7 +80,8 @@ test('parseTranscriptDocument keeps the versioned format, sorts, drops blanks an
 	});
 	assert.equal(parsed.json, JSON.stringify(parsed.document));
 	assert.equal(parsed.text, 'A\nB\nfirst\nsecond line');
-	assert.deepEqual(parseTranscriptDocument({ version: 1, segments: [{ start: 0, text: 'x' }], chapters: [] }).document,
+	assert.match(parsed.sha256, /^[0-9a-f]{64}$/);
+	assert.deepEqual((await parseTranscriptDocument({ version: 1, segments: [{ start: 0, text: 'x' }], chapters: [] })).document,
 		{ version: 1, segments: [{ start: 0, text: 'x' }] }, 'empty chapters and no language are omitted');
 	for (const bad of [
 		null, [], { version: 2, segments: [{ start: 0, text: 'x' }] }, { version: 1 }, { version: 1, segments: [] },
@@ -85,10 +89,51 @@ test('parseTranscriptDocument keeps the versioned format, sorts, drops blanks an
 		{ version: 1, segments: [{ start: '1', text: 'x' }] }, { version: 1, segments: [{ start: 1, text: 3 }] },
 		{ version: 1, segments: [{ start: 1, text: 'x', duration: -2 }] }, { version: 1, language: 'not a tag!', segments: [{ start: 0, text: 'x' }] },
 		{ version: 1, segments: [{ start: 0, text: 'x' }], chapters: {} }, { version: 1, segments: [{ start: 0, text: 'x' }], chapters: [{ start: 0 }] },
-		{ version: 1, segments: [{ start: 0, text: 'x'.repeat(5001) }] },
 	]) {
-		assert.throws(() => parseTranscriptDocument(bad), (error: any) => error.status === 400, JSON.stringify(bad));
+		await assert.rejects(parseTranscriptDocument(bad), (error: any) => error.status === 400, JSON.stringify(bad));
 	}
+});
+
+test('overlong segment text and chapter titles are truncated on a character boundary, not refused', async () => {
+	const long = 'é'.repeat(MAX_SEGMENT_TEXT_BYTES);
+	const parsed = await parseTranscriptDocument({ version: 1,
+		segments: [{ start: 0, text: long }, { start: 1, text: ' '.repeat(MAX_SEGMENT_TEXT_BYTES * 2 - 1) + '😀 tail' }, { start: 2, text: 'kept' }],
+		chapters: [{ start: 0, title: 'T'.repeat(1000) }] });
+	assert.equal(parsed.document.segments.length, 2, 'a segment that is only whitespace inside the cut is dropped');
+	assert.equal(parsed.document.segments[0].text, 'é'.repeat(MAX_SEGMENT_TEXT_BYTES / 2));
+	assert.equal(new TextEncoder().encode(parsed.document.segments[0].text).byteLength, MAX_SEGMENT_TEXT_BYTES);
+	assert.equal(parsed.document.segments[1].text, 'kept');
+	assert.equal(parsed.document.chapters![0].title, 'T'.repeat(300));
+	assert.equal(parsed.json.includes('\\ud83d'), false, 'no lone surrogate is stored');
+});
+
+test('too many segments or chapters is 413 transcript_too_large', async () => {
+	const segment = { start: 0, text: 'a' };
+	await assert.rejects(parseTranscriptDocument({ version: 1, segments: Array(MAX_TRANSCRIPT_SEGMENTS + 1).fill(segment) }),
+		(error: any) => error.status === 413 && error.code === 'transcript_too_large');
+	await assert.rejects(parseTranscriptDocument({ version: 1, segments: [segment], chapters: Array(MAX_TRANSCRIPT_CHAPTERS + 1).fill({ start: 0, title: 'c' }) }),
+		(error: any) => error.status === 413 && error.code === 'transcript_too_large');
+	assert.equal((await parseTranscriptDocument({ version: 1, segments: Array(MAX_TRANSCRIPT_SEGMENTS).fill(segment), chapters: Array(MAX_TRANSCRIPT_CHAPTERS).fill({ start: 0, title: 'c' }) })).document.segments.length, MAX_TRANSCRIPT_SEGMENTS);
+});
+
+test('a worst-case transcript validates in a few milliseconds (Free plan: 10 ms CPU per request)', async () => {
+	// Every cap at once: the most segments, chapters, and request bytes. Measured on an M-series Mac: median about 1.5 ms.
+	const document = (per: number) => ({ version: 1, language: 'en',
+		segments: Array.from({ length: MAX_TRANSCRIPT_SEGMENTS }, (_, index) => ({ start: index * 1.234, duration: 1.234, text: 'w'.repeat(per) })),
+		chapters: Array.from({ length: MAX_TRANSCRIPT_CHAPTERS }, (_, index) => ({ start: index * 30, title: 'Chapter ' + index })) });
+	let body = JSON.stringify(document(30));
+	body = body.slice(0, -1) + ',"pad":"' + ' '.repeat(MAX_TRANSCRIPT_REQUEST_BYTES - body.length - 12) + '"}';
+	assert.ok(body.length <= MAX_TRANSCRIPT_REQUEST_BYTES && body.length > MAX_TRANSCRIPT_REQUEST_BYTES - 64);
+	const times: number[] = [];
+	for (let run = 0; run < 15; run += 1) {
+		const started = performance.now();
+		const parsed = await parseTranscriptDocument(JSON.parse(body));
+		times.push(performance.now() - started);
+		assert.ok(parsed.bytes <= MAX_TRANSCRIPT_JSON_BYTES);
+	}
+	times.sort((a, b) => a - b);
+	// A generous bound so a loaded CI machine passes; a quadratic regression would not.
+	assert.ok(times[7] < 25, `median ${times[7].toFixed(2)} ms`);
 });
 
 test('PUT stores a transcript for a feed video and a saved YouTube link; GET reads it back', async (t) => {
@@ -153,7 +198,7 @@ test('transcripts are refused for text items, unknown items, bad bodies and over
 	assert.equal((await state.put(VIDEO, { version: 1, segments: [] })).status, 400);
 
 	// Canonical JSON over the cap: a 413, and nothing stored.
-	const big = { version: 1, segments: Array.from({ length: 200 }, (_, index) => ({ start: index, text: 'word '.repeat(480).trim() })) };
+	const big = { version: 1, segments: Array.from({ length: 100 }, (_, index) => ({ start: index, text: 'word '.repeat(395).trim() })) };
 	assert.ok(JSON.stringify(big).length > MAX_TRANSCRIPT_JSON_BYTES && JSON.stringify(big).length < MAX_TRANSCRIPT_REQUEST_BYTES);
 	assert.deepEqual((await state.put(VIDEO, big)).body.code, 'transcript_too_large');
 	// A request body over the request cap, with or without a Content-Length.
@@ -164,7 +209,7 @@ test('transcripts are refused for text items, unknown items, bad bodies and over
 		body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(huge)); controller.close(); } }),
 	} as RequestInit);
 	assert.equal(chunked.status, 413);
-	const tooMany = { version: 1, segments: Array.from({ length: 20_001 }, (_, index) => ({ start: index, text: 'a' })) };
+	const tooMany = { version: 1, segments: Array.from({ length: MAX_TRANSCRIPT_SEGMENTS + 1 }, (_, index) => ({ start: index, text: 'a' })) };
 	assert.equal((await state.put(VIDEO, tooMany)).status, 413);
 	assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM item_transcripts').get() as any).count, 0);
 	assert.equal((await state.request(`/api/v1/items/${VIDEO}/transcript`, { method: 'DELETE' })).status, 405);
@@ -295,9 +340,10 @@ test('YouTube proxy turns refusals, redirects, odd types, oversize bodies and ne
 	assert.deepEqual(await run(new Response('blocked', { status: 429 })), { status: 502, body: { error: 'YouTube did not return the transcript data', code: 'youtube_unavailable', upstreamStatus: 429 } });
 	assert.equal((await run(new Response(null, { status: 302, headers: { Location: 'https://consent.youtube.com/' } }))).body.upstreamStatus, 302, 'redirects are not followed');
 	assert.equal((await run(new Response('<html>', { headers: { 'Content-Type': 'text/html' } }))).status, 502);
-	assert.equal((await run(new Response('x', { headers: { 'Content-Type': 'text/xml', 'Content-Length': '4000001' } }))).status, 413);
+	assert.deepEqual(await run(new Response('x', { headers: { 'Content-Type': 'text/xml', 'Content-Length': '4000001' } })),
+		{ status: 502, body: { error: 'YouTube returned more data than the proxy passes on', code: 'youtube_unavailable' } });
 	const stream = new ReadableStream({ start(controller) { for (let index = 0; index < 5; index += 1) controller.enqueue(new Uint8Array(1_000_000)); controller.close(); } });
-	assert.equal((await run(new Response(stream, { headers: { 'Content-Type': 'text/xml' } }))).status, 413);
+	assert.equal((await run(new Response(stream, { headers: { 'Content-Type': 'text/xml' } }))).body.code, 'youtube_unavailable');
 	assert.deepEqual(await run(new TypeError('network down')), { status: 502, body: { error: 'Could not reach YouTube', code: 'youtube_unreachable' } });
 	assert.equal((await run(new DOMException('The operation timed out.', 'TimeoutError'))).body.code, 'youtube_unreachable');
 	const empty = await handleBrowserYouTubeProxy(proxyRequest(CAPTIONS), answer(new Response(null, { status: 204, headers: { 'Content-Type': 'text/xml' } })));

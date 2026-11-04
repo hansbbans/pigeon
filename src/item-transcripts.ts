@@ -16,31 +16,39 @@
  * - `version` is always 1. A future format gets a new number; readers skip
  *   versions they do not know.
  * - `language` (optional) is the caption track's BCP 47 code.
- * - `segments` (1..20 000) are sorted by `start`. `start` and the optional
- *   `duration` are seconds, rounded to milliseconds. `text` is plain text.
- * - `chapters` (optional, 0..500) are sorted by `start`; omitted when empty.
+ * - `segments` (1..8 000) are sorted by `start`. `start` and the optional
+ *   `duration` are seconds, rounded to milliseconds. `text` is plain text,
+ *   truncated to 4 000 UTF-8 bytes.
+ * - `chapters` (optional, 0..300) are sorted by `start`; omitted when empty.
  *
  * `item_transcripts.text` holds the plain text (chapter titles and segment
- * text, one per line) for search. Contract: docs/superpowers/plans/2026-11-03-read-it-later-05-transcripts.md.
+ * text, one per line) for search; `content_sha256` the hex SHA-256 of the
+ * stored JSON, so a repeat upload is detected without comparing the JSON.
+ *
+ * CPU: the Worker has 10 ms per request on the Free plan. Caps keep a
+ * worst-case PUT (JSON parse, one linear validation pass, serialize, hash)
+ * a few milliseconds; test/item-transcripts.test.ts times it. Contract: docs/superpowers/plans/2026-11-03-read-it-later-05-transcripts.md.
  */
 
+import { boundedBytes, failure, jsonHeaders, PayloadTooLarge } from './browser-reading-api';
 import { truncateUtf8 } from './content-size';
-import { hasStoredItemId, parseGoogleReaderItemRowid } from './item-identity';
+import { findItemByAnyId } from './item-identity';
 import { toISO8601 } from './timestamps';
 import type { Env } from './types';
 import { extractYouTubeVideoId } from './youtube';
 
 export const TRANSCRIPT_FORMAT_VERSION = 1;
-/** The stored JSON; together with the plain text (never longer) it stays under the 900 KB body budget. */
-export const MAX_TRANSCRIPT_JSON_BYTES = 450_000;
-/** A request may carry extra whitespace or keys that the canonical form drops. */
-export const MAX_TRANSCRIPT_REQUEST_BYTES = 1_000_000;
-export const MAX_TRANSCRIPT_SEGMENTS = 20_000;
-export const MAX_TRANSCRIPT_CHAPTERS = 500;
-const MAX_SEGMENT_TEXT_LENGTH = 5_000;
+/** The stored JSON. About three hours of grouped captions fit with room to spare. */
+export const MAX_TRANSCRIPT_JSON_BYTES = 192_000;
+/** A request may carry whitespace or keys that the canonical form drops. */
+export const MAX_TRANSCRIPT_REQUEST_BYTES = 256_000;
+export const MAX_TRANSCRIPT_SEGMENTS = 2_000;
+export const MAX_TRANSCRIPT_CHAPTERS = 200;
+export const MAX_SEGMENT_TEXT_BYTES = 4_000;
 const MAX_CHAPTER_TITLE_BYTES = 300;
 /** A week of video: anything later is not a real timestamp. */
 const MAX_SECONDS = 604_800;
+const REQUEST_DEADLINE_MS = 5_000;
 const LANGUAGE_PATTERN = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,4}$/;
 
 export interface TranscriptSegment {
@@ -68,6 +76,8 @@ export interface ParsedTranscript {
 	/** Plain text for search. */
 	text: string;
 	bytes: number;
+	/** Hex SHA-256 of `json`. */
+	sha256: string;
 }
 
 class TranscriptError extends Error {
@@ -78,49 +88,55 @@ class TranscriptError extends Error {
 
 /**
  * Validates a client's transcript and returns its canonical form. Unknown keys
- * are dropped; out-of-order segments and chapters are sorted; blank segments
- * are dropped. Throws a 400 for a malformed document, a 413 when too large.
+ * are dropped, blank segments are dropped, overlong text is truncated, and
+ * out-of-order segments and chapters are sorted (an already sorted list, the
+ * normal case, is only scanned). Throws a 400 for a malformed document and a
+ * 413 (transcript_too_large) for too many segments or chapters or too many bytes.
  */
-export function parseTranscriptDocument(value: unknown): ParsedTranscript {
+export async function parseTranscriptDocument(value: unknown): Promise<ParsedTranscript> {
 	if (!isRecord(value)) throw invalid('The transcript must be a JSON object');
 	if (value.version !== TRANSCRIPT_FORMAT_VERSION) throw invalid('version must be 1');
 	let language: string | undefined;
 	if (value.language !== undefined && value.language !== null) {
-		if (typeof value.language !== 'string' || !LANGUAGE_PATTERN.test(value.language.trim())) {
+		if (typeof value.language !== 'string' || value.language.length > 64 || !LANGUAGE_PATTERN.test(value.language.trim())) {
 			throw invalid('language must be a BCP 47 language tag');
 		}
 		language = value.language.trim();
 	}
 	if (!Array.isArray(value.segments)) throw invalid('segments must be an array');
-	if (value.segments.length > MAX_TRANSCRIPT_SEGMENTS) {
-		throw new TranscriptError(`A transcript has at most ${MAX_TRANSCRIPT_SEGMENTS} segments`, 413, 'transcript_too_large');
-	}
+	if (value.segments.length > MAX_TRANSCRIPT_SEGMENTS) throw tooLarge(`A transcript has at most ${MAX_TRANSCRIPT_SEGMENTS} segments`);
 	const segments: TranscriptSegment[] = [];
-	for (const [index, raw] of value.segments.entries()) {
+	let segmentsSorted = true;
+	for (let index = 0; index < value.segments.length; index += 1) {
+		const raw: unknown = value.segments[index];
 		if (!isRecord(raw)) throw invalid(`segments[${index}] must be an object`);
 		const start = seconds(raw.start, `segments[${index}].start`);
 		if (typeof raw.text !== 'string') throw invalid(`segments[${index}].text must be a string`);
-		const text = raw.text.replace(/\s+/g, ' ').trim();
-		if (text.length > MAX_SEGMENT_TEXT_LENGTH) throw invalid(`segments[${index}].text is too long`);
+		const text = plainText(raw.text, MAX_SEGMENT_TEXT_BYTES);
 		if (!text) continue;
 		const duration = raw.duration === undefined || raw.duration === null ? undefined : seconds(raw.duration, `segments[${index}].duration`);
+		if (segments.length > 0 && segments[segments.length - 1].start > start) segmentsSorted = false;
 		segments.push(duration === undefined ? { start, text } : { start, duration, text });
 	}
 	if (segments.length === 0) throw invalid('A transcript needs at least one segment with text');
-	segments.sort((a, b) => a.start - b.start);
+	if (!segmentsSorted) segments.sort((a, b) => a.start - b.start);
 
 	const chapters: TranscriptChapter[] = [];
 	if (value.chapters !== undefined && value.chapters !== null) {
 		if (!Array.isArray(value.chapters)) throw invalid('chapters must be an array');
-		if (value.chapters.length > MAX_TRANSCRIPT_CHAPTERS) throw invalid(`A transcript has at most ${MAX_TRANSCRIPT_CHAPTERS} chapters`);
-		for (const [index, raw] of value.chapters.entries()) {
+		if (value.chapters.length > MAX_TRANSCRIPT_CHAPTERS) throw tooLarge(`A transcript has at most ${MAX_TRANSCRIPT_CHAPTERS} chapters`);
+		let chaptersSorted = true;
+		for (let index = 0; index < value.chapters.length; index += 1) {
+			const raw: unknown = value.chapters[index];
 			if (!isRecord(raw)) throw invalid(`chapters[${index}] must be an object`);
 			const start = seconds(raw.start, `chapters[${index}].start`);
 			if (typeof raw.title !== 'string') throw invalid(`chapters[${index}].title must be a string`);
-			const title = truncateUtf8(raw.title.replace(/\s+/g, ' ').trim(), MAX_CHAPTER_TITLE_BYTES);
-			if (title) chapters.push({ start, title });
+			const title = plainText(raw.title, MAX_CHAPTER_TITLE_BYTES);
+			if (!title) continue;
+			if (chapters.length > 0 && chapters[chapters.length - 1].start > start) chaptersSorted = false;
+			chapters.push({ start, title });
 		}
-		chapters.sort((a, b) => a.start - b.start);
+		if (!chaptersSorted) chapters.sort((a, b) => a.start - b.start);
 	}
 
 	const document: TranscriptDocument = {
@@ -130,12 +146,14 @@ export function parseTranscriptDocument(value: unknown): ParsedTranscript {
 		...(chapters.length > 0 ? { chapters } : {}),
 	};
 	const json = JSON.stringify(document);
-	const bytes = new TextEncoder().encode(json).byteLength;
-	if (bytes > MAX_TRANSCRIPT_JSON_BYTES) {
-		throw new TranscriptError(`A stored transcript is at most ${MAX_TRANSCRIPT_JSON_BYTES} bytes`, 413, 'transcript_too_large');
-	}
+	// UTF-8 is never shorter than UTF-16 code units, so a long string is over without encoding it.
+	if (json.length > MAX_TRANSCRIPT_JSON_BYTES) throw tooLarge(`A stored transcript is at most ${MAX_TRANSCRIPT_JSON_BYTES} bytes`);
+	const encoded = new TextEncoder().encode(json);
+	if (encoded.byteLength > MAX_TRANSCRIPT_JSON_BYTES) throw tooLarge(`A stored transcript is at most ${MAX_TRANSCRIPT_JSON_BYTES} bytes`);
+	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded));
+	const sha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
 	const text = [...chapters.map((chapter) => chapter.title), ...segments.map((segment) => segment.text)].join('\n');
-	return { document, json, text, bytes };
+	return { document, json, text, bytes: encoded.byteLength, sha256 };
 }
 
 interface TranscriptItemRow {
@@ -153,7 +171,7 @@ export async function handleItemTranscriptRequest(request: Request, env: Env, ra
 		return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, PUT, POST' } });
 	}
 	try {
-		const item = await findItem(env.DB, rawId);
+		const item = await findItemByAnyId<TranscriptItemRow>(env.DB, rawId, 'id, media_kind, original_url');
 		if (!item) throw new TranscriptError('Item not found', 404, 'item_not_found');
 		if (request.method === 'GET') return await readTranscript(env, item.id);
 		if (item.media_kind !== 'video' && !extractYouTubeVideoId(item.original_url)) {
@@ -177,24 +195,25 @@ async function readTranscript(env: Env, itemId: string): Promise<Response> {
 }
 
 async function storeTranscript(request: Request, env: Env, itemId: string): Promise<Response> {
-	const parsed = parseTranscriptDocument(await readJsonBody(request));
+	const parsed = await parseTranscriptDocument(await readJsonBody(request));
 	const language = parsed.document.language ?? null;
-	// One batch: the sync event is written only when the stored document
-	// changes, so a repeat upload adds no sync_changes row (see the sync
-	// compaction notes). Clients learn of a new transcript from the article's
-	// `hasTranscript` field; YouTube items carry small bodies.
+	// One batch, compared by hash: the sync event is written only when the
+	// stored document changes, so a repeat upload adds no sync_changes row (see
+	// the sync compaction notes). Clients learn of a new transcript from the
+	// article's `hasTranscript` field; YouTube items carry small bodies.
 	const [event] = await env.DB.batch([
 		env.DB.prepare(
 			`INSERT INTO sync_changes (entity_type, entity_id)
 			 SELECT 'article', ?
-			 WHERE NOT EXISTS (SELECT 1 FROM item_transcripts WHERE item_id = ? AND html = ?)`,
-		).bind(itemId, itemId, parsed.json),
+			 WHERE NOT EXISTS (SELECT 1 FROM item_transcripts WHERE item_id = ? AND content_sha256 = ?)`,
+		).bind(itemId, itemId, parsed.sha256),
 		env.DB.prepare(
-			`INSERT INTO item_transcripts (item_id, language, html, text) VALUES (?, ?, ?, ?)
+			`INSERT INTO item_transcripts (item_id, language, html, text, content_sha256) VALUES (?, ?, ?, ?, ?)
 			 ON CONFLICT(item_id) DO UPDATE SET
-			   language = excluded.language, html = excluded.html, text = excluded.text, created_at = datetime('now')
-			 WHERE item_transcripts.html IS NOT excluded.html`,
-		).bind(itemId, language, parsed.json, parsed.text),
+			   language = excluded.language, html = excluded.html, text = excluded.text,
+			   content_sha256 = excluded.content_sha256, created_at = datetime('now')
+			 WHERE item_transcripts.content_sha256 IS NOT excluded.content_sha256`,
+		).bind(itemId, language, parsed.json, parsed.text, parsed.sha256),
 	]);
 	return Response.json({
 		itemId,
@@ -206,45 +225,27 @@ async function storeTranscript(request: Request, env: Env, itemId: string): Prom
 	}, { headers: jsonHeaders() });
 }
 
-async function findItem(db: D1Database, rawId: string): Promise<TranscriptItemRow | null> {
-	let id: string;
-	try {
-		id = decodeURIComponent(rawId);
-	} catch {
-		return null;
-	}
-	if (hasStoredItemId(id)) {
-		return db.prepare('SELECT id, media_kind, original_url FROM items WHERE id = ?').bind(id).first<TranscriptItemRow>();
-	}
-	const rowid = parseGoogleReaderItemRowid(id);
-	if (rowid === null) return null;
-	return db.prepare('SELECT id, media_kind, original_url FROM items WHERE rowid = ?').bind(rowid).first<TranscriptItemRow>();
-}
-
 async function readJsonBody(request: Request): Promise<unknown> {
-	const declared = Number(request.headers.get('Content-Length') ?? '0');
-	if (Number.isFinite(declared) && declared > MAX_TRANSCRIPT_REQUEST_BYTES) throw tooLargeRequest();
-	// Count bytes as they arrive: a chunked request has no Content-Length to trust.
-	const decoder = new TextDecoder();
-	let text = '';
-	let received = 0;
-	const reader = request.body?.getReader();
-	while (reader) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		received += value.byteLength;
-		if (received > MAX_TRANSCRIPT_REQUEST_BYTES) {
-			await reader.cancel().catch(() => undefined);
-			throw tooLargeRequest();
-		}
-		text += decoder.decode(value, { stream: true });
-	}
-	text += decoder.decode();
+	let bytes: Uint8Array;
 	try {
-		return JSON.parse(text) as unknown;
+		bytes = await boundedBytes(request, MAX_TRANSCRIPT_REQUEST_BYTES, AbortSignal.timeout(REQUEST_DEADLINE_MS));
+	} catch (error) {
+		if (error instanceof PayloadTooLarge) throw tooLarge(`Request body must be at most ${MAX_TRANSCRIPT_REQUEST_BYTES} bytes`);
+		throw invalid('Could not read the request body');
+	}
+	try {
+		return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
 	} catch {
 		throw invalid('Request body must be valid JSON');
 	}
+}
+
+/** Whitespace collapsed and trimmed, then cut to `maxBytes` of UTF-8 on a character boundary. */
+function plainText(value: string, maxBytes: number): string {
+	// Collapsing never lengthens text, and UTF-8 needs at least one byte per code unit:
+	// cutting the raw string first bounds the work for absurd inputs.
+	const collapsed = value.slice(0, maxBytes * 2).replace(/[\uD800-\uDBFF]$/, '').replace(/\s+/g, ' ').trim();
+	return collapsed.length * 3 <= maxBytes ? collapsed : truncateUtf8(collapsed, maxBytes).trim();
 }
 
 function seconds(value: unknown, name: string): number {
@@ -254,8 +255,8 @@ function seconds(value: unknown, name: string): number {
 	return Math.round(value * 1000) / 1000;
 }
 
-function tooLargeRequest(): TranscriptError {
-	return new TranscriptError(`Request body must be at most ${MAX_TRANSCRIPT_REQUEST_BYTES} bytes`, 413, 'transcript_too_large');
+function tooLarge(message: string): TranscriptError {
+	return new TranscriptError(message, 413, 'transcript_too_large');
 }
 
 function invalid(message: string): TranscriptError {
@@ -264,12 +265,4 @@ function invalid(message: string): TranscriptError {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function jsonHeaders(): Record<string, string> {
-	return { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
-}
-
-function failure(error: string, status: number, code: string): Response {
-	return Response.json({ error, code }, { status, headers: jsonHeaders() });
 }

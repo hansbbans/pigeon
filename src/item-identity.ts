@@ -69,3 +69,21 @@ export async function createCanonicalItemUuid(params: {
 export function googleReaderItemId(rowid: number): string {
 	return `${GOOGLE_ITEM_PREFIX}${rowid.toString(16).padStart(16, '0')}`;
 }
+
+/**
+ * Loads one item addressed by a URL path segment: the item UUID or any Google
+ * Reader item id form (long tag, 16 hex digits, decimal), percent-encoded.
+ * `columns` is trusted SQL from the caller. Null when the id is malformed or unknown.
+ */
+export async function findItemByAnyId<T>(db: D1Database, rawId: string, columns: string): Promise<T | null> {
+	let id: string;
+	try {
+		id = decodeURIComponent(rawId);
+	} catch {
+		return null;
+	}
+	if (hasStoredItemId(id)) return db.prepare(`SELECT ${columns} FROM items WHERE id = ?`).bind(id).first<T>();
+	const rowid = parseGoogleReaderItemRowid(id);
+	if (rowid === null) return null;
+	return db.prepare(`SELECT ${columns} FROM items WHERE rowid = ?`).bind(rowid).first<T>();
+}

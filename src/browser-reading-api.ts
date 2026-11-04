@@ -112,7 +112,8 @@ const ACCEPT_LANGUAGE = /^[A-Za-z0-9*,;=.\- ]{1,100}$/;
  * browser itself cannot set User-Agent) and X-Pigeon-Upstream-Language become
  * the upstream User-Agent and Accept-Language. The upstream body passes
  * through unparsed (<= 4 MB, one 10-second deadline) as a 200 when the
- * upstream answered 2xx; any other upstream answer is a 502 with code "youtube_unavailable".
+ * upstream answered 2xx; any other upstream answer, or a larger one, is a 502
+ * with code "youtube_unavailable".
  * YouTube may refuse Cloudflare addresses: clients treat every failure as
  * "transcript unavailable here".
  */
@@ -143,12 +144,16 @@ export async function handleBrowserYouTubeProxy(request: Request, fetcher: typeo
 		}
 		const type = normalizeContentType(response.headers.get('Content-Type'));
 		if (!YOUTUBE_PROXY_TYPES.has(type)) { cancelBody(response); return failure('YouTube returned an unexpected response', 502, 'youtube_unavailable'); }
-		const bytes = await boundedBytes(response, YOUTUBE_PROXY_RESPONSE_BYTES, signal);
+		let bytes: Uint8Array;
+		try { bytes = await boundedBytes(response, YOUTUBE_PROXY_RESPONSE_BYTES, signal); } catch (error) {
+			// An oversize answer is YouTube's problem, not the caller's request.
+			if (error instanceof PayloadTooLarge) return failure('YouTube returned more data than the proxy passes on', 502, 'youtube_unavailable');
+			throw error;
+		}
 		return new Response(bytes, { headers: {
 			...jsonHeaders(), 'Content-Type': `${type}; charset=utf-8`, 'Content-Security-Policy': "default-src 'none'; sandbox",
 		} });
 	} catch (error) {
-		if (error instanceof PayloadTooLarge) return failure('YouTube response is too large', 413, 'youtube_unavailable');
 		return failure('Could not reach YouTube', 502, 'youtube_unreachable');
 	}
 }
@@ -167,13 +172,18 @@ function safeURL(value: unknown): URL {
 	return assertSafeFeedUrl(value);
 }
 
-class PayloadTooLarge extends Error {}
+/** Thrown by boundedBytes when a body exceeds its limit. */
+export class PayloadTooLarge extends Error {}
 
 async function boundedText(source: Response | Request, limit: number, signal: AbortSignal): Promise<string> {
 	return new TextDecoder().decode(await boundedBytes(source, limit, signal));
 }
 
-async function boundedBytes(source: Response | Request, limit: number, signal: AbortSignal): Promise<Uint8Array> {
+/**
+ * Reads a request or response body as bytes, failing fast with PayloadTooLarge
+ * past `limit` (declared or counted) and with an Error once `signal` aborts.
+ */
+export async function boundedBytes(source: Response | Request, limit: number, signal: AbortSignal): Promise<Uint8Array> {
 	if (signal.aborted) { cancelBody(source); throw new Error('Request deadline exceeded'); }
 	const declared = Number(source.headers.get('Content-Length'));
 	if (Number.isFinite(declared) && declared > limit) { cancelBody(source); throw new PayloadTooLarge(); }
@@ -203,6 +213,8 @@ async function boundedBytes(source: Response | Request, limit: number, signal: A
 }
 
 function cancelBody(source: Response | Request) { void source.body?.cancel().catch(() => undefined); }
-function jsonHeaders() { return { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }; }
-function failure(error: string, status: number, code?: string, extra: Record<string, unknown> = {}) { return Response.json({ error, ...(code ? { code } : {}), ...extra }, { status, headers: jsonHeaders() }); }
+/** JSON API response headers: no caching, no sniffing. */
+export function jsonHeaders() { return { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }; }
+/** `{ error, code?, ...extra }` JSON error response. */
+export function failure(error: string, status: number, code?: string, extra: Record<string, unknown> = {}) { return Response.json({ error, ...(code ? { code } : {}), ...extra }, { status, headers: jsonHeaders() }); }
 function methodError(method: string) { return new Response('Method not allowed', { status: 405, headers: { Allow: method, 'Cache-Control': 'no-store' } }); }
