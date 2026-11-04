@@ -1,10 +1,12 @@
 import { ARTICLE_AUTHOR_SQL } from './article-author';
+import { notSavedFeedSql, SAVED_FEED_KEY } from './saved-items';
 import type { Env } from './types';
 
 const ALL = 'user/-/state/com.google/reading-list';
 const READ = 'user/-/state/com.google/read';
 const STARRED = 'user/-/state/com.google/starred';
 const LABEL = 'user/-/label/';
+const SAVED = 'saved';
 const MAX_CURSOR_LENGTH = 1024;
 
 interface ArticleQuery {
@@ -30,7 +32,9 @@ interface ArticleRow {
 
 /**
  * GET /api/v1/browser/articles (authenticated by handleNativeApiRequest).
- * stream: all/reading-list, feed/<numeric ID>, user/-/label/<literal name>, read, starred.
+ * stream: all/reading-list, feed/<numeric ID>, user/-/label/<literal name>, read, starred, saved.
+ * Read It Later items appear only in `saved` and in their feed's own feed/<ID> stream;
+ * every other stream (Today, All, folders, read, starred) leaves them out.
  * q: literal substring of title, author, feed title, or text; max 200 characters.
  * filter: all/unread/read. sort: newest/oldest. limit: 1..100 (default 50).
  * since/before: UTC ISO timestamps, inclusive/exclusive; pass both for local Today.
@@ -56,6 +60,12 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		const cursor = parseCursor(params.get('continuation'), fingerprint);
 		const where = ['f.is_active = 1'];
 		const binds: (string | number)[] = [];
+		if (query.stream === SAVED) {
+			where.push('f.feed_key = ?');
+			binds.push(SAVED_FEED_KEY);
+		} else if (!query.stream.startsWith('feed/')) {
+			where.push(notSavedFeedSql('f.source_type'));
+		}
 		if (query.stream === READ) where.push('i.is_read = 1');
 		else if (query.stream === STARRED) where.push('i.is_starred = 1');
 		else if (query.stream.startsWith(LABEL)) {
@@ -110,7 +120,7 @@ function parseQuery(params: URLSearchParams): ArticleQuery {
 	const rawStream = params.get('stream') ?? 'all';
 	const stream = rawStream === 'all' || rawStream === 'reading-list' ? ALL
 		: rawStream === 'read' ? READ : rawStream === 'starred' ? STARRED : rawStream;
-	if (![ALL, READ, STARRED].includes(stream)) {
+	if (![ALL, READ, STARRED, SAVED].includes(stream)) {
 		if (stream.startsWith('feed/')) {
 			const id = stream.slice(5);
 			if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) throw new InvalidQuery('Invalid feed stream');

@@ -1,0 +1,11 @@
+{
+	"html": "<article><h1>Slow software</h1><p>Software that waits for you.</p></article>",
+	"text": "Slow software. Software that waits for you.",
+	"title": "Slow software, and why it lasts",
+	"wordCount": 2650,
+	"author": "Ada Lovelace",
+	"published": "2026-10-28T09:30:00+01:00",
+	"image": "https://example.com/images/slow.jpg",
+	"site": "Example Essays",
+	"mediaKind": "text"
+}

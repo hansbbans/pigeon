@@ -19,11 +19,11 @@ const FEED_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS active_feed_count,
 	        SUM(CASE WHEN source_type = 'rss' THEN 1 ELSE 0 END) AS rss_feed_count,
 	        SUM(CASE WHEN source_type = 'rss' AND COALESCE(fetch_error, '') != '' THEN 1 ELSE 0 END) AS failing_rss_feed_count
 	   FROM feeds
-	  WHERE is_active = 1`);
+	  WHERE is_active = 1 AND source_type <> 'saved'`);
 const ITEM_COUNTS_SQL = normalizeSql(`SELECT COUNT(*) AS total_item_count,
-	        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 THEN 1 ELSE 0 END) AS unread_item_count,
+	        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 AND f.source_type <> 'saved' THEN 1 ELSE 0 END) AS unread_item_count,
 	        SUM(CASE WHEN i.is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
-	        MAX(CASE WHEN f.is_active = 1 THEN i.received_at ELSE NULL END) AS newest_item_at
+	        MAX(CASE WHEN f.is_active = 1 AND f.source_type <> 'saved' THEN i.received_at ELSE NULL END) AS newest_item_at
 	   FROM items i
 	   LEFT JOIN feeds f ON f.feed_key = i.feed_key`);
 const NEWEST_EMAIL_SQL = normalizeSql(`SELECT MAX(i.received_at) AS value

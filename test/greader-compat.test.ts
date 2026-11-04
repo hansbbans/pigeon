@@ -439,7 +439,7 @@ function createReaderApiEnv(
 				};
 			}
 
-			if (this.sql.includes('SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url FROM feeds WHERE is_active = 1')) {
+			if (this.sql.includes('SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url, source_type FROM feeds WHERE is_active = 1')) {
 				return {
 					results: feeds
 						.filter((feed) => (feed.is_active ?? 1) === 1)

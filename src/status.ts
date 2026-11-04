@@ -1,4 +1,5 @@
 import { requireApiAuth } from './api-auth';
+import { notSavedFeedSql } from './saved-items';
 import { ensureDatabaseSchema } from './migrations';
 import type { Env } from './types';
 import { redactRefreshError } from './refresh-policy';
@@ -105,14 +106,14 @@ export async function handleStatusRequest(
 		        SUM(CASE WHEN source_type = 'rss' THEN 1 ELSE 0 END) AS rss_feed_count,
 		        SUM(CASE WHEN source_type = 'rss' AND COALESCE(fetch_error, '') != '' THEN 1 ELSE 0 END) AS failing_rss_feed_count
 		   FROM feeds
-		  WHERE is_active = 1`,
+		  WHERE is_active = 1 AND ${notSavedFeedSql()}`,
 	).all<FeedCountsRow>();
 
 	const { results: itemCountsResults } = await env.DB.prepare(
 		`SELECT COUNT(*) AS total_item_count,
-		        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 THEN 1 ELSE 0 END) AS unread_item_count,
+		        SUM(CASE WHEN i.is_read = 0 AND f.is_active = 1 AND ${notSavedFeedSql('f.source_type')} THEN 1 ELSE 0 END) AS unread_item_count,
 		        SUM(CASE WHEN i.is_starred = 1 THEN 1 ELSE 0 END) AS starred_item_count,
-		        MAX(CASE WHEN f.is_active = 1 THEN i.received_at ELSE NULL END) AS newest_item_at
+		        MAX(CASE WHEN f.is_active = 1 AND ${notSavedFeedSql('f.source_type')} THEN i.received_at ELSE NULL END) AS newest_item_at
 		   FROM items i
 		   LEFT JOIN feeds f ON f.feed_key = i.feed_key`,
 	).all<ItemCountsRow>();

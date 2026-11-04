@@ -1,4 +1,5 @@
 import { readingLengthFields } from './reading-length';
+import { savedMetadataFields } from './saved-items';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -11,13 +12,9 @@ import {
 	type ClientFamily,
 } from './engagement';
 import { ensureDatabaseSchema } from './migrations';
-import { parseGoogleReaderItemRowid } from './item-identity';
+import { googleReaderItemId, parseGoogleReaderItemRowid } from './item-identity';
 
 // --- ID conversion utilities ---
-
-function toGoogleItemId(rowid: number): string {
-	return 'tag:google.com,2005:reader/item/' + rowid.toString(16).padStart(16, '0');
-}
 
 function isMissingColumnError(error: unknown, columnName: string): boolean {
 	const message = error instanceof Error ? error.message : String(error);
@@ -471,7 +468,7 @@ async function handleTagList(env: Env): Promise<Response> {
 async function handleSubscriptionList(env: Env): Promise<Response> {
 	const { results: [feedResult], labelsByFeedKey } = await batchWithFeedLabels(env, [
 		env.DB.prepare(
-			'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url FROM feeds WHERE is_active = 1',
+			'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url, source_type FROM feeds WHERE is_active = 1',
 		),
 	]);
 	const results = feedResult.results as Array<{
@@ -484,6 +481,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		icon_url: string | null;
 		source_url: string | null;
 		site_url: string | null;
+		source_type: string;
 	}>;
 
 	const subscriptions = results.map((f) => ({
@@ -494,6 +492,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		sourceUrl: f.source_url,
 		htmlUrl: f.site_url || f.source_url || env.BASE_URL,
 		iconUrl: f.icon_url || '',
+		sourceType: f.source_type,
 	}));
 
 	return Response.json({ subscriptions });
@@ -732,6 +731,10 @@ interface ResponseItemRow {
 	word_count?: number | null;
 	media_kind?: string | null;
 	duration_seconds?: number | null;
+	published_at?: string | null;
+	image_url?: string | null;
+	site_name?: string | null;
+	extraction_state?: string | null;
 }
 
 interface ResponseItemBody {
@@ -761,6 +764,10 @@ async function loadResponseItems(
 		wordCount?: number;
 		mediaKind?: 'text' | 'video';
 		durationSeconds?: number;
+		extractionState?: string;
+		publishedAt?: string;
+		imageUrl?: string;
+		siteName?: string;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -778,7 +785,7 @@ async function loadResponseItems(
 		};
 		const statements = (originalUrlExpression: string) => [
 			env.DB.prepare(
-				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds
+				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds, i.published_at, i.image_url, i.site_name, i.extraction_state
 				 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 			).bind(rowidPage),
 			env.DB.prepare(
@@ -832,7 +839,7 @@ async function loadResponseItems(
 			return [
 				item.rowid,
 				{
-					id: toGoogleItemId(item.rowid),
+					id: googleReaderItemId(item.rowid),
 					categories,
 					title: item.subject,
 					published: ts,
@@ -848,6 +855,7 @@ async function loadResponseItems(
 					isBodyPruned: item.content_pruned_at != null,
 					isPaywalled: isPaywalledHtml(item.html_content),
 					...readingLengthFields(item),
+					...savedMetadataFields(item, 'imageUrl'),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],

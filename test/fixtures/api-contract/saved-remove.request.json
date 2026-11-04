@@ -1,0 +1,11 @@
+{
+	"mutations": [
+		{
+			"id": "8f0e1b2c-0101-4a00-8000-000000000101",
+			"kind": "remove_saved",
+			"itemIds": [
+				"7e2c62ab-a567-8d88-8bbf-f2a458af63eb"
+			]
+		}
+	]
+}
