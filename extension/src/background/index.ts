@@ -5,20 +5,18 @@
  */
 
 import browser, { type Tabs } from '../browser-api';
+import { Badge, DEFAULT_COLOR, WAITING_COLOR, waiting, type ActionApi } from '../core/badge';
 import type { PageExtraction } from '../core/payload';
-import { readQueue } from '../core/queue';
-import { nextRetryState, parseRetryState, retryDue } from '../core/retry';
-import { flushQueue, isSending, saveLink, savePage, type SaveDeps, type SaveOutcome } from '../core/save';
+import { ensureRetryScheduled, RETRY_ALARM, runRetry, type AlarmsApi } from '../core/retry';
+import { flushQueue, guardSave, isSending, saveLink, savePage, type SaveDeps, type SaveOutcome } from '../core/save';
 
 const MENU_SAVE_PAGE = 'pigeon-save-page';
 const MENU_SAVE_LINK = 'pigeon-save-link';
 const COMMAND_SAVE_PAGE = 'save-page';
 const EXTRACTION_TIMEOUT_MS = 20_000;
 const BADGE_CLEAR_MS = 5_000;
-const DEFAULT_TITLE = 'Save to Pigeon';
-const DEFAULT_COLOR = '#6b7280';
-/** Backoff for opportunistic retries; storage.session survives worker restarts, not browser restarts. */
-const RETRY_STATE_KEY = 'pigeonRetry';
+/** Problems stay on the tab a little longer, then the tab shows the global badge (the queue count). */
+const BADGE_PROBLEM_CLEAR_MS = 10_000;
 /** An extension API call every 20 s keeps the worker alive while a save is in flight. */
 const KEEPALIVE_MS = 20_000;
 
@@ -26,6 +24,8 @@ const deps: SaveDeps = {
 	fetch: (input, init) => fetch(input, init),
 	store: browser.storage.local,
 };
+const alarms: AlarmsApi = browser.alarms;
+const badge = new Badge(browser.action as unknown as ActionApi, browser.storage.session);
 
 browser.runtime.onInstalled.addListener(async (details) => {
 	if (details.reason === 'install') void browser.runtime.openOptionsPage();
@@ -39,6 +39,15 @@ browser.runtime.onStartup.addListener(() => {
 	void retryQueued({ force: false });
 });
 
+// Queued saves are retried by an alarm (it survives worker restarts) with a backoff.
+browser.alarms.onAlarm.addListener((alarm) => {
+	if (alarm.name === RETRY_ALARM) void retryQueued({ force: false });
+});
+
+browser.tabs.onRemoved.addListener((tabId) => {
+	void badge.forgetTab(tabId);
+});
+
 browser.action.onClicked.addListener((tab) => {
 	void saveTab(tab);
 });
@@ -48,16 +57,12 @@ browser.commands.onCommand.addListener((command, tab) => {
 	void (async () => {
 		const target = tab ?? (await browser.tabs.query({ active: true, currentWindow: true }))[0];
 		if (target) await saveTab(target);
-	})();
+	})().catch((error) => console.error('[Pigeon] Shortcut failed:', error));
 });
 
 browser.contextMenus.onClicked.addListener((info, tab) => {
 	if (info.menuItemId === MENU_SAVE_LINK) {
-		void (async () => {
-			const tabId = tab?.id;
-			await showBusy(tabId);
-			report(tabId, await keepAlive(saveLink(info.linkUrl, deps)));
-		})();
+		void runSave(tab?.id, () => saveLink(info.linkUrl, deps));
 	} else if (info.menuItemId === MENU_SAVE_PAGE && tab) {
 		void saveTab(tab);
 	}
@@ -71,16 +76,15 @@ browser.runtime.onMessage.addListener((message: unknown) => {
 	return undefined;
 });
 
-// Browsing is a sign the network may be back: retry queued saves, subject to the backoff.
-browser.tabs.onUpdated.addListener((_tabId, change) => {
-	if (change.status === 'complete') void retryQueued({ force: false });
-});
-
-async function saveTab(tab: Tabs.Tab): Promise<void> {
+function saveTab(tab: Tabs.Tab): Promise<void> {
 	const tabId = tab.id;
-	await showBusy(tabId);
-	const outcome = await keepAlive(savePage({ url: tab.url, title: tab.title }, tabId === undefined ? null : () => extractFromTab(tabId), deps));
-	report(tabId, outcome);
+	return runSave(tabId, () => savePage({ url: tab.url, title: tab.title }, tabId === undefined ? null : () => extractFromTab(tabId), deps));
+}
+
+/** Shows progress, runs the save, and always ends in a visible state, even if something throws. */
+async function runSave(tabId: number | undefined, save: () => Promise<SaveOutcome>): Promise<void> {
+	await badge.showOnTab(tabId, '…', DEFAULT_COLOR, 'Saving to Pigeon…').catch(() => undefined);
+	report(tabId, await keepAlive(guardSave(save)));
 }
 
 /** Injects the bundled Defuddle script into the tab (activeTab grant) and runs it. */
@@ -112,24 +116,15 @@ async function extractFromTab(tabId: number): Promise<PageExtraction | null> {
 
 let retryRunning = false;
 
-/** Sends queued saves. `force` skips the backoff (the user just saved or signed in). */
+/** Sends queued saves and updates the alarm and the global badge. `force` restarts the backoff. */
 async function retryQueued({ force }: { force: boolean }): Promise<void> {
 	if (retryRunning && !force) return;
 	retryRunning = true;
 	try {
-		const now = Date.now();
-		const state = parseRetryState((await browser.storage.session.get(RETRY_STATE_KEY))[RETRY_STATE_KEY]);
-		if (!force && !retryDue(state, now)) return;
-		if ((await readQueue(deps.store)).length === 0) {
-			if (force) await setGlobalBadge(0);
-			return;
-		}
-		const result = await keepAlive(flushQueue(deps));
-		const next = nextRetryState(force ? null : state, result, Date.now());
-		if (next) await browser.storage.session.set({ [RETRY_STATE_KEY]: next });
-		else await browser.storage.session.remove(RETRY_STATE_KEY);
-		if (result.stoppedBy === 'unauthorized' || result.stoppedBy === 'signedOut') await setGlobalBadge(result.remaining, 'Sign in to Pigeon');
-		else await setGlobalBadge(result.remaining);
+		const result = await keepAlive(runRetry(force, { store: deps.store, alarms, flush: () => flushQueue(deps) }));
+		if (!result) await badge.setQueued(0);
+		else if (result.stoppedBy === 'unauthorized' || result.stoppedBy === 'signedOut') await badge.setQueued(result.remaining, 'Sign in to Pigeon');
+		else await badge.setQueued(result.remaining);
 	} catch (error) {
 		console.warn('[Pigeon] Retrying queued saves failed:', error instanceof Error ? error.message : String(error));
 	} finally {
@@ -153,80 +148,31 @@ async function keepAlive<T>(work: Promise<T>): Promise<T> {
 	}
 }
 
-async function showBusy(tabId: number | undefined): Promise<void> {
-	await setTabBadge(tabId, '…', DEFAULT_COLOR, 'Saving to Pigeon…');
-}
-
 function report(tabId: number | undefined, outcome: SaveOutcome): void {
 	void (async () => {
 		switch (outcome.status) {
 			case 'saved': {
 				const title = outcome.withContent ? 'Saved to Pigeon' : 'Saved to Pigeon (link only; Pigeon will fetch the article)';
-				await setTabBadge(tabId, '✓', '#15803d', title);
-				setTimeout(() => void clearTabBadge(tabId), BADGE_CLEAR_MS);
+				await badge.showOnTab(tabId, '✓', '#15803d', title, BADGE_CLEAR_MS);
 				void retryQueued({ force: true });
 				break;
 			}
 			case 'needsSignIn':
-				await setTabBadge(tabId, '!', '#b91c1c', `Sign in to Pigeon. ${waiting(outcome.queued)}`);
-				await setGlobalBadge(outcome.queued, 'Sign in to Pigeon');
+				await badge.setQueued(outcome.queued, 'Sign in to Pigeon');
+				await badge.showOnTab(tabId, '!', '#b91c1c', `Sign in to Pigeon. ${waiting(outcome.queued)}`, BADGE_PROBLEM_CLEAR_MS);
 				await browser.runtime.openOptionsPage();
 				break;
 			case 'queued':
-				await setTabBadge(tabId, '!', '#b45309', `${outcome.message} ${waiting(outcome.queued)} Pigeon will retry.`);
-				await setGlobalBadge(outcome.queued);
+				await badge.setQueued(outcome.queued);
+				await ensureRetryScheduled({ store: deps.store, alarms });
+				await badge.showOnTab(tabId, '!', WAITING_COLOR, `${outcome.message} ${waiting(outcome.queued)} Pigeon will retry.`, BADGE_PROBLEM_CLEAR_MS);
 				break;
 			case 'unsupported':
-				await setTabBadge(tabId, '×', DEFAULT_COLOR, 'Only web pages can be saved to Pigeon.');
-				setTimeout(() => void clearTabBadge(tabId), BADGE_CLEAR_MS);
+				await badge.showOnTab(tabId, '×', DEFAULT_COLOR, 'Only web pages can be saved to Pigeon.', BADGE_CLEAR_MS);
 				break;
 			case 'failed':
-				await setTabBadge(tabId, '!', '#b91c1c', `Pigeon could not save this: ${outcome.message}`);
+				await badge.showOnTab(tabId, '!', '#b91c1c', `Pigeon could not save this: ${outcome.message}`, BADGE_PROBLEM_CLEAR_MS);
 				break;
 		}
 	})().catch((error) => console.warn('[Pigeon] Badge update failed:', error));
 }
-
-function waiting(count: number): string {
-	return count === 1 ? '1 save is waiting.' : `${count} saves are waiting.`;
-}
-
-async function setTabBadge(tabId: number | undefined, text: string, color: string, title: string): Promise<void> {
-	if (tabId === undefined) return setGlobal(text, color, title);
-	try {
-		await browser.action.setBadgeBackgroundColor({ tabId, color });
-		await browser.action.setBadgeText({ tabId, text });
-		await browser.action.setTitle({ tabId, title });
-	} catch {
-		// The tab closed meanwhile.
-	}
-}
-
-/** Puts the tab back on the global badge (the queue count), its colour and its tooltip. */
-async function clearTabBadge(tabId: number | undefined): Promise<void> {
-	if (tabId === undefined) return;
-	try {
-		// Badge text: null drops the per-tab value. Colour and title have no reset in Chrome, so copy the global ones.
-		const [color, title] = await Promise.all([browser.action.getBadgeBackgroundColor({}), browser.action.getTitle({})]);
-		await browser.action.setBadgeText({ tabId, text: null });
-		await browser.action.setBadgeBackgroundColor({ tabId, color });
-		await browser.action.setTitle({ tabId, title });
-	} catch {
-		// The tab closed meanwhile.
-	}
-}
-
-async function setGlobal(text: string, color: string, title: string): Promise<void> {
-	await browser.action.setBadgeBackgroundColor({ color });
-	await browser.action.setBadgeText({ text });
-	await browser.action.setTitle({ title });
-}
-
-/** The badge every tab shows by default: how many saves are waiting. */
-async function setGlobalBadge(queued: number, reason?: string): Promise<void> {
-	if (queued <= 0) return setGlobal('', DEFAULT_COLOR, DEFAULT_TITLE);
-	await setGlobal(String(queued), '#b45309', `${reason ? `${reason}. ` : ''}${waiting(queued)}`);
-}
-
-// A service worker restart is a good moment to retry (subject to the backoff).
-void retryQueued({ force: false });

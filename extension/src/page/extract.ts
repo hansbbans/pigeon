@@ -1,9 +1,10 @@
 /**
- * Runs inside the tab (injected on demand under activeTab). Defuddle reads the
- * live, rendered page, so mobile CSS, hidden elements and loaded images count.
- * It cleans a clone of the document; on the live page it only normalizes
- * `srcSet` casing and swaps lazy-image placeholders for their <noscript>
- * sources (as in Obsidian Web Clipper, which also passes the live document).
+ * Runs inside the tab (injected on demand under activeTab), so the DOM is the
+ * rendered page: loaded images, logged-in and paywalled content. Defuddle
+ * gets a clone of it (as src/browser-readability.ts does) because it rewrites
+ * image attributes in the document it is given, and the user's page must stay
+ * untouched. A detached clone has no computed styles, so Defuddle's
+ * mobile-CSS and hidden-element steps fall back to its markup heuristics.
  *
  * Takes the document and the Defuddle class as arguments so tests can run it
  * under jsdom.
@@ -58,7 +59,7 @@ export function extractPage(doc: Document, Defuddle: DefuddleConstructor, url = 
  * check that `_fallbackResponse` still exists (test/extract.test.ts does).
  */
 function runDefuddle(doc: Document, Defuddle: DefuddleConstructor, url: string): DefuddleResult | null {
-	const defuddle = new Defuddle(doc, { url });
+	const defuddle = new Defuddle(doc.cloneNode(true) as Document, { url });
 	let usedFallback = false;
 	const fallback = defuddle._fallbackResponse;
 	if (typeof fallback === 'function') {
@@ -79,6 +80,8 @@ function extractArticle(doc: Document, Defuddle: DefuddleConstructor, url: strin
 	const text = plainText(fragment);
 	if (text.length < MIN_TEXT_CHARS && !fragment.content.querySelector('img, picture, video')) return null;
 	const fitted = fitToBudget(doc, fragment);
+	// Cutting something like one giant <pre> can leave next to nothing; a bare link is better then.
+	if (fitted.trimmed && fitted.keptChars < MIN_TEXT_CHARS) return null;
 	const content: SavedContent = { html: fitted.html, text: fitted.text, mediaKind: 'text' };
 	assignMetadata(content, result, url);
 	return content;
@@ -202,10 +205,38 @@ function markupOf(node: Node): string {
 	}
 }
 
+function isInRawText(node: Node): boolean {
+	return node.parentNode?.nodeType === 1 && RAW_TEXT_TAGS.has((node.parentNode as Element).localName);
+}
+
+/**
+ * The longest prefix of `value` whose escaped html plus text fit `budget`,
+ * cut at a character boundary (never inside a surrogate pair) and, when one
+ * is near, at whitespace.
+ */
+export function fitTextPrefix(value: string, budget: number): string {
+	const weight = (part: string) => utf8Bytes(escapeText(part)) + utf8Bytes(part);
+	if (budget <= 0) return '';
+	if (weight(value) <= budget) return value;
+	let low = 0;
+	let high = value.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (weight(value.slice(0, mid)) <= budget) low = mid;
+		else high = mid - 1;
+	}
+	let end = low;
+	const code = value.charCodeAt(end - 1);
+	if (end > 0 && code >= 0xd800 && code <= 0xdbff) end--;
+	const space = value.slice(Math.max(0, end - 200), end).search(/\s\S*$/);
+	if (space >= 0) end = Math.max(0, end - 200) + space;
+	return value.slice(0, end);
+}
+
 /**
  * Serializes the leading children whose html plus text fit `budget`. A child
- * that straddles the limit is entered and cut inside, so the result ends on
- * an element boundary and stays well formed. Measuring from the front means
+ * that straddles the limit is entered and cut inside (a text node at a
+ * character boundary), so the result stays well formed. Measuring from the front means
  * the dropped tail is never serialized, and the page's DOM is not changed.
  */
 function serializeWithin(nodes: ArrayLike<ChildNode>, budget: number): { html: string; text: string } {
@@ -222,7 +253,11 @@ function serializeWithin(nodes: ArrayLike<ChildNode>, budget: number): { html: s
 			used += weight;
 			continue;
 		}
-		if (node.nodeType === 1 && node.childNodes.length > 0 && !RAW_TEXT_TAGS.has((node as Element).localName)) {
+		if (node.nodeType === 3 && !isInRawText(node)) {
+			const kept = fitTextPrefix(node.nodeValue ?? '', budget - used);
+			html += escapeText(kept);
+			text += kept;
+		} else if (node.nodeType === 1 && node.childNodes.length > 0 && !RAW_TEXT_TAGS.has((node as Element).localName)) {
 			const element = node as Element;
 			const shell = (element.cloneNode(false) as Element).outerHTML;
 			const close = `</${element.localName}>`;
@@ -243,8 +278,19 @@ function serializeWithin(nodes: ArrayLike<ChildNode>, budget: number): { html: s
  * Keeps html plus text under the budget: first drops inline data: images,
  * then keeps the beginning of the article and adds a note that it was cut.
  */
-export function fitToBudget(doc: Document, template: HTMLTemplateElement, budget = EXTRACTION_BUDGET_BYTES): { html: string; text: string; trimmed: boolean } {
-	const whole = () => ({ html: template.innerHTML, text: plainText(template), trimmed: false });
+export interface FittedContent {
+	html: string;
+	text: string;
+	trimmed: boolean;
+	/** Characters of article text kept (without the trim note). */
+	keptChars: number;
+}
+
+export function fitToBudget(doc: Document, template: HTMLTemplateElement, budget = EXTRACTION_BUDGET_BYTES): FittedContent {
+	const whole = () => {
+		const text = plainText(template);
+		return { html: template.innerHTML, text, trimmed: false, keptChars: text.length };
+	};
 	let result = whole();
 	if (utf8Bytes(result.html) + utf8Bytes(result.text) <= budget) return result;
 	for (const media of Array.from(template.content.querySelectorAll('[src^="data:"], [srcset*="data:"]'))) {
@@ -255,7 +301,8 @@ export function fitToBudget(doc: Document, template: HTMLTemplateElement, budget
 	const notice = parseFragment(doc, TRIM_NOTICE);
 	const noticeText = plainText(notice);
 	const kept = serializeWithin(template.content.childNodes, budget - utf8Bytes(TRIM_NOTICE) - utf8Bytes(noticeText) - 2);
-	return { html: kept.html + TRIM_NOTICE, text: collapse(`${kept.text} ${noticeText}`), trimmed: true };
+	const keptText = collapse(kept.text);
+	return { html: kept.html + TRIM_NOTICE, text: collapse(`${keptText} ${noticeText}`), trimmed: true, keptChars: keptText.length };
 }
 
 function absoluteHttpUrl(value: string | undefined | null, base: string): string | undefined {
@@ -298,8 +345,9 @@ export function durationFromSchema(data: unknown, videoId: string): number | nul
 		const record = value as Record<string, unknown>;
 		const type = record['@type'];
 		if (type === 'VideoObject' || (Array.isArray(type) && type.includes('VideoObject'))) {
+			// An id-less VideoObject may describe the previous video after in-page navigation.
 			const ids = [record['@id'], record.url, record.embedUrl].filter((id): id is string => typeof id === 'string');
-			const matches = ids.length === 0 || ids.some((id) => id.includes(videoId));
+			const matches = ids.some((id) => id.includes(videoId));
 			const duration = parseIsoDuration(record.duration);
 			if (matches && duration !== null) return duration;
 		}

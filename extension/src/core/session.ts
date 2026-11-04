@@ -13,6 +13,7 @@ export interface KeyValueStore {
 }
 
 const KEYS = { origin: 'pigeonOrigin', auth: 'pigeonAuth', needsSignIn: 'pigeonNeedsSignIn' } as const;
+export const SETTINGS_KEYS: readonly string[] = Object.values(KEYS);
 
 export interface Settings {
 	/** Pigeon origin, e.g. https://pigeon.hanscho.com. */

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MAX_SAVED_HTML_BYTES, type PageExtraction } from '../src/core/payload';
-import { MAX_QUEUED_CONTENT_BYTES, readQueue } from '../src/core/queue';
-import { flushQueue, saveLink, savePage } from '../src/core/save';
+import { MAX_QUEUED_CONTENT_BYTES, readQueue, readQueueSummary } from '../src/core/queue';
+import { flushQueue, guardSave, saveLink, savePage } from '../src/core/save';
 import { loadSettings, storeSignIn } from '../src/core/session';
 import { AUTH, MemoryStore, mockFetch, ORIGIN, savedReply, signedInStore } from './helpers/fakes';
 
@@ -110,11 +110,14 @@ test('offline or 5xx queues the save; a later flush sends it once', async () => 
 	assert.equal((await readQueue(store)).length, 2);
 
 	const stillDown = mockFetch(() => 'network-error');
-	assert.deepEqual(await flushQueue({ fetch: stillDown.fetch, store }), { sent: 0, dropped: 0, remaining: 2, stoppedBy: 'unreachable' });
-	assert.equal(stillDown.requests.length, 1, 'stops at the first unreachable request');
+	for (let i = 0; i < 4; i++) {
+		assert.deepEqual(await flushQueue({ fetch: stillDown.fetch, store }), { sent: 0, dropped: 0, passedOver: 2, remaining: 2, stoppedBy: 'unreachable' });
+	}
+	assert.equal(stillDown.requests.length, 8, 'each flush stops after two unreachable saves in a row');
+	assert.equal((await readQueue(store))[0].attempts[0].content?.html, '<p>Body</p>', 'being offline never costs the extraction');
 
 	const back = mockFetch(() => savedReply('done'));
-	assert.deepEqual(await flushQueue({ fetch: back.fetch, store }), { sent: 2, dropped: 0, remaining: 0 });
+	assert.deepEqual(await flushQueue({ fetch: back.fetch, store }), { sent: 2, dropped: 0, passedOver: 0, remaining: 0 });
 	assert.deepEqual(back.requests.map((r) => JSON.parse(r.body).url), [PAGE.url, 'https://example.com/second']);
 	assert.equal(JSON.parse(back.requests[0].body).content.html, '<p>Body</p>');
 	assert.deepEqual(await readQueue(store), []);
@@ -154,9 +157,9 @@ test('a flush that hits 401 stops and asks for sign-in; rejected saves are dropp
 	await saveLink('https://example.com/a', { fetch: mockFetch(() => 'network-error').fetch, store });
 	await saveLink('https://example.com/b', { fetch: mockFetch(() => 'network-error').fetch, store });
 	const rejected = mockFetch([() => Response.json({ error: 'bad url' }, { status: 400 }), () => new Response('', { status: 401 })]);
-	assert.deepEqual(await flushQueue({ fetch: rejected.fetch, store }), { sent: 0, dropped: 1, remaining: 1, stoppedBy: 'unauthorized' });
+	assert.deepEqual(await flushQueue({ fetch: rejected.fetch, store }), { sent: 0, dropped: 1, passedOver: 0, remaining: 1, stoppedBy: 'unauthorized' });
 	assert.equal((await loadSettings(store)).needsSignIn, true);
-	assert.deepEqual(await flushQueue({ fetch: mockFetch([]).fetch, store }), { sent: 0, dropped: 0, remaining: 1, stoppedBy: 'signedOut' });
+	assert.deepEqual(await flushQueue({ fetch: mockFetch([]).fetch, store }), { sent: 0, dropped: 0, passedOver: 0, remaining: 1, stoppedBy: 'signedOut' });
 });
 
 test('concurrent flushes send each queued save once', async () => {
@@ -211,4 +214,69 @@ test('a late 401 for an old token does not sign out a newer sign-in', async () =
 	assert.equal(settings.auth, 'pigeon/new-token');
 	assert.equal(settings.needsSignIn, false);
 	assert.equal((await readQueue(store)).length, 1, 'the save waits and goes out with the new token');
+});
+
+test('a full save that keeps failing on the server is cut to its bare link after two tries', async () => {
+	const store = await signedInStore();
+	// The first send times out (the server never answers a ~2 MB body in time).
+	const slow = mockFetch(() => { throw Object.assign(new Error('The operation timed out.'), { name: 'TimeoutError' }); });
+	assert.equal((await savePage(PAGE, async () => extraction, { fetch: slow.fetch, store })).status, 'queued');
+	assert.equal((await readQueue(store))[0].failures, 1);
+	// The retry gets a 503 for the full body, then the bare link goes through at once.
+	const bodies: string[] = [];
+	const flaky = mockFetch((request) => {
+		bodies.push(request.body);
+		return JSON.parse(request.body).content ? new Response('', { status: 503 }) : savedReply('pending');
+	});
+	assert.deepEqual(await flushQueue({ fetch: flaky.fetch, store }), { sent: 1, dropped: 0, passedOver: 0, remaining: 0 });
+	assert.deepEqual(bodies.map((body) => Boolean(JSON.parse(body).content)), [true, false]);
+	assert.deepEqual(JSON.parse(bodies[1]), { url: PAGE.url, title: 'Slow software' });
+});
+
+test('a stuck save does not block the saves queued after it', async () => {
+	const store = await signedInStore();
+	const offline = mockFetch(() => 'network-error');
+	await saveLink('https://example.com/stuck', { fetch: offline.fetch, store });
+	await saveLink('https://example.com/fine', { fetch: offline.fetch, store });
+	const { fetch, requests } = mockFetch((request) =>
+		JSON.parse(request.body).url === 'https://example.com/stuck' ? new Response('', { status: 500 }) : savedReply('pending'));
+	assert.deepEqual(await flushQueue({ fetch, store }), { sent: 1, dropped: 0, passedOver: 1, remaining: 1 });
+	assert.equal(requests.length, 2);
+	assert.deepEqual((await readQueue(store)).map((entry) => entry.attempts[0].url), ['https://example.com/stuck']);
+});
+
+test('a later bare-link save of the same URL never replaces a queued extraction', async () => {
+	const store = await signedInStore();
+	const offline = mockFetch(() => 'network-error');
+	await savePage(PAGE, async () => extraction, { fetch: offline.fetch, store });
+	await saveLink(PAGE.url, { fetch: offline.fetch, store }, 'Newer title');
+	const queue = await readQueue(store);
+	assert.equal(queue.length, 1);
+	assert.equal(queue[0].attempts[0].content?.html, '<p>Body</p>');
+	assert.deepEqual(queue[0].attempts.map((body) => body.title), ['Newer title', 'Newer title']);
+	// Online again, a link save of that URL sends the kept extraction.
+	const online = mockFetch(() => savedReply('done'));
+	const outcome = await saveLink(PAGE.url, { fetch: online.fetch, store });
+	assert.equal(outcome.status === 'saved' && outcome.withContent, true);
+	assert.equal(JSON.parse(online.requests[0].body).content.html, '<p>Body</p>');
+	assert.deepEqual(await readQueue(store), []);
+});
+
+test('the queue keeps its count and size next to it', async () => {
+	const store = await signedInStore();
+	const offline = mockFetch(() => 'network-error');
+	await savePage(PAGE, async () => extraction, { fetch: offline.fetch, store });
+	await saveLink('https://example.com/b', { fetch: offline.fetch, store });
+	const queue = await readQueue(store);
+	const summary = await readQueueSummary(store);
+	assert.equal(summary.count, 2);
+	assert.equal(summary.bytes, queue[0].bytes + queue[1].bytes);
+	await flushQueue({ fetch: mockFetch(() => savedReply('done')).fetch, store });
+	assert.deepEqual(await readQueueSummary(store), { count: 0, bytes: 0 });
+});
+
+test('guardSave turns a thrown error into a failed outcome', async () => {
+	assert.deepEqual(await guardSave(async () => { throw new Error('storage quota exceeded'); }), { status: 'failed', message: 'storage quota exceeded' });
+	const ok = { status: 'unsupported' } as const;
+	assert.equal(await guardSave(async () => ok), ok);
 });

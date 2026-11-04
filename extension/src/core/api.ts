@@ -75,8 +75,14 @@ export type SaveResult =
 	| { kind: 'unauthorized' }
 	/** 400 or 413: this request will never succeed as sent. */
 	| { kind: 'rejected'; status: number; message: string }
-	/** Offline, timed out, 5xx, or a reply that is not Pigeon's: try again later. */
-	| { kind: 'retry'; message: string };
+	/**
+	 * Try again later. `cause` says whether the request itself may be the
+	 * problem: a timeout or a 5xx can be the body's size, being offline or a
+	 * server without the save API cannot.
+	 */
+	| { kind: 'retry'; cause: RetryCause; message: string };
+
+export type RetryCause = 'offline' | 'timeout' | 'server' | 'unsupported';
 
 export async function postSave(fetchImpl: Fetch, origin: string, auth: string, body: SaveRequestBody): Promise<SaveResult> {
 	let response: Response;
@@ -88,8 +94,11 @@ export async function postSave(fetchImpl: Fetch, origin: string, auth: string, b
 			credentials: 'omit',
 			signal: AbortSignal.timeout(SAVE_TIMEOUT_MS),
 		});
-	} catch {
-		return { kind: 'retry', message: 'Pigeon is unreachable.' };
+	} catch (error) {
+		const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+		return timedOut
+			? { kind: 'retry', cause: 'timeout', message: 'Pigeon took too long to answer.' }
+			: { kind: 'retry', cause: 'offline', message: 'Pigeon is unreachable.' };
 	}
 	if (response.status === 401) return { kind: 'unauthorized' };
 	if (response.status === 400 || response.status === 413) {
@@ -103,15 +112,15 @@ export async function postSave(fetchImpl: Fetch, origin: string, auth: string, b
 		return { kind: 'rejected', status: response.status, message };
 	}
 	// A Worker without the save API (before PR #161 is deployed) answers 404; keep the save for later.
-	if (response.status === 404) return { kind: 'retry', message: 'This Pigeon server cannot save links yet.' };
-	if (!response.ok) return { kind: 'retry', message: `Pigeon answered ${response.status}.` };
+	if (response.status === 404) return { kind: 'retry', cause: 'unsupported', message: 'This Pigeon server cannot save links yet.' };
+	if (!response.ok) return { kind: 'retry', cause: 'server', message: `Pigeon answered ${response.status}.` };
 	try {
 		const parsed = (await response.json()) as SaveResponseBody;
 		if (!parsed || typeof parsed.id !== 'string' || typeof parsed.state !== 'string') {
-			return { kind: 'retry', message: 'Pigeon sent an unexpected reply.' };
+			return { kind: 'retry', cause: 'server', message: 'Pigeon sent an unexpected reply.' };
 		}
 		return { kind: 'ok', body: parsed };
 	} catch {
-		return { kind: 'retry', message: 'Pigeon sent an unexpected reply.' };
+		return { kind: 'retry', cause: 'server', message: 'Pigeon sent an unexpected reply.' };
 	}
 }

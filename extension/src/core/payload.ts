@@ -4,6 +4,10 @@
  * docs/superpowers/plans/2026-11-03-read-it-later-03-core.md ("Content object").
  */
 
+import { truncateUtf8 } from '../../../src/content-size';
+
+export { truncateUtf8 };
+
 /** html (plus text) the Worker stores per item; over it the body is dropped (`contentTooLarge`). */
 export const MAX_SAVED_HTML_BYTES = 900_000;
 /** The Worker answers 413 above 2 000 000 bytes; keep headroom for headers and rounding. */
@@ -45,18 +49,6 @@ const encoder = new TextEncoder();
 
 export function utf8Bytes(value: string): number {
 	return encoder.encode(value).byteLength;
-}
-
-/** Cuts a string to at most `maxBytes` UTF-8 bytes without splitting a character. */
-export function truncateUtf8(value: string, maxBytes: number): string {
-	if (maxBytes <= 0) return '';
-	if (value.length * 3 <= maxBytes) return value;
-	const bytes = encoder.encode(value);
-	if (bytes.byteLength <= maxBytes) return value;
-	let end = maxBytes;
-	// Step back over continuation bytes (10xxxxxx) to a character boundary.
-	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-	return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 export function requestBytes(body: SaveRequestBody): number {

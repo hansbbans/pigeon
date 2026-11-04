@@ -17,5 +17,6 @@ test('parseIsoDuration reads schema.org durations', () => {
 	assert.equal(parseIsoDuration('PT1H2M3S'), 3723);
 	assert.equal(parseIsoDuration('PT45S'), 45);
 	assert.equal(parseIsoDuration('P1DT1S'), 86401);
+	assert.equal(parseIsoDuration(' pt2m '), 120);
 	for (const value of ['P0D', 'PT0S', 'PT', 'P', '18:03', '', null, 42]) assert.equal(parseIsoDuration(value), null, String(value));
 });

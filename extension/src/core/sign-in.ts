@@ -2,8 +2,8 @@
 
 import { clientLogin, type Fetch } from './api';
 import { normalizePigeonUrl, originPermissionPattern, PigeonUrlError } from './config';
-import { readQueue } from './queue';
-import { loadSettings, signOut, storeSignIn, type KeyValueStore } from './session';
+import { QUEUE_SUMMARY_KEY, readQueueSummary } from './queue';
+import { loadSettings, SETTINGS_KEYS, signOut, storeSignIn, type KeyValueStore } from './session';
 
 export interface SignInDeps {
 	fetch: Fetch;
@@ -42,6 +42,36 @@ export async function signIn(rawUrl: string, password: string, deps: SignInDeps)
 
 export { signOut };
 
+/** What the options page's sign-in form does, so the flow can be tested without a DOM. */
+export interface SignInForm {
+	setBusy(busy: boolean): void;
+	showError(field: 'url' | 'password' | 'general', message: string): void;
+	signedIn(): Promise<void>;
+}
+
+/**
+ * Handles one submit: never leaves the button disabled, and shows every
+ * failure, including unexpected ones (storage errors, a rejected permission call).
+ */
+export async function submitSignIn(rawUrl: string, password: string, deps: SignInDeps, form: SignInForm): Promise<boolean> {
+	form.setBusy(true);
+	try {
+		// signIn calls permissions.request before its first await, while the click still counts as a user gesture.
+		const result = await signIn(rawUrl, password, deps);
+		if (!result.ok) {
+			form.showError(result.field, result.message);
+			return false;
+		}
+		await form.signedIn();
+		return true;
+	} catch (error) {
+		form.showError('general', `Sign-in failed: ${error instanceof Error ? error.message : String(error)}`);
+		return false;
+	} finally {
+		form.setBusy(false);
+	}
+}
+
 export interface OptionsState {
 	origin: string;
 	signedIn: boolean;
@@ -51,6 +81,9 @@ export interface OptionsState {
 
 export async function optionsState(store: KeyValueStore): Promise<OptionsState> {
 	const settings = await loadSettings(store);
-	const queue = await readQueue(store);
-	return { origin: settings.origin, signedIn: Boolean(settings.auth), needsSignIn: settings.needsSignIn, queued: queue.length };
+	const queue = await readQueueSummary(store);
+	return { origin: settings.origin, signedIn: Boolean(settings.auth), needsSignIn: settings.needsSignIn, queued: queue.count };
 }
+
+/** storage.local keys the options page shows; other changes (queue contents, retry timing) need no re-render. */
+export const OPTIONS_STATE_KEYS: readonly string[] = [...SETTINGS_KEYS, QUEUE_SUMMARY_KEY];

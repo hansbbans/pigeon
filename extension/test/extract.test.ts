@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import Defuddle from 'defuddle';
 import { JSDOM } from 'jsdom';
 import { utf8Bytes } from '../src/core/payload';
-import { durationFromSchema, extractPage, fitToBudget, type DefuddleConstructor } from '../src/page/extract';
+import { durationFromSchema, extractPage, fitTextPrefix, fitToBudget, type DefuddleConstructor } from '../src/page/extract';
 
 const D = Defuddle as unknown as DefuddleConstructor;
 
@@ -88,7 +88,7 @@ test('fitToBudget descends into a single oversized block and drops data: images'
 	assert.match(fitted.html, /^<div><p>word/);
 	const small = document.createElement('template');
 	small.innerHTML = '<p>short</p>';
-	assert.deepEqual(fitToBudget(document, small, 20_000), { html: '<p>short</p>', text: 'short', trimmed: false });
+	assert.deepEqual(fitToBudget(document, small, 20_000), { html: '<p>short</p>', text: 'short', trimmed: false, keptChars: 5 });
 });
 
 const VIDEO_ID = 'dQw4w9WgXcQ';
@@ -153,6 +153,17 @@ test('after in-page YouTube navigation, stale og metadata is ignored', () => {
 	assert.equal(content.durationSeconds, undefined);
 });
 
+test('an id-less VideoObject does not make stale YouTube metadata look current', () => {
+	const idless = YOUTUBE
+		.replace(`"@id":"https://www.youtube.com/watch?v=${VIDEO_ID}",`, '')
+		.replace('<title>Never Gonna Give You Up - YouTube</title>', '<title>Another Video - YouTube</title>');
+	assert.ok(!idless.includes('"@id"'));
+	const content = extractPage(page(idless, 'https://www.youtube.com/watch?v=BBBBBBBBBBB'), D).content!;
+	assert.equal(content.title, 'Another Video');
+	assert.equal(content.durationSeconds, undefined);
+	assert.equal(content.image, 'https://i.ytimg.com/vi/BBBBBBBBBBB/hqdefault.jpg');
+});
+
 test('Defuddle still has the fallback hook this code watches', () => {
 	const instance = new D(page(ARTICLE, 'https://example.com/a'), { url: 'https://example.com/a' });
 	assert.equal(typeof instance._fallbackResponse, 'function');
@@ -175,9 +186,58 @@ test('an error in an optional Defuddle step keeps the extraction; the whole-body
 	assert.equal(failed.content, undefined);
 });
 
+/** A stand-in for Defuddle that returns fixed content, to test our own trimming quickly. */
+function fixedDefuddle(content: string): DefuddleConstructor {
+	return class {
+		_fallbackResponse() { return { content: '' }; }
+		parse() { return { content, title: 'Fixed' }; }
+	} as unknown as DefuddleConstructor;
+}
+
+test('one huge text node (a big <pre>) is cut inside the text, not emptied', () => {
+	const pre = `<pre>${'line of log output &amp; &lt;tags&gt; 🙂\n'.repeat(60_000)}</pre>`;
+	const content = extractPage(page('<title>log.txt</title>', 'https://example.com/log.txt'), fixedDefuddle(pre)).content!;
+	assert.ok(content, 'still saved with content');
+	const size = utf8Bytes(content.html!) + utf8Bytes(content.text!);
+	assert.ok(size <= 890_000, `html+text is ${size}`);
+	assert.ok(content.text!.length > 200_000, `kept ${content.text!.length} chars`);
+	assert.ok(/^<pre>line of log output &amp; &lt;tags&gt; 🙂/.test(content.html!), 'escaped text kept');
+	assert.ok(/<\/pre><p><em>Pigeon kept the first part/.test(content.html!), 'pre closed before the note');
+	assert.ok(!/\uFFFD/.test(content.text!), 'no split characters');
+});
+
+test('fitTextPrefix stays under budget, never splits a surrogate pair, prefers whitespace', () => {
+	const value = '🙂'.repeat(1000);
+	const kept = fitTextPrefix(value, 1001);
+	assert.ok(kept.length % 2 === 0 && !/\uFFFD/.test(kept));
+	assert.ok(utf8Bytes(kept) * 2 <= 1001);
+	assert.equal(fitTextPrefix('alpha beta gamma', 2 * 12), 'alpha beta');
+	assert.equal(fitTextPrefix('a<b', 100), 'a<b');
+	assert.equal(fitTextPrefix('abc', 0), '');
+});
+
+test('if trimming leaves almost no text, the page saves as a bare link', () => {
+	// A one-word intro, one text-free block bigger than the budget (an inline SVG chart), then the article.
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg">${'<path d="M0 0 L10 10"></path>'.repeat(40_000)}</svg>`;
+	const result = extractPage(page('<title>Chart</title>', 'https://example.com/chart'), fixedDefuddle(`<p>Intro.</p>${svg}<p>${'The article text after the chart. '.repeat(20)}</p>`));
+	assert.equal(result.content, undefined);
+	assert.ok(result.error);
+});
+
+test('extraction leaves the live page untouched', () => {
+	const live = page(`<!doctype html><html><head><title>Lazy</title></head><body><article><h1>Lazy images</h1>
+		<p><img alt="chart" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="><noscript><img alt="chart" src="https://example.com/chart.png"></noscript></p>
+		<img srcSet="https://example.com/a.png 1x" src="https://example.com/a.png">${paragraphs(10)}</article></body></html>`, 'https://example.com/lazy');
+	const before = live.documentElement.outerHTML;
+	assert.ok(extractPage(live, D).content);
+	assert.equal(live.documentElement.outerHTML, before);
+});
+
 test('durationFromSchema ignores a stale VideoObject for another video', () => {
 	const other = { '@type': 'VideoObject', '@id': 'https://www.youtube.com/watch?v=AAAAAAAAAAA', duration: 'PT10M' };
 	const mine = { '@type': 'VideoObject', url: `https://www.youtube.com/watch?v=${VIDEO_ID}`, duration: 'PT1M' };
 	assert.equal(durationFromSchema([other], VIDEO_ID), null);
 	assert.equal(durationFromSchema({ '@graph': [other, mine] }, VIDEO_ID), 60);
+	// No id at all: it could be the previous video after in-page navigation.
+	assert.equal(durationFromSchema({ '@type': 'VideoObject', duration: 'PT5M' }, VIDEO_ID), null);
 });

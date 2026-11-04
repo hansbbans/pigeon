@@ -1,7 +1,7 @@
 /** Options page: sign in once (the password is exchanged for a token), sign out. */
 
 import browser from '../browser-api';
-import { optionsState, signIn, signOut } from '../core/sign-in';
+import { OPTIONS_STATE_KEYS, optionsState, signOut, submitSignIn } from '../core/sign-in';
 
 const store = browser.storage.local;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -39,29 +39,36 @@ async function render(): Promise<void> {
 form.addEventListener('submit', (event) => {
 	event.preventDefault();
 	showError(null);
-	submit.disabled = true;
-	// signIn calls permissions.request first, while this click still counts as a user gesture.
-	void signIn(urlInput.value, passwordInput.value, {
+	void submitSignIn(urlInput.value, passwordInput.value, {
 		fetch: (input, init) => fetch(input, init),
 		store,
 		requestHostPermission: (pattern) => browser.permissions.request({ origins: [pattern] }),
-	}).then(async (result) => {
-		submit.disabled = false;
-		if (!result.ok) {
-			showError(result.field, result.message);
-			return;
-		}
-		passwordInput.value = '';
-		await render();
-		// Send anything that waited for sign-in.
-		await browser.runtime.sendMessage({ type: 'pigeon:flush' }).catch(() => undefined);
-		await render();
+	}, {
+		setBusy: (busy) => {
+			submit.disabled = busy;
+		},
+		showError,
+		signedIn: async () => {
+			passwordInput.value = '';
+			await render();
+			// Send anything that waited for sign-in.
+			await browser.runtime.sendMessage({ type: 'pigeon:flush' }).catch(() => undefined);
+			await render();
+		},
 	});
 });
 
 $('sign-out').addEventListener('click', () => {
-	void signOut(store).then(render);
+	void signOut(store)
+		.then(render)
+		.catch((error: unknown) => showError('general', `Sign-out failed: ${error instanceof Error ? error.message : String(error)}`));
 });
 
-browser.storage.onChanged.addListener(() => void render());
-void render();
+browser.storage.onChanged.addListener((changes, area) => {
+	if (area === 'local' && Object.keys(changes).some((key) => OPTIONS_STATE_KEYS.includes(key))) void render().catch(reportRenderError);
+});
+function reportRenderError(error: unknown): void {
+	showError('general', `Could not read the settings: ${error instanceof Error ? error.message : String(error)}`);
+}
+
+void render().catch(reportRenderError);

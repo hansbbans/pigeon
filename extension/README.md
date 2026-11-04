@@ -2,12 +2,12 @@
 
 Saves pages and links to Pigeon's **Read It Later** from Chrome, Dia and Vivaldi (all Chromium, Manifest V3).
 
-- **Toolbar button** or **Alt+Shift+S**: saves the current page. Defuddle runs on the live tab, so logged-in and paywalled pages you can see are saved as clean text with their images. The badge shows ✓ when it's saved.
+- **Toolbar button** or **Alt+Shift+S**: saves the current page. Defuddle runs on a copy of the page as the tab shows it, so logged-in and paywalled pages you can see are saved as clean text with their images. The badge shows ✓ when it's saved.
 - **Right-click a page > Save page to Pigeon**: the same.
 - **Right-click a link > Save link to Pigeon**: saves the link only. Pigeon marks it pending, and the iOS or web app extracts it later.
 - **YouTube watch pages** are saved as videos: title, channel, thumbnail and duration, without article text and without fetching the transcript.
 
-If the extraction fails (a restricted page, a page with no article, a timeout), the bare link is saved instead. Every save is written to the extension's storage before it is sent and removed once Pigeon answers. So if Pigeon can't be reached, the sign-in has expired, or the browser stops the extension mid-request, the save waits and is sent later. That happens after the next successful save, after signing in, on browser start, or while you browse, backing off from 1 to 30 minutes while Pigeon stays unreachable. The badge shows how many saves are waiting.
+If the extraction fails (a restricted page, a page with no article, a timeout), the bare link is saved instead. Every save is written to the extension's storage before it is sent and removed once Pigeon answers. So if Pigeon can't be reached, the sign-in has expired, or the browser stops the extension mid-request, the save waits and is sent later. It goes out after the next successful save, after signing in, on browser start, or on a timer (`chrome.alarms`) that backs off from 1 to 30 minutes while Pigeon stays unreachable. A save that keeps timing out or getting a server error with its full article is cut to its bare link after two tries, and a stuck save never holds back the ones behind it. A later bare-link save of the same URL keeps a queued extraction. The badge shows how many saves are waiting.
 
 The extension needs the save API from PR #161 (`POST /api/v1/saved`) on the Pigeon server. Against a server without it, saves wait in the queue.
 
@@ -39,14 +39,15 @@ To change the shortcut, open `chrome://extensions/shortcuts` (Vivaldi: `vivaldi:
 ## Permissions
 
 - `activeTab` and `scripting`: read the current tab only when you save it. There is no content script and no `<all_urls>`.
-- `contextMenus`, `storage`.
+- `contextMenus`, `storage`, and `alarms` (retrying waiting saves).
 - Host permission for `https://pigeon.hanscho.com` only. Requests to Pigeon go from the background service worker, so the Worker needs no CORS. Signing in to a different address asks for that one origin at runtime (`optional_host_permissions`); plain http is only accepted for `localhost` and `127.0.0.1`, for a local `wrangler dev`.
 
-Defuddle reads the live page. It cleans a copy, but on the page itself it normalizes `srcSet` attributes and swaps lazy-image placeholders for their `<noscript>` sources (Obsidian Web Clipper does the same).
+Defuddle gets a copy of the page (`document.cloneNode`), so the page you are reading is never changed. A detached copy has no computed styles, so Defuddle's mobile-CSS and hidden-element steps fall back to its markup rules.
 
 ## Layout
 
-- `src/core/`: browser-free logic (address handling, ClientLogin, the save request and its size rules, the retry queue, the save flow, sign-in). Tested with `node --test` against a mocked API.
+- `src/core/`: browser-free logic (address handling, ClientLogin, the save request and its size rules, the retry queue and its alarm, the save flow, sign-in, the badge). Tested with `node --test` against a mocked API.
+- Shared with the Worker and bundled straight from `../src`: YouTube video ids and durations (`src/youtube.ts`) and UTF-8 truncation (`src/content-size.ts`).
 - `src/page/`: the extraction that runs in the tab (`extract.ts`, tested under jsdom with the real Defuddle) and its bundle entry (`inject.ts`, built to `extract.js`).
 - `src/background/`: the service worker that connects browser events to `src/core`.
 - `src/options/` and `static/`: the settings page and icons.

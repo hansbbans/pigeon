@@ -4,10 +4,10 @@
  * even when extraction fails, so every path ends in a stored link or a queued one.
  */
 
-import { postSave, type Fetch, type SaveResponseBody } from './api';
+import { postSave, type Fetch, type RetryCause, type SaveResponseBody } from './api';
 import { isSaveableUrl } from './config';
 import { buildSaveAttempts, type PageExtraction, type SaveRequestBody } from './payload';
-import { enqueue, readQueue, removeFromQueue } from './queue';
+import { enqueue, readQueue, recordFailure, removeFromQueue } from './queue';
 import { loadSettings, markNeedsSignIn, type KeyValueStore } from './session';
 
 export interface SaveDeps {
@@ -26,6 +26,17 @@ export type SaveOutcome =
 	| { status: 'unsupported' }
 	/** Pigeon rejected even the bare link (for example a URL it cannot accept). */
 	| { status: 'failed'; message: string };
+
+/** Runs a save so that it always ends in an outcome to show, even if something throws. */
+export async function guardSave(save: () => Promise<SaveOutcome>): Promise<SaveOutcome> {
+	try {
+		return await save();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error('[Pigeon] Save failed:', message);
+		return { status: 'failed', message };
+	}
+}
 
 export interface PageTarget {
 	url: string | undefined;
@@ -59,7 +70,7 @@ export async function saveLink(url: string | undefined, deps: SaveDeps, title?: 
 type AttemptResult =
 	| { status: 'saved'; withContent: boolean; response: SaveResponseBody }
 	| { status: 'unauthorized' }
-	| { status: 'retry'; message: string }
+	| { status: 'retry'; cause: RetryCause; message: string }
 	| { status: 'failed'; message: string };
 
 /** Tries each request in order; a rejected request (400/413) falls through to the next. */
@@ -69,7 +80,7 @@ async function tryAttempts(attempts: SaveRequestBody[], origin: string, auth: st
 		const result = await postSave(fetchImpl, origin, auth, body);
 		if (result.kind === 'ok') return { status: 'saved', withContent: Boolean(body.content) && result.body.state === 'done', response: result.body };
 		if (result.kind === 'unauthorized') return { status: 'unauthorized' };
-		if (result.kind === 'retry') return { status: 'retry', message: result.message };
+		if (result.kind === 'retry') return { status: 'retry', cause: result.cause, message: result.message };
 		lastRejection = result.message;
 	}
 	return { status: 'failed', message: lastRejection };
@@ -77,32 +88,45 @@ async function tryAttempts(attempts: SaveRequestBody[], origin: string, auth: st
 
 /** Queue entries being sent right now; a flush leaves them alone. */
 const inFlight = new Set<string>();
+/**
+ * Times a full save may time out or get a 5xx before it is cut to its bare
+ * link (being offline does not count: that is not the request's fault).
+ */
+export const MAX_FULL_SAVE_FAILURES = 2;
+/** A flush stops after this many queued saves in a row could not reach Pigeon. */
+const UNREACHABLE_STREAK = 2;
 
 async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promise<SaveOutcome> {
 	// Write-ahead: if the browser stops the service worker mid-request, the save is still queued.
-	const { id, queued } = await enqueue(deps.store, attempts);
+	// Send what was stored: it may have kept an earlier extraction of the same URL.
+	const queued = await enqueue(deps.store, attempts);
 	const settings = await loadSettings(deps.store);
-	if (!settings.auth) return { status: 'needsSignIn', queued };
-	inFlight.add(id);
+	if (!settings.auth) return { status: 'needsSignIn', queued: queued.queued };
+	inFlight.add(queued.id);
 	let result: AttemptResult;
 	try {
-		result = await tryAttempts(attempts, settings.origin, settings.auth, deps.fetch);
+		result = await tryAttempts(queued.attempts, settings.origin, settings.auth, deps.fetch);
 	} finally {
-		inFlight.delete(id);
+		inFlight.delete(queued.id);
 	}
 	switch (result.status) {
 		case 'saved':
-			await removeFromQueue(deps.store, id);
+			await removeFromQueue(deps.store, queued.id);
 			return result;
 		case 'failed':
-			await removeFromQueue(deps.store, id);
+			await removeFromQueue(deps.store, queued.id);
 			return { status: 'failed', message: result.message };
 		case 'unauthorized':
 			await markNeedsSignIn(deps.store, settings.auth);
 			return { status: 'needsSignIn', queued: (await readQueue(deps.store)).length };
 		case 'retry':
+			if (countsAgainstRequest(result.cause)) await recordFailure(deps.store, queued.id, MAX_FULL_SAVE_FAILURES);
 			return { status: 'queued', queued: (await readQueue(deps.store)).length, message: result.message };
 	}
+}
+
+function countsAgainstRequest(cause: RetryCause): boolean {
+	return cause === 'timeout' || cause === 'server';
 }
 
 /** True while a save or a flush is talking to Pigeon (the background keeps the worker alive meanwhile). */
@@ -114,13 +138,20 @@ export interface FlushResult {
 	sent: number;
 	/** Dropped because Pigeon rejected even the bare link. */
 	dropped: number;
+	/** Could not get through this time; still queued for the next retry. */
+	passedOver: number;
 	remaining: number;
 	stoppedBy?: 'signedOut' | 'unauthorized' | 'unreachable';
 }
 
 let flushing: Promise<FlushResult> | null = null;
 
-/** Sends queued saves oldest first; stops at the first sign that Pigeon is unreachable. */
+/**
+ * Sends queued saves oldest first. A save that cannot get through is passed
+ * over (and cut to its bare link after repeated failures) so it cannot block
+ * the ones behind it; the flush stops once several in a row fail, since
+ * Pigeon is then most likely unreachable.
+ */
 export function flushQueue(deps: SaveDeps): Promise<FlushResult> {
 	flushing ??= runFlush(deps).finally(() => {
 		flushing = null;
@@ -129,23 +160,40 @@ export function flushQueue(deps: SaveDeps): Promise<FlushResult> {
 }
 
 async function runFlush(deps: SaveDeps): Promise<FlushResult> {
-	const result: FlushResult = { sent: 0, dropped: 0, remaining: 0 };
+	const result: FlushResult = { sent: 0, dropped: 0, passedOver: 0, remaining: 0 };
 	const queue = await readQueue(deps.store);
 	result.remaining = queue.length;
 	if (queue.length === 0) return result;
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { ...result, stoppedBy: 'signedOut' };
-	for (const entry of queue) {
-		if (inFlight.has(entry.id)) continue;
-		const attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
+	let streak = 0;
+	for (const queued of queue) {
+		if (inFlight.has(queued.id)) continue;
+		let entry = queued;
+		let attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
+		if (attempt.status === 'retry' && countsAgainstRequest(attempt.cause) && entry.attempts.length > 1) {
+			const updated = await recordFailure(deps.store, entry.id, MAX_FULL_SAVE_FAILURES);
+			// Just cut to its bare link: that small request may well get through now.
+			if (updated && updated.attempts.length === 1) {
+				entry = updated;
+				attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
+			}
+		}
 		if (attempt.status === 'unauthorized') {
 			await markNeedsSignIn(deps.store, settings.auth);
-			return { ...result, stoppedBy: 'unauthorized' };
+			return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unauthorized' };
 		}
-		if (attempt.status === 'retry') return { ...result, stoppedBy: 'unreachable' };
+		if (attempt.status === 'retry') {
+			result.passedOver++;
+			if (++streak >= UNREACHABLE_STREAK) {
+				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unreachable' };
+			}
+			continue;
+		}
+		streak = 0;
 		if (attempt.status === 'saved') result.sent++;
 		else result.dropped++;
-		result.remaining = await removeFromQueue(deps.store, entry.id);
+		await removeFromQueue(deps.store, entry.id);
 	}
 	result.remaining = (await readQueue(deps.store)).length;
 	return result;

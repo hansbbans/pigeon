@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { optionsState, signIn, signOut } from '../src/core/sign-in';
 import { markNeedsSignIn } from '../src/core/session';
 import { MemoryStore, mockFetch } from './helpers/fakes';
+import { OPTIONS_STATE_KEYS, optionsState, signIn, signOut, submitSignIn } from '../src/core/sign-in';
 
 function deps(store: MemoryStore, fetch: typeof globalThis.fetch, grant = true) {
 	const requested: string[] = [];
@@ -60,4 +60,36 @@ test('a 401 shows the re-sign-in notice; signing in again clears it; sign-out ke
 	assert.equal((await optionsState(store)).needsSignIn, false);
 	await signOut(store);
 	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: false, queued: 0 });
+});
+
+function form() {
+	const events: string[] = [];
+	return {
+		events,
+		form: {
+			setBusy: (busy: boolean) => events.push(busy ? 'busy' : 'idle'),
+			showError: (field: string, message: string) => events.push(`error:${field}:${message}`),
+			signedIn: async () => { events.push('signedIn'); },
+		},
+	};
+}
+
+test('the sign-in form is re-enabled and shows the error even when something throws', async () => {
+	const store = new MemoryStore();
+	store.set = async () => { throw new Error('QUOTA_BYTES quota exceeded'); };
+	const { events, form: f } = form();
+	const ok = await submitSignIn('pigeon.hanscho.com', 'pw', deps(store, mockFetch(() => new Response('Auth=pigeon/t')).fetch).deps, f);
+	assert.equal(ok, false);
+	assert.deepEqual(events, ['busy', 'error:general:Sign-in failed: QUOTA_BYTES quota exceeded', 'idle']);
+	const rejecting = { ...deps(new MemoryStore(), mockFetch([]).fetch).deps, requestHostPermission: async () => { throw new Error('gesture required'); } };
+	const second = form();
+	assert.equal(await submitSignIn('pigeon.hanscho.com', 'pw', rejecting, second.form), false);
+	assert.deepEqual(second.events.at(-1), 'idle');
+	const third = form();
+	assert.equal(await submitSignIn('pigeon.hanscho.com', 'pw', deps(new MemoryStore(), mockFetch(() => new Response('Auth=pigeon/t')).fetch).deps, third.form), true);
+	assert.deepEqual(third.events, ['busy', 'signedIn', 'idle']);
+});
+
+test('the options page re-renders only for the keys it shows', () => {
+	assert.deepEqual([...OPTIONS_STATE_KEYS].sort(), ['pigeonAuth', 'pigeonNeedsSignIn', 'pigeonOrigin', 'pigeonPendingSummary']);
 });

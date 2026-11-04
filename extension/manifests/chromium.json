@@ -32,7 +32,19 @@
       "description": "Save the current page to Pigeon"
     }
   },
-  "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
-  "host_permissions": ["https://pigeon.hanscho.com/*"],
-  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://pigeon.hanscho.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ]
 }
