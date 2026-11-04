@@ -12,7 +12,8 @@
 			"url": "https://pigeon.example/feed/design-weekly",
 			"sourceUrl": "https://feeds.example.com/design.xml",
 			"htmlUrl": "https://example.com",
-			"iconUrl": "https://example.com/icon.png"
+			"iconUrl": "https://example.com/icon.png",
+			"sourceType": "rss"
 		},
 		{
 			"id": "feed/2",
@@ -21,7 +22,8 @@
 			"url": "https://pigeon.example/feed/morning-brief",
 			"sourceUrl": null,
 			"htmlUrl": "https://pigeon.example",
-			"iconUrl": ""
+			"iconUrl": "",
+			"sourceType": "email"
 		},
 		{
 			"id": "feed/3",
@@ -35,7 +37,8 @@
 			"url": "https://pigeon.example/feed/quiet-blog",
 			"sourceUrl": "https://quiet.example.org/feed",
 			"htmlUrl": "https://quiet.example.org",
-			"iconUrl": ""
+			"iconUrl": "",
+			"sourceType": "rss"
 		}
 	]
 }

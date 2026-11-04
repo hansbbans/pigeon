@@ -139,6 +139,7 @@ test('buildFeedViews returns built-in views plus sorted uncategorized feeds', ()
 				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
 				unreadCount: 0, kind: 'starred', section: 'views',
 			},
+			{ id: 'saved', title: 'Read It Later', streamId: 'saved', unreadCount: 0, kind: 'saved', section: 'views' },
 			{ id:'for-you',title:'For You',streamId:'for-you',unreadCount:0,kind:'recommended',section:'views' },
 			{
 				id: 'feed/1',
@@ -219,6 +220,7 @@ test('buildFeedViews groups categorized feeds into folder views and keeps uncate
 				id: 'starred', title: 'Starred', streamId: 'user/-/state/com.google/starred',
 				unreadCount: 0, kind: 'starred', section: 'views',
 			},
+			{ id: 'saved', title: 'Read It Later', streamId: 'saved', unreadCount: 0, kind: 'saved', section: 'views' },
 			{ id:'for-you',title:'For You',streamId:'for-you',unreadCount:0,kind:'recommended',section:'views' },
 			{
 				id: 'user/-/label/Newsletters',

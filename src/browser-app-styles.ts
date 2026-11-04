@@ -32,6 +32,11 @@ const ICON_PATHS: Record<string, string> = {
 	sparkle: "<path d='M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6' />",
 	folder: "<path d='M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2' />",
 	rss: "<path d='M4 19a1 1 0 1 0 2 0a1 1 0 1 0 -2 0' /> <path d='M4 4a16 16 0 0 1 16 16' /> <path d='M4 11a9 9 0 0 1 9 9' />",
+	bookmark: "<path d='M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z' />",
+	archive: "<path d='M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2' /> <path d='M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-10' /> <path d='M10 12l4 0' />",
+	"archive-filled": "F:<path d='M2 3m0 2a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z' /> <path d='M19 9c.513 0 .936 .386 .993 .883l.007 .117v8a3 3 0 0 1 -2.824 2.995l-.176 .005h-10a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-8a1 1 0 0 1 .883 -.993l.117 -.007h14zm-5 2h-4l-.117 .007a1 1 0 0 0 0 1.986l.117 .007h4l.117 -.007a1 1 0 0 0 0 -1.986l-.117 -.007z' />",
+	trash: "<path d='M4 7l16 0' /> <path d='M10 11l0 6' /> <path d='M14 11l0 6' /> <path d='M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12' /> <path d='M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3' />",
+	link: "<path d='M9 15l6 -6' /> <path d='M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464' /> <path d='M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463' />",
 };
 
 function iconUrl(name: string): string {
@@ -242,8 +247,12 @@ ${iconVariables()}
       [data-icon="close"] { --icon: var(--icon-close); }
       [data-icon="theme"] { --icon: var(--icon-moon); }
       [data-icon="theme"][aria-pressed="true"] { --icon: var(--icon-sun); }
+      [data-icon="archive"] { --icon: var(--icon-archive); }
+      [data-icon="trash"] { --icon: var(--icon-trash); }
+      [data-icon="link"] { --icon: var(--icon-link); }
 
       #mark-unread-button[data-read="true"] { --icon: var(--icon-check-filled); color: var(--text-secondary); }
+      #mark-unread-button[data-icon="archive"][data-read="true"] { --icon: var(--icon-archive-filled); }
       #star-article-button[aria-pressed="true"] { --icon: var(--icon-star-filled); color: var(--star); }
 
       /* Sign in */
@@ -445,6 +454,7 @@ ${iconVariables()}
       .list-button[data-view-kind="today"] { --icon: var(--icon-today); }
       .list-button[data-view-kind="recent"] { --icon: var(--icon-recent); }
       .list-button[data-view-kind="starred"] { --icon: var(--icon-star); }
+      .list-button[data-view-kind="saved"] { --icon: var(--icon-bookmark); }
       .list-button[data-view-kind="recommended"] { --icon: var(--icon-sparkle); }
 
       .feed-count {
@@ -739,6 +749,81 @@ ${iconVariables()}
       }
 
       .article-card.is-read:not(.is-active) .article-hero { opacity: 0.6; }
+
+      /* Read It Later: an editorial list, thumbnail first, no preview text. */
+      .saved-filters {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0 0.75rem 0.6rem;
+      }
+      .saved-filters select { width: auto; padding: 0.2rem 0.45rem; font-size: 0.78rem; color: var(--text-secondary); }
+      .segmented { display: inline-flex; padding: 2px; border-radius: 7px; background: var(--hover); }
+      .segmented button {
+        padding: 0.18rem 0.6rem;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .segmented button[aria-pressed="true"] { background: var(--surface-raised); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+      .saved-card-grid { display: flex; gap: 0.8rem; align-items: center; }
+      .saved-thumbnail {
+        width: 4.75rem;
+        height: 3.2rem;
+        flex: none;
+        border-radius: 5px;
+        background: var(--hover);
+        object-fit: cover;
+      }
+      .saved-card-copy { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+      .saved-title {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        font-family: 'New York', 'Iowan Old Style', Charter, Georgia, 'Times New Roman', serif;
+        font-size: 1rem;
+        font-weight: 600;
+        line-height: 1.28;
+        letter-spacing: 0;
+      }
+      .saved-meta { display: flex; gap: 0.45rem; min-width: 0; color: var(--muted); font-size: 0.72rem; line-height: 1.35; white-space: nowrap; }
+      .saved-meta > span { flex: none; }
+      .saved-meta > .article-source { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .saved-meta > span + span::before { content: '·'; margin-right: 0.45rem; }
+      .saved-meta .article-length, .saved-meta .article-time { margin-left: 0; }
+      .saved-state { color: var(--text-secondary); }
+      .article-card.saved-card.is-read:not(.is-active) .saved-thumbnail { opacity: 0.6; }
+      .saved-extraction {
+        display: grid;
+        gap: 0.6rem;
+        margin: 0.4rem 0 0.2rem;
+        padding: 0.8rem 0.9rem;
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius);
+        color: var(--text-secondary);
+      }
+      .saved-extraction p { margin: 0; }
+      .saved-extraction-actions { display: flex; gap: 0.5rem; }
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 1.5rem;
+        z-index: 60;
+        transform: translateX(-50%);
+        max-width: calc(100vw - 2rem);
+        padding: 0.55rem 0.95rem;
+        border-radius: 9px;
+        background: var(--text);
+        color: var(--page);
+        box-shadow: var(--shadow);
+        font-size: 0.85rem;
+        pointer-events: none;
+      }
+      .toast[data-tone="error"] { background: var(--danger); color: #fff; }
 
       /* Reader */
       .reader-pane-surface {

@@ -26,7 +26,7 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			return url.href;
 		} catch { return null; }
 	}
-	root.__PIGEON_READING_TOOLS__ = { extract(html: string, url: string) {
+	root.__PIGEON_READING_TOOLS__ = { extract(html: string, url: string, options?: { withText?: boolean }) {
 		const base = safeURL(url);
 		if (!base || !html || typeof html !== 'string') throw new Error('A public article URL and HTML are required.');
 		if (new TextEncoder().encode(html).byteLength > 5_000_000) throw new Error('Article source is too large.');
@@ -197,7 +197,10 @@ function installBrowserReadingTools(root: any, Reader: any): void {
 			if (anchors.has(id) || anchors.has(fragment)) { link.setAttribute('href', '#' + fragment); link.setAttribute('target', '_self'); }
 			else { link.setAttribute('href', pageURL + '#' + fragment); link.removeAttribute('target'); }
 		}
-		return { ...extracted, content: client.sanitizeArticleHtml(output.innerHTML), url: base };
+		const content = client.sanitizeArticleHtml(output.innerHTML);
+		// Plain text of the cleaned article, only when asked: Read It Later uploads it for search.
+		if (!options?.withText) return { ...extracted, content, url: base };
+		return { ...extracted, content, text: (output.content.textContent || '').replace(/\s+/g, ' ').trim(), url: base };
 	}, hasDefuddle(): boolean { return typeof root.Defuddle === 'function'; } };
 }
 

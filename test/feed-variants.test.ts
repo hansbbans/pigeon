@@ -4,12 +4,12 @@ import { test } from 'node:test';
 import app from '../src/index';
 
 const FEED_SQL =
-	'SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1';
+	"SELECT feed_key, display_name, from_email, custom_title, source_type, source_url, site_url, icon_url, last_item_at FROM feeds WHERE feed_key = ? AND is_active = 1 AND source_type <> 'saved'";
 
 const ITEMS_SQL =
 	'SELECT id, message_id, subject, html_content, text_content, original_url, from_name, from_email, received_at FROM items WHERE feed_key = ? ORDER BY received_at DESC, id DESC LIMIT ?';
 
-const FEEDS_SQL_FRAGMENT = 'FROM feeds WHERE is_active = 1 ORDER BY last_item_at DESC';
+const FEEDS_SQL_FRAGMENT = "FROM feeds WHERE is_active = 1 AND source_type <> 'saved' ORDER BY last_item_at DESC";
 const OPML_SQL_FRAGMENT = 'FROM feeds f WHERE f.is_active = 1';
 
 class FeedVariantStatement {

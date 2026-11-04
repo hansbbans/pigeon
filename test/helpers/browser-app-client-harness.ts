@@ -277,6 +277,7 @@ export async function createBrowserHarness(options?: {
 	storedAutoReadPolicy?: string | null;
 	storedShowReadingTime?: '0' | '1';
 	storedSidebarCollapsed?: string | null;
+	storedEntries?: Record<string, string>;
 	offlineTools?: any;
 	locationHref?: string;
 	readingTools?: any;
@@ -329,8 +330,23 @@ export async function createBrowserHarness(options?: {
 		['reader-reading-status', createElement('', [], 'p', registerFocus)],
 		['load-images-button', createElement('', [], 'button', registerFocus)],
 		['share-article-button', createElement('', [], 'button', registerFocus)],
-		['readwise-token-input', createElement('', [], 'input', registerFocus)],
-		['readwise-save-button', createElement('', [], 'button', registerFocus)],
+		['copy-link-button', createElement('', ['hidden'], 'button', registerFocus)],
+		['remove-saved-button', createElement('', ['hidden'], 'button', registerFocus)],
+		['saved-filters', createElement('', ['hidden'], 'div', registerFocus)],
+		['saved-status-unread', createElement('', [], 'button', registerFocus)],
+		['saved-status-archive', createElement('', [], 'button', registerFocus)],
+		['saved-kind-filter', createElement('all', [], 'select', registerFocus)],
+		['saved-length-filter', createElement('any', [], 'select', registerFocus)],
+		['saved-sort-select', createElement('newest', [], 'select', registerFocus)],
+		['saved-extraction-panel', createElement('', ['hidden'], 'div', registerFocus)],
+		['saved-extraction-status', createElement('', [], 'p', registerFocus)],
+		['saved-retry-button', createElement('', [], 'button', registerFocus)],
+		['saved-open-original-button', createElement('', [], 'button', registerFocus)],
+		['link-context-menu', createElement('', ['hidden'], 'div', registerFocus)],
+		['link-save-button', createElement('', [], 'button', registerFocus)],
+		['link-open-button', createElement('', [], 'button', registerFocus)],
+		['link-copy-button', createElement('', [], 'button', registerFocus)],
+		['app-toast', createElement('', ['hidden'], 'div', registerFocus)],
 		['image-zoom-panel', createElement('', ['hidden'], 'div', registerFocus)],
 		['zoom-image', createElement('', [], 'img', registerFocus)],
 		['close-image-zoom', createElement('', [], 'button', registerFocus)],
@@ -434,6 +450,7 @@ export async function createBrowserHarness(options?: {
 	if (options?.storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', options.storedAutoReadPolicy);
 	if (options?.storedShowReadingTime) localStorageState.set('pigeon.browser.show-reading-time', options.storedShowReadingTime);
 	if (options?.storedSidebarCollapsed) localStorageState.set('pigeon.browser.sidebar-collapsed', options.storedSidebarCollapsed);
+	for (const [key, value] of Object.entries(options?.storedEntries ?? {})) localStorageState.set(key, value);
 	if (options?.storedColumnWidths) {
 		localStorageState.set('pigeon.browser.column-widths', JSON.stringify(options.storedColumnWidths));
 	}
@@ -686,6 +703,12 @@ export async function createBrowserHarness(options?: {
 		}
 	}
 
+	function dispatchFrameEvent(type: string, event: Record<string, unknown> = {}) {
+		let prevented = false;
+		frameDocumentHandlers.get(type)?.({ ...event, preventDefault() { prevented = true; } });
+		return prevented;
+	}
+
 	function dispatchReaderFrameScroll(scrollTop: number) {
 		readerFrameWindow.scrollTo(0, scrollTop);
 		frameDocumentHandlers.get('scroll')?.({});
@@ -721,6 +744,9 @@ export async function createBrowserHarness(options?: {
 		dispatchDocumentPointer,
 		dispatchWindowEvent,
 		dispatchReaderFrameScroll,
+		dispatchFrameEvent,
+		window: context.window as Record<string, any>,
+		frameDocumentElement,
 		getReaderFrameScrollTop() {
 			return frameDocumentElement.scrollTop;
 		},
@@ -848,6 +874,7 @@ export async function createStatefulArticleBrowser(options?: {
 	fetchOverride?: (input: string, init: RequestInit | undefined, next: () => Promise<Response>) => Promise<Response>;
 	seed?: (database: DatabaseSync) => void;
 	storedShowReadingTime?: '0' | '1';
+	storedEntries?: Record<string, string>;
 }) {
 	const browserNow = typeof options?.now === 'function' ? options.now() : options?.now ?? new Date(2026, 9, 12, 12).getTime();
 	const state = createLargeTodaySqliteLibrary(browserNow, options?.count ?? 2);
@@ -858,6 +885,7 @@ export async function createStatefulArticleBrowser(options?: {
 		now: options?.now ?? browserNow,
 		storedAutoReadPolicy: options?.policy,
 		storedShowReadingTime: options?.storedShowReadingTime,
+		storedEntries: options?.storedEntries,
 		readingTools:options?.readingTools,extractReader:options?.extractReader,offlineTools:options?.offlineTools,locationHref:options?.locationHref,
 		frameScrollHeight: options?.frameHeight,
 		frameViewportHeight: options?.viewportHeight,

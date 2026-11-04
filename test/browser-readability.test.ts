@@ -269,3 +269,13 @@ test('footnote targets that already have a title keep their id and their title',
 	assert.match(content, /<p[^>]*id="note-a"/);
 	assert.match(content, /title="Note one"/);
 });
+
+test('extract returns plain text only when the caller asks for it', () => {
+	const { window } = readingWindow();
+	const plain = window.__PIGEON_READING_TOOLS__.extract(readerFixture('essay-footnotes'), essayURL);
+	assert.equal('text' in plain, false, 'reader mode does not pay for a full textContent pass');
+	const withText = window.__PIGEON_READING_TOOLS__.extract(readerFixture('essay-footnotes'), essayURL, { withText: true });
+	assert.match(withText.text, /volunteers over many seasons/);
+	assert.doesNotMatch(withText.text, /</);
+	assert.doesNotMatch(withText.text, /\s{2,}/);
+});

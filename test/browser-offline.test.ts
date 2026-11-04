@@ -190,3 +190,30 @@ test('acknowledged base updates preserve newer pending overlays and every other 
  assert.equal((await library.stats()).pending,1);
  const database=state.databases.get(library.accountHash)!;assert.equal(database.get('articles')!.get('native-1').isRead,true);assert.equal(database.get('statuses')!.get('native-1').isStarred,true);assert.equal(database.get('outbox')!.get(queued.id).value,false);
 });
+
+test('offline Read It Later: saved items stay in their own stream and keep their list metadata', async () => {
+ const state = fixture();
+ state.setResponse(async () => page([
+  { sequence: 1, entityType: 'feed', entityId: 'one', operation: 'upsert', payload: { feedKey: 'one', streamId: 'feed/1', title: 'Newsletter', folders: [], isActive: true, sourceType: 'rss' } },
+  { sequence: 2, entityType: 'feed', entityId: 'pigeon:saved', operation: 'upsert', payload: { feedKey: 'pigeon:saved', streamId: 'feed/2', title: 'Read It Later', folders: [], isActive: true, sourceType: 'saved' } },
+  article(1),
+  article(2, { feedKey: 'pigeon:saved', extractionState: 'done', imageURL: 'https://example.com/a.jpg', siteName: 'Example', mediaKind: 'text', wordCount: 900 }),
+  article(3, { feedKey: 'pigeon:saved', extractionState: 'pending', isRead: true }),
+ ], 'v1:6'));
+ const library = await state.api.create(state.adapter()); await library.sync();
+ assert.deepEqual(plain((await library.query({})).itemIds), ['1']);
+ assert.deepEqual(plain((await library.query({ stream: 'starred' })).itemIds), []);
+ assert.deepEqual(plain((await library.query({ stream: 'read' })).itemIds), []);
+ assert.deepEqual(plain((await library.query({ stream: 'saved' })).itemIds), ['3', '2']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', filter: 'unread' })).itemIds), ['2']);
+ assert.deepEqual(plain((await library.query({ stream: 'feed/2' })).itemIds), ['3', '2']);
+ assert.equal((await library.query({ filter: 'unread', includeSaved: true })).total, 2);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', sort: 'longest' })).itemIds), ['2', '3']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', sort: 'shortest' })).itemIds), ['2', '3']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', length: 'short' })).itemIds), ['2']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', length: 'long' })).itemIds), []);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', kind: 'video' })).itemIds), []);
+ const [saved] = (await library.contents(['2'])).items;
+ assert.equal(saved.extractionState, 'done'); assert.equal(saved.imageUrl, 'https://example.com/a.jpg'); assert.equal(saved.siteName, 'Example'); assert.equal(saved.nativeId, 'native-2');
+ assert.deepEqual(plain(await library.feeds()).map((feed: any) => feed.sourceType), ['rss', 'saved']);
+});

@@ -211,3 +211,17 @@ test('successful deliveries renew a subscription so active browsers never age ou
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, later);
  assert.deepEqual(delivered, ['https://fcm.googleapis.com/wp/active']);
 });
+
+test('a selection that includes Read It Later subscribes to the rest and never stores the saved feed', async (t) => {
+ const state = await fixture(t);
+ state.db.exec("INSERT INTO feeds (feed_key, display_name, source_type) VALUES ('pigeon:saved', 'Read It Later', 'saved')");
+ const response = await handleBrowserPush(state.request({ subscription, feedKeys: ['one', 'pigeon:saved'] }), state.env);
+ assert.equal(response.status, 201, await response.clone().text());
+ assert.equal((state.db.prepare('SELECT feed_keys FROM browser_push_subscriptions').get() as any).feed_keys, '["one"]');
+ const own = await response.json() as { id: string; managementToken: string };
+ const update = await handleBrowserPush(state.request({ ...own, subscription, feedKeys: ['pigeon:saved', 'two'] }, 'PUT'), state.env);
+ assert.equal(update.status, 200);
+ assert.equal((state.db.prepare('SELECT feed_keys FROM browser_push_subscriptions').get() as any).feed_keys, '["two"]');
+ // A genuinely unknown key still fails the request.
+ assert.equal((await handleBrowserPush(state.request({ ...own, subscription, feedKeys: ['pigeon:saved', 'missing'] }, 'PUT'), state.env)).status, 400);
+});

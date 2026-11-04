@@ -1,4 +1,5 @@
 import { readingLengthFields } from './reading-length';
+import { notSavedFeedSql, SAVED_FEED_KEY, SAVED_SOURCE_TYPE, savedMetadataFields } from './saved-items';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -11,13 +12,9 @@ import {
 	type ClientFamily,
 } from './engagement';
 import { ensureDatabaseSchema } from './migrations';
-import { parseGoogleReaderItemRowid } from './item-identity';
+import { googleReaderItemId, parseGoogleReaderItemRowid } from './item-identity';
 
 // --- ID conversion utilities ---
-
-function toGoogleItemId(rowid: number): string {
-	return 'tag:google.com,2005:reader/item/' + rowid.toString(16).padStart(16, '0');
-}
 
 function isMissingColumnError(error: unknown, columnName: string): boolean {
 	const message = error instanceof Error ? error.message : String(error);
@@ -31,6 +28,19 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 
 function isPigeonClient(request: Request): boolean {
 	return request.headers.has('X-Pigeon-Client');
+}
+
+/**
+ * Pigeon extension `xs=saved` (query string or form body): the client lists
+ * Read It Later in its own section. The reading-list, read, starred and label
+ * streams then leave the saved feed out (matching /api/v1/browser/articles),
+ * and unread-count leaves it out of the reading-list total while still
+ * listing the saved feed's own `feed/<id>` count. The saved feed's own stream
+ * is unaffected. Without the parameter, older clients and third-party
+ * readers see Read It Later as an ordinary feed.
+ */
+function excludesSavedFeed(params: URLSearchParams): boolean {
+	return params.getAll('xs').includes('saved');
 }
 
 function labelFromStreamId(streamId: string | null): string | null {
@@ -392,7 +402,7 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 		return handleQuickAdd(request, env);
 	}
 	if (path === '/reader/api/0/unread-count') {
-		return handleUnreadCount(env);
+		return handleUnreadCount(env, excludesSavedFeed(await parseRequestParams(request, url)));
 	}
 	if (path === '/reader/api/0/stream/items/ids') {
 		return handleStreamItemIds(request, url, env);
@@ -471,7 +481,7 @@ async function handleTagList(env: Env): Promise<Response> {
 async function handleSubscriptionList(env: Env): Promise<Response> {
 	const { results: [feedResult], labelsByFeedKey } = await batchWithFeedLabels(env, [
 		env.DB.prepare(
-			'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url FROM feeds WHERE is_active = 1',
+			'SELECT rowid, feed_key, display_name, from_email, custom_title, category, icon_url, source_url, site_url, source_type FROM feeds WHERE is_active = 1',
 		),
 	]);
 	const results = feedResult.results as Array<{
@@ -484,6 +494,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		icon_url: string | null;
 		source_url: string | null;
 		site_url: string | null;
+		source_type: string;
 	}>;
 
 	const subscriptions = results.map((f) => ({
@@ -494,6 +505,7 @@ async function handleSubscriptionList(env: Env): Promise<Response> {
 		sourceUrl: f.source_url,
 		htmlUrl: f.site_url || f.source_url || env.BASE_URL,
 		iconUrl: f.icon_url || '',
+		sourceType: f.source_type,
 	}));
 
 	return Response.json({ subscriptions });
@@ -505,14 +517,14 @@ function newestTimestampUsec(current: string | undefined, candidate: string): st
 	return current === undefined || numericCandidate > Number(current) ? candidate : current;
 }
 
-async function handleUnreadCount(env: Env): Promise<Response> {
+async function handleUnreadCount(env: Env, excludeSaved = false): Promise<Response> {
 	// Labels are needed only for publishers with unread items; the filter keeps
 	// a large read-only library's metadata out of the response path.
 	const { results: [countResult], labelsByFeedKey } = await batchWithFeedLabels(
 		env,
 		[
 			env.DB.prepare(
-				`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+				`SELECT f.rowid, i.feed_key, f.source_type, COUNT(*) as count, MAX(i.received_at) as newest
 		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
 		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`,
 			),
@@ -522,6 +534,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 	const results = countResult.results as Array<{
 		rowid: number;
 		feed_key: string;
+		source_type: string;
 		count: number;
 		newest: string;
 	}>;
@@ -534,7 +547,8 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		newestItemTimestampUsec: (isoToUnix(r.newest) * 1_000_000).toString(),
 	}));
 	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string | undefined }>();
-	for (const unread of unreadcounts) {
+	for (const [index, unread] of unreadcounts.entries()) {
+		if (excludeSaved && results[index].source_type === SAVED_SOURCE_TYPE) continue;
 		totalUnreadCount += unread.count;
 		newestUnreadUsec = newestTimestampUsec(newestUnreadUsec, unread.newestItemTimestampUsec);
 	}
@@ -613,12 +627,17 @@ async function selectStreamRowIds(options: {
 	excludeTag: string;
 	olderThanUnix: string;
 	continuation: string;
+	excludeSaved?: boolean;
 	env: Env;
 }): Promise<{ rows: StreamRow[]; continuation?: string }> {
 	let sql =
 		'SELECT i.rowid, i.received_at, i.is_read, i.is_starred, i.content_version FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE f.is_active = 1';
 	const binds: (string | number)[] = [];
 	const label = labelFromStreamId(options.streamId);
+	const isStateStream = options.streamId === 'user/-/state/com.google/starred' ||
+		options.streamId === 'user/-/state/com.google/read' ||
+		options.streamId === 'user/-/state/com.google/reading-list' || !options.streamId;
+	if (options.excludeSaved && (isStateStream || label)) sql += ` AND ${notSavedFeedSql('f.source_type')}`;
 
 	if (options.streamId === 'user/-/state/com.google/starred') {
 		sql += ' AND i.is_starred = 1';
@@ -732,6 +751,10 @@ interface ResponseItemRow {
 	word_count?: number | null;
 	media_kind?: string | null;
 	duration_seconds?: number | null;
+	published_at?: string | null;
+	image_url?: string | null;
+	site_name?: string | null;
+	extraction_state?: string | null;
 }
 
 interface ResponseItemBody {
@@ -761,6 +784,11 @@ async function loadResponseItems(
 		wordCount?: number;
 		mediaKind?: 'text' | 'video';
 		durationSeconds?: number;
+		extractionState?: string;
+		publishedAt?: string;
+		imageUrl?: string;
+		siteName?: string;
+		nativeId?: string;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -778,7 +806,7 @@ async function loadResponseItems(
 		};
 		const statements = (originalUrlExpression: string) => [
 			env.DB.prepare(
-				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds
+				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds, i.published_at, i.image_url, i.site_name, i.extraction_state
 				 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 			).bind(rowidPage),
 			env.DB.prepare(
@@ -832,7 +860,7 @@ async function loadResponseItems(
 			return [
 				item.rowid,
 				{
-					id: toGoogleItemId(item.rowid),
+					id: googleReaderItemId(item.rowid),
 					categories,
 					title: item.subject,
 					published: ts,
@@ -848,6 +876,9 @@ async function loadResponseItems(
 					isBodyPruned: item.content_pruned_at != null,
 					isPaywalled: isPaywalledHtml(item.html_content),
 					...readingLengthFields(item),
+					...savedMetadataFields(item, 'imageUrl'),
+					// Removing a saved item takes its UUID, never the reusable reader id.
+					...(item.feed_key === SAVED_FEED_KEY ? { nativeId: item.id } : {}),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],
@@ -891,6 +922,7 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	// Pigeon clients use the read, starred, and contentVersion extensions to
@@ -993,6 +1025,7 @@ async function handleStreamContents(request: Request, url: URL, env: Env): Promi
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	const items = await loadResponseItems(

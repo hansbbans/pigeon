@@ -1,4 +1,6 @@
 import { readingLengthFields } from './reading-length';
+import { googleReaderItemId } from './item-identity';
+import { savedMetadataFields } from './saved-items';
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import { isPaywalledHtml } from './paywall';
@@ -30,6 +32,7 @@ interface FeedSyncRow {
 	site_url: string | null;
 	icon_url: string | null;
 	is_active: number;
+	source_type: string;
 }
 
 interface FeedTagRow {
@@ -54,6 +57,10 @@ interface ArticleSyncRow {
 	word_count: number | null;
 	media_kind: string | null;
 	duration_seconds: number | null;
+	published_at: string | null;
+	image_url: string | null;
+	site_name: string | null;
+	extraction_state: string | null;
 }
 
 interface StatusSyncRow {
@@ -171,7 +178,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			env.DB,
 			feedIDs,
 			`SELECT rowid, feed_key, COALESCE(custom_title, display_name) AS title,
-			        source_url, site_url, icon_url, is_active
+			        source_url, site_url, icon_url, is_active, source_type
 			 FROM feeds WHERE feed_key IN`,
 		),
 		loadRows<FeedTagRow>(
@@ -187,7 +194,8 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			        i.subject AS title, ${ARTICLE_AUTHOR_SQL} AS author, i.html_content,
 			        i.text_content, i.original_url, i.received_at,
 			        i.is_read, i.is_starred, i.content_pruned_at,
-			        i.word_count, i.media_kind, i.duration_seconds
+			        i.word_count, i.media_kind, i.duration_seconds,
+			        i.published_at, i.image_url, i.site_name, i.extraction_state
 			 FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE i.id IN`,
 		),
 		loadRows<StatusSyncRow>(
@@ -213,6 +221,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			siteURL: feed.site_url,
 			iconURL: feed.icon_url,
 			isActive: feed.is_active === 1,
+			sourceType: feed.source_type,
 			folders: [...new Set(tagsByFeed.get(feed.feed_key) ?? [])].sort(),
 		});
 	}
@@ -220,7 +229,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 	for (const article of articles) {
 		payloads.set(eventKey('article', article.id), {
 			id: article.id,
-			readerId: toGoogleItemID(article.rowid),
+			readerId: googleReaderItemId(article.rowid),
 			feedKey: article.feed_key,
 			source: article.source,
 			title: article.title,
@@ -234,6 +243,7 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			isBodyPruned: article.content_pruned_at !== null,
 			isPaywalled: isPaywalledHtml(article.html_content),
 			...readingLengthFields(article),
+			...savedMetadataFields(article, 'imageURL'),
 		});
 	}
 
@@ -268,10 +278,6 @@ function uniqueEntityIDs(events: SyncEventRow[], type: SyncEventRow['entity_type
 
 function eventKey(type: SyncEventRow['entity_type'], id: string): string {
 	return `${type}\u0000${id}`;
-}
-
-function toGoogleItemID(rowid: number): string {
-	return `tag:google.com,2005:reader/item/${rowid.toString(16).padStart(16, '0')}`;
 }
 
 function chunk<T>(values: T[], size: number): T[][] {

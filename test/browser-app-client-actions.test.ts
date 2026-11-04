@@ -415,33 +415,6 @@ test('reader extraction prepares image policy before insertion, consent reloads 
  await flushBrowserTasks();harness.elements.get('logout-button')!.dispatch('click');
 });
 
-test('Readwise token rejection keeps Pigeon authenticated and tokens clear on signout',async(t)=>{
- let saves=0;
- const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
-  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[recommendationFixture(1)],continuation:null});
-  if(input==='/api/v1/browser/readwise/save'){saves++;return Response.json({code:'readwise_authentication_failed'},{status:422});}return next();
- }});t.after(()=>database.close());
- findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
- harness.elements.get('readwise-token-input')!.value='test-only-token';harness.elements.get('readwise-save-button')!.dispatch('click');harness.elements.get('readwise-save-button')!.dispatch('click');
- await waitForBrowserCondition(()=>harness.elements.get('reader-reading-status')!.textContent.includes('Readwise rejected'),100);
- assert.equal(saves,1);assert.equal(harness.elements.get('reader-shell')!.classList.contains('hidden'),false);
- harness.elements.get('logout-button')!.dispatch('click');assert.equal(harness.elements.get('readwise-token-input')!.value,'');
-});
-
-test('a held Readwise save cannot keep the next session disabled or restore its old token',async(t)=>{
- const held=createDeferred<Response>();let requested=false;
- const {database,harness}=await createStatefulArticleBrowser({fetchOverride:async(input,init,next)=>{
-  if(input.startsWith('/api/v1/recommendations?'))return Response.json({items:[recommendationFixture(1)],continuation:null});
-  if(input==='/api/v1/browser/readwise/save'){requested=true;return held.promise;}return next();
- }});t.after(()=>database.close());
- findListButtonByViewId(harness.elements.get('views-list'),'for-you')!.dispatch('click');await waitForBrowserCondition(()=>harness.elements.get('reader-title')!.textContent==='Recommended 1',100);
- harness.elements.get('readwise-token-input')!.value='old-session-token';harness.elements.get('readwise-save-button')!.dispatch('click');await waitForBrowserCondition(()=>requested,100);
- harness.elements.get('logout-button')!.dispatch('click');await harness.elements.get('login-form')!.dispatch('submit');await flushBrowserTasks();
- assert.equal(harness.elements.get('readwise-save-button')!.disabled,false);assert.equal(harness.elements.get('readwise-token-input')!.value,'');
- held.resolve(Response.json({saved:true}));await flushBrowserTasks();assert.equal(harness.elements.get('readwise-save-button')!.disabled,false);
- assert.equal(harness.elements.get('reader-reading-status')!.textContent.includes('Saved to Readwise'),false);
-});
-
 test('returning to the same article after a view with no selection re-renders its body',async(t)=>{
  const tools=readingIntegrationTools('load');const {database,harness}=await createStatefulArticleBrowser({readingTools:tools});t.after(()=>database.close());
  await waitForBrowserCondition(() => harness.elements.get('reader-frame')!.srcdoc.includes('Body 3</p>'), 100);
