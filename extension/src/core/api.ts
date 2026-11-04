@@ -10,7 +10,8 @@ import type { SaveRequestBody } from './payload';
 export type Fetch = typeof globalThis.fetch;
 
 const LOGIN_TIMEOUT_MS = 20_000;
-const SAVE_TIMEOUT_MS = 45_000;
+/** Under Chrome's 30 s limit for a service worker waiting on one fetch. */
+const SAVE_TIMEOUT_MS = 25_000;
 
 /** The `Auth=` value from a ClientLogin reply, or null. */
 export function parseClientLoginResponse(body: string): string | null {

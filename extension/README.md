@@ -7,7 +7,7 @@ Saves pages and links to Pigeon's **Read It Later** from Chrome, Dia and Vivaldi
 - **Right-click a link > Save link to Pigeon**: saves the link only. Pigeon marks it pending, and the iOS or web app extracts it later.
 - **YouTube watch pages** are saved as videos: title, channel, thumbnail and duration, without article text and without fetching the transcript.
 
-If the extraction fails (a restricted page, a page with no article, a timeout), the bare link is saved instead. If Pigeon can't be reached or the sign-in has expired, the save waits in the extension's storage and is sent later: after the next successful save, on browser start, or while you browse (at most once a minute). The badge shows how many saves are waiting.
+If the extraction fails (a restricted page, a page with no article, a timeout), the bare link is saved instead. Every save is written to the extension's storage before it is sent and removed once Pigeon answers. So if Pigeon can't be reached, the sign-in has expired, or the browser stops the extension mid-request, the save waits and is sent later. That happens after the next successful save, after signing in, on browser start, or while you browse, backing off from 1 to 30 minutes while Pigeon stays unreachable. The badge shows how many saves are waiting.
 
 The extension needs the save API from PR #161 (`POST /api/v1/saved`) on the Pigeon server. Against a server without it, saves wait in the queue.
 
@@ -41,6 +41,8 @@ To change the shortcut, open `chrome://extensions/shortcuts` (Vivaldi: `vivaldi:
 - `activeTab` and `scripting`: read the current tab only when you save it. There is no content script and no `<all_urls>`.
 - `contextMenus`, `storage`.
 - Host permission for `https://pigeon.hanscho.com` only. Requests to Pigeon go from the background service worker, so the Worker needs no CORS. Signing in to a different address asks for that one origin at runtime (`optional_host_permissions`); plain http is only accepted for `localhost` and `127.0.0.1`, for a local `wrangler dev`.
+
+Defuddle reads the live page. It cleans a copy, but on the page itself it normalizes `srcSet` attributes and swaps lazy-image placeholders for their `<noscript>` sources (Obsidian Web Clipper does the same).
 
 ## Layout
 

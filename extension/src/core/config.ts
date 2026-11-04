@@ -2,7 +2,7 @@
 
 export const DEFAULT_PIGEON_URL = 'https://pigeon.hanscho.com';
 
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1']);
 
 export class PigeonUrlError extends Error {}
 

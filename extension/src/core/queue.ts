@@ -1,6 +1,7 @@
 /**
- * Saves that could not reach Pigeon (offline, 5xx, signed out, 401) wait in
- * storage.local and are sent again later, so a save is never lost.
+ * Every save is written here before it is sent and removed once Pigeon has
+ * answered, so a save survives being offline, a 5xx, a sign-out or 401, and
+ * the service worker being stopped mid-request.
  */
 
 import type { SaveRequestBody } from './payload';
@@ -42,20 +43,22 @@ function queuedBytes(queue: QueuedSave[]): number {
 }
 
 /**
- * Adds a save. A URL already waiting is replaced (the newer save wins, and a
- * re-save is what the Worker would do anyway). When the queue is full of
- * extractions, the new entry keeps only its bare link.
+ * Adds a save and returns its id and the queue length. A URL already waiting
+ * is replaced (the newer save wins, and a re-save is what the Worker would do
+ * anyway). When the queue is full of extractions, the new entry keeps only its
+ * bare link.
  */
-export async function enqueue(store: KeyValueStore, attempts: SaveRequestBody[], now = new Date()): Promise<number> {
+export async function enqueue(store: KeyValueStore, attempts: SaveRequestBody[], now = new Date()): Promise<{ id: string; queued: number }> {
 	return withQueueLock(async () => {
 		const queue = (await readQueue(store)).filter((entry) => entry.attempts[0]?.url !== attempts[0]?.url);
 		let kept = attempts;
 		if (queuedBytes(queue) + kept.reduce((sum, body) => sum + requestBytes(body), 0) > MAX_QUEUED_CONTENT_BYTES) {
 			kept = attempts.slice(-1);
 		}
-		queue.push({ id: `${now.getTime()}-${Math.random().toString(36).slice(2, 10)}`, attempts: kept, queuedAt: now.toISOString() });
+		const id = `${now.getTime()}-${Math.random().toString(36).slice(2, 10)}`;
+		queue.push({ id, attempts: kept, queuedAt: now.toISOString() });
 		await writeQueue(store, queue);
-		return queue.length;
+		return { id, queued: queue.length };
 	});
 }
 

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { MAX_SAVED_HTML_BYTES, type PageExtraction } from '../src/core/payload';
 import { MAX_QUEUED_CONTENT_BYTES, readQueue } from '../src/core/queue';
 import { flushQueue, saveLink, savePage } from '../src/core/save';
-import { loadSettings } from '../src/core/session';
+import { loadSettings, storeSignIn } from '../src/core/session';
 import { AUTH, MemoryStore, mockFetch, ORIGIN, savedReply, signedInStore } from './helpers/fakes';
 
 const PAGE = { url: 'https://example.com/essays/slow?utm_source=x', title: 'Slow software — Example' };
@@ -179,4 +179,36 @@ test('a link the Worker rejects outright reports failure', async () => {
 	const store = await signedInStore();
 	const { fetch } = mockFetch(() => Response.json({ error: 'url must not contain credentials' }, { status: 400 }));
 	assert.deepEqual(await saveLink('https://example.com/x', { fetch, store }), { status: 'failed', message: 'url must not contain credentials' });
+});
+
+test('a save is in the queue while its request is in flight (survives a worker stop)', async () => {
+	const store = await signedInStore();
+	let release!: (response: Response) => void;
+	const { fetch } = mockFetch(() => new Promise<Response>((resolve) => { release = resolve; }));
+	const saving = savePage(PAGE, async () => extraction, { fetch, store });
+	for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+	const [pending] = await readQueue(store);
+	assert.equal(pending.attempts[0].content?.html, '<p>Body</p>');
+	// A flush meanwhile leaves the in-flight save alone.
+	const other = mockFetch([]);
+	assert.equal((await flushQueue({ fetch: other.fetch, store })).sent, 0);
+	assert.equal(other.requests.length, 0);
+	release(savedReply('done'));
+	assert.equal((await saving).status, 'saved');
+	assert.deepEqual(await readQueue(store), []);
+});
+
+test('a late 401 for an old token does not sign out a newer sign-in', async () => {
+	const store = await signedInStore();
+	let release!: (response: Response) => void;
+	const { fetch } = mockFetch(() => new Promise<Response>((resolve) => { release = resolve; }));
+	const saving = saveLink('https://example.com/late', { fetch, store });
+	for (let i = 0; i < 20 && !release; i++) await new Promise((r) => setTimeout(r, 5));
+	await storeSignIn(store, ORIGIN, 'pigeon/new-token');
+	release(new Response('Unauthorized', { status: 401 }));
+	assert.equal((await saving).status, 'needsSignIn');
+	const settings = await loadSettings(store);
+	assert.equal(settings.auth, 'pigeon/new-token');
+	assert.equal(settings.needsSignIn, false);
+	assert.equal((await readQueue(store)).length, 1, 'the save waits and goes out with the new token');
 });

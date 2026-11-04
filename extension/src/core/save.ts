@@ -75,23 +75,39 @@ async function tryAttempts(attempts: SaveRequestBody[], origin: string, auth: st
 	return { status: 'failed', message: lastRejection };
 }
 
+/** Queue entries being sent right now; a flush leaves them alone. */
+const inFlight = new Set<string>();
+
 async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promise<SaveOutcome> {
+	// Write-ahead: if the browser stops the service worker mid-request, the save is still queued.
+	const { id, queued } = await enqueue(deps.store, attempts);
 	const settings = await loadSettings(deps.store);
-	if (!settings.auth) {
-		return { status: 'needsSignIn', queued: await enqueue(deps.store, attempts) };
+	if (!settings.auth) return { status: 'needsSignIn', queued };
+	inFlight.add(id);
+	let result: AttemptResult;
+	try {
+		result = await tryAttempts(attempts, settings.origin, settings.auth, deps.fetch);
+	} finally {
+		inFlight.delete(id);
 	}
-	const result = await tryAttempts(attempts, settings.origin, settings.auth, deps.fetch);
 	switch (result.status) {
 		case 'saved':
+			await removeFromQueue(deps.store, id);
 			return result;
-		case 'unauthorized':
-			await markNeedsSignIn(deps.store);
-			return { status: 'needsSignIn', queued: await enqueue(deps.store, attempts) };
-		case 'retry':
-			return { status: 'queued', queued: await enqueue(deps.store, attempts), message: result.message };
 		case 'failed':
+			await removeFromQueue(deps.store, id);
 			return { status: 'failed', message: result.message };
+		case 'unauthorized':
+			await markNeedsSignIn(deps.store, settings.auth);
+			return { status: 'needsSignIn', queued: (await readQueue(deps.store)).length };
+		case 'retry':
+			return { status: 'queued', queued: (await readQueue(deps.store)).length, message: result.message };
 	}
+}
+
+/** True while a save or a flush is talking to Pigeon (the background keeps the worker alive meanwhile). */
+export function isSending(): boolean {
+	return inFlight.size > 0 || flushing !== null;
 }
 
 export interface FlushResult {
@@ -120,9 +136,10 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { ...result, stoppedBy: 'signedOut' };
 	for (const entry of queue) {
+		if (inFlight.has(entry.id)) continue;
 		const attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
 		if (attempt.status === 'unauthorized') {
-			await markNeedsSignIn(deps.store);
+			await markNeedsSignIn(deps.store, settings.auth);
 			return { ...result, stoppedBy: 'unauthorized' };
 		}
 		if (attempt.status === 'retry') return { ...result, stoppedBy: 'unreachable' };
@@ -130,5 +147,6 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 		else result.dropped++;
 		result.remaining = await removeFromQueue(deps.store, entry.id);
 	}
+	result.remaining = (await readQueue(deps.store)).length;
 	return result;
 }

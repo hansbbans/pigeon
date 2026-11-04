@@ -142,6 +142,39 @@ test('YouTube microdata counts only when it names this video; the player is the 
 	assert.equal(extractPage(page(microdata('AAAAAAAAAAA'), `https://www.youtube.com/watch?v=${VIDEO_ID}`), D).content?.durationSeconds, undefined);
 });
 
+test('after in-page YouTube navigation, stale og metadata is ignored', () => {
+	// Loaded on video A, then navigated (SPA) to B: og:* and JSON-LD still describe A.
+	const stale = YOUTUBE.replace('<title>Never Gonna Give You Up - YouTube</title>', '<title>(3) Another Video - YouTube</title>');
+	const content = extractPage(page(stale, 'https://www.youtube.com/watch?v=BBBBBBBBBBB'), D).content!;
+	assert.equal(content.mediaKind, 'video');
+	assert.equal(content.title, 'Another Video');
+	assert.equal(content.image, 'https://i.ytimg.com/vi/BBBBBBBBBBB/hqdefault.jpg');
+	assert.equal(content.published, undefined);
+	assert.equal(content.durationSeconds, undefined);
+});
+
+test('Defuddle still has the fallback hook this code watches', () => {
+	const instance = new D(page(ARTICLE, 'https://example.com/a'), { url: 'https://example.com/a' });
+	assert.equal(typeof instance._fallbackResponse, 'function');
+});
+
+test('an error in an optional Defuddle step keeps the extraction; the whole-body fallback does not', () => {
+	const good = { content: `<p>${'Readable words here. '.repeat(20)}</p>`, title: 'T' };
+	class OptionalStepFailed {
+		_parseErrors = new Set(['schema retry failed']);
+		_fallbackResponse() { return { content: '<body>everything</body>' }; }
+		parse() { return good; }
+	}
+	assert.ok(extractPage(page(ARTICLE, 'https://example.com/a'), OptionalStepFailed as unknown as DefuddleConstructor).content);
+	class MainParseFailed {
+		_parseErrors = new Set(['boom']);
+		_fallbackResponse() { return { content: `<p>${'Whole body with nav and footer. '.repeat(20)}</p>` }; }
+		parse() { return this._fallbackResponse(); }
+	}
+	const failed = extractPage(page(ARTICLE, 'https://example.com/a'), MainParseFailed as unknown as DefuddleConstructor);
+	assert.equal(failed.content, undefined);
+});
+
 test('durationFromSchema ignores a stale VideoObject for another video', () => {
 	const other = { '@type': 'VideoObject', '@id': 'https://www.youtube.com/watch?v=AAAAAAAAAAA', duration: 'PT10M' };
 	const mine = { '@type': 'VideoObject', url: `https://www.youtube.com/watch?v=${VIDEO_ID}`, duration: 'PT1M' };

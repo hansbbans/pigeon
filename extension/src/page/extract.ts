@@ -1,7 +1,9 @@
 /**
  * Runs inside the tab (injected on demand under activeTab). Defuddle reads the
  * live, rendered page, so mobile CSS, hidden elements and loaded images count.
- * Defuddle clones the document before cleaning it; the page is not modified.
+ * It cleans a clone of the document; on the live page it only normalizes
+ * `srcSet` casing and swaps lazy-image placeholders for their <noscript>
+ * sources (as in Obsidian Web Clipper, which also passes the live document).
  *
  * Takes the document and the Defuddle class as arguments so tests can run it
  * under jsdom.
@@ -21,8 +23,15 @@ interface DefuddleResult {
 	schemaOrgData?: unknown;
 }
 
+interface DefuddleInstance {
+	parse(): DefuddleResult;
+	/** Private in Defuddle 0.19: what parse() returns when extraction failed (the whole body). */
+	_fallbackResponse?: (...args: unknown[]) => DefuddleResult;
+	_parseErrors?: Set<unknown>;
+}
+
 export interface DefuddleConstructor {
-	new (doc: Document, options?: { url?: string }): { parse(): DefuddleResult; _parseErrors?: Set<unknown> };
+	new (doc: Document, options?: { url?: string }): DefuddleInstance;
 }
 
 /** html plus text must fit the Worker's 900 KB body budget; keep a little headroom. */
@@ -42,11 +51,24 @@ export function extractPage(doc: Document, Defuddle: DefuddleConstructor, url = 
 	}
 }
 
+/**
+ * Defuddle catches its own errors and then returns the whole page body; that
+ * counts as a failure. Errors in optional steps (a schema.org retry, the
+ * hidden-content probe) leave a good result, which is kept. Bumping Defuddle:
+ * check that `_fallbackResponse` still exists (test/extract.test.ts does).
+ */
 function runDefuddle(doc: Document, Defuddle: DefuddleConstructor, url: string): DefuddleResult | null {
 	const defuddle = new Defuddle(doc, { url });
+	let usedFallback = false;
+	const fallback = defuddle._fallbackResponse;
+	if (typeof fallback === 'function') {
+		defuddle._fallbackResponse = (...args: unknown[]) => {
+			usedFallback = true;
+			return fallback.apply(defuddle, args);
+		};
+	}
 	const result = defuddle.parse();
-	// Defuddle catches its own errors and then returns the whole page body; treat that as a failure.
-	if ((defuddle._parseErrors?.size ?? 0) > 0) return null;
+	if (typeof fallback === 'function' ? usedFallback : (defuddle._parseErrors?.size ?? 0) > 0) return null;
 	return result ?? null;
 }
 
@@ -76,6 +98,10 @@ function extractYouTube(doc: Document, Defuddle: DefuddleConstructor, url: strin
 	} catch {
 		result = null;
 	}
+	const meta = (selector: string) => doc.querySelector(selector)?.getAttribute('content')?.trim() || undefined;
+	// YouTube leaves og:* (and Defuddle's title, image and date, which fall back to them)
+	// from the first page loaded when you navigate inside the site; trust them only for this video.
+	const fresh = (meta('meta[property="og:url"]') ?? '').includes(videoId) || durationFromPage !== null;
 	const content: SavedContent = { mediaKind: 'video' };
 	if (result?.content) {
 		const fragment = parseFragment(doc, result.content);
@@ -88,9 +114,8 @@ function extractYouTube(doc: Document, Defuddle: DefuddleConstructor, url: strin
 			content.text = fitted.text;
 		}
 	}
-	const meta = (selector: string) => doc.querySelector(selector)?.getAttribute('content')?.trim() || undefined;
-	const title = result?.title?.trim() || meta('meta[property="og:title"]') || doc.title;
-	content.title = title.replace(/\s+-\s+YouTube\s*$/i, '').trim() || undefined;
+	const title = (fresh ? result?.title?.trim() || meta('meta[property="og:title"]') : undefined) || doc.title;
+	content.title = title.replace(/^\(\d+\)\s+/, '').replace(/\s+-\s+YouTube\s*$/i, '').trim() || undefined;
 	const channel = result?.author?.trim() || meta('[itemprop="author"] [itemprop="name"]') || undefined;
 	if (channel) {
 		content.author = channel;
@@ -98,8 +123,9 @@ function extractYouTube(doc: Document, Defuddle: DefuddleConstructor, url: strin
 	} else {
 		content.site = 'YouTube';
 	}
-	content.image = absoluteHttpUrl(result?.image || meta('meta[property="og:image"]'), url) ?? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-	if (result?.published) content.published = result.published;
+	const freshImage = fresh ? absoluteHttpUrl(result?.image || meta('meta[property="og:image"]'), url) : undefined;
+	content.image = freshImage ?? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+	if (fresh && result?.published) content.published = result.published;
 	const duration = durationFromPage ?? durationFromSchema(result?.schemaOrgData, videoId) ?? durationFromPlayer(doc);
 	if (duration !== null) content.durationSeconds = duration;
 	return content;

@@ -39,8 +39,13 @@ export async function signOut(store: KeyValueStore): Promise<void> {
 	await store.remove([KEYS.auth, KEYS.needsSignIn]);
 }
 
-/** After a 401: drop the dead token and ask for the password again. */
-export async function markNeedsSignIn(store: KeyValueStore): Promise<void> {
+/**
+ * After a 401: drop the dead token and ask for the password again. Only the
+ * token that got the 401 is dropped; a late reply must not wipe a new sign-in.
+ */
+export async function markNeedsSignIn(store: KeyValueStore, rejectedAuth: string): Promise<void> {
+	const current = (await store.get(KEYS.auth))[KEYS.auth];
+	if (current !== rejectedAuth) return;
 	await store.remove(KEYS.auth);
 	await store.set({ [KEYS.needsSignIn]: true });
 }

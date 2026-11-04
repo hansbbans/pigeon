@@ -54,7 +54,7 @@ test('a 401 shows the re-sign-in notice; signing in again clears it; sign-out ke
 	const store = new MemoryStore();
 	const ok = () => new Response('Auth=pigeon/t2');
 	await signIn('https://pigeon.example.dev', 'pw', deps(store, mockFetch(ok).fetch).deps);
-	await markNeedsSignIn(store);
+	await markNeedsSignIn(store, (await store.get("pigeonAuth")).pigeonAuth as string);
 	assert.deepEqual(await optionsState(store), { origin: 'https://pigeon.example.dev', signedIn: false, needsSignIn: true, queued: 0 });
 	await signIn('https://pigeon.example.dev', 'pw', deps(store, mockFetch(ok).fetch).deps);
 	assert.equal((await optionsState(store)).needsSignIn, false);
