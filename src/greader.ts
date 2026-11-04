@@ -755,6 +755,7 @@ interface ResponseItemRow {
 	image_url?: string | null;
 	site_name?: string | null;
 	extraction_state?: string | null;
+	has_transcript?: number;
 }
 
 interface ResponseItemBody {
@@ -789,6 +790,7 @@ async function loadResponseItems(
 		imageUrl?: string;
 		siteName?: string;
 		nativeId?: string;
+		hasTranscript?: boolean;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -806,7 +808,8 @@ async function loadResponseItems(
 		};
 		const statements = (originalUrlExpression: string) => [
 			env.DB.prepare(
-				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds, i.published_at, i.image_url, i.site_name, i.extraction_state
+				`SELECT i.rowid, i.id, i.feed_key, ${ARTICLE_AUTHOR_SQL} AS from_name, i.subject, i.html_content, i.text_content, i.content_pruned_at, ${originalUrlExpression} AS original_url, i.received_at, i.is_read, i.is_starred, i.content_version, i.word_count, i.media_kind, i.duration_seconds, i.published_at, i.image_url, i.site_name, i.extraction_state,
+				        EXISTS (SELECT 1 FROM item_transcripts t WHERE t.item_id = i.id) AS has_transcript
 				 FROM items i LEFT JOIN feeds f ON f.feed_key = i.feed_key WHERE i.rowid IN (SELECT value FROM json_each(?))`,
 			).bind(rowidPage),
 			env.DB.prepare(
@@ -879,6 +882,7 @@ async function loadResponseItems(
 					...savedMetadataFields(item, 'imageUrl'),
 					// Removing a saved item takes its UUID, never the reusable reader id.
 					...(item.feed_key === SAVED_FEED_KEY ? { nativeId: item.id } : {}),
+					...(item.has_transcript === 1 ? { hasTranscript: true } : {}),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],

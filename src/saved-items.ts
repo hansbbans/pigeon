@@ -7,7 +7,7 @@
  */
 
 import { boundedStoredUrl, truncateUtf8 } from './content-size';
-import { createCanonicalItemUuid, googleReaderItemId, hasStoredItemId, parseGoogleReaderItemRowid } from './item-identity';
+import { createCanonicalItemUuid, findItemByAnyId, googleReaderItemId } from './item-identity';
 import type { Env } from './types';
 import { extractYouTubeVideoId, type MediaKind } from './youtube';
 
@@ -395,17 +395,7 @@ export function ensureSavedFeedStatement(db: D1Database): D1PreparedStatement {
 }
 
 async function findSavedItem(db: D1Database, rawId: string): Promise<SavedRow | null> {
-	let id: string;
-	try {
-		id = decodeURIComponent(rawId);
-	} catch {
-		return null;
-	}
-	const rowid = hasStoredItemId(id) ? null : parseGoogleReaderItemRowid(id);
-	if (!hasStoredItemId(id) && rowid === null) return null;
-	const row = rowid === null
-		? await db.prepare(`SELECT ${SAVED_ROW_COLUMNS} FROM items WHERE id = ?`).bind(id).first<SavedRow>()
-		: await db.prepare(`SELECT ${SAVED_ROW_COLUMNS} FROM items WHERE rowid = ?`).bind(rowid).first<SavedRow>();
+	const row = await findItemByAnyId<SavedRow>(db, rawId, SAVED_ROW_COLUMNS);
 	return row && row.feed_key === SAVED_FEED_KEY ? row : null;
 }
 

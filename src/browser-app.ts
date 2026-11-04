@@ -7,6 +7,7 @@ import { DEFUDDLE_VERSION } from './browser-defuddle-source';
 import { renderBrowserPersonalizationScript } from './browser-personalization';
 import { renderBrowserLibraryManagementScript } from './browser-library-management';
 import { renderBrowserAppStyles } from './browser-app-styles';
+import { renderBrowserTranscriptScript } from './browser-transcript';
 
 export interface BrowserAppShell {
 	html: string;
@@ -67,6 +68,7 @@ function buildBrowserAppHtml(baseUrl: string): string {
 	const offlineScript = renderBrowserOfflineScript();
 	const notificationScript = renderBrowserNotificationsScript();
 	const readabilityScript = renderBrowserReadabilityScript();
+	const transcriptScript = renderBrowserTranscriptScript();
 
 	return `<!doctype html>
 <html lang="en">
@@ -94,6 +96,7 @@ ${renderBrowserAppStyles()}
     <script>${libraryScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${readingScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${readabilityScript}</script>
+    <script>${transcriptScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${offlineScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${notificationScript.replace(/<\/script/gi, '<\\/script')}</script>
     <script>${personalizationScript.replace(/<\/script/gi, '<\\/script')}</script>
@@ -313,7 +316,12 @@ ${renderBrowserAppStyles()}
                   <section class="reader-player-shell hidden" id="reader-player-shell" aria-label="YouTube video player">
                     <p class="reader-player-label">Video</p>
                     <div class="reader-player-container" id="reader-player-container"></div>
-                    <a class="reader-player-fallback" id="reader-player-fallback" href="" target="_blank" rel="noopener">Open in YouTube</a>
+                    <div class="reader-player-bar">
+                      <a class="reader-player-fallback" id="reader-player-fallback" href="" target="_blank" rel="noopener">Open in YouTube</a>
+                      <button class="transcript-button" id="transcript-button" type="button" data-icon="transcript" hidden>Get transcript</button>
+                    </div>
+                    <p class="transcript-status" id="transcript-status" role="status" aria-live="polite"></p>
+                    <div class="reader-transcript hidden" id="reader-transcript" role="region" aria-label="Transcript" tabindex="0"></div>
                   </section>
                   <div class="reader-frame-shell">
                     <iframe id="reader-frame" title="Article content" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin" srcdoc=""></iframe>
@@ -476,6 +484,9 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerPlayerShell = document.getElementById('reader-player-shell');
   const readerPlayerContainer = document.getElementById('reader-player-container');
   const readerPlayerFallback = document.getElementById('reader-player-fallback');
+  const transcriptButton = document.getElementById('transcript-button');
+  const transcriptStatus = document.getElementById('transcript-status');
+  const transcriptPanel = document.getElementById('reader-transcript');
   const settingsContent = document.getElementById('settings-content');
   const DEFAULT_COLUMN_WIDTHS = { sidebar: 224, stream: 340 };
   const COLUMN_WIDTH_LIMITS = {
@@ -1386,6 +1397,7 @@ export function renderBrowserAppRuntimeScript(): string {
     frameObjectURLs.clear();visiblePreviewSources.clear();
     zoomPanel.classList.add('hidden'); zoomImage.setAttribute('src','');
     closeLinkContextMenu(false); hideToast(); inFlightSaves.clear(); savedExtractionJobs.clear(); savedExtractionErrors.clear(); pendingSavedRemoval = null;
+    hideTranscript(); transcriptStates.clear(); if (transcriptFetchAbort) transcriptFetchAbort.abort(); transcriptFetchAbort = null;
 
     if (personalizationService) personalizationService.destroy();
     personalizationService = null; personalizationPanel = null; pendingFeedback = null;
@@ -3138,7 +3150,158 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
+  // YouTube transcripts: stored ones load from the API; "Get transcript" runs
+  // Defuddle's YouTube extractor through the Worker's YouTube proxy, shows the
+  // result, and stores it for every client. YouTube may refuse the Worker's
+  // addresses, so failure is an expected, clean outcome (the iPhone app fetches
+  // from the phone instead). Every wait is bounded: no endless spinner.
+  const TRANSCRIPT_FAILURE_MESSAGE = "Couldn't get the transcript here, try from the iPhone app";
+  const TRANSCRIPT_FETCH_TIMEOUT_MS = 25000;
+  const TRANSCRIPT_API_TIMEOUT_MS = 10000;
+  const transcriptStates = new Map();
+  let transcriptView = null;
+  let transcriptItemKey = null;
+  let transcriptFetchAbort = null;
+
+  function transcriptKeyFor(item) { return item ? String(item.nativeId || item.id || '') : ''; }
+
+  function transcriptRequestInit(init) {
+    const timeout = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(TRANSCRIPT_API_TIMEOUT_MS) } : {};
+    return { ...init, ...timeout };
+  }
+
+  function transcriptApiPath(key) { return '/api/v1/items/' + encodeURIComponent(key) + '/transcript'; }
+
+  async function getStoredTranscript(key) {
+    const response = await authenticatedFetch(transcriptApiPath(key), transcriptRequestInit({}));
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error('Transcript request failed: ' + response.status);
+    const transcript = (await response.json())?.transcript;
+    return transcript && transcript.version === 1 && Array.isArray(transcript.segments) && transcript.segments.length > 0 ? transcript : null;
+  }
+
+  async function storeTranscript(key, transcript) {
+    const response = await authenticatedFetch(transcriptApiPath(key), transcriptRequestInit({
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(transcript),
+    }));
+    if (!response.ok) throw new Error('Transcript upload failed: ' + response.status);
+  }
+
+  function markItemHasTranscript(key) {
+    for (const cache of [loadedItemsById, articleCache, articleMetadataCache]) {
+      const values = cache instanceof Map ? cache.values() : Object.values(cache);
+      for (const entry of values) if (entry && transcriptKeyFor(entry) === key) entry.hasTranscript = true;
+    }
+  }
+
+  // Fetches only when asked to (the button); otherwise just reads a stored copy.
+  // States: checking (reading a stored copy), loading (the button's fetch),
+  // ready, failed (the fetch failed: message plus button), idle (no stored copy
+  // could be read: button only). failed and idle are terminal: nothing reloads
+  // on its own, only the button starts again.
+  function loadTranscript(item, fetchIfMissing) {
+    const key = transcriptKeyFor(item);
+    const existing = transcriptStates.get(key);
+    const restartable = !existing || existing.status === 'failed' || existing.status === 'idle' || (existing.status === 'checking' && fetchIfMissing);
+    if (!restartable) return existing.job;
+    const videoId = client.extractYouTubeVideoId(item?.alternate?.[0]?.href);
+    const generation = accountGeneration;
+    const token = session.token;
+    const state = { status: fetchIfMissing ? 'loading' : 'checking', transcript: null, job: null };
+    const current = () => requestBelongsToCurrentSession(generation, token) && transcriptStates.get(key) === state;
+    transcriptStates.delete(key);
+    transcriptStates.set(key, state);
+    while (transcriptStates.size > 20) transcriptStates.delete(transcriptStates.keys().next().value);
+    state.job = (async () => {
+      try {
+        const stored = await getStoredTranscript(key);
+        if (!current()) return;
+        if (stored) { state.status = 'ready'; state.transcript = stored; markItemHasTranscript(key); return; }
+        if (!fetchIfMissing) { state.status = 'idle'; return; }
+        const tools = window.PigeonTranscript;
+        if (!videoId || !tools) throw new Error('Transcripts are unavailable here');
+        await loadDefuddle();
+        if (!current()) return;
+        // One Defuddle run at a time: a new run (or logging out) aborts the previous one's requests.
+        if (transcriptFetchAbort) transcriptFetchAbort.abort();
+        const abort = new AbortController();
+        transcriptFetchAbort = abort;
+        let transcript;
+        try {
+          transcript = await tools.fetchYouTubeTranscript({
+            Defuddle: window.Defuddle, doc: document, videoId, signal: abort.signal,
+            fetch: tools.createYouTubeProxyFetch(authenticatedFetch), timeoutMs: TRANSCRIPT_FETCH_TIMEOUT_MS,
+          });
+        } finally {
+          if (transcriptFetchAbort === abort) transcriptFetchAbort = null;
+        }
+        if (!current()) return;
+        state.status = 'ready';
+        state.transcript = transcript;
+        // Shown now; stored in the background. A failed upload only means the next visit fetches again.
+        void storeTranscript(key, transcript).then(() => { if (current()) markItemHasTranscript(key); }).catch(() => {});
+      } catch (_error) {
+        if (!current()) return;
+        state.status = fetchIfMissing ? 'failed' : 'idle';
+      } finally {
+        if (requestBelongsToCurrentSession(generation, token) && transcriptItemKey === key) {
+          const selected = loadedItemsById[selectedItemId];
+          if (selected && transcriptKeyFor(selected) === key) renderTranscriptPanel(selected);
+        }
+      }
+    })();
+    return state.job;
+  }
+
+  function destroyTranscriptView() {
+    if (transcriptView) transcriptView.view.destroy();
+    transcriptView = null;
+  }
+
+  function hideTranscript() {
+    destroyTranscriptView();
+    transcriptItemKey = null;
+    if (!transcriptButton || !transcriptStatus || !transcriptPanel) return;
+    transcriptButton.hidden = true;
+    transcriptStatus.textContent = '';
+    transcriptPanel.classList.add('hidden');
+  }
+
+  function renderTranscriptPanel(item) {
+    const tools = window.PigeonTranscript;
+    const key = transcriptKeyFor(item);
+    if (!tools || !transcriptButton || !transcriptStatus || !transcriptPanel || !key || !client.extractYouTubeVideoId(item?.alternate?.[0]?.href)) {
+      hideTranscript();
+      return;
+    }
+    if (transcriptItemKey !== key) { destroyTranscriptView(); transcriptItemKey = key; }
+    if (!transcriptStates.has(key) && item.hasTranscript) void loadTranscript(item, false);
+    const state = transcriptStates.get(key);
+    const status = state ? state.status : 'idle';
+    transcriptButton.hidden = status === 'ready' || status === 'checking';
+    transcriptButton.disabled = status === 'loading';
+    transcriptButton.setAttribute('aria-busy', status === 'loading' ? 'true' : 'false');
+    transcriptStatus.textContent = status === 'loading' ? 'Getting the transcript…' : status === 'checking' ? 'Loading the transcript…'
+      : status === 'failed' ? TRANSCRIPT_FAILURE_MESSAGE : '';
+    if (status !== 'ready') { destroyTranscriptView(); transcriptPanel.classList.add('hidden'); return; }
+    transcriptPanel.classList.remove('hidden');
+    if (transcriptView && transcriptView.key === key) return;
+    destroyTranscriptView();
+    transcriptView = { key, view: tools.createTranscriptView({
+      doc: document, win: window, container: transcriptPanel, transcript: state.transcript,
+      getPlayerWindow: () => readerPlayerContainer.children[0]?.contentWindow || null,
+    }) };
+  }
+
+  transcriptButton?.addEventListener('click', () => {
+    const item = loadedItemsById[selectedItemId];
+    if (!item) return;
+    void loadTranscript(item, true);
+    renderTranscriptPanel(item);
+  });
+
   function clearYouTubePlayer() {
+    hideTranscript();
     activeYouTubeVideoId = null;
     if (!readerPlayerShell || !readerPlayerContainer || !readerPlayerFallback) {
       return;
@@ -3154,7 +3317,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const embedUrl = client.createYouTubeEmbedUrl(originalUrl);
+    const embedUrl = client.createYouTubeEmbedUrl(originalUrl, window.location?.origin);
     if (!embedUrl) {
       clearYouTubePlayer();
       return;
@@ -3468,7 +3631,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!hasFullArticle) {
       readerMeta.textContent = [readerMeta.textContent, 'Loading article content…'].filter(Boolean).join(' · ');
     }
-    if (!readingPreferences || readingPreferences.imagePolicy === 'load') renderYouTubePlayer(articleHref, item.title || ''); else clearYouTubePlayer();
+    if (!readingPreferences || readingPreferences.imagePolicy === 'load') { renderYouTubePlayer(articleHref, item.title || ''); renderTranscriptPanel(item); } else clearYouTubePlayer();
     if (savedArticle && hasFullArticle && getSavedExtractionView(selectedItemId) === 'pending') void extractSavedItem(selectedItemId);
     const savedExtraction = hasFullArticle ? getSavedExtractionView(selectedItemId) : null;
     if (savedExtraction) {

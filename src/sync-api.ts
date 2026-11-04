@@ -61,6 +61,7 @@ interface ArticleSyncRow {
 	image_url: string | null;
 	site_name: string | null;
 	extraction_state: string | null;
+	has_transcript: number;
 }
 
 interface StatusSyncRow {
@@ -195,7 +196,8 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			        i.text_content, i.original_url, i.received_at,
 			        i.is_read, i.is_starred, i.content_pruned_at,
 			        i.word_count, i.media_kind, i.duration_seconds,
-			        i.published_at, i.image_url, i.site_name, i.extraction_state
+			        i.published_at, i.image_url, i.site_name, i.extraction_state,
+			        EXISTS (SELECT 1 FROM item_transcripts t WHERE t.item_id = i.id) AS has_transcript
 			 FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE i.id IN`,
 		),
 		loadRows<StatusSyncRow>(
@@ -244,6 +246,8 @@ async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<strin
 			isPaywalled: isPaywalledHtml(article.html_content),
 			...readingLengthFields(article),
 			...savedMetadataFields(article, 'imageURL'),
+			// Omitted unless true; fetch the body from GET /api/v1/items/:id/transcript.
+			...(article.has_transcript === 1 ? { hasTranscript: true } : {}),
 		});
 	}
 

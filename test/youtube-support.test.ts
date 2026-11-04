@@ -73,7 +73,9 @@ test('YouTube channel and video URL helpers accept official shapes and reject lo
 	assert.equal(extractBrowserYouTubeVideoId(`https://www.youtube.com/watch?v=too-short`), null);
 	assert.equal(extractBrowserYouTubeVideoId(`https://www.youtube.com.evil.example/watch?v=${VIDEO_ID}`), null);
 	assert.equal(extractBrowserYouTubeVideoId(`https://youtu.be.evil.example/${VIDEO_ID}`), null);
-	assert.equal(createYouTubeEmbedUrl(`https://www.youtube.com/watch?v=${VIDEO_ID}`), `https://www.youtube.com/embed/${VIDEO_ID}?controls=1`);
+	assert.equal(createYouTubeEmbedUrl(`https://www.youtube.com/watch?v=${VIDEO_ID}`), `https://www.youtube.com/embed/${VIDEO_ID}?controls=1&enablejsapi=1`);
+	assert.equal(createYouTubeEmbedUrl(`https://youtu.be/${VIDEO_ID}`, "https://pigeon.example"), `https://www.youtube.com/embed/${VIDEO_ID}?controls=1&enablejsapi=1&origin=https%3A%2F%2Fpigeon.example`);
+	assert.equal(createYouTubeEmbedUrl(`https://youtu.be/${VIDEO_ID}`, "javascript:alert(1)"), `https://www.youtube.com/embed/${VIDEO_ID}?controls=1&enablejsapi=1`);
 	assert.equal(createYouTubeEmbedUrl(`https://www.youtube.com.evil.example/watch?v=${VIDEO_ID}`), null);
 });
 

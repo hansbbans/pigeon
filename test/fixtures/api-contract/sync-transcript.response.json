@@ -1,0 +1,33 @@
+{
+	"cursor": "v1:17",
+	"hasMore": false,
+	"changes": [
+		{
+			"sequence": 17,
+			"entityType": "article",
+			"entityId": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+			"operation": "upsert",
+			"changedAt": "2026-11-01T11:00:00.000Z",
+			"payload": {
+				"id": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+				"readerId": "tag:google.com,2005:reader/item/0000000000000002",
+				"feedKey": "design-weekly",
+				"source": "Design Weekly",
+				"title": "Notes on margins",
+				"author": null,
+				"html": "<p>Margins give text room.</p>",
+				"text": "Margins give text room.",
+				"originalURL": "https://example.com/margins",
+				"receivedAt": "2026-10-30T08:00:00.000Z",
+				"isRead": true,
+				"isStarred": true,
+				"isBodyPruned": false,
+				"isPaywalled": false,
+				"wordCount": 40,
+				"mediaKind": "video",
+				"durationSeconds": 1100,
+				"hasTranscript": true
+			}
+		}
+	]
+}

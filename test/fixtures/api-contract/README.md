@@ -44,10 +44,14 @@ Worker.
 | `saved-content.request.json`, `saved-content.response.json` | `PUT /api/v1/saved/:id/content` |
 | `saved-remove.request.json` | `POST /api/v1/mutations` with `remove_saved` |
 | `sync-saved.response.json` | `GET /api/v1/sync` after a save, an upload, and a removal |
+| `transcript-upload.request.json`, `transcript-upload.response.json` | `PUT /api/v1/items/:id/transcript` (YouTube transcript; see below) |
+| `transcript.response.json` | `GET /api/v1/items/:id/transcript` |
+| `sync-transcript.response.json` | `GET /api/v1/sync` after a transcript upload (`hasTranscript`) |
 
 The Read It Later fixtures are served by the Worker before the iOS app decodes them.
 They are listed in `AWAITING_IOS_CONTRACT_TESTS` in `test/api-contract.test.ts`; the
 iOS Read It Later PR names them in `APIContractTests.swift` and empties that list.
+The transcript fixtures are listed there too, until the iOS transcript PR names them.
 
 Values are deterministic: the test pins the clock to `2026-11-01T12:00:00.000Z` and the
 SQLite `datetime('now')` stamps of the sync log to `2026-11-01 11:00:00`.

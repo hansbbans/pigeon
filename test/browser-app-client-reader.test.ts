@@ -134,7 +134,7 @@ test('runtime YouTube player reuses the same iframe across rerenders and clears 
 	const firstFrame = playerContainer.children[0];
 	assert.ok(firstFrame);
 	assert.equal(firstFrame.tagName, 'IFRAME');
-	assert.equal(firstFrame.getAttribute('src'), 'https://www.youtube.com/embed/M1q063UD-gw?controls=1');
+	assert.equal(firstFrame.getAttribute('src'), 'https://www.youtube.com/embed/M1q063UD-gw?controls=1&enablejsapi=1');
 	assert.equal(firstFrame.getAttribute('referrerpolicy'), 'strict-origin-when-cross-origin');
 	assert.equal(firstFrame.getAttribute('allowfullscreen'), '');
 	assert.equal(playerFallback.getAttribute('href'), videoUrl);

@@ -109,12 +109,15 @@ CREATE INDEX IF NOT EXISTS idx_items_video_duration_pending
   ON items(received_at DESC)
   WHERE media_kind = 'video' AND duration_seconds IS NULL;
 
--- YouTube transcripts, fetched only on request (v16).
+-- YouTube transcripts, fetched only on request (v16). `html` holds the
+-- transcript JSON document (format v1, src/item-transcripts.ts), `text` its
+-- plain text for search, `content_sha256` the hex SHA-256 of `html`.
 CREATE TABLE IF NOT EXISTS item_transcripts (
   item_id TEXT PRIMARY KEY,
   language TEXT,
   html TEXT NOT NULL,
   text TEXT NOT NULL,
+  content_sha256 TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
 );

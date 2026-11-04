@@ -474,6 +474,7 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			   language TEXT,
 			   html TEXT NOT NULL,
 			   text TEXT NOT NULL,
+			   content_sha256 TEXT,
 			   created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			   FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
 			 )`,

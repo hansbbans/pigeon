@@ -36,6 +36,7 @@ const ICON_PATHS: Record<string, string> = {
 	archive: "<path d='M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2' /> <path d='M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-10' /> <path d='M10 12l4 0' />",
 	"archive-filled": "F:<path d='M2 3m0 2a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z' /> <path d='M19 9c.513 0 .936 .386 .993 .883l.007 .117v8a3 3 0 0 1 -2.824 2.995l-.176 .005h-10a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-8a1 1 0 0 1 .883 -.993l.117 -.007h14zm-5 2h-4l-.117 .007a1 1 0 0 0 0 1.986l.117 .007h4l.117 -.007a1 1 0 0 0 0 -1.986l-.117 -.007z' />",
 	trash: "<path d='M4 7l16 0' /> <path d='M10 11l0 6' /> <path d='M14 11l0 6' /> <path d='M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12' /> <path d='M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3' />",
+	transcript: "<path d='M3 7a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10' /> <path d='M10 10.5a1.5 1.5 0 0 0 -3 0v3a1.5 1.5 0 0 0 3 0' /> <path d='M17 10.5a1.5 1.5 0 0 0 -3 0v3a1.5 1.5 0 0 0 3 0' />",
 	link: "<path d='M9 15l6 -6' /> <path d='M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464' /> <path d='M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463' />",
 };
 
@@ -250,6 +251,7 @@ ${iconVariables()}
       [data-icon="archive"] { --icon: var(--icon-archive); }
       [data-icon="trash"] { --icon: var(--icon-trash); }
       [data-icon="link"] { --icon: var(--icon-link); }
+      [data-icon="transcript"] { --icon: var(--icon-transcript); }
 
       #mark-unread-button[data-read="true"] { --icon: var(--icon-check-filled); color: var(--text-secondary); }
       #mark-unread-button[data-icon="archive"][data-read="true"] { --icon: var(--icon-archive-filled); }
@@ -903,7 +905,27 @@ ${iconVariables()}
       .reader-player-label { display: none; }
       .reader-player-container { width: 100%; aspect-ratio: 16 / 9; min-height: 200px; overflow: hidden; border-radius: 10px; background: #000; }
       .reader-player-frame { display: block; width: 100%; height: 100%; min-height: 200px; border: 0; }
-      .reader-player-fallback { display: inline-block; margin-top: 0.4rem; font-size: 0.8rem; }
+      .reader-player-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.4rem; }
+      .reader-player-fallback { display: inline-block; font-size: 0.8rem; }
+      .transcript-button { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.6rem 0.25rem 0.45rem; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-secondary); font-size: 0.78rem; line-height: 1.2; cursor: pointer; }
+      .transcript-button[hidden] { display: none; }
+      .transcript-button::before { content: ""; width: 1rem; height: 1rem; background: currentColor; -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
+      @media (hover: hover) { .transcript-button:hover { background: var(--hover); color: var(--text); } }
+      .transcript-button[disabled] { cursor: default; }
+      .transcript-button[aria-busy="true"] { animation: pigeon-pulse 900ms ease-in-out infinite alternate; }
+      .transcript-status { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.78rem; }
+      .transcript-status:empty { display: none; }
+      .reader-transcript { position: relative; max-height: min(22rem, 45vh); margin-top: 0.75rem; padding: 0.25rem 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); }
+      .reader-transcript:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .transcript-chapter { display: flex; align-items: baseline; gap: 0.6rem; margin: 0.9rem 0 0.2rem; padding: 0 0.5rem; color: var(--text); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; }
+      .transcript-chapter:first-child { margin-top: 0.35rem; }
+      .transcript-segment { display: grid; grid-template-columns: 3.6rem 1fr; gap: 0.35rem; margin: 0; padding: 0.35rem 0.5rem; border-radius: 6px; color: var(--text-secondary); font-family: 'New York', 'Iowan Old Style', Charter, Georgia, serif; font-size: 0.93rem; line-height: 1.5; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
+      @media (hover: hover) { .transcript-segment:hover { background: var(--hover); } }
+      .transcript-segment.is-active { background: var(--accent-soft); color: var(--text); }
+      .transcript-time { justify-self: start; align-self: start; padding: 0; border: 0; background: none; color: var(--muted); font: 500 0.72rem/1.9 var(--font); font-variant-numeric: tabular-nums; cursor: pointer; }
+      .transcript-chapter .transcript-time { line-height: inherit; }
+      .transcript-segment.is-active .transcript-time { color: var(--accent); }
+      @media (prefers-reduced-motion: reduce) { .transcript-segment { transition: none; } }
 
       .reader-frame-shell { flex: 1 0 24rem; display: flex; padding: 0.5rem 0 0; }
 
