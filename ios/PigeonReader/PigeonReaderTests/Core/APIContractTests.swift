@@ -249,6 +249,78 @@ struct APIContractTests {
 		#expect(snapshot.navigation?.items.contains { $0.kind == .feed } == false)
 	}
 
+	// MARK: - YouTube transcripts
+
+	private static let transcriptItemID = "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72"
+
+	private static let contractTranscript = YouTubeTranscript(
+		language: "en",
+		segments: [
+			.init(start: 0, duration: 6.5, text: "Margins give text room to breathe."),
+			.init(start: 6.5, duration: 9, text: "A wider measure tires the eye on long lines."),
+			.init(start: 15.5, text: "So set the column first, then the type."),
+		],
+		chapters: [
+			.init(start: 0, title: "Why margins matter"),
+			.init(start: 15.5, title: "Setting the column"),
+		],
+	)
+
+	@Test func transcriptUploadRequestAndResponseMatchTheContract() async throws {
+		let mock = MockHTTPClient(responseData: try Self.fixture("transcript-upload.response.json"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+
+		let response = try await client.uploadTranscript(itemID: Self.transcriptItemID, transcript: Self.contractTranscript)
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path() == "/api/v1/items/\(Self.transcriptItemID)/transcript")
+		#expect(request.method == "PUT")
+		#expect(request.authorization == "GoogleLogin auth=pigeon/token")
+		#expect(request.contentType?.hasPrefix("application/json") == true)
+		try Self.expectJSON(try #require(request.body), equalsFixture: "transcript-upload.request.json")
+		#expect(response == YouTubeTranscriptUploadResponse(
+			itemId: Self.transcriptItemID, updated: true, language: "en", segmentCount: 3, chapterCount: 2, bytes: 356,
+		))
+		// The request fixture decodes to the same document the app sends.
+		let decoded = try JSONDecoder().decode(YouTubeTranscript.self, from: try Self.fixture("transcript-upload.request.json"))
+		#expect(decoded == Self.contractTranscript)
+	}
+
+	@Test func transcriptFixtureDecodesTheStoredDocument() async throws {
+		let mock = MockHTTPClient(responseData: try Self.fixture("transcript.response.json"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+		// A Google Reader id works too; it is percent-encoded into one path segment.
+		let readerID = "tag:google.com,2005:reader/item/0000000000000002"
+
+		let stored = try #require(try await client.transcript(itemID: readerID))
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.method == "GET")
+		#expect(request.url.absoluteString == "https://pigeon.example/api/v1/items/tag%3Agoogle.com%2C2005%3Areader%2Fitem%2F0000000000000002/transcript")
+		#expect(stored.itemId == Self.transcriptItemID)
+		#expect(stored.updatedAt == Self.date("2026-11-01T11:00:00Z"))
+		#expect(stored.transcript == Self.contractTranscript)
+		#expect(stored.transcript.sortedChapters.map(\.title) == ["Why margins matter", "Setting the column"])
+	}
+
+	@Test func syncTranscriptFixtureMarksTheArticleAndPersistsTheFlag() async throws {
+		let page = try await Self.client("sync-transcript.response.json").incrementalSync(cursor: nil)
+
+		let change = try #require(page.changes.first { $0.entityType == .article })
+		#expect(change.payload?.hasTranscript == true)
+		#expect(change.payload?.length?.isVideo == true)
+		// Without the key (older Workers, items without a transcript) the flag stays unknown.
+		let plain = try await Self.client("sync.response.json").incrementalSync(cursor: nil)
+		#expect(plain.changes.allSatisfy { $0.payload?.hasTranscript == nil })
+
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(plain, accountID: "contract")
+		try await store.apply(page, accountID: "contract")
+		let snapshot = try await store.loadSnapshot(accountID: "contract")
+		let article = try #require(snapshot.articlesByCollection.values.joined().first { $0.id == Self.transcriptItemID })
+		#expect(article.hasTranscript == true)
+	}
+
 	@Test func serverStatusFixtureDecodesSyncHealth() async throws {
 		let health = try await Self.client("app-status.response.json").syncHealth()
 		#expect(health.generatedAt == Self.date("2026-11-01T12:00:00Z"))

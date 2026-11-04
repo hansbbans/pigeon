@@ -54,6 +54,23 @@ enum PigeonError: Error, LocalizedError, Sendable {
 		return trimmed
 	}
 
+	/// The Worker's machine-readable error code (`{ "error": ..., "code": ... }`), if any.
+	var serverCode: String? {
+		guard case let .server(_, message) = self else { return nil }
+		return Self.serverCode(in: Data(message.utf8))
+	}
+
+	var statusCode: Int? {
+		guard case let .server(statusCode, _) = self else { return nil }
+		return statusCode
+	}
+
+	static func serverCode(in body: Data) -> String? {
+		guard body.count <= 4_096,
+			let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return nil }
+		return payload["code"] as? String
+	}
+
 	var isNonFatalEngagementFailure: Bool {
 		if case .server(let statusCode, _) = self, statusCode == 404 {
 			return true

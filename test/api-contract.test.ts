@@ -363,17 +363,12 @@ test('YouTube transcript: store one for a video, read it back, then sync the sig
 });
 
 /**
- * Fixtures the Worker already serves but the iOS suite does not decode yet.
- * The iOS PR for each feature names them in APIContractTests.swift and
- * removes them here; nothing may be added to it without that follow-up.
+ * Fixtures the Worker already serves but the iOS suite does not decode yet, so
+ * an API-first PR can add fixtures before the iOS PR names them. That iOS PR
+ * names them in APIContractTests.swift and removes them here; everything not
+ * listed must be named by the iOS suite.
  */
-const AWAITING_IOS_CONTRACT_TESTS = new Set([
-	// YouTube transcripts (step 5): named by the iOS transcript PR.
-	'transcript-upload.request.json',
-	'transcript-upload.response.json',
-	'transcript.response.json',
-	'sync-transcript.response.json',
-]);
+const AWAITING_IOS_CONTRACT_TESTS = new Set<string>([]);
 
 test('every contract fixture is checked by the iOS contract suite', () => {
 	// The iOS suite names each fixture as a string literal. A fixture it never loads

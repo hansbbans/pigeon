@@ -1,4 +1,5 @@
 import * as assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
@@ -82,6 +83,19 @@ test('pure transcript helpers: times, Defuddle text, active segment, player mess
 	assert.equal(shouldAutoScrollTranscript(10_000, 6_000, 4_000), true);
 	assert.equal(shouldAutoScrollTranscript(9_999, 6_000, 4_000), false);
 	assert.equal(shouldAutoScrollTranscript(0, Number.NEGATIVE_INFINITY, 4_000), true);
+});
+
+test('Defuddle transcript text parses to the shared vectors the iOS app also runs', async () => {
+	// The same file runs in PigeonReaderTests (YouTubeTranscriptTests), so the web and iOS parsers stay identical.
+	const { vectors } = JSON.parse(readFileSync(new URL('./fixtures/transcript/defuddle-transcript-vectors.json', import.meta.url), 'utf8')) as {
+		vectors: Array<{ name: string; text: string; language?: string; expected: unknown }>;
+	};
+	assert.ok(vectors.length >= 10);
+	for (const vector of vectors) {
+		const parsed = parseDefuddleTranscript(vector.text, vector.language);
+		assert.deepEqual(parsed, vector.expected, vector.name);
+		if (parsed) assert.deepEqual((await parseTranscriptDocument(parsed)).document, parsed, `${vector.name}: the Worker stores it unchanged`);
+	}
 });
 
 test('the proxy fetch sends YouTube requests to the Worker route with the agent and language in their own headers', async () => {

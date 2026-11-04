@@ -110,6 +110,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let isPaywalled: Bool?
 	let length: ArticleLength?
 	let savedMetadata: SavedArticleMetadata?
+	let hasTranscript: Bool?
 
 	private enum CodingKeys: String, CodingKey {
 		case id
@@ -131,6 +132,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		case publishedAt
 		case imageURL = "imageUrl"
 		case siteName
+		case hasTranscript
 	}
 
 	init(from decoder: Decoder) throws {
@@ -160,6 +162,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 				.flatMap(URL.init(string:)),
 			siteName: try? container.decodeIfPresent(String.self, forKey: .siteName),
 		)
+		hasTranscript = (try? container.decodeIfPresent(Bool.self, forKey: .hasTranscript)) ?? nil
 	}
 
 	var isRead: Bool {

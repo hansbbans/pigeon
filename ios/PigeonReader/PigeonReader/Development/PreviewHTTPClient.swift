@@ -36,6 +36,15 @@ private actor PreviewPersonalizationStore {
 	}
 }
 
+/// Transcripts the preview "server" holds, by item id: what the app uploaded.
+private actor PreviewTranscriptStore {
+	private var bodies: [String: Data] = [:]
+
+	func body(for itemID: String) -> Data? { bodies[itemID] }
+
+	func store(_ body: Data, for itemID: String) { bodies[itemID] = body }
+}
+
 private nonisolated struct PreviewPersonalizationTopicsUpdate: Decodable, Sendable {
 	let monitoredTopics: [String]
 }
@@ -70,6 +79,7 @@ struct PreviewHTTPClient: HTTPClient {
 	}
 	private let recommendations: [Recommendation]
 	private let personalizationStore: PreviewPersonalizationStore
+	private let transcriptStore = PreviewTranscriptStore()
 
 	init(recommendations: [Recommendation] = []) {
 		self.recommendations = recommendations
@@ -338,6 +348,23 @@ struct PreviewHTTPClient: HTTPClient {
 				}
 			} else {
 				data = Data()
+			}
+		case let path where path.hasPrefix("/api/v1/items/") && path.hasSuffix("/transcript"):
+			// YouTube transcripts: stores what the app uploads and serves it back.
+			let encodedID = String(path.dropFirst("/api/v1/items/".count).dropLast("/transcript".count))
+			let itemID = encodedID.removingPercentEncoding ?? encodedID
+			if request.httpMethod == "PUT", let body = request.httpBody,
+				let transcript = try? JSONDecoder().decode(YouTubeTranscript.self, from: body) {
+				await transcriptStore.store(body, for: itemID)
+				data = try JSONSerialization.data(withJSONObject: [
+					"itemId": itemID, "updated": true, "language": transcript.language ?? "",
+					"segmentCount": transcript.segments.count, "chapterCount": transcript.chapters?.count ?? 0, "bytes": body.count,
+				])
+			} else if let body = await transcriptStore.body(for: itemID) {
+				data = Data(#"{"itemId":"\#(itemID)","updatedAt":"2026-11-01T11:00:00.000Z","transcript":"#.utf8) + body + Data("}".utf8)
+			} else {
+				data = Data(#"{"error":"No transcript is stored for this item","code":"transcript_not_found"}"#.utf8)
+				statusCode = 404
 			}
 		case let path where path.hasPrefix("/api/v1/saved/") && path.hasSuffix("/content"):
 			let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]

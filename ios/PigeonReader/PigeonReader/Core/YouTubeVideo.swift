@@ -65,7 +65,7 @@ nonisolated struct YouTubeVideo: Equatable, Hashable, Identifiable, Sendable {
 
 	private static let shortHosts: Set<String> = ["youtu.be", "www.youtu.be"]
 
-	private static func isValidVideoID(_ value: String) -> Bool {
+	static func isValidVideoID(_ value: String) -> Bool {
 		guard value.utf8.count == 11 else { return false }
 		return value.unicodeScalars.allSatisfy { scalar in
 			(scalar.value >= 48 && scalar.value <= 57)

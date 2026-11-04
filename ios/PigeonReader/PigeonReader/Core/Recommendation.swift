@@ -27,6 +27,8 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	var length: ArticleLength? = nil
 	/// Read It Later metadata; nil for every article outside the saved feed.
 	var saved: SavedArticleMetadata? = nil
+	/// True once the server holds a YouTube transcript for this item; nil when unknown.
+	var hasTranscript: Bool? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -88,6 +90,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			isPaywalled: isPaywalled,
 			length: length,
 			saved: saved,
+			hasTranscript: hasTranscript,
 		)
 	}
 }

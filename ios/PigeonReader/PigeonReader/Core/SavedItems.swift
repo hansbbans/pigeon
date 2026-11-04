@@ -146,6 +146,7 @@ extension Recommendation {
 			isPaywalled: isPaywalled,
 			length: length ?? self.length,
 			saved: saved ?? self.saved,
+			hasTranscript: hasTranscript,
 		)
 	}
 

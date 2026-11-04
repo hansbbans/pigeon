@@ -62,6 +62,8 @@ nonisolated struct IncrementalSyncPayload: Codable, Equatable, Sendable {
 	var publishedAt: String? = nil
 	var imageURL: String? = nil
 	var siteName: String? = nil
+	/// Present (and `true`) only when the server stores a transcript for the item.
+	var hasTranscript: Bool? = nil
 
 	var length: ArticleLength? {
 		ArticleLength(wordCount: wordCount, mediaKind: mediaKind, durationSeconds: durationSeconds)

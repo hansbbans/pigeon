@@ -388,9 +388,11 @@ struct ArticleReaderView: View {
 		case .feedContent:
 			VStack(alignment: .leading, spacing: 18) {
 				if let video = YouTubeVideo(url: article.safeOriginalURL) {
-					YouTubePlayerView(
+					YouTubeVideoSection(
+						article: article,
 						video: video,
 						playbackAllowed: scenePhase == .active,
+						textScale: model.readerTypography.textScale,
 						onOpenYouTube: openOriginal,
 						onOpenLink: openYouTubeLink,
 					)

@@ -1,0 +1,248 @@
+{
+	"about": "Defuddle variables.transcript inputs and the version 1 transcript documents they parse to (null: nothing parses). Run by test/browser-transcript.test.ts (parseDefuddleTranscript) and PigeonReaderTests YouTubeTranscriptTests (YouTubeTranscript.parseDefuddle).",
+	"vectors": [
+		{
+			"name": "Defuddle 0.19.6 shape: chapters, an hour, noise lines",
+			"text": "### Introduction example\n\n**0:04** · This is a 3.\n**0:06** · It's sloppily written · and rendered.\n\n### Neural networks\n\n**1:02:14** · What are the neurons?\n**bad** · ignored\nstray line",
+			"language": "en",
+			"expected": {
+				"version": 1,
+				"language": "en",
+				"segments": [
+					{
+						"start": 4,
+						"text": "This is a 3.",
+						"duration": 2
+					},
+					{
+						"start": 6,
+						"text": "It's sloppily written · and rendered.",
+						"duration": 3728
+					},
+					{
+						"start": 3734,
+						"text": "What are the neurons?"
+					}
+				],
+				"chapters": [
+					{
+						"start": 4,
+						"title": "Introduction example"
+					},
+					{
+						"start": 3734,
+						"title": "Neural networks"
+					}
+				]
+			}
+		},
+		{
+			"name": "CRLF line endings and indented lines",
+			"text": "### Intro\r\n  **0:00** · Hello there.\r\n**0:05**·   Tight   spacing\t\there.\r\n",
+			"language": "en-US",
+			"expected": {
+				"version": 1,
+				"language": "en-US",
+				"segments": [
+					{
+						"start": 0,
+						"text": "Hello there.",
+						"duration": 5
+					},
+					{
+						"start": 5,
+						"text": "Tight spacing here."
+					}
+				],
+				"chapters": [
+					{
+						"start": 0,
+						"title": "Intro"
+					}
+				]
+			}
+		},
+		{
+			"name": "out-of-order timestamps are sorted; equal starts keep order and get no duration",
+			"text": "**0:30** · third\n**0:10** · first\n**0:10** · second\n**0:45** · last",
+			"language": "fr",
+			"expected": {
+				"version": 1,
+				"language": "fr",
+				"segments": [
+					{
+						"start": 10,
+						"text": "first"
+					},
+					{
+						"start": 10,
+						"text": "second",
+						"duration": 20
+					},
+					{
+						"start": 30,
+						"text": "third",
+						"duration": 15
+					},
+					{
+						"start": 45,
+						"text": "last"
+					}
+				]
+			}
+		},
+		{
+			"name": "several headings before one segment all start there; a trailing heading is dropped",
+			"text": "# Part one\n## Opening\n**2:00** · Begin.\n### Never used",
+			"language": "pt-BR",
+			"expected": {
+				"version": 1,
+				"language": "pt-BR",
+				"segments": [
+					{
+						"start": 120,
+						"text": "Begin."
+					}
+				],
+				"chapters": [
+					{
+						"start": 120,
+						"title": "Part one"
+					},
+					{
+						"start": 120,
+						"title": "Opening"
+					}
+				]
+			}
+		},
+		{
+			"name": "blank segment text is skipped, and a heading waits for the next real segment",
+			"text": "### Chapter\n**0:01** ·   \n**0:02** · Real text.",
+			"language": "zh-Hant-TW",
+			"expected": {
+				"version": 1,
+				"language": "zh-Hant-TW",
+				"segments": [
+					{
+						"start": 2,
+						"text": "Real text."
+					}
+				],
+				"chapters": [
+					{
+						"start": 2,
+						"title": "Chapter"
+					}
+				]
+			}
+		},
+		{
+			"name": "non-ASCII whitespace collapses inside segment text",
+			"text": "**0:03** · one  two three",
+			"language": "ja",
+			"expected": {
+				"version": 1,
+				"language": "ja",
+				"segments": [
+					{
+						"start": 3,
+						"text": "one two three"
+					}
+				]
+			}
+		},
+		{
+			"name": "three-digit minutes and single-digit seconds",
+			"text": "**120:5** · Long lecture.\n**0:1:02** · Leading zero hours.",
+			"language": "en",
+			"expected": {
+				"version": 1,
+				"language": "en",
+				"segments": [
+					{
+						"start": 62,
+						"text": "Leading zero hours.",
+						"duration": 7143
+					},
+					{
+						"start": 7205,
+						"text": "Long lecture."
+					}
+				]
+			}
+		},
+		{
+			"name": "an invalid language tag is dropped",
+			"text": "**0:01** · hi",
+			"language": "not a tag",
+			"expected": {
+				"version": 1,
+				"segments": [
+					{
+						"start": 1,
+						"text": "hi"
+					}
+				]
+			}
+		},
+		{
+			"name": "a language with surrounding spaces is trimmed",
+			"text": "**0:01** · hallo",
+			"language": "  de  ",
+			"expected": {
+				"version": 1,
+				"language": "de",
+				"segments": [
+					{
+						"start": 1,
+						"text": "hallo"
+					}
+				]
+			}
+		},
+		{
+			"name": "no language",
+			"text": "**0:01** · hi",
+			"expected": {
+				"version": 1,
+				"segments": [
+					{
+						"start": 1,
+						"text": "hi"
+					}
+				]
+			}
+		},
+		{
+			"name": "empty string",
+			"text": "",
+			"expected": null
+		},
+		{
+			"name": "whitespace only",
+			"text": "   \n  ",
+			"expected": null
+		},
+		{
+			"name": "only a heading",
+			"text": "### Only a heading",
+			"expected": null
+		},
+		{
+			"name": "no timestamps",
+			"text": "no timestamps here",
+			"expected": null
+		},
+		{
+			"name": "a bullet that is not a middle dot",
+			"text": "**0:01** - hi",
+			"expected": null
+		},
+		{
+			"name": "four-part time is not a timestamp",
+			"text": "**1:02:03:04** · nope",
+			"expected": null
+		}
+	]
+}

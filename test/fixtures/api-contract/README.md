@@ -48,10 +48,10 @@ Worker.
 | `transcript.response.json` | `GET /api/v1/items/:id/transcript` |
 | `sync-transcript.response.json` | `GET /api/v1/sync` after a transcript upload (`hasTranscript`) |
 
-The Read It Later fixtures are served by the Worker before the iOS app decodes them.
-They are listed in `AWAITING_IOS_CONTRACT_TESTS` in `test/api-contract.test.ts`; the
-iOS Read It Later PR names them in `APIContractTests.swift` and empties that list.
-The transcript fixtures are listed there too, until the iOS transcript PR names them.
+Every fixture here is named in `APIContractTests.swift`; `test/api-contract.test.ts`
+fails when one is not. An API-first PR may add a fixture before the iOS app decodes
+it by listing it in `AWAITING_IOS_CONTRACT_TESTS` in that test; the iOS PR names it
+in `APIContractTests.swift` and removes it from the list (currently empty).
 
 Values are deterministic: the test pins the clock to `2026-11-01T12:00:00.000Z` and the
 SQLite `datetime('now')` stamps of the sync log to `2026-11-01 11:00:00`.
