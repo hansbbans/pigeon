@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>Pigeon settings</title>
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<link rel="stylesheet" href="options.css">
+</head>
+<body>
+	<main>
+		<h1><img src="icons/icon-48.png" alt="" width="24" height="24"> Save to Pigeon</h1>
+
+		<p id="notice" class="notice" hidden></p>
+
+		<section id="signed-in" hidden>
+			<p>Signed in to <strong id="signed-in-origin"></strong>.</p>
+			<p class="hint">Click the toolbar button, press <kbd id="shortcut">Alt+Shift+S</kbd>, or right-click a page or link to save it to Read It Later.</p>
+			<button id="sign-out" type="button" class="secondary">Sign out</button>
+		</section>
+
+		<form id="sign-in" hidden novalidate>
+			<label for="url">Pigeon address</label>
+			<input id="url" name="url" type="url" autocomplete="url" spellcheck="false" required>
+			<p id="url-error" class="error" hidden></p>
+
+			<label for="password">Password</label>
+			<input id="password" name="password" type="password" autocomplete="current-password" required>
+			<p id="password-error" class="error" hidden></p>
+
+			<button id="submit" type="submit">Sign in</button>
+			<p id="general-error" class="error" role="alert" hidden></p>
+			<p class="hint">The password is sent once to get a token. Only the token is stored.</p>
+		</form>
+
+		<p id="queue" class="hint" hidden></p>
+	</main>
+	<script src="options.js"></script>
+</body>
+</html>

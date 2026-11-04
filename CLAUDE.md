@@ -23,7 +23,7 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 ## CI and the shared Mac
 - Suites (details in `docs/ci-validation.md`): PRs and pushes to `main` run all iOS unit tests plus the smoke UI tests in `.github/ios-smoke-ui-tests.txt`. The nightly run (08:00 UTC, skipped when `main` has not changed since its last full run) and `gh workflow run ci.yml --ref main -f ui_suite=full` run every UI test. A TestFlight release reuses CI only from a green full-suite run of the exact commit; otherwise it runs every test itself.
 - A full iOS job takes about 35 minutes (28 of them UI tests) and runs on the self-hosted Mac behind a cross-repo iOS runner lock. Never `gh run cancel` an iOS job: a cancelled job leaves `xcodebuild` orphans that push the load average into the hundreds. If the Mac is slow, `ps -Ao pid,etime,command | grep "xcodebuild test"`, kill only orphans from finished runs, then `gh run rerun <id> --failed`.
-- Scope filters: Worker-only changes (`src/`, `test/`, `migrations/`, npm manifests) skip the iOS job; documentation skips both; unknown paths run everything.
+- Scope filters: Worker-only changes (`src/`, `test/`, `migrations/`, npm manifests) and the browser extension (`extension/`) skip the iOS job; documentation skips both; unknown paths run everything.
 - Merging needs `CI required validation` plus the `Workstream reviewed head` status on the exact head. Post that status only after reviewing the PR (`/code-review` or a self-review subagent) and fixing what it found:
   `gh api repos/hansbbans/pigeon/statuses/<sha> -f state=success -f context="Workstream reviewed head" -f description="Reviewed by Claude: <one-line summary>"`.
   Then merge with a merge commit and confirm `main` is green.

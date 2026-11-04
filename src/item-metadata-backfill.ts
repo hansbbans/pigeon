@@ -9,7 +9,10 @@
 
 import { fetchBoundedFeedResource } from './feed-network';
 import type { RefreshQueryBudget } from './rss-fetcher';
-import { extractYouTubeVideoId } from './youtube';
+import { extractYouTubeVideoId, parseYouTubeDuration } from './youtube';
+
+// Moved to ./youtube (self-contained, also bundled into the browser extension).
+export { parseYouTubeDuration };
 
 export const YOUTUBE_DURATION_BATCH = 50;
 // Premieres and live streams report P0D until they finish; keep asking for
@@ -19,14 +22,6 @@ export const ZERO_DURATION_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 const YOUTUBE_VIDEOS_API_URL = 'https://www.googleapis.com/youtube/v3/videos';
 const YOUTUBE_API_MAX_BYTES = 200_000;
 const YOUTUBE_API_TIMEOUT_MS = 5_000;
-
-/** Seconds in an ISO 8601 YouTube duration ("PT1H2M3S", "P0D"), or null. */
-export function parseYouTubeDuration(iso: string): number | null {
-	const match = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(iso);
-	if (!match || iso === 'P' || iso.endsWith('T')) return null;
-	const [, days, hours, minutes, seconds] = match.map((part) => Number(part ?? 0));
-	return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
-}
 
 interface VideoCandidate {
 	id: string;

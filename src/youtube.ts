@@ -149,6 +149,14 @@ export function extractYouTubeVideoId(originalUrl: string | undefined | null): s
 	return candidate && /^[A-Za-z0-9_-]{11}$/.test(candidate) ? candidate : null;
 }
 
+/** Seconds in an ISO 8601 YouTube duration ("PT1H2M3S", "P0D"), or null. */
+export function parseYouTubeDuration(iso: string): number | null {
+	const match = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(iso);
+	if (!match || iso === 'P' || iso.endsWith('T')) return null;
+	const [, days, hours, minutes, seconds] = match.map((part) => Number(part ?? 0));
+	return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
 export type MediaKind = 'text' | 'video';
 
 /**

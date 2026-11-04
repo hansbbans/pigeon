@@ -1,0 +1,25 @@
+{
+  "name": "pigeon-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Save pages to Pigeon's Read It Later from Chrome, Dia and Vivaldi",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "audit": "npm audit --audit-level=high",
+    "check": "npm test && npm run typecheck && npm run build && npm run audit"
+  },
+  "devDependencies": {
+    "@types/jsdom": "30.0.0",
+    "@types/node": "^22.18.0",
+    "@types/webextension-polyfill": "^0.12.6",
+    "defuddle": "0.19.6",
+    "esbuild": "^0.28.2",
+    "jsdom": "29.1.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "webextension-polyfill": "0.12.0"
+  }
+}
