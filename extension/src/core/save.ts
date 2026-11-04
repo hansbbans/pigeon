@@ -4,6 +4,7 @@
  * even when extraction fails, so every path ends in a stored link or a queued one.
  */
 
+import { hasHostAccess, type HostAccessCheck } from './access';
 import { postSave, type Fetch, type RetryCause, type SaveResponseBody } from './api';
 import { isSaveableUrl } from './config';
 import { buildSaveAttempts, type PageExtraction, type SaveRequestBody } from './payload';
@@ -13,6 +14,8 @@ import { loadSettings, markNeedsSignIn, type KeyValueStore } from './session';
 export interface SaveDeps {
 	fetch: Fetch;
 	store: KeyValueStore;
+	/** `permissions.contains` for the Pigeon origin; without it, access is assumed. */
+	hasHostAccess?: HostAccessCheck;
 }
 
 export type SaveOutcome =
@@ -20,6 +23,8 @@ export type SaveOutcome =
 	| { status: 'saved'; withContent: boolean; response: SaveResponseBody }
 	/** Not signed in, or the token stopped working; the save waits in the queue. */
 	| { status: 'needsSignIn'; queued: number }
+	/** The browser has not allowed the extension to reach Pigeon (Safari asks per site); the save waits in the queue. */
+	| { status: 'needsAccess'; queued: number; origin: string }
 	/** Pigeon unreachable; the save waits in the queue. */
 	| { status: 'queued'; queued: number; message: string }
 	/** Not a web page (chrome://, file://, …). Nothing to save. */
@@ -102,6 +107,7 @@ async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promis
 	const queued = await enqueue(deps.store, attempts);
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { status: 'needsSignIn', queued: queued.queued };
+	if (!(await hasHostAccess(settings.origin, deps.hasHostAccess))) return { status: 'needsAccess', queued: queued.queued, origin: settings.origin };
 	inFlight.add(queued.id);
 	let result: AttemptResult;
 	try {
@@ -141,7 +147,7 @@ export interface FlushResult {
 	/** Could not get through this time; still queued for the next retry. */
 	passedOver: number;
 	remaining: number;
-	stoppedBy?: 'signedOut' | 'unauthorized' | 'unreachable';
+	stoppedBy?: 'signedOut' | 'unauthorized' | 'unreachable' | 'noAccess';
 }
 
 let flushing: Promise<FlushResult> | null = null;
@@ -166,6 +172,7 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 	if (queue.length === 0) return result;
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { ...result, stoppedBy: 'signedOut' };
+	if (!(await hasHostAccess(settings.origin, deps.hasHostAccess))) return { ...result, stoppedBy: 'noAccess' };
 	let streak = 0;
 	for (const queued of queue) {
 		if (inFlight.has(queued.id)) continue;

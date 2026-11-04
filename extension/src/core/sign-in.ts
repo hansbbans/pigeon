@@ -1,5 +1,6 @@
 /** Options-page logic without the DOM: sign in, sign out, and what to show. */
 
+import { hasHostAccess, type HostAccessCheck } from './access';
 import { clientLogin, type Fetch } from './api';
 import { normalizePigeonUrl, originPermissionPattern, PigeonUrlError } from './config';
 import { QUEUE_SUMMARY_KEY, readQueueSummary } from './queue';
@@ -87,3 +88,23 @@ export async function optionsState(store: KeyValueStore): Promise<OptionsState> 
 
 /** storage.local keys the options page shows; other changes (queue contents, retry timing) need no re-render. */
 export const OPTIONS_STATE_KEYS: readonly string[] = [...SETTINGS_KEYS, QUEUE_SUMMARY_KEY];
+
+/**
+ * Signed in, but the browser does not let the extension reach Pigeon: Safari
+ * asks per site (and "Allow for One Day" runs out), and Chrome users can
+ * withhold site access. Returns the pattern to request, or null when all is well.
+ */
+export async function missingHostAccess(store: KeyValueStore, check: HostAccessCheck | undefined): Promise<{ origin: string; pattern: string } | null> {
+	const settings = await loadSettings(store);
+	if (!settings.auth || (await hasHostAccess(settings.origin, check))) return null;
+	return { origin: settings.origin, pattern: originPermissionPattern(settings.origin) };
+}
+
+/** The "Allow access" button: permissions.request must be its first call (user gesture). A refusal or an error is false. */
+export async function grantHostAccess(pattern: string, request: (pattern: string) => Promise<boolean>): Promise<boolean> {
+	try {
+		return await request(pattern);
+	} catch {
+		return false;
+	}
+}

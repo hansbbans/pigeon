@@ -19,19 +19,25 @@ const BADGE_CLEAR_MS = 5_000;
 const BADGE_PROBLEM_CLEAR_MS = 10_000;
 /** An extension API call every 20 s keeps the worker alive while a save is in flight. */
 const KEEPALIVE_MS = 20_000;
+const NEEDS_ACCESS_TITLE = 'Allow access to Pigeon in the settings';
 
 const deps: SaveDeps = {
 	fetch: (input, init) => fetch(input, init),
 	store: browser.storage.local,
+	// Safari grants host access per site, so the Pigeon origin may not be allowed yet (or any more).
+	hasHostAccess: (pattern) => browser.permissions.contains({ origins: [pattern] }),
 };
 const alarms: AlarmsApi = browser.alarms;
 const badge = new Badge(browser.action as unknown as ActionApi, browser.storage.session);
 
 browser.runtime.onInstalled.addListener(async (details) => {
 	if (details.reason === 'install') void browser.runtime.openOptionsPage();
-	await browser.contextMenus.removeAll();
-	browser.contextMenus.create({ id: MENU_SAVE_PAGE, title: 'Save page to Pigeon', contexts: ['page'] });
-	browser.contextMenus.create({ id: MENU_SAVE_LINK, title: 'Save link to Pigeon', contexts: ['link'] });
+	// Safari on iOS and iPadOS has no context menus for extensions.
+	if (browser.contextMenus) {
+		await browser.contextMenus.removeAll();
+		browser.contextMenus.create({ id: MENU_SAVE_PAGE, title: 'Save page to Pigeon', contexts: ['page'] });
+		browser.contextMenus.create({ id: MENU_SAVE_LINK, title: 'Save link to Pigeon', contexts: ['link'] });
+	}
 	void retryQueued({ force: false });
 });
 
@@ -42,6 +48,11 @@ browser.runtime.onStartup.addListener(() => {
 // Queued saves are retried by an alarm (it survives worker restarts) with a backoff.
 browser.alarms.onAlarm.addListener((alarm) => {
 	if (alarm.name === RETRY_ALARM) void retryQueued({ force: false });
+});
+
+// Access to Pigeon was just allowed (the options page, or Safari's own prompt or settings): send what waited.
+browser.permissions.onAdded.addListener(() => {
+	void retryQueued({ force: true });
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
@@ -60,7 +71,7 @@ browser.commands.onCommand.addListener((command, tab) => {
 	})().catch((error) => console.error('[Pigeon] Shortcut failed:', error));
 });
 
-browser.contextMenus.onClicked.addListener((info, tab) => {
+browser.contextMenus?.onClicked.addListener((info, tab) => {
 	if (info.menuItemId === MENU_SAVE_LINK) {
 		void runSave(tab?.id, () => saveLink(info.linkUrl, deps));
 	} else if (info.menuItemId === MENU_SAVE_PAGE && tab) {
@@ -124,6 +135,7 @@ async function retryQueued({ force }: { force: boolean }): Promise<void> {
 		const result = await keepAlive(runRetry(force, { store: deps.store, alarms, flush: () => flushQueue(deps) }));
 		if (!result) await badge.setQueued(0);
 		else if (result.stoppedBy === 'unauthorized' || result.stoppedBy === 'signedOut') await badge.setQueued(result.remaining, 'Sign in to Pigeon');
+		else if (result.stoppedBy === 'noAccess') await badge.setQueued(result.remaining, NEEDS_ACCESS_TITLE);
 		else await badge.setQueued(result.remaining);
 	} catch (error) {
 		console.warn('[Pigeon] Retrying queued saves failed:', error instanceof Error ? error.message : String(error));
@@ -160,6 +172,12 @@ function report(tabId: number | undefined, outcome: SaveOutcome): void {
 			case 'needsSignIn':
 				await badge.setQueued(outcome.queued, 'Sign in to Pigeon');
 				await badge.showOnTab(tabId, '!', '#b91c1c', `Sign in to Pigeon. ${waiting(outcome.queued)}`, BADGE_PROBLEM_CLEAR_MS);
+				await browser.runtime.openOptionsPage();
+				break;
+			case 'needsAccess':
+				await badge.setQueued(outcome.queued, NEEDS_ACCESS_TITLE);
+				await ensureRetryScheduled({ store: deps.store, alarms });
+				await badge.showOnTab(tabId, '!', '#b91c1c', `Allow Save to Pigeon to reach ${new URL(outcome.origin).host}. ${waiting(outcome.queued)}`, BADGE_PROBLEM_CLEAR_MS);
 				await browser.runtime.openOptionsPage();
 				break;
 			case 'queued':

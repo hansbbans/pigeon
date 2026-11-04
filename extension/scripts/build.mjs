@@ -1,31 +1,36 @@
 // Builds the extension into dist/<browser>/, loadable unpacked.
-// Usage: node scripts/build.mjs [--browser chromium] [--watch]
+// Usage: node scripts/build.mjs [--browser chromium|safari] [--outdir dist] [--watch]
 //
 // Each browser has its own manifest in manifests/<browser>.json; the code is
 // shared and talks to the browser through webextension-polyfill
-// (src/browser-api.ts). Adding Safari or Firefox later means adding a
-// manifest and an entry in BROWSERS, not restructuring the code.
+// (src/browser-api.ts). Adding Firefox later means adding a manifest and an
+// entry in BROWSERS, not restructuring the code. dist/safari is the web
+// extension inside the Safari container app (safari/, scripts/build-safari.sh).
 import { build, context } from 'esbuild';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BROWSERS = {
 	chromium: { manifest: 'manifests/chromium.json', target: ['chrome116'] },
+	// Safari 17: scripting.executeScript returns results from then on (see browser_specific_settings).
+	safari: { manifest: 'manifests/safari.json', target: ['safari17'] },
 };
 
 const args = process.argv.slice(2);
 const watch = args.includes('--watch');
 const browserIndex = args.indexOf('--browser');
 const selected = browserIndex >= 0 ? [args[browserIndex + 1]] : Object.keys(BROWSERS);
+const outdirIndex = args.indexOf('--outdir');
+const distRoot = outdirIndex >= 0 ? resolve(args[outdirIndex + 1]) : join(root, 'dist');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const defuddleVersion = JSON.parse(readFileSync(join(root, 'node_modules/defuddle/package.json'), 'utf8')).version;
 
 for (const name of selected) {
 	const browser = BROWSERS[name];
 	if (!browser) throw new Error(`Unknown browser "${name}". Known: ${Object.keys(BROWSERS).join(', ')}`);
-	const outdir = join(root, 'dist', name);
+	const outdir = join(distRoot, name);
 	rmSync(outdir, { recursive: true, force: true });
 	mkdirSync(outdir, { recursive: true });
 

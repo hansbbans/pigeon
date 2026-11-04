@@ -1,6 +1,6 @@
 # Save to Pigeon (browser extension)
 
-Saves pages and links to Pigeon's **Read It Later** from Chrome, Dia and Vivaldi (all Chromium, Manifest V3).
+Saves pages and links to Pigeon's **Read It Later** from Chrome, Dia and Vivaldi (all Chromium, Manifest V3), and from Safari on the Mac (the same code in a Safari Web Extension; see [Safari](#safari)).
 
 - **Toolbar button** or **Alt+Shift+S**: saves the current page. Defuddle runs on a copy of the page as the tab shows it, so logged-in and paywalled pages you can see are saved as clean text with their images. The badge shows ✓ when it's saved.
 - **Right-click a page > Save page to Pigeon**: the same.
@@ -16,8 +16,9 @@ The extension needs the save API from PR #161 (`POST /api/v1/saved`) on the Pige
 ```bash
 cd extension
 npm ci
-npm run build      # dist/chromium/, loadable unpacked
-npm run check      # tests, typecheck, build, audit (what CI runs)
+npm run build         # dist/chromium/ (loadable unpacked) and dist/safari/
+npm run build:safari  # dist/safari/ plus the Safari app, dist/safari-app/ (macOS, Xcode)
+npm run check         # tests, typecheck, build, audit (what CI runs)
 ```
 
 `node scripts/build.mjs --watch` rebuilds on change.
@@ -40,7 +41,7 @@ To change the shortcut, open `chrome://extensions/shortcuts` (Vivaldi: `vivaldi:
 
 - `activeTab` and `scripting`: read the current tab only when you save it. There is no content script and no `<all_urls>`.
 - `contextMenus`, `storage`, and `alarms` (retrying waiting saves).
-- Host permission for `https://pigeon.hanscho.com` only. Requests to Pigeon go from the background service worker, so the Worker needs no CORS. Signing in to a different address asks for that one origin at runtime (`optional_host_permissions`); plain http is only accepted for `localhost` and `127.0.0.1`, for a local `wrangler dev`.
+- Host permission for `https://pigeon.hanscho.com` only (Safari asks the user for it; see [Safari](#safari)). Requests to Pigeon go from the background service worker, so the Worker needs no CORS. Signing in to a different address asks for that one origin at runtime (`optional_host_permissions`); plain http is only accepted for `localhost` and `127.0.0.1`, for a local `wrangler dev`.
 
 Defuddle gets a copy of the page (`document.cloneNode`), so the page you are reading is never changed. A detached copy has no computed styles, so Defuddle's mobile-CSS and hidden-element steps fall back to its markup rules.
 
@@ -52,7 +53,44 @@ Defuddle gets a copy of the page (`document.cloneNode`), so the page you are rea
 - `src/background/`: the service worker that connects browser events to `src/core`.
 - `src/options/` and `static/`: the settings page and icons.
 - `src/browser-api.ts`: the only import of the WebExtension API, through `webextension-polyfill`.
-- `manifests/<browser>.json` and `scripts/build.mjs`: one manifest per browser, built to `dist/<browser>/`. Only `chromium` exists today. A Safari or Firefox build adds a manifest and an entry in `BROWSERS` in the build script; the code stays shared.
+- `manifests/<browser>.json` and `scripts/build.mjs`: one manifest per browser (`chromium`, `safari`), built to `dist/<browser>/`. `test/manifest.test.ts` keeps them in step: they may differ only in the keys Safari handles differently. A Firefox build would add a manifest and an entry in `BROWSERS`; the code stays shared.
+- `safari/`: the Safari container app (xcodegen `project.yml`, a one-window SwiftUI app, the `.appex` stub and entitlements). `scripts/build-safari.sh` generates the Xcode project (not committed) and copies `dist/safari` into the `.appex`.
+
+## Safari
+
+Safari loads web extensions only from inside a Mac app, so `safari/` holds a small container app, **Save to Pigeon** (`com.hans.pigeon.safari`), whose extension (`com.hans.pigeon.safari.extension`) carries `dist/safari`. It needs Xcode and `brew install xcodegen`; CI does not build it.
+
+```bash
+cd extension
+npm ci
+npm run build:safari             # → dist/safari-app/Save to Pigeon.app
+npm run build:safari -- --open   # the same, then launch it
+```
+
+The build is ad-hoc signed ("Sign to Run Locally"), not with a developer certificate, so Safari loads it only as an unsigned extension:
+
+1. Safari > Settings > Advanced: turn on **Show features for web developers**.
+2. Develop menu > **Allow Unsigned Extensions** (asks for your password). Safari turns this off every time it quits, so do it again after restarting Safari.
+3. Run `dist/safari-app/Save to Pigeon.app` once. It registers the extension, shows whether it is on, and its button opens Safari's settings.
+4. Safari > Settings > Extensions: tick **Save to Pigeon**. Its settings page opens; sign in as above. Safari asks whether the extension may access `pigeon.hanscho.com`: choose **Always Allow on This Website**.
+
+After a rebuild, run the app again; Safari picks up the new build (the build number is the commit count). If Safari shows two copies, an older build from another checkout is still registered: delete it, or run `lsregister -u` on its path.
+
+What differs in Safari:
+
+- **Site access.** Safari does not grant the manifest's host permission at install; the user allows each site, possibly only for a day. Before sending, the extension checks `permissions.contains` for the Pigeon origin. Without access the save waits in the queue, the badge says so, and the settings page shows **Allow access** (which calls `permissions.request`). Once allowed, waiting saves go out. The same path covers a Chrome user who withheld site access. Signing in also requests the origin first, as on Chromium.
+- **Reading the page.** The toolbar button grants `activeTab`; Safari may also ask once to allow the extension on that site. If Safari refuses, the bare link is saved, as on any restricted page.
+- **Shortcut.** Option-Shift-S (`Alt+Shift+S` in the manifest). Safari has no settings page for extension shortcuts; if another extension holds the keys, use the toolbar button or the context menu.
+- **Badge colours** are ignored by Safari (it always draws the badge in its own colour); the text and tooltip still show the state.
+- **Minimum Safari 17** (`browser_specific_settings.safari.strict_min_version`): `scripting.executeScript` returns results from then on. Context menus are guarded, so the same code runs where Safari has none (iOS).
+
+### Signed builds (not set up)
+
+Unsigned extensions only work with the Develop setting above. To ship without it:
+
+- **Developer ID (outside the App Store):** set `DEVELOPMENT_TEAM` and `CODE_SIGN_STYLE: Automatic` (or a Developer ID Application identity) for both targets in `safari/project.yml`, keep the hardened runtime and sandbox, `xcodebuild archive`, export with a Developer ID method, notarize with `xcrun notarytool submit --wait`, and staple with `xcrun stapler staple`. Keep the credentials in the Keychain (`notarytool store-credentials`), never in the repo.
+- **App Store / TestFlight for Mac:** register `com.hans.pigeon.safari` and `com.hans.pigeon.safari.extension` in App Store Connect, add an app icon asset catalog (the app has none today), archive with automatic signing, and upload.
+- **iOS and iPadOS Safari:** the web extension code is ready (no context menus is handled), but it needs an iOS app target and an iOS Safari extension target in `safari/project.yml`, larger icons, and an Apple Developer team to install on a device.
 
 ## Size limits
 

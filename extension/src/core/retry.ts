@@ -15,11 +15,13 @@ export const MAX_RETRY_DELAY_MS = 30 * 60_000;
 /**
  * The wait before the next retry, or null when none is needed: the queue is
  * empty, or it waits for the user to sign in. Doubles while Pigeon stays
- * unreachable; saves that were only passed over retry after the minimum.
+ * unreachable, and while the browser withholds access to Pigeon (checking
+ * costs no request, and Safari may not report a grant made in its own UI);
+ * saves that were only passed over retry after the minimum.
  */
 export function nextRetryDelay(previousMs: number | null | undefined, result: FlushResult): number | null {
 	if (result.remaining === 0 || result.stoppedBy === 'signedOut' || result.stoppedBy === 'unauthorized') return null;
-	if (result.stoppedBy !== 'unreachable') return MIN_RETRY_DELAY_MS;
+	if (result.stoppedBy !== 'unreachable' && result.stoppedBy !== 'noAccess') return MIN_RETRY_DELAY_MS;
 	return previousMs ? Math.min(Math.max(previousMs * 2, MIN_RETRY_DELAY_MS), MAX_RETRY_DELAY_MS) : MIN_RETRY_DELAY_MS;
 }
 
