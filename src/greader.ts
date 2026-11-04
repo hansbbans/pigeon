@@ -1,5 +1,5 @@
 import { readingLengthFields } from './reading-length';
-import { savedMetadataFields } from './saved-items';
+import { notSavedFeedSql, SAVED_FEED_KEY, SAVED_SOURCE_TYPE, savedMetadataFields } from './saved-items';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -28,6 +28,19 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 
 function isPigeonClient(request: Request): boolean {
 	return request.headers.has('X-Pigeon-Client');
+}
+
+/**
+ * Pigeon extension `xs=saved` (query string or form body): the client lists
+ * Read It Later in its own section. The reading-list, read, starred and label
+ * streams then leave the saved feed out (matching /api/v1/browser/articles),
+ * and unread-count leaves it out of the reading-list total while still
+ * listing the saved feed's own `feed/<id>` count. The saved feed's own stream
+ * is unaffected. Without the parameter, older clients and third-party
+ * readers see Read It Later as an ordinary feed.
+ */
+function excludesSavedFeed(params: URLSearchParams): boolean {
+	return params.getAll('xs').includes('saved');
 }
 
 function labelFromStreamId(streamId: string | null): string | null {
@@ -389,7 +402,7 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 		return handleQuickAdd(request, env);
 	}
 	if (path === '/reader/api/0/unread-count') {
-		return handleUnreadCount(env);
+		return handleUnreadCount(env, excludesSavedFeed(await parseRequestParams(request, url)));
 	}
 	if (path === '/reader/api/0/stream/items/ids') {
 		return handleStreamItemIds(request, url, env);
@@ -504,14 +517,14 @@ function newestTimestampUsec(current: string | undefined, candidate: string): st
 	return current === undefined || numericCandidate > Number(current) ? candidate : current;
 }
 
-async function handleUnreadCount(env: Env): Promise<Response> {
+async function handleUnreadCount(env: Env, excludeSaved = false): Promise<Response> {
 	// Labels are needed only for publishers with unread items; the filter keeps
 	// a large read-only library's metadata out of the response path.
 	const { results: [countResult], labelsByFeedKey } = await batchWithFeedLabels(
 		env,
 		[
 			env.DB.prepare(
-				`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+				`SELECT f.rowid, i.feed_key, f.source_type, COUNT(*) as count, MAX(i.received_at) as newest
 		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
 		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`,
 			),
@@ -521,6 +534,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 	const results = countResult.results as Array<{
 		rowid: number;
 		feed_key: string;
+		source_type: string;
 		count: number;
 		newest: string;
 	}>;
@@ -533,7 +547,8 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		newestItemTimestampUsec: (isoToUnix(r.newest) * 1_000_000).toString(),
 	}));
 	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string | undefined }>();
-	for (const unread of unreadcounts) {
+	for (const [index, unread] of unreadcounts.entries()) {
+		if (excludeSaved && results[index].source_type === SAVED_SOURCE_TYPE) continue;
 		totalUnreadCount += unread.count;
 		newestUnreadUsec = newestTimestampUsec(newestUnreadUsec, unread.newestItemTimestampUsec);
 	}
@@ -612,12 +627,17 @@ async function selectStreamRowIds(options: {
 	excludeTag: string;
 	olderThanUnix: string;
 	continuation: string;
+	excludeSaved?: boolean;
 	env: Env;
 }): Promise<{ rows: StreamRow[]; continuation?: string }> {
 	let sql =
 		'SELECT i.rowid, i.received_at, i.is_read, i.is_starred, i.content_version FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE f.is_active = 1';
 	const binds: (string | number)[] = [];
 	const label = labelFromStreamId(options.streamId);
+	const isStateStream = options.streamId === 'user/-/state/com.google/starred' ||
+		options.streamId === 'user/-/state/com.google/read' ||
+		options.streamId === 'user/-/state/com.google/reading-list' || !options.streamId;
+	if (options.excludeSaved && (isStateStream || label)) sql += ` AND ${notSavedFeedSql('f.source_type')}`;
 
 	if (options.streamId === 'user/-/state/com.google/starred') {
 		sql += ' AND i.is_starred = 1';
@@ -768,6 +788,7 @@ async function loadResponseItems(
 		publishedAt?: string;
 		imageUrl?: string;
 		siteName?: string;
+		nativeId?: string;
 		alternate?: Array<{ href: string }>;
 		origin: { streamId: string; title: string; htmlUrl: string };
 	}>
@@ -856,6 +877,8 @@ async function loadResponseItems(
 					isPaywalled: isPaywalledHtml(item.html_content),
 					...readingLengthFields(item),
 					...savedMetadataFields(item, 'imageUrl'),
+					// Removing a saved item takes its UUID, never the reusable reader id.
+					...(item.feed_key === SAVED_FEED_KEY ? { nativeId: item.id } : {}),
 					...(item.original_url
 						? {
 								alternate: [{ href: item.original_url }],
@@ -899,6 +922,7 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	// Pigeon clients use the read, starred, and contentVersion extensions to
@@ -1001,6 +1025,7 @@ async function handleStreamContents(request: Request, url: URL, env: Env): Promi
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	const items = await loadResponseItems(
