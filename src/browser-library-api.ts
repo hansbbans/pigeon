@@ -9,11 +9,17 @@ const LABEL = 'user/-/label/';
 const SAVED = 'saved';
 const MAX_CURSOR_LENGTH = 1024;
 
+type ArticleSort = 'newest' | 'oldest' | 'shortest' | 'longest';
+type SavedKind = 'all' | 'text' | 'video';
+type SavedLength = 'any' | 'short' | 'medium' | 'long';
+
 interface ArticleQuery {
 	stream: string;
 	q: string;
 	filter: 'all' | 'unread' | 'read';
-	sort: 'newest' | 'oldest';
+	sort: ArticleSort;
+	kind: SavedKind;
+	length: SavedLength;
 	since: string | null;
 	before: string | null;
 }
@@ -23,16 +29,32 @@ interface ArticleCursor {
 	query: string;
 	date: number;
 	rowid: number;
+	// Length sorts only: the row's length key, null when unknown.
+	len?: number | null;
 }
 
 interface ArticleRow {
 	rowid: number;
 	date: number;
+	len: number | null;
 }
+
+/**
+ * Read It Later length as an integer key: seconds × 238, so text
+ * (word_count × 60, at 238 words a minute) and video (duration_seconds × 238)
+ * compare exactly. NULL when unknown. One minute is 14 280.
+ */
+const LENGTH_KEY_SQL = `(CASE WHEN i.media_kind = 'video'
+	THEN (CASE WHEN i.duration_seconds > 0 THEN i.duration_seconds * 238 END)
+	ELSE (CASE WHEN i.word_count > 0 THEN i.word_count * 60 END) END)`;
+const MINUTE_KEY = 14_280;
 
 /**
  * GET /api/v1/browser/articles (authenticated by handleNativeApiRequest).
  * stream: all/reading-list, feed/<numeric ID>, user/-/label/<literal name>, read, starred, saved.
+ * stream=saved only: kind=all/text/video; length=any/short (<5 min)/medium (5-15)/long (15+ min),
+ * by rounded-up minutes, unknown length matching only any; sort also shortest/longest
+ * (unknown last). Lengths come from word_count (238 wpm) or duration_seconds for video.
  * Read It Later items appear only in `saved` and in their feed's own feed/<ID> stream;
  * every other stream (Today, All, folders, read, starred) leaves them out.
  * q: literal substring of title, author, feed title, or text; max 200 characters.
@@ -48,7 +70,7 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 	if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
 	try {
 		const params = new URL(request.url).searchParams;
-		const allowed = new Set(['stream', 'q', 'filter', 'sort', 'limit', 'since', 'before', 'continuation']);
+		const allowed = new Set(['stream', 'q', 'filter', 'sort', 'kind', 'length', 'limit', 'since', 'before', 'continuation']);
 		for (const key of params.keys()) {
 			if (!allowed.has(key) || params.getAll(key).length !== 1) throw new InvalidQuery('Unknown or repeated query parameter');
 		}
@@ -88,22 +110,49 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		}
 		if (query.since) { where.push('julianday(i.received_at) >= julianday(?)'); binds.push(query.since); }
 		if (query.before) { where.push('julianday(i.received_at) < julianday(?)'); binds.push(query.before); }
-		const comparator = query.sort === 'oldest' ? '>' : '<';
-		const direction = query.sort === 'oldest' ? 'ASC' : 'DESC';
-		if (cursor) {
-			where.push(`(julianday(i.received_at) ${comparator} ? OR (julianday(i.received_at) = ? AND i.rowid ${comparator} ?))`);
-			binds.push(cursor.date, cursor.date, cursor.rowid);
+		if (query.kind === 'video') where.push("i.media_kind = 'video'");
+		else if (query.kind === 'text') where.push("i.media_kind IS NOT 'video'");
+		// Buckets use rounded-up minutes: under 5 means at most 4 whole minutes.
+		if (query.length === 'short') where.push(`${LENGTH_KEY_SQL} <= ${4 * MINUTE_KEY}`);
+		else if (query.length === 'medium') where.push(`${LENGTH_KEY_SQL} > ${4 * MINUTE_KEY} AND ${LENGTH_KEY_SQL} <= ${14 * MINUTE_KEY}`);
+		else if (query.length === 'long') where.push(`${LENGTH_KEY_SQL} > ${14 * MINUTE_KEY}`);
+		const lengthSort = query.sort === 'shortest' || query.sort === 'longest';
+		let order: string;
+		if (lengthSort) {
+			// Unknown lengths last, then by length, then rowid as the stable tiebreak.
+			const comparator = query.sort === 'shortest' ? '>' : '<';
+			const direction = query.sort === 'shortest' ? 'ASC' : 'DESC';
+			if (cursor) {
+				if (typeof cursor.len === 'number') {
+					where.push(`(${LENGTH_KEY_SQL} IS NULL OR ${LENGTH_KEY_SQL} ${comparator} ? OR (${LENGTH_KEY_SQL} = ? AND i.rowid ${comparator} ?))`);
+					binds.push(cursor.len, cursor.len, cursor.rowid);
+				} else {
+					where.push(`(${LENGTH_KEY_SQL} IS NULL AND i.rowid ${comparator} ?)`);
+					binds.push(cursor.rowid);
+				}
+			}
+			order = `(len IS NULL) ASC, len ${direction}, i.rowid ${direction}`;
+		} else {
+			const comparator = query.sort === 'oldest' ? '>' : '<';
+			const direction = query.sort === 'oldest' ? 'ASC' : 'DESC';
+			if (cursor) {
+				where.push(`(julianday(i.received_at) ${comparator} ? OR (julianday(i.received_at) = ? AND i.rowid ${comparator} ?))`);
+				binds.push(cursor.date, cursor.date, cursor.rowid);
+			}
+			order = `julianday(i.received_at) ${direction}, i.rowid ${direction}`;
 		}
-		const { results } = await env.DB.prepare(`SELECT i.rowid, julianday(i.received_at) AS date
+		const lengthColumn = query.stream === SAVED ? LENGTH_KEY_SQL : 'NULL';
+		const { results } = await env.DB.prepare(`SELECT i.rowid, julianday(i.received_at) AS date, ${lengthColumn} AS len
 			FROM items i JOIN feeds f ON f.feed_key = i.feed_key
-			WHERE ${where.join(' AND ')} ORDER BY julianday(i.received_at) ${direction}, i.rowid ${direction} LIMIT ?`)
+			WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ?`)
 			.bind(...binds, limit + 1).all<ArticleRow>();
 		const rows = results.slice(0, limit);
 		const last = rows.at(-1);
 		const hasMore = results.length > limit;
 		return Response.json({
 			itemIds: rows.map((row) => String(row.rowid)),
-			continuation: hasMore && last ? encodeCursor({ v: 1, query: fingerprint, date: last.date, rowid: last.rowid }) : null,
+			continuation: hasMore && last ? encodeCursor({ v: 1, query: fingerprint, date: last.date, rowid: last.rowid,
+				...(lengthSort ? { len: last.len ?? null } : {}) }) : null,
 			hasMore,
 			sort: query.sort,
 		}, { headers: { 'Cache-Control': 'no-store' } });
@@ -133,11 +182,20 @@ function parseQuery(params: URLSearchParams): ArticleQuery {
 	const filter = params.get('filter') ?? 'all';
 	if (filter !== 'all' && filter !== 'unread' && filter !== 'read') throw new InvalidQuery('Invalid article filter');
 	const sort = params.get('sort') ?? 'newest';
-	if (sort !== 'newest' && sort !== 'oldest') throw new InvalidQuery('Supported sorts are newest and oldest');
+	const kind = params.get('kind') ?? 'all';
+	const length = params.get('length') ?? 'any';
+	if (stream === SAVED) {
+		if (!['newest', 'oldest', 'shortest', 'longest'].includes(sort)) throw new InvalidQuery('Supported sorts are newest, oldest, shortest and longest');
+		if (!['all', 'text', 'video'].includes(kind)) throw new InvalidQuery('kind must be all, text or video');
+		if (!['any', 'short', 'medium', 'long'].includes(length)) throw new InvalidQuery('length must be any, short, medium or long');
+	} else {
+		if (sort !== 'newest' && sort !== 'oldest') throw new InvalidQuery('Supported sorts are newest and oldest');
+		if (kind !== 'all' || length !== 'any') throw new InvalidQuery('kind and length apply only to the saved stream');
+	}
 	const since = parseDate(params.get('since'));
 	const before = parseDate(params.get('before'));
 	if (since && before && since >= before) throw new InvalidQuery('since must be before before');
-	return { stream, q, filter, sort, since, before };
+	return { stream, q, filter, sort: sort as ArticleSort, kind: kind as SavedKind, length: length as SavedLength, since, before };
 }
 
 function parseDate(value: string | null): string | null {
@@ -151,7 +209,11 @@ function parseDate(value: string | null): string | null {
 }
 
 async function queryFingerprint(query: ArticleQuery): Promise<string> {
-	const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(query)));
+	// Saved-only fields join the fingerprint only for the saved stream, so other
+	// streams' continuations stay valid across deploys.
+	const { kind, length, ...shared } = query;
+	const bound = query.stream === SAVED ? query : shared;
+	const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(bound)));
 	return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -163,7 +225,8 @@ function parseCursor(value: string | null, fingerprint: string): ArticleCursor |
 		if (!value || value.length > MAX_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
 		const cursor = JSON.parse(atob(value.replace(/-/g, '+').replace(/_/g, '/'))) as ArticleCursor;
 		if (!cursor || cursor.v !== 1 || cursor.query !== fingerprint || !Number.isFinite(cursor.date)
-			|| cursor.date < 1721059.5 || cursor.date > 5373484.5 || !Number.isSafeInteger(cursor.rowid) || cursor.rowid < 1) throw new Error();
+			|| cursor.date < 1721059.5 || cursor.date > 5373484.5 || !Number.isSafeInteger(cursor.rowid) || cursor.rowid < 1
+			|| (cursor.len !== undefined && cursor.len !== null && (!Number.isSafeInteger(cursor.len) || cursor.len < 0))) throw new Error();
 		return cursor;
 	} catch { throw new InvalidQuery('Invalid article continuation'); }
 }

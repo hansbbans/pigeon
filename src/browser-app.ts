@@ -1052,10 +1052,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getArticleQuery(viewId = activeViewId) {
     const view = views.find((candidate) => candidate.id === viewId);
-    // Read It Later: Unread/Archive and the saved-time order come from the server;
-    // type, length and the length sorts are applied to the loaded list.
+    // Read It Later: every filter and sort is a server query over the whole saved list.
     if (view?.kind === 'saved') return { q: articleSearchQuery, filter: savedFilters.status === 'archive' ? 'read' : 'unread',
-      sort: savedFilters.sort === 'oldest' ? 'oldest' : 'newest' };
+      sort: savedFilters.sort, kind: savedFilters.kind, length: savedFilters.length };
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
       view?.kind === 'recent' ? 'read' : articleReadFilter, sort: view?.kind === 'recommended' ? recommendationSort : articleSortOrder };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
@@ -1079,6 +1078,16 @@ export function renderBrowserAppRuntimeScript(): string {
     if (views.find((view) => view.id === state.viewId)?.kind === 'recommended') {
       if (sort === 'score') return (left, right) => (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
       if (sort === 'recommended') return (left, right) => (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
+    }
+    if (sort === 'shortest' || sort === 'longest') {
+      // Matches the server: unknown lengths last, then length, then id.
+      const sign = sort === 'shortest' ? 1 : -1;
+      const minutes = (id) => (loadedItemsById[id] ? client.savedLengthMinutes({ ...loadedItemsById[id], estimatedWordCount: null }) : null);
+      return (left, right) => {
+        const a = minutes(left), b = minutes(right);
+        if (a === null || b === null) return a === b ? sign * (Number(left) - Number(right)) : a === null ? 1 : -1;
+        return sign * (a - b) || sign * (Number(left) - Number(right));
+      };
     }
     const direction = sort === 'oldest' ? -1 : 1;
     return (left, right) => direction *
@@ -1503,7 +1512,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(url.pathname.endsWith('/stream/contents')||url.pathname.endsWith('/ids')||url.pathname==='/api/v1/browser/articles') {
       const cursor=params.get('continuation')||params.get('c')||'';if(cursor&&!/^offline:\\d+$/.test(cursor))throw new Error('Reload this view to use saved offline articles.');
       const offset=cursor?Number(cursor.slice(8)):0;const limit=Number(params.get('limit')||params.get('n')||50);
-      const payload=await library.query({stream:params.get('stream')||params.get('s')||'all',q:params.get('q')||'',filter:params.get('filter')||(params.get('xt')?'unread':'all'),sort:params.get('sort')||'newest',since:params.get('since')||undefined,before:params.get('before')||undefined,limit,offset});
+      const payload=await library.query({stream:params.get('stream')||params.get('s')||'all',q:params.get('q')||'',filter:params.get('filter')||(params.get('xt')?'unread':'all'),sort:params.get('sort')||'newest',kind:params.get('kind')||undefined,length:params.get('length')||undefined,since:params.get('since')||undefined,before:params.get('before')||undefined,limit,offset});
       guard();const continuation=payload.hasMore?'offline:'+(offset+payload.itemIds.length):'';
       if(url.pathname.endsWith('/stream/contents')) {const saved=await savedContents(payload.itemIds);const byId=new Map(saved.items.map(item=>[client.normalizeBrowserItemId(String(item.id)),item]));
         return {...saved,items:payload.itemIds.map(id=>byId.get(String(id))).filter(Boolean),continuation};}
@@ -1882,9 +1891,11 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // Saved items live in the Read It Later feed; extractionState is only ever set on them.
+  let savedFeedLookup = { views: null, feedStreamId: undefined };
   function isSavedItem(item) {
     if (!item) return false;
-    const feedStreamId = views.find((view) => view.kind === 'saved')?.feedStreamId;
+    if (savedFeedLookup.views !== views) savedFeedLookup = { views, feedStreamId: views.find((view) => view.kind === 'saved')?.feedStreamId };
+    const feedStreamId = savedFeedLookup.feedStreamId;
     return Boolean((feedStreamId && item.origin?.streamId === feedStreamId) || typeof item.extractionState === 'string');
   }
 
@@ -1913,7 +1924,6 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getWindowCandidateIds() {
     reconcileArticleQueryBoundary();
-    if (isSavedView()) return client.filterSavedItemIds(itemIds, loadedItemsById, savedFilters);
     return isTodayView() ? getTodayCandidateIds() : itemIds;
   }
 
@@ -2545,8 +2555,9 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const option of articleSortSelect.querySelectorAll('option')) option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
-    articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || Boolean(pendingArticleMutation) ||
+    articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || savedView || Boolean(pendingArticleMutation) ||
       (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
+    articleBulkSelect.disabled = savedView;
   }
 
   async function changeArticleQuery() {
@@ -2600,8 +2611,7 @@ export function renderBrowserAppRuntimeScript(): string {
         isTodayView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
           ? 'Loading articles…'
           : activeView?.kind === 'saved'
-            ? (itemIds.length ? 'Nothing saved matches these filters.' : savedFilters.status === 'archive' ? 'Nothing archived yet.'
-              : 'Nothing saved yet. Right-click a link in an article and choose Read It Later.')
+            ? savedEmptyMessage()
           : activeView
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
@@ -2726,6 +2736,16 @@ export function renderBrowserAppRuntimeScript(): string {
     button.appendChild(grid);
   }
 
+  // Filters, search and Archive each get their own empty message; "nothing
+  // saved yet" only before the first save creates the Read It Later feed.
+  function savedEmptyMessage() {
+    if (isLoadingItemIdsPage || inFlightContentIds.length) return 'Loading saved items…';
+    if (articleSearchQuery || savedFilters.kind !== 'all' || savedFilters.length !== 'any') return 'Nothing saved matches these filters.';
+    if (savedFilters.status === 'archive') return 'Nothing archived yet.';
+    if (getActiveView()?.feedStreamId) return 'All caught up. Finished items are in Archive.';
+    return 'Nothing saved yet. Right-click a link in an article and choose Read It Later.';
+  }
+
   function readStoredSavedFilters() {
     try { return client.normalizeSavedFilters(JSON.parse(window.localStorage.getItem(savedFiltersStorageKey) || 'null')); }
     catch (_error) { return client.normalizeSavedFilters(null); }
@@ -2745,28 +2765,18 @@ export function renderBrowserAppRuntimeScript(): string {
     savedStatusArchiveButton.disabled = busy;
   }
 
-  // Filter and sort choices persist per device. Unread/Archive and oldest/newest
-  // change the server query; type, length and the length sorts only re-render.
+  // Filter and sort choices persist per device; each is part of the server query.
   async function changeSavedFilters(next) {
     if (pendingArticleMutation?.kind === 'bulk') return;
     if (isSavedView()) saveActiveViewState();
     const previousQueryKey = isSavedView() ? getViewQueryKey(activeViewId) : '';
     savedFilters = client.normalizeSavedFilters({ ...savedFilters, ...next });
     try { window.localStorage.setItem(savedFiltersStorageKey, JSON.stringify(savedFilters)); } catch (_error) {}
-    if (!isSavedView()) return;
-    if (getViewQueryKey(activeViewId) !== previousQueryKey) {
-      clearKeptItemIds();
-      heldReaderArticle = null;
-      renderSidebarSummary();
-      await loadActiveView();
-      return;
-    }
-    restoreArticleScrollTop(0);
-    getViewState(activeViewId).windowStart = 0;
-    renderSavedFilters();
-    renderArticles();
-    renderReader();
-    if (shouldContinueLoadingWindow()) void continueLoadingWindow(activeViewRequestId);
+    if (!isSavedView() || getViewQueryKey(activeViewId) === previousQueryKey) return;
+    clearKeptItemIds();
+    heldReaderArticle = null;
+    renderSidebarSummary();
+    await loadActiveView();
   }
 
   // Read It Later: toast, in-article link menu, saving, extraction and removal.
@@ -2808,6 +2818,14 @@ export function renderBrowserAppRuntimeScript(): string {
     return title;
   }
 
+  function appOrigins() {
+    const origins = [];
+    for (const candidate of [window.location?.href, config.baseUrl]) {
+      try { if (candidate) origins.push(new URL(candidate).origin); } catch (_error) {}
+    }
+    return origins;
+  }
+
   function isLinkContextMenuOpen() {
     return Boolean(linkContextTarget);
   }
@@ -2828,9 +2846,14 @@ export function renderBrowserAppRuntimeScript(): string {
     if (event?.shiftKey) return;
     const link = event?.target?.closest?.('a[href]');
     if (!link) return;
-    let url = '';
-    try { url = new URL(link.href || link.getAttribute('href') || '').href; } catch (_error) { return; }
-    if (!/^https?:$/.test(new URL(url).protocol)) return;
+    // In-page links (footnotes) keep the default menu; srcdoc frames resolve
+    // them against the app's own URL, which is never something to save.
+    const rawHref = String(link.getAttribute?.('href') || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) return;
+    let resolved;
+    try { resolved = new URL(link.href || rawHref); } catch (_error) { return; }
+    if (!/^https?:$/.test(resolved.protocol) || appOrigins().includes(resolved.origin)) return;
+    const url = resolved.href;
     if (typeof event.preventDefault === 'function') event.preventDefault();
     const frameRect = typeof readerFrame.getBoundingClientRect === 'function' ? readerFrame.getBoundingClientRect() : { left: 0, top: 0 };
     openLinkContextMenu({ url, title: link.textContent || '' }, (Number(frameRect.left) || 0) + (Number(event.clientX) || 0),
@@ -2911,46 +2934,44 @@ export function renderBrowserAppRuntimeScript(): string {
     return job;
   }
 
-  // The first save creates the Read It Later feed; until the subscription list
-  // knows it, its unread count would land in All instead of Read It Later.
+  // Counts must come from a request sent after the save. The first save also
+  // creates the Read It Later feed, which the subscription list must learn,
+  // or its unread count would land in All.
   async function refreshSavedNavigation(generation, token) {
-    if (!subscriptions.some((subscription) => subscription.sourceType === 'saved')) {
-      try {
-        const payload = await authenticatedJson('/reader/api/0/subscription/list');
-        if (!requestBelongsToCurrentSession(generation, token) || !Array.isArray(payload?.subscriptions)) return;
-        subscriptions = payload.subscriptions;
-      } catch (_error) { return; }
+    if (!requestBelongsToCurrentSession(generation, token)) return;
+    if (subscriptions.some((subscription) => subscription.sourceType === 'saved')) {
+      await refreshUnreadCounts(true);
+      return;
     }
-    await refreshUnreadCounts();
+    saveActiveViewState();
+    await loadSubscriptionsAndUnreadCounts({ forceUnread: true });
   }
 
+  // [{ id, count, at }], newest attempt last. An array, not an object: numeric
+  // ids as object keys enumerate in numeric order, which broke oldest-first pruning.
   function readSavedAttempts() {
     try {
-      const value = JSON.parse(window.localStorage.getItem(savedAttemptsStorageKey) || '{}');
-      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-    } catch (_error) { return {}; }
+      const value = JSON.parse(window.localStorage.getItem(savedAttemptsStorageKey) || '[]');
+      return Array.isArray(value) ? value.filter((entry) => entry && typeof entry.id === 'string' && Number.isFinite(entry.count)) : [];
+    } catch (_error) { return []; }
   }
 
   function writeSavedAttempts(attempts) {
-    const keys = Object.keys(attempts);
-    for (const key of keys.slice(0, Math.max(0, keys.length - 200))) delete attempts[key];
-    try { window.localStorage.setItem(savedAttemptsStorageKey, JSON.stringify(attempts)); } catch (_error) {}
+    const kept = [...attempts].sort((left, right) => (Number(left.at) || 0) - (Number(right.at) || 0)).slice(-200);
+    try { window.localStorage.setItem(savedAttemptsStorageKey, JSON.stringify(kept)); } catch (_error) {}
   }
 
   function recordSavedAttempt(itemId) {
     const attempts = readSavedAttempts();
-    const count = (Number(attempts[itemId]) || 0) + 1;
-    delete attempts[itemId];
-    attempts[itemId] = count;
-    writeSavedAttempts(attempts);
+    const count = (attempts.find((entry) => entry.id === itemId)?.count || 0) + 1;
+    writeSavedAttempts([...attempts.filter((entry) => entry.id !== itemId), { id: itemId, count, at: Date.now() }]);
     return count;
   }
 
   function forgetSavedAttempts(itemId) {
     const attempts = readSavedAttempts();
-    if (!(itemId in attempts)) return;
-    delete attempts[itemId];
-    writeSavedAttempts(attempts);
+    if (!attempts.some((entry) => entry.id === itemId)) return;
+    writeSavedAttempts(attempts.filter((entry) => entry.id !== itemId));
   }
 
   function setLocalExtractionState(itemId, state) {
@@ -3027,7 +3048,7 @@ export function renderBrowserAppRuntimeScript(): string {
           loadDefuddle(),
         ]);
         if (!current()) return;
-        const extracted = window.__PIGEON_READING_TOOLS__?.extract(source.html, source.url || href);
+        const extracted = window.__PIGEON_READING_TOOLS__?.extract(source.html, source.url || href, { withText: true });
         if (!extracted?.content) throw new Error('No readable article content found.');
         const result = await putSavedContent(item, savedContentFromExtraction(extracted, item));
         if (!current()) return;
@@ -3059,23 +3080,15 @@ export function renderBrowserAppRuntimeScript(): string {
     return job;
   }
 
+  // Uses the same collection path as read and star changes, so in-flight
+  // pages of the open list stay owned by their own request bookkeeping.
   function forgetRemovedSavedItem(itemId) {
     const visible = getVisibleItemIds();
     const index = visible.indexOf(itemId);
     const nextId = index < 0 ? null : visible[index + 1] || visible[index - 1] || null;
-    for (const state of viewStates.values()) {
-      if (!state.itemIds.includes(itemId) && !state.confirmedItemIds.has(itemId)) continue;
-      state.itemIds = state.itemIds.filter((id) => id !== itemId);
-      state.confirmedItemIds.delete(itemId);
-      state.contentLoadedIds.delete(itemId);
-      if (state.selectedItemId === itemId) state.selectedItemId = null;
-      // Membership pages already in flight still list the item; let them land as stale.
-      state.membershipEpoch += 1;
-      state.rootRequestId = ++membershipRootRequestId;
-      state.appliedRootRequestId = 0;
-    }
-    inFlightMembershipRequests.clear();
-    keptItemIds.ids.delete(itemId);
+    const activeAffected = reconcileArticleCollections(itemId, 'removed', true);
+    if (heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
+    if (undoArticleMutation?.itemId === itemId) undoArticleMutation = null;
     articleCache.delete(itemId);
     articleMetadataCache.delete(itemId);
     articleStateMutations.delete(itemId);
@@ -3083,15 +3096,14 @@ export function renderBrowserAppRuntimeScript(): string {
     savedExtractionErrors.delete(itemId);
     extractedArticles.delete(itemId);
     forgetSavedAttempts(itemId);
-    if (heldReaderArticle?.itemId === itemId) heldReaderArticle = null;
-    if (undoArticleMutation?.itemId === itemId) undoArticleMutation = null;
-    itemIds = itemIds.filter((id) => id !== itemId);
-    activeItemIdsPageRequest = null;
-    isLoadingItemIdsPage = false;
-    if (selectedItemId === itemId) selectedItemId = nextId;
-    saveActiveViewState();
+    if (selectedItemId === itemId) {
+      selectedItemId = nextId;
+      const state = getViewState(activeViewId, false);
+      if (state) state.selectedItemId = nextId;
+    }
     renderArticles();
     renderReader();
+    if (activeAffected) void revalidateActiveView({ refreshUnread: false });
   }
 
   // Removal is a hard delete by item UUID (reader ids can be reused), sent
@@ -3613,6 +3625,8 @@ export function renderBrowserAppRuntimeScript(): string {
     if (continuation) {
       params.set('c', continuation);
     }
+    // Read It Later has its own section: leave the saved feed out of every other stream.
+    params.set('xs', 'saved');
     return params;
   }
 
@@ -3647,6 +3661,10 @@ export function renderBrowserAppRuntimeScript(): string {
     const query = options?.query || getArticleQuery(view.id);
     const params = new URLSearchParams({ stream: view.streamId, q: query.q, filter: query.filter,
       sort: query.sort, limit: String(options?.limit || (view.kind === 'saved' ? 100 : client.INITIAL_ITEM_ID_LIMIT)) });
+    if (view.kind === 'saved') {
+      if (query.kind && query.kind !== 'all') params.set('kind', query.kind);
+      if (query.length && query.length !== 'any') params.set('length', query.length);
+    }
     if (view.kind === 'today') {
       const bounds = options?.dayBounds || query.dayBounds || client.getLocalDayBounds();
       params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
@@ -3985,8 +4003,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function shouldAutoLoadWindow() {
-    // Read It Later filters and length sorts run over the whole loaded list.
-    return isTodayView() || isSavedView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
+    return isTodayView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
   }
 
   async function continueLoadingWindow(requestId) {
@@ -4295,22 +4312,25 @@ export function renderBrowserAppRuntimeScript(): string {
     readerActionStatus.textContent = readerActionMessage;
   }
 
+  // field 'removed': the item no longer exists, so it leaves every collection.
   function reconcileArticleCollections(itemId, field, target) {
     let activeAffected = false;
     const article = loadedItemsById[itemId];
+    const removed = field === 'removed';
     for (const state of viewStates.values()) {
       const viewId = state.viewId;
       const view = views.find((candidate) => candidate.id === viewId);
-      if (!view || (field === 'starred' ? view.kind !== 'starred' :
-          !['unread', 'recent'].includes(view.kind) && state.query.filter === 'all')) continue;
+      if (removed && !state.itemIds.includes(itemId) && !state.confirmedItemIds.has(itemId)) continue;
+      if (!view || (!removed && (field === 'starred' ? view.kind !== 'starred' :
+          !['unread', 'recent'].includes(view.kind) && state.query.filter === 'all'))) continue;
       const read = field === 'read' ? target : getArticleState(article, 'read');
       const starred = field === 'starred' ? target : getArticleState(article, 'starred');
       const inScope = !(view.kind==='recommended'&&recommendationExclusions.has(itemId)) && (view.kind !== 'starred' || starred);
       const readMatches = (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read);
-      const belongs = inScope && readMatches;
+      const belongs = !removed && inScope && readMatches;
       // A row of the open list that only left its read filter stays in place;
       // bulk marks, Starred membership and For You exclusions still remove it.
-      const keepsRow = inScope && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
+      const keepsRow = !removed && inScope && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
         state.queryKey === getViewQueryKey(activeViewId) && state.itemIds.includes(itemId);
       // Saved items belong to Read It Later only, never to All, Unread, Read or Starred.
       const scopeMatches = (['all', 'unread', 'recent', 'starred'].includes(view.kind) && !isSavedItem(article)) ||
@@ -4373,6 +4393,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function toggleSelectedArticleState(field) {
     if (!articleCache.has(selectedItemId)) return;
+    // Saved items never appear in Starred, so S does nothing for them.
+    if (field === 'starred' && isSavedItem(loadedItemsById[selectedItemId])) return;
     return mutateArticleState(selectedItemId, field, !getArticleState(loadedItemsById[selectedItemId], field));
   }
 
@@ -4605,7 +4627,8 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId) {
-    if (!getActiveView() || session.status !== 'authenticated' || pendingArticleMutation) return;
+    // Read It Later archives one item at a time; no bulk mark there.
+    if (!getActiveView() || isSavedView() || session.status !== 'authenticated' || pendingArticleMutation) return;
     const mode = requestedMode || articleBulkSelect.value;
     if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
         (['above', 'below'].includes(mode) && !anchorItemId)) return;
@@ -4724,9 +4747,9 @@ export function renderBrowserAppRuntimeScript(): string {
       requestBelongsToCurrentSession(result.generation, result.token);
   }
 
-  async function refreshUnreadCounts() {
+  async function refreshUnreadCounts(force = false) {
     try {
-      const result = await requestUnreadCounts();
+      const result = await requestUnreadCounts(force);
       if (!isCurrentUnreadCountResult(result)) return;
       views = client.buildFeedViews(subscriptions, result.payload.unreadcounts || []);
       renderFeeds();
@@ -5149,7 +5172,8 @@ export function renderBrowserAppRuntimeScript(): string {
   // Right-click on a list row: bulk-mark around that row without opening it.
   function openArticleContextMenu(itemId, row, event) {
     closePopoverMenus(null);
-    if (!getWindowCandidateIds().includes(itemId)) return;
+    // Its only actions are bulk marks, which Read It Later does not offer.
+    if (isSavedView() || !getWindowCandidateIds().includes(itemId)) return;
     if (typeof event?.preventDefault === 'function') event.preventDefault();
     articleContextTarget = { itemId, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
     refreshArticleContextMenu();

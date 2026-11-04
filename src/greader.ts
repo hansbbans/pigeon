@@ -1,5 +1,5 @@
 import { readingLengthFields } from './reading-length';
-import { notSavedFeedSql, SAVED_FEED_KEY, savedMetadataFields } from './saved-items';
+import { notSavedFeedSql, SAVED_FEED_KEY, SAVED_SOURCE_TYPE, savedMetadataFields } from './saved-items';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import type { Env } from './types';
 import { subscribeToFeed } from './subscribe';
@@ -31,13 +31,16 @@ function isPigeonClient(request: Request): boolean {
 }
 
 /**
- * The web app lists Read It Later in its own section, so its reading-list,
- * read, starred and folder streams leave the saved feed out, matching
- * /api/v1/browser/articles. Third-party readers and the iOS app (which reads
- * sync) still see the saved feed as an ordinary feed.
+ * Pigeon extension `xs=saved` (query string or form body): the client lists
+ * Read It Later in its own section. The reading-list, read, starred and label
+ * streams then leave the saved feed out (matching /api/v1/browser/articles),
+ * and unread-count leaves it out of the reading-list total while still
+ * listing the saved feed's own `feed/<id>` count. The saved feed's own stream
+ * is unaffected. Without the parameter, older clients and third-party
+ * readers see Read It Later as an ordinary feed.
  */
-function excludesSavedFeed(request: Request): boolean {
-	return (request.headers.get('X-Pigeon-Client') ?? '').startsWith('pigeon-web/');
+function excludesSavedFeed(params: URLSearchParams): boolean {
+	return params.getAll('xs').includes('saved');
 }
 
 function labelFromStreamId(streamId: string | null): string | null {
@@ -399,7 +402,7 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 		return handleQuickAdd(request, env);
 	}
 	if (path === '/reader/api/0/unread-count') {
-		return handleUnreadCount(env);
+		return handleUnreadCount(env, excludesSavedFeed(await parseRequestParams(request, url)));
 	}
 	if (path === '/reader/api/0/stream/items/ids') {
 		return handleStreamItemIds(request, url, env);
@@ -514,14 +517,14 @@ function newestTimestampUsec(current: string | undefined, candidate: string): st
 	return current === undefined || numericCandidate > Number(current) ? candidate : current;
 }
 
-async function handleUnreadCount(env: Env): Promise<Response> {
+async function handleUnreadCount(env: Env, excludeSaved = false): Promise<Response> {
 	// Labels are needed only for publishers with unread items; the filter keeps
 	// a large read-only library's metadata out of the response path.
 	const { results: [countResult], labelsByFeedKey } = await batchWithFeedLabels(
 		env,
 		[
 			env.DB.prepare(
-				`SELECT f.rowid, i.feed_key, COUNT(*) as count, MAX(i.received_at) as newest
+				`SELECT f.rowid, i.feed_key, f.source_type, COUNT(*) as count, MAX(i.received_at) as newest
 		 FROM items i JOIN feeds f ON i.feed_key = f.feed_key
 		 WHERE f.is_active = 1 AND i.is_read = 0 GROUP BY i.feed_key`,
 			),
@@ -531,6 +534,7 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 	const results = countResult.results as Array<{
 		rowid: number;
 		feed_key: string;
+		source_type: string;
 		count: number;
 		newest: string;
 	}>;
@@ -543,7 +547,8 @@ async function handleUnreadCount(env: Env): Promise<Response> {
 		newestItemTimestampUsec: (isoToUnix(r.newest) * 1_000_000).toString(),
 	}));
 	const labelCounts = new Map<string, { count: number; newestItemTimestampUsec: string | undefined }>();
-	for (const unread of unreadcounts) {
+	for (const [index, unread] of unreadcounts.entries()) {
+		if (excludeSaved && results[index].source_type === SAVED_SOURCE_TYPE) continue;
 		totalUnreadCount += unread.count;
 		newestUnreadUsec = newestTimestampUsec(newestUnreadUsec, unread.newestItemTimestampUsec);
 	}
@@ -917,7 +922,7 @@ async function handleStreamItemIds(request: Request, url: URL, env: Env): Promis
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
-		excludeSaved: excludesSavedFeed(request),
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	// Pigeon clients use the read, starred, and contentVersion extensions to
@@ -1020,7 +1025,7 @@ async function handleStreamContents(request: Request, url: URL, env: Env): Promi
 		excludeTag: xt,
 		olderThanUnix: ot,
 		continuation: c,
-		excludeSaved: excludesSavedFeed(request),
+		excludeSaved: excludesSavedFeed(params),
 		env,
 	});
 	const items = await loadResponseItems(

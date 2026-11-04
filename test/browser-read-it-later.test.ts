@@ -3,18 +3,21 @@ import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import {
 	buildFeedViews,
-	filterSavedItemIds,
 	formatSavedAge,
 	getLocalDayBounds,
 	normalizeSavedFilters,
+	savedLengthMinutes,
 	savedSourceLabel,
 	savedThumbnailUrl,
 } from '../src/browser-app-client';
 import { handleGreaderRequest } from '../src/greader';
+import { handleNativeApiRequest } from '../src/native-api';
 import { generateApiToken } from '../src/api-auth';
 import {
 	createLargeTodaySqliteLibrary,
+	createDeferred,
 	createStatefulArticleBrowser,
+	drainBrowserMembershipPages,
 	findDescendantByClass,
 	findListButtonByItemId,
 	findListButtonByViewId,
@@ -77,8 +80,8 @@ async function openSavedView(harness: Browser['harness']) {
 	await flushBrowserTasks();
 }
 
-function link(url: string, text = 'The Great Work, an essay') {
-	const anchor = { href: url, textContent: text, getAttribute: () => url };
+function link(url: string, text = 'The Great Work, an essay', rawHref = url) {
+	const anchor = { href: url, textContent: text, getAttribute: () => rawHref };
 	return { closest: (selector: string) => (selector === 'a[href]' ? anchor : null) };
 }
 
@@ -90,25 +93,11 @@ test('pure Read It Later helpers: filters, sorts, ages, thumbnails and sources',
 	assert.deepEqual(normalizeSavedFilters(null), { status: 'unread', kind: 'all', length: 'any', sort: 'newest' });
 	assert.deepEqual(normalizeSavedFilters({ status: 'archive', kind: 'video', length: 'huge', sort: 'longest' }),
 		{ status: 'archive', kind: 'video', length: 'any', sort: 'longest' });
-	const items = {
-		a: { wordCount: 4000 }, // 17 min
-		b: { wordCount: 500 }, // 3 min
-		c: { mediaKind: 'video', durationSeconds: 1500 }, // 25 min
-		d: {}, // unknown
-		e: { wordCount: 1190 }, // exactly 5 min
-		f: { wordCount: 3570 }, // exactly 15 min
-		g: { estimatedWordCount: 3000, extractionState: 'pending' }, // placeholder only: unknown
-	};
-	const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'loading'];
-	const run = (kind: string, length: string, sort: string) => filterSavedItemIds(ids, items, { kind, length, sort });
-	assert.deepEqual(run('all', 'any', 'newest'), ids);
-	assert.deepEqual(run('video', 'any', 'newest'), ['c', 'loading']);
-	assert.deepEqual(run('text', 'any', 'newest'), ['a', 'b', 'd', 'e', 'f', 'g', 'loading']);
-	assert.deepEqual(run('all', 'short', 'newest'), ['b', 'loading']);
-	assert.deepEqual(run('all', 'medium', 'newest'), ['e', 'loading']);
-	assert.deepEqual(run('all', 'long', 'newest'), ['a', 'c', 'f', 'loading']);
-	assert.deepEqual(run('all', 'any', 'shortest'), ['b', 'e', 'f', 'a', 'c', 'd', 'g', 'loading']);
-	assert.deepEqual(run('all', 'any', 'longest'), ['c', 'a', 'f', 'e', 'b', 'd', 'g', 'loading']);
+	assert.equal(savedLengthMinutes({ wordCount: 2380 }), 10);
+	assert.equal(savedLengthMinutes({ mediaKind: 'video', durationSeconds: 90 }), 1.5);
+	assert.equal(savedLengthMinutes({ estimatedWordCount: 238 }), 1);
+	assert.equal(savedLengthMinutes({ estimatedWordCount: 238, extractionState: 'pending' }), null, 'a placeholder body is not a length');
+	assert.equal(savedLengthMinutes({}), null);
 
 	const now = Date.UTC(2026, 9, 12, 12);
 	assert.equal(formatSavedAge(now / 1000 - 20, now), 'Just now');
@@ -139,27 +128,95 @@ test('buildFeedViews lists Read It Later after Starred and keeps it out of feeds
 	});
 });
 
-test('GReader streams leave saved items out for the web app only, and saved items carry their UUID', async (t) => {
+test('GReader xs=saved leaves the saved feed out of streams and the total, by explicit opt-in only', async (t) => {
 	const state = createLargeTodaySqliteLibrary(NOW, 2);
 	seedSaved(state.database);
 	t.after(() => state.database.close());
 	const token = await generateApiToken('today-test-password');
-	const get = async (path: string, web: boolean) => (await handleGreaderRequest(new Request('https://pigeon.example' + path, {
-		headers: { Authorization: 'GoogleLogin auth=pigeon/' + token, ...(web ? { 'X-Pigeon-Client': 'pigeon-web/1' } : {}) },
+	const auth = { Authorization: 'GoogleLogin auth=pigeon/' + token };
+	const get = async (path: string, headers: Record<string, string> = {}) => (await handleGreaderRequest(new Request('https://pigeon.example' + path, {
+		headers: { ...auth, ...headers },
 	}), state.env)).json() as Promise<any>;
-	const ids = async (stream: string, web: boolean) => (await get('/reader/api/0/stream/items/ids?n=50&s=' + encodeURIComponent(stream), web)).itemRefs.map((ref: any) => ref.id);
+	const ids = async (stream: string, extra = '', headers: Record<string, string> = {}) =>
+		(await get('/reader/api/0/stream/items/ids?n=50&s=' + encodeURIComponent(stream) + extra, headers)).itemRefs.map((ref: any) => ref.id);
 	const saved = ['5', '6', '7', '8', '9'];
 	for (const stream of ['user/-/state/com.google/reading-list', 'user/-/state/com.google/read', 'user/-/state/com.google/starred']) {
-		assert.equal((await ids(stream, true)).some((id: string) => saved.includes(id)), false, stream);
+		assert.equal((await ids(stream, '&xs=saved')).some((id: string) => saved.includes(id)), false, stream);
 	}
-	assert.deepEqual((await ids('user/-/state/com.google/reading-list', false)).filter((id: string) => saved.includes(id)), saved);
-	const contents = await get('/reader/api/0/stream/contents?n=50&s=user%2F-%2Fstate%2Fcom.google%2Freading-list', true);
+	// Default behaviour is unchanged: older clients and third-party readers, whatever client header they send.
+	assert.deepEqual((await ids('user/-/state/com.google/reading-list')).filter((id: string) => saved.includes(id)), saved);
+	assert.deepEqual((await ids('user/-/state/com.google/reading-list', '', { 'X-Pigeon-Client': 'pigeon-web/1' })).filter((id: string) => saved.includes(id)), saved);
+	// The saved feed's own stream still lists its items with the opt-in.
+	const savedStream = (await get('/reader/api/0/subscription/list')).subscriptions.find((sub: any) => sub.sourceType === 'saved').id;
+	assert.deepEqual(await ids(savedStream, '&xs=saved'), saved);
+	// Form-encoded POST works too, as for every GReader parameter.
+	const posted = await (await handleGreaderRequest(new Request('https://pigeon.example/reader/api/0/stream/items/ids', {
+		method: 'POST', headers: { ...auth, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 's=user%2F-%2Fstate%2Fcom.google%2Freading-list&n=50&xs=saved',
+	}), state.env)).json() as any;
+	assert.equal(posted.itemRefs.some((ref: any) => saved.includes(ref.id)), false);
+
+	const contents = await get('/reader/api/0/stream/contents?n=50&xs=saved&s=user%2F-%2Fstate%2Fcom.google%2Freading-list');
 	assert.equal(contents.items.some((item: any) => item.nativeId), false);
-	const savedContents = await get('/reader/api/0/stream/contents?n=50&s=user%2F-%2Fstate%2Fcom.google%2Freading-list', false);
-	const essay = savedContents.items.find((item: any) => item.title === 'A long essay');
+	const allContents = await get('/reader/api/0/stream/contents?n=50&s=user%2F-%2Fstate%2Fcom.google%2Freading-list');
+	const essay = allContents.items.find((item: any) => item.title === 'A long essay');
 	assert.equal(essay.nativeId, UUID(1));
 	assert.equal(essay.imageUrl, 'https://example.com/essay.jpg');
-	assert.equal(savedContents.items.find((item: any) => item.title === 'Story 1').nativeId, undefined);
+	assert.equal(allContents.items.find((item: any) => item.title === 'Story 1').nativeId, undefined);
+
+	const total = (payload: any) => payload.unreadcounts.find((entry: any) => entry.id === 'user/-/state/com.google/reading-list').count;
+	const plain = await get('/reader/api/0/unread-count');
+	const optedIn = await get('/reader/api/0/unread-count?xs=saved');
+	assert.equal(total(plain), 8);
+	assert.equal(total(optedIn), 4);
+	assert.equal(optedIn.unreadcounts.find((entry: any) => entry.id === savedStream).count, 4, 'the saved feed keeps its own count');
+});
+
+test('browser/articles filters and sorts the whole saved list on the server, with stable paging', async (t) => {
+	const state = createLargeTodaySqliteLibrary(NOW, 2);
+	seedSaved(state.database, [
+		...DEFAULT_SAVES.slice(0, 4),
+		{ n: 6, title: 'Exactly five', url: 'https://example.com/five', words: 1190 },
+		{ n: 7, title: 'Exactly fifteen', url: 'https://example.com/fifteen', words: 3570 },
+		{ n: 8, title: 'Unknown two', url: 'https://example.com/unknown', words: null },
+	]);
+	t.after(() => state.database.close());
+	const token = await generateApiToken('today-test-password');
+	const query = async (params: string) => {
+		const response = await handleNativeApiRequest(new Request('https://pigeon.example/api/v1/browser/articles?' + params, {
+			headers: { Authorization: 'GoogleLogin auth=pigeon/' + token },
+		}), state.env);
+		return { status: response.status, body: await response.json() as any };
+	};
+	const titles = new Map((state.database.prepare("SELECT rowid, subject FROM items").all() as any[]).map((row) => [String(row.rowid), row.subject]));
+	const all = async (params: string) => {
+		const out: string[] = [];
+		let continuation = '';
+		for (let page = 0; page < 10; page += 1) {
+			const { status, body } = await query(params + '&limit=2' + (continuation ? '&continuation=' + continuation : ''));
+			assert.equal(status, 200, JSON.stringify(body));
+			out.push(...body.itemIds.map((id: string) => titles.get(id)));
+			if (!body.continuation) return out;
+			continuation = body.continuation;
+		}
+		assert.fail('paging did not finish');
+	};
+	assert.deepEqual(await all('stream=saved&filter=unread&kind=video'), ['A talk']);
+	assert.deepEqual(await all('stream=saved&filter=unread&kind=text&sort=oldest'),
+		['Unknown two', 'Exactly fifteen', 'Exactly five', 'example.org/pending', 'A quick note', 'A long essay']);
+	assert.deepEqual(await all('stream=saved&length=short'), ['A quick note']);
+	assert.deepEqual(await all('stream=saved&length=medium'), ['Exactly five']);
+	assert.deepEqual(await all('stream=saved&length=long'), ['A long essay', 'A talk', 'Exactly fifteen']);
+	assert.deepEqual(await all('stream=saved&sort=shortest'),
+		['A quick note', 'Exactly five', 'Exactly fifteen', 'A long essay', 'A talk', 'example.org/pending', 'Unknown two']);
+	assert.deepEqual(await all('stream=saved&sort=longest'),
+		['A talk', 'A long essay', 'Exactly fifteen', 'Exactly five', 'A quick note', 'Unknown two', 'example.org/pending']);
+	assert.deepEqual(await all('stream=saved&sort=shortest&kind=text&length=any&q=Exactly'), ['Exactly five', 'Exactly fifteen']);
+	assert.equal((await query('stream=all&kind=video')).status, 400);
+	assert.equal((await query('stream=all&sort=shortest')).status, 400);
+	assert.equal((await query('stream=saved&length=huge')).status, 400);
+	// Continuations are bound to the whole query, including the saved filters.
+	const first = await query('stream=saved&sort=shortest&limit=2');
+	assert.equal((await query('stream=saved&sort=longest&limit=2&continuation=' + first.body.continuation)).status, 400);
 });
 
 test('All, Today and the unread badges leave saved items out; Read It Later shows its own count', async (t) => {
@@ -216,23 +273,26 @@ test('the Read It Later list shows thumbnail, serif title, source, length and ag
 		harness.elements.get(id)!.dispatch('change');
 		await flushBrowserTasks();
 	};
+	const expectIds = async (ids: string[]) => {
+		await waitForBrowserCondition(() => renderedArticleIds(harness).join() === ids.join(), 200);
+		assert.deepEqual(renderedArticleIds(harness), ids);
+	};
 	await change('saved-kind-filter', 'video');
-	assert.deepEqual(renderedArticleIds(harness), ['7']);
+	await expectIds(['7']);
 	await change('saved-kind-filter', 'text');
-	assert.deepEqual(renderedArticleIds(harness), ['5', '6', '8']);
+	await expectIds(['5', '6', '8']);
 	await change('saved-kind-filter', 'all');
 	await change('saved-length-filter', 'short');
-	assert.deepEqual(renderedArticleIds(harness), ['6']);
+	await expectIds(['6']);
 	await change('saved-length-filter', 'long');
-	assert.deepEqual(renderedArticleIds(harness), ['5', '7']);
+	await expectIds(['5', '7']);
 	await change('saved-length-filter', 'any');
 	await change('saved-sort-select', 'shortest');
-	assert.deepEqual(renderedArticleIds(harness), ['6', '5', '7', '8']);
+	await expectIds(['6', '5', '7', '8']);
 	await change('saved-sort-select', 'longest');
-	assert.deepEqual(renderedArticleIds(harness), ['7', '5', '6', '8']);
+	await expectIds(['7', '5', '6', '8']);
 	await change('saved-sort-select', 'oldest');
-	await waitForBrowserCondition(() => renderedArticleIds(harness)[0] === '8', 200);
-	assert.deepEqual(renderedArticleIds(harness), ['8', '7', '6', '5']);
+	await expectIds(['8', '7', '6', '5']);
 	assert.deepEqual(JSON.parse(harness.localStorageState.get('pigeon.browser.saved-filters')!),
 		{ status: 'unread', kind: 'all', length: 'any', sort: 'oldest' });
 
@@ -538,4 +598,173 @@ test('the first save creates Read It Later: its count moves there instead of int
 	assert.equal(count('all'), '4');
 	assert.equal(harness.elements.get('feeds-list')!.textContent.includes('Read It Later'), false);
 	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('Read It Later offers no bulk mark: no row menu, no Apply, no range marking', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ now: NOW, seed: seedSaved });
+	t.after(() => database.close());
+	await openSavedView(harness);
+	const row = findListButtonByItemId(harness.elements.get('articles-list'), '6')!;
+	let prevented = false;
+	row.dispatch('contextmenu', { clientX: 10, clientY: 10, preventDefault() { prevented = true; } });
+	assert.equal(prevented, false, 'the browser menu stays');
+	assert.equal(harness.elements.get('article-context-menu')!.classList.contains('hidden'), true);
+	assert.equal(harness.elements.get('article-bulk-button')!.disabled, true);
+	assert.equal(harness.elements.get('article-bulk-select')!.disabled, true);
+	for (const mode of ['above', 'below', 'age-1']) {
+		harness.elements.get('article-bulk-select')!.value = mode;
+		harness.elements.get('article-bulk-button')!.dispatch('click');
+		await flushBrowserTasks();
+	}
+	assert.equal((database.prepare("SELECT COUNT(*) AS count FROM items WHERE feed_key = 'pigeon:saved' AND is_read = 1").get() as any).count, 1);
+	// Leaving Read It Later brings bulk marking back.
+	findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('article-bulk-select')!.disabled === false, 200);
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('footnote and app-relative links keep the default menu; only outside links are offered', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ now: NOW, seed: seedSaved });
+	t.after(() => database.close());
+	const menu = harness.elements.get('link-context-menu')!;
+	const open = (href: string, raw: string) => harness.dispatchFrameEvent('contextmenu', { target: link(href, 'Note 1', raw), clientX: 1, clientY: 1 });
+	assert.equal(open('https://pigeon.example/app#fn1', '#fn1'), false);
+	assert.equal(open('about:srcdoc#fn1', '#fn1'), false);
+	assert.equal(open('https://pigeon.example/app?view=today', '/app?view=today'), false);
+	assert.equal(menu.classList.contains('hidden'), true);
+	assert.equal(open('https://essays.example/post#section-2', 'https://essays.example/post#section-2'), true);
+	assert.equal(menu.classList.contains('hidden'), false);
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('the star shortcut does nothing on a saved item', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ now: NOW, seed: seedSaved });
+	t.after(() => database.close());
+	await openSavedView(harness);
+	assert.equal(harness.dispatchKeydown('s'), true);
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+	assert.equal((database.prepare('SELECT is_starred FROM items WHERE id = ?').get(UUID(1)) as any).is_starred, 0);
+	assert.equal(harness.elements.get('reader-action-status')!.textContent, '');
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('removing an item while a later page is loading leaves the list complete and pageable', async (t) => {
+	const many: SavedSeed[] = Array.from({ length: 105 }, (_, index) => ({
+		n: index + 1, title: 'Saved ' + (index + 1), url: 'https://example.com/many/' + (index + 1), words: 300 + index,
+	}));
+	const held = createDeferred<void>();
+	let holdPages = false;
+	const { database, harness } = await createStatefulArticleBrowser({
+		now: NOW,
+		seed: (db) => {
+			db.prepare("INSERT INTO feeds (feed_key, display_name, source_type) VALUES ('pigeon:saved', 'Read It Later', 'saved')").run();
+			const end = getLocalDayBounds(new Date(NOW)).endSeconds;
+			const insert = db.prepare(`INSERT INTO items (id, feed_key, subject, html_content, original_url, message_id, received_at, word_count, media_kind, extraction_state)
+				VALUES (?, 'pigeon:saved', ?, '<p>Body</p>', ?, ?, ?, ?, 'text', 'done')`);
+			for (const save of many) insert.run(`10000000-0000-4000-8000-${String(save.n).padStart(12, '0')}`, save.title, save.url, 'saved:' + save.n,
+				new Date((end + 1000 - save.n) * 1000).toISOString(), save.words!);
+		},
+		fetchOverride: async (input, _init, next) => {
+			if (holdPages && input.startsWith('/api/v1/browser/articles?') && input.includes('continuation=')) await held.promise;
+			return next();
+		},
+	});
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('views-list'), 'saved')!.dispatch('click');
+	// Rows past the first content chunk load as they scroll into view, like every list.
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 100 && harness.elements.get('reader-title')!.textContent === 'Saved 1', 300);
+	await flushBrowserTasks();
+	holdPages = true;
+	harness.elements.get('load-more-button')!.dispatch('click');
+	await flushBrowserTasks();
+	harness.elements.get('remove-saved-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('app-toast')!.textContent === 'Removed from Read It Later', 300);
+	holdPages = false;
+	held.resolve();
+	await drainBrowserMembershipPages(harness);
+
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 104, 400);
+	assert.equal(new Set(renderedArticleIds(harness)).size, 104);
+	assert.equal(harness.elements.get('load-more-button')!.classList.contains('hidden'), true);
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('extraction attempts prune by last attempt, not by item id order', async (t) => {
+	const old = Array.from({ length: 200 }, (_, index) => ({ id: String(1000 + index), count: 1, at: 1_000 + index }));
+	const { database, harness } = await createStatefulArticleBrowser({
+		now: NOW, seed: pendingOnly,
+		storedEntries: { 'pigeon.browser.saved-extraction-attempts': JSON.stringify(old) },
+		extractReader: () => { throw new Error('No readable article content found.'); },
+		fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/browser/reader-source?')
+			? Response.json({ url: 'https://example.org/pending', html: '<p>x</p>' }) : next(),
+	});
+	t.after(() => database.close());
+	await openSavedView(harness);
+	await waitForBrowserCondition(() => !harness.elements.get('saved-retry-button')!.classList.contains('hidden'), 300);
+	const stored = JSON.parse(harness.localStorageState.get('pigeon.browser.saved-extraction-attempts')!);
+	assert.equal(stored.length, 200);
+	assert.deepEqual(stored.at(-1).id, '5');
+	assert.equal(stored.at(-1).count, 1);
+	assert.equal(stored.some((entry: any) => entry.id === '1000'), false, 'the oldest attempt is dropped');
+	assert.ok(stored.some((entry: any) => entry.id === '1001'));
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('a save refreshes counts with a new request, not one already in flight', async (t) => {
+	const held = createDeferred<void>();
+	let holdCounts = false;
+	let countRequests = 0;
+	const { database, harness } = await createStatefulArticleBrowser({
+		now: NOW, seed: seedSaved,
+		fetchOverride: async (input, _init, next) => {
+			if (input === '/reader/api/0/unread-count') {
+				countRequests += 1;
+				if (holdCounts) { await held.promise; }
+			}
+			return next();
+		},
+	});
+	t.after(() => database.close());
+	holdCounts = true;
+	harness.elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => countRequests === 2, 200);
+	holdCounts = false;
+	rightClickLink(harness, 'https://example.com/new-one');
+	harness.elements.get('link-save-button')!.dispatch('click');
+	const count = () => findDescendantByClass(findListButtonByViewId(harness.elements.get('views-list'), 'saved'), 'feed-count')?.textContent;
+	await waitForBrowserCondition(() => count() === '5', 300);
+	assert.equal(countRequests, 3);
+	held.resolve();
+	await flushBrowserTasks();
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('the empty Read It Later list says why it is empty', async (t) => {
+	const status = (harness: Browser['harness']) => harness.elements.get('articles-status')!.textContent;
+	const fresh = await createStatefulArticleBrowser({ now: NOW });
+	t.after(() => fresh.database.close());
+	findListButtonByViewId(fresh.harness.elements.get('views-list'), 'saved')!.dispatch('click');
+	await waitForBrowserCondition(() => status(fresh.harness).startsWith('Nothing saved yet'), 200);
+	fresh.harness.elements.get('logout-button')!.dispatch('click');
+
+	const caughtUp = await createStatefulArticleBrowser({ now: NOW, seed: (db) => seedSaved(db, [DEFAULT_SAVES[4]!]) });
+	t.after(() => caughtUp.database.close());
+	findListButtonByViewId(caughtUp.harness.elements.get('views-list'), 'saved')!.dispatch('click');
+	await waitForBrowserCondition(() => status(caughtUp.harness).startsWith('All caught up'), 200);
+	caughtUp.harness.elements.get('saved-kind-filter')!.value = 'video';
+	caughtUp.harness.elements.get('saved-kind-filter')!.dispatch('change');
+	await waitForBrowserCondition(() => status(caughtUp.harness) === 'Nothing saved matches these filters.', 200);
+	caughtUp.harness.elements.get('saved-kind-filter')!.value = 'all';
+	caughtUp.harness.elements.get('saved-kind-filter')!.dispatch('change');
+	caughtUp.harness.elements.get('saved-status-archive')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(caughtUp.harness).join() === '5', 200);
+	caughtUp.harness.elements.get('logout-button')!.dispatch('click');
+
+	const noArchive = await createStatefulArticleBrowser({ now: NOW, seed: (db) => seedSaved(db, [DEFAULT_SAVES[1]!]),
+		storedEntries: { 'pigeon.browser.saved-filters': JSON.stringify({ status: 'archive' }) } });
+	t.after(() => noArchive.database.close());
+	findListButtonByViewId(noArchive.harness.elements.get('views-list'), 'saved')!.dispatch('click');
+	await waitForBrowserCondition(() => status(noArchive.harness) === 'Nothing archived yet.', 200);
+	noArchive.harness.elements.get('logout-button')!.dispatch('click');
 });

@@ -229,7 +229,7 @@ export function renderBrowserOfflineScript(): string {
     var query = options || {}; var outbox = await pending(); var feeds = await all('feeds'); var byFeed = new Map(feeds.map(function (feed) { return [feed.feedKey, feed]; }));
     var articles = await all('articles'); var matching = []; var needle = String(query.q || '').trim().toLocaleLowerCase(); var stream = query.stream || 'all';
     if (!['all','reading-list','unread','read','starred','saved','user/-/state/com.google/reading-list','user/-/state/com.google/read','user/-/state/com.google/starred'].includes(stream) && !/^feed\/[1-9][0-9]*$/.test(stream) && !(stream.indexOf('user/-/label/') === 0 && stream.slice('user/-/label/'.length).length > 0)) throw offlineError('query', 'This view is not supported in the locally saved library.');
-    if (needle.length > 200 || query.filter && !['all','read','unread'].includes(query.filter) || query.sort && !['newest','oldest'].includes(query.sort)) throw offlineError('query', 'Unsupported offline search, filter or sort.');
+    if (needle.length > 200 || query.filter && !['all','read','unread'].includes(query.filter) || query.sort && !['newest','oldest','shortest','longest'].includes(query.sort) || query.kind && !['all','text','video'].includes(query.kind) || query.length && !['any','short','medium','long'].includes(query.length)) throw offlineError('query', 'Unsupported offline search, filter or sort.');
     for (var saved of articles) {
      var article = overlay(saved, outbox); var feed = byFeed.get(article.feedKey);
      if (feed && feed.isActive === false) continue;
@@ -242,12 +242,20 @@ export function renderBrowserOfflineScript(): string {
      if (stream.indexOf('feed/') === 0 && (!feed || feed.streamId !== stream)) continue;
      if (stream.indexOf('user/-/label/') === 0 && (!feed || !(feed.folders || []).includes(stream.slice('user/-/label/'.length)))) continue;
      if (query.filter === 'unread' && article.isRead || query.filter === 'read' && !article.isRead) continue;
+     // Read It Later type and length, as the server: length key = seconds x 238.
+     var lengthKey = article.mediaKind === 'video' ? (article.durationSeconds > 0 ? article.durationSeconds * 238 : null) : (article.wordCount > 0 ? article.wordCount * 60 : null);
+     if (query.kind === 'video' && article.mediaKind !== 'video' || query.kind === 'text' && article.mediaKind === 'video') continue;
+     if (query.length && query.length !== 'any' && (lengthKey === null || query.length === 'short' && lengthKey > 57120 || query.length === 'medium' && (lengthKey <= 57120 || lengthKey > 199920) || query.length === 'long' && lengthKey <= 199920)) continue;
+     article.lengthKey = lengthKey;
      if (query.since && article.receivedAt < query.since || query.before && article.receivedAt >= query.before) continue;
      var searchable = [article.title, article.author, feed && feed.title || article.source, article.preview].join(' ').toLocaleLowerCase();
      if (needle && !searchable.includes(needle)) { var body = await read('bodies', article.id); if (!body || !String(body.text || '').toLocaleLowerCase().includes(needle)) continue; }
      matching.push(article);
     }
-    matching.sort(function (a, b) { var difference = new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime() || (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1); return query.sort === 'oldest' ? difference : -difference; });
+    if (query.sort === 'shortest' || query.sort === 'longest') {
+     var direction = query.sort === 'shortest' ? 1 : -1;
+     matching.sort(function (a, b) { if (a.lengthKey === null || b.lengthKey === null) return a.lengthKey === b.lengthKey ? direction * (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1) : a.lengthKey === null ? 1 : -1; return direction * (a.lengthKey - b.lengthKey) || direction * (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1); });
+    } else matching.sort(function (a, b) { var difference = new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime() || (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1); return query.sort === 'oldest' ? difference : -difference; });
     var offset = Math.max(0, Number(query.offset) || 0); var limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
     return { itemIds: matching.slice(offset, offset + limit).map(function (article) { return article.decimalId; }), total: matching.length, hasMore: offset + limit < matching.length, offline: true, coverage: 'locally-saved' };
    }); },

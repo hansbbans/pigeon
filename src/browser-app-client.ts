@@ -167,8 +167,9 @@ export function normalizeSavedFilters(value: unknown): BrowserSavedFilters {
 }
 
 /**
- * Length in minutes (not rounded) for the Read It Later filters and sorts, or
- * null when unknown. Unlike the labels, every known length counts here.
+ * Length in minutes (not rounded), or null when unknown: orders rows locally
+ * the way the server's shortest/longest sorts do. Unlike the labels, every
+ * known length counts here.
  * Self-contained: emitted via toString().
  */
 export function savedLengthMinutes(item: {
@@ -186,48 +187,6 @@ export function savedLengthMinutes(item: {
 	const extracted = item.extractionState !== 'pending' && item.extractionState !== 'failed';
 	const words = typeof item.wordCount === 'number' ? item.wordCount : extracted ? item.estimatedWordCount : null;
 	return typeof words === 'number' && words > 0 ? words / 238 : null;
-}
-
-/**
- * Applies the client-side Read It Later filters (kind, length) and sorts
- * (shortest, longest) to the loaded saved list. Newest/oldest keep the server
- * order. Rows still loading stay in place so their bodies get fetched.
- * Unknown lengths match only "Any" and sort last. Emitted with savedLengthMinutes.
- */
-export function filterSavedItemIds(
-	itemIds: string[],
-	itemsById: Record<string, Parameters<typeof savedLengthMinutes>[0] | undefined>,
-	filters: { kind: string; length: string; sort: string },
-): string[] {
-	const minutesOf = (id: string): number | null => {
-		const item = itemsById[id];
-		return item ? savedLengthMinutes(item) : null;
-	};
-	const matches = itemIds.filter((id) => {
-		const item = itemsById[id];
-		if (!item) return true;
-		const isVideo = item.mediaKind === 'video';
-		if (filters.kind === 'text' && isVideo) return false;
-		if (filters.kind === 'video' && !isVideo) return false;
-		if (filters.length === 'any') return true;
-		const exact = minutesOf(id);
-		if (exact === null) return false;
-		const minutes = Math.max(1, Math.ceil(exact));
-		if (filters.length === 'short') return minutes < 5;
-		if (filters.length === 'medium') return minutes >= 5 && minutes < 15;
-		return minutes >= 15;
-	});
-	if (filters.sort !== 'shortest' && filters.sort !== 'longest') return matches;
-	const direction = filters.sort === 'shortest' ? 1 : -1;
-	return matches
-		.map((id, index) => ({ id, index, minutes: minutesOf(id) }))
-		.sort((left, right) => {
-			if (left.minutes === null || right.minutes === null) {
-				return left.minutes === right.minutes ? left.index - right.index : left.minutes === null ? 1 : -1;
-			}
-			return direction * (left.minutes - right.minutes) || left.index - right.index;
-		})
-		.map((entry) => entry.id);
 }
 
 /** "Just now", "12 min ago", "3 hr ago", "4 days ago", "2 wk ago", then a date. Self-contained. */
@@ -1056,7 +1015,6 @@ ${buildArticleListEntries.toString()}
 ${extractYouTubeVideoId.toString()}
 ${normalizeSavedFilters.toString()}
 ${savedLengthMinutes.toString()}
-${filterSavedItemIds.toString()}
 ${formatSavedAge.toString()}
 ${savedThumbnailUrl.toString()}
 ${savedSourceLabel.toString()}
@@ -1096,7 +1054,6 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   extractYouTubeVideoId,
   normalizeSavedFilters,
   savedLengthMinutes,
-  filterSavedItemIds,
   formatSavedAge,
   savedThumbnailUrl,
   savedSourceLabel,

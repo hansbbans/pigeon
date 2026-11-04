@@ -208,6 +208,11 @@ test('offline Read It Later: saved items stay in their own stream and keep their
  assert.deepEqual(plain((await library.query({ stream: 'saved', filter: 'unread' })).itemIds), ['2']);
  assert.deepEqual(plain((await library.query({ stream: 'feed/2' })).itemIds), ['3', '2']);
  assert.equal((await library.query({ filter: 'unread', includeSaved: true })).total, 2);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', sort: 'longest' })).itemIds), ['2', '3']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', sort: 'shortest' })).itemIds), ['2', '3']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', length: 'short' })).itemIds), ['2']);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', length: 'long' })).itemIds), []);
+ assert.deepEqual(plain((await library.query({ stream: 'saved', kind: 'video' })).itemIds), []);
  const [saved] = (await library.contents(['2'])).items;
  assert.equal(saved.extractionState, 'done'); assert.equal(saved.imageUrl, 'https://example.com/a.jpg'); assert.equal(saved.siteName, 'Example'); assert.equal(saved.nativeId, 'native-2');
  assert.deepEqual(plain(await library.feeds()).map((feed: any) => feed.sourceType), ['rss', 'saved']);
