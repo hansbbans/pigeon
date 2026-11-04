@@ -6,7 +6,7 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 	case recEngine
 	case share
 	case readingControls
-	case shareToReadwise
+	case readItLater
 
 	var id: Int { rawValue }
 
@@ -16,7 +16,8 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 		case .markRead: "Mark read"
 		case .recEngine: "More like this"
 		case .readingControls: "Reading controls"
-		case .shareToReadwise: "Share to Readwise"
+		// Distinct from the link menu's "Read It Later", which saves the link.
+		case .readItLater: "Save to Read It Later"
 		}
 	}
 
@@ -26,19 +27,22 @@ nonisolated enum ArticleReaderControl: Int, CaseIterable, Identifiable, Sendable
 		case .markRead: "largecircle.fill.circle"
 		case .recEngine: "sparkles"
 		case .readingControls: "textformat.size"
-		case .shareToReadwise: "bookmark"
+		case .readItLater: "bookmark"
 		}
 	}
 
-	func title(isRead: Bool) -> String {
+	/// Saved items archive instead of marking read.
+	func title(isRead: Bool, isSaved: Bool = false) -> String {
 		switch self {
+		case .markRead where isSaved: isRead ? "Unarchive" : "Archive"
 		case .markRead: isRead ? "Mark unread" : "Mark read"
 		default: title
 		}
 	}
 
-	func systemImage(isRead: Bool) -> String {
+	func systemImage(isRead: Bool, isSaved: Bool = false) -> String {
 		switch self {
+		case .markRead where isSaved: isRead ? "tray.and.arrow.up" : "archivebox"
 		case .markRead: isRead ? "circle" : "largecircle.fill.circle"
 		default: systemImage
 		}
@@ -155,10 +159,10 @@ nonisolated struct ArticleReaderControlsSaveTaskID: Equatable, Sendable {
 
 struct ArticleReaderControlsSaveRequest: Equatable, Sendable {
 	let articleID: String
-	let readwiseRequest: ReadwiseSaveRequest
+	let saveRequest: SaveForLaterRequest
 
 	var id: UUID {
-		readwiseRequest.id
+		saveRequest.id
 	}
 }
 
@@ -177,7 +181,7 @@ final class ArticleReaderControlsSaveState {
 	func begin(articleID: String, destination: OutboundDestination) -> ArticleReaderControlsSaveRequest {
 		let request = ArticleReaderControlsSaveRequest(
 			articleID: articleID,
-			readwiseRequest: ReadwiseSaveRequest(destination: destination),
+			saveRequest: SaveForLaterRequest(destination: destination),
 		)
 		self.request = request
 		saveMessage = nil
@@ -258,7 +262,7 @@ struct ArticleReaderControlsBar: View {
 				recEngineButton
 				shareButton
 				readingControlsButton
-				shareToReadwiseButton
+				readItLaterButton
 			}
 			.labelStyle(.iconOnly)
 			.buttonStyle(.borderless)
@@ -272,13 +276,13 @@ struct ArticleReaderControlsBar: View {
 		.accessibilityIdentifier("article-reader-controls")
 		.task(id: saveTaskID) {
 			let taskID = saveTaskID
-			await performReadwiseSave(for: taskID)
+			await performSave(for: taskID)
 		}
 		.onChange(of: article.id) { _, newArticleID in
 			saveState.articleDidChange(to: newArticleID)
 		}
 		.sensoryFeedback(.selection, trigger: actionFeedbackCount)
-		.alert("Readwise Reader", isPresented: $saveState.isShowingSaveMessage) {
+		.alert("Read It Later", isPresented: $saveState.isShowingSaveMessage) {
 			Button("OK") {}
 		} message: {
 			Text(saveState.saveMessage ?? "")
@@ -317,8 +321,8 @@ struct ArticleReaderControlsBar: View {
 	private var markReadButton: some View {
 		controlSlot {
 			Button(
-				ArticleReaderControl.markRead.title(isRead: article.isRead),
-				systemImage: ArticleReaderControl.markRead.systemImage(isRead: article.isRead),
+				ArticleReaderControl.markRead.title(isRead: article.isRead, isSaved: article.isSaved),
+				systemImage: ArticleReaderControl.markRead.systemImage(isRead: article.isRead, isSaved: article.isSaved),
 			) {
 				actionFeedbackCount &+= 1
 				Task {
@@ -362,14 +366,15 @@ struct ArticleReaderControlsBar: View {
 		}
 	}
 
-	private var shareToReadwiseButton: some View {
+	private var readItLaterButton: some View {
 		controlSlot {
-			Button(ArticleReaderControl.shareToReadwise.title, systemImage: ArticleReaderControl.shareToReadwise.systemImage) {
-				shareToReadwise()
+			Button(ArticleReaderControl.readItLater.title, systemImage: article.isSaved ? "bookmark.fill" : ArticleReaderControl.readItLater.systemImage) {
+				saveForLater()
 			}
-			.disabled(article.safeOriginalURL == nil || saveState.isSaving)
-			.accessibilityHint("Saves this article to Readwise Reader")
-			.accessibilityIdentifier("article-share-to-readwise")
+			// A saved item is already in Read It Later.
+			.disabled(article.isSaved || article.safeOriginalURL == nil || saveState.isSaving)
+			.accessibilityHint("Saves this article's web page to Read It Later")
+			.accessibilityIdentifier("article-read-it-later")
 		}
 	}
 
@@ -378,7 +383,7 @@ struct ArticleReaderControlsBar: View {
 			.frame(maxWidth: .infinity, minHeight: 44)
 	}
 
-	private func shareToReadwise() {
+	private func saveForLater() {
 		guard let url = article.safeOriginalURL, let destination = OutboundDestination(url: url) else {
 			saveState.present("This article does not have an original web address.")
 			return
@@ -391,7 +396,7 @@ struct ArticleReaderControlsBar: View {
 		ArticleReaderControlsSaveTaskID(articleID: article.id, requestID: saveState.request?.id)
 	}
 
-	private func performReadwiseSave(for taskID: ArticleReaderControlsSaveTaskID) async {
+	private func performSave(for taskID: ArticleReaderControlsSaveTaskID) async {
 		guard let request = saveState.request,
 			request.articleID == article.id,
 			request.articleID == taskID.articleID,
@@ -402,15 +407,10 @@ struct ArticleReaderControlsBar: View {
 
 		do {
 			try Task.checkCancellation()
-			switch try await model.saveToReader(request.readwiseRequest.destination) {
-			case .saved:
-				try Task.checkCancellation()
-				guard saveState.completeQuietly(request) else { return }
-				onSaveConfirmation(ReaderSaveConfirmation(message: "Saved to Reader", isSuccess: true))
-			case .alreadyInFlight:
-				try Task.checkCancellation()
-				_ = saveState.complete(request, with: "This article is already being saved.")
-			}
+			let outcome = try await model.saveForLater(request.saveRequest.destination.url, title: article.title)
+			try Task.checkCancellation()
+			guard saveState.completeQuietly(request) else { return }
+			onSaveConfirmation(ReaderSaveConfirmation(message: outcome.confirmationMessage, isSuccess: outcome.isSuccess))
 		} catch is CancellationError {
 			// Leaving the article is a normal cancellation.
 		} catch {

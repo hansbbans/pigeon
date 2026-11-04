@@ -13,6 +13,7 @@ struct PigeonReaderApp: App {
 	init() {
 		BackgroundRefreshManager.shared.register()
 		_ = ReaderNotificationManager.shared
+		LegacyReadwiseCleanup.run()
 		#if DEBUG
 		if Self.disablesAnimations {
 			UIView.setAnimationsEnabled(false)
@@ -33,6 +34,9 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.nextKey)
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.previousKey)
 			UserDefaults.standard.removeObject(forKey: ReaderSmartViewStore.key)
+			UserDefaults.standard.removeObject(forKey: SavedListFilter.kindKey)
+			UserDefaults.standard.removeObject(forKey: SavedListFilter.lengthKey)
+			UserDefaults.standard.removeObject(forKey: SavedExtractionAttemptStore.key)
 			ReaderArticleFilterStore().removeAll()
 		}
 		if let launchFixtureScenario = PreviewData.launchFixtureScenario {

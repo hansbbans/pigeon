@@ -5,6 +5,8 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 	case forYou
 	case unread
 	case starred
+	/// Read It Later. Listed below Starred and always visible.
+	case saved
 	case today
 
 	var id: Self { self }
@@ -15,6 +17,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		case .today: "Today"
 		case .unread: "Unread"
 		case .starred: "Starred"
+		case .saved: SavedItems.title
 		}
 	}
 
@@ -24,6 +27,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		case .today: "calendar"
 		case .unread: "circle"
 		case .starred: "star"
+		case .saved: "bookmark"
 		}
 	}
 
@@ -33,6 +37,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		case .today: "today"
 		case .unread: "unread"
 		case .starred: "starred"
+		case .saved: "saved"
 		}
 	}
 
@@ -42,11 +47,17 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		case .unread: "2"
 		case .starred: "3"
 		case .today: "4"
+		case .saved: "5"
 		}
 	}
 
 	var usesRecommendationEndpoint: Bool {
 		self == .forYou
+	}
+
+	/// Read It Later is not a Smart View setting; it is always listed.
+	var isAlwaysVisible: Bool {
+		self == .saved
 	}
 
 	var streamExcludeTag: String? {

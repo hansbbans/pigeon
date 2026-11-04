@@ -18,7 +18,7 @@ extension ReaderSidebarPresentationSnapshot {
 			switch item.kind {
 			case .smart:
 				if let section = item.smartSection,
-					enabledSmartViewSections.contains(section) {
+					section.isAlwaysVisible || enabledSmartViewSections.contains(section) {
 					smartItems.append(item)
 				}
 			case .folder:

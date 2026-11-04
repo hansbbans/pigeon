@@ -9,6 +9,33 @@ nonisolated struct ReaderNavigationState: Codable, Equatable, Sendable {
 		self.expandedFolderIDs = expandedFolderIDs
 	}
 
+	private enum CodingKeys: String, CodingKey {
+		case items
+		case expandedFolderIDs
+	}
+
+	init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		items = Self.addingMissingSavedSection(try container.decode([ReaderNavigationItem].self, forKey: .items))
+		expandedFolderIDs = try container.decode(Set<String>.self, forKey: .expandedFolderIDs)
+	}
+
+	/// Navigation cached by builds before Read It Later has no saved row. Add it
+	/// below Starred so the section shows before the next navigation load.
+	static func addingMissingSavedSection(_ items: [ReaderNavigationItem]) -> [ReaderNavigationItem] {
+		// Real navigation always carries every smart section; partial lists are
+		// deliberate (tests, fixtures) and stay as they are.
+		let sections = Set(items.compactMap(\.smartSection))
+		guard sections.isSuperset(of: [.forYou, .unread, .starred, .today]),
+			sections.contains(.saved) == false,
+			let starredIndex = items.lastIndex(where: { $0.smartSection == .starred }) else {
+			return items
+		}
+		var result = items
+		result.insert(.smart(.saved), at: starredIndex + 1)
+		return result
+	}
+
 	static var initial: Self {
 		Self(items: ReaderSection.allCases.map { ReaderNavigationItem.smart($0) })
 	}

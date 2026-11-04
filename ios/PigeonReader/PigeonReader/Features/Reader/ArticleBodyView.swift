@@ -18,13 +18,14 @@ struct ArticleBodyView: View {
 	let imageProxySession: PigeonSession?
 	let preparedBody: PreparedReaderBody?
 	let openedDestination: (OutboundDestination) -> Void
-	let saveToReader: (OutboundDestination) async throws -> ReadwiseSaveOutcome
+	let saveForLater: (OutboundDestination) async throws -> SaveForLaterOutcome
 	let onHTMLLayout: (ReaderHTMLLayout) -> Void
 	let onBodyFrameChange: (CGFloat) -> Void
 
 	@Environment(\.openURL) private var openURL
 	@State private var linkChoiceState = OutboundLinkChoiceState()
-	@State private var readwiseSaveRequest: ReadwiseSaveRequest?
+	@State private var saveRequest: SaveForLaterRequest?
+	@State private var sharedLink: SharedArticleLink?
 	@State private var saveMessage: String?
 	@State private var isShowingSaveMessage = false
 	@State private var imageSelection: ArticleImageSelection?
@@ -51,7 +52,7 @@ struct ArticleBodyView: View {
 		imageProxySession: PigeonSession? = nil,
 		preparedBody: PreparedReaderBody? = nil,
 		openedDestination: @escaping (OutboundDestination) -> Void,
-		saveToReader: @escaping (OutboundDestination) async throws -> ReadwiseSaveOutcome,
+		saveForLater: @escaping (OutboundDestination) async throws -> SaveForLaterOutcome,
 		onHTMLLayout: @escaping (ReaderHTMLLayout) -> Void = { _ in },
 		onBodyFrameChange: @escaping (CGFloat) -> Void = { _ in },
 	) {
@@ -67,7 +68,7 @@ struct ArticleBodyView: View {
 		self.imageProxySession = imageProxySession
 		self.preparedBody = preparedBody
 		self.openedDestination = openedDestination
-		self.saveToReader = saveToReader
+		self.saveForLater = saveForLater
 		self.onHTMLLayout = onHTMLLayout
 		self.onBodyFrameChange = onBodyFrameChange
 	}
@@ -96,8 +97,8 @@ struct ArticleBodyView: View {
 			Button("Open in Browser") {
 				choose(.openInBrowser, for: destination)
 			}
-			Button("Share to Reader") {
-				choose(.shareToReader, for: destination)
+			Button("Read It Later") {
+				choose(.readItLater, for: destination)
 			}
 			Button("Cancel", role: .cancel) {}
 		} message: { destination in
@@ -126,15 +127,19 @@ struct ArticleBodyView: View {
 			deferredLinkDestination = nil
 			Task { @MainActor in
 				// Let the linked-image confirmation finish its dismissal before
-				// presenting the existing browser/Readwise choice.
+				// presenting the existing browser/Read It Later choice.
 				await Task.yield()
 				handleLink(destination.url)
 			}
 		}
-		.task(id: readwiseSaveRequest?.id) {
-			await performReadwiseSave()
+		.task(id: saveRequest?.id) {
+			await performSave()
 		}
-		.alert("Couldn’t Save to Reader", isPresented: $isShowingSaveMessage) {
+		.sheet(item: $sharedLink) { link in
+			ReaderShareSheet(items: [link.url])
+				.presentationDetents([.medium, .large])
+		}
+		.alert("Couldn’t Save Link", isPresented: $isShowingSaveMessage) {
 			Button("OK") {}
 		} message: {
 			Text(saveMessage ?? "")
@@ -263,6 +268,7 @@ struct ArticleBodyView: View {
 			onImage: handleImage,
 			onImageFailure: handleImageFailure,
 			onLayout: onHTMLLayout,
+			onLinkMenuAction: handleLinkMenuAction,
 		)
 		.background {
 				GeometryReader { geometry in
@@ -320,8 +326,23 @@ struct ArticleBodyView: View {
 		switch route {
 		case .openInBrowser(let destination):
 			openURL(destination.url)
-		case .shareToReader(let destination):
-			readwiseSaveRequest = ReadwiseSaveRequest(destination: destination)
+		case .readItLater(let destination):
+			saveRequest = SaveForLaterRequest(destination: destination)
+		}
+	}
+
+	private func handleLinkMenuAction(_ action: ArticleLinkMenuAction, url: URL) {
+		guard let destination = OutboundDestination(url: url) else { return }
+		switch action {
+		case .readItLater:
+			saveRequest = SaveForLaterRequest(destination: destination)
+		case .openInBrowser:
+			openedDestination(destination)
+			openURL(destination.url)
+		case .copyLink:
+			UIPasteboard.general.url = destination.url
+		case .share:
+			sharedLink = SharedArticleLink(url: destination.url)
 		}
 	}
 
@@ -331,20 +352,20 @@ struct ArticleBodyView: View {
 		self.linkedImage = nil
 	}
 
-	private func performReadwiseSave() async {
-		guard let request = readwiseSaveRequest else {
+	private func performSave() async {
+		guard let request = saveRequest else {
 			return
 		}
 		defer {
-			if readwiseSaveRequest?.id == request.id {
-				readwiseSaveRequest = nil
+			if saveRequest?.id == request.id {
+				saveRequest = nil
 			}
 		}
 
 		do {
 			// The reader presents successful saves near its controls so the
 			// confirmation stays visible even when this body is scrolled.
-			_ = try await saveToReader(request.destination)
+			_ = try await saveForLater(request.destination)
 		} catch is CancellationError {
 			// Leaving the article is a normal cancellation.
 		} catch {
@@ -356,6 +377,11 @@ struct ArticleBodyView: View {
 		saveMessage = message
 		isShowingSaveMessage = true
 	}
+}
+
+private struct SharedArticleLink: Identifiable {
+	let url: URL
+	var id: String { url.absoluteString }
 }
 
 private struct ArticleColumnWidthKey: PreferenceKey {

@@ -31,7 +31,7 @@ struct ReaderPresentedCollectionActionsTests {
 
 	private func makeModel() -> ReaderAppModel {
 		let model = ReaderAppModel(sessionStore: TestSessionStore(), httpClient: MockHTTPClient(),
-			readwiseTokenStore: PreviewReadwiseTokenStore(), offlineStore: OfflineLibraryStore.inMemory(),
+			offlineStore: OfflineLibraryStore.inMemory(),
 			offlineSynchronizationEnabled: false)
 		model.select(section: .forYou)
 		return model

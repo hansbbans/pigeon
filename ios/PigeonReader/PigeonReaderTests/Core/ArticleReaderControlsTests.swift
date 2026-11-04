@@ -4,18 +4,25 @@ import Testing
 
 @MainActor
 struct ArticleReaderControlsTests {
-	@Test func bottomBarKeepsRecEngineInTheStarSlotAndReadwiseFifth() {
+	@Test func bottomBarKeepsRecEngineInTheStarSlotAndReadItLaterFifth() {
 		#expect(ArticleReaderControl.allCases == [
 			.markRead,
 			.recEngine,
 			.share,
 			.readingControls,
-			.shareToReadwise,
+			.readItLater,
 		])
 		#expect(ArticleReaderControl.recEngine.title == "More like this")
 		#expect(ArticleReaderControl.recEngine.systemImage == "sparkles")
-		#expect(ArticleReaderControl.shareToReadwise.title == "Share to Readwise")
-		#expect(ArticleReaderControl.shareToReadwise.systemImage == "bookmark")
+		#expect(ArticleReaderControl.readItLater.title == "Save to Read It Later")
+		#expect(ArticleReaderControl.readItLater.systemImage == "bookmark")
+	}
+
+	@Test func savedItemsArchiveInsteadOfMarkingRead() {
+		#expect(ArticleReaderControl.markRead.title(isRead: false, isSaved: true) == "Archive")
+		#expect(ArticleReaderControl.markRead.title(isRead: true, isSaved: true) == "Unarchive")
+		#expect(ArticleReaderControl.markRead.systemImage(isRead: false, isSaved: true) == "archivebox")
+		#expect(ArticleReaderControl.markRead.title(isRead: false) == "Mark read")
 	}
 
 	@Test func readingControlsMenuLeadsWithTextSizeThenLineHeight() {
@@ -151,10 +158,10 @@ struct ArticleReaderControlsTests {
 		let saveState = ArticleReaderControlsSaveState()
 		let request = saveState.begin(articleID: "first-article", destination: destination)
 		#expect(saveState.isSaving)
-		let delayedSave = DelayedReadwiseSave()
+		let delayedSave = DelayedSave()
 		let completion = Task { @MainActor () -> Bool in
 			await delayedSave.wait()
-			return saveState.complete(request, with: "Saved to Reader.")
+			return saveState.complete(request, with: "Saved to Read It Later.")
 		}
 
 		await delayedSave.waitUntilWaiting()
@@ -183,7 +190,7 @@ struct ArticleReaderControlsTests {
 	}
 }
 
-private actor DelayedReadwiseSave {
+private actor DelayedSave {
 	private var continuation: CheckedContinuation<Void, Never>?
 	private var waitingContinuations: [CheckedContinuation<Void, Never>] = []
 	private var isWaiting = false

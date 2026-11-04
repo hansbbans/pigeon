@@ -74,11 +74,21 @@ struct ReaderSidebarViewportCoordinatorTests {
 		#expect(coordinator.consumeRevealPlan() == nil)
 	}
 
-	@Test func lateRevealFramesCannotQueueAnotherAnimationAfterExpansionSettles() {
+	/// A folder at the bottom edge: its rows (and the grown content size) are
+	/// laid out only after the expansion animation. The reveal still happens,
+	/// once, without the animation's remaining duration.
+	@Test func revealWaitsForTheFirstGrownLayoutAfterExpansionSettles() {
 		let coordinator = configuredCoordinator()
-		coordinator.beginReveal(folderID: "folder", firstChildID: "child", refreshingRowIDs: ["child"])
+		coordinator.beginReveal(
+			folderID: "folder",
+			firstChildID: "child",
+			refreshingRowIDs: ["child"],
+			animationDuration: ReaderMotion.folderExpansionDuration,
+		)
 		let generation = coordinator.currentGeneration
+		#expect(coordinator.consumeRevealPlan(settled: true) == nil, "The content has not grown yet")
 		coordinator.finishRevealWindow(expectedGeneration: generation)
+		#expect(coordinator.hasPendingReveal)
 
 		coordinator.updateRowFrame(
 			CGRect(x: 0, y: 384, width: 300, height: 44),
@@ -87,8 +97,18 @@ struct ReaderSidebarViewportCoordinatorTests {
 		)
 		completeExpandedLayout(in: coordinator)
 
+		let plan = coordinator.consumeRevealPlan()
+		#expect(plan?.targetID == "child")
+		#expect(plan?.animationDuration == nil)
+		#expect(coordinator.consumeRevealPlan() == nil, "A reveal is consumed once")
+	}
+
+	@Test func dragAfterSettlingCancelsAWaitingReveal() {
+		let coordinator = configuredCoordinator()
+		coordinator.beginReveal(folderID: "folder", firstChildID: "child", refreshingRowIDs: ["child"])
+		coordinator.finishRevealWindow(expectedGeneration: coordinator.currentGeneration)
+		coordinator.updateScrollPhase(.tracking)
 		#expect(coordinator.hasPendingReveal == false)
-		#expect(coordinator.consumeRevealPlan() == nil)
 	}
 
 	@Test func staleRevealWindowCompletionCannotCloseANewerExpansion() {
@@ -199,6 +219,40 @@ struct ReaderSidebarViewportCoordinatorTests {
 		completeExpandedLayout(in: coordinator)
 
 		#expect(coordinator.consumeRevealPlan(now: start.advanced(by: .milliseconds(300))) == nil)
+		// The request waits for the settled layout instead of being dropped.
+		#expect(coordinator.hasPendingReveal)
+		coordinator.finishRevealWindow(expectedGeneration: generation)
+		#expect(coordinator.consumeRevealPlan(now: start.advanced(by: .milliseconds(300)))?.animationDuration == nil)
+		#expect(coordinator.hasPendingReveal == false)
+	}
+
+	/// A folder at the bottom edge expands below the viewport, and the List
+	/// reports the grown content only after the animation. The settled pass
+	/// must still scroll its first feed into view.
+	@Test func settledLayoutRevealsAfterTheAnimationDeadline() {
+		let coordinator = configuredCoordinator()
+		let start = ContinuousClock.now
+		coordinator.beginReveal(
+			folderID: "folder",
+			firstChildID: "child",
+			refreshingRowIDs: ["child"],
+			animationDuration: ReaderMotion.folderExpansionDuration,
+			now: start,
+		)
+		let generation = coordinator.currentGeneration
+		let late = start.advanced(by: .milliseconds(400))
+		#expect(coordinator.consumeRevealPlan(now: late) == nil, "No grown content yet")
+		coordinator.updateRowFrame(
+			CGRect(x: 0, y: 384, width: 300, height: 44),
+			for: "child",
+			generation: generation,
+		)
+		completeExpandedLayout(in: coordinator)
+		#expect(coordinator.consumeRevealPlan(now: late) == nil, "Past the deadline, layout callbacks don't animate")
+
+		let plan = coordinator.consumeRevealPlan(now: late, settled: true)
+		#expect(plan?.targetID == "child")
+		#expect(plan?.animationDuration == nil)
 		#expect(coordinator.hasPendingReveal == false)
 	}
 

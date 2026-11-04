@@ -10,6 +10,8 @@ nonisolated struct ReaderSubscription: Decodable, Sendable {
 	let categories: [ReaderSubscriptionCategory]
 	let url: String?
 	let iconURL: String?
+	/// "email", "rss" or "saved"; absent on older servers.
+	let sourceType: String?
 
 	private enum CodingKeys: String, CodingKey {
 		case id
@@ -17,6 +19,7 @@ nonisolated struct ReaderSubscription: Decodable, Sendable {
 		case categories
 		case url
 		case iconURL = "iconUrl"
+		case sourceType
 	}
 
 	init(from decoder: Decoder) throws {
@@ -26,6 +29,7 @@ nonisolated struct ReaderSubscription: Decodable, Sendable {
 		categories = try container.decodeIfPresent([ReaderSubscriptionCategory].self, forKey: .categories) ?? []
 		url = try container.decodeIfPresent(String.self, forKey: .url)
 		iconURL = try container.decodeIfPresent(String.self, forKey: .iconURL)
+		sourceType = try? container.decodeIfPresent(String.self, forKey: .sourceType)
 	}
 
 	init(
@@ -34,12 +38,22 @@ nonisolated struct ReaderSubscription: Decodable, Sendable {
 		categories: [ReaderSubscriptionCategory] = [],
 		url: String? = nil,
 		iconURL: String? = nil,
+		sourceType: String? = nil,
 	) {
 		self.id = id
 		self.title = title
 		self.categories = categories
 		self.url = url
 		self.iconURL = iconURL
+		self.sourceType = sourceType
+	}
+
+	/// The Read It Later system feed. Its URL ends in `/feed/pigeon:saved`, so
+	/// it is recognised even where the source type is missing.
+	var isSavedFeed: Bool {
+		guard sourceType != SavedItems.sourceType else { return true }
+		guard let url, let parsed = URL(string: url) else { return false }
+		return parsed.lastPathComponent == SavedItems.feedKey
 	}
 }
 
@@ -95,6 +109,7 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 	let contentVersion: String?
 	let isPaywalled: Bool?
 	let length: ArticleLength?
+	let savedMetadata: SavedArticleMetadata?
 
 	private enum CodingKeys: String, CodingKey {
 		case id
@@ -112,6 +127,10 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 		case wordCount
 		case mediaKind
 		case durationSeconds
+		case extractionState
+		case publishedAt
+		case imageURL = "imageUrl"
+		case siteName
 	}
 
 	init(from decoder: Decoder) throws {
@@ -132,6 +151,14 @@ nonisolated struct ReaderStreamItem: Decodable, Sendable, Hashable {
 			wordCount: try? container.decodeIfPresent(Int.self, forKey: .wordCount),
 			mediaKind: try? container.decodeIfPresent(String.self, forKey: .mediaKind),
 			durationSeconds: try? container.decodeIfPresent(Int.self, forKey: .durationSeconds)
+		)
+		savedMetadata = SavedArticleMetadata(
+			extractionState: try? container.decodeIfPresent(String.self, forKey: .extractionState),
+			publishedAt: (try? container.decodeIfPresent(String.self, forKey: .publishedAt)).flatMap { $0 }
+				.flatMap(SavedArticleMetadata.parseDate),
+			imageURL: (try? container.decodeIfPresent(String.self, forKey: .imageURL)).flatMap { $0 }
+				.flatMap(URL.init(string:)),
+			siteName: try? container.decodeIfPresent(String.self, forKey: .siteName),
 		)
 	}
 
@@ -173,11 +200,28 @@ nonisolated struct ReaderNavigationSmartCounts: Equatable, Sendable {
 	let today: Int
 	let unread: Int
 	let starred: Int
+	/// Unread Read It Later items; nil lets the catalog read the saved feed's count.
+	var saved: Int? = nil
 }
 
 nonisolated struct ReaderNavigationSnapshot: Sendable {
 	let subscriptions: [ReaderSubscription]
 	let unreadCounts: [ReaderUnreadCount]
 	let starredUnreadCount: Int?
+	/// Requested with `xs=saved`, so Read It Later is already left out.
 	let todayUnreadCount: Int?
+
+	var savedSubscription: ReaderSubscription? {
+		subscriptions.first(where: \.isSavedFeed)
+	}
+
+	var savedUnreadCount: Int {
+		guard let savedSubscription else { return 0 }
+		return unreadCounts.first(where: { $0.id == savedSubscription.id })?.count ?? 0
+	}
+
+	/// The reading-list total; `xs=saved` already leaves Read It Later out.
+	var readingListUnreadCount: Int {
+		unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0
+	}
 }

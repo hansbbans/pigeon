@@ -34,7 +34,7 @@ final class ReaderSidebarViewportCoordinator {
 		let firstChildID: String?
 		let baselineContentHeight: CGFloat
 		let folderFrameAtRequest: CGRect
-		let animationDeadline: ContinuousClock.Instant?
+		var animationDeadline: ContinuousClock.Instant?
 	}
 
 	private struct PendingCollapse: Equatable {
@@ -138,11 +138,15 @@ final class ReaderSidebarViewportCoordinator {
 	}
 
 	/// Closes the animated reveal window when the expansion animation settles.
-	/// A layout callback that arrives after that point must not start a second
-	/// scroll animation. A mismatched generation belongs to a newer gesture.
+	/// A request that has not been revealed yet stays pending without a
+	/// deadline: a folder expanded at the bottom edge gets its rows laid out
+	/// (and the content size grows) only after the animation, so the reveal
+	/// happens on that first grown layout. A drag, a new toggle or a collapse
+	/// still cancels it, and a consumed reveal never repeats. A mismatched
+	/// generation belongs to a newer gesture.
 	func finishRevealWindow(expectedGeneration: Int) {
 		guard generation == expectedGeneration else { return }
-		pendingReveal = nil
+		pendingReveal?.animationDeadline = nil
 	}
 
 	func updateRowFrame(_ frame: CGRect, for id: String, generation callbackGeneration: Int) {
@@ -177,17 +181,25 @@ final class ReaderSidebarViewportCoordinator {
 		}
 	}
 
-	func consumeRevealPlan(now: ContinuousClock.Instant = ContinuousClock.now) -> ReaderSidebarViewportRevealPlan? {
+	/// `settled` is the expansion animation's completion: the reveal no longer
+	/// joins that animation, so it carries no remaining duration.
+	func consumeRevealPlan(
+		now: ContinuousClock.Instant = ContinuousClock.now,
+		settled: Bool = false,
+	) -> ReaderSidebarViewportRevealPlan? {
 		guard let pendingReveal, scrollPhase == .idle else {
 			return nil
 		}
 		let remainingAnimationDuration: Double?
-		if let animationDeadline = pendingReveal.animationDeadline {
+		if settled {
+			remainingAnimationDuration = nil
+		} else if let animationDeadline = pendingReveal.animationDeadline {
 			let remaining = now.duration(to: animationDeadline)
 			let components = remaining.components
 			let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
 			guard seconds > 0 else {
-				self.pendingReveal = nil
+				// Too late to join the expansion animation; the settled pass and
+				// later layouts (after `finishRevealWindow`) still reveal.
 				return nil
 			}
 			remainingAnimationDuration = seconds

@@ -86,7 +86,7 @@ struct ReaderShellView: View {
 		}
 		.task(id: model.session?.storageIdentity) {
 			model.configurePlatformServices()
-			model.startReadwiseTokenServerSync()
+			// Ends by sending links saved offline and extracting pending saves.
 			await model.prepareOfflineLibrary()
 			await model.handleLocalDayChange()
 			await model.writeWidgetSnapshotOffMain()

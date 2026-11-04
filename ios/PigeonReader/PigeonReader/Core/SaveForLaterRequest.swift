@@ -1,6 +1,6 @@
 import Foundation
 
-struct ReadwiseSaveRequest: Equatable, Identifiable, Sendable {
+struct SaveForLaterRequest: Equatable, Identifiable, Sendable {
 	let id: UUID
 	let destination: OutboundDestination
 

@@ -54,8 +54,26 @@ nonisolated struct IncrementalSyncPayload: Codable, Equatable, Sendable {
 	var mediaKind: String? = nil
 	var durationSeconds: Int? = nil
 
+	/// Feed payloads: "email", "rss" or "saved" (Read It Later).
+	var sourceType: String? = nil
+	// Read It Later article fields. Strings, not URL/Date, so one odd value
+	// can never make the whole sync page undecodable.
+	var extractionState: String? = nil
+	var publishedAt: String? = nil
+	var imageURL: String? = nil
+	var siteName: String? = nil
+
 	var length: ArticleLength? {
 		ArticleLength(wordCount: wordCount, mediaKind: mediaKind, durationSeconds: durationSeconds)
+	}
+
+	var savedMetadata: SavedArticleMetadata? {
+		SavedArticleMetadata(
+			extractionState: extractionState,
+			publishedAt: publishedAt.flatMap(SavedArticleMetadata.parseDate),
+			imageURL: imageURL.flatMap(URL.init(string:)),
+			siteName: siteName,
+		)
 	}
 
 	let itemId: String?
@@ -74,6 +92,7 @@ nonisolated enum OfflineMutationKind: String, Codable, Sendable {
 	case unsubscribeFeed = "unsubscribe_feed"
 	case restoreFeed = "restore_feed"
 	case setWordCount = "set_word_count"
+	case removeSaved = "remove_saved"
 }
 
 nonisolated enum OfflineMutationScope: String, Codable, Sendable {
@@ -387,9 +406,13 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func cleanupReadBodies(accountID: String, keepingNewest count: Int) async throws -> Int
 	func clearCachedArticles(accountID: String) async throws
 	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation]
+	func removeArticles(ids: [String], accountID: String) async throws
 }
 
 extension OfflineLibraryStoring {
+	/// Test doubles without article rows have nothing to remove.
+	func removeArticles(ids: [String], accountID: String) async throws {}
+
 	/// Compatibility fallback for lightweight stores and test doubles. The SQLite
 	/// implementation overrides this with a scoped membership query.
 	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot {

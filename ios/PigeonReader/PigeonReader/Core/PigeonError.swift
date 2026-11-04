@@ -6,8 +6,6 @@ enum PigeonError: Error, LocalizedError, Sendable {
 	case server(statusCode: Int, message: String)
 	case invalidResponse
 	case keychain(status: Int32)
-	case invalidReadwiseToken
-	case readwiseKeychain(status: Int32)
 
 	var errorDescription: String? {
 		switch self {
@@ -21,10 +19,6 @@ enum PigeonError: Error, LocalizedError, Sendable {
 			"Pigeon returned an unexpected response."
 		case let .keychain(status):
 			"The session could not be saved securely (Keychain error \(status))."
-		case .invalidReadwiseToken:
-			"Enter a non-empty Readwise access token."
-		case let .readwiseKeychain(status):
-			"The Readwise token could not be saved securely (Keychain error \(status))."
 		}
 	}
 

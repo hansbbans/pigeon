@@ -221,6 +221,7 @@ final class ReaderViewExtractor: NSObject, ReaderViewExtracting {
 				published: article.published,
 				site: article.site,
 				extractor: article.extractor,
+				text: (output.content.textContent || "").replace(/\\s+/g, " ").trim(),
 			};
 		})()
 		"""

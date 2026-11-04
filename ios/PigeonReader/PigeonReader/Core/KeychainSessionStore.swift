@@ -1,54 +1,40 @@
 import Foundation
 import Security
 
+/// The session lives in the app group's keychain access group so the share
+/// extension can save links. The first read after updating moves the item
+/// from the app's private access group (see `SharedSessionKeychain.load`).
 @MainActor
 final class KeychainSessionStore: SessionStore {
-	private let service = "com.hans.pigeon.reader"
-	private let account = "session"
+	private let keychain: SharedSessionKeychain
+
+	init(keychain: SharedSessionKeychain = SharedSessionKeychain()) {
+		self.keychain = keychain
+	}
 
 	func load() throws -> PigeonSession? {
-		let query: [String: Any] = [
-			kSecClass as String: kSecClassGenericPassword,
-			kSecAttrService as String: service,
-			kSecAttrAccount as String: account,
-			kSecReturnData as String: true,
-		]
-		var result: CFTypeRef?
-		let status = SecItemCopyMatching(query as CFDictionary, &result)
-		if status == errSecItemNotFound {
-			return nil
+		do {
+			guard let data = try keychain.load() else { return nil }
+			return try JSONDecoder().decode(PigeonSession.self, from: data)
+		} catch let error as KeychainAccessError {
+			throw PigeonError.keychain(status: error.status)
 		}
-		guard status == errSecSuccess, let data = result as? Data else {
-			throw PigeonError.keychain(status: status)
-		}
-		return try JSONDecoder().decode(PigeonSession.self, from: data)
 	}
 
 	func save(_ session: PigeonSession) throws {
-		try remove()
 		let data = try JSONEncoder().encode(session)
-		let query: [String: Any] = [
-			kSecClass as String: kSecClassGenericPassword,
-			kSecAttrService as String: service,
-			kSecAttrAccount as String: account,
-			kSecValueData as String: data,
-			kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-		]
-		let status = SecItemAdd(query as CFDictionary, nil)
-		guard status == errSecSuccess else {
-			throw PigeonError.keychain(status: status)
+		do {
+			try keychain.save(data)
+		} catch let error as KeychainAccessError {
+			throw PigeonError.keychain(status: error.status)
 		}
 	}
 
 	func remove() throws {
-		let query: [String: Any] = [
-			kSecClass as String: kSecClassGenericPassword,
-			kSecAttrService as String: service,
-			kSecAttrAccount as String: account,
-		]
-		let status = SecItemDelete(query as CFDictionary)
-		guard status == errSecSuccess || status == errSecItemNotFound else {
-			throw PigeonError.keychain(status: status)
+		do {
+			try keychain.remove()
+		} catch let error as KeychainAccessError {
+			throw PigeonError.keychain(status: error.status)
 		}
 	}
 }

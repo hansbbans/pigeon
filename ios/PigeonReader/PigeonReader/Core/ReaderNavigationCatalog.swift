@@ -2,10 +2,15 @@ import Foundation
 
 nonisolated enum ReaderNavigationCatalog {
 	static func make(
-		subscriptions: [ReaderSubscription],
+		subscriptions allSubscriptions: [ReaderSubscription],
 		unreadCounts: [ReaderUnreadCount],
 		smartCounts: ReaderNavigationSmartCounts,
+		savedStreamID knownSavedStreamID: String? = nil,
 	) -> ReaderNavigationState {
+		// The Read It Later feed is a smart section, never a feed row.
+		let savedSubscription = allSubscriptions.first(where: \.isSavedFeed)
+		let subscriptions = allSubscriptions.filter { $0.isSavedFeed == false }
+		let savedStreamID = savedSubscription?.id ?? knownSavedStreamID
 		let countsByID = Dictionary(uniqueKeysWithValues: unreadCounts.map { ($0.id, max($0.count, 0)) })
 		let feedCounts = unreadCounts.reduce(into: [String: Int]()) { result, count in
 			guard count.id.hasPrefix("feed/") else {
@@ -85,8 +90,13 @@ nonisolated enum ReaderNavigationCatalog {
 			case .today: count = smartCounts.today
 			case .unread: count = smartCounts.unread
 			case .starred: count = smartCounts.starred
+			case .saved: count = smartCounts.saved ?? savedStreamID.flatMap { countsByID[$0] } ?? 0
 			}
-			return ReaderNavigationItem.smart(section, unreadCount: count)
+			return ReaderNavigationItem.smart(
+				section,
+				unreadCount: count,
+				streamID: section == .saved ? savedStreamID : nil,
+			)
 		}
 
 		return ReaderNavigationState(items: smartItems + folderItems + childItems.sorted(by: sortByTitle) + uncategorizedItems.sorted(by: sortByTitle))

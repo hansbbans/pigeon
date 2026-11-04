@@ -14,7 +14,7 @@ struct OutboundLinkChoiceStateTests {
 		#expect(state.choose(.openInBrowser) == .openInBrowser(destination))
 		#expect(state.pendingDestination == nil)
 		#expect(state.isDialogPresented == false)
-		#expect(state.choose(.shareToReader) == nil)
+		#expect(state.choose(.readItLater) == nil)
 	}
 
 	@Test func routesToReaderShareWithoutASecondAcceptance() throws {
@@ -25,7 +25,7 @@ struct OutboundLinkChoiceStateTests {
 
 		#expect(state.accept(firstURL) == firstDestination)
 		#expect(state.accept(secondURL) == nil)
-		#expect(state.choose(.shareToReader) == .shareToReader(firstDestination))
+		#expect(state.choose(.readItLater) == .readItLater(firstDestination))
 		#expect(state.pendingDestination == nil)
 	}
 

@@ -1,4 +1,5 @@
 #if DEBUG
+import CryptoKit
 import Foundation
 
 private actor PreviewPersonalizationStore {
@@ -61,6 +62,12 @@ struct PreviewHTTPClient: HTTPClient {
 	}
 
 	nonisolated static let markReadProgressGate = MarkReadProgressGate()
+
+	/// A stable UUID per saved URL, like the Worker's.
+	nonisolated static func savedItemID(for url: String) -> String {
+		let hex = Array(SHA256.hash(data: Data(url.utf8)).map { String(format: "%02x", $0) }.joined())
+		return [hex[0..<8], hex[8..<12], hex[12..<16], hex[16..<20], hex[20..<32]].map { String($0) }.joined(separator: "-")
+	}
 	private let recommendations: [Recommendation]
 	private let personalizationStore: PreviewPersonalizationStore
 
@@ -97,9 +104,18 @@ struct PreviewHTTPClient: HTTPClient {
 		let data: Data
 		var statusCode = 200
 		switch url.path {
-		case "/api/v3/save/":
-			// Preview mode never contacts Readwise; this drives the save feedback UI.
-			data = Data("{}".utf8)
+		case "/api/v1/saved":
+			// Read It Later saves: a deterministic item per URL, pending until
+			// the app uploads its extraction.
+			let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+			let savedURL = body?["url"] as? String ?? ""
+			data = try JSONSerialization.data(withJSONObject: [
+				"id": Self.savedItemID(for: savedURL),
+				"readerId": "tag:google.com,2005:reader/item/0000000000000a01",
+				"url": savedURL,
+				"state": YouTubeVideo(url: URL(string: savedURL)) == nil ? "pending" : "done",
+				"created": true,
+			])
 			statusCode = 201
 		case "/api/v1/recommendations":
 			let response = PreviewRecommendationsResponse(
@@ -323,6 +339,25 @@ struct PreviewHTTPClient: HTTPClient {
 			} else {
 				data = Data()
 			}
+		case let path where path.hasPrefix("/api/v1/saved/") && path.hasSuffix("/content"):
+			let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+			let itemID = String(path.dropFirst("/api/v1/saved/".count).dropLast("/content".count))
+			data = try JSONSerialization.data(withJSONObject: [
+				"id": itemID,
+				"readerId": "tag:google.com,2005:reader/item/0000000000000a01",
+				"url": "https://pigeon.preview/saved",
+				"state": body?["failed"] as? Bool == true ? "failed" : "done",
+				"updated": true,
+			])
+		case let path where path.hasPrefix("/saved/"):
+			// A page the Read It Later fixture extracts in the background.
+			data = Data("""
+			<!doctype html><html><head><title>The quiet craft of editing</title></head>
+			<body><article><h1>The quiet craft of editing</h1>
+			<p>Editing is the art of leaving out. Every sentence that survives has to earn its place on the page.</p>
+			<p>Good editors read slowly, cut patiently, and give the writer's voice more room rather than less.</p>
+			</article></body></html>
+			""".utf8)
 		default:
 			if ProcessInfo.processInfo.arguments.contains("-reader-reader-success"), url.path == "/design" {
 				data = Data("""

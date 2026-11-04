@@ -336,6 +336,10 @@ struct ReaderSidebarView: View {
 				finishSidebarAnimation(animationToken)
 			}
 			if isExpanding, animation != nil {
+				// Reveal from the settled layout first; only then close the window.
+				if sidebarViewportCoordinator.isCurrentGeneration(toggleGeneration) {
+					attemptFolderReveal(using: proxy, settled: true)
+				}
 				sidebarViewportCoordinator.finishRevealWindow(expectedGeneration: toggleGeneration)
 			}
 			attemptFolderAdjustment(
@@ -389,8 +393,8 @@ struct ReaderSidebarView: View {
 		)
 	}
 
-	private func attemptFolderReveal(using proxy: ScrollViewProxy) {
-		guard let plan = sidebarViewportCoordinator.consumeRevealPlan() else {
+	private func attemptFolderReveal(using proxy: ScrollViewProxy, settled: Bool = false) {
+		guard let plan = sidebarViewportCoordinator.consumeRevealPlan(settled: settled) else {
 			return
 		}
 		guard let targetID = plan.targetID else {
