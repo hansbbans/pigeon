@@ -105,10 +105,11 @@ struct YouTubeTranscriptFetchTests {
 	@Test func theBridgeCapsRequestsPerRun() async throws {
 		let bridge = YouTubeFetchBridge(transport: StubTransport(body: "x"))
 		let replies = ReplyLog()
+		// One at a time, as Defuddle mostly asks; concurrency is capped by bytes (below).
 		for id in 1...(YouTubeFetchBridge.maximumRequests + 1) {
 			bridge.handle(["id": id, "url": "https://www.youtube.com/api/timedtext?v=x", "method": "GET"], reply: replies.record(id))
+			try await waitUntil { replies.count == id }
 		}
-		try await waitUntil { replies.count == YouTubeFetchBridge.maximumRequests + 1 }
 		#expect(replies[YouTubeFetchBridge.maximumRequests + 1]?.error == "Too many requests")
 	}
 
@@ -202,7 +203,7 @@ struct YouTubeTranscriptFetchTests {
 		store.request(article, video: Self.video)
 		#expect(store.phase(for: article) == .fetching)
 		store.request(article, video: Self.video)
-		try await waitUntil { store.phase(for: article) == .ready(PreviewTranscriptFetcher.transcript) }
+		try await waitUntil { store.phase(for: article) == .ready(YouTubeTranscriptLayout(PreviewTranscriptFetcher.transcript)) }
 		try await waitUntil { await api.uploads.count == 1 }
 		#expect(fetcher.calls == 1, "a second tap while fetching starts nothing")
 		#expect(await api.uploads.first?.itemID == article.readerId)
@@ -222,7 +223,7 @@ struct YouTubeTranscriptFetchTests {
 		#expect(store.phase(for: article) == .failed("YouTube took too long to answer."))
 
 		store.request(article, video: Self.video)
-		try await waitUntil { store.phase(for: article) == .ready(PreviewTranscriptFetcher.transcript) }
+		try await waitUntil { store.phase(for: article) == .ready(YouTubeTranscriptLayout(PreviewTranscriptFetcher.transcript)) }
 		#expect(fetcher.calls == 2)
 	}
 
@@ -235,7 +236,7 @@ struct YouTubeTranscriptFetchTests {
 
 		#expect(store.phase(for: article) == .checking)
 		store.open(article)
-		try await waitUntil { store.phase(for: article) == .ready(PreviewTranscriptFetcher.transcript) }
+		try await waitUntil { store.phase(for: article) == .ready(YouTubeTranscriptLayout(PreviewTranscriptFetcher.transcript)) }
 
 		let failing = StubTranscriptAPI(stored: .failure(PigeonError.server(statusCode: 503, message: "")))
 		let failingStore = YouTubeTranscriptStore(fetcher: StubFetcher(results: []), uploadRetryDelays: [])
@@ -246,15 +247,97 @@ struct YouTubeTranscriptFetchTests {
 		try await Task.sleep(for: .milliseconds(200))
 		#expect(await failing.reads == 1, "opening again does not reload a failure by itself")
 
-		// A stale flag (nothing stored) or a newer format falls back to the button.
-		let fallbacks: [Result<StoredYouTubeTranscript?, Error>] = [.success(nil), .failure(YouTubeTranscriptFormatError.unsupportedVersion(2))]
-		for result in fallbacks {
-			let other = YouTubeTranscriptStore(fetcher: StubFetcher(results: []), uploadRetryDelays: [])
-			let api = StubTranscriptAPI(stored: result)
-			other.apiProvider = { api }
-			other.open(article)
-			try await waitUntil { other.phase(for: article) == .idle }
+		// A stale flag (nothing stored) falls back to the button.
+		let stale = YouTubeTranscriptStore(fetcher: StubFetcher(results: []), uploadRetryDelays: [])
+		let empty = StubTranscriptAPI(stored: .success(nil))
+		stale.apiProvider = { empty }
+		stale.open(article)
+		try await waitUntil { stale.phase(for: article) == .idle }
+	}
+
+	@Test func aNewerFormatOnTheServerIsNeverOverwritten() async throws {
+		let newer = StubTranscriptAPI(stored: .failure(YouTubeTranscriptFormatError.unsupportedVersion(2)))
+		let fetcher = StubFetcher(results: [.success(PreviewTranscriptFetcher.transcript)])
+		let store = YouTubeTranscriptStore(fetcher: fetcher, uploadRetryDelays: [])
+		store.apiProvider = { newer }
+
+		// Opening a known transcript in a newer format asks for an update.
+		store.open(Self.article(hasTranscript: true))
+		try await waitUntil { store.phase(for: Self.article()) == .needsUpdate }
+		store.request(Self.article(), video: Self.video)
+		#expect(store.phase(for: Self.article()) == .needsUpdate, "no fetch from this state")
+
+		// Get Transcript on an item whose flag had not synced yet: still no fetch, no upload.
+		let other = YouTubeTranscriptStore(fetcher: fetcher, uploadRetryDelays: [])
+		other.apiProvider = { newer }
+		other.request(Self.article(), video: Self.video)
+		try await waitUntil { other.phase(for: Self.article()) == .needsUpdate }
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(fetcher.calls == 0)
+		#expect(await newer.uploads.isEmpty)
+	}
+
+	@Test func aReplacedUploadDoesNotClearTheNewOne() async throws {
+		// The first upload hangs until cancelled; the second replaces it.
+		let api = StubTranscriptAPI(uploadDelay: .seconds(30))
+		let first = PreviewTranscriptFetcher.transcript
+		var second = first
+		second.segments[0].text = "Changed."
+		let store = YouTubeTranscriptStore(fetcher: StubFetcher(results: [.success(first), .success(second)]), uploadRetryDelays: [])
+		store.apiProvider = { api }
+		let article = Self.article()
+
+		store.request(article, video: Self.video)
+		try await waitUntil { await api.uploads.count == 1 }
+		// Evicted from memory, then fetched again: the second upload replaces the first.
+		store.evict(key: YouTubeTranscriptStore.key(for: article))
+		store.request(article, video: Self.video)
+		try await waitUntil { await api.uploads.count == 2 }
+		// The cancelled first task has finished by now; the second is still in flight.
+		try await Task.sleep(for: .milliseconds(200))
+		#expect(store.uploads.count == 1, "the cancelled task must not remove its replacement")
+	}
+
+	@Test func offlineFetchesSayYouAreOffline() async throws {
+		#expect(YouTubeTranscriptStore.fetchFailureMessage(for: YouTubeTranscriptError.offline) == YouTubeTranscriptStore.offlineMessage)
+		// Defuddle swallows the failed request and reports nothing; the bridge saw why.
+		let swallowing = """
+		var Defuddle = function(doc, options) { this.options = options; };
+		Defuddle.prototype.parseAsync = async function() {
+			try { await this.options.fetch('https://www.youtube.com/api/timedtext?v=x'); } catch (error) {}
+			return { variables: {} };
+		};
+		"""
+		let offline = YouTubeTranscriptFetcher(transport: StubTransport(error: URLError(.notConnectedToInternet)), defuddleSource: { swallowing }, timeout: .seconds(5))
+		await #expect(throws: YouTubeTranscriptError.offline) { try await offline.fetchTranscript(videoID: "aircAruvnKk") }
+		// An answered request (e.g. a 404) with no captions is still "no transcript".
+		let online = YouTubeTranscriptFetcher(transport: StubTransport(body: ""), defuddleSource: { swallowing }, timeout: .seconds(5))
+		await #expect(throws: YouTubeTranscriptError.noTranscript) { try await online.fetchTranscript(videoID: "aircAruvnKk") }
+	}
+
+	@Test func concurrentRequestsShareTheRunsByteBudget() async throws {
+		let transport = StubTransport(body: "small", delay: .seconds(30))
+		let bridge = YouTubeFetchBridge(transport: transport)
+		let replies = ReplyLog()
+		let perRun = YouTubeFetchBridge.maximumTotalBytes / YouTubeFetchBridge.maximumResponseBytes
+		for id in 1...(perRun + 1) {
+			bridge.handle(["id": id, "url": "https://www.youtube.com/api/timedtext?v=x", "method": "GET"], reply: replies.record(id))
 		}
+		try await waitUntil { await transport.requests.count == perRun && replies.count == 1 }
+		#expect(replies[perRun + 1]?.error == "Too many bytes", "in-flight requests have reserved the whole budget")
+		#expect(await transport.maximumBytes == Array(repeating: YouTubeFetchBridge.maximumResponseBytes, count: perRun))
+		#expect(bridge.remainingBytes == 0)
+		bridge.close()
+		try await waitUntil { replies.count == perRun + 1 }
+		#expect(bridge.remainingBytes == YouTubeFetchBridge.maximumTotalBytes, "cancelled requests give their reservation back")
+	}
+
+	@Test func finishedRequestsKeepOnlyWhatArrived() async throws {
+		let bridge = YouTubeFetchBridge(transport: StubTransport(body: "12345"))
+		let replies = ReplyLog()
+		bridge.handle(["id": 1, "url": "https://www.youtube.com/api/timedtext?v=x", "method": "GET"], reply: replies.record(1))
+		try await waitUntil { replies.count == 1 }
+		#expect(bridge.remainingBytes == YouTubeFetchBridge.maximumTotalBytes - 5)
 	}
 
 	@Test func uploadsRetryOnlyTransientFailures() {
@@ -305,16 +388,21 @@ struct YouTubeTranscriptFetchTests {
 private actor StubTransport: YouTubeBridgeTransport {
 	private let body: String
 	private let delay: Duration?
+	private let error: Error?
 	private(set) var requests: [URLRequest] = []
+	private(set) var maximumBytes: [Int] = []
 
-	init(body: String, delay: Duration? = nil) {
+	init(body: String = "", delay: Duration? = nil, error: Error? = nil) {
 		self.body = body
 		self.delay = delay
+		self.error = error
 	}
 
 	func send(_ request: URLRequest, maximumBytes: Int) async throws -> (Data, HTTPURLResponse) {
 		requests.append(request)
+		self.maximumBytes.append(maximumBytes)
 		if let delay { try await Task.sleep(for: delay) }
+		if let error { throw error }
 		let url = request.url ?? URL(string: "https://www.youtube.com/")!
 		return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/xml"])!)
 	}
@@ -362,12 +450,14 @@ private final class StubFetcher: YouTubeTranscriptFetching {
 private actor StubTranscriptAPI: YouTubeTranscriptAPI {
 	private let stored: Result<StoredYouTubeTranscript?, Error>
 	private let uploadFailure: Error?
+	private let uploadDelay: Duration?
 	private(set) var reads = 0
 	private(set) var uploads: [(itemID: String, transcript: YouTubeTranscript)] = []
 
-	init(stored: Result<StoredYouTubeTranscript?, Error> = .success(nil), uploadFailure: Error? = nil) {
+	init(stored: Result<StoredYouTubeTranscript?, Error> = .success(nil), uploadFailure: Error? = nil, uploadDelay: Duration? = nil) {
 		self.stored = stored
 		self.uploadFailure = uploadFailure
+		self.uploadDelay = uploadDelay
 	}
 
 	func transcript(itemID: String) async throws -> StoredYouTubeTranscript? {
@@ -377,6 +467,7 @@ private actor StubTranscriptAPI: YouTubeTranscriptAPI {
 
 	func uploadTranscript(itemID: String, transcript: YouTubeTranscript) async throws -> YouTubeTranscriptUploadResponse {
 		uploads.append((itemID, transcript))
+		if let uploadDelay { try await Task.sleep(for: uploadDelay) }
 		if let uploadFailure { throw uploadFailure }
 		return YouTubeTranscriptUploadResponse(itemId: itemID, updated: true, segmentCount: transcript.segments.count, chapterCount: 0, bytes: 1)
 	}

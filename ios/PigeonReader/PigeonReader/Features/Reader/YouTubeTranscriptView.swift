@@ -74,8 +74,12 @@ struct YouTubeTranscriptSection: View {
 					.buttonStyle(.bordered)
 					.accessibilityIdentifier("transcript-try-again")
 				}
-			case .ready(let transcript):
-				YouTubeTranscriptList(transcript: transcript, playback: playback, textScale: textScale)
+			case .needsUpdate:
+				Label(YouTubeTranscriptStore.needsUpdateMessage, systemImage: "arrow.down.app")
+					.foregroundStyle(.secondary)
+					.accessibilityIdentifier("transcript-needs-update")
+			case .ready(let layout):
+				YouTubeTranscriptList(layout: layout, playback: playback, textScale: textScale)
 					.id(key)
 			}
 		}
@@ -95,22 +99,28 @@ private struct TranscriptOpenID: Hashable {
 
 /// The transcript in a box of its own, so the article keeps scrolling past it.
 struct YouTubeTranscriptList: View {
-	let transcript: YouTubeTranscript
+	typealias Row = YouTubeTranscriptLayout.Row
+
+	let layout: YouTubeTranscriptLayout
 	let playback: YouTubePlaybackLink?
 	let textScale: Double
 
 	@State private var follow: YouTubeTranscriptFollowState
+	/// Bound to the transcript's own scroll view only: following playback
+	/// must never scroll the article around it.
+	@State private var position = ScrollPosition(idType: String.self)
+	/// Auto-follow runs only while the box is on screen.
+	@State private var isBoxVisible = false
 	@ScaledMetric(relativeTo: .body) private var boxHeight = 340
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-	private let rows: [Row]
-
-	init(transcript: YouTubeTranscript, playback: YouTubePlaybackLink?, textScale: Double) {
-		self.transcript = transcript
+	init(layout: YouTubeTranscriptLayout, playback: YouTubePlaybackLink?, textScale: Double) {
+		self.layout = layout
 		self.playback = playback
 		self.textScale = textScale
-		_follow = State(initialValue: YouTubeTranscriptFollowState(transcript: transcript))
-		rows = Row.rows(for: transcript)
+		// `starts` is shared with the layout (copy-on-write), so this is cheap
+		// on every re-render; SwiftUI keeps the first value anyway.
+		_follow = State(initialValue: YouTubeTranscriptFollowState(starts: layout.starts))
 	}
 
 	var body: some View {
@@ -118,29 +128,36 @@ struct YouTubeTranscriptList: View {
 			Text("Transcript")
 				.font(.custom("Bookerly-Bold", size: ReaderTypography.scaledPointSize(20, textScale: textScale), relativeTo: .title3))
 				.accessibilityAddTraits(.isHeader)
-			ScrollViewReader { proxy in
-				ScrollView {
-					LazyVStack(alignment: .leading, spacing: 2) {
-						ForEach(rows) { row in
-							rowView(row)
-						}
-					}
-					.padding(.vertical, 6)
-				}
-				.frame(height: min(boxHeight, 560))
-				.scrollIndicators(.visible)
-				.accessibilityIdentifier("transcript-list")
-				.onScrollPhaseChange { oldPhase, newPhase in
-					// Any scroll that is not our own pauses auto-scroll; the pause
-					// counts from when the reader lets go.
-					if Self.isReaderScroll(newPhase) || (Self.isReaderScroll(oldPhase) && newPhase == .idle) {
-						follow.userScrolled(now: .now)
+			ScrollView {
+				LazyVStack(alignment: .leading, spacing: 2) {
+					ForEach(layout.rows) { row in
+						rowView(row)
 					}
 				}
-				.background {
-					PlaybackTimeObserver(playback: playback) { time in
-						follow(time: time, proxy: proxy)
-					}
+				.scrollTargetLayout()
+				.padding(.vertical, 6)
+			}
+			.scrollPosition($position)
+			.frame(height: min(boxHeight, 560))
+			.scrollIndicators(.visible)
+			.accessibilityIdentifier("transcript-list")
+			.onScrollPhaseChange { oldPhase, newPhase in
+				// Any scroll that is not our own pauses auto-scroll; the pause
+				// counts from when the reader lets go.
+				if Self.isReaderScroll(newPhase) || (Self.isReaderScroll(oldPhase) && newPhase == .idle) {
+					follow.userScrolled(now: .now)
+				}
+			}
+			.onScrollVisibilityChange(threshold: 0.3) { visible in
+				isBoxVisible = visible
+				// Catch up with playback that moved on while the box was away.
+				if visible, let index = follow.activeIndex, follow.allowsAutoScroll(now: .now) {
+					scrollToSegment(index)
+				}
+			}
+			.background {
+				PlaybackTimeObserver(playback: playback) { time in
+					follow(time: time)
 				}
 			}
 			.overlay(alignment: .top) { Divider() }
@@ -215,49 +232,24 @@ struct YouTubeTranscriptList: View {
 		playback?.seek(to: time)
 	}
 
-	private func follow(time: Double, proxy: ScrollViewProxy) {
-		guard case .scroll(let index) = follow.update(time: time, now: .now) else { return }
+	private func follow(time: Double) {
+		guard case .scroll(let index) = follow.update(time: time, now: .now), isBoxVisible else { return }
+		scrollToSegment(index)
+	}
+
+	private func scrollToSegment(_ index: Int) {
 		let anchor = UnitPoint(x: 0.5, y: 1.0 / 3.0)
 		if reduceMotion {
-			proxy.scrollTo(Row.segmentID(index), anchor: anchor)
+			position.scrollTo(id: Row.segmentID(index), anchor: anchor)
 		} else {
 			withAnimation(.easeInOut(duration: 0.3)) {
-				proxy.scrollTo(Row.segmentID(index), anchor: anchor)
+				position.scrollTo(id: Row.segmentID(index), anchor: anchor)
 			}
 		}
 	}
 
 	private static func isReaderScroll(_ phase: ScrollPhase) -> Bool {
 		phase == .tracking || phase == .interacting || phase == .decelerating
-	}
-
-	struct Row: Identifiable {
-		enum Kind {
-			case chapter(YouTubeTranscript.Chapter)
-			case segment(Int, YouTubeTranscript.Segment)
-		}
-
-		let id: String
-		let kind: Kind
-
-		static func segmentID(_ index: Int) -> String { "s\(index)" }
-
-		/// Segments in order, each chapter just before the first segment at or
-		/// after its start (as the web view lays them out).
-		static func rows(for transcript: YouTubeTranscript) -> [Row] {
-			let chapters = transcript.sortedChapters
-			var rows: [Row] = []
-			rows.reserveCapacity(transcript.segments.count + chapters.count)
-			var chapterIndex = 0
-			for (index, segment) in transcript.segments.enumerated() {
-				while chapterIndex < chapters.count, chapters[chapterIndex].start <= segment.start {
-					rows.append(Row(id: "c\(chapterIndex)", kind: .chapter(chapters[chapterIndex])))
-					chapterIndex += 1
-				}
-				rows.append(Row(id: segmentID(index), kind: .segment(index, segment)))
-			}
-			return rows
-		}
 	}
 }
 
@@ -270,7 +262,9 @@ private struct PlaybackTimeObserver: View {
 	var body: some View {
 		Color.clear
 			.accessibilityHidden(true)
-			.onChange(of: playback?.currentTime) { _, time in
+			// `initial`: a transcript that appears while the video is already
+			// playing highlights the current line at once.
+			.onChange(of: playback?.currentTime, initial: true) { _, time in
 				if let time { onChange(time) }
 			}
 	}

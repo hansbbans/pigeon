@@ -25,8 +25,12 @@ final class YouTubeTranscriptStore {
 		case checking
 		/// Fetching from YouTube on this phone.
 		case fetching
-		case ready(YouTubeTranscript)
+		/// Laid out once here, so views never rebuild rows on a re-render.
+		case ready(YouTubeTranscriptLayout)
 		case failed(String)
+		/// The server holds a transcript in a newer format than this build reads.
+		/// Terminal: fetching and uploading a version 1 copy would replace it.
+		case needsUpdate
 
 		var isLoading: Bool { self == .checking || self == .fetching }
 	}
@@ -40,9 +44,15 @@ final class YouTubeTranscriptStore {
 	@ObservationIgnored private let uploadRetryDelays: [Duration]
 	@ObservationIgnored var apiProvider: @MainActor () -> (any YouTubeTranscriptAPI)? = { nil }
 	@ObservationIgnored private var tasks: [String: Task<Void, Never>] = [:]
-	@ObservationIgnored private(set) var uploads: [String: Task<Void, Never>] = [:]
+	@ObservationIgnored private(set) var uploads: [String: Upload] = [:]
 	@ObservationIgnored private var readyOrder: [String] = []
 	@ObservationIgnored private var generation = UUID()
+
+	/// An upload in flight; `id` lets only the task that owns the entry clear it.
+	struct Upload {
+		let id: UUID
+		let task: Task<Void, Never>
+	}
 
 	private static let logger = Logger(subsystem: "com.hans.pigeon.reader", category: "YouTubeTranscript")
 
@@ -82,6 +92,7 @@ final class YouTubeTranscriptStore {
 		let key = Self.key(for: article)
 		if let phase = phases[key], phase.isLoading { return }
 		if case .ready = phases[key] { return }
+		if phases[key] == .needsUpdate { return }
 		setPhase(.fetching, for: key)
 		let generation = generation
 		tasks[key] = Task { [weak self] in
@@ -93,7 +104,7 @@ final class YouTubeTranscriptStore {
 	func reset() {
 		generation = UUID()
 		for task in tasks.values { task.cancel() }
-		for task in uploads.values { task.cancel() }
+		for upload in uploads.values { upload.task.cancel() }
 		tasks = [:]
 		uploads = [:]
 		readyOrder = []
@@ -110,13 +121,12 @@ final class YouTubeTranscriptStore {
 		}
 		do {
 			if let stored = try await api.transcript(itemID: key) {
-				setPhase(.ready(stored.transcript), for: key, generation: generation)
+				setPhase(.ready(YouTubeTranscriptLayout(stored.transcript)), for: key, generation: generation)
 			} else {
 				setPhase(.idle, for: key, generation: generation)
 			}
 		} catch is YouTubeTranscriptFormatError {
-			// A newer format than this build reads: offer a fresh fetch instead.
-			setPhase(.idle, for: key, generation: generation)
+			setPhase(.needsUpdate, for: key, generation: generation)
 		} catch where isCancellation(error) {
 			setPhase(.idle, for: key, generation: generation)
 		} catch {
@@ -128,11 +138,21 @@ final class YouTubeTranscriptStore {
 	private func fetch(key: String, videoID: String, generation: UUID) async {
 		defer { finishTask(key: key, generation: generation) }
 		let api = apiProvider()
-		// Another device may have stored it since this item last synced. Any
-		// failure here just means fetching it ourselves.
-		if let api, let stored = try? await api.transcript(itemID: key) {
-			setPhase(.ready(stored.transcript), for: key, generation: generation)
-			return
+		// Another device may have stored it since this item last synced. A
+		// failure here just means fetching it ourselves, except a newer format,
+		// which a version 1 upload must not replace.
+		if let api {
+			do {
+				if let stored = try await api.transcript(itemID: key) {
+					setPhase(.ready(YouTubeTranscriptLayout(stored.transcript)), for: key, generation: generation)
+					return
+				}
+			} catch is YouTubeTranscriptFormatError {
+				setPhase(.needsUpdate, for: key, generation: generation)
+				return
+			} catch {
+				// Fall through to fetching.
+			}
 		}
 		guard self.generation == generation else { return }
 		guard Task.isCancelled == false else {
@@ -142,7 +162,7 @@ final class YouTubeTranscriptStore {
 		do {
 			let transcript = try await fetcher.fetchTranscript(videoID: videoID)
 			guard self.generation == generation else { return }
-			setPhase(.ready(transcript), for: key, generation: generation)
+			setPhase(.ready(YouTubeTranscriptLayout(transcript)), for: key, generation: generation)
 			if let api {
 				upload(transcript, key: key, api: api, generation: generation)
 			}
@@ -155,9 +175,10 @@ final class YouTubeTranscriptStore {
 	}
 
 	private func upload(_ transcript: YouTubeTranscript, key: String, api: any YouTubeTranscriptAPI, generation: UUID) {
-		uploads[key]?.cancel()
+		uploads[key]?.task.cancel()
 		let delays = uploadRetryDelays
-		uploads[key] = Task { [weak self] in
+		let id = UUID()
+		let task = Task { [weak self] in
 			var attempt = 0
 			while Task.isCancelled == false {
 				do {
@@ -172,9 +193,10 @@ final class YouTubeTranscriptStore {
 					attempt += 1
 				}
 			}
-			guard let self, self.generation == generation else { return }
+			guard let self, self.uploads[key]?.id == id else { return }
 			self.uploads[key] = nil
 		}
+		uploads[key] = Upload(id: id, task: task)
 	}
 
 	/// Only transient failures are retried. 413 (too large), 422 (not a video),
@@ -189,13 +211,16 @@ final class YouTubeTranscriptStore {
 	}
 
 	nonisolated static let loadFailureMessage = "The saved transcript didn't load."
+	nonisolated static let offlineMessage = "You appear to be offline."
+	nonisolated static let needsUpdateMessage = "Update Pigeon to see this transcript."
 
 	nonisolated static func fetchFailureMessage(for error: Error) -> String {
 		switch error as? YouTubeTranscriptError {
 		case .noTranscript: "YouTube has no captions for this video."
 		case .timedOut: "YouTube took too long to answer."
 		case .notAVideo: "This isn't a YouTube video."
-		case .unavailable, nil: isConnectivityFailure(error) ? "You appear to be offline." : "YouTube didn't share the transcript."
+		case .offline: offlineMessage
+		case .unavailable, nil: isConnectivityFailure(error) ? offlineMessage : "YouTube didn't share the transcript."
 		}
 	}
 
@@ -207,8 +232,15 @@ final class YouTubeTranscriptStore {
 		guard case .ready = phase else { return }
 		readyOrder.append(key)
 		while readyOrder.count > Self.maximumReadyTranscripts {
-			phases[readyOrder.removeFirst()] = nil
+			evict(key: readyOrder[0])
 		}
+	}
+
+	/// Drops a shown transcript from memory; the next view of it reads the
+	/// server (or fetches) again. An upload in flight carries on.
+	func evict(key: String) {
+		readyOrder.removeAll { $0 == key }
+		phases[key] = nil
 	}
 
 	private func finishTask(key: String, generation: UUID) {

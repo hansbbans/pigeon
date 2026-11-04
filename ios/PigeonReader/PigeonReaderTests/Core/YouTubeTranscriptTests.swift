@@ -100,7 +100,7 @@ struct YouTubeTranscriptTests {
 			segments: [.init(start: 0, text: "a"), .init(start: 10, text: "b"), .init(start: 20, text: "c")],
 			chapters: [.init(start: 10, title: "Two"), .init(start: 0, title: "One"), .init(start: 99, title: "After the end")],
 		)
-		#expect(YouTubeTranscriptList.Row.rows(for: transcript).map(\.id) == ["c0", "s0", "c1", "s1", "s2"])
+		#expect(YouTubeTranscriptLayout(transcript).rows.map(\.id) == ["c0", "s0", "c1", "s1", "s2"])
 	}
 
 	// MARK: - Decoding the signal

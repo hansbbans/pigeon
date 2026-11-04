@@ -83,6 +83,17 @@ class ScopeTests(unittest.TestCase):
                 self.assertEqual(classify("pigeon", [path]), {"native": True, "worker": True, "unknown": []})
         self.assertTrue(classify("pigeon", ["test/fixtures/api-contract/../email.eml"])["native"])
 
+    def test_pigeon_transcript_vectors_run_worker_and_native(self):
+        # The parser vectors are a PigeonReaderTests resource as well as a Worker test input.
+        path = "test/fixtures/transcript/defuddle-transcript-vectors.json"
+        self.assertEqual(classify("pigeon", [path]), {"native": True, "worker": True, "unknown": []})
+        self.assertEqual(classify("pigeon", [path, "src/browser-transcript.ts"]), {"native": True, "worker": True, "unknown": []})
+        # Other fixtures stay Worker-only, and look-alike directories are not shared.
+        for other in ["test/fixtures/reader/page.html", "test/fixtures/transcripts/x.json", "test/fixtures/transcript-old.json"]:
+            with self.subTest(path=other):
+                self.assertEqual(classify("pigeon", [other]), {"native": False, "worker": True, "unknown": []})
+        self.assertTrue(classify("pigeon", ["test/fixtures/transcript/../email.eml"])["native"])
+
     def test_empty_and_forced_scope_run_full_validation(self):
         for repo in ("pigeon", "todomd", "swole"):
             for paths, force in [([], False), (["README.md"], True)]:

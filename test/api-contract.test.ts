@@ -362,6 +362,14 @@ test('YouTube transcript: store one for a video, read it back, then sync the sig
 	await assertMatchesFixture(await state.request(`/api/v1/sync?limit=200&cursor=v1:${head}`), 'sync-transcript.response.json');
 });
 
+/**
+ * Fixtures the Worker already serves but the iOS suite does not decode yet, so
+ * an API-first PR can add fixtures before the iOS PR names them. That iOS PR
+ * names them in APIContractTests.swift and removes them here; everything not
+ * listed must be named by the iOS suite.
+ */
+const AWAITING_IOS_CONTRACT_TESTS = new Set<string>([]);
+
 test('every contract fixture is checked by the iOS contract suite', () => {
 	// The iOS suite names each fixture as a string literal. A fixture it never loads
 	// would let a Worker change pass the native job without iOS decoding it.
@@ -371,6 +379,8 @@ test('every contract fixture is checked by the iOS contract suite', () => {
 	);
 	const fixtures = readdirSync(FIXTURES).filter((name) => name !== 'README.md');
 	assert.ok(fixtures.length > 0, 'no contract fixtures found');
-	const unchecked = fixtures.filter((name) => !swift.includes(`"${name}"`));
+	const unchecked = fixtures.filter((name) => !swift.includes(`"${name}"`) && !AWAITING_IOS_CONTRACT_TESTS.has(name));
 	assert.deepEqual(unchecked, [], 'fixtures not referenced by APIContractTests.swift');
+	const stale = [...AWAITING_IOS_CONTRACT_TESTS].filter((name) => swift.includes(`"${name}"`) || !fixtures.includes(name));
+	assert.deepEqual(stale, [], 'remove these from AWAITING_IOS_CONTRACT_TESTS: iOS checks them now, or they no longer exist');
 });

@@ -180,7 +180,11 @@ nonisolated struct YouTubeTranscriptFollowState: Equatable, Sendable {
 	private(set) var lastUserScroll: Date?
 
 	init(transcript: YouTubeTranscript, cooldown: TimeInterval = Self.defaultCooldown) {
-		starts = transcript.segments.map(\.start)
+		self.init(starts: transcript.segments.map(\.start), cooldown: cooldown)
+	}
+
+	init(starts: [Double], cooldown: TimeInterval = Self.defaultCooldown) {
+		self.starts = starts
 		self.cooldown = cooldown
 	}
 
@@ -209,6 +213,54 @@ nonisolated struct YouTubeTranscriptFollowState: Equatable, Sendable {
 		lastUserScroll = now
 		_ = update(time: time, now: now)
 		return time
+	}
+}
+
+/// A transcript laid out for the list: chapters interleaved with segments,
+/// and the segment start times. Built once per transcript (by the store),
+/// so re-rendering a view costs nothing. Equal when the transcripts are.
+nonisolated struct YouTubeTranscriptLayout: Equatable, Sendable {
+	nonisolated struct Row: Identifiable, Sendable {
+		enum Kind: Sendable {
+			case chapter(YouTubeTranscript.Chapter)
+			case segment(Int, YouTubeTranscript.Segment)
+		}
+
+		let id: String
+		let kind: Kind
+
+		static func segmentID(_ index: Int) -> String { "s\(index)" }
+	}
+
+	let transcript: YouTubeTranscript
+	let rows: [Row]
+	let starts: [Double]
+
+	init(_ transcript: YouTubeTranscript) {
+		self.transcript = transcript
+		starts = transcript.segments.map(\.start)
+		rows = Self.rows(for: transcript)
+	}
+
+	static func == (lhs: Self, rhs: Self) -> Bool {
+		lhs.transcript == rhs.transcript
+	}
+
+	/// Segments in order, each chapter just before the first segment at or
+	/// after its start (as the web view lays them out).
+	static func rows(for transcript: YouTubeTranscript) -> [Row] {
+		let chapters = transcript.sortedChapters
+		var rows: [Row] = []
+		rows.reserveCapacity(transcript.segments.count + chapters.count)
+		var chapterIndex = 0
+		for (index, segment) in transcript.segments.enumerated() {
+			while chapterIndex < chapters.count, chapters[chapterIndex].start <= segment.start {
+				rows.append(Row(id: "c\(chapterIndex)", kind: .chapter(chapters[chapterIndex])))
+				chapterIndex += 1
+			}
+			rows.append(Row(id: Row.segmentID(index), kind: .segment(index, segment)))
+		}
+		return rows
 	}
 }
 

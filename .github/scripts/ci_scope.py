@@ -35,6 +35,9 @@ PIGEON_DOC_DIRS = {
     "04-storage", "05-rss-serving", "06-feed-management", "07-custom-parsing-rules", "08-testing",
 }
 
+# Test fixture directories bundled into PigeonReaderTests (see project.yml).
+PIGEON_SHARED_FIXTURE_DIRS = ("test/fixtures/api-contract/", "test/fixtures/transcript/")
+
 
 def classify(repo, paths, force_full=False):
     if repo not in RELEASE_TOOLING:
@@ -49,9 +52,10 @@ def classify(repo, paths, force_full=False):
         docs = valid and path.endswith(".md") and (path in ROOT_DOCS or doc_dir or path in {"SwoleMCP/README.md", "scripts/testflight-monitor.md"})
         if docs or path in RELEASE_TOOLING[repo]:
             continue
-        # Shared API contract fixtures are read by both the Worker tests and the
-        # iOS unit tests, so a change there must validate both sides.
-        if valid and repo == "pigeon" and path.startswith("test/fixtures/api-contract/"):
+        # Shared fixtures are read by both the Worker tests and the iOS unit
+        # tests (API contract responses; Defuddle transcript parser vectors),
+        # so a change there must validate both sides.
+        if valid and repo == "pigeon" and path.startswith(PIGEON_SHARED_FIXTURE_DIRS):
             native = worker = True
             continue
         # These backend inputs cannot change the native app. Other dependencies

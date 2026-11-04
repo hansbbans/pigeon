@@ -12,6 +12,8 @@ nonisolated enum YouTubeTranscriptError: Error, Equatable, Sendable {
 	case noTranscript
 	case timedOut
 	case unavailable
+	/// Every request YouTube was sent failed for lack of a connection.
+	case offline
 }
 
 /// Fetches a transcript on the phone: Defuddle's YouTube extractor runs with
@@ -42,9 +44,16 @@ final class YouTubeTranscriptFetcher: YouTubeTranscriptFetching {
 		guard let source = defuddleSource() else { throw YouTubeTranscriptError.unavailable }
 		let run = YouTubeTranscriptRun(transport: transport)
 		defer { run.tearDown() }
-		let raw = try await run.run(defuddleSource: source, videoID: videoID, timeout: timeout)
+		let raw: YouTubeTranscriptRun.RawResult
+		do {
+			raw = try await run.run(defuddleSource: source, videoID: videoID, timeout: timeout)
+		} catch where isCancellation(error) == false && run.wasOffline {
+			throw YouTubeTranscriptError.offline
+		}
+		// Defuddle swallows fetch failures and reports no transcript; tell the
+		// two apart by what the bridge saw.
 		guard let transcript = YouTubeTranscript.parseDefuddle(raw.transcript, language: raw.language) else {
-			throw YouTubeTranscriptError.noTranscript
+			throw run.wasOffline ? YouTubeTranscriptError.offline : YouTubeTranscriptError.noTranscript
 		}
 		return transcript
 	}
@@ -99,6 +108,9 @@ final class YouTubeTranscriptRun: NSObject, WKNavigationDelegate {
 			Task { @MainActor [weak self] in self?.fail(CancellationError()) }
 		}
 	}
+
+	/// True when requests failed for lack of a connection and none got an answer.
+	var wasOffline: Bool { bridge.wasOffline }
 
 	func tearDown() {
 		fail(CancellationError())
@@ -274,8 +286,15 @@ final class YouTubeFetchBridge: NSObject, WKScriptMessageHandlerWithReply {
 	private let transport: any YouTubeBridgeTransport
 	private var tasks: [Int: Task<Void, Never>] = [:]
 	private var requestCount = 0
-	private var receivedBytes = 0
+	/// Bytes received plus the full per-response allowance of every request in
+	/// flight, so concurrent requests cannot together exceed the run's total.
+	private var committedBytes = 0
+	private var answeredCount = 0
+	private var connectivityFailures = 0
 	private(set) var isClosed = false
+
+	var remainingBytes: Int { Self.maximumTotalBytes - committedBytes }
+	var wasOffline: Bool { connectivityFailures > 0 && answeredCount == 0 }
 
 	init(transport: any YouTubeBridgeTransport) {
 		self.transport = transport
@@ -314,17 +333,22 @@ final class YouTubeFetchBridge: NSObject, WKScriptMessageHandlerWithReply {
 			reply(nil, "Blocked")
 			return
 		}
+		let budget = min(Self.maximumResponseBytes, remainingBytes)
+		guard budget > 0 else {
+			reply(nil, "Too many bytes")
+			return
+		}
 		requestCount += 1
-		let budget = min(Self.maximumResponseBytes, Self.maximumTotalBytes - receivedBytes)
+		committedBytes += budget
 		let transport = transport
 		tasks[id] = Task { [weak self] in
 			var answer: [String: Any]?
 			var failure: String?
+			var used = 0
 			do {
-				guard budget > 0 else { throw URLError(.dataLengthExceedsMaximum) }
 				let (data, response) = try await transport.send(request, maximumBytes: budget)
 				try Task.checkCancellation()
-				self?.receivedBytes += data.count
+				used = data.count
 				answer = [
 					"status": response.statusCode,
 					"body": String(decoding: data, as: UTF8.self),
@@ -332,8 +356,16 @@ final class YouTubeFetchBridge: NSObject, WKScriptMessageHandlerWithReply {
 				]
 			} catch {
 				failure = isCancellation(error) ? "The transcript request ended" : "Network request failed"
+				if isCancellation(error) == false, isConnectivityFailure(error) {
+					self?.connectivityFailures += 1
+				}
 			}
-			self?.tasks[id] = nil
+			if let self {
+				// Keep what arrived; give back the rest of the reservation.
+				self.committedBytes -= budget - used
+				if answer != nil { self.answeredCount += 1 }
+				self.tasks[id] = nil
+			}
 			reply(answer, answer == nil ? failure : nil)
 		}
 	}
