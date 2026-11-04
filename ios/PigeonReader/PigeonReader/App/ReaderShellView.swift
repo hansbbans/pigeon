@@ -86,10 +86,8 @@ struct ReaderShellView: View {
 		}
 		.task(id: model.session?.storageIdentity) {
 			model.configurePlatformServices()
+			// Ends by sending links saved offline and extracting pending saves.
 			await model.prepareOfflineLibrary()
-			// Send links saved offline (here or from the share extension) and
-			// extract pending saves; also runs after every sync.
-			await model.processSavedItems()
 			await model.handleLocalDayChange()
 			await model.writeWidgetSnapshotOffMain()
 			if let action = ReaderNotificationManager.shared.consumePendingAction() {

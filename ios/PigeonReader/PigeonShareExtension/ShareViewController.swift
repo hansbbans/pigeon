@@ -201,7 +201,7 @@ private enum ShareSaver {
 	}
 
 	private static func queue(url: URL, title: String?) -> Outcome {
-		guard PendingSavedLinkQueue.enqueue(url: url, title: title) != nil else {
+		guard PendingSavedLinkQueue.shared.enqueue(url: url, title: title) != nil else {
 			return .rejected("Only web links can be saved.")
 		}
 		return .queued

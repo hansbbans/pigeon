@@ -48,6 +48,17 @@ nonisolated struct SavedArticleMetadata: Codable, Equatable, Hashable, Sendable 
 		extractionState.flatMap(SavedExtractionState.init(rawValue:))
 	}
 
+	/// `existing` with its extraction state replaced, or metadata holding only that state.
+	static func with(state: SavedExtractionState, from existing: SavedArticleMetadata?) -> SavedArticleMetadata {
+		var metadata = existing ?? SavedArticleMetadata(stateOnly: state)
+		metadata.extractionState = state.rawValue
+		return metadata
+	}
+
+	private init(stateOnly state: SavedExtractionState) {
+		extractionState = state.rawValue
+	}
+
 	/// The Worker sends ISO 8601 UTC, with or without fractional seconds.
 	static func parseDate(_ value: String) -> Date? {
 		let formatter = ISO8601DateFormatter()
@@ -57,7 +68,7 @@ nonisolated struct SavedArticleMetadata: Codable, Equatable, Hashable, Sendable 
 		return formatter.date(from: value)
 	}
 
-	private static func safeWebURL(_ url: URL) -> URL? {
+	static func safeWebURL(_ url: URL) -> URL? {
 		guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https", url.host != nil else {
 			return nil
 		}
@@ -141,16 +152,16 @@ extension Recommendation {
 	/// The local copy after this device uploaded an extraction.
 	nonisolated func applyingSavedContent(_ content: SavedItemContent) -> Recommendation {
 		let trimmedTitle = content.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-		var metadata = saved ?? SavedArticleMetadata(extractionState: SavedExtractionState.done.rawValue, publishedAt: nil, imageURL: nil, siteName: nil)
-		metadata?.extractionState = SavedExtractionState.done.rawValue
-		if let image = content.image.flatMap(URL.init(string:)), metadata?.imageURL == nil {
-			metadata?.imageURL = image
+		var metadata = SavedArticleMetadata.with(state: .done, from: saved)
+		if metadata.imageURL == nil,
+			let image = content.image.flatMap(URL.init(string:)).flatMap(SavedArticleMetadata.safeWebURL) {
+			metadata.imageURL = image
 		}
 		if let site = content.site?.trimmingCharacters(in: .whitespacesAndNewlines), site.isEmpty == false {
-			metadata?.siteName = site
+			metadata.siteName = site
 		}
 		if let published = content.published.flatMap(SavedArticleMetadata.parseDate) {
-			metadata?.publishedAt = published
+			metadata.publishedAt = published
 		}
 		var updatedLength = length ?? ArticleLength(wordCount: nil, mediaKind: content.mediaKind ?? "text", durationSeconds: nil)
 		if let wordCount = content.wordCount { updatedLength?.wordCount = wordCount }
@@ -199,7 +210,7 @@ extension Recommendation {
 			explanation: "Saved to Read It Later",
 			learningState: "Saved",
 			length: isVideo ? ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: nil) : nil,
-			saved: SavedArticleMetadata(extractionState: state.rawValue, publishedAt: nil, imageURL: nil, siteName: nil),
+			saved: SavedArticleMetadata.with(state: state, from: nil),
 		)
 	}
 }

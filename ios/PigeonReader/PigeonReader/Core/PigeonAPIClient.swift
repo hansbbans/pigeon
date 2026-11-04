@@ -203,21 +203,11 @@ struct PigeonAPIClient: Sendable {
 		async let unreadCounts = readerUnreadCounts()
 		async let starredUnreadCount = unreadCountIfAvailable(in: "user/-/state/com.google/starred")
 		async let todayUnreadCount = unreadCountIfAvailable(on: bounds)
-		let resolvedSubscriptions = try await subscriptions
-		var todayCount = try await todayUnreadCount
-		// Today counts the reading list, which includes Read It Later. Saved
-		// items never appear in Today, so take the ones saved today back out.
-		if let today = todayCount, today > 0,
-			let saved = resolvedSubscriptions.first(where: \.isSavedFeed) {
-			if let savedToday = try await unreadCountIfAvailable(in: saved.id, olderThanUnix: max(bounds.startSeconds - 1, 0)) {
-				todayCount = max(today - savedToday, 0)
-			}
-		}
 		return try await ReaderNavigationSnapshot(
-			subscriptions: resolvedSubscriptions,
+			subscriptions: subscriptions,
 			unreadCounts: unreadCounts,
 			starredUnreadCount: starredUnreadCount,
-			todayUnreadCount: todayCount,
+			todayUnreadCount: todayUnreadCount,
 		)
 	}
 
@@ -292,7 +282,9 @@ struct PigeonAPIClient: Sendable {
 	}
 
 	func readerUnreadCounts() async throws -> [ReaderUnreadCount] {
-		let (data, response) = try await requestJSON(path: "reader/api/0/unread-count")
+		var components = try endpointComponents(path: "reader/api/0/unread-count")
+		components.queryItems = [Self.excludeSavedFeedItem]
+		let (data, response) = try await requestJSON(components: components)
 		_ = response
 		return try decoder.decode(ReaderUnreadCountResponse.self, from: data).unreadCounts
 	}
@@ -307,6 +299,7 @@ struct PigeonAPIClient: Sendable {
 		var queryItems = [
 			URLQueryItem(name: "s", value: streamID),
 			URLQueryItem(name: "n", value: String(min(max(limit, 1), 1_000))),
+			Self.excludeSavedFeedItem,
 		]
 		if let excludeTag {
 			queryItems.append(URLQueryItem(name: "xt", value: excludeTag))
@@ -330,6 +323,7 @@ struct PigeonAPIClient: Sendable {
 		var queryItems = [
 			URLQueryItem(name: "s", value: streamID),
 			URLQueryItem(name: "n", value: String(min(max(limit, 1), 1_000))),
+			Self.excludeSavedFeedItem,
 		]
 		if let excludeTag {
 			queryItems.append(URLQueryItem(name: "xt", value: excludeTag))
@@ -418,14 +412,9 @@ struct PigeonAPIClient: Sendable {
 			}
 		}
 
-		// Read It Later items live only in their own section. The reading list
-		// and folder streams still return them for older clients, so drop them
-		// here; a single feed's stream and Starred keep them.
-		let keepsSavedItems = Self.streamKeepsSavedItems(streamID)
 		let recommendations = orderedReferences.compactMap {
 			recommendationsByID[ReaderArticleIdentity.normalized($0.id)]
 		}.filter { recommendation in
-			guard keepsSavedItems || recommendation.isSaved == false else { return false }
 			guard let dayBounds else { return true }
 			return dayBounds.contains(recommendation.receivedAt)
 		}
@@ -436,9 +425,10 @@ struct PigeonAPIClient: Sendable {
 		)
 	}
 
-	static func streamKeepsSavedItems(_ streamID: String) -> Bool {
-		streamID.hasPrefix("feed/") || streamID == "user/-/state/com.google/starred"
-	}
+	/// Pigeon's `xs=saved`: the reading-list, read, starred and folder streams
+	/// and the reading-list unread total leave out Read It Later, which this app
+	/// lists in its own section. The saved feed's own `feed/<id>` is unaffected.
+	static let excludeSavedFeedItem = URLQueryItem(name: "xs", value: "saved")
 
 	/// Fetches bodies for `itemIDs` in chunks of `streamItemContentChunkSize`, running at
 	/// most `maximumConcurrentContentRequests` chunks at once. Result order is unspecified.
@@ -518,9 +508,9 @@ struct PigeonAPIClient: Sendable {
 		}
 	}
 
-	private func unreadCountIfAvailable(in streamID: String, olderThanUnix: Int? = nil) async throws -> Int? {
+	private func unreadCountIfAvailable(in streamID: String) async throws -> Int? {
 		do {
-			return try await unreadItemCount(streamID: streamID, olderThanUnix: olderThanUnix)
+			return try await unreadCount(in: streamID)
 		} catch is CancellationError {
 			throw CancellationError()
 		} catch {

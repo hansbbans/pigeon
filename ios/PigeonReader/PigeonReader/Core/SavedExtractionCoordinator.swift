@@ -126,6 +126,23 @@ final class SavedExtractionCoordinator {
 		startNext()
 	}
 
+	/// Moves an item to the front of the queue, keeping its attempt count. A
+	/// running item is left alone.
+	func prioritize(_ target: Target, scope: String) {
+		guard running[target.itemID] == nil else { return }
+		queue.removeAll { $0.target.itemID == target.itemID }
+		queue.insert((target, scope), at: 0)
+		startNext()
+	}
+
+	func resetAttempts(itemID: String, scope: String) {
+		attempts.clear(Self.attemptKey(scope: scope, itemID: itemID))
+	}
+
+	func attemptCount(itemID: String, scope: String) -> Int {
+		attempts.attempts(for: Self.attemptKey(scope: scope, itemID: itemID))
+	}
+
 	func cancelAll() {
 		generation = UUID()
 		queue.removeAll()

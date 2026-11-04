@@ -208,7 +208,7 @@ nonisolated struct ReaderNavigationSnapshot: Sendable {
 	let subscriptions: [ReaderSubscription]
 	let unreadCounts: [ReaderUnreadCount]
 	let starredUnreadCount: Int?
-	/// Excludes Read It Later items saved today.
+	/// Requested with `xs=saved`, so Read It Later is already left out.
 	let todayUnreadCount: Int?
 
 	var savedSubscription: ReaderSubscription? {
@@ -220,9 +220,8 @@ nonisolated struct ReaderNavigationSnapshot: Sendable {
 		return unreadCounts.first(where: { $0.id == savedSubscription.id })?.count ?? 0
 	}
 
-	/// The reading-list total without the Read It Later feed.
-	var unreadCountExcludingSaved: Int {
-		let readingList = unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0
-		return max(readingList - savedUnreadCount, 0)
+	/// The reading-list total; `xs=saved` already leaves Read It Later out.
+	var readingListUnreadCount: Int {
+		unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0
 	}
 }

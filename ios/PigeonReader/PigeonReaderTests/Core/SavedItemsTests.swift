@@ -90,7 +90,18 @@ struct SavedItemsTests {
 		#expect(extracted.updatingSaved(saved: SavedArticleMetadata(extractionState: "pending", publishedAt: nil, imageURL: nil, siteName: nil)).savedState == .done)
 	}
 
-	@Test func placeholderUsesTheWorkersHostAndPathTitle() throws {
+	@Test func uploadedImagesMustBeWebURLs() {
+		let pending = Self.saved("a", html: "", state: .pending)
+		let unsafe = pending.applyingSavedContent(SavedItemContent(html: "<p>B</p>", image: "javascript:alert(1)"))
+		#expect(unsafe.saved?.imageURL == nil)
+		#expect(unsafe.saved?.state == .done)
+		let safe = pending.applyingSavedContent(SavedItemContent(html: "<p>B</p>", image: "https://example.com/a.jpg"))
+		#expect(safe.saved?.imageURL?.absoluteString == "https://example.com/a.jpg")
+		#expect(SavedArticleMetadata.with(state: .failed, from: nil).state == .failed)
+		#expect(SavedArticleMetadata.with(state: .pending, from: safe.saved).imageURL == safe.saved?.imageURL)
+	}
+
+		@Test func placeholderUsesTheWorkersHostAndPathTitle() throws {
 		let response = SavedItemResponse(
 			id: "abde2a43-22dc-8734-9049-5cd424e03007",
 			readerId: "tag:google.com,2005:reader/item/0000000000000005",
@@ -142,7 +153,7 @@ struct SavedItemsTests {
 		#expect(smartIDs.firstIndex(of: "saved") == smartIDs.firstIndex(of: "starred").map { $0 + 1 })
 	}
 
-	@Test func snapshotCountsLeaveReadItLaterOutOfTheReadingList() {
+	@Test func snapshotReadsTheSavedFeedsOwnCount() {
 		let snapshot = ReaderNavigationSnapshot(
 			subscriptions: [ReaderSubscription(id: "feed/4", title: "Read It Later", url: "https://pigeon.test/feed/pigeon:saved")],
 			unreadCounts: [
@@ -153,7 +164,8 @@ struct SavedItemsTests {
 			todayUnreadCount: 4,
 		)
 		#expect(snapshot.savedUnreadCount == 3)
-		#expect(snapshot.unreadCountExcludingSaved == 7)
+		// Requested with xs=saved: the server's reading-list total already leaves it out.
+		#expect(snapshot.readingListUnreadCount == 10)
 	}
 
 	@Test func cachedNavigationFromOlderBuildsGainsTheSection() throws {
@@ -201,6 +213,28 @@ struct SavedItemsTests {
 		#expect(keychain.items[FakeKeychain.Key(group: "TEAM.com.hans.pigeon.reader")] == nil)
 	}
 
+	@Test func anyGroupErrorFallsBackToThePrivateItem() throws {
+		let keychain = FakeKeychain()
+		keychain.copyFailureGroups = ["group.com.hans.pigeon.reader"]
+		keychain.missingEntitlementGroups = ["group.com.hans.pigeon.reader"]
+		keychain.items[FakeKeychain.Key(group: "TEAM.com.hans.pigeon.reader")] = Data("legacy".utf8)
+		let store = SharedSessionKeychain(keychain: keychain, accessGroup: "group.com.hans.pigeon.reader")
+		#expect(try store.load() == Data("legacy".utf8), "A failing group read must not look signed out")
+	}
+
+	@Test func aFailedMigrationKeepsThePrivateItem() throws {
+		let keychain = FakeKeychain()
+		keychain.addFailureStatus = errSecInteractionNotAllowed
+		keychain.items[FakeKeychain.Key(group: "TEAM.com.hans.pigeon.reader")] = Data("legacy".utf8)
+		let store = SharedSessionKeychain(keychain: keychain, accessGroup: "group.com.hans.pigeon.reader")
+		#expect(try store.load() == Data("legacy".utf8))
+		#expect(keychain.items[FakeKeychain.Key(group: "TEAM.com.hans.pigeon.reader")] == Data("legacy".utf8))
+		keychain.addFailureStatus = nil
+		#expect(try store.load() == Data("legacy".utf8))
+		#expect(keychain.items[FakeKeychain.Key(group: "group.com.hans.pigeon.reader")] == Data("legacy".utf8))
+		#expect(keychain.items[FakeKeychain.Key(group: "TEAM.com.hans.pigeon.reader")] == nil)
+	}
+
 	@Test func savingAndRemovingUseTheSharedGroup() throws {
 		let keychain = FakeKeychain()
 		let store = SharedSessionKeychain(keychain: keychain, accessGroup: "group.com.hans.pigeon.reader")
@@ -239,20 +273,63 @@ struct SavedItemsTests {
 	// MARK: - Offline share queue
 
 	@Test func queueDedupesByURLAndDropsSentLinks() throws {
-		let defaults = try #require(UserDefaults(suiteName: "pigeon-saved-queue-\(UUID().uuidString)"))
+		let queue = Self.temporaryQueue()
 		let first = try #require(URL(string: "https://example.com/a"))
 		let second = try #require(URL(string: "https://example.com/b"))
-		let queued = try #require(PendingSavedLinkQueue.enqueue(url: first, title: "A", defaults: defaults))
-		PendingSavedLinkQueue.enqueue(url: second, title: nil, defaults: defaults)
-		let requeued = try #require(PendingSavedLinkQueue.enqueue(url: first, title: "A again", defaults: defaults))
+		let start = Date(timeIntervalSince1970: 1_800_000_000)
+		let queued = try #require(queue.enqueue(url: first, title: "A", now: start))
+		queue.enqueue(url: second, title: nil, now: start.addingTimeInterval(1))
+		let requeued = try #require(queue.enqueue(url: first, title: "A again", now: start.addingTimeInterval(2)))
 
 		#expect(requeued.id == queued.id)
-		#expect(PendingSavedLinkQueue.all(defaults: defaults).map(\.url) == [second, first])
-		#expect(PendingSavedLinkQueue.all(defaults: defaults).last?.title == "A again")
-		#expect(PendingSavedLinkQueue.enqueue(url: try #require(URL(string: "file:///tmp/a")), title: nil, defaults: defaults) == nil)
+		#expect(queue.all().map(\.url) == [second, first])
+		#expect(queue.all().last?.title == "A again")
+		#expect(queue.enqueue(url: try #require(URL(string: "file:///tmp/a")), title: nil) == nil)
 
-		PendingSavedLinkQueue.remove(ids: [queued.id], defaults: defaults)
-		#expect(PendingSavedLinkQueue.all(defaults: defaults).map(\.url) == [second])
+		queue.remove(ids: [queued.id])
+		#expect(queue.all().map(\.url) == [second])
+	}
+
+	/// The app and the share extension are separate processes: each writes its
+	/// own file, so concurrent writers and a flush never drop a link.
+	@Test func concurrentWritersNeverDropALink() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-queue-race-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let urls = try (0..<60).map { try #require(URL(string: "https://example.com/\($0)")) }
+		let flushed = PendingSavedLinkQueue(directory: directory)
+		flushed.enqueue(url: try #require(URL(string: "https://example.com/flushed")), title: nil)
+		let flushedIDs = Set(flushed.all().map(\.id))
+
+		await withTaskGroup(of: Void.self) { group in
+			for (index, url) in urls.enumerated() {
+				group.addTask {
+					// A separate instance per writer, as a separate process would have.
+					PendingSavedLinkQueue(directory: directory).enqueue(url: url, title: "\(index)")
+				}
+			}
+			group.addTask {
+				PendingSavedLinkQueue(directory: directory).remove(ids: flushedIDs)
+			}
+		}
+
+		let remaining = PendingSavedLinkQueue(directory: directory).all()
+		#expect(Set(remaining.map(\.url)) == Set(urls))
+	}
+
+	@Test func queueKeepsTheNewestLinksWithinItsLimit() throws {
+		let queue = Self.temporaryQueue()
+		let start = Date(timeIntervalSince1970: 1_800_000_000)
+		for index in 0..<(PendingSavedLinkQueue.limit + 3) {
+			queue.enqueue(url: try #require(URL(string: "https://example.com/\(index)")), title: nil, now: start.addingTimeInterval(Double(index)))
+		}
+		let links = queue.all()
+		#expect(links.count == PendingSavedLinkQueue.limit)
+		#expect(links.first?.url.absoluteString == "https://example.com/3")
+	}
+
+	private static func temporaryQueue() -> PendingSavedLinkQueue {
+		PendingSavedLinkQueue(directory: FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-saved-queue-\(UUID().uuidString)", directoryHint: .isDirectory))
 	}
 
 	@Test func onlyRefusedLinksLeaveTheQueueOnFailure() {
@@ -326,10 +403,15 @@ final class FakeKeychain: KeychainItemAccessing, @unchecked Sendable {
 
 	var items: [Key: Data] = [:]
 	var missingEntitlementGroups: Set<String> = []
+	var copyFailureGroups: Set<String> = []
+	var addFailureStatus: OSStatus?
 	private(set) var addCount = 0
 	private(set) var deleteCount = 0
 
 	func copyItem(service: String, account: String, accessGroup: String?) throws -> KeychainItem? {
+		if let accessGroup, copyFailureGroups.contains(accessGroup) {
+			throw KeychainAccessError(status: errSecMissingEntitlement)
+		}
 		let match = items
 			.filter { $0.key.service == service && $0.key.account == account && (accessGroup == nil || $0.key.group == accessGroup) }
 			.sorted { ($0.key.group ?? "") < ($1.key.group ?? "") }
@@ -341,6 +423,7 @@ final class FakeKeychain: KeychainItemAccessing, @unchecked Sendable {
 		if let accessGroup, missingEntitlementGroups.contains(accessGroup) {
 			throw KeychainAccessError(status: errSecMissingEntitlement)
 		}
+		if let addFailureStatus { throw KeychainAccessError(status: addFailureStatus) }
 		let key = Key(group: accessGroup, service: service, account: account)
 		guard items[key] == nil else { throw KeychainAccessError(status: errSecDuplicateItem) }
 		addCount += 1

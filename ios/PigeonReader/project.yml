@@ -106,7 +106,7 @@ targets:
     info:
       path: PigeonShareExtension/Info.plist
       properties:
-        CFBundleDisplayName: Pigeon
+        CFBundleDisplayName: Save to Pigeon
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:

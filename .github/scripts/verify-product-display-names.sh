@@ -26,4 +26,4 @@ verify_display_name() {
 
 verify_display_name PigeonReader ios/PigeonReader/PigeonReader/Resources/Info.plist Pigeon
 verify_display_name PigeonWidgets ios/PigeonReader/PigeonWidgets/Info.plist "Pigeon Widgets"
-verify_display_name PigeonShareExtension ios/PigeonReader/PigeonShareExtension/Info.plist "Add to Pigeon"
+verify_display_name PigeonShareExtension ios/PigeonReader/PigeonShareExtension/Info.plist "Save to Pigeon"

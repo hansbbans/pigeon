@@ -253,10 +253,12 @@ final class ReaderAppModel {
 	private var isFlushingPendingSavedLinks = false
 	private var locallySavedArticles: [String: Recommendation] = [:]
 	private let savedExtraction: SavedExtractionCoordinator
-	/// The app group defaults shared with the share extension (offline save queue).
-	private let sharedDefaults: UserDefaults
+	/// Links saved while offline, shared with the share extension.
+	private let pendingSavedLinks: PendingSavedLinkQueue
+	/// Item IDs with a queued `remove_saved`; snapshots must not bring them back.
+	private var pendingSavedRemovalIDs: Set<String> = []
 	private let savedPreferencesDefaults: UserDefaults
-	private var savedPersistenceSyncTask: Task<Void, Never>?
+	private var savedPersistenceSyncID: UUID?
 	/// Read It Later's Text/Video and length filters, persisted on this device.
 	var savedListFilter: SavedListFilter {
 		didSet {
@@ -412,7 +414,7 @@ final class ReaderAppModel {
 		readerTypography: ReaderTypographySettings? = nil,
 		keyboardShortcuts: ReaderKeyboardShortcutSettings? = nil,
 		savedPreferencesDefaults: UserDefaults = .standard,
-		sharedDefaults: UserDefaults = PigeonSharedData.defaults,
+		pendingSavedLinks: PendingSavedLinkQueue = .shared,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
@@ -426,7 +428,7 @@ final class ReaderAppModel {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
 		self.savedPreferencesDefaults = savedPreferencesDefaults
-		self.sharedDefaults = sharedDefaults
+		self.pendingSavedLinks = pendingSavedLinks
 		self.savedListFilter = SavedListFilter.load(from: savedPreferencesDefaults)
 		self.readerModeStore = readerModeStore
 		self.defaultArticleView = readerModeStore.defaultArticleView
@@ -796,9 +798,9 @@ final class ReaderAppModel {
 			foregroundAppearanceTask = nil
 			cancelSceneBackgroundFlush()
 			savedExtraction.cancelAll()
-			savedPersistenceSyncTask?.cancel()
-			savedPersistenceSyncTask = nil
+			savedPersistenceSyncID = nil
 			locallySavedArticles = [:]
+			pendingSavedRemovalIDs = []
 			sessionGeneration = UUID()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
@@ -1478,7 +1480,7 @@ final class ReaderAppModel {
 		guard inFlightSavedLinks.insert(key).inserted else { return .alreadySaving }
 		defer { inFlightSavedLinks.remove(key) }
 		guard let apiClient, let context = accountContext(for: apiClient) else {
-			PendingSavedLinkQueue.enqueue(url: destination.url, title: title, defaults: sharedDefaults)
+			pendingSavedLinks.enqueue(url: destination.url, title: title)
 			return .queued
 		}
 		// Leaving the article cancels the caller; the save itself must still land.
@@ -1494,7 +1496,7 @@ final class ReaderAppModel {
 				SavedLinkFailure.classify(statusCode: statusCode) == .rejected {
 				throw SaveForLaterError(message: error.localizedDescription)
 			}
-			PendingSavedLinkQueue.enqueue(url: destination.url, title: title, defaults: sharedDefaults)
+			pendingSavedLinks.enqueue(url: destination.url, title: title)
 			return .queued
 		}
 	}
@@ -1505,7 +1507,7 @@ final class ReaderAppModel {
 		guard isFlushingPendingSavedLinks == false,
 			let apiClient,
 			let context = accountContext(for: apiClient) else { return }
-		let links = PendingSavedLinkQueue.all(defaults: sharedDefaults)
+		let links = pendingSavedLinks.all()
 		guard links.isEmpty == false else { return }
 		isFlushingPendingSavedLinks = true
 		defer { isFlushingPendingSavedLinks = false }
@@ -1513,7 +1515,10 @@ final class ReaderAppModel {
 		for link in links {
 			guard isCurrentAccountOperation(context) else { break }
 			do {
-				let response = try await apiClient.saveLink(url: link.url, title: link.title)
+				// A cancelled caller (a sync that was superseded) must not abort a
+				// request already on its way; the link stays queued if it fails.
+				let request = Task { @MainActor in try await apiClient.saveLink(url: link.url, title: link.title) }
+				let response = try await request.value
 				finished.insert(link.id)
 				if isCurrentAccountOperation(context) {
 					applySavedResponse(response, title: link.title, receivedAt: link.createdAt)
@@ -1527,7 +1532,7 @@ final class ReaderAppModel {
 				break
 			}
 		}
-		PendingSavedLinkQueue.remove(ids: finished, defaults: sharedDefaults)
+		pendingSavedLinks.remove(ids: finished)
 	}
 
 	/// Launch and post-sync work: send queued saves, then extract pending items.
@@ -1550,23 +1555,19 @@ final class ReaderAppModel {
 		savedExtraction.isExtracting(id)
 	}
 
-	/// Opening a pending item moves it to the front of the queue.
+	/// Opening a pending item moves it to the front of the queue. It keeps its
+	/// attempt count, so a page that always fails still reaches the limit.
 	func prioritizeSavedExtraction(for article: Recommendation) {
 		guard article.savedState == .pending,
 			let session,
-			let target = savedExtractionTarget(for: article),
-			savedExtraction.isExtracting(article.id) == false else { return }
-		savedExtraction.retry(target, scope: session.storageIdentity)
+			let target = savedExtractionTarget(for: article) else { return }
+		savedExtraction.prioritize(target, scope: session.storageIdentity)
 	}
 
 	/// "Try again" on an item whose extraction failed.
 	func retrySavedExtraction(_ article: Recommendation) {
 		guard let session, let target = savedExtractionTarget(for: article) else { return }
-		updateSavedArticle(article.id) { current in
-			var metadata = current.saved ?? SavedArticleMetadata(extractionState: SavedExtractionState.pending.rawValue, publishedAt: nil, imageURL: nil, siteName: nil)
-			metadata?.extractionState = SavedExtractionState.pending.rawValue
-			return current.updatingSaved(saved: metadata)
-		}
+		updateSavedArticle(article.id) { $0.updatingSaved(saved: SavedArticleMetadata.with(state: .pending, from: $0.saved)) }
 		savedExtraction.retry(target, scope: session.storageIdentity)
 	}
 
@@ -1586,6 +1587,12 @@ final class ReaderAppModel {
 		}
 		let mutation = OfflineMutation(kind: .removeSaved, itemIds: [article.id])
 		guard await enqueueOfflineMutation(mutation) else { return false }
+		let current = self.article(withId: article.id) ?? article
+		if current.isRead == false {
+			// Read It Later and, for a starred item, Starred lose an unread row.
+			applyNavigationCountDeltas(navigationCountDeltas(for: current, fromRead: false, toRead: true))
+		}
+		pendingSavedRemovalIDs.formUnion(ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId))
 		locallySavedArticles[article.id] = nil
 		for collectionID in articleCache.keys {
 			guard let articles = articleCache[collectionID], articles.contains(where: { articlesMatch($0, article) }) else { continue }
@@ -1601,7 +1608,6 @@ final class ReaderAppModel {
 				preferredCompactColumn = .content
 			}
 		}
-		refreshSavedNavigationCount()
 		if let accountID = session?.storageIdentity {
 			try? await offlineStore.removeArticles(ids: [article.id], accountID: accountID)
 		}
@@ -1627,12 +1633,7 @@ final class ReaderAppModel {
 			updateSavedArticle(target.itemID) { $0.applyingSavedContent(content) }
 			scheduleSavedPersistenceSync()
 		case .failed:
-			updateSavedArticle(target.itemID) { current in
-				var metadata = current.saved
-					?? SavedArticleMetadata(extractionState: SavedExtractionState.failed.rawValue, publishedAt: nil, imageURL: nil, siteName: nil)
-				metadata?.extractionState = SavedExtractionState.failed.rawValue
-				return current.updatingSaved(saved: metadata)
-			}
+			updateSavedArticle(target.itemID) { $0.updatingSaved(saved: SavedArticleMetadata.with(state: .failed, from: $0.saved)) }
 			scheduleSavedPersistenceSync()
 		case .willRetry:
 			return
@@ -1644,9 +1645,20 @@ final class ReaderAppModel {
 		let savedID = ReaderSection.saved.rawValue
 		let existing = article(withId: response.id) ?? article(withId: response.readerId)
 		let state = response.extractionState ?? .pending
+		if state == .pending, let session {
+			// A re-save of a failed link is pending again: give it fresh attempts.
+			savedExtraction.resetAttempts(itemID: response.id, scope: session.storageIdentity)
+			if let existing, existing.id != response.id {
+				savedExtraction.resetAttempts(itemID: existing.id, scope: session.storageIdentity)
+			}
+		}
 		let article: Recommendation
 		if let existing {
-			article = existing.updatingSaved(receivedAt: receivedAt, isRead: false)
+			article = existing.updatingSaved(
+				receivedAt: receivedAt,
+				isRead: false,
+				saved: SavedArticleMetadata.with(state: state, from: existing.saved),
+			)
 		} else {
 			article = Recommendation.savedPlaceholder(response: response, title: title, receivedAt: receivedAt, state: state)
 		}
@@ -1671,6 +1683,7 @@ final class ReaderAppModel {
 		let savedID = ReaderSection.saved.rawValue
 		// The saved list is the whole sync-backed feed, so its unread rows are the count.
 		defer { refreshSavedNavigationCount() }
+		dropPendingSavedRemovals()
 		guard locallySavedArticles.isEmpty == false, let articles = articleCache[savedID] else { return }
 		var missing: [Recommendation] = []
 		for (id, local) in locallySavedArticles {
@@ -1682,6 +1695,24 @@ final class ReaderAppModel {
 		}
 		guard missing.isEmpty == false else { return }
 		setArticles(articles + missing, for: savedID)
+	}
+
+	/// A removal waits in the outbox until the server confirms it; until then a
+	/// snapshot or page that still has the item must not show it again.
+	private func dropPendingSavedRemovals() {
+		guard pendingSavedRemovalIDs.isEmpty == false else { return }
+		for collectionID in articleCache.keys {
+			guard let articles = articleCache[collectionID] else { continue }
+			let kept = articles.filter { isPendingSavedRemoval($0) == false }
+			if kept.count != articles.count {
+				articleCache[collectionID] = kept
+			}
+		}
+	}
+
+	private func isPendingSavedRemoval(_ article: Recommendation) -> Bool {
+		pendingSavedRemovalIDs.isEmpty == false
+			&& ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId).isDisjoint(with: pendingSavedRemovalIDs) == false
 	}
 
 	private func updateSavedArticle(_ itemID: String, _ transform: (Recommendation) -> Recommendation) {
@@ -1733,12 +1764,17 @@ final class ReaderAppModel {
 
 	/// Persist local saves and extractions through a sync shortly after the
 	/// last one, coalescing a burst of saves into one sync.
+	///
+	/// A newer request only supersedes one still waiting out its delay; a sync
+	/// that has started is never cancelled (that would abort its queue flush).
 	private func scheduleSavedPersistenceSync() {
 		guard offlineSynchronizationEnabled else { return }
-		savedPersistenceSyncTask?.cancel()
-		savedPersistenceSyncTask = Task { @MainActor [weak self] in
+		let requestID = UUID()
+		savedPersistenceSyncID = requestID
+		Task { @MainActor [weak self] in
 			try? await Task.sleep(for: .seconds(3))
-			guard Task.isCancelled == false, let self else { return }
+			guard let self, self.savedPersistenceSyncID == requestID else { return }
+			self.savedPersistenceSyncID = nil
 			await self.prepareOfflineLibrary()
 		}
 	}
@@ -2632,7 +2668,7 @@ final class ReaderAppModel {
 					forYou: forYouCount,
 					today: snapshot.todayUnreadCount ?? previousTodayCount,
 					// Read It Later has its own section and count.
-					unread: snapshot.unreadCountExcludingSaved,
+					unread: snapshot.readingListUnreadCount,
 					starred: snapshot.starredUnreadCount ?? previousStarredCount,
 					saved: snapshot.savedSubscription == nil
 						? articleCache[ReaderSection.saved.rawValue]?.count(where: { $0.isRead == false }) ?? 0
@@ -7285,7 +7321,7 @@ final class ReaderAppModel {
 	}
 
 	private func applyPendingArticleStates(_ articles: [Recommendation]) -> [Recommendation] {
-		articles.map { article in
+		articles.filter { isPendingSavedRemoval($0) == false }.map { article in
 			let aliases = ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
 			let pending = aliases.compactMap { pendingArticleStates[$0] }.reduce(
 				into: PendingArticleState(),
@@ -7409,6 +7445,10 @@ final class ReaderAppModel {
 			return
 		}
 		guard isCurrentOperation(context), Task.isCancelled == false else { return }
+		pendingSavedRemovalIDs = Set(pendingMutations
+			.filter { $0.mutation.kind == .removeSaved }
+			.flatMap(\.mutation.itemIds)
+			.map(ReaderArticleIdentity.normalized))
 		let durableStates = pendingArticleStates(from: pendingMutations)
 		let keys = Set(pendingArticleStates.keys).union(durableStates.keys)
 		for key in keys {

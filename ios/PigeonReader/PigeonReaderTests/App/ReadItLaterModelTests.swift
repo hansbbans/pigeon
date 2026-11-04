@@ -53,17 +53,17 @@ struct ReadItLaterModelTests {
 		let second = try #require(URL(string: "https://example.com/second"))
 
 		#expect(try await harness.model.saveForLater(first, title: "First") == .queued)
-		PendingSavedLinkQueue.enqueue(url: second, title: nil, defaults: harness.sharedDefaults)
-		#expect(PendingSavedLinkQueue.all(defaults: harness.sharedDefaults).map(\.url) == [first, second])
+		harness.queue.enqueue(url: second, title: nil)
+		#expect(harness.queue.all().map(\.url) == [first, second])
 
 		// Still offline: nothing is lost and the queue stops at the first failure.
 		await harness.model.flushPendingSavedLinks()
-		#expect(PendingSavedLinkQueue.all(defaults: harness.sharedDefaults).count == 2)
+		#expect(harness.queue.all().count == 2)
 
 		await http.setOffline(false)
 		let sentBeforeReconnecting = await http.requests().count
 		await harness.model.flushPendingSavedLinks()
-		#expect(PendingSavedLinkQueue.all(defaults: harness.sharedDefaults).isEmpty)
+		#expect(harness.queue.all().isEmpty)
 		let posted = await http.requests().dropFirst(sentBeforeReconnecting)
 			.filter { $0.method == "POST" }.compactMap { $0.json?["url"] as? String }
 		#expect(posted == ["https://example.com/first", "https://example.com/second"])
@@ -75,14 +75,14 @@ struct ReadItLaterModelTests {
 		let harness = try Harness(http: http)
 		let refused = try #require(URL(string: "https://example.com/refused"))
 		let later = try #require(URL(string: "https://example.com/later"))
-		PendingSavedLinkQueue.enqueue(url: refused, title: nil, defaults: harness.sharedDefaults)
-		PendingSavedLinkQueue.enqueue(url: later, title: nil, defaults: harness.sharedDefaults)
+		harness.queue.enqueue(url: refused, title: nil)
+		harness.queue.enqueue(url: later, title: nil)
 		await http.setSaveStatus(400, for: refused.absoluteString)
 		await http.setSaveStatus(503, for: later.absoluteString)
 
 		await harness.model.flushPendingSavedLinks()
 
-		#expect(PendingSavedLinkQueue.all(defaults: harness.sharedDefaults).map(\.url) == [later])
+		#expect(harness.queue.all().map(\.url) == [later])
 	}
 
 	@Test func aRefusedInAppSaveReportsAnError() async throws {
@@ -94,7 +94,55 @@ struct ReadItLaterModelTests {
 		await #expect(throws: SaveForLaterError.self) {
 			try await harness.model.saveForLater(url)
 		}
-		#expect(PendingSavedLinkQueue.all(defaults: harness.sharedDefaults).isEmpty)
+		#expect(harness.queue.all().isEmpty)
+	}
+
+	@Test func reSavingAFailedLinkMakesItPendingWithFreshAttempts() async throws {
+		let http = SavedRoutingHTTPClient()
+		let extractor = SavedTestExtractor(error: ReaderViewError.extractionFailed)
+		let harness = try Harness(http: http, extractor: extractor)
+		let failed = SavedItemsTests.saved(SavedRoutingHTTPClient.itemID, url: "https://example.com/failed", html: "", state: .failed)
+		harness.model.setArticles([failed], for: .saved)
+		let scope = harness.accountID
+		let attempts = SavedExtractionAttemptStore(defaults: harness.preferences)
+		attempts.recordFailure(for: SavedExtractionCoordinator.attemptKey(scope: scope, itemID: failed.id))
+		attempts.recordFailure(for: SavedExtractionCoordinator.attemptKey(scope: scope, itemID: failed.id))
+
+		#expect(try await harness.model.saveForLater(try #require(failed.originalURL)) == .saved)
+
+		#expect(attempts.attempts(for: SavedExtractionCoordinator.attemptKey(scope: scope, itemID: failed.id)) <= 1,
+			"The server's pending state resets the attempts (one may already be spent by the new run)")
+		try await waitUntil { harness.model.isExtractingSavedItem(failed.id) == false && extractor.extractedURLs.count == 1 }
+		#expect(harness.model.article(withId: failed.id)?.savedState == .pending)
+	}
+
+	@Test func openingAQueuedItemMovesItFirstWithoutResettingAttempts() async throws {
+		let http = SavedRoutingHTTPClient()
+		let extractor = SavedTestExtractor(error: ReaderViewError.extractionFailed)
+		extractor.delay = .milliseconds(40)
+		let harness = try Harness(http: http, extractor: extractor)
+		let items = (1...4).map { number in
+			SavedItemsTests.saved(
+				"5a7ed000-0000-4000-8000-00000000010\(number)",
+				url: "https://example.com/\(number)",
+				html: "",
+				state: .pending,
+			)
+		}
+		harness.model.setArticles(items, for: .saved)
+		// The sweep follows the list order; the last row waits behind three.
+		let last = try #require(harness.model.articles(for: .saved).last)
+		let attempts = SavedExtractionAttemptStore(defaults: harness.preferences)
+		let lastKey = SavedExtractionCoordinator.attemptKey(scope: harness.accountID, itemID: last.id)
+		attempts.recordFailure(for: lastKey)
+
+		harness.model.sweepPendingSavedItems()
+		harness.model.prioritizeSavedExtraction(for: last)
+
+		try await waitUntil { extractor.extractedURLs.count >= 3 }
+		#expect(extractor.extractedURLs[2] == last.originalURL, "Queued behind the two running items only")
+		try await waitUntil { harness.model.isExtractingSavedItem(last.id) == false }
+		#expect(attempts.attempts(for: lastKey) == 2)
 	}
 
 	// MARK: - Pending sweep
@@ -255,6 +303,28 @@ struct ReadItLaterModelTests {
 		#expect(pending.first?.mutation.itemIds == [saved.id])
 	}
 
+	@Test func aQueuedRemovalStaysHiddenAndCountsDropForStarredItems() async throws {
+		let harness = try Harness(http: SavedRoutingHTTPClient())
+		var saved = SavedItemsTests.saved("5a7ed000-0000-4000-8000-000000000014")
+		saved.isStarred = true
+		harness.model.setArticles([saved], for: .saved)
+		harness.model.setArticles([saved], for: .starred)
+		harness.model.setNavigation(ReaderNavigationState(items: ReaderSection.allCases.map {
+			ReaderNavigationItem.smart($0, unreadCount: $0 == .saved || $0 == .starred ? 1 : 0)
+		}))
+
+		#expect(await harness.model.removeSaved(saved))
+		#expect(harness.model.navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount == 0)
+		#expect(harness.model.navigation.item(withID: ReaderSection.saved.rawValue)?.unreadCount == 0)
+
+		// A page or snapshot that still has it (the server has not applied the
+		// removal yet) must not bring it back.
+		harness.model.setArticles([saved], for: .saved)
+		harness.model.setArticles([saved], for: .starred)
+		#expect(harness.model.allArticles(for: .saved).isEmpty)
+		#expect(harness.model.allArticles(for: .starred).isEmpty)
+	}
+
 	@Test func filtersAndSortApplyToTheDisplayedList() throws {
 		let harness = try Harness(http: SavedRoutingHTTPClient())
 		let now = Date.now
@@ -276,23 +346,29 @@ struct ReadItLaterModelTests {
 		#expect(harness.model.sortOrder(for: .unread) != .shortest)
 	}
 
-	@Test func readingListStreamsDropSavedItemsButTheirOwnFeedKeepsThem() async throws {
-		let ids = #"{"itemRefs":[{"id":"1"},{"id":"5"}]}"#
+	@Test func streamAndCountRequestsAskTheServerToLeaveOutReadItLater() async throws {
+		let ids = #"{"itemRefs":[{"id":"5"}]}"#
 		let contents = """
 		{"id":"x","items":[
-		{"id":"tag:google.com,2005:reader/item/0000000000000001","title":"Story","published":1793523600,"categories":[],"origin":{"streamId":"feed/1","title":"Design"}},
 		{"id":"tag:google.com,2005:reader/item/0000000000000005","title":"Saved","published":1793523600,"categories":[],"extractionState":"done","siteName":"Example","origin":{"streamId":"feed/4","title":"Read It Later"}}
 		]}
 		"""
 		let http = SavedRoutingHTTPClient(streamIDs: Data(ids.utf8), streamContents: Data(contents.utf8))
 		let client = PigeonAPIClient(session: PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "t"), httpClient: http)
 
-		let readingList = try await client.recommendationsPage(from: "user/-/state/com.google/reading-list")
-		#expect(readingList.items.map(\.title) == ["Story"])
 		let savedFeed = try await client.recommendationsPage(from: "feed/4")
-		#expect(savedFeed.items.map(\.title) == ["Story", "Saved"])
-		#expect(savedFeed.items.last?.feedKey == SavedItems.feedKey)
-		#expect(savedFeed.items.last?.saved?.siteName == "Example")
+		_ = try? await client.readerUnreadCounts()
+		_ = try? await client.streamContents(streamID: "user/-/state/com.google/reading-list")
+
+		let requests = await http.requests()
+		for path in ["/reader/api/0/stream/items/ids", "/reader/api/0/unread-count", "/reader/api/0/stream/contents"] {
+			let request = try #require(requests.first { $0.path == path }, "\(path) was not requested")
+			#expect(request.query.contains(URLQueryItem(name: "xs", value: "saved")), "\(path) must send xs=saved")
+		}
+		// The saved feed's own stream still lists its items, keyed on the system feed.
+		#expect(savedFeed.items.map(\.title) == ["Saved"])
+		#expect(savedFeed.items.first?.feedKey == SavedItems.feedKey)
+		#expect(savedFeed.items.first?.saved?.siteName == "Example")
 	}
 
 	// MARK: - Helpers
@@ -324,16 +400,16 @@ struct ReadItLaterModelTests {
 	private struct Harness {
 		let model: ReaderAppModel
 		let store: OfflineLibraryStore
-		let sharedDefaults: UserDefaults
+		let queue: PendingSavedLinkQueue
 		let preferences: UserDefaults
 		let accountID: String
 
 		init(http: SavedRoutingHTTPClient, extractor: SavedTestExtractor = SavedTestExtractor(error: ReaderViewError.extractionFailed)) throws {
 			let defaults = try #require(UserDefaults(suiteName: "pigeon-saved-model-\(UUID().uuidString)"))
-			let shared = try #require(UserDefaults(suiteName: "pigeon-saved-shared-\(UUID().uuidString)"))
 			let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "token")
 			store = OfflineLibraryStore.inMemory()
-			sharedDefaults = shared
+			queue = PendingSavedLinkQueue(directory: FileManager.default.temporaryDirectory
+				.appending(path: "pigeon-saved-queue-\(UUID().uuidString)", directoryHint: .isDirectory))
 			preferences = defaults
 			accountID = session.storageIdentity
 			model = ReaderAppModel(
@@ -347,7 +423,7 @@ struct ReadItLaterModelTests {
 				readerTypography: ReaderTypographySettings(defaults: defaults),
 				keyboardShortcuts: ReaderKeyboardShortcutSettings(defaults: defaults),
 				savedPreferencesDefaults: defaults,
-				sharedDefaults: shared,
+				pendingSavedLinks: queue,
 				readerViewExtractor: extractor,
 			)
 		}
@@ -358,6 +434,7 @@ struct ReadItLaterModelTests {
 final class SavedTestExtractor: ReaderViewExtracting {
 	var document: ReaderViewDocument?
 	var error: Error?
+	var delay: Duration?
 	private(set) var extractedURLs: [URL] = []
 
 	init(document: ReaderViewDocument? = nil, error: Error? = nil) {
@@ -367,6 +444,7 @@ final class SavedTestExtractor: ReaderViewExtracting {
 
 	func extract(from url: URL) async throws -> ReaderViewDocument {
 		extractedURLs.append(url)
+		if let delay { try await Task.sleep(for: delay) }
 		await Task.yield()
 		if let error { throw error }
 		guard let document else { throw ReaderViewError.extractionFailed }
@@ -386,6 +464,7 @@ actor SavedRoutingHTTPClient: HTTPClient {
 	struct Request: Sendable {
 		let method: String
 		let path: String
+		var query: [URLQueryItem] = []
 		let body: Data?
 
 		var json: [String: Any]? {
@@ -413,7 +492,12 @@ actor SavedRoutingHTTPClient: HTTPClient {
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
 		guard let url = request.url else { throw URLError(.badURL) }
 		let method = request.httpMethod ?? "GET"
-		recorded.append(Request(method: method, path: url.path(), body: request.httpBody))
+		recorded.append(Request(
+			method: method,
+			path: url.path(),
+			query: URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [],
+			body: request.httpBody,
+		))
 		if isOffline { throw URLError(.notConnectedToInternet) }
 		var status = 200
 		let body: Data
@@ -450,3 +534,4 @@ actor SavedRoutingHTTPClient: HTTPClient {
 		return (body, response)
 	}
 }
+

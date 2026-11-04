@@ -88,24 +88,27 @@ nonisolated struct SharedSessionKeychain: Sendable {
 
 	/// Reads the shared item. Builds before Read It Later wrote it to the app's
 	/// own access group; that item is moved here the first time it is read.
+	/// Any failure to use the group (an unsigned build has no entitlement for
+	/// it) falls back to the private item, so migration can never sign anyone out.
 	func load(migratingLegacyItem: Bool = true) throws -> Data? {
-		if let shared = try keychain.copyItem(service: Self.service, account: Self.account, accessGroup: accessGroup) {
+		if let shared = try? keychain.copyItem(service: Self.service, account: Self.account, accessGroup: accessGroup) {
 			return shared.data
 		}
 		guard migratingLegacyItem,
 			let legacy = try keychain.copyItem(service: Self.service, account: Self.account, accessGroup: nil) else {
 			return nil
 		}
+		guard legacy.accessGroup != accessGroup else { return legacy.data }
 		do {
 			try keychain.addItem(legacy.data, service: Self.service, account: Self.account, accessGroup: accessGroup)
-		} catch let error as KeychainAccessError where error.isMissingEntitlement {
-			// Unsigned simulator builds keep using the private item.
-			return legacy.data
 		} catch let error as KeychainAccessError where error.status == errSecDuplicateItem {
 			// Another reader migrated it first.
+		} catch {
+			// Keep using the private item; the next launch tries again.
+			return legacy.data
 		}
 		// Delete only the old copy; a nil group would also delete the new one.
-		if let legacyGroup = legacy.accessGroup, legacyGroup != accessGroup {
+		if let legacyGroup = legacy.accessGroup {
 			try? keychain.deleteItems(service: Self.service, account: Self.account, accessGroup: legacyGroup)
 		}
 		return legacy.data
@@ -115,7 +118,9 @@ nonisolated struct SharedSessionKeychain: Sendable {
 		try remove()
 		do {
 			try keychain.addItem(data, service: Self.service, account: Self.account, accessGroup: accessGroup)
-		} catch let error as KeychainAccessError where error.isMissingEntitlement {
+		} catch {
+			// Without the group the share extension queues its saves instead;
+			// the session itself must still be kept.
 			try keychain.addItem(data, service: Self.service, account: Self.account, accessGroup: nil)
 		}
 	}
@@ -134,56 +139,91 @@ nonisolated struct PendingSavedLink: Codable, Equatable, Identifiable, Sendable 
 	let createdAt: Date
 }
 
-/// Links saved while the server was unreachable, in the app group so the
+/// Links saved while the server was unreachable, kept in the app group so the
 /// share extension and the app share one queue. The app sends them on launch
 /// and after each sync.
-nonisolated enum PendingSavedLinkQueue {
-	static let key = "pigeon.pending-saved-links.v1"
+///
+/// Two processes write it, so there is no shared list to read, modify and
+/// write back: each link is its own file, named after its URL and written
+/// atomically, and a sent link is removed by name. A link added by the share
+/// extension while the app is flushing can never be overwritten or dropped.
+nonisolated struct PendingSavedLinkQueue: Sendable {
 	static let limit = 200
+	static let directoryName = "PendingSavedLinks"
 
-	static func all(defaults: UserDefaults = PigeonSharedData.defaults) -> [PendingSavedLink] {
-		guard let data = defaults.data(forKey: key),
-			let links = try? JSONDecoder().decode([PendingSavedLink].self, from: data) else { return [] }
-		return links
+	let directory: URL
+
+	init(directory: URL) {
+		self.directory = directory
+	}
+
+	/// The app group container's queue (the app's own Library when the group is
+	/// unavailable, as in unsigned simulator builds).
+	static var shared: PendingSavedLinkQueue {
+		let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: PigeonSharedData.appGroup)
+			?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+		return PendingSavedLinkQueue(directory: base.appending(path: directoryName, directoryHint: .isDirectory))
+	}
+
+	func all() -> [PendingSavedLink] {
+		let files = (try? FileManager.default.contentsOfDirectory(
+			at: directory,
+			includingPropertiesForKeys: nil,
+			options: [.skipsHiddenFiles],
+		)) ?? []
+		let decoder = JSONDecoder()
+		return files
+			.filter { $0.pathExtension == "json" }
+			.compactMap { try? decoder.decode(PendingSavedLink.self, from: Data(contentsOf: $0)) }
+			.sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
 	}
 
 	/// Adds a link, or refreshes the title of one already queued.
 	@discardableResult
-	static func enqueue(
-		url: URL,
-		title: String?,
-		defaults: UserDefaults = PigeonSharedData.defaults,
-		now: Date = .now,
-	) -> PendingSavedLink? {
+	func enqueue(url: URL, title: String?, now: Date = .now) -> PendingSavedLink? {
 		guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else { return nil }
-		var links = all(defaults: defaults)
 		let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
 		let link = PendingSavedLink(
-			id: links.first(where: { $0.url == url })?.id ?? UUID().uuidString.lowercased(),
+			id: Self.fileStem(for: url),
 			url: url,
 			title: trimmedTitle?.isEmpty == false ? trimmedTitle : nil,
 			createdAt: now,
 		)
-		links.removeAll { $0.url == url }
-		links.append(link)
-		if links.count > limit {
-			links.removeFirst(links.count - limit)
+		do {
+			try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+			let data = try JSONEncoder().encode(link)
+			try data.write(to: fileURL(for: link.id), options: [.atomic])
+		} catch {
+			return nil
 		}
-		write(links, defaults: defaults)
+		trimToLimit()
 		return link
 	}
 
-	static func remove(ids: Set<String>, defaults: UserDefaults = PigeonSharedData.defaults) {
-		guard ids.isEmpty == false else { return }
-		write(all(defaults: defaults).filter { ids.contains($0.id) == false }, defaults: defaults)
+	func remove(ids: Set<String>) {
+		for id in ids {
+			try? FileManager.default.removeItem(at: fileURL(for: id))
+		}
 	}
 
-	private static func write(_ links: [PendingSavedLink], defaults: UserDefaults) {
-		if links.isEmpty {
-			defaults.removeObject(forKey: key)
-		} else if let data = try? JSONEncoder().encode(links) {
-			defaults.set(data, forKey: key)
+	private func trimToLimit() {
+		let links = all()
+		guard links.count > Self.limit else { return }
+		remove(ids: Set(links.prefix(links.count - Self.limit).map(\.id)))
+	}
+
+	private func fileURL(for id: String) -> URL {
+		directory.appending(path: "\(id).json", directoryHint: .notDirectory)
+	}
+
+	/// One file per URL: a repeated save of the same link replaces its entry.
+	static func fileStem(for url: URL) -> String {
+		// FNV-1a over the URL bytes, twice with different seeds: stable across
+		// processes and launches, unlike Hasher.
+		func fnv(_ seed: UInt64) -> UInt64 {
+			url.absoluteString.utf8.reduce(seed) { ($0 ^ UInt64($1)) &* 0x100000001b3 }
 		}
+		return String(format: "%016llx%016llx", fnv(0xcbf29ce484222325), fnv(0x84222325cbf29ce4))
 	}
 }
 

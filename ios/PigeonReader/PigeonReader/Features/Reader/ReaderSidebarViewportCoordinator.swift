@@ -177,17 +177,27 @@ final class ReaderSidebarViewportCoordinator {
 		}
 	}
 
-	func consumeRevealPlan(now: ContinuousClock.Instant = ContinuousClock.now) -> ReaderSidebarViewportRevealPlan? {
+	/// `settled` is the expansion animation's completion: the last chance to
+	/// reveal. The List often reports the grown content only then (a folder at
+	/// the bottom edge expands below the viewport), so the animation deadline
+	/// must not discard the request before that final layout is measured.
+	func consumeRevealPlan(
+		now: ContinuousClock.Instant = ContinuousClock.now,
+		settled: Bool = false,
+	) -> ReaderSidebarViewportRevealPlan? {
 		guard let pendingReveal, scrollPhase == .idle else {
 			return nil
 		}
 		let remainingAnimationDuration: Double?
-		if let animationDeadline = pendingReveal.animationDeadline {
+		if settled {
+			remainingAnimationDuration = nil
+		} else if let animationDeadline = pendingReveal.animationDeadline {
 			let remaining = now.duration(to: animationDeadline)
 			let components = remaining.components
 			let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
 			guard seconds > 0 else {
-				self.pendingReveal = nil
+				// Too late for this frame to join the expansion animation. The
+				// settled completion still gets its chance, then closes the window.
 				return nil
 			}
 			remainingAnimationDuration = seconds
