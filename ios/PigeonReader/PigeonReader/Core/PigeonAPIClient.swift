@@ -203,11 +203,21 @@ struct PigeonAPIClient: Sendable {
 		async let unreadCounts = readerUnreadCounts()
 		async let starredUnreadCount = unreadCountIfAvailable(in: "user/-/state/com.google/starred")
 		async let todayUnreadCount = unreadCountIfAvailable(on: bounds)
+		let resolvedSubscriptions = try await subscriptions
+		var todayCount = try await todayUnreadCount
+		// Today counts the reading list, which includes Read It Later. Saved
+		// items never appear in Today, so take the ones saved today back out.
+		if let today = todayCount, today > 0,
+			let saved = resolvedSubscriptions.first(where: \.isSavedFeed) {
+			if let savedToday = try await unreadCountIfAvailable(in: saved.id, olderThanUnix: max(bounds.startSeconds - 1, 0)) {
+				todayCount = max(today - savedToday, 0)
+			}
+		}
 		return try await ReaderNavigationSnapshot(
-			subscriptions: subscriptions,
+			subscriptions: resolvedSubscriptions,
 			unreadCounts: unreadCounts,
 			starredUnreadCount: starredUnreadCount,
-			todayUnreadCount: todayUnreadCount,
+			todayUnreadCount: todayCount,
 		)
 	}
 
@@ -223,7 +233,9 @@ struct PigeonAPIClient: Sendable {
 		request.httpMethod = "GET"
 		let (data, response) = try await httpClient.data(for: request)
 		try Self.validate(response: response, data: data)
+		// The Read It Later system feed is not a feed the library can manage.
 		return try decoder.decode(SubscriptionListResponse.self, from: data).subscriptions
+			.filter { $0.feedKey != SavedItems.feedKey }
 	}
 
 	@discardableResult
@@ -406,9 +418,14 @@ struct PigeonAPIClient: Sendable {
 			}
 		}
 
+		// Read It Later items live only in their own section. The reading list
+		// and folder streams still return them for older clients, so drop them
+		// here; a single feed's stream and Starred keep them.
+		let keepsSavedItems = Self.streamKeepsSavedItems(streamID)
 		let recommendations = orderedReferences.compactMap {
 			recommendationsByID[ReaderArticleIdentity.normalized($0.id)]
 		}.filter { recommendation in
+			guard keepsSavedItems || recommendation.isSaved == false else { return false }
 			guard let dayBounds else { return true }
 			return dayBounds.contains(recommendation.receivedAt)
 		}
@@ -417,6 +434,10 @@ struct PigeonAPIClient: Sendable {
 			continuation: page.continuation,
 			fetchedContentCount: missingItemIDs.count,
 		)
+	}
+
+	static func streamKeepsSavedItems(_ streamID: String) -> Bool {
+		streamID.hasPrefix("feed/") || streamID == "user/-/state/com.google/starred"
 	}
 
 	/// Fetches bodies for `itemIDs` in chunks of `streamItemContentChunkSize`, running at
@@ -497,9 +518,9 @@ struct PigeonAPIClient: Sendable {
 		}
 	}
 
-	private func unreadCountIfAvailable(in streamID: String) async throws -> Int? {
+	private func unreadCountIfAvailable(in streamID: String, olderThanUnix: Int? = nil) async throws -> Int? {
 		do {
-			return try await unreadCount(in: streamID)
+			return try await unreadItemCount(streamID: streamID, olderThanUnix: olderThanUnix)
 		} catch is CancellationError {
 			throw CancellationError()
 		} catch {
@@ -577,28 +598,47 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
-	/// Server-side backup of the Readwise Reader token so it survives a fresh install.
-	func readwiseToken() async throws -> String? {
-		let (data, _) = try await requestJSON(path: "api/v1/readwise/token")
-		let token = try JSONDecoder().decode(ReadwiseTokenPayload.self, from: data).token?
-			.trimmingCharacters(in: .whitespacesAndNewlines)
-		return token?.isEmpty == false ? token : nil
+	// MARK: - Read It Later
+
+	/// Saves a bare link. The server stores it as pending; the app extracts it
+	/// afterwards and uploads the result with `uploadSavedContent`.
+	func saveLink(url: URL, title: String? = nil) async throws -> SavedItemResponse {
+		let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+		return try await sendSavedJSON(
+			path: "api/v1/saved",
+			method: "POST",
+			body: SaveLinkRequest(url: url.absoluteString, title: trimmedTitle?.isEmpty == false ? trimmedTitle : nil),
+		)
 	}
 
-	func saveReadwiseToken(_ token: String) async throws {
-		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/readwise/token"))
-		request.httpMethod = "PUT"
+	func uploadSavedContent(id: String, content: SavedItemContent) async throws -> SavedItemResponse {
+		try await sendSavedJSON(path: Self.savedContentPath(id: id), method: "PUT", body: content)
+	}
+
+	/// Sent after the last extraction attempt. Never downgrades a finished item.
+	func reportSavedExtractionFailure(id: String) async throws -> SavedItemResponse {
+		try await sendSavedJSON(path: Self.savedContentPath(id: id), method: "PUT", body: SavedExtractionFailure())
+	}
+
+	private static func savedContentPath(id: String) -> String {
+		let encoded = id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? id
+		return "api/v1/saved/\(encoded)/content"
+	}
+
+	private func sendSavedJSON<Body: Encodable>(path: String, method: String, body: Body) async throws -> SavedItemResponse {
+		guard var components = URLComponents(url: session.baseURL, resolvingAgainstBaseURL: false) else {
+			throw PigeonError.invalidServerURL
+		}
+		// `appending(path:)` would encode the reader id's percent signs again.
+		let basePath = components.percentEncodedPath.hasSuffix("/") ? String(components.percentEncodedPath.dropLast()) : components.percentEncodedPath
+		components.percentEncodedPath = basePath + "/" + path
+		var request = makeAuthorizedRequest(url: try endpointURL(components: components))
+		request.httpMethod = method
 		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-		request.httpBody = try JSONEncoder().encode(ReadwiseTokenPayload(token: token))
+		request.httpBody = try JSONEncoder().encode(body)
 		let (data, response) = try await httpClient.data(for: request)
 		try Self.validate(response: response, data: data)
-	}
-
-	func deleteReadwiseToken() async throws {
-		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/readwise/token"))
-		request.httpMethod = "DELETE"
-		let (data, response) = try await httpClient.data(for: request)
-		try Self.validate(response: response, data: data)
+		return try decoder.decode(SavedItemResponse.self, from: data)
 	}
 
 	func exportPersonalization() async throws -> String {
@@ -614,7 +654,10 @@ struct PigeonAPIClient: Sendable {
 		return Recommendation(
 			id: item.id,
 			readerId: item.id,
-			feedKey: item.origin?.streamID ?? fallbackStreamID,
+			// Saved items key on the system feed, as they do in sync payloads.
+			feedKey: item.savedMetadata?.extractionState != nil
+				? SavedItems.feedKey
+				: item.origin?.streamID ?? fallbackStreamID,
 			source: source,
 			author: item.author,
 			title: item.title,
@@ -633,6 +676,7 @@ struct PigeonAPIClient: Sendable {
 			contentVersion: item.contentVersion,
 			isPaywalled: item.isPaywalled,
 			length: item.length,
+			saved: item.savedMetadata,
 		)
 	}
 
@@ -738,10 +782,6 @@ struct PigeonAPIClient: Sendable {
 
 private struct EngagementEnvelope: Codable, Sendable {
 	let events: [EngagementEvent]
-}
-
-private struct ReadwiseTokenPayload: Codable, Sendable {
-	let token: String?
 }
 
 private struct PersonalizationTopicsUpdate: Codable, Sendable {

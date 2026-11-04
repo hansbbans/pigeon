@@ -25,7 +25,7 @@ struct ReaderSmartViewSettingsTests {
 		#expect(migrated.enabledSections == [.unread, .starred, .today])
 		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.unread, .starred, .today])
 		let model = try makeModel(defaults: defaults, smartViewStore: migrated)
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today])
 	}
 
 	@MainActor
@@ -37,7 +37,7 @@ struct ReaderSmartViewSettingsTests {
 		let restoredModel = try makeModel(defaults: defaults)
 
 		#expect(restoredModel.enabledSmartViewSections == [.today, .starred])
-		#expect(restoredModel.visibleSmartNavigationItems.compactMap(\.smartSection) == [.starred, .today])
+		#expect(restoredModel.visibleSmartNavigationItems.compactMap(\.smartSection) == [.starred, .saved, .today])
 		#expect(restoredModel.selectedNavigationID == ReaderSection.starred.rawValue)
 	}
 
@@ -48,11 +48,12 @@ struct ReaderSmartViewSettingsTests {
 		let model = try makeModel(defaults: defaults)
 
 		model.isForYouSmartViewEnabled = false
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .today])
+		// Read It Later is not a Smart View setting; it is always listed.
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today])
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 
 		model.isForYouSmartViewEnabled = true
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .starred, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .starred, .saved, .today])
 	}
 
 	@MainActor
@@ -85,12 +86,12 @@ struct ReaderSmartViewSettingsTests {
 
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 		#expect(model.smartNavigationItems.contains(where: { $0.smartSection == .unread }))
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .saved])
 		#expect(ReaderSmartViewStore.configurableSections.contains(.unread))
 		#expect(model.allArticles(for: .unread).map(\.id) == [article.id])
 
 		model.isUnreadSmartViewEnabled = false
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .saved])
 		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.forYou])
 		#expect(model.isUnreadSmartViewEnabled == false)
 	}
@@ -132,7 +133,6 @@ struct ReaderSmartViewSettingsTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: MockHTTPClient(),
-			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: ReaderArticleFilterStore(defaults: defaults),
 			smartViewStore: smartViewStore ?? ReaderSmartViewStore(defaults: defaults),
 			offlineStore: OfflineLibraryStore.inMemory(),

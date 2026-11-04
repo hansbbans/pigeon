@@ -712,6 +712,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	}
 
 	func saveArticles(_ articles: [Recommendation], collectionID: String, accountID: String) throws {
+		// Read It Later is projected from sync alone. An explicit page would be
+		// protected from that projection and stop receiving new saves.
+		guard collectionID != ReaderSection.saved.rawValue else { return }
 		let database = try openDatabase()
 		// Selected-page/body hydration is a committed local read cache. Keep it on the
 		// canonical account so a failed or cancelled full rebuild cannot hide a body that
@@ -1015,10 +1018,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		try query(
 			"""
 			SELECT id, payload FROM cached_articles
-			WHERE account_id = ? AND is_read = 1 AND is_starred = 0
+			WHERE account_id = ? AND is_read = 1 AND is_starred = 0 AND feed_key <> ?
 			ORDER BY received_at DESC LIMIT -1 OFFSET ?
 			""",
-			bindings: [.text(storageAccountID), .int64(Int64(max(count, 0)))],
+			// Archived Read It Later items stay readable, as they do on the server.
+			bindings: [.text(storageAccountID), .text(SavedItems.feedKey), .int64(Int64(max(count, 0)))],
 			database: database,
 		) { statement in
 			guard let id = string(at: 0, statement: statement),
@@ -1040,6 +1044,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					explanation: article.explanation, learningState: article.learningState,
 					isPaywalled: article.isPaywalled,
 					length: article.length,
+					saved: article.saved,
 				)
 				try execute(
 					"UPDATE cached_articles SET payload = ?, body_pruned = 1 WHERE account_id = ? AND id = ?",
@@ -1049,6 +1054,22 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			}
 		}
 		return candidates.count
+	}
+
+	/// Deletes articles the user removed (Read It Later's Remove). The server
+	/// confirms with a sync `delete`; until then the queued mutation retries.
+	func removeArticles(ids: [String], accountID: String) throws {
+		guard ids.isEmpty == false else { return }
+		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
+		try transaction(database) {
+			for id in ids {
+				try deleteArticle(identifier: id, accountID: storageAccountID, database: database)
+				if storageAccountID != accountID {
+					try deleteArticle(identifier: id, accountID: accountID, database: database)
+				}
+			}
+		}
 	}
 
 	func clearCachedArticles(accountID: String) throws {
@@ -1237,7 +1258,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					database: database,
 				)
 			}
-			if payload.isActive == false {
+			if payload.isActive == false || SavedItems.isSavedFeed(feedKey: feedKey, sourceType: payload.sourceType) {
+				// The Read It Later feed keeps its cached_feeds row (navigation reads
+				// its stream ID from there) but is never a managed subscription.
 				try execute(
 					"DELETE FROM cached_subscriptions WHERE account_id = ? AND id = ?",
 					bindings: [.text(accountID), .text(streamID)],
@@ -1315,6 +1338,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				// The flag describes the body, so it follows whichever body is kept.
 				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
 				length: payload.length ?? existing?.article.length,
+				saved: payload.savedMetadata ?? existing?.article.saved,
 				)),
 				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
 			)
@@ -1553,6 +1577,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			isBodyPruned: article.isBodyPruned,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
+			saved: article.saved,
 		)
 	}
 
@@ -1860,6 +1885,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			isBodyPruned: article.isBodyPruned,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
+			saved: article.saved,
 		)
 	}
 
@@ -2145,12 +2171,22 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		accountID: String,
 		database: OpaquePointer,
 	) throws {
-		let managedCollections = [ReaderSection.unread.rawValue, ReaderSection.today.rawValue, ReaderSection.starred.rawValue]
+		let managedCollections = Self.managedCollectionIDs
 		for collectionID in managedCollections where protectedCollectionIDs.contains(collectionID) == false {
 			try execute(
 				"DELETE FROM cached_collection_articles WHERE account_id = ? AND collection_id = ? AND article_id = ?",
 				bindings: [.text(accountID), .text(collectionID), .text(article.id)], database: database,
 			)
+		}
+		if article.isSaved {
+			// Read It Later items belong only to their own section (and Starred).
+			if protectedCollectionIDs.contains(ReaderSection.saved.rawValue) == false {
+				try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.saved.rawValue, articleID: article.id, position: 0, database: database)
+			}
+			if protectedCollectionIDs.contains(ReaderSection.starred.rawValue) == false, article.isStarred {
+				try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.starred.rawValue, articleID: article.id, position: 0, database: database)
+			}
+			return
 		}
 		if protectedCollectionIDs.contains(ReaderSection.unread.rawValue) == false, article.isRead == false {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.unread.rawValue, articleID: article.id, position: 0, database: database)
@@ -2228,6 +2264,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		struct CachedArticleMetadata {
 			let id: String
 			let feedKey: String
+			var isSaved: Bool { feedKey == SavedItems.feedKey }
 			let receivedAt: Date
 			let isRead: Bool
 			let isStarred: Bool
@@ -2297,6 +2334,24 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)
 		for article in articles {
 			var expected = Set<String>()
+			let memberships = membershipsByArticleID[article.id, default: []]
+			if article.isSaved {
+				// Builds before Read It Later projected saved items into Unread and
+				// Today. Those rows must be rebuilt away, not just supplemented.
+				if memberships.contains(ReaderSection.unread.rawValue) && protectedCollectionIDs.contains(ReaderSection.unread.rawValue) == false
+					|| memberships.contains(ReaderSection.today.rawValue) && protectedCollectionIDs.contains(ReaderSection.today.rawValue) == false {
+					return false
+				}
+				expected.insert(ReaderSection.saved.rawValue)
+				if article.isStarred {
+					expected.insert(ReaderSection.starred.rawValue)
+				}
+				expected.subtract(protectedCollectionIDs)
+				if expected.subtracting(memberships).isEmpty == false {
+					return false
+				}
+				continue
+			}
 			if article.isRead == false {
 				expected.insert(ReaderSection.unread.rawValue)
 			}
@@ -2368,11 +2423,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let protectedCollectionIDs = try cachedExplicitCollectionIDs(accountID: accountID, database: database)
 		var localMemberships: [(collectionID: String, articleID: String, position: Int)] = []
 		if preservingLocalCollections || protectedCollectionIDs.isEmpty == false {
-			let managedCollectionIDs = Set([
-				ReaderSection.unread.rawValue,
-				ReaderSection.today.rawValue,
-				ReaderSection.starred.rawValue,
-			])
+			let managedCollectionIDs = Set(Self.managedCollectionIDs)
 			let feedCollectionIDs = collectionIDs(for: activeSubscriptions)
 			var navigationCollectionIDs = Set<String>()
 			try query(
@@ -2436,6 +2487,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		}
 	}
 
+	private static let managedCollectionIDs = [
+		ReaderSection.unread.rawValue,
+		ReaderSection.today.rawValue,
+		ReaderSection.starred.rawValue,
+		ReaderSection.saved.rawValue,
+	]
+
 	private func insertCollectionMembership(
 		accountID: String,
 		collectionID: String,
@@ -2491,14 +2549,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			let feedKey = subscription.url.flatMap(URL.init(string:))?.lastPathComponent ?? ""
 			return ReaderUnreadCount(id: subscription.id, count: countsByFeedKey[feedKey, default: 0])
 		}
-		let allArticles = try scalarCount("SELECT COUNT(*) FROM cached_articles WHERE account_id = ? AND is_read = 0", accountID: accountID, database: database)
+		let allArticles = try queryOne(
+			"SELECT COUNT(*) FROM cached_articles WHERE account_id = ? AND is_read = 0 AND feed_key <> ?",
+			bindings: [.text(accountID), .text(SavedItems.feedKey)],
+			database: database,
+			map: { Int(sqlite3_column_int64($0, 0)) },
+		) ?? 0
 		let today = try membershipUnreadCount(collectionID: ReaderSection.today.rawValue, accountID: accountID, database: database)
 		let starred = try membershipUnreadCount(collectionID: ReaderSection.starred.rawValue, accountID: accountID, database: database)
 		let forYou = try membershipUnreadCount(collectionID: ReaderSection.forYou.rawValue, accountID: accountID, database: database)
+		let saved = try membershipUnreadCount(collectionID: ReaderSection.saved.rawValue, accountID: accountID, database: database)
 		let navigation = ReaderNavigationCatalog.make(
 			subscriptions: subscriptions,
 			unreadCounts: unreadCounts + [ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: allArticles)],
-			smartCounts: ReaderNavigationSmartCounts(forYou: forYou, today: today, unread: allArticles, starred: starred),
+			smartCounts: ReaderNavigationSmartCounts(forYou: forYou, today: today, unread: allArticles, starred: starred, saved: saved),
 		)
 		try writeNavigation(navigation, accountID: accountID, database: database)
 		return navigation

@@ -162,7 +162,6 @@ final class ReaderAppModel {
 	}
 	private(set) var subscriptions: [FeedSubscription] = []
 	var isLoadingLibrary = false
-	private(set) var hasReadwiseToken = false
 	private(set) var navigation = ReaderNavigationState.initial
 	private(set) var enabledSmartViewSections: Set<ReaderSection>
 	private(set) var isLoadingNavigation = false
@@ -197,8 +196,6 @@ final class ReaderAppModel {
 
 	private let sessionStore: any SessionStore
 	private let httpClient: any HTTPClient
-	private let readwiseTokenStore: any ReadwiseTokenStore
-	private let readwiseAPIClient: ReadwiseAPIClient
 	private let readerModeStore: ReaderModeStore
 	private let articleFilterStore: ReaderArticleFilterStore
 	private let smartViewStore: ReaderSmartViewStore
@@ -251,15 +248,23 @@ final class ReaderAppModel {
 	private var pendingPrewarmPersistence: [String: PendingPrewarmPersistence] = [:]
 	private var collectionActivityGeneration = UUID()
 	private var articleStateGeneration = UUID()
-	private var inFlightReadwiseSaves: Set<String> = []
-	private let readwiseSyncDefaults: UserDefaults
-	/// Serializes server writes so an older PUT/DELETE can never land after a newer one.
-	private var readwiseServerOperation: Task<Bool, Never>?
-	/// Bumped on every local save/remove so in-flight reconciliation can't undo it.
-	private var readwiseTokenRevision = 0
-	private var readwiseReconciliationGeneration: UUID?
-	private var reconciledReadwiseGeneration: UUID?
-	private static let readwisePendingServerSyncKey = "pigeon.readwise.pending-server-sync.v1"
+	/// Read It Later saves in flight, by URL, so rapid repeats send one request.
+	private var inFlightSavedLinks: Set<String> = []
+	private var isFlushingPendingSavedLinks = false
+	private var locallySavedArticles: [String: Recommendation] = [:]
+	private let savedExtraction: SavedExtractionCoordinator
+	/// The app group defaults shared with the share extension (offline save queue).
+	private let sharedDefaults: UserDefaults
+	private let savedPreferencesDefaults: UserDefaults
+	private var savedPersistenceSyncTask: Task<Void, Never>?
+	/// Read It Later's Text/Video and length filters, persisted on this device.
+	var savedListFilter: SavedListFilter {
+		didSet {
+			guard savedListFilter != oldValue else { return }
+			savedListFilter.save(to: savedPreferencesDefaults)
+			reconcileSelection(for: ReaderSection.saved.rawValue)
+		}
+	}
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
 	private var hasLoadedNavigation = false
@@ -399,7 +404,6 @@ final class ReaderAppModel {
 	init(
 		sessionStore: any SessionStore = KeychainSessionStore(),
 		httpClient: any HTTPClient = URLSessionHTTPClient(),
-		readwiseTokenStore: any ReadwiseTokenStore = KeychainReadwiseTokenStore(),
 		readerModeStore: ReaderModeStore = ReaderModeStore(),
 		articleFilterStore: ReaderArticleFilterStore = ReaderArticleFilterStore(),
 		smartViewStore: ReaderSmartViewStore = ReaderSmartViewStore(),
@@ -407,7 +411,8 @@ final class ReaderAppModel {
 		offlineSynchronizationEnabled: Bool = true,
 		readerTypography: ReaderTypographySettings? = nil,
 		keyboardShortcuts: ReaderKeyboardShortcutSettings? = nil,
-		readwiseSyncDefaults: UserDefaults = .standard,
+		savedPreferencesDefaults: UserDefaults = .standard,
+		sharedDefaults: UserDefaults = PigeonSharedData.defaults,
 		readerViewExtractor: (any ReaderViewExtracting)? = nil,
 		bootstrapProvider: (any OfflineLibraryBootstrapProviding)? = nil,
 		offlineSyncDelay: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
@@ -420,9 +425,9 @@ final class ReaderAppModel {
 	) {
 		self.sessionStore = sessionStore
 		self.httpClient = httpClient
-		self.readwiseTokenStore = readwiseTokenStore
-		self.readwiseAPIClient = ReadwiseAPIClient(tokenStore: readwiseTokenStore, httpClient: httpClient)
-		self.readwiseSyncDefaults = readwiseSyncDefaults
+		self.savedPreferencesDefaults = savedPreferencesDefaults
+		self.sharedDefaults = sharedDefaults
+		self.savedListFilter = SavedListFilter.load(from: savedPreferencesDefaults)
 		self.readerModeStore = readerModeStore
 		self.defaultArticleView = readerModeStore.defaultArticleView
 		self.articleFilterStore = articleFilterStore
@@ -439,15 +444,16 @@ final class ReaderAppModel {
 		self.prepareCachedSnapshot = prepareCachedSnapshot
 		self.readerTypography = readerTypography ?? ReaderTypographySettings()
 		self.keyboardShortcuts = keyboardShortcuts ?? ReaderKeyboardShortcutSettings()
-		self.readerViewExtractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
+		let extractor = readerViewExtractor ?? ReaderViewExtractor(httpClient: httpClient)
+		self.readerViewExtractor = extractor
+		self.savedExtraction = SavedExtractionCoordinator(
+			extractor: extractor,
+			httpClient: httpClient,
+			attempts: SavedExtractionAttemptStore(defaults: savedPreferencesDefaults),
+		)
 		self.allowsLowDataBackgroundRefresh = UserDefaults.standard.bool(forKey: Self.lowDataBackgroundKey)
 		if let initialSmartView = ReaderSmartViewStore.configurableSections.first(where: enabledSmartViewSections.contains) {
 			selectedNavigationID = initialSmartView.rawValue
-		}
-		do {
-			hasReadwiseToken = try readwiseTokenStore.load()?.isEmpty == false
-		} catch {
-			hasReadwiseToken = false
 		}
 		if let savedSession = try? sessionStore.load() {
 			if savedSession.baseURL.scheme?.lowercased() == "https" {
@@ -467,6 +473,7 @@ final class ReaderAppModel {
 			let snapshot = bootstrapProvider.loadBootstrapSnapshot(accountID: session.storageIdentity) {
 			_ = applyBootstrapSnapshot(snapshot)
 		}
+		configureSavedExtraction()
 	}
 
 	var canConnect: Bool {
@@ -518,7 +525,7 @@ final class ReaderAppModel {
 			guard let section = item.smartSection else {
 				return false
 			}
-			return enabledSmartViewSections.contains(section)
+			return section.isAlwaysVisible || enabledSmartViewSections.contains(section)
 		}
 	}
 
@@ -788,6 +795,10 @@ final class ReaderAppModel {
 			foregroundAppearanceTask?.cancel()
 			foregroundAppearanceTask = nil
 			cancelSceneBackgroundFlush()
+			savedExtraction.cancelAll()
+			savedPersistenceSyncTask?.cancel()
+			savedPersistenceSyncTask = nil
+			locallySavedArticles = [:]
 			sessionGeneration = UUID()
 			libraryGeneration = UUID()
 			try sessionStore.remove()
@@ -872,152 +883,6 @@ final class ReaderAppModel {
 			settingsErrorMessage = nil
 		} catch {
 			errorMessage = error.localizedDescription
-		}
-	}
-
-	/// Saves the token to Keychain, then backs it up to the Pigeon server so it
-	/// survives a fresh install. Throws only when the local save fails; returns
-	/// whether the server copy was updated. A failed upload is retried on the
-	/// next reconciliation.
-	@discardableResult
-	func saveReadwiseToken(_ token: String) async throws -> Bool {
-		try readwiseTokenStore.save(token)
-		hasReadwiseToken = true
-		let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-		return await recordLocalReadwiseChange(.upload) { apiClient in
-			try await apiClient.saveReadwiseToken(normalized)
-		}
-	}
-
-	/// Removes the token from Keychain and the Pigeon server. Throws only when the
-	/// local removal fails; returns whether the server copy was deleted.
-	@discardableResult
-	func removeReadwiseToken() async throws -> Bool {
-		try readwiseTokenStore.remove()
-		hasReadwiseToken = false
-		return await recordLocalReadwiseChange(.delete) { apiClient in
-			try await apiClient.deleteReadwiseToken()
-		}
-	}
-
-	/// Starts server reconciliation without blocking the caller. Safe to call on
-	/// every launch/sign-in; it runs at most once per session.
-	func startReadwiseTokenServerSync() {
-		guard apiClient != nil,
-			reconciledReadwiseGeneration != sessionGeneration,
-			readwiseReconciliationGeneration != sessionGeneration else { return }
-		Task { await syncReadwiseTokenWithServer() }
-	}
-
-	/// Restores the server's token when Keychain is empty (fresh install), uploads
-	/// the local token when the server has none (existing installs), and replays a
-	/// pending local change that couldn't reach the server earlier.
-	func syncReadwiseTokenWithServer() async {
-		guard let apiClient, let context = accountContext(for: apiClient),
-			reconciledReadwiseGeneration != context.generation,
-			readwiseReconciliationGeneration != context.generation else { return }
-		readwiseReconciliationGeneration = context.generation
-		let succeeded = await enqueueReadwiseServerOperation { [weak self] in
-			guard let self else { return false }
-			return await self.reconcileReadwiseToken(apiClient: apiClient, context: context)
-		}.value
-		if readwiseReconciliationGeneration == context.generation {
-			readwiseReconciliationGeneration = nil
-		}
-		if succeeded, isCurrentAccountOperation(context) {
-			reconciledReadwiseGeneration = context.generation
-		}
-	}
-
-	private enum ReadwisePendingServerSync: String {
-		case upload
-		case delete
-	}
-
-	private var readwisePendingServerSync: ReadwisePendingServerSync? {
-		get { readwiseSyncDefaults.string(forKey: Self.readwisePendingServerSyncKey).flatMap(ReadwisePendingServerSync.init) }
-		set { readwiseSyncDefaults.set(newValue?.rawValue, forKey: Self.readwisePendingServerSyncKey) }
-	}
-
-	private func recordLocalReadwiseChange(
-		_ pending: ReadwisePendingServerSync,
-		send: @escaping @MainActor (PigeonAPIClient) async throws -> Void,
-	) async -> Bool {
-		readwiseTokenRevision &+= 1
-		let revision = readwiseTokenRevision
-		readwisePendingServerSync = pending
-		guard let apiClient, let context = accountContext(for: apiClient) else { return false }
-		return await enqueueReadwiseServerOperation { [weak self] in
-			guard let self, self.isCurrentAccountOperation(context), self.readwiseTokenRevision == revision else {
-				return false
-			}
-			do {
-				try await send(apiClient)
-			} catch {
-				return false
-			}
-			if self.readwiseTokenRevision == revision {
-				self.readwisePendingServerSync = nil
-			}
-			return true
-		}.value
-	}
-
-	private func enqueueReadwiseServerOperation(
-		_ operation: @escaping @MainActor () async -> Bool,
-	) -> Task<Bool, Never> {
-		let previous = readwiseServerOperation
-		let task = Task { @MainActor in
-			_ = await previous?.value
-			return await operation()
-		}
-		readwiseServerOperation = task
-		return task
-	}
-
-	private func reconcileReadwiseToken(apiClient: PigeonAPIClient, context: AccountOperationContext) async -> Bool {
-		let revision = readwiseTokenRevision
-		let isCurrent = { [weak self] in
-			guard let self else { return false }
-			return self.isCurrentAccountOperation(context) && self.readwiseTokenRevision == revision
-		}
-		guard isCurrent() else { return false }
-		let localToken = (try? readwiseTokenStore.load())?.trimmingCharacters(in: .whitespacesAndNewlines)
-		let local = localToken?.isEmpty == false ? localToken : nil
-		do {
-			switch (readwisePendingServerSync, local) {
-			case (.delete, nil):
-				try await apiClient.deleteReadwiseToken()
-				guard isCurrent() else { return false }
-				readwisePendingServerSync = nil
-			case (.upload, let local?):
-				try await apiClient.saveReadwiseToken(local)
-				guard isCurrent() else { return false }
-				readwisePendingServerSync = nil
-			case (_, let local?):
-				let remote = try await apiClient.readwiseToken()
-				guard isCurrent() else { return false }
-				if remote == nil {
-					try await apiClient.saveReadwiseToken(local)
-					guard isCurrent() else { return false }
-				}
-				readwisePendingServerSync = nil
-			case (_, nil):
-				let remote = try await apiClient.readwiseToken()
-				guard isCurrent() else { return false }
-				guard let remote else {
-					readwisePendingServerSync = nil
-					return true
-				}
-				try readwiseTokenStore.save(remote)
-				hasReadwiseToken = true
-				readwisePendingServerSync = nil
-			}
-			return true
-		} catch {
-			// Best effort: never surface or log the token. The next launch or
-			// sign-in retries.
-			return false
 		}
 	}
 
@@ -1567,8 +1432,9 @@ final class ReaderAppModel {
 
 	private func captureWidgetSnapshotInput(now: Date = .now) -> WidgetSnapshotInput {
 		WidgetSnapshotInput(
-			articlesByCollection: articleCache.mapValues { articles in
-				articles.map(WidgetSnapshotArticleRecord.init)
+			// The widget's recent stories are feed stories; Read It Later stays out.
+			articlesByCollection: articleCache.filter { $0.key != ReaderSection.saved.rawValue }.mapValues { articles in
+				articles.filter { $0.isSaved == false }.map(WidgetSnapshotArticleRecord.init)
 			},
 			unreadCount: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount,
 			starredUnreadCount: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount,
@@ -1599,17 +1465,290 @@ final class ReaderAppModel {
 		}
 	}
 
-	func saveToReader(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
-		try Task.checkCancellation()
-		let key = destination.url.absoluteString
-		guard inFlightReadwiseSaves.insert(key).inserted else {
-			return .alreadyInFlight
-		}
-		defer { inFlightReadwiseSaves.remove(key) }
+	// MARK: - Read It Later
 
-		try await readwiseAPIClient.save(url: destination.url)
-		try Task.checkCancellation()
-		return .saved
+	/// Saves a link to Read It Later without leaving the article. A save the
+	/// server cannot take right now is queued and sent after the next sync, so
+	/// a link is never lost. Repeats of an in-flight URL send nothing.
+	func saveForLater(_ url: URL, title: String? = nil) async throws -> SaveForLaterOutcome {
+		guard let destination = OutboundDestination(url: url), url.user == nil, url.password == nil else {
+			throw SaveForLaterError(message: "This link can’t be saved.")
+		}
+		let key = destination.url.absoluteString
+		guard inFlightSavedLinks.insert(key).inserted else { return .alreadySaving }
+		defer { inFlightSavedLinks.remove(key) }
+		guard let apiClient, let context = accountContext(for: apiClient) else {
+			PendingSavedLinkQueue.enqueue(url: destination.url, title: title, defaults: sharedDefaults)
+			return .queued
+		}
+		// Leaving the article cancels the caller; the save itself must still land.
+		let request = Task { @MainActor in try await apiClient.saveLink(url: destination.url, title: title) }
+		do {
+			let response = try await request.value
+			if isCurrentAccountOperation(context) {
+				applySavedResponse(response, title: title)
+			}
+			return .saved
+		} catch {
+			if case let PigeonError.server(statusCode, _) = error,
+				SavedLinkFailure.classify(statusCode: statusCode) == .rejected {
+				throw SaveForLaterError(message: error.localizedDescription)
+			}
+			PendingSavedLinkQueue.enqueue(url: destination.url, title: title, defaults: sharedDefaults)
+			return .queued
+		}
+	}
+
+	/// Sends links saved while offline, by the app or the share extension.
+	/// Stops at the first failure that a later try could fix.
+	func flushPendingSavedLinks() async {
+		guard isFlushingPendingSavedLinks == false,
+			let apiClient,
+			let context = accountContext(for: apiClient) else { return }
+		let links = PendingSavedLinkQueue.all(defaults: sharedDefaults)
+		guard links.isEmpty == false else { return }
+		isFlushingPendingSavedLinks = true
+		defer { isFlushingPendingSavedLinks = false }
+		var finished = Set<String>()
+		for link in links {
+			guard isCurrentAccountOperation(context) else { break }
+			do {
+				let response = try await apiClient.saveLink(url: link.url, title: link.title)
+				finished.insert(link.id)
+				if isCurrentAccountOperation(context) {
+					applySavedResponse(response, title: link.title, receivedAt: link.createdAt)
+				}
+			} catch {
+				if case let PigeonError.server(statusCode, _) = error,
+					SavedLinkFailure.classify(statusCode: statusCode) == .rejected {
+					finished.insert(link.id)
+					continue
+				}
+				break
+			}
+		}
+		PendingSavedLinkQueue.remove(ids: finished, defaults: sharedDefaults)
+	}
+
+	/// Launch and post-sync work: send queued saves, then extract pending items.
+	func processSavedItems() async {
+		await flushPendingSavedLinks()
+		sweepPendingSavedItems()
+	}
+
+	/// Queues every pending saved item for background extraction.
+	func sweepPendingSavedItems() {
+		guard let session, apiClient != nil else { return }
+		let targets = (articleCache[ReaderSection.saved.rawValue] ?? [])
+			.filter { $0.savedState == .pending }
+			.compactMap(savedExtractionTarget)
+		guard targets.isEmpty == false else { return }
+		savedExtraction.enqueue(targets, scope: session.storageIdentity)
+	}
+
+	func isExtractingSavedItem(_ id: String) -> Bool {
+		savedExtraction.isExtracting(id)
+	}
+
+	/// Opening a pending item moves it to the front of the queue.
+	func prioritizeSavedExtraction(for article: Recommendation) {
+		guard article.savedState == .pending,
+			let session,
+			let target = savedExtractionTarget(for: article),
+			savedExtraction.isExtracting(article.id) == false else { return }
+		savedExtraction.retry(target, scope: session.storageIdentity)
+	}
+
+	/// "Try again" on an item whose extraction failed.
+	func retrySavedExtraction(_ article: Recommendation) {
+		guard let session, let target = savedExtractionTarget(for: article) else { return }
+		updateSavedArticle(article.id) { current in
+			var metadata = current.saved ?? SavedArticleMetadata(extractionState: SavedExtractionState.pending.rawValue, publishedAt: nil, imageURL: nil, siteName: nil)
+			metadata?.extractionState = SavedExtractionState.pending.rawValue
+			return current.updatingSaved(saved: metadata)
+		}
+		savedExtraction.retry(target, scope: session.storageIdentity)
+	}
+
+	/// Archive is the read flag.
+	func setArchived(_ article: Recommendation, archived: Bool) async {
+		await setRead(article, read: archived, offersUndo: true)
+	}
+
+	/// Deletes the saved item everywhere. The removal is queued like any other
+	/// mutation, so it reaches the server once the device is online.
+	@discardableResult
+	func removeSaved(_ article: Recommendation) async -> Bool {
+		guard article.isSaved else { return false }
+		guard SavedItems.isRemovableItemID(article.id) else {
+			errorMessage = "This item can’t be removed until Pigeon finishes syncing."
+			return false
+		}
+		let mutation = OfflineMutation(kind: .removeSaved, itemIds: [article.id])
+		guard await enqueueOfflineMutation(mutation) else { return false }
+		locallySavedArticles[article.id] = nil
+		for collectionID in articleCache.keys {
+			guard let articles = articleCache[collectionID], articles.contains(where: { articlesMatch($0, article) }) else { continue }
+			articleCache[collectionID] = articles.filter { articlesMatch($0, article) == false }
+		}
+		for alias in ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId) {
+			canonicalArticleRecords[alias] = nil
+		}
+		if selectedArticleID == article.id || selectedArticleID == article.readerId {
+			selectedArticleID = nil
+			selectedArticleIDs[selectedNavigationID] = nil
+			if preferredCompactColumn == .detail {
+				preferredCompactColumn = .content
+			}
+		}
+		refreshSavedNavigationCount()
+		if let accountID = session?.storageIdentity {
+			try? await offlineStore.removeArticles(ids: [article.id], accountID: accountID)
+		}
+		Task { await replayPendingMutations() }
+		return true
+	}
+
+	private func savedExtractionTarget(for article: Recommendation) -> SavedExtractionCoordinator.Target? {
+		guard let url = article.safeOriginalURL else { return nil }
+		return SavedExtractionCoordinator.Target(itemID: article.id, url: url, isVideo: article.isSavedVideo)
+	}
+
+	private func configureSavedExtraction() {
+		savedExtraction.uploaderProvider = { [weak self] in self?.apiClient }
+		savedExtraction.onOutcome = { [weak self] target, outcome in
+			self?.applySavedExtractionOutcome(outcome, for: target)
+		}
+	}
+
+	private func applySavedExtractionOutcome(_ outcome: SavedExtractionCoordinator.Outcome, for target: SavedExtractionCoordinator.Target) {
+		switch outcome {
+		case .done(let content):
+			updateSavedArticle(target.itemID) { $0.applyingSavedContent(content) }
+			scheduleSavedPersistenceSync()
+		case .failed:
+			updateSavedArticle(target.itemID) { current in
+				var metadata = current.saved
+					?? SavedArticleMetadata(extractionState: SavedExtractionState.failed.rawValue, publishedAt: nil, imageURL: nil, siteName: nil)
+				metadata?.extractionState = SavedExtractionState.failed.rawValue
+				return current.updatingSaved(saved: metadata)
+			}
+			scheduleSavedPersistenceSync()
+		case .willRetry:
+			return
+		}
+	}
+
+	/// Shows a save immediately; the next sync brings the server's copy.
+	private func applySavedResponse(_ response: SavedItemResponse, title: String?, receivedAt: Date = .now) {
+		let savedID = ReaderSection.saved.rawValue
+		let existing = article(withId: response.id) ?? article(withId: response.readerId)
+		let state = response.extractionState ?? .pending
+		let article: Recommendation
+		if let existing {
+			article = existing.updatingSaved(receivedAt: receivedAt, isRead: false)
+		} else {
+			article = Recommendation.savedPlaceholder(response: response, title: title, receivedAt: receivedAt, state: state)
+		}
+		locallySavedArticles[article.id] = article
+		var articles = (articleCache[savedID] ?? []).filter { articlesMatch($0, article) == false }
+		articles.append(article)
+		setArticles(articles, for: savedID)
+		for collectionID in articleCache.keys where collectionID != savedID {
+			guard let cached = articleCache[collectionID], cached.contains(where: { articlesMatch($0, article) }) else { continue }
+			articleCache[collectionID] = cached.map { articlesMatch($0, article) ? article : $0 }
+		}
+		refreshSavedNavigationCount()
+		if article.savedState == .pending, let session, let target = savedExtractionTarget(for: article) {
+			savedExtraction.enqueue([target], scope: session.storageIdentity)
+		}
+		scheduleSavedPersistenceSync()
+	}
+
+	/// Saves made this session that the offline library has not synced yet.
+	/// A snapshot reload must not make them vanish from the list.
+	private func reapplyLocallySavedArticles() {
+		let savedID = ReaderSection.saved.rawValue
+		// The saved list is the whole sync-backed feed, so its unread rows are the count.
+		defer { refreshSavedNavigationCount() }
+		guard locallySavedArticles.isEmpty == false, let articles = articleCache[savedID] else { return }
+		var missing: [Recommendation] = []
+		for (id, local) in locallySavedArticles {
+			if articles.contains(where: { articlesMatch($0, local) }) {
+				locallySavedArticles[id] = nil
+			} else {
+				missing.append(local)
+			}
+		}
+		guard missing.isEmpty == false else { return }
+		setArticles(articles + missing, for: savedID)
+	}
+
+	private func updateSavedArticle(_ itemID: String, _ transform: (Recommendation) -> Recommendation) {
+		guard let current = article(withId: itemID) else { return }
+		let updated = transform(current)
+		guard updated != current else { return }
+		if locallySavedArticles[current.id] != nil {
+			locallySavedArticles[current.id] = updated
+		}
+		for alias in ReaderArticleIdentity.aliases(id: updated.id, readerID: updated.readerId) {
+			canonicalArticleRecords[alias] = updated
+		}
+		for collectionID in articleCache.keys {
+			guard let cached = articleCache[collectionID], cached.contains(where: { articlesMatch($0, current) }) else { continue }
+			articleCache[collectionID] = cached.map { articlesMatch($0, current) ? updated : $0 }
+		}
+		updateKeptArticles(matching: current) { $0 = updated }
+	}
+
+	private func refreshSavedNavigationCount() {
+		guard let saved = articleCache[ReaderSection.saved.rawValue] else { return }
+		updateNavigationCount(for: ReaderSection.saved.rawValue, to: saved.count(where: { $0.isRead == false }))
+	}
+
+	/// Read It Later is sync-backed: its list is the offline library's saved
+	/// membership, never a Google Reader stream (whose items lack the UUID that
+	/// removal needs).
+	private func loadSavedCollection(context: AccountOperationContext) async {
+		let savedID = ReaderSection.saved.rawValue
+		defer {
+			if isCurrentAccountOperation(context) {
+				completedInitialLoadCollectionIDs.insert(savedID)
+				failedInitialLoadCollectionIDs.remove(savedID)
+			}
+		}
+		if offlineSynchronizationEnabled {
+			if let snapshot = try? await offlineStore.loadSnapshot(accountID: context.accountID, collectionIDs: [savedID]) {
+				guard isCurrentAccountOperation(context) else { return }
+				setArticles(snapshot.articlesByCollection[savedID] ?? [], for: savedID)
+				collectionFreshness[savedID] = CollectionFreshness(updatedAt: snapshot.lastSyncAt ?? .now, isCached: true)
+			}
+		} else if articleCache[savedID] == nil {
+			setArticles([], for: savedID)
+		}
+		reapplyLocallySavedArticles()
+		refreshSavedNavigationCount()
+		sweepPendingSavedItems()
+	}
+
+	/// Persist local saves and extractions through a sync shortly after the
+	/// last one, coalescing a burst of saves into one sync.
+	private func scheduleSavedPersistenceSync() {
+		guard offlineSynchronizationEnabled else { return }
+		savedPersistenceSyncTask?.cancel()
+		savedPersistenceSyncTask = Task { @MainActor [weak self] in
+			try? await Task.sleep(for: .seconds(3))
+			guard Task.isCancelled == false, let self else { return }
+			await self.prepareOfflineLibrary()
+		}
+	}
+
+	/// Read It Later's list after its filters: Unread/Archive is the collection's
+	/// read filter; Text/Video and length are `savedListFilter`.
+	private func filteredSavedArticles(_ articles: [Recommendation]) -> [Recommendation] {
+		let filter = savedListFilter
+		guard filter.isDefault == false else { return articles }
+		return articles.filter { filter.includes($0, minutes: SavedLength.minutes(for: $0)) }
 	}
 
 	func readerMode(for feedID: String) -> ReaderMode {
@@ -1684,6 +1823,7 @@ final class ReaderAppModel {
 			offlinePreparationTask = nil
 			offlinePreparationTaskID = nil
 		}
+		await processSavedItems()
 	}
 
 	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
@@ -2491,8 +2631,12 @@ final class ReaderAppModel {
 				smartCounts: ReaderNavigationSmartCounts(
 					forYou: forYouCount,
 					today: snapshot.todayUnreadCount ?? previousTodayCount,
-					unread: snapshot.unreadCounts.first(where: { $0.id == "user/-/state/com.google/reading-list" })?.count ?? 0,
+					// Read It Later has its own section and count.
+					unread: snapshot.unreadCountExcludingSaved,
 					starred: snapshot.starredUnreadCount ?? previousStarredCount,
+					saved: snapshot.savedSubscription == nil
+						? articleCache[ReaderSection.saved.rawValue]?.count(where: { $0.isRead == false }) ?? 0
+						: snapshot.savedUnreadCount,
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
@@ -2699,6 +2843,18 @@ final class ReaderAppModel {
 		contextOverride: OperationContext? = nil,
 	) async {
 		guard let accountContext = accountContext(), Task.isCancelled == false else { return }
+		if collection.smartSection == .saved {
+			if force == false,
+				offlineSynchronizationEnabled,
+				let session,
+				preparedOfflineAccountID != session.storageIdentity,
+				isShowingBootstrapSnapshot == false {
+				await prepareOfflineLibrary()
+				guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
+			}
+			await loadSavedCollection(context: accountContext)
+			return
+		}
 		guard retryAttempt > 0 || force || activeLoadIDs[collection.id] == nil else {
 			return
 		}
@@ -3256,12 +3412,14 @@ final class ReaderAppModel {
 			today: navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0,
 			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
 			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
+			saved: navigation.item(withID: ReaderSection.saved.rawValue)?.unreadCount ?? 0,
 		)
 		setNavigation(
 			ReaderNavigationCatalog.make(
 				subscriptions: readerSubscriptions,
 				unreadCounts: [],
 				smartCounts: smartCounts,
+				savedStreamID: navigation.item(withID: ReaderSection.saved.rawValue)?.streamID,
 			),
 			markAsLoaded: true,
 		)
@@ -3801,9 +3959,7 @@ final class ReaderAppModel {
 	}
 
 	func availableSortOrders(for collection: ReaderNavigationItem) -> [ArticleSortOrder] {
-		ArticleSortOrder.allCases.filter { order in
-			order != .recommended || collection.smartSection == .forYou
-		}
+		ArticleSortOrder.available(for: collection.smartSection)
 	}
 
 	private func sortOrder(for collectionID: String) -> ArticleSortOrder {
@@ -3811,7 +3967,7 @@ final class ReaderAppModel {
 	}
 
 	private func setSortOrder(_ newSortOrder: ArticleSortOrder, for collectionID: String) {
-		guard newSortOrder != .recommended || ReaderSection(rawValue: collectionID) == .forYou else {
+		guard ArticleSortOrder.available(for: ReaderSection(rawValue: collectionID)).contains(newSortOrder) else {
 			return
 		}
 		guard sortOrder(for: collectionID) != newSortOrder else {
@@ -3964,6 +4120,7 @@ final class ReaderAppModel {
 			isPaywalled: preserveBody || incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
 			// For You and other thin payloads omit length; keep what was known.
 			length: incoming.length ?? existing.length,
+			saved: incoming.saved ?? existing.saved,
 		)
 	}
 
@@ -3995,6 +4152,7 @@ final class ReaderAppModel {
 			contentVersion: incoming.html.isEmpty ? existing.contentVersion : incoming.contentVersion,
 			isPaywalled: incoming.html.isEmpty ? existing.isPaywalled : incoming.isPaywalled,
 			length: incoming.length ?? existing.length,
+			saved: incoming.saved ?? existing.saved,
 		)
 	}
 
@@ -4022,6 +4180,7 @@ final class ReaderAppModel {
 			contentVersion: merged.contentVersion,
 			isPaywalled: merged.isPaywalled,
 			length: merged.length,
+			saved: merged.saved,
 		)
 	}
 
@@ -4105,6 +4264,11 @@ final class ReaderAppModel {
 	}
 
 	private func displayedArticles(for collectionID: String) -> [Recommendation] {
+		if collectionID == ReaderSection.saved.rawValue {
+			// Unread/Archive, then Text/Video and length. Archiving removes a row
+			// at once (no kept rows): the list is a queue, not an inbox.
+			return filteredSavedArticles(articleFilter(for: collectionID).filtering(allArticles(for: collectionID)))
+		}
 		let filter = articleFilter(for: collectionID)
 		guard keptArticles.applies(to: collectionID, filter: filter) else {
 			return filter.filtering(allArticles(for: collectionID))
@@ -4132,6 +4296,7 @@ final class ReaderAppModel {
 	/// place, with read styling, until the list is deliberately re-filtered.
 	private func keepArticleLeavingDisplayedList(_ article: Recommendation, read: Bool) {
 		let collectionID = selectedNavigationID
+		guard collectionID != ReaderSection.saved.rawValue else { return }
 		let filter = articleFilter(for: collectionID)
 		let leavesUnreadSection = read && collectionID == ReaderSection.unread.rawValue
 		let leavesFilter = (filter == .unread && read) || (filter == .read && read == false)
@@ -4289,11 +4454,13 @@ final class ReaderAppModel {
 				case .forYou:
 					shouldAdjust = cachedContains(item.id)
 				case .today:
-					shouldAdjust = todayBounds.contains(article.receivedAt)
+					shouldAdjust = article.isSaved == false && todayBounds.contains(article.receivedAt)
 				case .unread:
-					shouldAdjust = true
+					shouldAdjust = article.isSaved == false
 				case .starred:
 					shouldAdjust = article.isStarred
+				case .saved:
+					shouldAdjust = article.isSaved
 				case nil:
 					shouldAdjust = false
 				}
@@ -4585,7 +4752,8 @@ final class ReaderAppModel {
 		sentScrollThresholds[article.id] = []
 		await send(EngagementEvent(itemId: article.id, type: .explicitOpen))
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
-		if readerTypography.markReadBehavior == .onOpen, !article.isRead {
+		// Opening a saved item never archives it; reaching its end does.
+		if readerTypography.markReadBehavior == .onOpen, !article.isRead, article.isSaved == false {
 			await setRead(article, read: true)
 		}
 	}
@@ -4632,14 +4800,33 @@ final class ReaderAppModel {
 		}
 	}
 
+	/// Feed stories follow the mark-read setting. A saved text item is archived
+	/// when its end is reached, unless marking is manual; saved videos and
+	/// items still being extracted are archived only by hand.
+	nonisolated static func shouldMarkReadAfterScrolling(
+		_ article: Recommendation,
+		depth: Double,
+		behavior: ReaderMarkReadBehavior,
+	) -> Bool {
+		guard article.isSaved else {
+			return behavior == .onScroll && depth >= 0.6
+		}
+		return behavior != .manually
+			&& depth >= 0.97
+			&& article.isSavedVideo == false
+			&& article.hasReadableHTML
+	}
+
 	@discardableResult
-	func recordScrollDepth(itemId: String, depth: Double) -> Task<Void, Never>? {
+	/// `canScroll` is false when the whole article fits on screen: a saved item
+	/// is archived only when its end is reached by scrolling, never on open.
+	func recordScrollDepth(itemId: String, depth: Double, canScroll: Bool = true) -> Task<Void, Never>? {
 		guard let context = accountContext(), Task.isCancelled == false else { return nil }
 		let articleToMarkRead: Recommendation?
-		if readerTypography.markReadBehavior == .onScroll,
-			depth >= 0.6,
-			let article = article(withId: itemId),
+		if let article = article(withId: itemId),
 			article.isRead == false,
+			Self.shouldMarkReadAfterScrolling(article, depth: depth, behavior: readerTypography.markReadBehavior),
+			article.isSaved == false || canScroll,
 			scrollReadTriggered.insert(itemId).inserted
 		{
 			articleToMarkRead = article
@@ -6086,6 +6273,7 @@ final class ReaderAppModel {
 				resetStreamPagination(for: ReaderSection.today.rawValue)
 				resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
 			}
+			reapplyLocallySavedArticles()
 			return didPruneToday || discardedUntrustedTodayPagination
 		}
 
@@ -6112,6 +6300,7 @@ final class ReaderAppModel {
 			resetStreamPagination(for: ReaderSection.today.rawValue)
 			resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
 		}
+		reapplyLocallySavedArticles()
 		return didPruneToday || discardedUntrustedTodayPagination
 	}
 
@@ -6181,6 +6370,7 @@ final class ReaderAppModel {
 		}
 		reconcileSelectedSmartViewIfNeeded()
 		reconcileCurrentArticleSelection()
+		reapplyLocallySavedArticles()
 	}
 
 	private func incrementalReloadScope(for changes: [IncrementalSyncChange]) -> IncrementalReloadScope {
@@ -7615,12 +7805,14 @@ final class ReaderAppModel {
 			today: navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0,
 			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
 			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
+			saved: navigation.item(withID: ReaderSection.saved.rawValue)?.unreadCount ?? 0,
 		)
 		setNavigation(
 			ReaderNavigationCatalog.make(
 				subscriptions: readerSubscriptions,
 				unreadCounts: feedCounts.map { ReaderUnreadCount(id: $0.key, count: $0.value) },
 				smartCounts: smartCounts,
+				savedStreamID: navigation.item(withID: ReaderSection.saved.rawValue)?.streamID,
 			),
 			markAsLoaded: true,
 		)

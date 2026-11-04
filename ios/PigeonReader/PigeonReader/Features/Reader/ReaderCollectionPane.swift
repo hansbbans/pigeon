@@ -13,7 +13,13 @@ struct ReaderCollectionPane: View {
 		let collection = displayedAccountID == model.session?.storageIdentity
 			? displayedCollection ?? model.selectedCollection : model.selectedCollection
 		ZStack {
-			ArticleListView(collection: collection)
+			Group {
+				if collection.smartSection == .saved {
+					ReadItLaterListView(collection: collection)
+				} else {
+					ArticleListView(collection: collection)
+				}
+			}
 				.id(collection.id)
 				.transition(horizontalSizeClass == .regular ? .opacity : .identity)
 		}

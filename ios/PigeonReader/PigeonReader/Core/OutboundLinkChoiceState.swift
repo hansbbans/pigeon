@@ -29,8 +29,8 @@ struct OutboundLinkChoiceState: Equatable, Sendable {
 		switch choice {
 		case .openInBrowser:
 			return .openInBrowser(destination)
-		case .shareToReader:
-			return .shareToReader(destination)
+		case .readItLater:
+			return .readItLater(destination)
 		}
 	}
 }

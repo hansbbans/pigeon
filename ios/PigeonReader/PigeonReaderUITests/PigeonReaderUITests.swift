@@ -99,7 +99,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.buttons["Open link"].exists)
 		app.buttons["Open link"].tap()
 		XCTAssertTrue(app.buttons["Open in Browser"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Share to Reader"].exists)
+		XCTAssertTrue(app.buttons["Read It Later"].exists)
 		attachScreenshot(named: "linked-image-link-choice")
 	}
 
@@ -116,7 +116,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(revealSidebar(containing: firstFeed))
 		XCTAssertEqual(firstFeed.value as? String, "1 unread")
 		XCTAssertEqual(secondFeed.value as? String, "1 unread")
-		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
+		XCTAssertEqual(sidebarValue(of: unrelatedFeed), "1 unread")
 		attachScreenshot(named: "folder-feed-badges-before-mark-all")
 
 		app.staticTexts["Design"].tap()
@@ -141,7 +141,7 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "folder-feed-badges-after-mark-all")
 		XCTAssertEqual(firstFeed.value as? String, "0 unread")
 		XCTAssertEqual(secondFeed.value as? String, "0 unread")
-		XCTAssertEqual(unrelatedFeed.value as? String, "1 unread")
+		XCTAssertEqual(sidebarValue(of: unrelatedFeed), "1 unread")
 	}
 
 	func testFeedMarkReadShowsProgressWhileCompleting() throws {
@@ -226,8 +226,8 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(revealSidebar(containing: feed))
 		XCTAssertEqual(feed.value as? String, "0 unread")
 		XCTAssertEqual(app.buttons["Marginal Revolution"].value as? String, "1 unread")
-		XCTAssertEqual(app.buttons["Stratechery"].value as? String, "1 unread")
 		XCTAssertEqual(unread.value as? String, "3 unread")
+		XCTAssertEqual(sidebarValue(of: app.buttons["Stratechery"]), "1 unread")
 		attachScreenshot(named: "feed-direct-mark-read-updated-counts")
 	}
 
@@ -283,7 +283,7 @@ final class PigeonReaderUITests: XCTestCase {
 		try tapNormalLink()
 		attachScreenshot(named: "normal-link-choice")
 		XCTAssertTrue(app.buttons["Open in Browser"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.buttons["Share to Reader"].exists)
+		XCTAssertTrue(app.buttons["Read It Later"].exists)
 	}
 
 	func testModeMenuWebsiteAndBackToFeedContent() throws {
@@ -756,7 +756,7 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(app.buttons["Unstar"].exists)
 		XCTAssertFalse(app.buttons["Star"].exists)
 		XCTAssertTrue(app.buttons["More like this"].exists)
-		XCTAssertTrue(app.buttons["Share to Readwise"].exists)
+		XCTAssertTrue(app.buttons["article-read-it-later"].exists)
 		XCTAssertFalse(app.buttons["Larger text"].exists)
 		XCTAssertFalse(app.buttons["Smaller text"].exists)
 		attachScreenshot(named: "accessibility-large-text-reader")
@@ -838,35 +838,25 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.descendants(matching: .any)["article-reader-controls"].waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Share"].exists)
 		XCTAssertTrue(app.buttons["More like this"].exists)
-		XCTAssertTrue(app.buttons["Share to Readwise"].exists)
+		XCTAssertTrue(app.buttons["article-read-it-later"].exists)
 		XCTAssertFalse(app.buttons["Star"].exists)
 		XCTAssertFalse(app.buttons["Unstar"].exists)
 		attachScreenshot(named: "article-bottom-controls")
 	}
 
-	func testFeedRowSaveErrorIsVisible() throws {
+	func testFeedRowSuccessfulSaveKeepsTheListInteractive() throws {
 		try launchFeedList()
 
 		let article = app.staticTexts["Designing calmer tools for people who read every day"]
 		XCTAssertTrue(article.waitForExistence(timeout: 10))
 		// The trailing swipe offers both save and star actions.
 		article.swipeLeft()
-		let save = app.buttons["Save to Reader"]
+		let save = app.buttons["Read It Later"]
 		XCTAssertTrue(save.waitForExistence(timeout: 5))
 		XCTAssertTrue(app.buttons["Unstar"].exists)
 		save.tap()
 
-		XCTAssertTrue(app.staticTexts["Add a Readwise access token in Settings before saving links."].waitForExistence(timeout: 5))
-	}
-
-	func testFeedRowSuccessfulSaveKeepsTheListInteractive() throws {
-		try launchFeedList(additionalArguments: ["-reader-save-success"])
-
-		let article = app.staticTexts["Designing calmer tools for people who read every day"]
-		article.swipeLeft()
-		app.buttons["Save to Reader"].tap()
-
-		XCTAssertTrue(app.staticTexts["Saved to Reader"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Saved to Read It Later"].waitForExistence(timeout: 5))
 		XCTAssertFalse(app.alerts.firstMatch.exists)
 		app.buttons["Dismiss confirmation"].tap()
 		article.tap()
@@ -956,15 +946,105 @@ final class PigeonReaderUITests: XCTestCase {
 		option.tap()
 	}
 
-	func testInlineSuccessfulSaveDoesNotInterruptReading() throws {
-		app.launchArguments += ["-reader-save-success"]
+	/// The core save path: a link in an article goes to Read It Later and the
+	/// reader stays on the article.
+	func testInlineReadItLaterSaveDoesNotInterruptReading() throws {
 		app.launchWithoutAnimations()
 		try tapNormalLink()
-		app.buttons["Share to Reader"].tap()
+		let readItLater = app.buttons["Read It Later"]
+		XCTAssertTrue(readItLater.waitForExistence(timeout: 5))
+		readItLater.tap()
 
-		XCTAssertTrue(app.staticTexts["Saved to Reader"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Saved to Read It Later"].waitForExistence(timeout: 5))
 		XCTAssertFalse(app.alerts.firstMatch.exists)
 		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].exists)
+		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].exists)
+		attachScreenshot(named: "inline-read-it-later-toast")
+	}
+
+	func testLongPressingALinkOffersReadItLaterFirst() throws {
+		launchShowingArticle()
+		let link = app.links["Read the design notes"]
+		guard waitForHittableReaderTarget(link, description: "the normal fixture link") else { return }
+		link.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+
+		let readItLater = app.buttons["Read It Later"]
+		XCTAssertTrue(readItLater.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Open in Browser"].exists)
+		XCTAssertTrue(app.buttons["Copy Link"].exists)
+		XCTAssertTrue(app.buttons["Share…"].exists)
+		XCTAssertLessThan(readItLater.frame.minY, app.buttons["Open in Browser"].frame.minY, "Read It Later leads the menu")
+		attachScreenshot(named: "link-long-press-menu")
+		readItLater.tap()
+
+		XCTAssertTrue(app.staticTexts["Saved to Read It Later"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].exists)
+	}
+
+	func testReadItLaterListFiltersSortsAndArchives() throws {
+		app.launchArguments = ["-reader-sample-data", "-reader-show-saved", "-reader-reset-reader-state"]
+		app.launchWithoutAnimations()
+
+		let slow = app.staticTexts["Slow software, and why it lasts"]
+		let short = app.staticTexts["Notes on short reads"]
+		let video = app.staticTexts["How typefaces are drawn"]
+		let archived = app.staticTexts["A field guide to margins"]
+		XCTAssertTrue(app.navigationBars["Read It Later"].waitForExistence(timeout: 10))
+		XCTAssertTrue(slow.waitForExistence(timeout: 10))
+		XCTAssertTrue(short.exists)
+		XCTAssertTrue(video.exists)
+		XCTAssertFalse(archived.exists, "Archive is a separate filter")
+		attachScreenshot(named: "read-it-later-list")
+
+		chooseSavedOption(menu: "saved-filter", option: "Video")
+		XCTAssertTrue(video.waitForExistence(timeout: 5))
+		XCTAssertTrue(slow.waitForNonExistence(timeout: 5))
+		chooseSavedOption(menu: "saved-filter", option: "All")
+		XCTAssertTrue(slow.waitForExistence(timeout: 5))
+
+		chooseSavedOption(menu: "saved-sort", option: "Shortest First")
+		XCTAssertTrue(short.waitForExistence(timeout: 5))
+		XCTAssertLessThan(short.frame.minY, slow.frame.minY, "Shortest First puts the two-minute read above the long essay")
+		chooseSavedOption(menu: "saved-sort", option: "Longest First")
+		let reordered = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in slow.frame.minY < short.frame.minY }, object: nil)
+		XCTAssertEqual(XCTWaiter.wait(for: [reordered], timeout: 5), .completed)
+
+		slow.press(forDuration: 1)
+		let archive = app.buttons["Archive"]
+		XCTAssertTrue(archive.waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["Remove"].exists)
+		XCTAssertTrue(app.buttons["Copy Link"].exists)
+		archive.tap()
+		XCTAssertTrue(slow.waitForNonExistence(timeout: 5))
+
+		chooseSavedOption(menu: "saved-filter", option: "Archive")
+		XCTAssertTrue(slow.waitForExistence(timeout: 5))
+		XCTAssertTrue(archived.exists)
+		XCTAssertFalse(short.exists)
+	}
+
+	func testPendingSavedItemPreparesThenShowsTheArticle() throws {
+		app.launchArguments = ["-reader-sample-data", "-reader-show-saved", "-reader-reset-reader-state"]
+		app.launchWithoutAnimations()
+		let pending = app.staticTexts["The quiet craft of editing"]
+		XCTAssertTrue(pending.waitForExistence(timeout: 10))
+		pending.tap()
+
+		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Editing is the art of leaving out. Every sentence that survives has to earn its place on the page."].waitForExistence(timeout: 15))
+		XCTAssertFalse(app.descendants(matching: .any)["saved-preparing"].exists)
+		// A short page that fits on screen is not archived just by opening it.
+		XCTAssertTrue(app.buttons["Archive"].exists, "Saved items archive instead of marking read")
+		attachScreenshot(named: "saved-item-extracted")
+	}
+
+	private func chooseSavedOption(menu: String, option: String) {
+		let button = app.buttons[menu]
+		XCTAssertTrue(button.waitForExistence(timeout: 5))
+		button.tap()
+		let choice = app.buttons[option]
+		XCTAssertTrue(choice.waitForExistence(timeout: 5), "Missing \(option) in \(menu)")
+		choice.tap()
 	}
 
 	func testReadingControlsSheetReturnsToTheOpenArticle() throws {
@@ -1206,6 +1286,20 @@ final class PigeonReaderUITests: XCTestCase {
 		}
 
 		return rowIsVisible()
+	}
+
+	/// Reads a sidebar row's value, scrolling it into the lazy list when the
+	/// views above it (Read It Later included) push it below the fold.
+	private func sidebarValue(of row: XCUIElement) -> String? {
+		let sidebar = app.collectionViews["reader-sidebar"].exists ? app.collectionViews["reader-sidebar"] : app.collectionViews.firstMatch
+		var swipes = 0
+		while row.exists == false, swipes < 4 {
+			sidebar.swipeUp(velocity: .slow)
+			swipes += 1
+		}
+		let value = row.value as? String
+		for _ in 0..<swipes { sidebar.swipeDown(velocity: .slow) }
+		return value
 	}
 
 	private func revealSidebar(containing target: XCUIElement, timeout: TimeInterval = 10) -> Bool {

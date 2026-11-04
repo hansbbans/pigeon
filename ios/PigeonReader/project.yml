@@ -101,10 +101,12 @@ targets:
     sources:
       - path: PigeonShareExtension
       - path: PigeonReader/Shared/PigeonSharedData.swift
+      - path: PigeonReader/Shared/PigeonSharedSaving.swift
+      - path: PigeonReader/Core/PigeonSession.swift
     info:
       path: PigeonShareExtension/Info.plist
       properties:
-        CFBundleDisplayName: Add to Pigeon
+        CFBundleDisplayName: Pigeon
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:

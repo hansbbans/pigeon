@@ -31,6 +31,7 @@ struct ArticleReaderView: View {
 	@State private var isArticleBodyLaidOut = false
 	@State private var isShowingReadingSettings = false
 	@State private var saveConfirmation: ReaderSaveConfirmation?
+	@State private var isShowingSavedOriginal = false
 
 	private var currentArticle: Recommendation {
 		model.article(withId: article.id) ?? article
@@ -171,7 +172,7 @@ struct ArticleReaderView: View {
 								isBodyLaidOut: isBodyLaidOut,
 							)
 							if isBodyLaidOut {
-								model.recordScrollDepth(itemId: current.id, depth: depth)
+								model.recordScrollDepth(itemId: current.id, depth: depth, canScroll: geometry.maximumOffset > 1)
 								model.setArticleScrollOffset(depth, for: current.id)
 							}
 						}
@@ -261,6 +262,12 @@ struct ArticleReaderView: View {
 		}
 		.sheet(isPresented: $isShowingReadingSettings) {
 			ReaderReadingSettingsView(settings: model.readerTypography)
+		}
+		.fullScreenCover(isPresented: $isShowingSavedOriginal) {
+			if let url = current.safeOriginalURL {
+				SafariView(url: url, onDone: { isShowingSavedOriginal = false })
+					.ignoresSafeArea()
+			}
 		}
 		.task(id: ArticleReaderModeResolutionIdentity(
 			articleID: current.id,
@@ -369,6 +376,15 @@ struct ArticleReaderView: View {
 	@ViewBuilder
 	private func articleContent(for article: Recommendation) -> some View {
 		switch readerMode(for: article) {
+		case .feedContent where article.isSaved && article.isSavedVideo == false && article.savedState != .done:
+			SavedArticleExtractionView(
+				article: article,
+				onOpenOriginal: { isShowingSavedOriginal = true },
+				onRetry: { model.retrySavedExtraction(article) },
+			)
+			.task(id: article.id) {
+				model.prioritizeSavedExtraction(for: article)
+			}
 		case .feedContent:
 			VStack(alignment: .leading, spacing: 18) {
 				if let video = YouTubeVideo(url: article.safeOriginalURL) {
@@ -391,7 +407,7 @@ struct ArticleReaderView: View {
 					imageProxySession: model.session,
 					preparedBody: model.readerPreparation.preparedBody(for: article),
 					openedDestination: openInlineDestination,
-					saveToReader: saveInlineDestination,
+					saveForLater: saveInlineDestination,
 					onHTMLLayout: { layout in
 						handleReaderLayout(layout, article: article, mode: .feedContent)
 					},
@@ -454,7 +470,7 @@ struct ArticleReaderView: View {
 						// ArticleBodyView prepares once off the main actor, keyed by
 						// exact HTML and source URL. Scroll updates reuse that body.
 						openedDestination: openInlineDestination,
-						saveToReader: saveInlineDestination,
+						saveForLater: saveInlineDestination,
 						onHTMLLayout: { layout in
 							handleReaderLayout(layout, article: article, mode: .readerView)
 						},
@@ -706,7 +722,7 @@ struct ArticleReaderView: View {
 					imageProxySession: model.session,
 					preparedBody: model.readerPreparation.preparedBody(for: article),
 					openedDestination: openInlineDestination,
-					saveToReader: saveInlineDestination,
+					saveForLater: saveInlineDestination,
 					onHTMLLayout: { layout in
 						handleReaderLayout(layout, article: article, mode: .feedContent)
 					},
@@ -884,23 +900,16 @@ struct ArticleReaderView: View {
 		}
 	}
 
-	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> ReadwiseSaveOutcome {
+	/// Saves a link from the article to Read It Later. The reader stays put
+	/// and shows a toast; it never navigates.
+	private func saveInlineDestination(_ destination: OutboundDestination) async throws -> SaveForLaterOutcome {
 		let articleID = currentArticle.id
-		let mode = selectedMode
-		let outcome = try await model.saveToReader(destination)
-		try Task.checkCancellation()
-		guard model.selectedArticleID == articleID, selectedMode == mode else {
+		let outcome = try await model.saveForLater(destination.url)
+		guard model.selectedArticleID == articleID else {
 			return outcome
 		}
-		switch outcome {
-		case .saved:
-			withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
-				saveConfirmation = ReaderSaveConfirmation(message: "Saved to Reader", isSuccess: true)
-			}
-		case .alreadyInFlight:
-			withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
-				saveConfirmation = ReaderSaveConfirmation(message: "Already saving this link…", isSuccess: false)
-			}
+		withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
+			saveConfirmation = ReaderSaveConfirmation(message: outcome.confirmationMessage, isSuccess: outcome.isSuccess)
 		}
 		return outcome
 	}

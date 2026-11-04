@@ -101,7 +101,6 @@ enum PreviewData {
 				scenario: scenario,
 				articles: scenario == .emptyColdToday ? launchTodayArticles : cachedArticles,
 			),
-			readwiseTokenStore: PreviewReadwiseTokenStore(),
 			offlineStore: offlineStore,
 			offlineSynchronizationEnabled: true,
 		)
@@ -138,7 +137,6 @@ enum PreviewData {
 		let model = ReaderAppModel(
 			sessionStore: PreviewSessionStore(session: session),
 			httpClient: PreviewHTTPClient(recommendations: articles),
-			readwiseTokenStore: PreviewReadwiseTokenStore(),
 			offlineStore: OfflineLibraryStore.inMemory(
 				seeding: previewSeedArticles,
 				collectionID: previewSeedCollectionID,
@@ -149,6 +147,7 @@ enum PreviewData {
 		model.setArticles(articles, for: .forYou)
 		model.setArticles(articles.filter { $0.isRead == false }, for: .unread)
 		model.setArticles(articles.filter(\.isStarred), for: .starred)
+		model.setArticles(savedArticles, for: .saved)
 		model.setSubscriptions([
 			FeedSubscription(
 				id: "feed/1", title: "Dense Discovery", categories: [FeedCategory(id: "user/-/label/Design", label: "Design")],
@@ -197,7 +196,13 @@ enum PreviewData {
 					ReaderUnreadCount(id: "user/-/label/Technology", count: 1),
 					ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: articles.count(where: { $0.isRead == false })),
 				],
-				smartCounts: ReaderNavigationSmartCounts(forYou: showsFolderRead ? 3 : 2, today: 1, unread: articles.count(where: { $0.isRead == false }), starred: 1),
+				smartCounts: ReaderNavigationSmartCounts(
+					forYou: showsFolderRead ? 3 : 2,
+					today: 1,
+					unread: articles.count(where: { $0.isRead == false }),
+					starred: 1,
+					saved: savedArticles.count(where: { $0.isRead == false }),
+				),
 			),
 				markAsLoaded: true,
 			)
@@ -213,6 +218,10 @@ enum PreviewData {
 				}
 			}
 			model.select(section: showsToday ? .today : .forYou)
+			if ProcessInfo.processInfo.arguments.contains("-reader-show-saved") {
+				model.select(section: .saved)
+				model.preferredCompactColumn = .content
+			}
 			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
 				PreviewNavigationFixture.install(in: model)
 			}
@@ -223,6 +232,75 @@ enum PreviewData {
 				model.setArticleFilter(.all, for: model.selectedCollection)
 			}
 			return model
+	}
+
+	/// Read It Later fixtures: finished text of several lengths, a video, an
+	/// archived item, and a pending page the preview server can extract.
+	static var savedArticles: [Recommendation] {
+		let now = Date.now
+		func saved(
+			_ number: Int,
+			title: String,
+			url: String,
+			site: String,
+			html: String,
+			wordCount: Int?,
+			hoursAgo: Double,
+			state: SavedExtractionState = .done,
+			isRead: Bool = false,
+			mediaKind: String = "text",
+			durationSeconds: Int? = nil,
+		) -> Recommendation {
+			Recommendation(
+				id: String(format: "5a7ed000-0000-4000-8000-%012d", number),
+				readerId: String(format: "tag:google.com,2005:reader/item/%016x", 0x900 + number),
+				feedKey: SavedItems.feedKey,
+				source: SavedItems.title,
+				title: title,
+				html: html,
+				text: nil,
+				originalURL: URL(string: url),
+				receivedAt: now.addingTimeInterval(-hoursAgo * 3_600),
+				isRead: isRead,
+				isStarred: false,
+				score: 0,
+				confidence: 0,
+				sampleCount: 0,
+				explanation: "Saved to Read It Later",
+				learningState: "Saved",
+				length: ArticleLength(wordCount: wordCount, mediaKind: mediaKind, durationSeconds: durationSeconds),
+				saved: SavedArticleMetadata(extractionState: state.rawValue, publishedAt: nil, imageURL: nil, siteName: site),
+			)
+		}
+		return [
+			saved(
+				1, title: "Slow software, and why it lasts", url: "https://example.com/essays/slow-software",
+				site: "Example Essays",
+				html: "<article><p>Software that waits for you is software you keep. The tools that last are the ones that never hurry their owner.</p><p>This saved essay is long enough to reach the twelve minute mark.</p></article>",
+				wordCount: 2_650, hoursAgo: 2,
+			),
+			saved(
+				2, title: "Notes on short reads", url: "https://example.com/notes/short-reads",
+				site: "Field Notes",
+				html: "<article><p>A short read is a promise kept quickly.</p></article>",
+				wordCount: 400, hoursAgo: 5,
+			),
+			saved(
+				3, title: "The quiet craft of editing", url: "https://pigeon.preview/saved/quiet-craft",
+				site: "pigeon.preview", html: "", wordCount: nil, hoursAgo: 26, state: .pending,
+			),
+			saved(
+				4, title: "How typefaces are drawn", url: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+				site: "Type Studio", html: "", wordCount: nil, hoursAgo: 72,
+				mediaKind: "video", durationSeconds: 1_140,
+			),
+			saved(
+				5, title: "A field guide to margins", url: "https://example.com/guides/margins",
+				site: "Example Essays",
+				html: "<article><p>Margins give text room to breathe.</p></article>",
+				wordCount: 1_400, hoursAgo: 120, isRead: true,
+			),
+		]
 	}
 
 	// Keep the Today UI fixture inside the current local day across test dates.
@@ -700,6 +778,10 @@ private actor LaunchFixtureOfflineStore: OfflineLibraryStoring, OfflineLibraryBo
 
 	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation] {
 		try await store.searchArticles(query: query, collectionID: collectionID, accountID: accountID, limit: limit)
+	}
+
+	func removeArticles(ids: [String], accountID: String) async throws {
+		try await store.removeArticles(ids: ids, accountID: accountID)
 	}
 }
 #endif

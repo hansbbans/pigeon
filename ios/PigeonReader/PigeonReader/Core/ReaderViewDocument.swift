@@ -15,6 +15,8 @@ struct ReaderViewDocument: Equatable, Sendable {
 	let publishedAt: Date?
 	let siteName: String?
 	let extractor: ReaderViewExtractorKind
+	/// Plain text of the extraction, uploaded with Read It Later saves for search.
+	let textContent: String?
 
 	init(
 		title: String? = nil,
@@ -26,6 +28,7 @@ struct ReaderViewDocument: Equatable, Sendable {
 		publishedAt: Date? = nil,
 		siteName: String? = nil,
 		extractor: ReaderViewExtractorKind = .readability,
+		textContent: String? = nil,
 	) throws {
 		let trimmedContent = contentHTML.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard trimmedContent.isEmpty == false else {
@@ -40,6 +43,7 @@ struct ReaderViewDocument: Equatable, Sendable {
 		self.publishedAt = publishedAt
 		self.siteName = siteName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
 		self.extractor = extractor
+		self.textContent = textContent?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
 	}
 
 	init(payload: [String: Any]) throws {
@@ -55,6 +59,7 @@ struct ReaderViewDocument: Equatable, Sendable {
 			publishedAt: ReaderPublishedDate.normalize(payload["published"] as? String),
 			siteName: payload["site"] as? String,
 			extractor: (payload["extractor"] as? String).flatMap(ReaderViewExtractorKind.init(rawValue:)) ?? .readability,
+			textContent: payload["text"] as? String,
 		)
 	}
 

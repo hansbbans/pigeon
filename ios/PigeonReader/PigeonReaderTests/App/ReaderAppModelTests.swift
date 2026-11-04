@@ -5604,7 +5604,8 @@ struct ReaderAppModelTests {
 		#expect(model.personalizationErrorMessage == nil)
 	}
 
-	@Test(arguments: ReaderSection.allCases)
+	// Read It Later sorts by saved time and length, never by score.
+	@Test(arguments: ReaderSection.allCases.filter { $0 != .saved })
 	func everySectionSortsByNewestOrScoreWithoutLosingSelection(section: ReaderSection) throws {
 		let model = try makeModel(httpClient: MockHTTPClient())
 		let day = ReaderLocalDayBounds.localDay(containing: .now).start
@@ -8981,7 +8982,7 @@ struct ReaderAppModelTests {
 			#expect(model.allArticles(for: item).first(where: { $0.id == boundary.id })?.isRead == false)
 			#expect(model.allArticles(for: item).first(where: { $0.id == alreadyRead.id })?.isRead == true)
 		}
-		#expect(model.navigation.items.allSatisfy { $0.unreadCount == 1 })
+		#expect(model.navigation.items.filter { $0.smartSection != .saved }.allSatisfy { $0.unreadCount == 1 })
 		#expect(model.selectedArticleID == boundary.id)
 		#expect(model.preferredCompactColumn == .detail)
 	}
@@ -10577,7 +10578,6 @@ struct ReaderAppModelTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: storedSession),
 			httpClient: httpClient,
-			readwiseTokenStore: TestReadwiseTokenStore(),
 			readerModeStore: readerModeStore ?? ReaderModeStore(defaults: isolatedDefaults),
 			articleFilterStore: articleFilterStore ?? ReaderArticleFilterStore(defaults: isolatedDefaults),
 			smartViewStore: ReaderSmartViewStore(defaults: isolatedDefaults),

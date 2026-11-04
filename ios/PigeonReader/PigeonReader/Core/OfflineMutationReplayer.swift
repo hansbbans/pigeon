@@ -210,6 +210,12 @@ actor OfflineMutationReplayer {
 			guard mutation.itemIds.count == 1, let wordCount = mutation.wordCount, (1...2_000_000).contains(wordCount) else {
 				return "The word-count report is invalid."
 			}
+		case .removeSaved:
+			guard mutation.itemIds.isEmpty == false,
+				mutation.itemIds.count <= 200,
+				mutation.itemIds.allSatisfy(SavedItems.isRemovableItemID) else {
+				return "The saved-item removal must name item IDs."
+			}
 		}
 		return nil
 	}

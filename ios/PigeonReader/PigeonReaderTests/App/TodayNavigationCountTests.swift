@@ -31,7 +31,6 @@ struct TodayNavigationCountTests {
 		let model = ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: client,
-			readwiseTokenStore: TestReadwiseTokenStore(),
 			readerModeStore: ReaderModeStore(defaults: defaults),
 			articleFilterStore: ReaderArticleFilterStore(defaults: defaults),
 			smartViewStore: ReaderSmartViewStore(defaults: defaults),

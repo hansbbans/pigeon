@@ -368,12 +368,6 @@ test('YouTube transcript: store one for a video, read it back, then sync the sig
  * this list; nothing may be added to it without that follow-up.
  */
 const AWAITING_IOS_CONTRACT_TESTS = new Set([
-	'saved-create.request.json',
-	'saved-create.response.json',
-	'saved-content.request.json',
-	'saved-content.response.json',
-	'saved-remove.request.json',
-	'sync-saved.response.json',
 	// YouTube transcripts (step 5): named by the iOS transcript PR.
 	'transcript-upload.request.json',
 	'transcript-upload.response.json',

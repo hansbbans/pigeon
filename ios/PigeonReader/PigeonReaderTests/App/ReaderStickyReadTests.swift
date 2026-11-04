@@ -442,7 +442,6 @@ struct ReaderStickyReadTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: MockHTTPClient(shouldFail: true),
-			readwiseTokenStore: TestReadwiseTokenStore(),
 			readerModeStore: ReaderModeStore(defaults: defaults),
 			articleFilterStore: ReaderArticleFilterStore(defaults: defaults),
 			smartViewStore: ReaderSmartViewStore(defaults: defaults),

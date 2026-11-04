@@ -25,6 +25,8 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 	var isPaywalled: Bool? = nil
 	/// Server reading-length metadata; nil for older servers and caches.
 	var length: ArticleLength? = nil
+	/// Read It Later metadata; nil for every article outside the saved feed.
+	var saved: SavedArticleMetadata? = nil
 
 	var safeOriginalURL: URL? {
 		guard let originalURL, let scheme = originalURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
@@ -85,6 +87,7 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 			contentVersion: contentVersion,
 			isPaywalled: isPaywalled,
 			length: length,
+			saved: saved,
 		)
 	}
 }

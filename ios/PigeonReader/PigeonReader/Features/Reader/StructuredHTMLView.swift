@@ -1,6 +1,32 @@
 import SwiftUI
 import WebKit
 
+/// The long-press menu on an article link. Read It Later comes first.
+nonisolated enum ArticleLinkMenuAction: CaseIterable, Sendable {
+	case readItLater
+	case openInBrowser
+	case copyLink
+	case share
+
+	var title: String {
+		switch self {
+		case .readItLater: "Read It Later"
+		case .openInBrowser: "Open in Browser"
+		case .copyLink: "Copy Link"
+		case .share: "Share…"
+		}
+	}
+
+	var systemImage: String {
+		switch self {
+		case .readItLater: "bookmark"
+		case .openInBrowser: "safari"
+		case .copyLink: "doc.on.doc"
+		case .share: "square.and.arrow.up"
+		}
+	}
+}
+
 struct StructuredHTMLView: UIViewRepresentable {
 	let html: String
 	let baseURL: URL?
@@ -15,6 +41,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 	let onImage: (URL, URL?) -> Void
 	let onImageFailure: ([URL]) -> Void
 	let onLayout: (ReaderHTMLLayout) -> Void
+	let onLinkMenuAction: (ArticleLinkMenuAction, URL) -> Void
 
 	init(
 		html: String,
@@ -30,6 +57,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		onImage: @escaping (URL, URL?) -> Void,
 		onImageFailure: @escaping ([URL]) -> Void,
 		onLayout: @escaping (ReaderHTMLLayout) -> Void = { _ in },
+		onLinkMenuAction: @escaping (ArticleLinkMenuAction, URL) -> Void = { _, _ in },
 	) {
 		self.html = html
 		self.baseURL = baseURL
@@ -44,6 +72,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		self.onImage = onImage
 		self.onImageFailure = onImageFailure
 		self.onLayout = onLayout
+		self.onLinkMenuAction = onLinkMenuAction
 	}
 
 	func makeCoordinator() -> Coordinator {
@@ -53,6 +82,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 				onImage: onImage,
 				onImageFailure: onImageFailure,
 				onLayout: onLayout,
+				onLinkMenuAction: onLinkMenuAction,
 			onHeight: { height in
 				heightBinding.wrappedValue = height
 			},
@@ -71,7 +101,11 @@ struct StructuredHTMLView: UIViewRepresentable {
 
 		let webView = WKWebView(frame: .zero, configuration: configuration)
 		webView.navigationDelegate = context.coordinator
-		webView.allowsLinkPreview = false
+		webView.uiDelegate = context.coordinator
+		// WebKit asks the UI delegate for a link's context menu only while link
+		// previews are allowed. The delegate returns Pigeon's own menu with no
+		// preview, so a long press never loads the page.
+		webView.allowsLinkPreview = true
 		webView.isOpaque = false
 		webView.backgroundColor = .clear
 		webView.scrollView.isScrollEnabled = false
@@ -92,6 +126,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		context.coordinator.onImage = onImage
 		context.coordinator.onImageFailure = onImageFailure
 		context.coordinator.onLayout = onLayout
+		context.coordinator.onLinkMenuAction = onLinkMenuAction
 		context.coordinator.onHeight = { height in
 			heightBinding.wrappedValue = height
 		}
@@ -106,12 +141,13 @@ struct StructuredHTMLView: UIViewRepresentable {
 		context.coordinator.find(findQuery)
 	}
 
-	final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+	final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
 		weak var webView: WKWebView?
 		var onLink: (URL) -> Void
 		var onImage: (URL, URL?) -> Void
 		var onImageFailure: ([URL]) -> Void
 		var onLayout: (ReaderHTMLLayout) -> Void
+		var onLinkMenuAction: (ArticleLinkMenuAction, URL) -> Void
 		var onHeight: (CGFloat) -> Void
 		private var isShellLoaded = false
 		private var pendingPayload: Payload?
@@ -124,12 +160,14 @@ struct StructuredHTMLView: UIViewRepresentable {
 			onImage: @escaping (URL, URL?) -> Void,
 			onImageFailure: @escaping ([URL]) -> Void,
 			onLayout: @escaping (ReaderHTMLLayout) -> Void,
+			onLinkMenuAction: @escaping (ArticleLinkMenuAction, URL) -> Void = { _, _ in },
 			onHeight: @escaping (CGFloat) -> Void,
 		) {
 			self.onLink = onLink
 			self.onImage = onImage
 			self.onImageFailure = onImageFailure
 			self.onLayout = onLayout
+			self.onLinkMenuAction = onLinkMenuAction
 			self.onHeight = onHeight
 			super.init()
 		}
@@ -233,6 +271,37 @@ struct StructuredHTMLView: UIViewRepresentable {
 			} else {
 				decisionHandler(.allow)
 			}
+		}
+
+		func webView(
+			_ webView: WKWebView,
+			contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
+			completionHandler: @escaping @MainActor (UIContextMenuConfiguration?) -> Void,
+		) {
+			guard let rawURL = elementInfo.linkURL?.absoluteString,
+				let url = StructuredHTMLSanitizer.safeWebURL(rawURL, relativeTo: nil),
+				OutboundDestination(url: url) != nil else {
+				// Images and plain text keep no menu, as before.
+				completionHandler(nil)
+				return
+			}
+			let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+				let actions = ArticleLinkMenuAction.allCases.map { action in
+					UIAction(title: action.title, image: UIImage(systemName: action.systemImage)) { _ in
+						self?.onLinkMenuAction(action, url)
+					}
+				}
+				return UIMenu(title: url.host() ?? "", children: actions)
+			}
+			completionHandler(configuration)
+		}
+
+		func webView(
+			_ webView: WKWebView,
+			contextMenuForElement elementInfo: WKContextMenuElementInfo,
+			willCommitWithAnimator animator: any UIContextMenuInteractionCommitAnimating,
+		) {
+			// No preview is shown, so there is nothing to commit to: never navigate.
 		}
 
 		func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

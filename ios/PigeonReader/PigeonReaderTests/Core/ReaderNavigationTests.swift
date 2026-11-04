@@ -318,7 +318,6 @@ struct ReaderNavigationTests {
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: httpClient,
-			readwiseTokenStore: TestReadwiseTokenStore(),
 			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
 			offlineStore: OfflineLibraryStore.inMemory(),
 		)

@@ -3,10 +3,6 @@ import SwiftUI
 struct SettingsView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.dismiss) private var dismiss
-	@State private var readwiseToken = ""
-	@State private var readwiseMessage: String?
-	@State private var readwiseMessageIsError = false
-	@State private var isUpdatingReadwiseToken = false
 	@State private var offlineMessage: String?
 	@State private var isShowingClearOfflineConfirmation = false
 
@@ -243,34 +239,6 @@ struct SettingsView: View {
 						.foregroundStyle(.secondary)
 				}
 
-				Section("Readwise Reader") {
-					SecureField("Access token", text: $readwiseToken)
-						.textInputAutocapitalization(.never)
-						.autocorrectionDisabled()
-						.textContentType(.password)
-					Button("Save token", systemImage: "key.fill") {
-						saveReadwiseToken()
-					}
-					.disabled(readwiseToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isUpdatingReadwiseToken)
-
-					if model.hasReadwiseToken {
-						Label("A token is stored securely.", systemImage: "checkmark.circle")
-							.foregroundStyle(.secondary)
-						Button("Remove token", systemImage: "trash", role: .destructive) {
-							removeReadwiseToken()
-						}
-						.disabled(isUpdatingReadwiseToken)
-					}
-
-					Text("Create an access token at readwise.io/access_token. Pigeon stores it in Keychain and backs it up to your Pigeon server so it's restored after reinstalling.")
-						.font(.footnote)
-						.foregroundStyle(.secondary)
-					if let readwiseMessage {
-						Label(readwiseMessage, systemImage: readwiseMessageIsError ? "exclamationmark.triangle" : "checkmark.circle")
-							.foregroundStyle(readwiseMessageIsError ? .red : .secondary)
-					}
-				}
-
 				Section {
 					Button("Disconnect", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
 						model.disconnect()
@@ -304,44 +272,6 @@ struct SettingsView: View {
 		}
 		.onDisappear {
 			model.clearSettingsError()
-		}
-	}
-
-	private func saveReadwiseToken() {
-		guard isUpdatingReadwiseToken == false else { return }
-		isUpdatingReadwiseToken = true
-		let token = readwiseToken
-		Task {
-			defer { isUpdatingReadwiseToken = false }
-			do {
-				let backedUp = try await model.saveReadwiseToken(token)
-				readwiseToken = ""
-				readwiseMessage = backedUp
-					? "Token saved securely."
-					: "Token saved on this device. Pigeon will back it up to your server when it can connect."
-				readwiseMessageIsError = false
-			} catch {
-				readwiseMessage = error.localizedDescription
-				readwiseMessageIsError = true
-			}
-		}
-	}
-
-	private func removeReadwiseToken() {
-		guard isUpdatingReadwiseToken == false else { return }
-		isUpdatingReadwiseToken = true
-		Task {
-			defer { isUpdatingReadwiseToken = false }
-			do {
-				let removedRemotely = try await model.removeReadwiseToken()
-				readwiseMessage = removedRemotely
-					? "Token removed."
-					: "Token removed from this device. Pigeon will remove the server copy when it can connect."
-				readwiseMessageIsError = false
-			} catch {
-				readwiseMessage = error.localizedDescription
-				readwiseMessageIsError = true
-			}
 		}
 	}
 

@@ -11,8 +11,8 @@ struct ArticleListView: View {
 	@State private var searchScope = ReaderSearchScope.collection
 	@State private var searchPresentation = ReaderArticleSearchPresentation()
 	@State private var searchAttempt = 0
-	@State private var readwiseSaveMessage: String?
-	@State private var isShowingReadwiseSaveMessage = false
+	@State private var saveErrorMessage: String?
+	@State private var isShowingSaveErrorMessage = false
 	@State private var saveConfirmation: ReaderSaveConfirmation?
 	@State private var actionFeedbackCount = 0
 	@State private var presentationID = UUID()
@@ -157,7 +157,7 @@ struct ArticleListView: View {
 								readButton(for: article)
 							}
 							.swipeActions(edge: .trailing, allowsFullSwipe: true) {
-								saveToReaderButton(for: article)
+								readItLaterButton(for: article)
 								starButton(for: article)
 							}
 							.contextMenu {
@@ -375,9 +375,9 @@ struct ArticleListView: View {
 			resetSavePresentation()
 		}
 		.onDisappear(perform: resetSavePresentation)
-		.alert("Couldn’t Save to Reader", isPresented: $isShowingReadwiseSaveMessage) {
+		.alert("Couldn’t Save Link", isPresented: $isShowingSaveErrorMessage) {
 		} message: {
-			Text(readwiseSaveMessage ?? "")
+			Text(saveErrorMessage ?? "")
 		}
 	}
 
@@ -599,6 +599,7 @@ struct ArticleListView: View {
 		case .today: "Nothing from today"
 		case .forYou: "No recommendations yet"
 		case .unread: "You are all caught up"
+		case .saved: "Nothing saved yet"
 		case nil: "No stories yet"
 		}
 	}
@@ -618,6 +619,7 @@ struct ArticleListView: View {
 		case .today: "Stories received today will appear here."
 		case .forYou: "Pigeon will surface unread stories as it learns what you like."
 		case .unread: "New stories will appear here as Pigeon receives them."
+		case .saved: "Saved links appear here."
 		case nil: "New stories will appear here as Pigeon receives them."
 		}
 	}
@@ -668,42 +670,37 @@ struct ArticleListView: View {
 		.tint(.orange)
 	}
 
-	private func saveToReaderButton(for article: Recommendation) -> some View {
-		Button("Save to Reader", systemImage: "bookmark") {
-			Task { await saveToReader(article) }
+	private func readItLaterButton(for article: Recommendation) -> some View {
+		Button("Read It Later", systemImage: "bookmark") {
+			Task { await saveForLater(article) }
 		}
 		.tint(.green)
-		.accessibilityHint("Saves this article's original web page to Readwise Reader")
+		.accessibilityHint("Saves this article's original web page to Read It Later")
 	}
 
-	private func saveToReader(_ article: Recommendation) async {
+	private func saveForLater(_ article: Recommendation) async {
 		let requestPresentationID = presentationID
-		guard let url = article.safeOriginalURL, let destination = OutboundDestination(url: url) else {
-			presentReadwiseSaveMessage("This article does not have a valid web address.")
+		guard let url = article.safeOriginalURL else {
+			presentSaveErrorMessage("This article does not have a valid web address.")
 			return
 		}
 
 		do {
-			let outcome = try await model.saveToReader(destination)
+			let outcome = try await model.saveForLater(url, title: article.title)
 			guard requestPresentationID == presentationID else { return }
-			switch outcome {
-			case .saved:
-				presentSaveConfirmation("Saved to Reader", isSuccess: true)
-			case .alreadyInFlight:
-				presentSaveConfirmation("Already saving this link…", isSuccess: false)
-			}
+			presentSaveConfirmation(outcome.confirmationMessage, isSuccess: outcome.isSuccess)
 		} catch is CancellationError {
 			// Leaving the list is a normal cancellation; do not claim the save failed.
 		} catch {
 			guard requestPresentationID == presentationID else { return }
-			presentReadwiseSaveMessage(error.localizedDescription)
+			presentSaveErrorMessage(error.localizedDescription)
 		}
 	}
 
-	private func presentReadwiseSaveMessage(_ message: String) {
+	private func presentSaveErrorMessage(_ message: String) {
 		saveConfirmation = nil
-		readwiseSaveMessage = message
-		isShowingReadwiseSaveMessage = true
+		saveErrorMessage = message
+		isShowingSaveErrorMessage = true
 	}
 
 	private func presentSaveConfirmation(_ message: String, isSuccess: Bool) {
@@ -713,7 +710,7 @@ struct ArticleListView: View {
 	private func resetSavePresentation() {
 		presentationID = UUID()
 		saveConfirmation = nil
-		isShowingReadwiseSaveMessage = false
+		isShowingSaveErrorMessage = false
 	}
 
 	private func markAboveButton(for article: Recommendation) -> some View {

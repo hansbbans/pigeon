@@ -33,6 +33,7 @@ struct APIContractTests {
 		#expect(feed.feedURL?.absoluteString == "https://feeds.example.com/design.xml")
 		#expect(feed.folders == ["Design"])
 		#expect(feed.isActive == true)
+		#expect(feed.sourceType == "rss")
 		let article = try #require(page.changes.first { $0.entityId == "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61" && $0.entityType == .article })
 		#expect(article.changedAt == Self.date("2026-11-01T11:00:00Z"))
 		#expect(article.payload?.readerId == "tag:google.com,2005:reader/item/0000000000000001")
@@ -146,8 +147,106 @@ struct APIContractTests {
 		#expect(updated.monitoredTopics == ["Typography", "Climate policy"])
 	}
 
-	@Test func readwiseTokenFixtureDecodes() async throws {
-		#expect(try await Self.client("readwise-token.response.json").readwiseToken() == "readwise-contract-token")
+	/// The app no longer reads this (Read It Later replaced Readwise). The Worker
+	/// keeps the endpoint for older TestFlight builds, so its shape stays pinned.
+	@Test func readwiseTokenFixtureIsKeptForOlderBuilds() throws {
+		let payload = try JSONSerialization.jsonObject(with: try Self.fixture("readwise-token.response.json")) as? [String: Any]
+		#expect(payload?["token"] as? String == "readwise-contract-token")
+	}
+
+	// MARK: - Read It Later
+
+	@Test func savedCreateRequestAndResponseMatchTheContract() async throws {
+		let mock = MockHTTPClient(responseData: try Self.fixture("saved-create.response.json"), statusCode: 201)
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+		let url = try #require(URL(string: "https://example.com/essays/slow-software?utm_source=pigeon&utm_medium=email#comments"))
+
+		let response = try await client.saveLink(url: url, title: "Slow software")
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path() == "/api/v1/saved")
+		#expect(request.method == "POST")
+		#expect(request.authorization == "GoogleLogin auth=pigeon/token")
+		try Self.expectJSON(try #require(request.body), equalsFixture: "saved-create.request.json")
+		#expect(response.id == "abde2a43-22dc-8734-9049-5cd424e03007")
+		#expect(response.readerId == "tag:google.com,2005:reader/item/0000000000000005")
+		#expect(response.url == "https://example.com/essays/slow-software")
+		#expect(response.extractionState == .pending)
+		#expect(response.created == true)
+		#expect(SavedItems.isRemovableItemID(response.id))
+	}
+
+	@Test func savedContentRequestAndResponseMatchTheContract() async throws {
+		let mock = MockHTTPClient(responseData: try Self.fixture("saved-content.response.json"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+		let content = SavedItemContent(
+			html: "<article><h1>Slow software</h1><p>Software that waits for you.</p></article>",
+			text: "Slow software. Software that waits for you.",
+			title: "Slow software, and why it lasts",
+			wordCount: 2650,
+			author: "Ada Lovelace",
+			published: "2026-10-28T09:30:00+01:00",
+			image: "https://example.com/images/slow.jpg",
+			site: "Example Essays",
+			mediaKind: "text",
+		)
+
+		let response = try await client.uploadSavedContent(id: "abde2a43-22dc-8734-9049-5cd424e03007", content: content)
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path() == "/api/v1/saved/abde2a43-22dc-8734-9049-5cd424e03007/content")
+		#expect(request.method == "PUT")
+		try Self.expectJSON(try #require(request.body), equalsFixture: "saved-content.request.json")
+		#expect(response.extractionState == .done)
+		#expect(response.updated == true)
+		#expect(response.contentTooLarge == nil)
+	}
+
+	@Test func savedRemoveMutationMatchesTheContract() async throws {
+		let receipt = #"{"results":[{"mutationId":"8f0e1b2c-0101-4a00-8000-000000000101","status":"applied","appliedAt":"2026-11-01T12:00:00.000Z"}]}"#
+		let mock = MockHTTPClient(responseData: Data(receipt.utf8))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+		let mutation = OfflineMutation(
+			id: "8f0e1b2c-0101-4a00-8000-000000000101",
+			kind: .removeSaved,
+			itemIds: ["7e2c62ab-a567-8d88-8bbf-f2a458af63eb"],
+		)
+
+		let result = try await client.sendMutations([mutation])
+
+		try Self.expectJSON(try #require(await mock.lastRequest()?.body), equalsFixture: "saved-remove.request.json")
+		#expect(result.results.first?.status == .applied)
+	}
+
+	@Test func syncSavedFixtureProjectsOnlyIntoReadItLater() async throws {
+		let page = try await Self.client("sync-saved.response.json").incrementalSync(cursor: nil)
+
+		let feed = try #require(page.changes.first { $0.entityType == .feed }?.payload)
+		#expect(feed.feedKey == SavedItems.feedKey)
+		#expect(feed.sourceType == "saved")
+		#expect(feed.streamId == "feed/4")
+		let article = try #require(page.changes.first { $0.entityType == .article && $0.operation == .upsert }?.payload)
+		#expect(article.feedKey == SavedItems.feedKey)
+		let metadata = try #require(article.savedMetadata)
+		#expect(metadata.state == .done)
+		#expect(metadata.publishedAt == Self.date("2026-10-28T08:30:00Z"))
+		#expect(metadata.imageURL?.absoluteString == "https://example.com/images/slow.jpg")
+		#expect(metadata.siteName == "Example Essays")
+		#expect(article.length?.wordCount == 2650)
+		let removal = try #require(page.changes.first { $0.operation == .delete })
+		#expect(removal.entityId == "7e2c62ab-a567-8d88-8bbf-f2a458af63eb")
+
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(page, accountID: "contract")
+		let snapshot = try await store.loadSnapshot(accountID: "contract")
+		#expect(snapshot.articlesByCollection[ReaderSection.saved.rawValue]?.map(\.id) == ["abde2a43-22dc-8734-9049-5cd424e03007"])
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue, default: []].isEmpty)
+		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue, default: []].isEmpty)
+		#expect(snapshot.subscriptions.isEmpty, "The Read It Later feed is not a managed subscription")
+		let savedItem = try #require(snapshot.navigation?.item(withID: ReaderSection.saved.rawValue))
+		#expect(savedItem.streamID == "feed/4")
+		#expect(snapshot.navigation?.item(withID: ReaderSection.unread.rawValue)?.unreadCount == 0)
+		#expect(snapshot.navigation?.items.contains { $0.kind == .feed } == false)
 	}
 
 	@Test func serverStatusFixtureDecodesSyncHealth() async throws {
