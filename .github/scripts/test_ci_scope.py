@@ -10,7 +10,7 @@ import sys
 sys.dont_write_bytecode = True
 from unittest.mock import patch
 
-from ci_scope import classify, changed_paths, scope, ui_suite, validate_gate
+from ci_scope import classify, changed_paths, safari_scope, scope, ui_suite, validate_gate
 
 
 class ScopeTests(unittest.TestCase):
@@ -57,6 +57,24 @@ class ScopeTests(unittest.TestCase):
                 self.assertTrue(classify("pigeon", [path])["native"])
         # Other repositories have no extension; the prefix is not special there.
         self.assertTrue(classify("todomd", ["extension/a.ts"])["native"])
+
+    def test_pigeon_safari_container_runs_worker_and_the_safari_build_but_not_ios(self):
+        for path in ["extension/safari/project.yml", "extension/safari/App/PigeonSafariApp.swift",
+                     "extension/safari/Extension/Info.plist", "extension/scripts/build-safari.sh"]:
+            with self.subTest(path=path):
+                self.assertEqual(classify("pigeon", [path]), {"native": False, "worker": True, "unknown": []})
+                self.assertTrue(safari_scope("pigeon", [path, "README.md"]))
+        for path in [".github/workflows/ci.yml", ".github/scripts/ci_scope.py", "extension/safari/../../ios/a.swift", "/extension/safari/a"]:
+            with self.subTest(path=path):
+                self.assertTrue(safari_scope("pigeon", [path]))
+        for path in ["extension/src/background/index.ts", "extension/manifests/safari.json", "extension/scripts/build.mjs",
+                     "ios/PigeonReader/App.swift", "src/greader.ts", "README.md", "extension/safari.md", "extensions/safari/a.swift"]:
+            with self.subTest(path=path):
+                self.assertFalse(safari_scope("pigeon", [path]))
+        self.assertTrue(safari_scope("pigeon", []))
+        self.assertTrue(safari_scope("pigeon", ["README.md"], force_full=True))
+        for repo in ("todomd", "swole"):
+            self.assertFalse(safari_scope(repo, ["extension/safari/project.yml"], force_full=True))
 
     def test_pigeon_api_contract_fixtures_run_worker_and_native(self):
         for path in ["test/fixtures/api-contract/sync.response.json", "test/fixtures/api-contract/README.md"]:
@@ -113,6 +131,7 @@ class ScopeTests(unittest.TestCase):
             output = self.run_scope(event_name, payload)
             self.assertIn("native=true", output)
             self.assertIn("worker=true", output)
+            self.assertIn("safari=true", output)
 
     def test_ui_suite_is_smoke_only_for_pull_requests_pushes_and_explicit_smoke_dispatches(self):
         self.assertEqual(ui_suite("pull_request", {}), "smoke")
@@ -130,19 +149,21 @@ class ScopeTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    def needs(self, native="true", worker="true", suite="smoke"):
-        return {"scope": {"result": "success", "outputs": {"native": native, "worker": worker, "ui_suite": suite}},
+    def needs(self, native="true", worker="true", suite="smoke", safari="true"):
+        return {"scope": {"result": "success", "outputs": {"native": native, "worker": worker, "ui_suite": suite, "safari": safari}},
                 "tooling": {"result": "success"},
                 "native": {"result": "success" if native == "true" else "skipped"},
-                "worker": {"result": "success" if worker == "true" else "skipped"}}
+                "worker": {"result": "success" if worker == "true" else "skipped"},
+                "safari": {"result": "success" if safari == "true" else "skipped"}}
 
     def test_full_docs_and_backend_scopes_accept_only_expected_results(self):
         for native, worker in [("true", "true"), ("false", "false"), ("false", "true")]:
             for repo in ("pigeon", "todomd", "swole"):
-                self.assertEqual(validate_gate(repo, self.needs(native, worker)), [])
+                for safari in ("true", "false"):
+                    self.assertEqual(validate_gate(repo, self.needs(native, worker, safari=safari)), [])
 
     def test_failures_cancellations_and_unexpected_skips_do_not_pass(self):
-        for job in ("scope", "tooling", "native", "worker"):
+        for job in ("scope", "tooling", "native", "worker", "safari"):
             for status in ("failure", "cancelled", "skipped", None):
                 needs = self.needs()
                 needs[job]["result"] = status
@@ -150,9 +171,14 @@ class GateTests(unittest.TestCase):
 
     def test_scope_output_missing_invalid_or_empty_does_not_pass(self):
         for value in (None, "", "yes", True):
-            needs = self.needs()
-            needs["scope"]["outputs"]["native"] = value
-            self.assertTrue(validate_gate("pigeon", needs))
+            for job in ("native", "safari"):
+                needs = self.needs()
+                needs["scope"]["outputs"][job] = value
+                self.assertTrue(validate_gate("pigeon", needs))
+        needs = self.needs()
+        del needs["scope"]["outputs"]["safari"]
+        self.assertTrue(validate_gate("pigeon", needs))
+        self.assertEqual(validate_gate("todomd", needs), [])
         for job in self.needs():
             needs = self.needs()
             del needs[job]
@@ -169,9 +195,9 @@ class GateTests(unittest.TestCase):
         self.assertEqual(validate_gate("todomd", needs), [])
 
     def test_intentional_skips_cannot_mask_failed_suites(self):
-        for job in ("native", "worker"):
+        for job in ("native", "worker", "safari"):
             for status in ("failure", "cancelled", "success"):
-                needs = self.needs("false", "false")
+                needs = self.needs("false", "false", safari="false")
                 needs[job]["result"] = status
                 self.assertTrue(validate_gate("pigeon", needs))
 

@@ -4,10 +4,11 @@
  * Worker needs no CORS headers.
  */
 
-import browser, { type Tabs } from '../browser-api';
+import browser, { hostPermission, type Tabs } from '../browser-api';
 import { Badge, DEFAULT_COLOR, WAITING_COLOR, waiting, type ActionApi } from '../core/badge';
 import type { PageExtraction } from '../core/payload';
 import { ensureRetryScheduled, RETRY_ALARM, runRetry, type AlarmsApi } from '../core/retry';
+import { loadSettings } from '../core/session';
 import { flushQueue, guardSave, isSending, saveLink, savePage, type SaveDeps, type SaveOutcome } from '../core/save';
 
 const MENU_SAVE_PAGE = 'pigeon-save-page';
@@ -24,8 +25,8 @@ const NEEDS_ACCESS_TITLE = 'Allow access to Pigeon in the settings';
 const deps: SaveDeps = {
 	fetch: (input, init) => fetch(input, init),
 	store: browser.storage.local,
-	// Safari grants host access per site, so the Pigeon origin may not be allowed yet (or any more).
-	hasHostAccess: (pattern) => browser.permissions.contains({ origins: [pattern] }),
+	// Safari grants host access per site, so a failed request may mean the Pigeon origin is not allowed (yet, or any more).
+	hasHostAccess: hostPermission.contains,
 };
 const alarms: AlarmsApi = browser.alarms;
 const badge = new Badge(browser.action as unknown as ActionApi, browser.storage.session);
@@ -51,8 +52,11 @@ browser.alarms.onAlarm.addListener((alarm) => {
 });
 
 // Access to Pigeon was just allowed (the options page, or Safari's own prompt or settings): send what waited.
+// Signing in grants the permission before the token is stored; that sign-in sends the queue itself.
 browser.permissions.onAdded.addListener(() => {
-	void retryQueued({ force: true });
+	void loadSettings(deps.store).then((settings) => {
+		if (settings.auth) void retryQueued({ force: true });
+	}).catch((error) => console.warn('[Pigeon] Could not read the settings after a permission change:', error));
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {

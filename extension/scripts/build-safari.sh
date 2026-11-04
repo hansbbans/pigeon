@@ -27,8 +27,9 @@ command -v xcodebuild >/dev/null || { echo "xcodebuild is missing: install Xcode
 node scripts/build.mjs --browser safari
 
 version="$(node -p "require('./package.json').version")"
-# A rising build number lets Safari notice a rebuilt extension.
-build_number="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+# A rising build number lets Safari notice a rebuilt extension. The UTC time
+# rises for every build, uncommitted or from an older worktree, unlike a commit count.
+build_number="$(date -u +%Y%m%d%H%M)"
 
 (cd safari && xcodegen generate --quiet)
 

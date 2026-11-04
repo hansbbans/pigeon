@@ -74,7 +74,7 @@ The build is ad-hoc signed ("Sign to Run Locally"), not with a developer certifi
 3. Run `dist/safari-app/Save to Pigeon.app` once. It registers the extension, shows whether it is on, and its button opens Safari's settings.
 4. Safari > Settings > Extensions: tick **Save to Pigeon**. Its settings page opens; sign in as above. Safari asks whether the extension may access `pigeon.hanscho.com`: choose **Always Allow on This Website**.
 
-After a rebuild, run the app again; Safari picks up the new build (the build number is the commit count). If Safari shows two copies, an older build from another checkout is still registered: delete it, or run `lsregister -u` on its path.
+After a rebuild, run the app again; Safari picks up the new build (the build number is the UTC build time, `YYYYMMDDHHMM`). If Safari shows two copies, an older build from another checkout is still registered: delete it, or run `lsregister -u` on its path.
 
 What differs in Safari:
 

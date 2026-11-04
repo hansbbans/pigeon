@@ -57,8 +57,11 @@ def classify(repo, paths, force_full=False):
         # These backend inputs cannot change the native app. Other dependencies
         # and configuration are deliberately outside this narrow allowlist; the
         # root npm manifests are in it because only the Worker job runs npm.
-        # The browser extension (extension/, its own npm package) is Node-only:
-        # the Worker job builds and tests it, and nothing in it reaches iOS.
+        # The browser extension (extension/, its own npm package) never reaches
+        # the iOS app: the Worker job builds and tests its JavaScript. Its Safari
+        # container app (extension/safari/, Swift built by
+        # extension/scripts/build-safari.sh) is macOS code; safari_scope()
+        # routes it to its own job on a GitHub-hosted Mac, not the shared one.
         backend = valid and repo == "pigeon" and (
             path in {"package.json", "package-lock.json"} or
             path.startswith("extension/") or
@@ -73,6 +76,23 @@ def classify(repo, paths, force_full=False):
             worker = repo == "pigeon"
             unknown.append(path)
     return {"native": native, "worker": worker, "unknown": unknown}
+
+
+def safari_scope(repo, paths, force_full=False):
+    """Pigeon's Safari container app (extension/safari/) builds when its
+    sources or build script change, when CI itself changes (.github/), on
+    full validation, and when a path is not a plain repository path."""
+    if repo != "pigeon":
+        return False
+    if force_full or not paths:
+        return True
+    for path in paths:
+        parts = PurePosixPath(path).parts
+        if not parts or path.startswith("/") or ".." in parts:
+            return True
+        if parts[0] == ".github" or path.startswith("extension/safari/") or path == "extension/scripts/build-safari.sh":
+            return True
+    return False
 
 
 def changed_paths(event_name, event):
@@ -108,19 +128,25 @@ def scope(repo):
         suite = ui_suite(os.environ["GITHUB_EVENT_NAME"], event)
         paths = changed_paths(os.environ["GITHUB_EVENT_NAME"], event)
         result = classify(repo, paths)
+        safari = safari_scope(repo, paths)
         reason = "Changed paths classified conservatively."
     except (KeyError, ValueError, OSError, subprocess.CalledProcessError) as error:
         result = classify(repo, [], force_full=True)
+        safari = safari_scope(repo, [], force_full=True)
         paths = []
         reason = f"Full validation: baseline unavailable ({type(error).__name__})."
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"native={str(result['native']).lower()}\nworker={str(result['worker']).lower()}\nui_suite={suite}\n")
+        if repo == "pigeon":
+            output.write(f"safari={str(safari).lower()}\n")
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
         summary.write("### CI validation scope\n\n" + reason + "\n\n")
         summary.write(f"Native validation: **{result['native']}** ({suite} UI tests). Worker validation: **{result['worker']}**.\n\n")
+        if repo == "pigeon":
+            summary.write(f"Safari container build: **{safari}**.\n\n")
         # JSON keeps newlines/control characters in filenames out of Markdown.
         summary.write("Changed paths: `" + json.dumps(paths).replace("`", "\\u0060") + "`\n")
-    print(json.dumps(result))
+    print(json.dumps({**result, "safari": safari} if repo == "pigeon" else result))
 
 
 def validate_gate(repo, needs):
@@ -131,7 +157,7 @@ def validate_gate(repo, needs):
     outputs = needs.get("scope", {}).get("outputs", {})
     if repo == "pigeon" and outputs.get("ui_suite") not in ("full", "smoke"):
         errors.append("Missing/invalid ui_suite classification")
-    for job in (["native", "worker"] if repo == "pigeon" else ["native"]):
+    for job in (["native", "worker", "safari"] if repo == "pigeon" else ["native"]):
         required = outputs.get(job)
         result = needs.get(job, {}).get("result")
         if required not in ("true", "false"):

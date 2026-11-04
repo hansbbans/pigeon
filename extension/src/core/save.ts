@@ -14,7 +14,11 @@ import { loadSettings, markNeedsSignIn, type KeyValueStore } from './session';
 export interface SaveDeps {
 	fetch: Fetch;
 	store: KeyValueStore;
-	/** `permissions.contains` for the Pigeon origin; without it, access is assumed. */
+	/**
+	 * `permissions.contains` for the Pigeon origin. Asked only after a request
+	 * failed like a network error, to tell "no access" from "unreachable":
+	 * Safari may not report access granted in its own UI, so it never stops a request.
+	 */
 	hasHostAccess?: HostAccessCheck;
 }
 
@@ -107,7 +111,6 @@ async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promis
 	const queued = await enqueue(deps.store, attempts);
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { status: 'needsSignIn', queued: queued.queued };
-	if (!(await hasHostAccess(settings.origin, deps.hasHostAccess))) return { status: 'needsAccess', queued: queued.queued, origin: settings.origin };
 	inFlight.add(queued.id);
 	let result: AttemptResult;
 	try {
@@ -127,12 +130,18 @@ async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promis
 			return { status: 'needsSignIn', queued: (await readQueue(deps.store)).length };
 		case 'retry':
 			if (countsAgainstRequest(result.cause)) await recordFailure(deps.store, queued.id, MAX_FULL_SAVE_FAILURES);
+			if (await lacksAccess(result.cause, settings.origin, deps)) return { status: 'needsAccess', queued: (await readQueue(deps.store)).length, origin: settings.origin };
 			return { status: 'queued', queued: (await readQueue(deps.store)).length, message: result.message };
 	}
 }
 
 function countsAgainstRequest(cause: RetryCause): boolean {
 	return cause === 'timeout' || cause === 'server';
+}
+
+/** A request without host access fails like being offline; only then is it worth asking the browser. */
+async function lacksAccess(cause: RetryCause, origin: string, deps: SaveDeps): Promise<boolean> {
+	return cause === 'offline' && !(await hasHostAccess(origin, deps.hasHostAccess));
 }
 
 /** True while a save or a flush is talking to Pigeon (the background keeps the worker alive meanwhile). */
@@ -172,7 +181,6 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 	if (queue.length === 0) return result;
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { ...result, stoppedBy: 'signedOut' };
-	if (!(await hasHostAccess(settings.origin, deps.hasHostAccess))) return { ...result, stoppedBy: 'noAccess' };
 	let streak = 0;
 	for (const queued of queue) {
 		if (inFlight.has(queued.id)) continue;
@@ -191,6 +199,10 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 			return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unauthorized' };
 		}
 		if (attempt.status === 'retry') {
+			// Without access every request fails the same way: stop and ask for access.
+			if (await lacksAccess(attempt.cause, settings.origin, deps)) {
+				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'noAccess' };
+			}
 			result.passedOver++;
 			if (++streak >= UNREACHABLE_STREAK) {
 				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unreachable' };

@@ -28,12 +28,7 @@ export async function signIn(rawUrl: string, password: string, deps: SignInDeps)
 		return { ok: false, field: 'url', message: error instanceof PigeonUrlError ? error.message : 'That is not a valid address.' };
 	}
 	if (!password) return { ok: false, field: 'password', message: 'Enter your Pigeon password.' };
-	let granted = false;
-	try {
-		granted = await deps.requestHostPermission(originPermissionPattern(origin));
-	} catch {
-		granted = false;
-	}
+	const granted = await requestHostAccess(originPermissionPattern(origin), deps.requestHostPermission);
 	if (!granted) return { ok: false, field: 'url', message: `The extension needs permission to reach ${origin}.` };
 	const login = await clientLogin(deps.fetch, origin, password);
 	if (!login.ok) return { ok: false, field: login.reason === 'badPassword' ? 'password' : 'general', message: login.message };
@@ -78,30 +73,30 @@ export interface OptionsState {
 	signedIn: boolean;
 	needsSignIn: boolean;
 	queued: number;
+	/**
+	 * Signed in, but the browser does not let the extension reach Pigeon:
+	 * Safari asks per site (and "Allow for One Day" runs out), and Chrome users
+	 * can withhold site access. The pattern for "Allow access" to request.
+	 */
+	missingAccess: string | null;
 }
 
-export async function optionsState(store: KeyValueStore): Promise<OptionsState> {
+export async function optionsState(store: KeyValueStore, check?: HostAccessCheck): Promise<OptionsState> {
 	const settings = await loadSettings(store);
 	const queue = await readQueueSummary(store);
-	return { origin: settings.origin, signedIn: Boolean(settings.auth), needsSignIn: settings.needsSignIn, queued: queue.count };
+	const missingAccess = settings.auth && !(await hasHostAccess(settings.origin, check)) ? originPermissionPattern(settings.origin) : null;
+	return { origin: settings.origin, signedIn: Boolean(settings.auth), needsSignIn: settings.needsSignIn, queued: queue.count, missingAccess };
 }
 
 /** storage.local keys the options page shows; other changes (queue contents, retry timing) need no re-render. */
 export const OPTIONS_STATE_KEYS: readonly string[] = [...SETTINGS_KEYS, QUEUE_SUMMARY_KEY];
 
 /**
- * Signed in, but the browser does not let the extension reach Pigeon: Safari
- * asks per site (and "Allow for One Day" runs out), and Chrome users can
- * withhold site access. Returns the pattern to request, or null when all is well.
+ * permissions.request for one origin pattern, for sign-in and the "Allow
+ * access" button. It must be the first call in the click handler (user
+ * gesture). A refusal or an error is false.
  */
-export async function missingHostAccess(store: KeyValueStore, check: HostAccessCheck | undefined): Promise<{ origin: string; pattern: string } | null> {
-	const settings = await loadSettings(store);
-	if (!settings.auth || (await hasHostAccess(settings.origin, check))) return null;
-	return { origin: settings.origin, pattern: originPermissionPattern(settings.origin) };
-}
-
-/** The "Allow access" button: permissions.request must be its first call (user gesture). A refusal or an error is false. */
-export async function grantHostAccess(pattern: string, request: (pattern: string) => Promise<boolean>): Promise<boolean> {
+export async function requestHostAccess(pattern: string, request: (pattern: string) => Promise<boolean>): Promise<boolean> {
 	try {
 		return await request(pattern);
 	} catch {

@@ -1,12 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { after, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { BROWSERS, ENTRY_POINTS, parseBuildArgs, renderManifest, root, UsageError } from '../scripts/build-config.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 type Manifest = Record<string, unknown> & {
 	permissions: string[];
 	host_permissions: string[];
@@ -45,28 +42,27 @@ test('the Safari manifest uses only what Safari 17 supports', () => {
 	assert.deepEqual(safari.host_permissions, ['https://pigeon.hanscho.com/*']);
 });
 
-const outdir = mkdtempSync(join(tmpdir(), 'pigeon-extension-build-'));
-after(() => rmSync(outdir, { recursive: true, force: true }));
-
-test('the build writes every browser with the package version and every file its manifest names', () => {
-	execFileSync(process.execPath, [join(root, 'scripts/build.mjs'), '--outdir', outdir], { cwd: root, stdio: 'pipe' });
+test('every browser renders with the package version and names only files the build writes', () => {
 	const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
-	for (const browser of ['chromium', 'safari']) {
-		const dir = join(outdir, browser);
-		const manifest = read(join(dir, 'manifest.json'));
+	const bundles = new Set(Object.keys(ENTRY_POINTS).map((name) => `${name}.js`));
+	for (const browser of Object.keys(BROWSERS)) {
+		const manifest = renderManifest(browser, version) as Manifest;
 		assert.equal(manifest.version, version, browser);
-		const files = [
-			String(manifest.background.service_worker),
-			manifest.options_ui.page,
-			'options.js',
-			'options.css',
-			'extract.js', // injected by the background with scripting.executeScript
-			'THIRD_PARTY_NOTICES.md',
-			...Object.values(manifest.icons),
-			...Object.values(manifest.action.default_icon),
-		];
-		for (const file of files) assert.ok(existsSync(join(dir, file)), `${browser}: ${file}`);
+		// The build copies static/ and writes one bundle per entry point; extract.js is injected by the background.
+		for (const file of [String(manifest.background.service_worker), 'options.js', 'extract.js']) assert.ok(bundles.has(file), `${browser}: ${file}`);
+		for (const file of [manifest.options_ui.page, 'options.css', ...Object.values(manifest.icons), ...Object.values(manifest.action.default_icon)]) {
+			assert.ok(existsSync(join(root, 'static', file)), `${browser}: static/${file}`);
+		}
 	}
-	assert.deepEqual(read(join(outdir, 'safari/manifest.json')).browser_specific_settings, safari.browser_specific_settings);
-	assert.equal(read(join(outdir, 'chromium/manifest.json')).browser_specific_settings, undefined);
+	assert.deepEqual(renderManifest('safari', version).browser_specific_settings, safari.browser_specific_settings);
+	assert.equal(renderManifest('chromium', version).browser_specific_settings, undefined);
+	assert.throws(() => renderManifest('firefox', version), /Unknown browser/);
+});
+
+test('the build rejects unknown, missing and repeated arguments', () => {
+	assert.deepEqual(parseBuildArgs([]), { browsers: ['chromium', 'safari'], outdir: join(root, 'dist'), watch: false });
+	assert.deepEqual(parseBuildArgs(['--browser', 'safari', '--outdir', '/tmp/x', '--watch']), { browsers: ['safari'], outdir: '/tmp/x', watch: true });
+	for (const args of [['--browser'], ['--browser', 'firefox'], ['--browser', '--watch'], ['--outdir'], ['--outdir', ''], ['--bogus'], ['safari'], ['--watch', '--watch'], ['--browser', 'safari', '--browser', 'chromium']]) {
+		assert.throws(() => parseBuildArgs(args), UsageError, args.join(' '));
+	}
 });

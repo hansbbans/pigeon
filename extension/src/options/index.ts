@@ -1,12 +1,11 @@
 /** Options page: sign in once (the password is exchanged for a token), sign out. */
 
-import browser from '../browser-api';
+import browser, { hostPermission } from '../browser-api';
 import { browserFamily, shortcutLabel } from '../core/access';
-import { grantHostAccess, missingHostAccess, OPTIONS_STATE_KEYS, optionsState, signOut, submitSignIn } from '../core/sign-in';
+import { OPTIONS_STATE_KEYS, optionsState, requestHostAccess, signOut, submitSignIn } from '../core/sign-in';
 
 const store = browser.storage.local;
 const family = browserFamily(browser.runtime.getURL(''));
-const hasAccess = (pattern: string) => browser.permissions.contains({ origins: [pattern] });
 /** The pattern the "Allow access" button requests, set by render() so the click can request it synchronously. */
 let accessPattern: string | null = null;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -25,7 +24,7 @@ function showError(field: keyof typeof errors | null, message = ''): void {
 }
 
 async function render(): Promise<void> {
-	const state = await optionsState(store);
+	const state = await optionsState(store, hostPermission.contains);
 	$('signed-in').hidden = !state.signedIn;
 	form.hidden = state.signedIn;
 	$('signed-in-origin').textContent = state.origin;
@@ -36,10 +35,9 @@ async function render(): Promise<void> {
 	const queue = $('queue');
 	queue.hidden = state.queued === 0;
 	queue.textContent = state.queued === 1 ? '1 save is waiting to be sent.' : `${state.queued} saves are waiting to be sent.`;
-	const missing = await missingHostAccess(store, hasAccess);
-	accessPattern = missing?.pattern ?? null;
-	$('access').hidden = !missing;
-	$('access-origin').textContent = missing?.origin ?? '';
+	accessPattern = state.missingAccess;
+	$('access').hidden = !state.missingAccess;
+	$('access-origin').textContent = state.missingAccess ? state.origin : '';
 	const commands = await browser.commands.getAll();
 	const shortcut = commands.find((command) => command.name === 'save-page')?.shortcut;
 	$('shortcut').textContent = shortcutLabel(shortcut, family);
@@ -51,14 +49,14 @@ $('allow-access').addEventListener('click', () => {
 	const error = $('access-error');
 	error.hidden = true;
 	// The request is the first call in the click handler, while it still counts as a user gesture.
-	void grantHostAccess(pattern, (origin) => browser.permissions.request({ origins: [origin] })).then(async (granted) => {
+	void requestHostAccess(pattern, hostPermission.request).then(async (granted) => {
 		if (!granted) {
 			error.textContent = 'Access was not allowed. Saves keep waiting until it is.';
 			error.hidden = false;
 			return;
 		}
 		await render();
-		await browser.runtime.sendMessage({ type: 'pigeon:flush' }).catch(() => undefined);
+		await flushWaitingSaves();
 		await render();
 	}).catch(reportRenderError);
 });
@@ -69,7 +67,7 @@ form.addEventListener('submit', (event) => {
 	void submitSignIn(urlInput.value, passwordInput.value, {
 		fetch: (input, init) => fetch(input, init),
 		store,
-		requestHostPermission: (pattern) => browser.permissions.request({ origins: [pattern] }),
+		requestHostPermission: hostPermission.request,
 	}, {
 		setBusy: (busy) => {
 			submit.disabled = busy;
@@ -79,7 +77,7 @@ form.addEventListener('submit', (event) => {
 			passwordInput.value = '';
 			await render();
 			// Send anything that waited for sign-in.
-			await browser.runtime.sendMessage({ type: 'pigeon:flush' }).catch(() => undefined);
+			await flushWaitingSaves();
 			await render();
 		},
 	});
@@ -97,6 +95,19 @@ browser.storage.onChanged.addListener((changes, area) => {
 // Access granted or taken back elsewhere (Safari's Websites settings, Chrome's site access menu).
 browser.permissions.onAdded.addListener(() => void render().catch(reportRenderError));
 browser.permissions.onRemoved.addListener(() => void render().catch(reportRenderError));
+/**
+ * Asks the background to send waiting saves now. If that fails, the saves
+ * still wait in storage and the retry alarm, the next save or the next browser
+ * start sends them; say so in the console rather than fail the page.
+ */
+async function flushWaitingSaves(): Promise<void> {
+	try {
+		await browser.runtime.sendMessage({ type: 'pigeon:flush' });
+	} catch (error) {
+		console.warn('[Pigeon] Could not ask the background to send waiting saves; they will be retried:', error instanceof Error ? error.message : String(error));
+	}
+}
+
 function reportRenderError(error: unknown): void {
 	showError('general', `Could not read the settings: ${error instanceof Error ? error.message : String(error)}`);
 }
