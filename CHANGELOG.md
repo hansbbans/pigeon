@@ -4,6 +4,8 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.9.0] - 2026-11-04
+
 ### Added
 
 - YouTube transcripts on iPhone and iPad. Under the player of any YouTube video (saved or from a feed), Get Transcript fetches the captions and chapters from YouTube on the phone itself, shows them at once and stores them in Pigeon so other devices load them directly. The transcript follows the video: the playing line is highlighted and kept in view (it waits 4 seconds after you scroll it), tapping a line or chapter jumps the video there, and chapters appear as headings. If YouTube doesn't answer within 25 seconds or has no captions, a message and Try Again replace the spinner.
