@@ -57,8 +57,17 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 	func testBottomFolderRevealsItsFirstFeedWithoutLosingTheFolder() {
 		folderToggle(1).tap()
 		let sidebar = app.descendants(matching: .any)["reader-sidebar"].firstMatch
-		sidebar.swipeUp()
 		let toggle = folderToggle(6)
+		// Scroll to the very end, so Folder 06 is the last row, fully visible
+		// above the bottom inset. A single swipe stops at a variable offset that
+		// can leave the folder half under the bottom edge.
+		var previousY: CGFloat?
+		for _ in 0..<5 {
+			sidebar.swipeUp()
+			let y = toggle.exists ? toggle.frame.minY : nil
+			if let y, let previousY, abs(y - previousY) < 1 { break }
+			previousY = y
+		}
 		XCTAssertTrue(toggle.isHittable)
 		let originalY = toggle.frame.minY
 		toggle.tap()
