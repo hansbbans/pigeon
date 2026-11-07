@@ -27,6 +27,10 @@ The smoke list is `.github/ios-smoke-ui-tests.txt`, one `-only-testing` identifi
 
 A TestFlight release reuses CI only from a green exact-SHA `main` run (push, schedule, or dispatch) whose `Run unit and full UI tests` and `Clean Release build` steps succeeded. A smoke-only run never qualifies, and a non-green run newer than the full run forces full release tests. In practice: release after the nightly has run on that commit, or dispatch CI with `ui_suite: full` on `main` first; otherwise the release workflow runs every test itself.
 
+## Red main
+
+`.github/workflows/main-health.yml` watches every CI run on `main` (push, nightly, dispatch). A failure opens one `main is red` issue, labelled `main-red` and assigned to the repository owner, and later failures comment on it. The next green run closes it. Fix or revert before merging anything else: steps that pull requests skip only run on `main`, so this issue is how a break they would have caught gets noticed.
+
 ## Cancellation
 
 Superseded pull request runs are cancelled. Main and scheduled CI runs and TestFlight releases are not cancelled by that policy. The release workflows retain their separate non-cancelling concurrency groups.

@@ -1,0 +1,64 @@
+name: Main health
+
+# Opens one "main is red" issue, assigned to the repository owner, when CI fails
+# on main (push, nightly, or dispatch), comments on it for each further failure,
+# and closes it when CI on main is green again. GitHub notifies the assignee.
+# workflow_run workflows run from the default branch, so this takes effect
+# once it is merged.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: main-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report CI on main
+    if: github.event.workflow_run.event != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open, update, or close the main-is-red issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER: ${{ github.event.workflow_run.event }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          label="main-red"
+          short_sha="${HEAD_SHA:0:7}"
+          existing="$(gh issue list --state open --label "$label" --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+
+          case "$CONCLUSION" in
+            success)
+              if [[ -n "$existing" ]]; then
+                gh issue close "$existing" --comment "CI on \`main\` is green again at $short_sha: $RUN_URL"
+              fi
+              echo "CI on main succeeded."
+              ;;
+            failure|timed_out|startup_failure)
+              body="$(printf 'CI on `main` concluded **%s** at %s (%s).\n\nRun: %s\n\nFix it or revert the commit that broke it before merging anything else.' \
+                "$CONCLUSION" "$short_sha" "$TRIGGER" "$RUN_URL")"
+              if [[ -n "$existing" ]]; then
+                gh issue comment "$existing" --body "$body"
+              else
+                gh label create "$label" --color B60205 --description "CI on main is failing" --force
+                gh issue create --title "main is red" --label "$label" --assignee "$OWNER" --body "$body"
+              fi
+              ;;
+            *)
+              echo "CI on main concluded $CONCLUSION; leaving the issue as it is."
+              ;;
+          esac
