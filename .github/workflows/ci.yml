@@ -221,6 +221,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Clean Release build
+        # Pull requests stop at the tests; main, nightly and dispatched runs keep
+        # this build, and only those count as release evidence. See docs/ci-validation.md.
+        if: github.event_name != 'pull_request'
         timeout-minutes: 20
         env:
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-ci-${{ github.run_id }}-${{ github.run_attempt }}

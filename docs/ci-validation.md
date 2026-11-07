@@ -10,7 +10,7 @@ The allowlists and fail-closed gate are in `.github/scripts/ci_scope.py`; fixtur
 
 ## Smoke, full, nightly, and release test suites
 
-The native job always runs every iOS unit test (`PigeonReaderTests`) and the clean Release build. Which UI tests it runs depends on the trigger:
+The native job always runs every iOS unit test (`PigeonReaderTests`). It runs the clean Release build, including the first-party warnings check, on every trigger except pull requests: that build is a second full compile behind the shared iOS runner lock, and it only counts toward a release on `main`, so a Release-only break or new warning shows up on `main` right after the merge. Which UI tests it runs depends on the trigger:
 
 | Trigger | UI tests | Native step | Counts as release evidence |
 | --- | --- | --- | --- |
