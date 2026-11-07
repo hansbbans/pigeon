@@ -1,0 +1,96 @@
+name: Main health
+
+# Opens one "main is red" issue, assigned to the repository owner, when CI fails
+# on main (push, nightly, or dispatch), comments on it for each further failure,
+# and closes it when CI on main is green again. GitHub notifies the assignee.
+# Only runs of the current main HEAD count. A failure that arrives while another
+# report is running can be dropped by the concurrency queue; the next CI run on
+# main reports the state again.
+# workflow_run workflows run from the default branch, so this takes effect
+# once it is merged.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  # contents: read for the commits API (main's current HEAD); issues: write for the issue.
+  contents: read
+  issues: write
+
+concurrency:
+  group: main-health
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report CI on main
+    if: github.event.workflow_run.event != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open, update, or close the main-is-red issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER: ${{ github.event.workflow_run.event }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          label="main-red"
+          full_label="main-red-full-suite"
+          short_sha="${HEAD_SHA:0:7}"
+
+          # Act only on runs of the current main HEAD. Push and nightly runs can
+          # overlap and finish out of order; an older commit's result must not
+          # open or close the issue for a newer main.
+          main_sha="$(gh api "repos/$GH_REPO/commits/main" --jq .sha)"
+          if [[ "$HEAD_SHA" != "$main_sha" ]]; then
+            echo "Run is for $short_sha, but main is at ${main_sha:0:7}; the run for main reports instead."
+            exit 0
+          fi
+
+          existing="$(gh issue list --state open --label "$label" --json number,labels \
+            --jq '.[0] // empty | "\(.number) \([.labels[].name] | index("main-red-full-suite") != null)"')"
+          number="${existing%% *}"
+          opened_by_full_suite="${existing##* }"
+
+          case "$CONCLUSION" in
+            success)
+              if [[ -z "$existing" ]]; then
+                echo "CI on main succeeded."
+              elif [[ "$opened_by_full_suite" == "true" && "$TRIGGER" == "push" ]]; then
+                # Push runs can run fewer tests than the nightly or a dispatched
+                # run, so they don't clear a failure only those runs can see.
+                gh issue comment "$number" --body "A push run passed at $short_sha, but this issue came from a full-suite run; the next nightly or dispatched run decides. $RUN_URL"
+              else
+                gh issue close "$number" --comment "CI on \`main\` is green again at $short_sha ($TRIGGER): $RUN_URL"
+              fi
+              ;;
+            failure|timed_out|startup_failure)
+              body="$(printf 'CI on `main` concluded **%s** at %s (%s).\n\nRun: %s\n\nFix it or revert the commit that broke it before merging anything else.' \
+                "$CONCLUSION" "$short_sha" "$TRIGGER" "$RUN_URL")"
+              if [[ -n "$existing" ]]; then
+                gh issue comment "$number" --body "$body"
+                if [[ "$TRIGGER" != "push" ]]; then
+                  gh issue edit "$number" --add-label "$full_label"
+                fi
+              else
+                gh label create "$label" --color B60205 --description "CI on main is failing" --force
+                labels=("--label" "$label")
+                if [[ "$TRIGGER" != "push" ]]; then
+                  gh label create "$full_label" --color D93F0B --description "Opened by a nightly or dispatched CI run on main" --force
+                  labels+=("--label" "$full_label")
+                fi
+                gh issue create --title "main is red" "${labels[@]}" --assignee "$OWNER" --body "$body"
+              fi
+              ;;
+            *)
+              echo "CI on main concluded $CONCLUSION; leaving the issue as it is."
+              ;;
+          esac

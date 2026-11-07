@@ -10,7 +10,7 @@ The allowlists and fail-closed gate are in `.github/scripts/ci_scope.py`; fixtur
 
 ## Smoke, full, nightly, and release test suites
 
-The native job always runs every iOS unit test (`PigeonReaderTests`) and the clean Release build. Which UI tests it runs depends on the trigger:
+The native job always runs every iOS unit test (`PigeonReaderTests`). It runs the clean Release build, including the first-party warnings check, on every trigger except pull requests: that build is a second full compile behind the shared iOS runner lock, and it only counts toward a release on `main`, so a Release-only break or new warning shows up on `main` right after the merge. Which UI tests it runs depends on the trigger:
 
 | Trigger | UI tests | Native step | Counts as release evidence |
 | --- | --- | --- | --- |
@@ -26,6 +26,10 @@ The smoke list is `.github/ios-smoke-ui-tests.txt`, one `-only-testing` identifi
 `ci_scope.py` writes the `ui_suite` output (`smoke` for pull requests and pushes, `full` for everything else, including unreadable events) and the required gate rejects a missing or invalid value. Scheduled and dispatched runs have no change range, so they always select full native and Worker validation. The nightly run first asks `scripts/testflight-ci-gate.mjs --full-suite-exists` whether an earlier run already proved the current `main` HEAD with the full suite; if so it skips both suites (the required gate still reports green), so the nightly only does native work when `main` changed. Unreadable evidence runs the full suite.
 
 A TestFlight release reuses CI only from a green exact-SHA `main` run (push, schedule, or dispatch) whose `Run unit and full UI tests` and `Clean Release build` steps succeeded. A smoke-only run never qualifies, and a non-green run newer than the full run forces full release tests. In practice: release after the nightly has run on that commit, or dispatch CI with `ui_suite: full` on `main` first; otherwise the release workflow runs every test itself.
+
+## Red main
+
+`.github/workflows/main-health.yml` watches every CI run on `main` (push, nightly, dispatch). Only runs of the current `main` HEAD count, so an older or overlapping run can't open or close it. A failure opens one `main is red` issue, labelled `main-red` and assigned to the repository owner, and later failures comment on it. The next green run closes it, except that a push run's success does not close an issue a nightly or dispatched run opened (label `main-red-full-suite`), since push runs can run fewer tests. Fix or revert before merging anything else: steps that pull requests skip only run on `main`, so this issue is how a break they would have caught gets noticed.
 
 ## Cancellation
 
