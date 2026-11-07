@@ -29,7 +29,7 @@ A TestFlight release reuses CI only from a green exact-SHA `main` run (push, sch
 
 ## Red main
 
-`.github/workflows/main-health.yml` watches every CI run on `main` (push, nightly, dispatch). A failure opens one `main is red` issue, labelled `main-red` and assigned to the repository owner, and later failures comment on it. The next green run closes it. Fix or revert before merging anything else: steps that pull requests skip only run on `main`, so this issue is how a break they would have caught gets noticed.
+`.github/workflows/main-health.yml` watches every CI run on `main` (push, nightly, dispatch). Only runs of the current `main` HEAD count, so an older or overlapping run can't open or close it. A failure opens one `main is red` issue, labelled `main-red` and assigned to the repository owner, and later failures comment on it. The next green run closes it, except that a push run's success does not close an issue a nightly or dispatched run opened (label `main-red-full-suite`), since push runs can run fewer tests. Fix or revert before merging anything else: steps that pull requests skip only run on `main`, so this issue is how a break they would have caught gets noticed.
 
 ## Cancellation
 
