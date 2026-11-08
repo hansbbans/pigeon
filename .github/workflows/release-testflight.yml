@@ -145,6 +145,9 @@ jobs:
         shell: bash
         run: bash .github/scripts/kill-orphaned-xcodebuild.sh
 
+      # Held until after the signing keychain is removed from the user's keychain search list:
+      # every release on this Mac edits that one list, and a release that restores it while
+      # another exports breaks that export's code signing (errSecInternalComponent).
       - name: Acquire the shared iOS runner lock
         timeout-minutes: 65
         shell: bash
@@ -426,11 +429,6 @@ jobs:
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
           )
           xcodebuild "${archive_arguments[@]}"
-
-      - name: Release the shared iOS runner lock after the archive
-        # Export and upload are network-bound; other repos' builds can start.
-        shell: bash
-        run: bash .github/scripts/ios-runner-lock.sh release
 
       - name: Upload archive to TestFlight
         timeout-minutes: 30
