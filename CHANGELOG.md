@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Substack paid-only posts sent to a free subscriber with no preview at all (the email body is empty) now carry the Paywall label. Previously only teasers that stopped partway at Substack's paywall block were labeled.
+
 ## [0.1.9.0] - 2026-11-04
 
 ### Added

@@ -4,6 +4,11 @@
 const PAYWALL_MARKERS = [
 	// Substack. A paying subscriber's full copy carries "PaywallToDOM" instead.
 	/data-component-name=["']Paywall["']/i,
+	// Substack paid-only post with the paywall above the first paragraph: no
+	// Paywall block, just an empty body. The "free subscriber" CTA alone also
+	// sits under free posts, so require the empty body before it. The CTA follows
+	// about 750 characters later; the bounded gaps keep a crafted email linear.
+	/<div class=["']body markup["'][^>]{0,1000}>\s*(?:<p[^>]{0,1000}>\s*<\/p>\s*)*<\/div>[\s\S]{0,2000}?You(?:'|&#39;|&#x27;|&#8217;|&rsquo;|’)re currently a free subscriber/i,
 	// beehiiv premium posts.
 	/class=["'][^"']*\bemail-paywall-break\b/i,
 	// Ghost members-only posts.

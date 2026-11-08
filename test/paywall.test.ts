@@ -17,6 +17,30 @@ test('isPaywalledHtml ignores the jump marker in a full post sent to a paying su
 	assert.equal(isPaywalledHtml(html), false);
 });
 
+test('isPaywalledHtml flags a Substack paid-only post sent to a free subscriber with an empty body', () => {
+	// Trimmed from Shax "Attack Differently": the paywall sits above the first
+	// paragraph, so Substack sends no Paywall block, just an empty body and the CTA.
+	const html = `<div class="post typography" dir="auto"><div class="body markup" dir="auto" style="text-align: initial;font-size: 16px;line-height: 26px;width: 100%;margin-bottom: 16px;hanging-punctuation: allow-end;overflow-wrap: anywhere;word-break: break-word;font-family: Spectral,sans-serif;font-weight: 400;"><p style="margin: 0 0 20px 0;color: rgb(54,55,55);line-height: 26px;font-size: 16px;unicode-bidi: plaintext;margin-top: 0;margin-bottom: 0;"></p></div></div>
+		<div class="container-border"></div><div class="post-cta typography markup"><p><span class="pencraft pc-reset reset-KrJVVF">You're currently a free subscriber to <a href="https://substack.com/redirect/a">Shax</a>. For the full experience, <a href="https://substack.com/redirect/2/b">upgrade your subscription.</a></span></p>
+		<p class="cta-box"><a class="button primary" role="button" href="https://substack.com/redirect/2/b">Upgrade to paid</a></p></div>`;
+	assert.equal(isPaywalledHtml(html), true);
+});
+
+test('isPaywalledHtml ignores the free-subscriber footer under a free Substack post', () => {
+	const html = `<div class="post typography" dir="auto"><div class="body markup" dir="auto"><p>Here is the whole free post.</p></div></div>
+		<div class="post-cta typography markup"><p><span>You're currently a free subscriber to <a href="https://substack.com/redirect/a">Shax</a>. For the full experience, <a href="https://substack.com/redirect/2/b">upgrade your subscription.</a></span></p></div>`;
+	assert.equal(isPaywalledHtml(html), false);
+});
+
+test('isPaywalledHtml stays fast on an email full of empty Substack bodies without the CTA', () => {
+	// Unbounded gaps made this quadratic: about 3 s, far past the Worker's 10 ms CPU limit.
+	const html = '<div class="body markup" dir="auto"><p></p></div>'.repeat(2000)
+		+ '<div class="body markup"'.repeat(2000) + 'x'.repeat(500_000);
+	const started = performance.now();
+	assert.equal(isPaywalledHtml(html), false);
+	assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
+});
+
 test('isPaywalledHtml flags a beehiiv premium teaser', () => {
 	const html = `<p>They are running the apps.</p>
 		<table class="email-paywall-break-body"><tr><td><h2>Subscribe to Premium to read the rest.</h2></td></tr></table>`;
