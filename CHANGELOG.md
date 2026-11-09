@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
+- In the web reader, Today in the sidebar now shows how many unread articles arrived today (your local day), like All and Unread. It used to show no number.
 - Substack paid-only posts sent to a free subscriber with no preview at all (the email body is empty) now carry the Paywall label. Previously only teasers that stopped partway at Substack's paywall block were labeled.
 
 ## [0.1.9.0] - 2026-11-04

@@ -1,6 +1,7 @@
 import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { handleGreaderRequest } from '../src/greader';
+import { handleNativeApiRequest } from '../src/native-api';
 import { generateApiToken } from '../src/api-auth';
 import {
 	browserRegressionItem,
@@ -25,6 +26,9 @@ test('bounded Today windows keep every story reachable beyond 2100 real GReader 
 		const harness = await createBrowserHarness({ now: () => now, fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
 			if (input.endsWith('/contents')) bodyRequests += 1;
+			if (input.startsWith('/api/v1/browser/articles/count?')) {
+				return handleNativeApiRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
+			}
 			return handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env);
 		} });
 		await harness.elements.get('login-form')!.dispatch('submit');
@@ -32,7 +36,8 @@ test('bounded Today windows keep every story reachable beyond 2100 real GReader 
 		findListButtonByViewId(harness.elements.get('views-list'), 'today')!.dispatch('click');
 		await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === `Story ${count}`);
 		await waitForTodayWindow(harness);
-		assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'today')!.textContent, 'Today');
+		// The sidebar counts today's unread stories, not the future or yesterday items around them.
+		assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'today')!.textContent, `Today${count}`);
 		assert.equal(findListButtonByViewId(harness.elements.get('views-list'), 'recent')!.textContent, 'Recently read');
 		const seen = new Set<string>();
 		for (let page = 0; page < 20; page += 1) {
@@ -164,4 +169,34 @@ test('Today windows retain a partial cached tail through a page error, then prun
 		assert.deepEqual([...seen], Array.from({ length: 300 }, (_, index) => String(300 - index)));
 		assert.ok(renderedArticleIds(harness).includes(harness.elements.get('reader-title')!.textContent.replace('Story ', '')));
 	} finally { state.database.close(); }
+});
+
+test('Today sidebar count follows the local day and never carries a stale day forward', async () => {
+	let now = new Date(2026, 9, 2, 12).getTime();
+	const count = 30;
+	const state = createLargeTodaySqliteLibrary(now, count);
+	try {
+		const token = await generateApiToken('today-test-password');
+		let failCount = false;
+		const harness = await createBrowserHarness({ now: () => now, fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
+			const request = new Request(`https://pigeon.example${input}`, init as RequestInit);
+			if (input.startsWith('/api/v1/browser/articles/count?')) {
+				return failCount ? new Response('Unavailable', { status: 503 }) : handleNativeApiRequest(request, state.env);
+			}
+			return handleGreaderRequest(request, state.env);
+		} });
+		const todayButton = () => findListButtonByViewId(harness.elements.get('views-list'), 'today');
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => todayButton()?.textContent === `Today${count}`);
+		// The next day's count request fails: Today must drop yesterday's number, not keep it.
+		now += 24 * 60 * 60 * 1000;
+		failCount = true;
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+		await waitForBrowserCondition(() => todayButton()?.textContent === 'Today0');
+		await flushBrowserTasks();
+		assert.equal(todayButton()?.textContent, 'Today0');
+	} finally {
+		state.database.close();
+	}
 });

@@ -504,6 +504,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let views = [];
   let subscriptions = [];
   let unreadCountRequestId = 0;
+  let todayUnreadCount = null;
+  let inFlightTodayCount = null;
+  let todayCountStale = false;
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
@@ -1504,7 +1507,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // Subscriptions minus the Read It Later feed: what feed settings and notifications list.
   function getFeedSubscriptions(){return subscriptions.filter(subscription=>subscription.sourceType!=='saved');}
   function isOfflineReading(){return Boolean(offlineLibrary&&(offlineSession||window.navigator?.onLine===false));}
-  function canReadOfflinePath(input){return String(input).startsWith('/reader/api/0/')||String(input).startsWith('/api/v1/browser/articles?');}
+  function canReadOfflinePath(input){return String(input).startsWith('/reader/api/0/')||String(input).startsWith('/api/v1/browser/articles?')||String(input).startsWith('/api/v1/browser/articles/count?');}
   async function offlineJSON(input,init) {
     const library=offlineLibrary,generation=accountGeneration,token=session.token;if(!library)throw new Error('Offline storage is unavailable.');
     const guard=()=>{if(library!==offlineLibrary||!requestBelongsToCurrentSession(generation,token))throw new Error('Offline account changed.');};
@@ -1518,6 +1521,10 @@ export function renderBrowserAppRuntimeScript(): string {
       for(const feed of feeds) {guard();counts.push({id:feed.streamId,count:(await library.query({stream:feed.streamId,filter:'unread'})).total});for(const folder of feed.folders||[])folders.add(folder);}
       for(const folder of folders){guard();counts.push({id:'user/-/label/'+folder,count:(await library.query({stream:'user/-/label/'+folder,filter:'unread'})).total});}
       guard();return {unreadcounts:counts};
+    }
+    if(url.pathname==='/api/v1/browser/articles/count') {
+      const payload=await library.query({stream:params.get('stream')||'all',q:params.get('q')||'',filter:params.get('filter')||'all',kind:params.get('kind')||undefined,length:params.get('length')||undefined,since:params.get('since')||undefined,before:params.get('before')||undefined,limit:1,offset:0});
+      guard();return {count:payload.total};
     }
     const savedContents=async(ids)=>{const payload=await library.contents(ids.map(String));guard();return {...payload,items:payload.items.map(item=>({...item,content:item.content||item.summary}))};};
     if(url.pathname.endsWith('/stream/items/contents'))return savedContents(init?.body?.getAll('i')||[]);
@@ -2406,7 +2413,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: view.title }));
     row.appendChild(titleGroup);
-    row.appendChild(createNode('span', { classNames: ['feed-count'], text: ['today', 'recent', 'starred', 'recommended'].includes(view.kind) ? '' : formatUnreadCount(view.unreadCount) }));
+    row.appendChild(createNode('span', { classNames: ['feed-count'], text: ['recent', 'starred', 'recommended'].includes(view.kind) ? '' : formatUnreadCount(view.unreadCount) }));
     button.appendChild(row);
 
     if (view.kind === 'folder') {
@@ -4619,7 +4626,7 @@ export function renderBrowserAppRuntimeScript(): string {
           if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) {
             throw new Error('Could not refresh unread counts');
           }
-          views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
+          views = buildViews(result.payload.unreadcounts);
           renderFeeds();
           renderMarkAllAsReadAction();
         } catch (_error) {
@@ -4718,7 +4725,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const result = await requestUnreadCounts(true);
       if (!isCurrentBulkRequest(request)) return;
       if (!isCurrentUnreadCountResult(result) || !Array.isArray(result.payload?.unreadcounts)) throw new Error('Invalid counts');
-      views = client.buildFeedViews(subscriptions, result.payload.unreadcounts);
+      views = buildViews(result.payload.unreadcounts);
       renderFeeds();
     } catch (_error) {
       if (isCurrentBulkRequest(request) && request.viewId === activeViewId && request.queryKey === getViewQueryKey(activeViewId)) {
@@ -4896,6 +4903,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const token = session.token;
     if (!force && inFlightUnreadCountRequest) return inFlightUnreadCountRequest;
     const requestId = ++unreadCountRequestId;
+    void refreshTodayUnreadCount();
     const requestPromise = authenticatedJson('/reader/api/0/unread-count')
       .then((payload) => ({ payload, generation, token, requestId }))
       .finally(() => {
@@ -4903,6 +4911,47 @@ export function renderBrowserAppRuntimeScript(): string {
       });
     inFlightUnreadCountRequest = requestPromise;
     return requestPromise;
+  }
+
+  // Today's count comes from its own request (unread-count cannot know the local
+  // day), runs beside unread-count without delaying it, and patches only Today.
+  // A stored count counts only for the session and local day it was fetched for.
+  function refreshTodayUnreadCount() {
+    if (inFlightTodayCount) {
+      todayCountStale = true;
+      return inFlightTodayCount;
+    }
+    const generation = accountGeneration, token = session.token;
+    const bounds = client.getLocalDayBounds();
+    const params = new URLSearchParams({ stream: 'all', filter: 'unread',
+      since: new Date(bounds.startSeconds * 1000).toISOString(), before: new Date(bounds.endSeconds * 1000).toISOString() });
+    todayCountStale = false;
+    inFlightTodayCount = authenticatedJson('/api/v1/browser/articles/count?' + params.toString())
+      .then((payload) => {
+        if (!requestBelongsToCurrentSession(generation, token) || !Number.isSafeInteger(payload?.count) || payload.count < 0) return;
+        todayUnreadCount = { count: payload.count, day: bounds.startSeconds, generation, token };
+        const todayView = views.find((view) => view.kind === 'today');
+        if (todayView && todayView.unreadCount !== payload.count) {
+          todayView.unreadCount = payload.count;
+          renderFeeds();
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlightTodayCount = null;
+        if (todayCountStale && requestBelongsToCurrentSession(generation, token)) void refreshTodayUnreadCount();
+      });
+    return inFlightTodayCount;
+  }
+
+  function currentTodayUnreadCount() {
+    const stored = todayUnreadCount;
+    return stored && stored.day === client.getLocalDayBounds().startSeconds &&
+      requestBelongsToCurrentSession(stored.generation, stored.token) ? stored.count : 0;
+  }
+
+  function buildViews(unreadcounts) {
+    return client.buildFeedViews(subscriptions, unreadcounts, currentTodayUnreadCount());
   }
 
   function isCurrentUnreadCountResult(result) {
@@ -4914,7 +4963,7 @@ export function renderBrowserAppRuntimeScript(): string {
     try {
       const result = await requestUnreadCounts(force);
       if (!isCurrentUnreadCountResult(result)) return;
-      views = client.buildFeedViews(subscriptions, result.payload.unreadcounts || []);
+      views = buildViews(result.payload.unreadcounts || []);
       renderFeeds();
     } catch (_error) {
       // Retain existing counts when their refresh fails; membership has its own error state.
@@ -4956,7 +5005,7 @@ export function renderBrowserAppRuntimeScript(): string {
         throw new Error('Invalid navigation response');
       }
       subscriptions = subscriptionPayload.subscriptions;
-      views = client.buildFeedViews(subscriptions, unreadResult.payload.unreadcounts);
+      views = buildViews(unreadResult.payload.unreadcounts);
       const validViewIds = new Set(views.map((view) => view.id));
       viewStates = new Map([...viewStates].filter(([_key, state]) => validViewIds.has(state.viewId)));
       pruneExpandedFolders();
