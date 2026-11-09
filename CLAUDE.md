@@ -33,6 +33,7 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 - For cross-platform features, build API, then web, then iOS.
 - Batch `.github`/CI edits into one PR: any change under `.github` runs the native iOS job on the shared Mac.
 - Keep the API backward compatible with the build currently on TestFlight.
+- After web UI changes, run `npm run visual:check` (local only, not CI; first time `npx playwright install chromium`). It starts both Workers on a fresh local D1 with a throwaway password, screenshots `/app` (login, reader, settings, library) at 375/768/1280 px into gitignored `visual-check/`, and fails on console errors or non-2xx responses. `-- --base-url <url>` checks a running server; signed-in pages then need `PIGEON_API_PASSWORD`.
 
 ## Release
 - **release** / **testflight**: from a clean `main`, `node scripts/release-new-build-to-testflight.mjs --monitor-state /tmp/pigeon-release-request.json --monitor-receipt /tmp/pigeon-release-receipt.json`. It dispatches `Release to TestFlight` for the exact remote `main` SHA, waits for the upload and App Store Connect verification, and prints a receipt with version and build. Resume an interrupted wait with `--resume-monitor` on the same state file; never dispatch twice. The workflow tags the released commit `testflight/<build>` (best effort: a failed tag push does not fail the release).

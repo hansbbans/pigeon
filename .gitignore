@@ -6,3 +6,4 @@ dist/
 .playwright-cli/
 .superpowers/
 output/
+visual-check/
