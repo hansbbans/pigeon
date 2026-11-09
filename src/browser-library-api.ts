@@ -8,6 +8,11 @@ const STARRED = 'user/-/state/com.google/starred';
 const LABEL = 'user/-/label/';
 const SAVED = 'saved';
 const MAX_CURSOR_LENGTH = 1024;
+// Membership filters shared by the list and its count; sort is validated by both
+// so a list query string can be reused for the count.
+const FILTER_PARAMS = ['stream', 'q', 'filter', 'sort', 'kind', 'length', 'since', 'before'];
+const LIST_PARAMS = new Set([...FILTER_PARAMS, 'limit', 'continuation']);
+const COUNT_PARAMS = new Set(FILTER_PARAMS);
 
 type ArticleSort = 'newest' | 'oldest' | 'shortest' | 'longest';
 type SavedKind = 'all' | 'text' | 'video';
@@ -69,11 +74,7 @@ const MINUTE_KEY = 14_280;
 export async function handleBrowserArticles(request: Request, env: Env): Promise<Response> {
 	if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
 	try {
-		const params = new URL(request.url).searchParams;
-		const allowed = new Set(['stream', 'q', 'filter', 'sort', 'kind', 'length', 'limit', 'since', 'before', 'continuation']);
-		for (const key of params.keys()) {
-			if (!allowed.has(key) || params.getAll(key).length !== 1) throw new InvalidQuery('Unknown or repeated query parameter');
-		}
+		const params = readParams(request, LIST_PARAMS);
 		const query = parseQuery(params);
 		const rawLimit = params.get('limit') ?? '50';
 		if (!/^[1-9]\d{0,2}$/.test(rawLimit) || Number(rawLimit) > 100) throw new InvalidQuery('limit must be between 1 and 100');
@@ -158,7 +159,14 @@ function buildArticleFilter(query: ArticleQuery): { where: string[]; binds: (str
 			OR COALESCE(f.custom_title, f.display_name) LIKE ? ESCAPE '\\' OR i.text_content LIKE ? ESCAPE '\\')`);
 		binds.push(pattern, pattern, pattern, pattern);
 	}
-	if (query.since) { where.push('julianday(i.received_at) >= julianday(?)'); binds.push(query.since); }
+	if (query.since) {
+		where.push('julianday(i.received_at) >= julianday(?)');
+		binds.push(query.since);
+		// Coarse bound so SQLite can seek the received_at indexes (julianday() cannot):
+		// every stored received_at starts with its UTC date, ISO or "YYYY-MM-DD HH:MM:SS".
+		where.push('i.received_at >= ?');
+		binds.push(query.since.slice(0, 10));
+	}
 	if (query.before) { where.push('julianday(i.received_at) < julianday(?)'); binds.push(query.before); }
 	if (query.kind === 'video') where.push("i.media_kind = 'video'");
 	else if (query.kind === 'text') where.push("i.media_kind IS NOT 'video'");
@@ -171,19 +179,16 @@ function buildArticleFilter(query: ArticleQuery): { where: string[]; binds: (str
 
 /**
  * GET /api/v1/browser/articles/count (authenticated by handleNativeApiRequest).
- * Takes the article list's filters (stream, q, filter, kind, length, since, before)
- * and returns { count } for the same membership. The browser uses it for the
- * Today sidebar count: stream=all, filter=unread, since/before as the local day.
+ * Takes the article list's query parameters, validated the same way (kind and
+ * length only with stream=saved; sort is checked but does not change the count),
+ * without limit or continuation, and returns { count } for the same membership.
+ * The browser uses it for Today's sidebar count: stream=all, filter=unread,
+ * since/before as the local day.
  */
 export async function handleBrowserArticleCount(request: Request, env: Env): Promise<Response> {
 	if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
 	try {
-		const params = new URL(request.url).searchParams;
-		const allowed = new Set(['stream', 'q', 'filter', 'kind', 'length', 'since', 'before']);
-		for (const key of params.keys()) {
-			if (!allowed.has(key) || params.getAll(key).length !== 1) throw new InvalidQuery('Unknown or repeated query parameter');
-		}
-		const { where, binds } = buildArticleFilter(parseQuery(params));
+		const { where, binds } = buildArticleFilter(parseQuery(readParams(request, COUNT_PARAMS)));
 		const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM items i JOIN feeds f ON f.feed_key = i.feed_key
 			WHERE ${where.join(' AND ')}`).bind(...binds).first<{ count: number }>();
 		return Response.json({ count: row?.count ?? 0 }, { headers: { 'Cache-Control': 'no-store' } });
@@ -195,6 +200,14 @@ export async function handleBrowserArticleCount(request: Request, env: Env): Pro
 }
 
 class InvalidQuery extends Error {}
+
+function readParams(request: Request, allowed: Set<string>): URLSearchParams {
+	const params = new URL(request.url).searchParams;
+	for (const key of params.keys()) {
+		if (!allowed.has(key) || params.getAll(key).length !== 1) throw new InvalidQuery('Unknown or repeated query parameter');
+	}
+	return params;
+}
 
 function parseQuery(params: URLSearchParams): ArticleQuery {
 	const rawStream = params.get('stream') ?? 'all';

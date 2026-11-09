@@ -192,6 +192,9 @@ test('article count matches Today unread membership and validates like the list'
 	state.insert(5, { date: '2026-10-12T07:00:00.000Z', feed: 'inactive' });
 	state.insert(6, { date: '2026-10-12T08:00:00.000Z', feed: SAVED_FEED_KEY });
 	state.insert(7, { date: '2026-10-13T04:00:00.000Z' });
+	// SQLite-style timestamps on either side of the bound stay exact under the coarse date prefix.
+	state.insert(8, { date: '2026-10-12 03:59:59' });
+	state.insert(9, { date: '2026-10-12 04:00:00' });
 	const auth = state.request().headers.get('Authorization')!;
 	function count(params: Record<string, string>, options: { auth?: string | null; method?: string } = {}) {
 		const url = new URL('https://pigeon.example/api/v1/browser/articles/count');
@@ -202,9 +205,10 @@ test('article count matches Today unread membership and validates like the list'
 	const today = { stream: 'all', filter: 'unread', since: '2026-10-12T04:00:00Z', before: '2026-10-13T04:00:00Z' };
 	const response = await count(today);
 	assert.equal(response.status, 200, await response.clone().text());
-	assert.deepEqual(await response.json(), { count: 2 });
-	const listed = await state.query(today);
-	assert.equal(listed.itemIds.length, 2);
+	assert.deepEqual(await response.json(), { count: 3 });
+	assert.deepEqual((await state.query(today)).itemIds, ['3', '9', '2']);
+	assert.equal((await count({ ...today, sort: 'oldest' })).status, 200);
+	assert.equal((await count({ ...today, kind: 'video' })).status, 400);
 	assert.equal((await count(today, { auth: null })).status, 401);
 	assert.equal((await count(today, { method: 'POST' })).status, 405);
 	assert.equal((await count({ ...today, limit: '5' })).status, 400);

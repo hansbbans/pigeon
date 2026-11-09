@@ -170,3 +170,33 @@ test('Today windows retain a partial cached tail through a page error, then prun
 		assert.ok(renderedArticleIds(harness).includes(harness.elements.get('reader-title')!.textContent.replace('Story ', '')));
 	} finally { state.database.close(); }
 });
+
+test('Today sidebar count follows the local day and never carries a stale day forward', async () => {
+	let now = new Date(2026, 9, 2, 12).getTime();
+	const count = 30;
+	const state = createLargeTodaySqliteLibrary(now, count);
+	try {
+		const token = await generateApiToken('today-test-password');
+		let failCount = false;
+		const harness = await createBrowserHarness({ now: () => now, fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response(`Auth=pigeon/${token}`);
+			const request = new Request(`https://pigeon.example${input}`, init as RequestInit);
+			if (input.startsWith('/api/v1/browser/articles/count?')) {
+				return failCount ? new Response('Unavailable', { status: 503 }) : handleNativeApiRequest(request, state.env);
+			}
+			return handleGreaderRequest(request, state.env);
+		} });
+		const todayButton = () => findListButtonByViewId(harness.elements.get('views-list'), 'today');
+		await harness.elements.get('login-form')!.dispatch('submit');
+		await waitForBrowserCondition(() => todayButton()?.textContent === `Today${count}`);
+		// The next day's count request fails: Today must drop yesterday's number, not keep it.
+		now += 24 * 60 * 60 * 1000;
+		failCount = true;
+		findListButtonByViewId(harness.elements.get('views-list'), 'all')!.dispatch('click');
+		await waitForBrowserCondition(() => todayButton()?.textContent === 'Today0');
+		await flushBrowserTasks();
+		assert.equal(todayButton()?.textContent, 'Today0');
+	} finally {
+		state.database.close();
+	}
+});
