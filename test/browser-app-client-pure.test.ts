@@ -90,6 +90,14 @@ test('sortSubscriptionsByTitle orders subscriptions alphabetically by title', ()
 	);
 });
 
+test('buildFeedViews shows the local-day unread count on Today and defaults it to zero', () => {
+	const unread = [{ id: 'user/-/state/com.google/reading-list', count: 9 }];
+	const today = (views: ReturnType<typeof buildFeedViews>) => views.find((view) => view.kind === 'today')!.unreadCount;
+	assert.equal(today(buildFeedViews([], unread, 4)), 4);
+	assert.equal(today(buildFeedViews([], unread)), 0);
+	assert.equal(buildFeedViews([], unread, 4).find((view) => view.kind === 'all')!.unreadCount, 9);
+});
+
 test('buildFeedViews returns built-in views plus sorted uncategorized feeds', () => {
 	assert.deepEqual(
 		buildFeedViews(

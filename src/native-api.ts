@@ -6,7 +6,7 @@ import { handleMutationBatch } from './mutation-api';
 import { handleImageProxy } from './image-proxy';
 import { handlePersonalization } from './personalization-api';
 import { handleStaleFeeds } from './stale-feeds-api';
-import { handleBrowserArticles } from './browser-library-api';
+import { handleBrowserArticleCount, handleBrowserArticles } from './browser-library-api';
 import { handleSavedRequest } from './saved-items';
 import { handleBrowserReaderSource, handleBrowserReadwiseSave, handleBrowserYouTubeProxy } from './browser-reading-api';
 import { handleItemTranscriptRequest } from './item-transcripts';
@@ -64,6 +64,9 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	}
 	if (path === '/api/v1/browser/articles') {
 		return handleBrowserArticles(request, env);
+	}
+	if (path === '/api/v1/browser/articles/count') {
+		return handleBrowserArticleCount(request, env);
 	}
 	if (path === '/api/v1/browser/push/subscription') return handleBrowserPush(request, env);
 	if (path === '/api/v1/saved' || path.startsWith('/api/v1/saved/')) return handleSavedRequest(request, env);

@@ -5,6 +5,7 @@ import { test, type TestContext } from 'node:test';
 import { generateApiToken } from '../src/api-auth';
 import { handleNativeApiRequest } from '../src/native-api';
 import worker from '../src/index';
+import { SAVED_FEED_KEY } from '../src/saved-items';
 import type { Env } from '../src/types';
 
 class Statement {
@@ -178,4 +179,34 @@ test('database failures return a recoverable error without disclosing query inte
 	const response = await handleNativeApiRequest(state.request(), state.env);
 	assert.equal(response.status, 503);
 	assert.deepEqual(await response.json(), { error: 'Could not query articles' });
+});
+
+test('article count matches Today unread membership and validates like the list', async (t) => {
+	const state = await fixture(t);
+	state.database.exec(`INSERT INTO feeds (rowid, feed_key, display_name, source_type, is_active)
+		VALUES (4, '${SAVED_FEED_KEY}', 'Read It Later', 'saved', 1)`);
+	state.insert(1, { date: '2026-10-12T03:59:59.000Z' });
+	state.insert(2, { date: '2026-10-12T04:00:00.000Z' });
+	state.insert(3, { date: '2026-10-12T05:00:00.000Z', feed: 'two' });
+	state.insert(4, { date: '2026-10-12T06:00:00.000Z', read: 1 });
+	state.insert(5, { date: '2026-10-12T07:00:00.000Z', feed: 'inactive' });
+	state.insert(6, { date: '2026-10-12T08:00:00.000Z', feed: SAVED_FEED_KEY });
+	state.insert(7, { date: '2026-10-13T04:00:00.000Z' });
+	const auth = state.request().headers.get('Authorization')!;
+	function count(params: Record<string, string>, options: { auth?: string | null; method?: string } = {}) {
+		const url = new URL('https://pigeon.example/api/v1/browser/articles/count');
+		for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+		return worker.fetch(new Request(url, { method: options.method ?? 'GET',
+			headers: options.auth === null ? {} : { Authorization: options.auth ?? auth } }), state.env);
+	}
+	const today = { stream: 'all', filter: 'unread', since: '2026-10-12T04:00:00Z', before: '2026-10-13T04:00:00Z' };
+	const response = await count(today);
+	assert.equal(response.status, 200, await response.clone().text());
+	assert.deepEqual(await response.json(), { count: 2 });
+	const listed = await state.query(today);
+	assert.equal(listed.itemIds.length, 2);
+	assert.equal((await count(today, { auth: null })).status, 401);
+	assert.equal((await count(today, { method: 'POST' })).status, 405);
+	assert.equal((await count({ ...today, limit: '5' })).status, 400);
+	assert.equal((await count({ since: '2026-10-12' })).status, 400);
 });

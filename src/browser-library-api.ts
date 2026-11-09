@@ -80,42 +80,7 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		const limit = Number(rawLimit);
 		const fingerprint = await queryFingerprint(query);
 		const cursor = parseCursor(params.get('continuation'), fingerprint);
-		const where = ['f.is_active = 1'];
-		const binds: (string | number)[] = [];
-		if (query.stream === SAVED) {
-			where.push('f.feed_key = ?');
-			binds.push(SAVED_FEED_KEY);
-		} else if (!query.stream.startsWith('feed/')) {
-			where.push(notSavedFeedSql('f.source_type'));
-		}
-		if (query.stream === READ) where.push('i.is_read = 1');
-		else if (query.stream === STARRED) where.push('i.is_starred = 1');
-		else if (query.stream.startsWith(LABEL)) {
-			where.push('(f.category = ? OR EXISTS (SELECT 1 FROM feed_tags ft WHERE ft.feed_key = f.feed_key AND ft.label = ?))');
-			binds.push(query.stream.slice(LABEL.length), query.stream.slice(LABEL.length));
-		} else if (query.stream.startsWith('feed/')) {
-			where.push('f.rowid = ?');
-			binds.push(Number(query.stream.slice(5)));
-		}
-		if (query.filter !== 'all') {
-			where.push('i.is_read = ?');
-			binds.push(query.filter === 'read' ? 1 : 0);
-		}
-		if (query.q) {
-			// Bind the escaped pattern so SQL punctuation and LIKE wildcards are literal.
-			const pattern = `%${query.q.replace(/[\\%_]/g, '\\$&')}%`;
-			where.push(`(i.subject LIKE ? ESCAPE '\\' OR ${ARTICLE_AUTHOR_SQL} LIKE ? ESCAPE '\\'
-				OR COALESCE(f.custom_title, f.display_name) LIKE ? ESCAPE '\\' OR i.text_content LIKE ? ESCAPE '\\')`);
-			binds.push(pattern, pattern, pattern, pattern);
-		}
-		if (query.since) { where.push('julianday(i.received_at) >= julianday(?)'); binds.push(query.since); }
-		if (query.before) { where.push('julianday(i.received_at) < julianday(?)'); binds.push(query.before); }
-		if (query.kind === 'video') where.push("i.media_kind = 'video'");
-		else if (query.kind === 'text') where.push("i.media_kind IS NOT 'video'");
-		// Buckets use rounded-up minutes: under 5 means at most 4 whole minutes.
-		if (query.length === 'short') where.push(`${LENGTH_KEY_SQL} <= ${4 * MINUTE_KEY}`);
-		else if (query.length === 'medium') where.push(`${LENGTH_KEY_SQL} > ${4 * MINUTE_KEY} AND ${LENGTH_KEY_SQL} <= ${14 * MINUTE_KEY}`);
-		else if (query.length === 'long') where.push(`${LENGTH_KEY_SQL} > ${14 * MINUTE_KEY}`);
+		const { where, binds } = buildArticleFilter(query);
 		const lengthSort = query.sort === 'shortest' || query.sort === 'longest';
 		let order: string;
 		if (lengthSort) {
@@ -160,6 +125,72 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		if (error instanceof InvalidQuery) return Response.json({ error: error.message }, { status: 400 });
 		console.error('[Browser articles] Query failed', error instanceof Error ? error.message : String(error));
 		return Response.json({ error: 'Could not query articles' }, { status: 503 });
+	}
+}
+
+/** WHERE clauses shared by the article list and its count, so both agree on membership. */
+function buildArticleFilter(query: ArticleQuery): { where: string[]; binds: (string | number)[] } {
+	const where = ['f.is_active = 1'];
+	const binds: (string | number)[] = [];
+	if (query.stream === SAVED) {
+		where.push('f.feed_key = ?');
+		binds.push(SAVED_FEED_KEY);
+	} else if (!query.stream.startsWith('feed/')) {
+		where.push(notSavedFeedSql('f.source_type'));
+	}
+	if (query.stream === READ) where.push('i.is_read = 1');
+	else if (query.stream === STARRED) where.push('i.is_starred = 1');
+	else if (query.stream.startsWith(LABEL)) {
+		where.push('(f.category = ? OR EXISTS (SELECT 1 FROM feed_tags ft WHERE ft.feed_key = f.feed_key AND ft.label = ?))');
+		binds.push(query.stream.slice(LABEL.length), query.stream.slice(LABEL.length));
+	} else if (query.stream.startsWith('feed/')) {
+		where.push('f.rowid = ?');
+		binds.push(Number(query.stream.slice(5)));
+	}
+	if (query.filter !== 'all') {
+		where.push('i.is_read = ?');
+		binds.push(query.filter === 'read' ? 1 : 0);
+	}
+	if (query.q) {
+		// Bind the escaped pattern so SQL punctuation and LIKE wildcards are literal.
+		const pattern = `%${query.q.replace(/[\\%_]/g, '\\$&')}%`;
+		where.push(`(i.subject LIKE ? ESCAPE '\\' OR ${ARTICLE_AUTHOR_SQL} LIKE ? ESCAPE '\\'
+			OR COALESCE(f.custom_title, f.display_name) LIKE ? ESCAPE '\\' OR i.text_content LIKE ? ESCAPE '\\')`);
+		binds.push(pattern, pattern, pattern, pattern);
+	}
+	if (query.since) { where.push('julianday(i.received_at) >= julianday(?)'); binds.push(query.since); }
+	if (query.before) { where.push('julianday(i.received_at) < julianday(?)'); binds.push(query.before); }
+	if (query.kind === 'video') where.push("i.media_kind = 'video'");
+	else if (query.kind === 'text') where.push("i.media_kind IS NOT 'video'");
+	// Buckets use rounded-up minutes: under 5 means at most 4 whole minutes.
+	if (query.length === 'short') where.push(`${LENGTH_KEY_SQL} <= ${4 * MINUTE_KEY}`);
+	else if (query.length === 'medium') where.push(`${LENGTH_KEY_SQL} > ${4 * MINUTE_KEY} AND ${LENGTH_KEY_SQL} <= ${14 * MINUTE_KEY}`);
+	else if (query.length === 'long') where.push(`${LENGTH_KEY_SQL} > ${14 * MINUTE_KEY}`);
+	return { where, binds };
+}
+
+/**
+ * GET /api/v1/browser/articles/count (authenticated by handleNativeApiRequest).
+ * Takes the article list's filters (stream, q, filter, kind, length, since, before)
+ * and returns { count } for the same membership. The browser uses it for the
+ * Today sidebar count: stream=all, filter=unread, since/before as the local day.
+ */
+export async function handleBrowserArticleCount(request: Request, env: Env): Promise<Response> {
+	if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+	try {
+		const params = new URL(request.url).searchParams;
+		const allowed = new Set(['stream', 'q', 'filter', 'kind', 'length', 'since', 'before']);
+		for (const key of params.keys()) {
+			if (!allowed.has(key) || params.getAll(key).length !== 1) throw new InvalidQuery('Unknown or repeated query parameter');
+		}
+		const { where, binds } = buildArticleFilter(parseQuery(params));
+		const row = await env.DB.prepare(`SELECT COUNT(*) AS count FROM items i JOIN feeds f ON f.feed_key = i.feed_key
+			WHERE ${where.join(' AND ')}`).bind(...binds).first<{ count: number }>();
+		return Response.json({ count: row?.count ?? 0 }, { headers: { 'Cache-Control': 'no-store' } });
+	} catch (error) {
+		if (error instanceof InvalidQuery) return Response.json({ error: error.message }, { status: 400 });
+		console.error('[Browser articles] Count failed', error instanceof Error ? error.message : String(error));
+		return Response.json({ error: 'Could not count articles' }, { status: 503 });
 	}
 }
 

@@ -475,6 +475,9 @@ export function createArticleFrameDocument(
 export function buildFeedViews(
 	subscriptions: BrowserSubscription[],
 	unreadCounts: BrowserUnreadCount[],
+	// Unread items received in the local day; the server cannot derive it from
+	// unread-count because it does not know the browser's time zone.
+	todayUnreadCount = 0,
 ): BrowserFeedView[] {
 	function createCategoryLabel(category: { id: string; label?: string }): string {
 		if (category.label && category.label.trim()) {
@@ -609,7 +612,7 @@ export function buildFeedViews(
 			id: 'today',
 			title: 'Today',
 			streamId: 'user/-/state/com.google/reading-list',
-			unreadCount: 0,
+			unreadCount: todayUnreadCount,
 			kind: 'today',
 			section: 'views',
 		},
