@@ -627,6 +627,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let contentRequestQueue = [];
   let activeContentRequestJobs = new Set();
   let renderedReaderItemId = null;
+  // The article whose saved reading position has been applied to the frame. Separate from
+  // renderedReaderItemId because the loading placeholder also renders under the article's id.
+  let readerPositionAppliedFor = null;
   let readerFrameScrollTop = 0;
   let pendingReaderFrameScrollTop = null;
 
@@ -3430,7 +3433,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
-    if (!preparedReading) preparedReaderKey = '';
+    if (!preparedReading) { preparedReaderKey = ''; readerPositionAppliedFor = null; }
     const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
     if (!shouldReplace) {
       return;
@@ -3551,7 +3554,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if(!current()){for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}return;}
       let documentHtml=client.createArticleFrameDocument(result.html,getReaderFrameTheme());
       documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
-      if(renderedReaderItemId!==id) {
+      if(readerPositionAppliedFor!==id) {
+        readerPositionAppliedFor=id;
         const fraction=Number(readingData.positions[id]);
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
       }
