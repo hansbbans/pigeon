@@ -71,8 +71,8 @@ export function renderBrowserAppStyles(): string {
         --text: #1c1c1e;
         --text-secondary: #48484a;
         --muted: #6e6e73;
-        --accent: #3466b0;
-        --accent-soft: rgba(52, 102, 176, 0.12);
+        --accent: #0063d1;
+        --accent-soft: rgba(0, 99, 209, 0.10);
         --star: #e3a008;
         --danger: #c4382b;
         --frame: #ffffff;
@@ -98,8 +98,8 @@ ${iconVariables()}
         --text: #e8e8ea;
         --text-secondary: #b4b4b9;
         --muted: #8e8e94;
-        --accent: #8fb3e8;
-        --accent-soft: rgba(143, 179, 232, 0.16);
+        --accent: #409cff;
+        --accent-soft: rgba(64, 156, 255, 0.18);
         --star: #f0b429;
         --danger: #ff8a7a;
         --frame: #1f1f21;
@@ -868,7 +868,7 @@ ${iconVariables()}
 
       .reader-copy {
         width: 100%;
-        max-width: calc(var(--reader-measure, 720px));
+        max-width: calc(var(--reader-measure, 640px));
         margin: 0 auto;
         padding: 1.5rem var(--reader-gutter, 24px) 0;
       }
