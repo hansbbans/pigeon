@@ -210,6 +210,7 @@ struct ArticleReaderView: View {
 		.safeAreaInset(edge: .bottom, spacing: 0) {
 			ArticleReaderControlsBar(
 				article: current,
+				barBackground: readerBarBackground,
 				onShowReadingControls: showReadingSettings,
 				onSaveConfirmation: { confirmation in
 					withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
@@ -218,6 +219,14 @@ struct ArticleReaderView: View {
 				},
 			)
 				.id(current.id)
+				// The inset sits outside the reader's environment-only override on
+				// iPad, so the bar takes the theme's scheme itself (Sepia stays light).
+				.readerThemeColorScheme(
+					ReaderThemeColorSchemePlacement.resolve(
+						theme: model.readerTypography.theme,
+						isCompactReader: isCompactReader,
+					)
+				)
 		}
 		.toolbar {
 			ToolbarItem(placement: .topBarTrailing) {
@@ -457,7 +466,7 @@ struct ArticleReaderView: View {
 					if let byline = readerDocument.byline {
 						Text(byline)
 							.font(.subheadline)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					ArticleBodyView(
 						content: readerDocument.contentHTML,
@@ -486,7 +495,7 @@ struct ArticleReaderView: View {
 				.accessibilityIdentifier("reader-view-loaded-content")
 			} else {
 				Text("Reader View returned no article content.")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 		}
 	}
@@ -706,7 +715,7 @@ struct ArticleReaderView: View {
 			Label("Reader View unavailable", systemImage: "exclamationmark.triangle")
 				.font(.headline)
 			Text(message)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 			Button("Use Feed Content") {
 				selectMode(.feedContent)
 			}
@@ -934,7 +943,7 @@ struct ArticleReaderView: View {
 			.padding(.horizontal, 16)
 			.padding(.vertical, 10)
 			.frame(maxWidth: .infinity, alignment: .leading)
-			.background(.bar)
+			.background(readerBarBackground)
 		}
 	}
 
@@ -948,12 +957,18 @@ struct ArticleReaderView: View {
 	private var readerBackground: Color {
 		switch model.readerTypography.theme {
 		case .sepia:
-			Color(red: 0.965, green: 0.925, blue: 0.82)
+			PigeonPalette.sepiaBackground
 		case .darkGray:
-			Color(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 30.0 / 255.0)
+			PigeonPalette.darkGrayBackground
 		case .system, .light, .dark:
 			Color(uiColor: .systemBackground)
 		}
+	}
+
+	/// Sepia's toolbars take the page colour so the chrome matches the page;
+	/// other themes keep the system bar material.
+	private var readerBarBackground: AnyShapeStyle {
+		model.readerTypography.theme == .sepia ? AnyShapeStyle(PigeonPalette.sepiaBackground) : AnyShapeStyle(.bar)
 	}
 }
 

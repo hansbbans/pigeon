@@ -170,7 +170,7 @@ struct ArticleListView: View {
 						}
 						Text(model.collectionStatusText(for: collection))
 							.font(.footnote)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 							.frame(maxWidth: .infinity, alignment: .center)
 							.listRowSeparator(.hidden)
 							.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
@@ -413,7 +413,7 @@ struct ArticleListView: View {
 			} footer: {
 				Text(model.collectionStatusText(for: collection))
 					.font(.footnote)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 					.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
 				loadMoreControls(for: collection, isSearchActive: isSearchActive)
 			}
@@ -568,7 +568,7 @@ struct ArticleListView: View {
 			if let error = model.loadMoreError(for: collection) {
 				Text("Could not load more articles: \(error)")
 					.font(.footnote)
-					.foregroundStyle(.red)
+					.foregroundStyle(.pigeonDanger)
 					.frame(maxWidth: .infinity, alignment: .center)
 					.listRowSeparator(.hidden)
 			}
@@ -656,7 +656,7 @@ struct ArticleListView: View {
 				await model.setRead(article, read: !article.isRead, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
 			}
 		}
-		.tint(.blue)
+		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
 	private func starButton(for article: Recommendation) -> some View {
@@ -667,14 +667,14 @@ struct ArticleListView: View {
 				await model.setStarred(article, starred: !article.isStarred, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
 			}
 		}
-		.tint(.orange)
+		.tint(PigeonPalette.SwipeFill.keep)
 	}
 
 	private func readItLaterButton(for article: Recommendation) -> some View {
 		Button("Read It Later", systemImage: "bookmark") {
 			Task { await saveForLater(article) }
 		}
-		.tint(.green)
+		.tint(PigeonPalette.SwipeFill.readLater)
 		.accessibilityHint("Saves this article's original web page to Read It Later")
 	}
 
@@ -718,7 +718,7 @@ struct ArticleListView: View {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
 			Task { await model.markStoriesAboveAsRead(article, in: collection) }
 		}
-		.tint(.blue)
+		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
 	private func markBelowButton(for article: Recommendation) -> some View {
@@ -726,7 +726,7 @@ struct ArticleListView: View {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
 			Task { await model.markStoriesBelowAsRead(article, in: collection) }
 		}
-		.tint(.blue)
+		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
 }

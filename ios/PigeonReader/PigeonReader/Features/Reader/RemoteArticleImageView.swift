@@ -64,7 +64,7 @@ struct RemoteArticleImageView: View {
 		case .failed:
 			Label("Lead image unavailable", systemImage: "photo.badge.exclamationmark")
 				.frame(maxWidth: .infinity, minHeight: 88)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 		}
 	}
 

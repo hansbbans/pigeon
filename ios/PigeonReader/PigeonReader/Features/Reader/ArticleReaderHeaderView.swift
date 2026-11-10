@@ -59,11 +59,11 @@ struct ArticleReaderHeaderView: View {
 				Spacer(minLength: 12)
 				Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
 					.font(.subheadline)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 				if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
 					Text("· \(readingLength)")
 						.font(.subheadline)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 						.accessibilityIdentifier("article-reading-length")
 				}
 			}
@@ -71,7 +71,7 @@ struct ArticleReaderHeaderView: View {
 			if let author = article.displayAuthor {
 				Text(author)
 					.font(.subheadline)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 					.textSelection(.enabled)
 			}
 
@@ -100,7 +100,7 @@ struct ArticleReaderHeaderView: View {
 						.buttonStyle(.borderless)
 				} else {
 					Label("Original unavailable", systemImage: "link.badge.xmark")
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 			}
 			.font(.subheadline)
@@ -110,18 +110,18 @@ struct ArticleReaderHeaderView: View {
 					HStack(spacing: 10) {
 						ScoreBadge(score: article.score)
 						Text(article.learningState)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 						Text("\(article.sampleCount) signals")
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Text(article.explanation)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 						.textSelection(.enabled)
 				}
 				.font(.subheadline)
 				.padding(.top, 4)
 			}
-			.tint(.secondary)
+			.tint(PigeonPalette.labelSecondary)
 		}
 	}
 }

@@ -236,6 +236,7 @@ final class ArticleReaderControlsSaveState {
 
 struct ArticleReaderControlsBar: View {
 	let article: Recommendation
+	let barBackground: AnyShapeStyle
 	let onShowReadingControls: () -> Void
 	let onSaveConfirmation: (ReaderSaveConfirmation) -> Void
 
@@ -246,10 +247,12 @@ struct ArticleReaderControlsBar: View {
 
 	init(
 		article: Recommendation,
+		barBackground: AnyShapeStyle = AnyShapeStyle(.bar),
 		onShowReadingControls: @escaping () -> Void = {},
 		onSaveConfirmation: @escaping (ReaderSaveConfirmation) -> Void = { _ in },
 	) {
 		self.article = article
+		self.barBackground = barBackground
 		self.onShowReadingControls = onShowReadingControls
 		self.onSaveConfirmation = onSaveConfirmation
 	}
@@ -271,7 +274,7 @@ struct ArticleReaderControlsBar: View {
 			.padding(.horizontal, 6)
 			.padding(.vertical, 8)
 		}
-		.background(.bar)
+		.background(barBackground)
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("article-reader-controls")
 		.task(id: saveTaskID) {

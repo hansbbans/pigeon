@@ -19,16 +19,16 @@ struct ReaderSidebarFeedPreview: View {
 				Spacer(minLength: 8)
 				Text("\(preview.unreadCount) unread")
 					.font(.subheadline.monospacedDigit())
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 
 			switch preview.cacheState {
 			case .uncached:
 				Label("Stories aren't cached yet", systemImage: "clock")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			case .empty:
 				Label("No cached stories", systemImage: "tray")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			case .loaded(let headlines):
 				VStack(alignment: .leading, spacing: 8) {
 					ForEach(headlines) { headline in

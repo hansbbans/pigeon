@@ -15,7 +15,7 @@ struct ReaderNavigationLabelView: View {
 			Spacer(minLength: 8)
 			Text(item.unreadCount, format: .number)
 				.font(.body.monospacedDigit())
-				.foregroundStyle(item.unreadCount > 0 ? .primary : .secondary)
+				.foregroundStyle(item.unreadCount > 0 ? Color.primary : PigeonPalette.labelSecondary)
 				.fixedSize(horizontal: true, vertical: false)
 				.contentTransition(reduceMotion ? .identity : .numericText())
 				.animation(

@@ -49,7 +49,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 				.frame(maxWidth: .infinity)
 				.padding(.top, 28)
 			}
-			.padding(.horizontal, 18)
+			.padding(.horizontal, 16)
 			.padding(.bottom, 24)
 		}
 		.onScrollGeometryChange(for: Bool.self) { geometry in
@@ -112,7 +112,7 @@ private struct FrontPageMasthead: View {
 			.font(.caption2.weight(.semibold))
 			.textCase(.uppercase)
 			.tracking(0.8)
-			.foregroundStyle(.secondary)
+			.foregroundStyle(.pigeonSecondary)
 			.accessibilityElement(children: .combine)
 			FrontPageRule(thickness: 2)
 		}
@@ -183,7 +183,7 @@ struct FrontPageStoryView: View {
 								.resizable()
 								.scaledToFill()
 						}
-						.clipShape(.rect(cornerRadius: 3))
+						.clipShape(.rect(cornerRadius: 12, style: .continuous))
 						.accessibilityHidden(true)
 				}
 				Text(article.source)
@@ -202,7 +202,7 @@ struct FrontPageStoryView: View {
 				if role == .lead, let deck = FrontPageLayout.deck(from: article.text) {
 					Text(deck)
 						.font(.custom("Bookerly-Regular", size: 16, relativeTo: .callout))
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 						.lineLimit(3)
 				}
 				HStack(spacing: 6) {
@@ -212,11 +212,11 @@ struct FrontPageStoryView: View {
 					}
 					if article.isStarred {
 						Image(systemName: "star.fill")
-							.foregroundStyle(.orange)
+							.foregroundStyle(.pigeonKeep)
 					}
 				}
 				.font(.caption2)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 			}
 			.frame(maxWidth: .infinity, alignment: .leading)
 			.padding(6)

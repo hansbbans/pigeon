@@ -15,7 +15,7 @@ struct ConnectionView: View {
 						.accessibilityAddTraits(.isHeader)
 					Text("Connect the reader to the Pigeon server that already powers your feeds.")
 						.font(.body)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section {
@@ -37,13 +37,13 @@ struct ConnectionView: View {
 						.textContentType(.password)
 					Text("The password is used once for ClientLogin. Only the resulting token and server URL are saved in Keychain.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				if let errorMessage = model.errorMessage {
 					Section {
 						Label(errorMessage, systemImage: "exclamationmark.triangle")
-							.foregroundStyle(.red)
+							.foregroundStyle(.pigeonDanger)
 					}
 				}
 
