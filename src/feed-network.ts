@@ -6,6 +6,7 @@ export const MAX_FEED_REDIRECTS = 5;
 export const FEED_FETCH_TIMEOUT_MS = 15_000;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const PERMANENT_REDIRECT_STATUSES = new Set([301, 308]);
 const ALLOWED_PORTS = new Set(['', '80', '443']);
 const BLOCKED_HOST_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa'];
 const BINARY_CONTENT_PREFIXES = [
@@ -33,6 +34,11 @@ export interface BoundedFetchResult {
 	response: Response;
 	text: string;
 	finalUrl: URL;
+	/**
+	 * Where the resource permanently lives: the request URL after following only its leading
+	 * 301/308 redirects. A temporary redirect (302, 303, 307) says to keep asking the old URL.
+	 */
+	permanentUrl: URL;
 	redirects: URL[];
 	contentType: string;
 	byteLength: number;
@@ -43,6 +49,8 @@ export async function fetchBoundedFeedResource(
 	options: BoundedFetchOptions = {},
 ): Promise<BoundedFetchResult> {
 	let currentUrl = assertSafeFeedUrl(input);
+	let permanentUrl = currentUrl;
+	let onlyPermanentRedirectsSoFar = true;
 	const redirects: URL[] = [];
 	const maxRedirects = options.maxRedirects ?? MAX_FEED_REDIRECTS;
 	const timeoutMs = options.timeoutMs ?? FEED_FETCH_TIMEOUT_MS;
@@ -65,6 +73,8 @@ export async function fetchBoundedFeedResource(
 			}
 			currentUrl = assertSafeFeedUrl(new URL(location, currentUrl));
 			redirects.push(currentUrl);
+			onlyPermanentRedirectsSoFar &&= PERMANENT_REDIRECT_STATUSES.has(response.status);
+			if (onlyPermanentRedirectsSoFar) permanentUrl = currentUrl;
 			continue;
 		}
 
@@ -80,7 +90,7 @@ export async function fetchBoundedFeedResource(
 				? options.maxHtmlBytes
 				: (options.maxBytes ?? MAX_FEED_BYTES);
 		const { text, byteLength } = await readResponseText(response, responseLimit);
-		return { response, text, finalUrl: currentUrl, redirects, contentType, byteLength };
+		return { response, text, finalUrl: currentUrl, permanentUrl, redirects, contentType, byteLength };
 	}
 }
 

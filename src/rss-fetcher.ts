@@ -106,6 +106,8 @@ interface SuccessfulContent {
 	lastModified: string | null;
 	contentHash: string;
 	finalUrl: string;
+	/** The URL to keep polling: `finalUrl` only when every redirect on the way was permanent. */
+	sourceUrl: string;
 	aliases: string[];
 	itemsProcessed: number;
 	responseBytes: number;
@@ -375,6 +377,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 				lastModified: response.headers.get('Last-Modified'),
 				contentHash,
 				finalUrl: resource.finalUrl.href,
+				sourceUrl: resource.permanentUrl.href,
 				aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
 				itemsProcessed: 0,
 				responseBytes: resource.byteLength,
@@ -406,9 +409,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 		const filteredItems = initialBaseline
 			? await filterItemsForInitialBaseline(feed, pollWindow, initialBaseline)
 			: pollWindow;
-		const items = initialBaseline
-			? deduplicateParsedItems(filteredItems).slice(0, MAX_ITEMS_PER_FETCH)
-			: filteredItems;
+		// Two entries with one identity would otherwise overwrite each other on every changed poll.
+		const items = deduplicateParsedItems(filteredItems).slice(0, MAX_ITEMS_PER_FETCH);
 		const statements = await buildRssItemStatements(
 			env.DB,
 			feed.feed_key,
@@ -426,6 +428,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			lastModified: response.headers.get('Last-Modified'),
 			contentHash,
 			finalUrl: resource.finalUrl.href,
+			sourceUrl: resource.permanentUrl.href,
 			aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
 			itemsProcessed: items.length,
 			responseBytes: resource.byteLength,
@@ -653,7 +656,7 @@ async function persistRefresh(
 			content.performedFullFetch ? result.completedAt : null,
 			nextFetchAt,
 			content.format,
-			content.finalUrl,
+			content.sourceUrl,
 			content.finalUrl,
 			result.outcome,
 			result.durationMs,
