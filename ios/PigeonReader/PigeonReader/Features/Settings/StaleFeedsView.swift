@@ -20,7 +20,7 @@ struct StaleFeedsView: View {
 				Section {
 					Text("Feeds appear here after no new article for 90 days. Archive moves a feed into the Archived section without unsubscribing; both actions can be undone. Select up to 100 feeds at a time.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 					LabeledContent("Inactive since", value: snapshot.cutoff.formatted(date: .abbreviated, time: .omitted))
 				}
 				feedSection("Stale", feeds: snapshot.feeds.filter { $0.archived == false })
@@ -75,7 +75,7 @@ struct StaleFeedsView: View {
 							Image(systemName: selectedIDs.contains(feed.id) ? "checkmark.circle.fill" : "circle")
 							VStack(alignment: .leading, spacing: 4) {
 								Text(feed.title).foregroundStyle(.primary)
-								Text(evidence(for: feed)).font(.caption).foregroundStyle(.secondary)
+								Text(evidence(for: feed)).font(.caption).foregroundStyle(.pigeonSecondary)
 							}
 						}
 					}

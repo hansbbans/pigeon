@@ -34,10 +34,10 @@ struct SyncHealthView: View {
 			if case let .failed(message) = model.state {
 				Section {
 					Label("Couldn’t refresh sync health", systemImage: "exclamationmark.triangle")
-						.foregroundStyle(.red)
+						.foregroundStyle(.pigeonDanger)
 					Text(message)
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 			}
 			summarySection(snapshot)
@@ -79,7 +79,7 @@ struct SyncHealthView: View {
 			LabeledContent("Refreshing now", value: snapshot.leasedCount, format: .number)
 			LabeledContent("Last checked") {
 				Text(snapshot.generatedAt, style: .relative)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 		}
 	}
@@ -109,18 +109,18 @@ struct SyncHealthView: View {
 
 			Text(feed.host)
 				.font(.subheadline)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 
 			if let detail = feedDetail(feed) {
 				Text(detail)
 					.font(.footnote)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 
 			if let error = feed.error {
 				Text(error)
 					.font(.footnote)
-					.foregroundStyle(.red)
+					.foregroundStyle(.pigeonDanger)
 					.accessibilityLabel("Sync error: \(error)")
 			}
 
@@ -143,7 +143,7 @@ struct SyncHealthView: View {
 			if let retryError = model.retryErrors[feed.feedKey] {
 				Text(retryError)
 					.font(.footnote)
-					.foregroundStyle(.red)
+					.foregroundStyle(.pigeonDanger)
 			}
 		}
 		.padding(.vertical, 4)
@@ -159,11 +159,11 @@ struct SyncHealthView: View {
 							.font(.headline)
 						Text(activitySummary(activity))
 							.font(.footnote)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 						if let error = activity.error {
 							Text(error)
 								.font(.footnote)
-								.foregroundStyle(.red)
+								.foregroundStyle(.pigeonDanger)
 						}
 					}
 				}
@@ -206,10 +206,10 @@ struct SyncHealthView: View {
 
 	private func color(for state: String) -> Color {
 		switch state {
-		case "healthy": .green
-		case "failing": .red
-		case "backing_off", "due": .orange
-		default: .secondary
+		case "healthy": PigeonPalette.positive
+		case "failing": PigeonPalette.danger
+		case "backing_off", "due": PigeonPalette.keep
+		default: PigeonPalette.labelSecondary
 		}
 	}
 }

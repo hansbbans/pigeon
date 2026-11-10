@@ -85,7 +85,7 @@ struct ArticleThumbnailView: View {
 		ZStack {
 			Color.secondary.opacity(0.1)
 			Image(systemName: placeholderSymbol)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 		}
 		.accessibilityHidden(true)
 	}

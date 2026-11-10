@@ -249,7 +249,7 @@ struct ArticleBodyView: View {
 			systemImage: "hand.raised.fill",
 		)
 		.font(.footnote)
-		.foregroundStyle(.secondary)
+		.foregroundStyle(.pigeonSecondary)
 		.accessibilityIdentifier("remote-images-blocked-notice")
 	}
 

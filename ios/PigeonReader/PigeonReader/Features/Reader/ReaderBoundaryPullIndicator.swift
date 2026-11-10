@@ -8,7 +8,7 @@ struct ReaderBoundaryPullIndicator: View {
 		VStack(spacing: 6) {
 			Image(systemName: symbolName)
 				.font(.headline.weight(.semibold))
-				.foregroundStyle(state.isArmed ? Color.accentColor : .secondary)
+				.foregroundStyle(state.isArmed ? Color.accentColor : PigeonPalette.labelSecondary)
 
 			Text(preview.actionTitle)
 				.font(.caption.weight(.semibold))
@@ -22,7 +22,7 @@ struct ReaderBoundaryPullIndicator: View {
 
 			Text(statusText)
 				.font(.caption2)
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 
 			ProgressView(value: state.progress)
 				.progressViewStyle(.linear)

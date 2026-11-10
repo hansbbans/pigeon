@@ -10,7 +10,7 @@ struct FeedNotificationSettingsView: View {
 			Section {
 				Text("Choose the feeds that should alert you after a successful background refresh. Each alert includes Mark Read and Star actions.")
 					.font(.footnote)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 			Section("Feeds") {
 				ForEach(model.subscriptions) { subscription in
@@ -21,7 +21,7 @@ struct FeedNotificationSettingsView: View {
 				}
 			}
 			if let deniedMessage {
-				Section { Text(deniedMessage).foregroundStyle(.red) }
+				Section { Text(deniedMessage).foregroundStyle(.pigeonDanger) }
 			}
 		}
 		.navigationTitle("Feed Notifications")

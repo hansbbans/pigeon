@@ -93,11 +93,11 @@ struct AddFeedView: View {
 									}
 									Text(channel.channelLabel)
 										.font(.footnote)
-										.foregroundStyle(.secondary)
+										.foregroundStyle(.pigeonSecondary)
 									if channel.description.isEmpty == false {
 										Text(channel.description)
 											.font(.subheadline)
-											.foregroundStyle(.secondary)
+											.foregroundStyle(.pigeonSecondary)
 											.lineLimit(3)
 									}
 								}
@@ -112,13 +112,13 @@ struct AddFeedView: View {
 						if let message = channelSearch.message {
 							Text(message)
 								.font(.footnote)
-								.foregroundStyle(.secondary)
+								.foregroundStyle(.pigeonSecondary)
 								.accessibilityIdentifier("youtube-search-message")
 						}
 						if let errorMessage = channelSearch.errorMessage {
 							Label(errorMessage, systemImage: "exclamationmark.triangle")
 								.font(.footnote)
-								.foregroundStyle(.red)
+								.foregroundStyle(.pigeonDanger)
 								.accessibilityIdentifier("youtube-search-error")
 							Button("Retry search", systemImage: "arrow.clockwise") {
 								channelSearch.retry()
@@ -130,7 +130,7 @@ struct AddFeedView: View {
 							channelSearch.message == nil,
 							channelSearch.errorMessage == nil {
 							Text("No matching YouTube channels found.")
-								.foregroundStyle(.secondary)
+								.foregroundStyle(.pigeonSecondary)
 								.accessibilityIdentifier("youtube-search-empty")
 						}
 					}
@@ -295,7 +295,7 @@ private struct EditFeedFoldersView: View {
 				Section {
 					if model.folders.isEmpty {
 						Text("No folders yet")
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					} else {
 						ForEach(model.folders) { folder in
 							Toggle(folder.name, isOn: folderSelection(for: folder.name))
@@ -315,7 +315,7 @@ private struct EditFeedFoldersView: View {
 					if newFolderIsInvalid {
 						Text("Folder names must be between 1 and 80 characters.")
 							.font(.footnote)
-							.foregroundStyle(.red)
+							.foregroundStyle(.pigeonDanger)
 					}
 				} header: {
 					Text("Create Folder")
