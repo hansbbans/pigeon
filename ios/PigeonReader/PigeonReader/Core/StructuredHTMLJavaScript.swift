@@ -354,7 +354,7 @@ enum StructuredHTMLJavaScript {
 			.pigeon-layout-table { font: inherit; line-height: inherit; margin: 0; table-layout: auto; }
 			.pigeon-layout-table > :is(thead, tbody, tfoot) > tr > :is(th, td), .pigeon-layout-table > tr > :is(th, td) { border: 0; padding: 0; }
 			.table-scroll .pigeon-data-table { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .84em; line-height: 1.4; margin: 0; min-width: 0; table-layout: fixed; }
-			.pigeon-data-table > :is(thead, tbody, tfoot) > tr > :is(th, td), .pigeon-data-table > tr > :is(th, td) { border: 1px solid #b7c0c6; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
+			.pigeon-data-table > :is(thead, tbody, tfoot) > tr > :is(th, td), .pigeon-data-table > tr > :is(th, td) { border: 1px solid #aeb7bd; overflow-wrap: anywhere; padding: .55em .7em; text-align: start; vertical-align: top; word-break: break-word; }
 			.pigeon-data-table > :is(thead, tbody, tfoot) > tr > th, .pigeon-data-table > tr > th { background: #eef1f3; font-weight: 650; }
 			.pigeon-image-failure { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #5e6971; display: flex; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: .8em; gap: .45em; justify-content: center; margin: 1.25em auto; min-height: 3.5em; padding: .75em; text-align: center; }
 			.pigeon-image-blocked { align-items: center; background: #eef1f3; border: 1px solid #b7c0c6; border-radius: .5em; color: #39434a; cursor: pointer; display: flex; font: 600 .82em -apple-system, BlinkMacSystemFont, sans-serif; justify-content: center; margin: 1.25em auto; min-height: 5em; padding: 1em; width: 100%; }
@@ -378,6 +378,8 @@ enum StructuredHTMLJavaScript {
 			body[data-theme="sepia"] h1, body[data-theme="sepia"] h2, body[data-theme="sepia"] h3, body[data-theme="sepia"] h4, body[data-theme="sepia"] h5, body[data-theme="sepia"] h6 { color: #2f281e; }
 			body[data-theme="sepia"] a { color: #735c17; }
 			body[data-theme="sepia"] blockquote { border-inline-start-color: #a58b62; color: #62533d; }
+			body[data-theme="sepia"] hr { border-top-color: #b9a57c; }
+			body[data-theme="sepia"] .pigeon-data-table th, body[data-theme="sepia"] .pigeon-data-table td { border-color: #b9a57c; }
 			body[data-theme="sepia"] pre, body[data-theme="sepia"] .pigeon-data-table th, body[data-theme="sepia"] .pigeon-image-failure, body[data-theme="sepia"] .pigeon-image-blocked { background: #ede2c9; }
 			@media (prefers-color-scheme: dark) {
 				body { color: #ececec; }

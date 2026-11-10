@@ -98,7 +98,7 @@ struct ArticleRowView: View {
 		VStack(alignment: .leading, spacing: density == .compact ? 2 : 4) {
 			HStack(alignment: .firstTextBaseline, spacing: 7) {
 				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-					.font(.body.weight(.semibold))
+					.font(ReaderTypography.storyTitle)
 					.lineLimit(density == .titleOnly ? 1 : 2)
 				Spacer(minLength: 4)
 				if article.sampleCount > 0 || article.score > 0 {
@@ -114,21 +114,21 @@ struct ArticleRowView: View {
 					if article.displayAuthor != nil {
 						Text(article.source)
 							.font(.caption)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Text(article.receivedAt, format: .relative(presentation: .named))
 						.font(.caption)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 					if let readingLength {
 						Text("· \(readingLength)")
 							.font(.caption)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 							.lineLimit(1)
 					}
 					Spacer()
 				Image(systemName: "star.fill")
 					.font(.caption)
-					.foregroundStyle(.orange)
+					.foregroundStyle(.pigeonKeep)
 					.opacity(article.isStarred ? 1 : 0)
 					.animation(ReaderMotion.animation(reduceMotion: reduceMotion), value: article.isStarred)
 					.accessibilityLabel("Starred")
@@ -139,7 +139,7 @@ struct ArticleRowView: View {
 			if (density == .comfortable || density == .imageRich) && shouldShowExplanation {
 				Text(article.explanation)
 					.font(.caption)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 					.lineLimit(1)
 					.accessibilityLabel("Why this is here: \(article.explanation)")
 			}
@@ -225,7 +225,7 @@ struct ArticleRowView: View {
 		ZStack {
 			Color.secondary.opacity(0.1)
 			Image(systemName: remoteImagePolicy == .blocked ? "photo.badge.shield.exclamationmark" : "photo")
-				.foregroundStyle(.secondary)
+				.foregroundStyle(.pigeonSecondary)
 		}
 		.clipShape(.rect(cornerRadius: 8))
 		.accessibilityHidden(true)

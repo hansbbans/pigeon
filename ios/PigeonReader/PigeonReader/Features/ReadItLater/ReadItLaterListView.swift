@@ -199,7 +199,7 @@ struct ReadItLaterRowView: View {
 						.lineLimit(3)
 					Text(metadataLine)
 						.font(.caption)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 						.lineLimit(1)
 				}
 				.frame(maxWidth: .infinity, alignment: .leading)
@@ -251,7 +251,7 @@ struct SavedArticleExtractionView: View {
 				Label("Pigeon couldn’t get the text of this page", systemImage: "exclamationmark.triangle")
 					.font(.headline)
 				Text("You can read it on the original site, or try again.")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 				HStack(spacing: 12) {
 					Button("Open Original", systemImage: "safari", action: onOpenOriginal)
 						.buttonStyle(.borderedProminent)
@@ -265,7 +265,7 @@ struct SavedArticleExtractionView: View {
 				HStack(spacing: 10) {
 					ProgressView()
 					Text("Preparing the article…")
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 				.accessibilityElement(children: .combine)
 				.accessibilityIdentifier("saved-preparing")

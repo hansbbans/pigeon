@@ -14,7 +14,7 @@ struct OPMLImportView: View {
 				Button("Choose OPML File", systemImage: "doc.badge.plus") { isChoosingFile = true }
 				Text("Pigeon previews every feed, skips subscriptions you already have, preserves folder names, and rolls back this import if any new feed fails.")
 					.font(.footnote)
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 			}
 			if let preview = screen.preview {
 				Section("Preview") {
@@ -27,12 +27,12 @@ struct OPMLImportView: View {
 								Text(entry.title)
 								Spacer()
 								if preview.duplicateIDs.contains(entry.id) {
-									Text("Already subscribed").font(.caption).foregroundStyle(.secondary)
+									Text("Already subscribed").font(.caption).foregroundStyle(.pigeonSecondary)
 								}
 							}
-							Text(entry.url.absoluteString).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+							Text(entry.url.absoluteString).font(.caption).foregroundStyle(.pigeonSecondary).lineLimit(1)
 							if entry.folders.isEmpty == false {
-								Text(entry.folders.joined(separator: " › ")).font(.caption).foregroundStyle(.secondary)
+								Text(entry.folders.joined(separator: " › ")).font(.caption).foregroundStyle(.pigeonSecondary)
 							}
 						}
 					}
@@ -42,7 +42,7 @@ struct OPMLImportView: View {
 					.disabled((preview.newEntries.isEmpty && preview.folderMerges.isEmpty) || isImporting)
 				}
 			}
-			if let message = screen.message { Section { Text(message).foregroundStyle(.secondary) } }
+			if let message = screen.message { Section { Text(message).foregroundStyle(.pigeonSecondary) } }
 		}
 		.navigationTitle("Import OPML")
 		.fileImporter(isPresented: $isChoosingFile, allowedContentTypes: [.xml, Self.opmlType]) { result in
