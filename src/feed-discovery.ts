@@ -91,11 +91,12 @@ export async function discoverFeeds(
 			page_url: parsed.link ?? null,
 			candidates: [
 				candidateFromParsedFeed(
-					initial.finalUrl,
+					// Subscribe to where the feed permanently lives, not to a temporary redirect target.
+					initial.permanentUrl,
 					parsed,
 					publishedYouTubeFeed ? 'alternate' : 'direct',
 					publishedYouTubeFeed ? 120 : 200,
-					redirectAliases(inputUrl, initial.redirects, initial.finalUrl),
+					redirectAliases(inputUrl, initial.permanentRedirects, initial.permanentUrl),
 					undefined,
 					options.includeItems === true,
 				),
@@ -131,13 +132,13 @@ export async function discoverFeeds(
 			});
 			candidates.push(
 				candidateFromParsedFeed(
-					resource.finalUrl,
+					resource.permanentUrl,
 					parsed,
 					candidateUrl.source,
 					candidateUrl.score,
 					[
 						...candidateUrl.aliases,
-						...redirectAliases(candidateUrl.url, resource.redirects, resource.finalUrl),
+						...redirectAliases(candidateUrl.url, resource.permanentRedirects, resource.permanentUrl),
 					],
 					candidateUrl.title,
 					options.includeItems === true,

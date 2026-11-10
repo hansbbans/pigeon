@@ -60,6 +60,27 @@ test('a temporary redirect does not replace the stored source URL', async () => 
 	}
 });
 
+test('a temporary redirect target is never stored as the canonical URL or as an alias', async () => {
+	const s = setup();
+	s.database.exec("UPDATE feeds SET canonical_url = NULL WHERE feed_key = 'blog'");
+	serveWithRedirect(302, 'https://cdn.example.net/feed.xml?sig=expires-tomorrow', rss(item('a', 'A', 'alpha')));
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	assert.equal((s.database.prepare("SELECT canonical_url FROM feeds WHERE feed_key = 'blog'").get() as { canonical_url: string }).canonical_url, SOURCE);
+	assert.equal(s.count('SELECT COUNT(*) AS n FROM feed_url_aliases'), 0);
+	s.database.close();
+});
+
+test('a permanent redirect records the old URL as an alias of the new one', async () => {
+	const s = setup();
+	serveWithRedirect(301, 'https://new.example.com/feed.xml', rss(item('a', 'A', 'alpha')));
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	assert.deepEqual(
+		s.database.prepare('SELECT alias_url, canonical_url FROM feed_url_aliases').all().map((row) => ({ ...row })),
+		[{ alias_url: SOURCE, canonical_url: 'https://new.example.com/feed.xml' }],
+	);
+	s.database.close();
+});
+
 test('a permanent redirect still moves the stored source URL', async () => {
 	for (const status of [301, 308]) {
 		const s = setup();

@@ -16,7 +16,7 @@ import {
 	shouldUseConditionalRequest,
 	type RefreshOutcome,
 } from './refresh-policy';
-import { parseFeed, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
+import { parseFeed, rssItemIdentitySource, type FeedFormat, type ParsedFeed, type ParsedItem } from './rss-parser';
 import { resolveRssItemUrl, rewriteRssContentLinks } from './rss-links';
 import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 import { decodeHtmlTextEntities } from './preview-text';
@@ -105,8 +105,10 @@ interface SuccessfulContent {
 	etag: string | null;
 	lastModified: string | null;
 	contentHash: string;
-	finalUrl: string;
-	/** The URL to keep polling: `finalUrl` only when every redirect on the way was permanent. */
+	/**
+	 * The URL to keep polling and to treat as canonical: where the feed permanently lives. A
+	 * temporary redirect target (often signed or rotating) is fetched but never stored.
+	 */
 	sourceUrl: string;
 	aliases: string[];
 	itemsProcessed: number;
@@ -158,7 +160,7 @@ export function serializeInitialImportBaseline(baseline: InitialImportBaseline):
 export function deduplicateParsedItems(items: ParsedItem[]): ParsedItem[] {
 	const seen = new Set<string>();
 	return items.filter((item) => {
-		const identity = item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+		const identity = rssItemIdentitySource(item);
 		if (seen.has(identity)) return false;
 		seen.add(identity);
 		return true;
@@ -376,9 +378,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 				etag: response.headers.get('ETag'),
 				lastModified: response.headers.get('Last-Modified'),
 				contentHash,
-				finalUrl: resource.finalUrl.href,
 				sourceUrl: resource.permanentUrl.href,
-				aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
+				aliases: [feed.source_url, ...resource.permanentRedirects.map((url) => url.href)],
 				itemsProcessed: 0,
 				responseBytes: resource.byteLength,
 				performedFullFetch: !useConditionalRequest,
@@ -410,7 +411,7 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			? await filterItemsForInitialBaseline(feed, pollWindow, initialBaseline)
 			: pollWindow;
 		// Two entries with one identity would otherwise overwrite each other on every changed poll.
-		const items = deduplicateParsedItems(filteredItems).slice(0, MAX_ITEMS_PER_FETCH);
+		const items = deduplicateParsedItems(filteredItems);
 		const statements = await buildRssItemStatements(
 			env.DB,
 			feed.feed_key,
@@ -427,9 +428,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			etag: response.headers.get('ETag'),
 			lastModified: response.headers.get('Last-Modified'),
 			contentHash,
-			finalUrl: resource.finalUrl.href,
 			sourceUrl: resource.permanentUrl.href,
-			aliases: [feed.source_url, ...resource.redirects.map((url) => url.href)],
+			aliases: [feed.source_url, ...resource.permanentRedirects.map((url) => url.href)],
 			itemsProcessed: items.length,
 			responseBytes: resource.byteLength,
 			performedFullFetch: !useConditionalRequest,
@@ -657,7 +657,7 @@ async function persistRefresh(
 			nextFetchAt,
 			content.format,
 			content.sourceUrl,
-			content.finalUrl,
+			content.sourceUrl,
 			result.outcome,
 			result.durationMs,
 			feed.feed_key,
@@ -668,13 +668,13 @@ async function persistRefresh(
 		);
 
 		for (const alias of [...new Set(content.aliases)]) {
-			if (alias === content.finalUrl) continue;
+			if (alias === content.sourceUrl) continue;
 			statements.push(
 				env.DB.prepare(
 					`INSERT OR IGNORE INTO feed_url_aliases (alias_url, feed_key, canonical_url)
 					 SELECT ?, ?, ?
 					 WHERE ? IS NULL OR EXISTS (SELECT 1 FROM feeds WHERE feed_key = ? AND refresh_lease_token = ?)`,
-				).bind(alias, feed.feed_key, content.finalUrl, feed.refresh_lease_token ?? null, feed.feed_key, feed.refresh_lease_token ?? null),
+				).bind(alias, feed.feed_key, content.sourceUrl, feed.refresh_lease_token ?? null, feed.feed_key, feed.refresh_lease_token ?? null),
 			);
 		}
 	} else {
@@ -779,10 +779,10 @@ export async function createRssItemIdentity(
 		pubDate?: string;
 		content: string;
 		author?: string;
+		legacyIdentityFallback?: string;
 	},
 ): Promise<RssItemIdentity> {
-	const rawIdentity =
-		item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+	const rawIdentity = rssItemIdentitySource(item);
 	const digest = await sha256Hex(`${feedKey}\n${rawIdentity}`);
 	return { id: hexToUuid(digest), messageId: `rss:${digest}` };
 }

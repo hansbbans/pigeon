@@ -242,3 +242,20 @@ test('UTF-8 feeds and unknown charset labels still decode as UTF-8', async () =>
 		assert.match(resource.text, /<title>Caf\u00e9 \u2014 \u65e5\u672c<\/title>/, contentType);
 	}
 });
+
+test('a UTF-8 feed served with a wrong legacy charset header is still decoded as UTF-8', async () => {
+	const xml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Caf\u00e9 \u2014 \u65e5\u672c</title></channel></rss>';
+	for (const body of [new TextEncoder().encode(xml), new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(xml)])]) {
+		globalThis.fetch = (async () => new Response(body, { status: 200, headers: { 'Content-Type': 'text/xml; charset=ISO-8859-1' } })) as typeof fetch;
+		const resource = await fetchBoundedFeedResource('https://example.com/feed.xml');
+		assert.match(resource.text, /<title>Caf\u00e9 \u2014 \u65e5\u672c<\/title>/);
+		assert.ok(resource.text.startsWith('<?xml'), 'a byte order mark is not left in the text');
+	}
+});
+
+test('invalid UTF-8 with no usable declaration decodes as before, with replacement characters', async () => {
+	const bytes = Uint8Array.from('<rss><channel><title>Caf\u00e9</title></channel></rss>', (character) => character.charCodeAt(0));
+	globalThis.fetch = (async () => new Response(bytes, { status: 200, headers: { 'Content-Type': 'application/rss+xml' } })) as typeof fetch;
+	const resource = await fetchBoundedFeedResource('https://example.com/feed.xml');
+	assert.equal(resource.text, new TextDecoder().decode(bytes));
+});
