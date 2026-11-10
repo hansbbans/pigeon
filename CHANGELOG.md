@@ -4,8 +4,23 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.10.0] - 2026-11-10
+
+### Changed
+
+- iPhone and iPad follow the new Pigeon design system. Buttons, links and selections use one blue tint (darker in light mode, brighter in dark mode). Secondary text, the Starred and Paywall labels and error messages use solid colours that stay readable (4.5:1 or better) instead of faint system grey, orange and red. Story titles in the list are set in Bookerly like the reader. Front Page pictures have rounder corners and slightly wider margins. In the Sepia theme the reader's bottom controls and back bar match the page, and dividers and table borders are warm instead of grey. Swipe actions use the tint, amber and teal.
+- The default reading column is narrower (640 points instead of 720, about 66 characters per line) on iOS and in the web reader. A width you already chose is kept.
+- The web reader uses the same blue as the app, and its Sepia article theme now matches the iOS one.
+
 ### Fixed
 
+- Feeds that declare a character set other than UTF-8 no longer turn accented letters into garbage; text that is valid UTF-8 wins over a wrong declaration.
+- A feed that temporarily redirected no longer has its address replaced by the redirect target, and a feed that lists the same entry twice no longer rewrites it back and forth.
+- Character references such as `&#8217;` and `&#038;` in feed and article titles and bylines show as the character, and feed discovery no longer cuts links like `/?feed=rss2&#038;cat=3` short.
+- Newsletters whose List-Id has no letters or digits no longer land in a feed with an empty name, encoded List-Id names are decoded, and a forwarded email whose subject was only "Fwd:" no longer breaks iOS sync.
+- Mark all as read touches only unread stories, so it is faster on large feeds.
+- In the web reader, turning on the offline library works (the app page was never saved for offline use), a server error while restoring your session no longer signs you out, and your reading position is restored even when the article text loads after the article opens.
+- The browser extension backs off while Pigeon is unreachable, no longer sends a save twice, keeps retrying after a failed attempt, and shows sign-out and settings errors instead of hiding them.
 - The web reader's page can be revalidated instead of downloaded in full on every load. Its ETag was a strong one, which Cloudflare removes from Worker responses, so the browser never had anything to revalidate with; it is now a weak ETag, and the service worker (offline saving, notifications) revalidates too instead of always fetching a fresh copy.
 - In the web reader, Today in the sidebar now shows how many unread articles arrived today (your local day), like All and Unread. It used to show no number.
 - Substack paid-only posts sent to a free subscriber with no preview at all (the email body is empty) now carry the Paywall label. Previously only teasers that stopped partway at Substack's paywall block were labeled.
