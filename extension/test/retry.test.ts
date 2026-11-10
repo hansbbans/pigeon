@@ -104,3 +104,17 @@ test('a flush that finds the user signed out does not start a retry loop of its 
 	assert.equal(result?.stoppedBy, 'signedOut');
 	assert.equal(alarms.alarms.has(RETRY_ALARM), false);
 });
+
+test('a single queued save that Pigeon answers with an error keeps the short retry', async () => {
+	const store = await signedInStore();
+	const failing = mockFetch(() => new Response('unavailable', { status: 503 }));
+	await saveLink('https://example.com/only', { fetch: failing.fetch, store });
+	const alarms = new FakeAlarms();
+	const deps = { store, alarms, flush: () => flushQueue({ fetch: failing.fetch, store }) };
+	const delays: Array<number | undefined> = [];
+	for (let i = 0; i < 3; i++) {
+		await runRetry(false, deps);
+		delays.push(alarms.alarms.get(RETRY_ALARM));
+	}
+	assert.deepEqual(delays, [1, 1, 1]);
+});

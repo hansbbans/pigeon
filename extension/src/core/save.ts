@@ -98,6 +98,11 @@ async function tryAttempts(attempts: SaveRequestBody[], origin: string, auth: st
 /** Queue entries being sent right now; a flush leaves them alone. */
 const inFlight = new Set<string>();
 /**
+ * Entries whose own send finished while a flush was running. The flush works from a snapshot of
+ * the queue, so without this it would send again a save that has just been saved and removed.
+ */
+const settledDuringFlush = new Set<string>();
+/**
  * Times a full save may time out or get a 5xx before it is cut to its bare
  * link (being offline does not count: that is not the request's fault).
  */
@@ -117,6 +122,7 @@ async function sendAttempts(attempts: SaveRequestBody[], deps: SaveDeps): Promis
 		result = await tryAttempts(queued.attempts, settings.origin, settings.auth, deps.fetch);
 	} finally {
 		inFlight.delete(queued.id);
+		if (flushing) settledDuringFlush.add(queued.id);
 	}
 	switch (result.status) {
 		case 'saved':
@@ -170,6 +176,7 @@ let flushing: Promise<FlushResult> | null = null;
 export function flushQueue(deps: SaveDeps): Promise<FlushResult> {
 	flushing ??= runFlush(deps).finally(() => {
 		flushing = null;
+		settledDuringFlush.clear();
 	});
 	return flushing;
 }
@@ -182,11 +189,9 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 	const settings = await loadSettings(deps.store);
 	if (!settings.auth) return { ...result, stoppedBy: 'signedOut' };
 	let streak = 0;
+	let onlyOffline = true;
 	for (const queued of queue) {
-		if (inFlight.has(queued.id)) continue;
-		// `queue` is a snapshot. A save that was in flight then may have finished and left the
-		// queue while an earlier entry was being sent; sending it again would save it twice.
-		if (!(await readQueue(deps.store)).some((current) => current.id === queued.id)) continue;
+		if (inFlight.has(queued.id) || settledDuringFlush.has(queued.id)) continue;
 		let entry = queued;
 		let attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
 		if (attempt.status === 'retry' && countsAgainstRequest(attempt.cause) && entry.attempts.length > 1) {
@@ -207,6 +212,7 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'noAccess' };
 			}
 			result.passedOver++;
+			if (attempt.cause !== 'offline') onlyOffline = false;
 			if (++streak >= UNREACHABLE_STREAK) {
 				return { ...result, remaining: (await readQueue(deps.store)).length, stoppedBy: 'unreachable' };
 			}
@@ -218,8 +224,9 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 		await removeFromQueue(deps.store, entry.id);
 	}
 	result.remaining = (await readQueue(deps.store)).length;
-	// Nothing got through and every attempt failed: Pigeon is unreachable even though the streak
-	// limit was not reached (a single queued save can never reach it), so the retry backs off.
-	if (result.sent === 0 && result.dropped === 0 && result.passedOver > 0) return { ...result, stoppedBy: 'unreachable' };
+	// Nothing got through and no request reached Pigeon at all: it is unreachable even though the
+	// streak limit was not reached (a single queued save can never reach it), so the retry backs
+	// off. A timeout or 5xx is about that request and keeps the short retry that cuts it down.
+	if (result.sent === 0 && result.dropped === 0 && result.passedOver > 0 && onlyOffline) return { ...result, stoppedBy: 'unreachable' };
 	return result;
 }
