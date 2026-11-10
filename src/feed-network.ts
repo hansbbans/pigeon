@@ -160,7 +160,26 @@ async function readResponseText(response: Response, maxBytes: number): Promise<{
 		combined.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return { text: new TextDecoder().decode(combined), byteLength };
+	return { text: decodeResponseBytes(combined, response.headers.get('Content-Type')), byteLength };
+}
+
+/**
+ * Decodes with the charset the response declares: the Content-Type parameter first, then the
+ * XML declaration. Anything undeclared, UTF-8, or unknown to this runtime decodes as UTF-8.
+ */
+function decodeResponseBytes(bytes: Uint8Array, contentTypeHeader: string | null): string {
+	const label =
+		contentTypeHeader?.match(/;\s*charset\s*=\s*"?([^";\s]+)/i)?.[1] ??
+		// The declaration is ASCII in every encoding handled here, so its bytes map straight to characters.
+		String.fromCharCode(...bytes.subarray(0, 200)).match(/^\s*<\?xml[^>]*\bencoding\s*=\s*["']([^"']+)["']/i)?.[1];
+	if (label && !/^utf-?8$/i.test(label)) {
+		try {
+			return new TextDecoder(label).decode(bytes);
+		} catch {
+			// Not a charset this runtime knows.
+		}
+	}
+	return new TextDecoder().decode(bytes);
 }
 
 function isObviouslyBinaryContentType(contentType: string): boolean {
