@@ -14,7 +14,7 @@ export interface BrowserAppShell {
 	etag: string;
 }
 
-// The shell is a static ~400 KB document per deployment; render it once per
+// The shell is a static ~580 KB document per deployment; render it once per
 // base URL for the life of the isolate instead of rebuilding it per request.
 const browserAppShellCache = new Map<string, BrowserAppShell>();
 
@@ -22,7 +22,9 @@ export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
 	let shell = browserAppShellCache.get(baseUrl);
 	if (!shell) {
 		const html = buildBrowserAppHtml(baseUrl);
-		shell = { html, etag: `"${hashBrowserAppHtml(html)}"` };
+		// Weak on purpose: Cloudflare removes a strong ETag from a Worker response, so the browser
+		// would never have one to send back and every load would download the whole shell.
+		shell = { html, etag: `W/"${hashBrowserAppHtml(html)}"` };
 		browserAppShellCache.set(baseUrl, shell);
 	}
 	return shell;
@@ -30,14 +32,6 @@ export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
 
 export function renderBrowserAppHtml(baseUrl: string): string {
 	return renderBrowserAppShell(baseUrl).html;
-}
-
-export function matchesBrowserAppEtag(ifNoneMatch: string | null, etag: string): boolean {
-	if (!ifNoneMatch) return false;
-	return ifNoneMatch.split(',').some((candidate) => {
-		const trimmed = candidate.trim();
-		return trimmed === '*' || trimmed === etag || trimmed === `W/${etag}`;
-	});
 }
 
 function hashBrowserAppHtml(html: string): string {
@@ -516,6 +510,14 @@ export function renderBrowserAppRuntimeScript(): string {
   const offlineEnableButton=document.getElementById('offline-enable-button'); const offlineSyncButton=document.getElementById('offline-sync-button');
   const readingTools = window.PigeonReading;
   let readingPreferences = readingTools ? readingTools.readPreferences(window.localStorage) : null;
+  // The header column follows the same width and margins as the article frame, so the
+  // title and the body text start on the same edge whatever the saved preference.
+  function applyReaderMeasure() {
+    if(!readingPreferences) return;
+    readerScroll.style.setProperty('--reader-measure', readingPreferences.width+'px');
+    readerScroll.style.setProperty('--reader-gutter', readingPreferences.margins+'px');
+  }
+  applyReaderMeasure();
   let readingRenderRequest = 0; let preparedReaderKey = ''; let readingAccountHash = ''; let readingData = {modes:{},positions:{}};
   let readingIdentityPromise = null; let positionSaveTimer = null; let consentItemId = null;
   const extractedArticles = new Map(); const previewImages = new Map(); const readingObjectURLs = new Set();
@@ -619,6 +621,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let contentRequestQueue = [];
   let activeContentRequestJobs = new Set();
   let renderedReaderItemId = null;
+  // The article whose saved reading position has been applied to the frame. Separate from
+  // renderedReaderItemId because the loading placeholder also renders under the article's id.
+  let readerPositionAppliedFor = null;
   let readerFrameScrollTop = 0;
   let pendingReaderFrameScrollTop = null;
 
@@ -2336,13 +2341,13 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReader();
   }
 
-  function setLoggedOut(message) {
+  function setLoggedOut(message, keepStoredToken) {
     activeLoginAttemptId += 1;
     setMobilePane('stream');
     setSearchOpen(false);
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
-    clearStoredToken();
+    if (!keepStoredToken) clearStoredToken();
     cancelPendingValidation();
     resetReaderState();
     detachFrameNavigationListener();
@@ -2380,7 +2385,11 @@ export function renderBrowserAppRuntimeScript(): string {
       },
     });
 
-    return response.status === 200;
+    if (response.status === 200) return true;
+    // A server error says nothing about the token: fail like an unreachable server and keep it.
+    // Any other answer (401, or a 403/404 from something in front of the Worker) rejects it.
+    if (response.status >= 500) throw new Error('Session check failed: ' + response.status);
+    return false;
   }
 
   function createViewButton(view, extraClassNames) {
@@ -3420,6 +3429,10 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
     if (!preparedReading) preparedReaderKey = '';
+    // Anything other than the article whose position was applied (another article, nothing, or the
+    // placeholder of one not yet restored) means the next prepared render restores again. The
+    // prepared path marks its article before calling this, so that render leaves the mark alone.
+    if (readerPositionAppliedFor !== itemId) readerPositionAppliedFor = null;
     const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
     if (!shouldReplace) {
       return;
@@ -3540,7 +3553,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if(!current()){for(const url of preparedObjectURLs){URL.revokeObjectURL(url);readingObjectURLs.delete(url);}return;}
       let documentHtml=client.createArticleFrameDocument(result.html,getReaderFrameTheme());
       documentHtml=documentHtml.replace('</style>','\\n'+readingTools.frameCSS(readingPreferences)+'body{background:transparent;color:inherit}body>article{max-width:100%}</style>');
-      if(renderedReaderItemId!==id) {
+      if(readerPositionAppliedFor!==id) {
+        readerPositionAppliedFor=id;
         const fraction=Number(readingData.positions[id]);
         if(Number.isFinite(fraction)&&fraction>0) pendingReaderPosition={id,fraction};
       }
@@ -3576,7 +3590,7 @@ export function renderBrowserAppRuntimeScript(): string {
     event.preventDefault();if(!readingTools)return;
     const next={shortcuts:{}};for(const key of readingFields)next[key]=document.getElementById('reading-'+key).value;
     for(const key of ['next','previous','read','star'])next.shortcuts[key]=document.getElementById('shortcut-'+key).value;
-    try {const previousPolicy=readingPreferences.imagePolicy;readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';
+    try {const previousPolicy=readingPreferences.imagePolicy;readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';applyReaderMeasure();
       if(previousPolicy!==readingPreferences.imagePolicy){for(const promise of previewImages.values())void promise.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});previewImages.clear();consentItemId=null;zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');renderReaderFrame(null,client.createArticleFrameDocument('<p>Preparing private reading view…</p>',theme));}
       renderArticles();renderReader();document.getElementById('reading-settings-status').textContent='Reading settings saved.';
       markUnreadButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.read);starArticleButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.star);
@@ -5640,7 +5654,7 @@ export function renderBrowserAppRuntimeScript(): string {
       try {const library=await openOfflineLibrary(true);if(!isActiveValidation(validationId))return;
         if(library){offlineSession=true;setLoggedIn();await restoreOrBootstrapReader();return;}
       }catch(_){}
-      if(isActiveValidation(validationId))setLoggedOut('Could not restore session.');
+      if(isActiveValidation(validationId))setLoggedOut('Could not restore session.', true);
     });
   } else {
     setLoggedOut('');

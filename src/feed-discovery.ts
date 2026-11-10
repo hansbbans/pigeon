@@ -91,11 +91,12 @@ export async function discoverFeeds(
 			page_url: parsed.link ?? null,
 			candidates: [
 				candidateFromParsedFeed(
-					initial.finalUrl,
+					// Subscribe to where the feed permanently lives, not to a temporary redirect target.
+					initial.permanentUrl,
 					parsed,
 					publishedYouTubeFeed ? 'alternate' : 'direct',
 					publishedYouTubeFeed ? 120 : 200,
-					redirectAliases(inputUrl, initial.redirects, initial.finalUrl),
+					redirectAliases(inputUrl, initial.permanentRedirects, initial.permanentUrl),
 					undefined,
 					options.includeItems === true,
 				),
@@ -131,13 +132,13 @@ export async function discoverFeeds(
 			});
 			candidates.push(
 				candidateFromParsedFeed(
-					resource.finalUrl,
+					resource.permanentUrl,
 					parsed,
 					candidateUrl.source,
 					candidateUrl.score,
 					[
 						...candidateUrl.aliases,
-						...redirectAliases(candidateUrl.url, resource.redirects, resource.finalUrl),
+						...redirectAliases(candidateUrl.url, resource.permanentRedirects, resource.permanentUrl),
 					],
 					candidateUrl.title,
 					options.includeItems === true,
@@ -309,7 +310,8 @@ function addCandidate(
 	metadata: Omit<CandidateUrl, 'url' | 'aliases'>,
 ): void {
 	try {
-		const safeUrl = assertSafeFeedUrl(new URL(decodeHtmlEntities(href), pageUrl));
+		// `href` is already entity-decoded by parseHtmlAttributes; decoding again would corrupt `&amp;amp;`.
+		const safeUrl = assertSafeFeedUrl(new URL(href, pageUrl));
 		const url = canonicalizeYouTubeFeedUrl(safeUrl) ?? safeUrl;
 		const alias = safeUrl.href === url.href ? [] : [safeUrl.href];
 		if (seen.has(url.href)) {
@@ -416,13 +418,15 @@ function feedAcceptHeader(): string {
 	return 'application/rss+xml, application/atom+xml, application/feed+json, application/rdf+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.1';
 }
 
+const NAMED_ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' };
+
+// Single pass, so `&amp;amp;` decodes to `&amp;` and is not decoded again.
 function decodeHtmlEntities(value: string): string {
-	return value
-		.replaceAll('&amp;', '&')
-		.replaceAll('&quot;', '"')
-		.replaceAll('&#39;', "'")
-		.replaceAll('&lt;', '<')
-		.replaceAll('&gt;', '>');
+	return value.replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|(amp|quot|apos|lt|gt));/gi, (entity, hex?: string, decimal?: string, name?: string) => {
+		if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? entity;
+		const codePoint = hex ? parseInt(hex, 16) : parseInt(decimal!, 10);
+		return codePoint > 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+	});
 }
 
 function redactedFailure(error: unknown): string {

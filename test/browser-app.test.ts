@@ -394,16 +394,18 @@ test('GET /app/ returns the same HTML shell as /app', async () => {
 	assert.match(html, /id="logout-button"/);
 });
 
-test('GET /app sends a strong ETag with private revalidation caching', async () => {
+// Cloudflare drops a strong ETag from a Worker response (seen on both production hostnames) and keeps
+// a weak one, so only a weak ETag ever reaches the browser to be sent back for a 304.
+test('GET /app sends a weak ETag with revalidation caching the service worker may store', async () => {
 	const response = await app.fetch(
 		new Request('https://pigeon.example/app'),
 		createEnv() as never,
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+	assert.equal(response.headers.get('Cache-Control'), 'no-cache');
 	const etag = response.headers.get('ETag');
-	assert.ok(etag && /^"[^"]+"$/.test(etag), `strong ETag expected, got ${etag}`);
+	assert.ok(etag && /^W\/"[^"]+"$/.test(etag), `weak ETag expected, got ${etag}`);
 	assert.equal(renderBrowserAppShell('https://pigeon.example').etag, etag);
 	assert.notEqual(renderBrowserAppShell('https://other.example').etag, etag);
 });
@@ -411,24 +413,28 @@ test('GET /app sends a strong ETag with private revalidation caching', async () 
 test('GET /app returns 304 for a matching If-None-Match and 200 otherwise', async () => {
 	const first = await app.fetch(new Request('https://pigeon.example/app'), createEnv() as never);
 	const etag = first.headers.get('ETag')!;
+	const strongForm = etag.replace(/^W\//, '');
+	assert.notEqual(strongForm, etag);
 
-	for (const header of [etag, `W/${etag}`, `"stale", ${etag}`, '*']) {
+	for (const header of [etag, strongForm, `"stale", ${etag}`, `W/"stale",${strongForm}`, '*']) {
 		const response = await app.fetch(
 			new Request('https://pigeon.example/app/', { headers: { 'If-None-Match': header } }),
 			createEnv() as never,
 		);
 		assert.equal(response.status, 304, header);
 		assert.equal(response.headers.get('ETag'), etag);
-		assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+		assert.equal(response.headers.get('Cache-Control'), 'no-cache');
 		assert.equal(await response.text(), '');
 	}
 
-	const miss = await app.fetch(
-		new Request('https://pigeon.example/app', { headers: { 'If-None-Match': '"stale"' } }),
-		createEnv() as never,
-	);
-	assert.equal(miss.status, 200);
-	assert.match(await miss.text(), /id="app"/);
+	for (const header of ['"stale"', 'W/"stale"', `W/W/${strongForm}`, strongForm.slice(1, -1)]) {
+		const miss = await app.fetch(
+			new Request('https://pigeon.example/app', { headers: { 'If-None-Match': header } }),
+			createEnv() as never,
+		);
+		assert.equal(miss.status, 200, header);
+		assert.match(await miss.text(), /id="app"/);
+	}
 });
 
 test('renderBrowserAppShell memoizes the rendered HTML per base URL', () => {

@@ -462,9 +462,10 @@ export function createReleaseReceipt(result, environment) {
 	};
 }
 
-function environmentInteger(environment, name, fallback) {
+/** Reads a duration configured in seconds and returns milliseconds, for the default as well. */
+export function environmentMilliseconds(environment, name, fallbackSeconds) {
 	const value = environment[name];
-	if (value === undefined || value === "") return fallback;
+	if (value === undefined || value === "") return fallbackSeconds * 1000;
 	const parsed = Number(value);
 	if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number.`);
 	return parsed * 1000;
@@ -483,8 +484,8 @@ export async function verifyFromEnvironment(environment = process.env, dependenc
 		marketingVersion: environment.MARKETING_VERSION,
 		buildNumber: environment.BUILD_NUMBER,
 		groupName: environment.BETA_GROUP_NAME || DEFAULT_GROUP_NAME,
-		timeoutMs: environmentInteger(environment, "ASC_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_MS / 1000),
-		pollIntervalMs: environmentInteger(environment, "ASC_POLL_INTERVAL_SECONDS", DEFAULT_POLL_INTERVAL_MS / 1000),
+		timeoutMs: environmentMilliseconds(environment, "ASC_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_MS / 1000),
+		pollIntervalMs: environmentMilliseconds(environment, "ASC_POLL_INTERVAL_SECONDS", DEFAULT_POLL_INTERVAL_MS / 1000),
 	});
 	return result;
 }

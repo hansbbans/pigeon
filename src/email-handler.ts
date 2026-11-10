@@ -77,8 +77,9 @@ function unwrapForward(
 
 	if (!originalAddress) return null;
 
-	// Strip "Fwd: " prefix from subject
-	const subject = (parsed.subject || '(no subject)').replace(/^Fwd:\s*/i, '');
+	// Strip "Fwd: " prefix from subject. The placeholder is applied afterwards, so a subject that is
+	// only "Fwd:" does not become an empty title (clients reject an article without one).
+	const subject = (parsed.subject ?? '').replace(/^Fwd:\s*/i, '').trim() || '(no subject)';
 
 	console.log(`Forward unwrapped | forwarder=${trustedForwarder} original_sender=${truncateUtf8(originalAddress, MAX_TEXT_METADATA_BYTES)}`);
 
@@ -204,7 +205,13 @@ export async function handleIncomingEmail(
 				     ELSE feeds.display_name
 				   END,
 				   icon_url = COALESCE(feeds.icon_url, excluded.icon_url),
-				   site_url = COALESCE(feeds.site_url, excluded.site_url)`,
+				   site_url = COALESCE(feeds.site_url, excluded.site_url)
+				 -- Only touch the row when something changes: the feed sync trigger fires on any
+				 -- UPDATE that names these columns, and feed events are never compacted.
+				 WHERE (excluded.display_name NOT LIKE '%@%' AND feeds.display_name LIKE '%@%')
+				    OR (feeds.display_name LIKE '"%"' AND excluded.display_name NOT LIKE '"%"')
+				    OR (feeds.icon_url IS NULL AND excluded.icon_url IS NOT NULL)
+				    OR (feeds.site_url IS NULL AND excluded.site_url IS NOT NULL)`,
 				).bind(feedKey, displayName, fromAddress, iconUrl, siteUrl, now, receivedAt),
 
 			env.DB.prepare(

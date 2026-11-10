@@ -41,7 +41,7 @@ test('SW caches only successful public app HTML, uses offline navigation fallbac
   self: { location: { origin: 'https://pigeon.example' }, addEventListener: (name: string, callback: Function) => { listeners[name] = callback; }, skipWaiting: async () => {}, clients: { claim: async () => {} } } });
  let waiting: Promise<any>;
  listeners.install({ waitUntil: (promise: Promise<any>) => { waiting = promise; } }); await waiting!;
- assert.equal(saved.size, 1); assert.equal(fetched[0].url, 'https://pigeon.example/app'); assert.equal(fetched[0].init.credentials, 'omit'); assert.equal(fetched[0].init.redirect, 'error');
+ assert.equal(saved.size, 1); assert.equal(fetched[0].url, 'https://pigeon.example/app'); assert.equal(fetched[0].init.credentials, 'omit'); assert.equal(fetched[0].init.redirect, 'error'); assert.equal(fetched[0].init.cache, 'no-cache');
  listeners.activate({ waitUntil: (promise: Promise<any>) => { waiting = promise; } }); await waiting!; assert.deepEqual(deleted, ['pigeon-public-shell-old']);
  function navigate(path: string, overrides: any = {}) {
   let response: Promise<Response> | undefined;
@@ -54,4 +54,34 @@ test('SW caches only successful public app HTML, uses offline navigation fallbac
  mode = 'offline'; const offline = await navigate('/app?article=12'); assert.equal(await offline!.text(), '<html>public app shell</html>');
  for (const value of ['private','json','error']) { mode = value; await navigate('/app'); assert.equal(await saved.get('https://pigeon.example/app')!.clone().text(), '<html>public app shell</html>'); }
  saved.clear(); mode = 'offline'; assert.equal((await navigate('/app/'))!.status, 503);
+});
+
+test('the service worker saves the shell the Worker actually serves at /app', async () => {
+	const listeners: Record<string, Function> = {};
+	const saved = new Map<string, Response>();
+	const env = { BASE_URL: 'https://pigeon.example' } as never;
+	runInNewContext(renderBrowserServiceWorker(), {
+		URL, Response,
+		caches: {
+			open: async () => ({
+				put: async (url: string, response: Response) => { saved.set(url, response); },
+				match: async (url: string) => saved.get(url)?.clone(),
+			}),
+			keys: async () => [],
+			delete: async () => {},
+		},
+		fetch: async (url: string) => worker.fetch(new Request(url), env),
+		self: {
+			location: { origin: 'https://pigeon.example' },
+			addEventListener: (name: string, callback: Function) => { listeners[name] = callback; },
+			skipWaiting: async () => {},
+			clients: { claim: async () => {} },
+		},
+	});
+	let installing: Promise<unknown> | undefined;
+	listeners.install({ waitUntil: (promise: Promise<unknown>) => { installing = promise; } });
+	await installing;
+	const shell = await worker.fetch(new Request('https://pigeon.example/app'), env);
+	assert.equal(saved.size, 1, `shell not saved; /app is served with Cache-Control: ${shell.headers.get('Cache-Control')}`);
+	assert.match(await saved.get('https://pigeon.example/app')!.clone().text(), /<!doctype html>/i);
 });
