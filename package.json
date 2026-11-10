@@ -17,13 +17,15 @@
     "typecheck": "tsc --noEmit",
     "audit": "npm audit --audit-level=high",
     "check": "npm test && npm run typecheck && npm run audit",
-    "vendor:defuddle": "node scripts/vendor-defuddle.mjs"
+    "vendor:defuddle": "node scripts/vendor-defuddle.mjs",
+    "visual:check": "node scripts/visual-check.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",
     "@types/jsdom": "30.0.0",
     "defuddle": "0.19.6",
     "jsdom": "29.1.1",
+    "playwright": "1.64.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.115.0"
