@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { parseFeed, type FeedFormat } from '../src/rss-parser';
+import { parseFeed, rssItemIdentitySource, type FeedFormat } from '../src/rss-parser';
 
 interface CorpusCase {
 	name: string;
@@ -316,4 +316,29 @@ test('a repeated RSS element uses its first value instead of dropping the field'
 	</channel></rss>`);
 	assert.equal(feed.items[0].author, 'Jane');
 	assert.equal(feed.items[0].content, 'First');
+});
+
+test('cleaning up display text never changes what an item identity is hashed from', () => {
+	const feed = parseFeed(`<?xml version="1.0"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>T</title>
+		<item><guid>https://shop.example/?post_type=product&#038;p=123</guid><title>Don&#8217;t</title><link>https://shop.example/?a=1&#038;b=2</link></item>
+		<item><title>It&#8217;s guid-less</title><pubDate>Sun, 01 Nov 2026 00:00:00 GMT</pubDate><dc:creator>Zo&#235;</dc:creator><description>Body</description></item>
+		<item><title>Two bylines</title><dc:creator>Jane</dc:creator><dc:creator>Bob</dc:creator><description>Body</description></item>
+		<item><title>Plain</title><description>Body</description></item>
+	</channel></rss>`);
+	const [withGuid, guidless, repeated, plain] = feed.items;
+
+	// Guids and links are identity: they stay exactly as they were parsed before titles were decoded.
+	assert.equal(withGuid.guid, 'https://shop.example/?post_type=product&#038;p=123');
+	assert.equal(withGuid.title, 'Don\u2019t');
+	assert.equal(rssItemIdentitySource(withGuid), withGuid.guid);
+
+	// Without guid or link the identity is the text the item had before the cleanup.
+	assert.equal(guidless.title, 'It\u2019s guid-less');
+	assert.equal(guidless.author, 'Zo\u00eb');
+	assert.equal(rssItemIdentitySource(guidless), ['It&#8217;s guid-less', guidless.pubDate, 'Zo&#235;', 'Body'].join('\n'));
+	assert.equal(repeated.author, 'Jane');
+	assert.equal(rssItemIdentitySource(repeated), ['Two bylines', '', '', 'Body'].join('\n'));
+
+	assert.equal(plain.legacyIdentityFallback, undefined);
+	assert.equal(rssItemIdentitySource(plain), ['Plain', '', '', 'Body'].join('\n'));
 });
