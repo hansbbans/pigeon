@@ -516,6 +516,14 @@ export function renderBrowserAppRuntimeScript(): string {
   const offlineEnableButton=document.getElementById('offline-enable-button'); const offlineSyncButton=document.getElementById('offline-sync-button');
   const readingTools = window.PigeonReading;
   let readingPreferences = readingTools ? readingTools.readPreferences(window.localStorage) : null;
+  // The header column follows the same width and margins as the article frame, so the
+  // title and the body text start on the same edge whatever the saved preference.
+  function applyReaderMeasure() {
+    if(!readingPreferences) return;
+    readerScroll.style.setProperty('--reader-measure', readingPreferences.width+'px');
+    readerScroll.style.setProperty('--reader-gutter', readingPreferences.margins+'px');
+  }
+  applyReaderMeasure();
   let readingRenderRequest = 0; let preparedReaderKey = ''; let readingAccountHash = ''; let readingData = {modes:{},positions:{}};
   let readingIdentityPromise = null; let positionSaveTimer = null; let consentItemId = null;
   const extractedArticles = new Map(); const previewImages = new Map(); const readingObjectURLs = new Set();
@@ -3576,7 +3584,7 @@ export function renderBrowserAppRuntimeScript(): string {
     event.preventDefault();if(!readingTools)return;
     const next={shortcuts:{}};for(const key of readingFields)next[key]=document.getElementById('reading-'+key).value;
     for(const key of ['next','previous','read','star'])next.shortcuts[key]=document.getElementById('shortcut-'+key).value;
-    try {const previousPolicy=readingPreferences.imagePolicy;readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';
+    try {const previousPolicy=readingPreferences.imagePolicy;readingPreferences=readingTools.savePreferences(next,window.localStorage);preparedReaderKey='';applyReaderMeasure();
       if(previousPolicy!==readingPreferences.imagePolicy){for(const promise of previewImages.values())void promise.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});previewImages.clear();consentItemId=null;zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');renderReaderFrame(null,client.createArticleFrameDocument('<p>Preparing private reading view…</p>',theme));}
       renderArticles();renderReader();document.getElementById('reading-settings-status').textContent='Reading settings saved.';
       markUnreadButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.read);starArticleButton.setAttribute('aria-keyshortcuts',readingPreferences.shortcuts.star);

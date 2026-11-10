@@ -535,7 +535,7 @@ test('createArticleFrameDocument wraps article HTML in a complete readable docum
 	assert.match(darkDocumentHtml, /<html lang="en" data-theme="dark">/);
 	assert.match(darkDocumentHtml, /html\[data-theme="dark"\]/);
 	assert.match(darkDocumentHtml, /--frame-page:\s*#1f1f21/);
-	assert.match(darkDocumentHtml, /--frame-link:\s*#8fb3e8/);
+	assert.match(darkDocumentHtml, /--frame-link:\s*#409cff/);
 });
 
 test('selectArticleHeroImageUrl returns the first usable absolute image URL from loaded article HTML', () => {

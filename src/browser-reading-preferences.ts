@@ -9,7 +9,7 @@ export function renderBrowserReadingScript(): string {
  return String.raw`(function () {
  'use strict';
  var STORAGE_KEY = 'pigeon.browser.reading.v1';
- var DEFAULTS = {theme:'app',font:'system',fontSize:18,lineHeight:1.65,width:720,margins:24,density:'comfortable',imagePolicy:'load',shortcuts:{next:'j',previous:'k',read:'m',star:'s'}};
+ var DEFAULTS = {theme:'app',font:'system',fontSize:18,lineHeight:1.65,width:640,margins:24,density:'comfortable',imagePolicy:'load',shortcuts:{next:'j',previous:'k',read:'m',star:'s'}};
  var IMAGE_TYPES = ['image/avif','image/gif','image/heic','image/heif','image/jpeg','image/png','image/webp'];
  function choice(value, values, fallback) { return values.includes(value) ? value : fallback; }
  function bounded(value, minimum, maximum, fallback) { var number=typeof value==='number' || typeof value==='string' && value.trim() ? Number(value) : NaN; return Number.isFinite(number) ? Math.round(Math.min(maximum,Math.max(minimum,number))*100)/100 : fallback; }
@@ -37,7 +37,7 @@ export function renderBrowserReadingScript(): string {
  }
  function frameCSS(input) {
   var p=normalizePreferences(input); var font=p.font==='serif' ? 'Georgia, Charter, serif' : p.font==='sans' ? 'Arial, Helvetica, sans-serif' : '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  var colors=p.theme==='sepia' ? ':root{color-scheme:light;color:#40362c;background:#f4ecd8}a{color:#765b2d}' : '';
+  var colors=p.theme==='sepia' ? ':root{color-scheme:light;color:#433a2c;background:#f6ecd1}a{color:#735c17}' : '';
   return colors+'*{box-sizing:border-box}html{overflow-wrap:anywhere}body{font-family:'+font+';font-size:'+p.fontSize+'px;line-height:'+p.lineHeight+';max-width:'+p.width+'px;margin:0 auto;padding:'+p.margins+'px}p,figure,ul,ol{margin:0 0 '+(p.density==='compact'?'0.65':'1')+'em}h1,h2,h3,h4,h5,h6{line-height:1.25}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.75em}blockquote{margin:1em 0;padding-left:1em;border-left:3px solid #b6bbc1}.pigeon-image-hidden{display:block;padding:.75em;border:1px dashed #a5a9af;color:inherit}';
  }
  function safeURL(raw,base,links) {
