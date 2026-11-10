@@ -6,7 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
-- The web reader's page is no longer downloaded in full on every load. Its ETag was a strong one, which Cloudflare removes from Worker responses, so the browser could never revalidate; it is now a weak ETag and an unchanged page answers with 304.
+- The web reader's page can be revalidated instead of downloaded in full on every load. Its ETag was a strong one, which Cloudflare removes from Worker responses, so the browser never had anything to revalidate with; it is now a weak ETag, and the service worker (offline saving, notifications) revalidates too instead of always fetching a fresh copy.
 - In the web reader, Today in the sidebar now shows how many unread articles arrived today (your local day), like All and Unread. It used to show no number.
 - Substack paid-only posts sent to a free subscriber with no preview at all (the email body is empty) now carry the Paywall label. Previously only teasers that stopped partway at Substack's paywall block were labeled.
 

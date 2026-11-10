@@ -14,7 +14,7 @@ export interface BrowserAppShell {
 	etag: string;
 }
 
-// The shell is a static ~400 KB document per deployment; render it once per
+// The shell is a static ~580 KB document per deployment; render it once per
 // base URL for the life of the isolate instead of rebuilding it per request.
 const browserAppShellCache = new Map<string, BrowserAppShell>();
 
@@ -32,16 +32,6 @@ export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
 
 export function renderBrowserAppHtml(baseUrl: string): string {
 	return renderBrowserAppShell(baseUrl).html;
-}
-
-export function matchesBrowserAppEtag(ifNoneMatch: string | null, etag: string): boolean {
-	if (!ifNoneMatch) return false;
-	// If-None-Match uses weak comparison: the W/ prefix is ignored on both sides.
-	const opaqueTag = etag.replace(/^W\//, '');
-	return ifNoneMatch.split(',').some((candidate) => {
-		const trimmed = candidate.trim();
-		return trimmed === '*' || trimmed.replace(/^W\//, '') === opaqueTag;
-	});
 }
 
 function hashBrowserAppHtml(html: string): string {
