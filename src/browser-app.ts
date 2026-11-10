@@ -3435,10 +3435,10 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
     if (!preparedReading) preparedReaderKey = '';
-    // A different article (or none) in the frame: the next time this one is shown, restore it again.
-    // The loading placeholder of the same article must not reset this, or a re-render mid-read
-    // would jump back to the last saved position.
-    if (renderedReaderItemId !== itemId) readerPositionAppliedFor = null;
+    // Anything other than the article whose position was applied (another article, nothing, or the
+    // placeholder of one not yet restored) means the next prepared render restores again. The
+    // prepared path marks its article before calling this, so that render leaves the mark alone.
+    if (readerPositionAppliedFor !== itemId) readerPositionAppliedFor = null;
     const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
     if (!shouldReplace) {
       return;

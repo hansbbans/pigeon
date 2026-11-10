@@ -1410,12 +1410,14 @@ test('logout keeps old body requests counted until their network work settles', 
 
 test('a saved reading position is restored whether or not the body was cached when the article was opened', async (t) => {
 	const preferences = { theme: 'app', font: 'system', fontSize: 18, lineHeight: 1.6, width: 720, margins: 24, density: 'comfortable', imagePolicy: 'load', shortcuts: { next: 'j', previous: 'k', read: 'm', star: 's' } };
+	let prepared = 0;
 	const readingTools = {
 		readPreferences: () => preferences,
 		savePreferences: (next: unknown) => next,
 		frameCSS: () => '',
 		frameTheme: () => 'light',
-		async applyImagePolicy(html: string) { return { html, images: [], blockedCount: 0 }; },
+		// Each preparation yields a different document, as a changed setting or image consent would.
+		async applyImagePolicy(html: string) { prepared += 1; return { html: `${html}<!-- prepared ${prepared} -->`, images: [], blockedCount: 0 }; },
 	};
 	const token = await generateApiToken('today-test-password');
 	const accountHash = createHash('sha256').update(token).digest('hex');
@@ -1435,6 +1437,15 @@ test('a saved reading position is restored whether or not the body was cached wh
 	await waitForBrowserCondition(() => frame.srcdoc.includes('Body 80</p>'), 100);
 	await flushBrowserTasks();
 	assert.equal(harness.getReaderFrameScrollTop(), 400, 'cached body: position restored');
+
+	// Re-rendering the article being read keeps the live scroll; it must not jump back to the saved position.
+	harness.dispatchReaderFrameScroll(700);
+	const documentBefore = frame.srcdoc;
+	harness.elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => frame.srcdoc !== documentBefore && frame.srcdoc.includes('Body 80</p>'), 200);
+	await flushBrowserTasks();
+	await waitForBrowserCondition(() => harness.getCacheSizes().pending === 0 && harness.getCacheSizes().membership === 0, 500);
+	assert.equal(harness.getReaderFrameScrollTop(), 700, 're-render of the open article kept the live scroll');
 
 	// Story 5 arrives with a later page; opening it shows the loading placeholder first.
 	harness.elements.get('load-more-button')!.dispatch('click');
