@@ -901,7 +901,7 @@ ${iconVariables()}
       .reader-copy.is-empty #reader-meta { display: none; }
       .reader-scroll.is-empty .reader-frame-shell { display: none; }
 
-      .reader-player-shell { width: 100%; max-width: 720px; margin: 1.25rem auto 0; padding: 0 24px; }
+      .reader-player-shell { width: 100%; max-width: var(--reader-measure, 640px); margin: 1.25rem auto 0; padding: 0 var(--reader-gutter, 24px); }
       .reader-player-label { display: none; }
       .reader-player-container { width: 100%; aspect-ratio: 16 / 9; min-height: 200px; overflow: hidden; border-radius: 10px; background: #000; }
       .reader-player-frame { display: block; width: 100%; height: 100%; min-height: 200px; border: 0; }
