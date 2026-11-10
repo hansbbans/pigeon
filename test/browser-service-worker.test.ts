@@ -41,7 +41,7 @@ test('SW caches only successful public app HTML, uses offline navigation fallbac
   self: { location: { origin: 'https://pigeon.example' }, addEventListener: (name: string, callback: Function) => { listeners[name] = callback; }, skipWaiting: async () => {}, clients: { claim: async () => {} } } });
  let waiting: Promise<any>;
  listeners.install({ waitUntil: (promise: Promise<any>) => { waiting = promise; } }); await waiting!;
- assert.equal(saved.size, 1); assert.equal(fetched[0].url, 'https://pigeon.example/app'); assert.equal(fetched[0].init.credentials, 'omit'); assert.equal(fetched[0].init.redirect, 'error');
+ assert.equal(saved.size, 1); assert.equal(fetched[0].url, 'https://pigeon.example/app'); assert.equal(fetched[0].init.credentials, 'omit'); assert.equal(fetched[0].init.redirect, 'error'); assert.equal(fetched[0].init.cache, 'no-cache');
  listeners.activate({ waitUntil: (promise: Promise<any>) => { waiting = promise; } }); await waiting!; assert.deepEqual(deleted, ['pigeon-public-shell-old']);
  function navigate(path: string, overrides: any = {}) {
   let response: Promise<Response> | undefined;

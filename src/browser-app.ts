@@ -14,7 +14,7 @@ export interface BrowserAppShell {
 	etag: string;
 }
 
-// The shell is a static ~400 KB document per deployment; render it once per
+// The shell is a static ~580 KB document per deployment; render it once per
 // base URL for the life of the isolate instead of rebuilding it per request.
 const browserAppShellCache = new Map<string, BrowserAppShell>();
 
@@ -22,7 +22,9 @@ export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
 	let shell = browserAppShellCache.get(baseUrl);
 	if (!shell) {
 		const html = buildBrowserAppHtml(baseUrl);
-		shell = { html, etag: `"${hashBrowserAppHtml(html)}"` };
+		// Weak on purpose: Cloudflare removes a strong ETag from a Worker response, so the browser
+		// would never have one to send back and every load would download the whole shell.
+		shell = { html, etag: `W/"${hashBrowserAppHtml(html)}"` };
 		browserAppShellCache.set(baseUrl, shell);
 	}
 	return shell;
@@ -30,14 +32,6 @@ export function renderBrowserAppShell(baseUrl: string): BrowserAppShell {
 
 export function renderBrowserAppHtml(baseUrl: string): string {
 	return renderBrowserAppShell(baseUrl).html;
-}
-
-export function matchesBrowserAppEtag(ifNoneMatch: string | null, etag: string): boolean {
-	if (!ifNoneMatch) return false;
-	return ifNoneMatch.split(',').some((candidate) => {
-		const trimmed = candidate.trim();
-		return trimmed === '*' || trimmed === etag || trimmed === `W/${etag}`;
-	});
 }
 
 function hashBrowserAppHtml(html: string): string {
