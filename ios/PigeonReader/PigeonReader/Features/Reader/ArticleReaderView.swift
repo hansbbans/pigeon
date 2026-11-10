@@ -219,6 +219,14 @@ struct ArticleReaderView: View {
 				},
 			)
 				.id(current.id)
+				// The inset sits outside the reader's environment-only override on
+				// iPad, so the bar takes the theme's scheme itself (Sepia stays light).
+				.readerThemeColorScheme(
+					ReaderThemeColorSchemePlacement.resolve(
+						theme: model.readerTypography.theme,
+						isCompactReader: isCompactReader,
+					)
+				)
 		}
 		.toolbar {
 			ToolbarItem(placement: .topBarTrailing) {
