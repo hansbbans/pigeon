@@ -13,4 +13,4 @@ export const hostPermission = {
 	/** Must be the first call in a click handler: it needs the user gesture. */
 	request: (pattern: string): Promise<boolean> => browser.permissions.request({ origins: [pattern] }),
 };
-export type { Tabs, ContextMenus } from 'webextension-polyfill';
+export type { Tabs } from 'webextension-polyfill';

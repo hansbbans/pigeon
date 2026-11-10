@@ -394,14 +394,14 @@ test('GET /app/ returns the same HTML shell as /app', async () => {
 	assert.match(html, /id="logout-button"/);
 });
 
-test('GET /app sends a strong ETag with private revalidation caching', async () => {
+test('GET /app sends a strong ETag with revalidation caching the service worker may store', async () => {
 	const response = await app.fetch(
 		new Request('https://pigeon.example/app'),
 		createEnv() as never,
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+	assert.equal(response.headers.get('Cache-Control'), 'no-cache');
 	const etag = response.headers.get('ETag');
 	assert.ok(etag && /^"[^"]+"$/.test(etag), `strong ETag expected, got ${etag}`);
 	assert.equal(renderBrowserAppShell('https://pigeon.example').etag, etag);
@@ -419,7 +419,7 @@ test('GET /app returns 304 for a matching If-None-Match and 200 otherwise', asyn
 		);
 		assert.equal(response.status, 304, header);
 		assert.equal(response.headers.get('ETag'), etag);
-		assert.equal(response.headers.get('Cache-Control'), 'private, max-age=0, must-revalidate');
+		assert.equal(response.headers.get('Cache-Control'), 'no-cache');
 		assert.equal(await response.text(), '');
 	}
 

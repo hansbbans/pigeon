@@ -6,3 +6,5 @@ dist/
 .playwright-cli/
 .superpowers/
 output/
+__pycache__/
+HANDOFF.md

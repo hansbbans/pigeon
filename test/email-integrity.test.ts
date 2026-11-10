@@ -36,13 +36,14 @@ class EmailDatabase {
 	}
 }
 
-async function deliver(db: EmailDatabase, id: string, date: string, content = 'Newsletter body', contentType = 'text/plain; charset=UTF-8', subject = 'Newsletter') {
+async function deliver(db: EmailDatabase, id: string, date: string, content = 'Newsletter body', contentType = 'text/plain; charset=UTF-8', subject = 'Newsletter', extraHeaders: string[] = [], trustedForwarder?: string) {
 	const raw = [
 		'From: Newsletter <news@example.com>',
 		'To: pigeon@example.com',
 		`Subject: ${subject}`,
 		`Date: ${date}`,
 		`Message-ID: <${id}@example.com>`,
+		...extraHeaders,
 		'MIME-Version: 1.0',
 		`Content-Type: ${contentType}`,
 		'',
@@ -51,7 +52,7 @@ async function deliver(db: EmailDatabase, id: string, date: string, content = 'N
 	await handleIncomingEmail({
 		from: 'news@example.com', to: 'pigeon@example.com', raw: new Blob([raw]).stream(),
 	} as unknown as ForwardableEmailMessage, {
-		DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '50', API_PASSWORD: 'password',
+		DB: db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '50', API_PASSWORD: 'password', TRUSTED_FORWARDER: trustedForwarder,
 	} as never);
 }
 
@@ -223,5 +224,62 @@ test('a redelivery that fills in the original URL bumps the content version once
 		await deliver(db, 'versioned-message', 'Fri, 02 Oct 2026 12:00:00 +0000', html, 'text/html; charset=UTF-8');
 		row = db.database.prepare('SELECT content_version FROM items').get() as { content_version: number };
 		assert.equal(row.content_version, 1, 'a second redelivery with the same URL is a no-op');
+	} finally { db.database.close(); }
+});
+
+const DATE = 'Fri, 02 Oct 2026 12:00:00 +0000';
+
+test('a second email from a known sender does not write a feed sync change', async () => {
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'first', DATE);
+		const feedChanges = () => Number(db.database.prepare("SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'feed'").get()?.n);
+		const before = feedChanges();
+		await deliver(db, 'second', DATE);
+		await deliver(db, 'third', DATE);
+		assert.equal(feedChanges() - before, 0);
+		assert.equal(db.database.prepare('SELECT item_count FROM feeds').get()?.item_count, 3);
+	} finally { db.database.close(); }
+});
+
+test('a later email still fills in a missing icon and heals an address-like display name', async () => {
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'first', DATE);
+		db.database.exec("UPDATE feeds SET icon_url = NULL, display_name = 'news@example.com'");
+		const feedChanges = () => Number(db.database.prepare("SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'feed'").get()?.n);
+		const before = feedChanges();
+		await deliver(db, 'second', DATE);
+		const feed = db.database.prepare('SELECT display_name, icon_url FROM feeds').get();
+		assert.equal(feed?.display_name, 'Newsletter');
+		assert.ok(feed?.icon_url);
+		assert.equal(feedChanges() - before, 1);
+	} finally { db.database.close(); }
+});
+
+test('a List-Id with no ASCII letters or digits falls back to the sender for the feed key', async () => {
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'list', DATE, 'Newsletter body', 'text/plain; charset=UTF-8', 'Newsletter', ['List-Id: News <\u30cb\u30e5\u30fc\u30b9>']);
+		assert.deepEqual(db.database.prepare('SELECT feed_key FROM feeds').all().map((row) => row.feed_key), ['news-at-example.com']);
+	} finally { db.database.close(); }
+});
+
+test('an encoded List-Id phrase is decoded for the feed display name', async () => {
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'encoded', DATE, 'Newsletter body', 'text/plain; charset=UTF-8', 'Newsletter', ['List-Id: =?utf-8?Q?Caf=C3=A9_Weekly?= <cafe.example.com>']);
+		assert.equal(db.database.prepare('SELECT display_name FROM feeds').get()?.display_name, 'Caf\u00e9 Weekly');
+	} finally { db.database.close(); }
+});
+
+test('a forwarded email whose subject is only "Fwd:" is stored with the no-subject placeholder', async (context) => {
+	context.mock.method(console, 'log', () => undefined);
+	const db = new EmailDatabase();
+	try {
+		await deliver(db, 'forwarded', DATE, 'Newsletter body', 'text/plain; charset=UTF-8', 'Fwd:', ['X-Google-Original-From: Original <original@example.org>'], 'news@example.com');
+		const item = db.database.prepare('SELECT subject, from_email FROM items').get();
+		assert.equal(item?.from_email, 'original@example.org');
+		assert.equal(item?.subject, '(no subject)');
 	} finally { db.database.close(); }
 });

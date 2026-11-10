@@ -1,14 +1,18 @@
 import * as assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
+import { generateApiToken } from '../src/api-auth';
 import { AUTH_STORAGE_KEY, createArticleFrameDocument, getLocalDayBounds } from '../src/browser-app-client';
 import {
 	collectBrowserWindowIds,
 	createBrowserHarness,
 	createDeferred,
 	createElement,
+	createStatefulArticleBrowser,
 	findListButtonByItemId,
 	findListButtonByViewId,
 	flushBrowserTasks,
+	renderedArticleIds,
 	waitForBrowserCondition,
 	waitForTodayWindow,
 } from './helpers/browser-app-client-harness';
@@ -1402,4 +1406,54 @@ test('logout keeps old body requests counted until their network work settles', 
 
 	assert.equal(maximumNetworkRequests, 2);
 	assert.equal(elements.get('reader-title')?.textContent, 'Article 1');
+});
+
+test('a saved reading position is restored whether or not the body was cached when the article was opened', async (t) => {
+	const preferences = { theme: 'app', font: 'system', fontSize: 18, lineHeight: 1.6, width: 720, margins: 24, density: 'comfortable', imagePolicy: 'load', shortcuts: { next: 'j', previous: 'k', read: 'm', star: 's' } };
+	let prepared = 0;
+	const readingTools = {
+		readPreferences: () => preferences,
+		savePreferences: (next: unknown) => next,
+		frameCSS: () => '',
+		frameTheme: () => 'light',
+		// Each preparation yields a different document, as a changed setting or image consent would.
+		async applyImagePolicy(html: string) { prepared += 1; return { html: `${html}<!-- prepared ${prepared} -->`, images: [], blockedCount: 0 }; },
+	};
+	const token = await generateApiToken('today-test-password');
+	const accountHash = createHash('sha256').update(token).digest('hex');
+	const { database, harness } = await createStatefulArticleBrowser({
+		count: 85,
+		readingTools,
+		frameHeight: 1000,
+		viewportHeight: 200,
+		storedEntries: { ['pigeon.browser.reading-account.' + accountHash]: JSON.stringify({ modes: {}, positions: { '80': 0.5, '5': 0.5 } }) },
+	});
+	t.after(() => database.close());
+	const list = harness.elements.get('articles-list')!;
+	const frame = harness.elements.get('reader-frame')!;
+
+	// Story 80 is on the first page, so its body is already cached when it is opened.
+	findListButtonByItemId(list, '80')!.dispatch('click');
+	await waitForBrowserCondition(() => frame.srcdoc.includes('Body 80</p>'), 100);
+	await flushBrowserTasks();
+	assert.equal(harness.getReaderFrameScrollTop(), 400, 'cached body: position restored');
+
+	// Re-rendering the article being read keeps the live scroll; it must not jump back to the saved position.
+	harness.dispatchReaderFrameScroll(700);
+	const documentBefore = frame.srcdoc;
+	harness.elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => frame.srcdoc !== documentBefore && frame.srcdoc.includes('Body 80</p>'), 200);
+	await flushBrowserTasks();
+	await waitForBrowserCondition(() => harness.getCacheSizes().pending === 0 && harness.getCacheSizes().membership === 0, 500);
+	assert.equal(harness.getReaderFrameScrollTop(), 700, 're-render of the open article kept the live scroll');
+
+	// Story 5 arrives with a later page; opening it shows the loading placeholder first.
+	harness.elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).includes('5') && harness.getCacheSizes().pending === 0, 200);
+	const bodiesBefore = harness.getCacheSizes().bodies;
+	findListButtonByItemId(list, '5')!.dispatch('click');
+	await waitForBrowserCondition(() => frame.srcdoc.includes('Body 5</p>'), 200);
+	await flushBrowserTasks();
+	assert.ok(harness.getCacheSizes().bodies > bodiesBefore, 'story 5 was opened before its body was cached');
+	assert.equal(harness.getReaderFrameScrollTop(), 400, 'body loaded after opening: position restored');
 });

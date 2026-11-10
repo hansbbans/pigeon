@@ -14,7 +14,7 @@ import {
 	serializeInitialImportBaseline,
 	type InitialImportBaseline,
 } from './rss-fetcher';
-import type { ParsedItem } from './rss-parser';
+import { rssItemIdentitySource, type ParsedItem } from './rss-parser';
 import { assertBoundedIdentifier, boundedStoredUrl, MAX_TEXT_METADATA_BYTES, truncateUtf8 } from './content-size';
 
 interface SubscribeResponse {
@@ -254,7 +254,7 @@ function selectInitialItems(items: ParsedItem[]): ParsedItem[] {
 	const seen = new Set<string>();
 	return sortedItems
 		.filter(({ item }) => {
-			const identity = item.guid || item.link || [item.title, item.pubDate || '', item.author || '', item.content].join('\n');
+			const identity = rssItemIdentitySource(item);
 			if (seen.has(identity)) return false;
 			seen.add(identity);
 			return true;

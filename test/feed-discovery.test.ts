@@ -190,3 +190,40 @@ test('merges aliases from lower-scoring duplicates regardless of completion orde
 		'https://example.com/feed/',
 	]);
 });
+
+test('feed links with numeric character references in the href resolve to the real URL', () => {
+	const candidates = collectCandidateUrls(
+		'<link rel="alternate" type="application/rss+xml" href="/?feed=rss2&#038;cat=3"><link rel="alternate" type="application/atom+xml" href="/atom?a=1&amp;amp;b=2">',
+		new URL('https://example.com/'),
+	);
+	assert.deepEqual(candidates.slice(0, 2).map((candidate) => candidate.url.href), [
+		'https://example.com/?feed=rss2&cat=3',
+		// Decoded once: `&amp;amp;` is a literal `&amp;` in the URL, not a second separator.
+		'https://example.com/atom?a=1&amp;b=2',
+	]);
+});
+
+test('a feed behind a temporary redirect is discovered at the URL that was asked for', async () => {
+	globalThis.fetch = (async (input: string | URL) => {
+		const url = String(input);
+		if (url === 'https://example.com/feed') {
+			return new Response(null, { status: 302, headers: { Location: 'https://cdn.example.net/feed.xml?sig=expires-tomorrow' } });
+		}
+		if (url === 'https://moved.example.com/feed') {
+			return new Response(null, { status: 301, headers: { Location: 'https://example.com/feed' } });
+		}
+		if (url.startsWith('https://cdn.example.net/feed.xml')) {
+			return new Response(rss('Signed Feed'), { status: 200, headers: { 'Content-Type': 'application/rss+xml' } });
+		}
+		return new Response('missing', { status: 404 });
+	}) as typeof fetch;
+
+	const temporary = await discoverFeeds('https://example.com/feed');
+	assert.equal(temporary.candidates[0].url, 'https://example.com/feed');
+	assert.deepEqual(temporary.candidates[0].aliases, []);
+
+	// A permanent hop is followed and recorded; the temporary hop after it is not.
+	const mixed = await discoverFeeds('https://moved.example.com/feed');
+	assert.equal(mixed.candidates[0].url, 'https://example.com/feed');
+	assert.deepEqual(mixed.candidates[0].aliases, ['https://moved.example.com/feed']);
+});

@@ -776,7 +776,7 @@ function createMarkAllAsReadEnv(
 
 			if (
 				this.sql ===
-					'UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)'
+					'UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND is_read = 0'
 			) {
 				const feedKey = String(this.values[0]);
 				const activeFeedKeys = new Set(
@@ -794,7 +794,7 @@ function createMarkAllAsReadEnv(
 
 			if (
 				this.sql ===
-					"UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')"
+					"UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch') AND is_read = 0"
 			) {
 				const feedKey = String(this.values[0]);
 				const cutoffMs = cutoffMillis(this.values[1]);
@@ -813,9 +813,9 @@ function createMarkAllAsReadEnv(
 
 			if (
 				this.sql ===
-					'UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)' ||
+					'UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND is_read = 0' ||
 				this.sql ===
-					"UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')"
+					"UPDATE items SET is_read = 1 WHERE feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch') AND is_read = 0"
 			) {
 				const cutoffMs = this.values.length > 0 ? cutoffMillis(this.values[0]) : null;
 				const activeFeedKeys = new Set(
