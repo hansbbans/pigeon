@@ -220,7 +220,7 @@ test('runtime script re-renders the active article frame with dark styles when e
 
 	assert.equal(elements.get('reader-frame')?.srcdoc, createArticleFrameDocument(articleBody, 'dark'));
 	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /<html lang="en" data-theme="dark">/);
-	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /--frame-link:\s*#8fb3e8/);
+	assert.match(elements.get('reader-frame')?.srcdoc ?? '', /--frame-link:\s*#409cff/);
 });
 
 test('runtime script uses j and k to move between articles while keeping the active reader state in sync', async () => {
