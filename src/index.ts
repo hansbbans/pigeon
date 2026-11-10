@@ -74,7 +74,9 @@ export default {
 			const shell = renderBrowserAppShell(env.BASE_URL);
 			const headers = {
 				'Content-Type': 'text/html; charset=utf-8',
-				'Cache-Control': 'private, max-age=0, must-revalidate',
+				// The shell holds no account data. `no-cache` still revalidates on every load, and unlike
+				// `private` it lets the service worker (which refuses private responses) save it for offline use.
+				'Cache-Control': 'no-cache',
 				ETag: shell.etag,
 			};
 			if (matchesBrowserAppEtag(request.headers.get('If-None-Match'), shell.etag)) {
