@@ -90,7 +90,7 @@ final class ReaderTypographySettings {
 	static let defaultTextScale = 1.0
 	static let defaultLineHeight = 1.55
 	static let defaultHorizontalMargin = 20.0
-	static let defaultColumnWidth = 720.0
+	static let defaultColumnWidth = 640.0
 
 	private let defaults: UserDefaults
 	private let textScaleKey = "pigeon.reader.typography.text-scale"

@@ -68,6 +68,7 @@ targets:
         PROVISIONING_PROFILE_SPECIFIER: "$(PIGEON_READER_PROFILE_NAME)"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_ENTITLEMENTS: PigeonReader/Resources/PigeonReader.entitlements
     scheme:
       testTargets:

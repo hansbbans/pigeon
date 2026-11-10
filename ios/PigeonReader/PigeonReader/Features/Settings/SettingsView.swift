@@ -19,7 +19,7 @@ struct SettingsView: View {
 					LabeledContent("Server", value: model.session?.baseURL.absoluteString ?? "Not connected")
 					Text("Your password is never stored here. Pigeon keeps only the ClientLogin token in Keychain.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				if let syncHealthService = model.syncHealthService {
@@ -31,7 +31,7 @@ struct SettingsView: View {
 						}
 						Text("See which feeds are healthy, delayed, or failing, and retry recoverable failures.")
 							.font(.footnote)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 						NavigationLink {
 							StaleFeedsView()
 						} label: {
@@ -57,7 +57,7 @@ struct SettingsView: View {
 					}
 					Text("Background delivery is best effort. By default Pigeon waits for an unconstrained connection; iOS decides when the app and widgets may refresh.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section("Views") {
@@ -71,7 +71,7 @@ struct SettingsView: View {
 						.disabled(model.canDisableSmartView(.today) == false)
 					Text("At least one smart view must stay enabled so Reader always has a home.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section("Offline Library") {
@@ -109,11 +109,11 @@ struct SettingsView: View {
 					if let offlineMessage {
 						Text(offlineMessage)
 							.font(.footnote)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Text("Unread and starred article bodies are protected during automatic cleanup. Pending changes stay queued until the server is reachable.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section("Reading") {
@@ -149,7 +149,7 @@ struct SettingsView: View {
 						.accessibilityIdentifier("show-reading-time-toggle")
 					LabeledContent("Text size") {
 						Text(typography.textScale, format: .percent.precision(.fractionLength(0)))
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Slider(
 						value: $typography.textScale,
@@ -161,7 +161,7 @@ struct SettingsView: View {
 
 					LabeledContent("Line spacing") {
 						Text(typography.lineHeight, format: .number.precision(.fractionLength(2)))
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Slider(
 						value: $typography.lineHeight,
@@ -173,7 +173,7 @@ struct SettingsView: View {
 
 					LabeledContent("Page margins") {
 						Text(typography.horizontalMargin, format: .number.precision(.fractionLength(0)))
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Slider(
 						value: $typography.horizontalMargin,
@@ -184,7 +184,7 @@ struct SettingsView: View {
 
 					LabeledContent("Reading width") {
 						Text(typography.columnWidth, format: .number.precision(.fractionLength(0)))
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					Slider(
 						value: $typography.columnWidth,
@@ -206,7 +206,7 @@ struct SettingsView: View {
 					}
 					Text(remoteImageExplanation(for: typography.remoteImagePolicy))
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section("Keyboard Shortcuts") {
@@ -225,7 +225,7 @@ struct SettingsView: View {
 					}
 					Text("Use these shortcuts with an external keyboard while an article is selected. If both actions are assigned the same key, Pigeon swaps the other action to keep them distinct.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section("Personalization") {
@@ -236,7 +236,7 @@ struct SettingsView: View {
 					}
 					Text("See exactly what affects recommendations, delete individual signals, reset preferences, or export your data.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 
 				Section {

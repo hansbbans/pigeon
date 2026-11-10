@@ -16,7 +16,7 @@ struct PersonalizationSettingsView: View {
 				Section("Topics to Monitor") {
 					Text("For You prioritizes matching stories from your existing subscriptions. Topics do not create subscriptions or send notifications.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 
 					HStack {
 						TextField("Topic to monitor", text: $newTopic)
@@ -59,11 +59,11 @@ struct PersonalizationSettingsView: View {
 					if let personalizationError = model.personalizationErrorMessage {
 						Label(personalizationError, systemImage: "exclamationmark.triangle")
 							.font(.footnote)
-							.foregroundStyle(.red)
+							.foregroundStyle(.pigeonDanger)
 					} else if let topicMessage {
 						Label(topicMessage, systemImage: topicMessageIsError ? "exclamationmark.triangle" : "checkmark.circle")
 							.font(.footnote)
-							.foregroundStyle(topicMessageIsError ? .red : .secondary)
+							.foregroundStyle(topicMessageIsError ? PigeonPalette.danger : PigeonPalette.labelSecondary)
 					}
 					if model.isUpdatingPersonalization {
 						ProgressView("Saving topics")
@@ -75,7 +75,7 @@ struct PersonalizationSettingsView: View {
 					Text(snapshot.policy.plainLanguageSummary)
 					Text("Recommended puts your strongest matches first. Monitored topics make matching stories more important within your subscriptions.")
 						.font(.footnote)
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 					ForEach(snapshot.policy.confirmedSignals) { signal in
 						LabeledContent(signal.name, value: signal.effect)
 					}
@@ -101,10 +101,10 @@ struct PersonalizationSettingsView: View {
 										.font(.body.weight(.semibold))
 									Text(entry.title ?? entry.source ?? "Story no longer retained")
 										.font(.footnote)
-										.foregroundStyle(.secondary)
+										.foregroundStyle(.pigeonSecondary)
 									Text(entry.occurredAt, format: .dateTime.month().day().year().hour().minute())
 										.font(.caption)
-										.foregroundStyle(.secondary)
+										.foregroundStyle(.pigeonSecondary)
 								}
 								Spacer()
 								Button("Delete", systemImage: "trash", role: .destructive) {
@@ -123,7 +123,7 @@ struct PersonalizationSettingsView: View {
 				if let personalizationError = model.personalizationErrorMessage {
 					Section {
 						Label(personalizationError, systemImage: "exclamationmark.triangle")
-							.foregroundStyle(.red)
+							.foregroundStyle(.pigeonDanger)
 					}
 				}
 				ContentUnavailableView(

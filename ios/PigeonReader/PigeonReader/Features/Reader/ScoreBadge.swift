@@ -15,9 +15,9 @@ struct ScoreBadge: View {
 
 	private var scoreColor: Color {
 		switch score {
-		case 75...: .green
-		case 50..<75: .orange
-		default: .secondary
+		case 75...: PigeonPalette.positive
+		case 50..<75: PigeonPalette.keep
+		default: PigeonPalette.labelSecondary
 		}
 	}
 }

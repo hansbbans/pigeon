@@ -54,7 +54,7 @@ struct YouTubeTranscriptSection: View {
 				HStack(spacing: 10) {
 					ProgressView()
 					Text(phase == .fetching ? "Getting the transcript from YouTube…" : "Loading the transcript…")
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 				}
 				.accessibilityElement(children: .combine)
 				.accessibilityIdentifier("transcript-loading")
@@ -64,7 +64,7 @@ struct YouTubeTranscriptSection: View {
 						Label("Couldn’t get the transcript", systemImage: "exclamationmark.triangle")
 							.font(.headline)
 						Text(message)
-							.foregroundStyle(.secondary)
+							.foregroundStyle(.pigeonSecondary)
 					}
 					.accessibilityElement(children: .combine)
 					.accessibilityIdentifier("transcript-failed")
@@ -76,7 +76,7 @@ struct YouTubeTranscriptSection: View {
 				}
 			case .needsUpdate:
 				Label(YouTubeTranscriptStore.needsUpdateMessage, systemImage: "arrow.down.app")
-					.foregroundStyle(.secondary)
+					.foregroundStyle(.pigeonSecondary)
 					.accessibilityIdentifier("transcript-needs-update")
 			case .ready(let layout):
 				YouTubeTranscriptList(layout: layout, playback: playback, textScale: textScale)
@@ -175,7 +175,7 @@ struct YouTubeTranscriptList: View {
 				HStack(alignment: .firstTextBaseline, spacing: 12) {
 					Text(YouTubeTranscriptTime.format(chapter.start))
 						.font(.footnote.monospacedDigit())
-						.foregroundStyle(.secondary)
+						.foregroundStyle(.pigeonSecondary)
 						.frame(minWidth: 44, alignment: .leading)
 					Text(chapter.title)
 						.font(.custom("Bookerly-Bold", size: ReaderTypography.scaledPointSize(17, textScale: textScale), relativeTo: .headline))
@@ -200,11 +200,11 @@ struct YouTubeTranscriptList: View {
 				HStack(alignment: .firstTextBaseline, spacing: 12) {
 					Text(YouTubeTranscriptTime.format(segment.start))
 						.font(.footnote.monospacedDigit())
-						.foregroundStyle(isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+						.foregroundStyle(isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(PigeonPalette.labelSecondary))
 						.frame(minWidth: 44, alignment: .leading)
 					Text(segment.text)
 						.font(.custom("Bookerly-Regular", size: ReaderTypography.scaledPointSize(16, textScale: textScale), relativeTo: .body))
-						.foregroundStyle(isActive ? .primary : .secondary)
+						.foregroundStyle(isActive ? Color.primary : PigeonPalette.labelSecondary)
 						.multilineTextAlignment(.leading)
 						.frame(maxWidth: .infinity, alignment: .leading)
 				}

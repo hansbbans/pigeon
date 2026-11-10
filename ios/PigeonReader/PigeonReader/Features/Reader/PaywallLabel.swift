@@ -23,6 +23,6 @@ enum PaywallLabel {
 		Text("\(Image(systemName: "lock.fill"))\u{00A0}PAYWALL")
 			.font(.caption2.weight(.semibold))
 			.tracking(0.6)
-			.foregroundStyle(.secondary)
+			.foregroundStyle(.pigeonSecondary)
 	}
 }
