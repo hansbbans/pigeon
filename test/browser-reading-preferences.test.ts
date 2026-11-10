@@ -57,7 +57,7 @@ test('reading preferences persist typed bounded settings and unique keyboard sho
 
 test('frame CSS uses only safe enum fonts/colors and bounded numbers; system theme follows media preference',()=>{
  const state=fixture();const css=state.api.frameCSS({theme:'system',font:'url(https://evil.test/font)',fontSize:'18;@import x',width:'NaN',margins:-10});
- assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');assert.match(css,/font-size:18px/);assert.match(css,/max-width:720px/);assert.match(css,/padding:0px/);
+ assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');assert.match(css,/font-size:18px/);assert.match(css,/max-width:640px/);assert.match(css,/padding:0px/);
  assert.doesNotMatch(css,/@import|https:\/\/|javascript:|url\(/);
  const failing={getItem:()=>{throw new Error('denied');},setItem:()=>{throw new Error('denied');}};
  assert.equal(state.api.readPreferences(failing).theme,'app');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
@@ -79,7 +79,7 @@ test('frame theme follows the article theme choice; only sepia paints its own pa
  assert.equal(state.api.frameTheme({theme:'system'},'dark',false),'light');
  assert.equal(state.api.frameTheme({theme:'sepia'},'dark',true),'light');
  for(const theme of ['app','light','dark','system']) assert.doesNotMatch(state.api.frameCSS({theme}),/color-scheme|background:#|!important/);
- assert.match(state.api.frameCSS({theme:'sepia'}),/:root\{color-scheme:light;color:#40362c;background:#f4ecd8\}/);
+ assert.match(state.api.frameCSS({theme:'sepia'}),/:root\{color-scheme:light;color:#433a2c;background:#f6ecd1\}/);
 });
 
 test('a light theme saved under the old light default reads as Match app once, then sticks when chosen again',()=>{

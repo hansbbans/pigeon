@@ -336,7 +336,7 @@ export function createArticleFrameDocument(
         color-scheme: light;
         --frame-page: #ffffff;
         --frame-text: #1c1c1e;
-        --frame-link: #3466b0;
+        --frame-link: #0063d1;
         --frame-link-hover: #234d8c;
         --frame-border: #e4e4e7;
         --frame-pre: #f5f5f6;
@@ -348,7 +348,7 @@ export function createArticleFrameDocument(
         color-scheme: dark;
         --frame-page: #1f1f21;
         --frame-text: #dcdcdf;
-        --frame-link: #8fb3e8;
+        --frame-link: #409cff;
         --frame-link-hover: #b5cdf0;
         --frame-border: #3a3a3e;
         --frame-pre: #262629;
