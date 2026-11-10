@@ -280,3 +280,32 @@ test('guardSave turns a thrown error into a failed outcome', async () => {
 	const ok = { status: 'unsupported' } as const;
 	assert.equal(await guardSave(async () => ok), ok);
 });
+
+test('a flush does not send again a save that finished while the flush was busy', async () => {
+	const store = await signedInStore();
+	await saveLink('https://example.com/old', { fetch: mockFetch(() => 'network-error').fetch, store });
+	let releaseNew: ((response: Response) => void) | undefined;
+	const newFetch = mockFetch(() => new Promise<Response>((resolve) => { releaseNew = resolve; }));
+	const saving = saveLink('https://example.com/new', { fetch: newFetch.fetch, store });
+	await until(() => releaseNew !== undefined);
+	let releaseOld: ((response: Response) => void) | undefined;
+	const sentByFlush: string[] = [];
+	const flushFetch = mockFetch((request) => {
+		const url = JSON.parse(request.body).url as string;
+		sentByFlush.push(url);
+		if (url.endsWith('/old')) return new Promise<Response>((resolve) => { releaseOld = resolve; });
+		return savedReply('pending');
+	});
+	const flushing = flushQueue({ fetch: flushFetch.fetch, store });
+	await until(() => releaseOld !== undefined);
+	releaseNew!(savedReply('pending'));
+	assert.equal((await saving).status, 'saved');
+	releaseOld!(savedReply('pending'));
+	await flushing;
+	assert.deepEqual(sentByFlush, ['https://example.com/old']);
+});
+
+async function until(ready: () => boolean): Promise<void> {
+	for (let i = 0; i < 100 && !ready(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.ok(ready(), 'condition never became true');
+}

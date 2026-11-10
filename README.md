@@ -105,11 +105,9 @@ Main files:
 Pigeon includes two authenticated Reader clients backed by the Google Reader style API:
 
 - `/app` is the browser Reader. It supports read/unread and stars with Undo, Starred and Today views, full-library search, read filters, chronological sorting, and scoped bulk read actions with Undo. Library management includes feed discovery, YouTube lookup, multiple folders, OPML preview/import, and stale-feed cleanup. For You adds recommendation scores, explanations, feedback, monitored topics, and personalization history/export/reset.
-- `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, a dedicated Unread view with global counts, long-press multi-folder feed organization, leading-edge swipe back to the feed, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, bulk Mark Above/Below triage, and direct Readwise saves.
+- `ios/PigeonReader` is the native iOS Reader. It supports the same navigation hierarchy, a dedicated Unread view with global counts, long-press multi-folder feed organization, leading-edge swipe back to the feed, boundary-swipe article navigation, configurable external-keyboard next/previous shortcuts, bounded folder/feed/Today loading with Load More, bulk Mark Above/Below triage, and Read It Later.
 
-`extension/` is a browser extension for Chrome, Dia and Vivaldi that saves the current page (extracted with Defuddle on the live tab) or a link to Read It Later through `POST /api/v1/saved`. See `extension/README.md`.
-
-The native client stores the optional Readwise access token in the iOS Keychain. It only sends the exact validated article URL to Readwise and treats HTTP 200 and 201 as successful saves.
+`extension/` is a browser extension for Chrome, Dia, Vivaldi and Safari on the Mac that saves the current page (extracted with Defuddle on the live tab) or a link to Read It Later through `POST /api/v1/saved`. See `extension/README.md`.
 
 The browser reader offers newsletter content, extracted Reader mode, and a Website mode linking to the original in a separate tab. Reading settings include light/dark/sepia/system themes, typography, density, width, margins, keyboard shortcuts, and direct/ask/proxy image policies. Image policy applies to previews as well as article bodies. Read It Later saves a link from an article's right-click menu (`POST /api/v1/saved`); a link saved without content is fetched through the reader-source proxy, cleaned with Defuddle in the browser, and uploaded with `PUT /api/v1/saved/:id/content` when first opened.
 
@@ -131,7 +129,7 @@ xcodebuild build -project PigeonReader.xcodeproj -scheme PigeonReader -configura
 
 The app stores feed metadata in `feeds` and content items in `items`.
 
-Current schema version: `13`
+Current schema version: `16`
 
 Schema files:
 
@@ -144,7 +142,7 @@ Schema files:
 
 Version `2` added RSS subscription support. Version `3` added feed icons. Version `4` added per-item original URLs so reader apps can open source posts. Version `5` added `feeds.site_url` so feed homepages stay separate from feed URLs.
 
-Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `13` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. Version 13 adds indexed, once-daily retention batches and targeted starred, unread, and read indexes without repeating any legacy backfill. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
+Current deployments automatically apply pending migration work on the first database-backed request after a deployment. A stored schema version newer than `16` is rejected instead of being downgraded. The v12 legacy status/tag backfills, sync index and seed, and final version update run as one ordered transaction claimed by a single Worker. Version 13 adds indexed, once-daily retention batches and targeted starred, unread, and read indexes without repeating any legacy backfill. Version 14 replaces the item status trigger on databases created before it. Version 15 adds `items.content_version` and a covering unread index. Version 16 adds reading-length and saved-item metadata, on-request transcripts, and an index for the YouTube duration backfill. The legacy `SCHEMA-V2.sql` through `SCHEMA-V5.sql` commands below are recovery-only for databases that missed prior upgrades, not the normal current path.
 
 ## Runtime Settings
 
@@ -292,7 +290,7 @@ If you are changing the public hostname itself, commit the `wrangler.toml` route
 - `src/browser-app.ts`: authenticated browser Reader shell and client
 - `ios/PigeonReader/project.yml`: authoritative native iOS project definition
 - `ios/PigeonReader/PigeonReader/`: native Reader app
-- `extension/`: Chromium browser extension (save to Read It Later)
+- `extension/`: browser extension for Chromium browsers and Safari (save to Read It Later)
 - `04-storage/SCHEMA.sql`: current schema
 - `09-deployment/DEPLOYMENT.md`: older deployment notes
 

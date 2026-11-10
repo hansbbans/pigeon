@@ -6,7 +6,7 @@ import { generateOpml } from './opml';
 import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
-import { matchesBrowserAppEtag, renderBrowserAppShell } from './browser-app';
+import { renderBrowserAppShell } from './browser-app';
 import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
@@ -74,10 +74,12 @@ export default {
 			const shell = renderBrowserAppShell(env.BASE_URL);
 			const headers = {
 				'Content-Type': 'text/html; charset=utf-8',
-				'Cache-Control': 'private, max-age=0, must-revalidate',
+				// The shell holds no account data. `no-cache` still revalidates on every load, and unlike
+				// `private` it lets the service worker (which refuses private responses) save it for offline use.
+				'Cache-Control': 'no-cache',
 				ETag: shell.etag,
 			};
-			if (matchesBrowserAppEtag(request.headers.get('If-None-Match'), shell.etag)) {
+			if (matchesIfNoneMatch(request.headers.get('If-None-Match'), shell.etag)) {
 				return new Response(null, { status: 304, headers });
 			}
 			return new Response(shell.html, { headers });
@@ -237,11 +239,7 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 		'ETag': etag,
 		'Access-Control-Allow-Origin': '*',
 	};
-	const ifNoneMatch = request.headers.get('If-None-Match');
-	if (ifNoneMatch?.split(',').some((value) => {
-		const candidate = value.trim();
-		return candidate === '*' || candidate.replace(/^W\//, '') === etag.replace(/^W\//, '');
-	})) {
+	if (matchesIfNoneMatch(request.headers.get('If-None-Match'), etag)) {
 		return new Response(null, { status: 304, headers });
 	}
 	const { results: items } = await env.DB.prepare(
@@ -261,6 +259,16 @@ async function handleFeed(request: Request, url: URL, env: Env): Promise<Respons
 
 	return new Response(xml, {
 		headers,
+	});
+}
+
+// If-None-Match uses weak comparison: the W/ prefix is ignored on both sides.
+function matchesIfNoneMatch(ifNoneMatch: string | null, etag: string): boolean {
+	if (!ifNoneMatch) return false;
+	const opaqueTag = etag.replace(/^W\//, '');
+	return ifNoneMatch.split(',').some((value) => {
+		const candidate = value.trim();
+		return candidate === '*' || candidate.replace(/^W\//, '') === opaqueTag;
 	});
 }
 

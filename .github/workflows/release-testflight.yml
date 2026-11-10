@@ -133,8 +133,6 @@ jobs:
           set -euo pipefail
           npm test
           npm run test:testflight
-          node --test test/testflight-ci-gate.test.mjs
-          node --test test/testflight-release-monitor.test.mjs
           npx tsc --noEmit
 
       - name: Generate Xcode project

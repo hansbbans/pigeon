@@ -111,7 +111,7 @@ export async function postSave(fetchImpl: Fetch, origin: string, auth: string, b
 		}
 		return { kind: 'rejected', status: response.status, message };
 	}
-	// A Worker without the save API (before PR #161 is deployed) answers 404; keep the save for later.
+	// A Worker without the save API (an older deployment) answers 404; keep the save for later.
 	if (response.status === 404) return { kind: 'retry', cause: 'unsupported', message: 'This Pigeon server cannot save links yet.' };
 	if (!response.ok) return { kind: 'retry', cause: 'server', message: `Pigeon answered ${response.status}.` };
 	try {

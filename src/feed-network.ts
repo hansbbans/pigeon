@@ -6,6 +6,7 @@ export const MAX_FEED_REDIRECTS = 5;
 export const FEED_FETCH_TIMEOUT_MS = 15_000;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const PERMANENT_REDIRECT_STATUSES = new Set([301, 308]);
 const ALLOWED_PORTS = new Set(['', '80', '443']);
 const BLOCKED_HOST_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa'];
 const BINARY_CONTENT_PREFIXES = [
@@ -33,7 +34,14 @@ export interface BoundedFetchResult {
 	response: Response;
 	text: string;
 	finalUrl: URL;
+	/**
+	 * Where the resource permanently lives: the request URL after following only its leading
+	 * 301/308 redirects. A temporary redirect (302, 303, 307) says to keep asking the old URL.
+	 */
+	permanentUrl: URL;
 	redirects: URL[];
+	/** The leading 301/308 hops only: the URLs that now permanently mean `permanentUrl`. */
+	permanentRedirects: URL[];
 	contentType: string;
 	byteLength: number;
 }
@@ -43,7 +51,10 @@ export async function fetchBoundedFeedResource(
 	options: BoundedFetchOptions = {},
 ): Promise<BoundedFetchResult> {
 	let currentUrl = assertSafeFeedUrl(input);
+	let permanentUrl = currentUrl;
+	let onlyPermanentRedirectsSoFar = true;
 	const redirects: URL[] = [];
+	const permanentRedirects: URL[] = [];
 	const maxRedirects = options.maxRedirects ?? MAX_FEED_REDIRECTS;
 	const timeoutMs = options.timeoutMs ?? FEED_FETCH_TIMEOUT_MS;
 
@@ -65,6 +76,11 @@ export async function fetchBoundedFeedResource(
 			}
 			currentUrl = assertSafeFeedUrl(new URL(location, currentUrl));
 			redirects.push(currentUrl);
+			onlyPermanentRedirectsSoFar &&= PERMANENT_REDIRECT_STATUSES.has(response.status);
+			if (onlyPermanentRedirectsSoFar) {
+				permanentUrl = currentUrl;
+				permanentRedirects.push(currentUrl);
+			}
 			continue;
 		}
 
@@ -80,7 +96,7 @@ export async function fetchBoundedFeedResource(
 				? options.maxHtmlBytes
 				: (options.maxBytes ?? MAX_FEED_BYTES);
 		const { text, byteLength } = await readResponseText(response, responseLimit);
-		return { response, text, finalUrl: currentUrl, redirects, contentType, byteLength };
+		return { response, text, finalUrl: currentUrl, permanentUrl, redirects, permanentRedirects, contentType, byteLength };
 	}
 }
 
@@ -160,7 +176,34 @@ async function readResponseText(response: Response, maxBytes: number): Promise<{
 		combined.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return { text: new TextDecoder().decode(combined), byteLength };
+	return { text: decodeResponseBytes(combined, response.headers.get('Content-Type')), byteLength };
+}
+
+/**
+ * Decodes a response body. Bytes that are valid UTF-8 are UTF-8 whatever the response claims:
+ * servers often send a default legacy charset with a UTF-8 feed. Only when they are not is the
+ * declared charset used, the XML declaration first, then the Content-Type parameter.
+ */
+function decodeResponseBytes(bytes: Uint8Array, contentTypeHeader: string | null): string {
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
+	} catch {
+		// Not UTF-8: look for a declared charset.
+	}
+	const labels = [
+		// The declaration is ASCII in every encoding handled here, so its bytes map straight to characters.
+		String.fromCharCode(...bytes.subarray(0, 200)).match(/^\s*<\?xml[^>]*\bencoding\s*=\s*["']([^"']+)["']/i)?.[1],
+		contentTypeHeader?.match(/;\s*charset\s*=\s*"?([^";\s]+)/i)?.[1],
+	];
+	for (const label of labels) {
+		if (!label || /^utf-?8$/i.test(label)) continue;
+		try {
+			return new TextDecoder(label).decode(bytes);
+		} catch {
+			// Not a charset this runtime knows.
+		}
+	}
+	return new TextDecoder().decode(bytes);
 }
 
 function isObviouslyBinaryContentType(contentType: string): boolean {

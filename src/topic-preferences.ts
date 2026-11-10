@@ -86,10 +86,6 @@ export async function saveMonitoredTopics(env: Env, topics: string[]): Promise<v
 		.run();
 }
 
-export async function clearMonitoredTopics(env: Env): Promise<void> {
-	await env.DB.prepare('DELETE FROM _meta WHERE key = ?').bind(MONITORED_TOPICS_META_KEY).run();
-}
-
 export async function readBoundedJson(request: Request): Promise<unknown> {
 	const contentLength = request.headers.get('Content-Length');
 	if (contentLength !== null) {

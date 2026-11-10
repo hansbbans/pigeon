@@ -3,6 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
 import {
+	environmentMilliseconds,
 	AppStoreConnectApiError,
 	AppStoreConnectClient,
 	formatVerificationSummary,
@@ -374,4 +375,13 @@ test("summary contains app, bundle, version, build, processing, group, and teste
 	assert.match(summary, /Build: 456 \(VALID\)/);
 	assert.match(summary, /Group: Pigeon Internal \(group-1\)/);
 	assert.match(summary, /Testers in group: 1/);
+});
+
+test("timeout and poll interval defaults are in the same unit as the configured values", () => {
+	// Configured in seconds, used in milliseconds. The defaults must be converted too.
+	assert.equal(environmentMilliseconds({ ASC_TIMEOUT_SECONDS: "900" }, "ASC_TIMEOUT_SECONDS", 15), 900_000);
+	assert.equal(environmentMilliseconds({}, "ASC_TIMEOUT_SECONDS", 900), 900_000);
+	assert.equal(environmentMilliseconds({ ASC_TIMEOUT_SECONDS: "" }, "ASC_TIMEOUT_SECONDS", 900), 900_000);
+	assert.equal(environmentMilliseconds({ ASC_POLL_INTERVAL_SECONDS: "0" }, "ASC_POLL_INTERVAL_SECONDS", 15), 0);
+	assert.throws(() => environmentMilliseconds({ ASC_TIMEOUT_SECONDS: "-1" }, "ASC_TIMEOUT_SECONDS", 900), /non-negative/);
 });

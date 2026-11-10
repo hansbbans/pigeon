@@ -7,3 +7,5 @@ dist/
 .superpowers/
 output/
 visual-check/
+__pycache__/
+HANDOFF.md

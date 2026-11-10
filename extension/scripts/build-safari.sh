@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds Save to Pigeon for Safari on macOS: the web extension (dist/safari),
 # then the ad-hoc signed container app that carries it, into
-# dist/safari-app/Save to Pigeon.app. Local only: CI does not run it.
+# dist/safari-app/Save to Pigeon.app. CI runs it on a GitHub-hosted Mac when
+# extension/safari/ or this script changes (the `safari` job in ci.yml).
 #
 # Usage: scripts/build-safari.sh [--open]
 #   --open   launch the app afterwards (registers the extension with Safari)

@@ -58,7 +58,7 @@ Defuddle gets a copy of the page (`document.cloneNode`), so the page you are rea
 
 ## Safari
 
-Safari loads web extensions only from inside a Mac app, so `safari/` holds a small container app, **Save to Pigeon** (`com.hans.pigeon.safari`), whose extension (`com.hans.pigeon.safari.extension`) carries `dist/safari`. It needs Xcode and `brew install xcodegen`; CI does not build it.
+Safari loads web extensions only from inside a Mac app, so `safari/` holds a small container app, **Save to Pigeon** (`com.hans.pigeon.safari`), whose extension (`com.hans.pigeon.safari.extension`) carries `dist/safari`. It needs Xcode and `brew install xcodegen`. CI builds it (ad-hoc signed) on a GitHub-hosted Mac when `safari/` or `scripts/build-safari.sh` changes.
 
 ```bash
 cd extension

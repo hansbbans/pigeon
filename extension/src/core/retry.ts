@@ -51,11 +51,19 @@ export async function runRetry(force: boolean, deps: RetryDeps): Promise<FlushRe
 		await clearRetry(deps);
 		return null;
 	}
+	// The alarm is one-shot and has usually just fired. Put one in place before flushing, so a
+	// flush that throws (or a worker stopped mid-flush) does not leave the queue with no retry.
+	// The stored backoff is left alone; the result below replaces or clears this alarm.
+	const hadAlarm = Boolean(await deps.alarms.get(RETRY_ALARM));
+	if (!hadAlarm) await deps.alarms.create(RETRY_ALARM, { delayInMinutes: MIN_RETRY_DELAY_MS / 60_000 });
 	const result = await deps.flush();
 	// Signed out: leave any scheduled retry alone. A flush can run in the middle
 	// of signing in (the host permission is granted before the token is stored);
 	// clearing the alarm then would strand the queue if the sign-in's own flush failed.
-	if (result.stoppedBy === 'signedOut') return result;
+	if (result.stoppedBy === 'signedOut') {
+		if (!hadAlarm) await deps.alarms.clear(RETRY_ALARM);
+		return result;
+	}
 	const previous = force ? null : (await deps.store.get(RETRY_DELAY_KEY))[RETRY_DELAY_KEY];
 	const delay = nextRetryDelay(typeof previous === 'number' ? previous : null, result);
 	if (delay === null) await clearRetry(deps);

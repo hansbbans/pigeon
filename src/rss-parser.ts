@@ -26,6 +26,47 @@ export interface ParsedItem {
 	content: string;
 	author?: string;
 	attachments: ParsedAttachment[];
+	/**
+	 * Set when `title`, `author` or `content` were cleaned up for display. It is the identity text
+	 * an item without guid or link had before the cleanup, so stored articles keep their identity.
+	 */
+	legacyIdentityFallback?: string;
+}
+
+/** The text an RSS item's stable identity is hashed from. Guids and links are used exactly as parsed. */
+export function rssItemIdentitySource(item: Pick<ParsedItem, 'guid' | 'link' | 'title' | 'pubDate' | 'author' | 'content' | 'legacyIdentityFallback'>): string {
+	return item.guid || item.link || item.legacyIdentityFallback || compositeIdentity(item.title, item.pubDate, item.author, item.content);
+}
+
+function compositeIdentity(title: string, pubDate: string | undefined, author: string | undefined, content: string): string {
+	return [title, pubDate || '', author || '', content].join('\n');
+}
+
+/**
+ * Decodes numeric character references (`&#8217;`, `&#x2013;`) in a plain-text field. WordPress
+ * emits them in titles and bylines, where no HTML layer will ever decode them. Single pass.
+ */
+function decodeCharacterReferences(value: string): string;
+function decodeCharacterReferences(value: string | undefined): string | undefined;
+function decodeCharacterReferences(value: string | undefined): string | undefined {
+	if (!value || !value.includes('&#')) return value;
+	return value.replace(/&#(?:x([0-9a-f]+)|([0-9]+));/gi, (reference, hex?: string, decimal?: string) => {
+		const codePoint = hex ? parseInt(hex, 16) : parseInt(decimal!, 10);
+		return codePoint > 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : reference;
+	});
+}
+
+/** Display fields plus the fallback that keeps the identity of an item whose fields changed. */
+function withDisplayFields(
+	raw: { title: string; author: string | undefined; content: string; pubDate: string | undefined },
+	display: { title: string; author: string | undefined; content: string },
+): Pick<ParsedItem, 'title' | 'author' | 'content' | 'pubDate' | 'legacyIdentityFallback'> {
+	const changed = display.title !== raw.title || display.author !== raw.author || display.content !== raw.content;
+	return {
+		...display,
+		pubDate: raw.pubDate,
+		...(changed ? { legacyIdentityFallback: compositeIdentity(raw.title, raw.pubDate, raw.author, raw.content) } : {}),
+	};
 }
 
 export interface ParsedAttachment {
@@ -168,11 +209,6 @@ export function parseFeed(feedText: string, options: ParseFeedOptions = {}): Par
 	throw new Error('Unsupported feed format (expected RSS, RDF, Atom, or JSON Feed)');
 }
 
-/** Kept for existing callers and Google Reader compatibility tests. */
-export function parseRssFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
-	return parseFeed(feedText, options);
-}
-
 export function detectFeedFormat(feedText: string, contentType?: string | null): FeedFormat | null {
 	try {
 		return parseFeed(feedText, { contentType }).format;
@@ -263,6 +299,11 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: Namesp
 			? textValue(findKey(mediaGroup, ['media:description', 'description']))
 			: undefined;
 		const title = textValue(findKey(entry, ['title'])) ?? mediaTitle ?? 'Untitled';
+		const pubDate = firstDate(entry, ['published', 'updated']);
+		const content =
+			atomContentValue(findKey(entry, ['content']), xhtmlScopes) ??
+			atomContentValue(findKey(entry, ['summary']), xhtmlScopes) ??
+			(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : '');
 
 		return {
 			// YouTube's Atom IDs are already stable. Prefer the explicit video ID
@@ -270,14 +311,11 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: Namesp
 			guid: videoId && isYouTubeVideoId(videoId)
 				? `yt:video:${videoId}`
 				: textValue(findKey(entry, ['id'])) ?? link ?? '',
-			title,
 			link,
-			pubDate: firstDate(entry, ['published', 'updated']),
-			content:
-				atomContentValue(findKey(entry, ['content']), xhtmlScopes) ??
-				atomContentValue(findKey(entry, ['summary']), xhtmlScopes) ??
-				(mediaDescription ? `<p>${escapePlainText(mediaDescription)}</p>` : ''),
-			author,
+			...withDisplayFields(
+				{ title, author, content, pubDate },
+				{ title: decodeCharacterReferences(title), author: decodeCharacterReferences(author), content },
+			),
 			attachments: deduplicateAttachments([
 				...parseAtomAttachments(findKey(entry, ['link']), baseUrl),
 				...parseYouTubeMediaAttachments(mediaGroup, baseUrl, mediaTitle),
@@ -286,7 +324,7 @@ function parseAtomFeed(feed: FeedRecord, sourceUrl?: string, xhtmlScopes: Namesp
 	});
 
 	return {
-		title: textValue(findKey(feed, ['title'])) ?? 'Untitled Feed',
+		title: decodeCharacterReferences(textValue(findKey(feed, ['title'])) ?? 'Untitled Feed'),
 		link: feedLink,
 		items,
 		format: 'atom',
@@ -337,7 +375,7 @@ function parseRss2Feed(channel: FeedRecord, sourceUrl?: string): ParsedFeed {
 	const entries = arrayValue(findKey(channel, ['item']));
 
 	return {
-		title: textValue(findKey(channel, ['title'])) ?? 'Untitled Feed',
+		title: decodeCharacterReferences(textValue(findKey(channel, ['title'])) ?? 'Untitled Feed'),
 		link: feedLink,
 		items: entries.map((rawItem) => parseRssItem(asRecord(rawItem), baseUrl)),
 		format: 'rss2',
@@ -351,7 +389,7 @@ function parseRss1Feed(rdf: FeedRecord, sourceUrl?: string): ParsedFeed {
 	const entries = arrayValue(findKey(rdf, ['item']));
 
 	return {
-		title: textValue(findKey(channel, ['title'])) ?? 'Untitled Feed',
+		title: decodeCharacterReferences(textValue(findKey(channel, ['title'])) ?? 'Untitled Feed'),
 		link: feedLink,
 		items: entries.map((rawItem) => parseRssItem(asRecord(rawItem), baseUrl)),
 		format: 'rss1',
@@ -362,13 +400,24 @@ function parseRssItem(item: FeedRecord, baseUrl?: string): ParsedItem {
 	const guidValue = findKey(item, ['guid', 'dc:identifier']);
 	const link = resolveUrl(textValue(findKey(item, ['link'])), baseUrl);
 
+	const contentCandidates = ['content:encoded', 'description', 'summary'];
+	const authorCandidates = ['author', 'dc:creator', 'creator'];
+	const raw = {
+		title: textValue(findKey(item, ['title'])) ?? 'Untitled',
+		author: firstText(item, authorCandidates),
+		content: firstText(item, contentCandidates) ?? '',
+		pubDate: firstDate(item, ['pubDate', 'dc:date', 'date']),
+	};
+
 	return {
 		guid: textValue(guidValue) ?? attributeValue(item, ['rdf:about', 'about']) ?? link ?? '',
-		title: textValue(findKey(item, ['title'])) ?? 'Untitled',
 		link,
-		pubDate: firstDate(item, ['pubDate', 'dc:date', 'date']),
-		content: firstText(item, ['content:encoded', 'description', 'summary']) ?? '',
-		author: firstText(item, ['author', 'dc:creator', 'creator']),
+		...withDisplayFields(raw, {
+			title: decodeCharacterReferences(raw.title),
+			// A repeated element (two `<dc:creator>`) used to drop the field; fall back to its first value.
+			author: decodeCharacterReferences(raw.author ?? firstRepeatedText(item, authorCandidates)),
+			content: raw.content || firstRepeatedText(item, contentCandidates) || '',
+		}),
 		attachments: parseRssAttachments(item, baseUrl),
 	};
 }
@@ -505,6 +554,19 @@ function firstText(record: FeedRecord, candidates: string[]): string | undefined
 	for (const candidate of candidates) {
 		const text = textValue(findKey(record, [candidate]));
 		if (text) return text;
+	}
+	return undefined;
+}
+
+/** The first text among elements that appear more than once, which `textValue` deliberately rejects. */
+function firstRepeatedText(record: FeedRecord, candidates: string[]): string | undefined {
+	for (const candidate of candidates) {
+		const value = findKey(record, [candidate]);
+		if (!Array.isArray(value)) continue;
+		for (const entry of value) {
+			const text = textValue(entry);
+			if (text) return text;
+		}
 	}
 	return undefined;
 }

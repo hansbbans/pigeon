@@ -1,4 +1,4 @@
-import type { Email } from 'postal-mime';
+import { decodeWords, type Email } from 'postal-mime';
 
 /** Extract the machine-readable portion from a List-Id header. */
 function extractListId(headers: Email['headers']): string | null {
@@ -32,11 +32,14 @@ export function resolveFeedKey(
 	fromAddress: string,
 	replyToAddress: string | undefined,
 ): string {
+	// A List-Id made only of non-ASCII characters normalizes to an empty key; fall through to the sender.
 	const listId = extractListId(headers);
-	if (listId) return normalizeFeedKey(listId);
+	const listKey = listId ? normalizeFeedKey(listId) : '';
+	if (listKey) return listKey;
 
 	if (replyToAddress && replyToAddress !== fromAddress) {
-		return normalizeFeedKey(replyToAddress);
+		const replyToKey = normalizeFeedKey(replyToAddress);
+		if (replyToKey) return replyToKey;
 	}
 
 	return normalizeFeedKey(fromAddress);
@@ -53,7 +56,8 @@ export function resolveFeedDisplayName(
 ): string {
 	const listIdHeader = headers.find((h) => h.key === 'list-id')?.value;
 	if (listIdHeader) {
-		const humanName = unquotePhrase(listIdHeader.replace(/<[^>]+>/, '').trim());
+		// The phrase may be an RFC 2047 encoded word (`=?utf-8?Q?Caf=C3=A9_Weekly?=`).
+		const humanName = decodeWords(unquotePhrase(listIdHeader.replace(/<[^>]+>/, '').trim())).trim();
 		if (humanName) return humanName;
 	}
 

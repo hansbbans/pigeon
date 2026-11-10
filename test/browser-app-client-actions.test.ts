@@ -396,6 +396,13 @@ test('notification read action requires explicit confirmation after authenticati
  assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read,1);assert.equal(mutations.length,1);
 });
 
+test('the reader header column follows the saved reading width and margins',async(t)=>{
+ const {database,harness}=await createStatefulArticleBrowser({readingTools:readingIntegrationTools()});t.after(()=>database.close());
+ const scroll=harness.elements.get('reader-scroll')!;
+ assert.equal(scroll.style.getPropertyValue('--reader-measure'),'720px');
+ assert.equal(scroll.style.getPropertyValue('--reader-gutter'),'24px');
+});
+
 test('reader extraction prepares image policy before insertion, consent reloads safely, and preference shortcuts work',async(t)=>{
  const tools=readingIntegrationTools();let sources=0;
  const {database,harness}=await createStatefulArticleBrowser({readingTools:tools,extractReader:()=>({content:'<p>Extracted story</p><img src="https://example.com/image.jpg">',url:'https://example.com/reader'}),fetchOverride:async(input,init,next)=>{
