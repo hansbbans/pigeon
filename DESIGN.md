@@ -1,6 +1,84 @@
 # Pigeon design system
 
-What exists today, with file references. Every value below is grep-able in the code. Paths are relative to the repo root; `ios/…/PigeonReader/` means `ios/PigeonReader/PigeonReader/`.
+Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles. Reading (article text, story titles, the Front Page) is set in Bookerly with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
+
+The first half of this file is the target system from Claude Design. The second half, from **Principle** on, is what the code does today, with file references. Where they disagree, see **Drift**. Paths are relative to the repo root; `ios/…/PigeonReader/` means `ios/PigeonReader/PigeonReader/`.
+
+## Source
+- Claude Design: [Pigeon](https://claude.ai/artifact/7zYobhZqf2TbFHWbqe1w5d) (Design System), synced 2026-11-09 from `main@f5ce68e`. Its README holds the full usage rules; this file is the in-repo copy of the decisions.
+- Code: `Core/StructuredHTMLJavaScript.swift` (reader colours), `Core/ReaderTypography.swift` and `Core/ReaderTypographySettings.swift` (type and reader settings), `Features/Reader/FrontPageView.swift` (kickers), `src/browser-app-styles.ts` (web).
+
+## Color (target)
+Four themes, matching `ReaderTheme`: Light, Black (`dark`), Dark Gray and Sepia. System follows the device between Light and Black.
+
+| Token | Light | Black | Dark Gray | Sepia | Use |
+|---|---|---|---|---|---|
+| `bg` | `#ffffff` | `#000000` | `#1c1c1e` | `#f6ecd1` | Page and list background |
+| `bg-grouped` | `#f2f2f7` | `#1c1c1e` | `#2c2c2e` | `#ede2c9` | Settings, sheets, iPad sidebar |
+| `bg-inset` | `#eef1f3` | `#252c31` | `#2c2c2e` | `#ede2c9` | Code, table headers, image placeholders |
+| `separator` | `#c6c6c8` | `#38383a` | `#48484a` | `#d9c9a3` | Row hairlines (decorative only) |
+| `rule` | `#aeb7bd` | `#63717a` | `#636366` | `#b9a57c` | Article `hr`, table borders, masthead rules |
+| `text-heading` | `#151515` | `#fafafa` | `#ffffff` | `#2f281e` | Article title and headings |
+| `text-body` | `#202124` | `#ececec` | `#f2f2f7` | `#433a2c` | Article body |
+| `text-quote` / `quote-rule` | `#4c5660` / `#9aa6af` | `#c3ccd2` / `#71808b` | `#d1d1d6` / `#8e8e93` | `#62533d` / `#a58b62` | Blockquote text and bar |
+| `text-caption` | `#5e6971` | `#b7c1c8` | `#aeaeb2` | `#6b5d45` | Figure captions |
+| `link` | `#075f9a` | `#75c7ff` | `#64d2ff` | `#735c17` | Inline links |
+| `label` | `#000000` | `#ffffff` | `#ffffff` | `#2f281e` | Interface text |
+| `label-secondary` | `#6c6c70` | `#98989f` | `#aeaeb2` | `#6b5d45` | Metadata (opaque; replaces `.secondary`) |
+| `tint` / `focus-ring` | `#0063d1` | `#409cff` | `#409cff` | `#7a5c12` | Tappable things, 2px focus ring |
+| `on-tint` | `#ffffff` | `#000000` | `#000000` | `#ffffff` | Text on a filled tint |
+| `tint-soft` | `rgba(0,99,209,.10)` | `rgba(64,156,255,.18)` | same as Black | `rgba(122,92,18,.12)` | Selection wash |
+| `danger` | `#d70015` | `#ff6961` | `#ff6961` | `#a3271b` | Errors, always with a word |
+| `keep` | `#a05a00` | `#ffb340` | `#ffb340` | `#8a5a00` | Kept/starred, paywall label |
+
+- `kicker-1`…`kicker-8` are the existing `FrontPageKickerPalette` pairs unchanged: the light value is used for Light and Sepia, the dark value for Black and Dark Gray. `kicker-6` (`#2e7d32`) reads 4.36:1 on Sepia, which is flagged.
+- Brand colours from the app icon, for the icon, onboarding and marketing only: `brand-paper` `#fbf2e6`, `brand-slate` `#2d363e`, `brand-blue` `#597a9d` (fills only, 4:1 on paper).
+
+## Typography (target)
+| Style | Font / size / weight / line height | Use |
+|---|---|---|
+| `reader-body` | Bookerly 18 / 400 / 1.55 (28) | Article body; paragraphs 1.08em apart |
+| `reader-title` | Bookerly 25 / 700 / 30 | Article title |
+| `reader-h2` / `reader-h3` | Bookerly 26 / 22, 700, leading 1.16 | Article headings (1.45em / 1.24em) |
+| `story-title` | Bookerly 17 / 700 / 22, relative to `.body` | List story titles, two lines at most |
+| `masthead` / `front-lead` / `front-dek` | Bookerly Italic 38 / Bold 27 / Regular 16 | Front Page |
+| `kicker` | SF 11 / 700, uppercase, tracking 0.8 | Kickers and datelines (`.caption2`) |
+| `large-title` … `caption` | iOS text styles unchanged (34, 20, 17, 17, 15, 13, 12) | All chrome |
+| `code` | system monospace 15 / 22 | `pre` in articles |
+
+Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` for Bookerly); the reader's `textScale` multiplies on top. Body text never goes below 16pt, is never justified, and never uses light weights.
+
+## Spacing and radius (target)
+- Spacing: 2, 4, 8, 12, 16 (iOS layout margin), 20 (reader margin on iPhone), 24, 32.
+- Radius: 4 favicons, 8 thumbnails and code, 12 Front Page images and inset cells, 16 floating material panels, pill for capsules. Use continuous corners.
+- Layout: `reader-measure` 640 (about 66 characters), minimum tap target 44, row thumbnail 72×54.
+- Depth comes from system materials (`.bar`, `.regularMaterial`), never custom shadows.
+
+## Components (target)
+- **ReaderArticle**: header (feed in `tint`, `reader-title`, `subheadline` meta) and Bookerly body. Lives in `ArticleReaderHeaderView.swift` and `StructuredHTMLView` / `StructuredHTMLJavaScript.swift`.
+- **ArticleRow**: serif `story-title` first, one `caption` meta line, optional 72×54 thumbnail; read state is a change of weight and colour, not a dot. Lives in `ArticleRowView.swift`.
+- **FrontPage**: masthead between 2pt and 0.5pt rules, lead story plus grid, kicker colours by feed key. Lives in `FrontPageView.swift` and `FrontPageLayout.swift`.
+- **ReadingSettings**: a sheet with theme swatches, text size, line spacing, margins and remote images. Lives in `ReaderReadingSettingsView.swift`.
+
+## Do / Don't
+- Do use SF Symbols, outline for actions and `.fill` only for an on state. Do keep toolbars icon-only, with accessibility labels.
+- Do keep copy quiet, in Title Case for settings values ("Ask Before Loading") and sentence case for explanations. No emoji.
+- Don't restyle controls Apple already ships, add shadows, colour headings, or use colour alone to carry meaning.
+- Don't use raw `.red`, `.orange` or `.secondary` for text; use `danger`, `keep` and `label-secondary`.
+
+## Drift
+Design value first, then the code value. Nothing has been changed in code; each entry needs a decision on which one wins.
+- Column width: design `reader-measure` 640 vs code `defaultColumnWidth = 720.0` (`ios/…/PigeonReader/Core/ReaderTypographySettings.swift:93`). The web also defaults to 720 (`--reader-measure`).
+- List titles: design `story-title` (Bookerly Bold 17) vs code `.body.weight(.semibold)` (`ios/…/PigeonReader/Features/Reader/ArticleRowView.swift:101`).
+- Secondary text: design `label-secondary` (opaque) vs `.foregroundStyle(.secondary)`, used throughout `Features/` (about 3.5:1 on white).
+- Kept and paywall labels: design `keep` vs `.orange` (`ArticleRowView.swift:131`, `FrontPageView.swift:215`).
+- Errors: design `danger` vs `.red` (`ArticleListView.swift:571`, `Settings/SyncHealthView.swift:37`).
+- Tint: design `tint` `#0063d1` / `#409cff` vs the default accent and `.tint(.blue)` (`ArticleListView.swift:659,721,729`). The web accent is `#3466b0` / `#8fb3e8`.
+- Front Page thumbnails: design `radius-m` 12 vs `cornerRadius: 3` (`FrontPageView.swift:186`). Front Page padding is 18 (`FrontPageView.swift:52`), which is not on the spacing scale.
+- Sepia chrome: the design gives Sepia its own `bg-grouped`, `separator` and `rule`. The code tints only the reader background (`ArticleReaderView.swift:951`) and the article CSS (`StructuredHTMLJavaScript.swift:377`). Sepia `hr` and table borders fall back to the light greys.
+- `rule`: the design merges the `hr` colour `#aeb7bd` with the table border colour `#b7c0c6` (`StructuredHTMLJavaScript.swift:357`).
+- Web sepia: `#40362c` on `#f4ecd8`, links `#765b2d` (`src/browser-reading-preferences.ts`), vs iOS and the design `#433a2c` on `#f6ecd1`, links `#735c17`.
+- Swipe actions: `.tint(.orange)` and `.tint(.green)` (`ArticleListView.swift:670,677`) are outside the design palette, and the design discourages swipe-first triage.
 
 ## Principle
 
