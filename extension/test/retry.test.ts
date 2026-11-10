@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ensureRetryScheduled, MAX_RETRY_DELAY_MS, MIN_RETRY_DELAY_MS, nextRetryDelay, RETRY_ALARM, runRetry } from '../src/core/retry';
 import { enqueue } from '../src/core/queue';
-import { MemoryStore } from './helpers/fakes';
-import type { FlushResult } from '../src/core/save';
+import { MemoryStore, mockFetch, signedInStore } from './helpers/fakes';
+import { flushQueue, saveLink, type FlushResult } from '../src/core/save';
 
 const unreachable = { sent: 0, dropped: 0, passedOver: 2, remaining: 2, stoppedBy: 'unreachable' as const };
 
@@ -72,4 +72,35 @@ test('a flush that finds no token (as one can mid sign-in) leaves the scheduled 
 	assert.deepEqual(await runRetry(true, { store, alarms, flush: async () => signedOut }), signedOut);
 	assert.equal(alarms.alarms.get(RETRY_ALARM), 4);
 	assert.equal((await store.get('pigeonRetryDelayMs')).pigeonRetryDelayMs, 4 * 60_000);
+});
+
+test('a single queued save backs off while Pigeon stays unreachable', async () => {
+	const store = await signedInStore();
+	const offline = mockFetch(() => 'network-error');
+	await saveLink('https://example.com/only', { fetch: offline.fetch, store });
+	const alarms = new FakeAlarms();
+	const deps = { store, alarms, flush: () => flushQueue({ fetch: offline.fetch, store }) };
+	const delays: Array<number | undefined> = [];
+	for (let i = 0; i < 4; i++) {
+		await runRetry(false, deps);
+		delays.push(alarms.alarms.get(RETRY_ALARM));
+	}
+	assert.deepEqual(delays, [1, 2, 4, 8]);
+});
+
+test('a retry whose flush throws still leaves a retry scheduled', async () => {
+	const store = new MemoryStore();
+	const alarms = new FakeAlarms(); // empty: the one-shot alarm that started this retry has already fired
+	await enqueue(store, [{ url: 'https://example.com/a' }]);
+	await assert.rejects(runRetry(false, { store, alarms, flush: async () => { throw new Error('QUOTA_BYTES quota exceeded'); } }));
+	assert.equal(alarms.alarms.has(RETRY_ALARM), true, 'one save is queued and no alarm will retry it');
+});
+
+test('a flush that finds the user signed out does not start a retry loop of its own', async () => {
+	const store = new MemoryStore();
+	const alarms = new FakeAlarms();
+	await enqueue(store, [{ url: 'https://example.com/a' }]);
+	const result = await runRetry(false, { store, alarms, flush: async () => ({ sent: 0, dropped: 0, passedOver: 0, remaining: 1, stoppedBy: 'signedOut' }) });
+	assert.equal(result?.stoppedBy, 'signedOut');
+	assert.equal(alarms.alarms.has(RETRY_ALARM), false);
 });

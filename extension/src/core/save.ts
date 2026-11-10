@@ -184,6 +184,9 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 	let streak = 0;
 	for (const queued of queue) {
 		if (inFlight.has(queued.id)) continue;
+		// `queue` is a snapshot. A save that was in flight then may have finished and left the
+		// queue while an earlier entry was being sent; sending it again would save it twice.
+		if (!(await readQueue(deps.store)).some((current) => current.id === queued.id)) continue;
 		let entry = queued;
 		let attempt = await tryAttempts(entry.attempts, settings.origin, settings.auth, deps.fetch);
 		if (attempt.status === 'retry' && countsAgainstRequest(attempt.cause) && entry.attempts.length > 1) {
@@ -215,5 +218,8 @@ async function runFlush(deps: SaveDeps): Promise<FlushResult> {
 		await removeFromQueue(deps.store, entry.id);
 	}
 	result.remaining = (await readQueue(deps.store)).length;
+	// Nothing got through and every attempt failed: Pigeon is unreachable even though the streak
+	// limit was not reached (a single queued save can never reach it), so the retry backs off.
+	if (result.sent === 0 && result.dropped === 0 && result.passedOver > 0) return { ...result, stoppedBy: 'unreachable' };
 	return result;
 }
