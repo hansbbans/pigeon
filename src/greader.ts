@@ -105,6 +105,8 @@ function parseMarkAllTimestamp(raw: string | null): MarkAllTimestampCutoff {
 // datetime() truncates to whole seconds; %f keeps milliseconds on both sides.
 const MARK_ALL_CUTOFF_CLAUSE =
 	"strftime('%Y-%m-%dT%H:%M:%fZ', received_at) <= strftime('%Y-%m-%dT%H:%M:%fZ', ?, 'unixepoch')";
+// Mark-all must not rewrite rows that are already read: on a large library that is every row.
+const MARK_ALL_UNREAD_ONLY = ' AND is_read = 0';
 
 const MAX_MEMBERSHIP_PAYLOAD_BYTES = 900_000;
 const MAX_D1_BATCH_STATEMENTS = 50;
@@ -429,13 +431,9 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 // --- Endpoint handlers ---
 
 async function handleClientLogin(request: Request, env: Env): Promise<Response> {
-	const url = new URL(request.url);
-	let passwd: string | null = url.searchParams.get('Passwd');
-
-	if (!passwd && request.method !== 'GET') {
-		const body = await request.formData();
-		passwd = body.get('Passwd') as string | null;
-	}
+	// parseRequestParams tolerates any content type; request.formData() throws on a non-form POST.
+	const params = await parseRequestParams(request, new URL(request.url));
+	const passwd = params.get('Passwd');
 
 	if (!env.API_PASSWORD || !passwd || !constantTimeEqual(passwd, env.API_PASSWORD)) {
 		return new Response('Error=BadAuthentication', { status: 401, headers: { 'Content-Type': 'text/plain' } });
@@ -1282,7 +1280,7 @@ async function loadMarkAllRowIds(
 			`SELECT i.rowid
 			   FROM items i
 			   JOIN feeds f ON f.feed_key = i.feed_key
-			  WHERE f.is_active = 1 AND i.feed_key = ?${cutoffClause}`,
+			  WHERE f.is_active = 1 AND i.is_read = 0 AND i.feed_key = ?${cutoffClause}`,
 		)
 			.bind(options.feedKey, ...cutoffBind)
 			.all<{ rowid: number }>();
@@ -1296,7 +1294,7 @@ async function loadMarkAllRowIds(
 				`SELECT i.rowid
 				   FROM items i
 				   JOIN feeds f ON f.feed_key = i.feed_key
-				  WHERE f.is_active = 1
+				  WHERE f.is_active = 1 AND i.is_read = 0
 				    AND (f.category = ? OR EXISTS (SELECT 1 FROM feed_tags ft WHERE ft.feed_key = f.feed_key AND ft.label = ?))${cutoffClause}`,
 			)
 				.bind(label, label, ...cutoffBind)
@@ -1310,7 +1308,7 @@ async function loadMarkAllRowIds(
 				`SELECT i.rowid
 				   FROM items i
 				   JOIN feeds f ON f.feed_key = i.feed_key
-				  WHERE f.is_active = 1 AND f.category = ?${cutoffClause}`,
+				  WHERE f.is_active = 1 AND i.is_read = 0 AND f.category = ?${cutoffClause}`,
 			)
 				.bind(label, ...cutoffBind)
 				.all<{ rowid: number }>();
@@ -1323,7 +1321,7 @@ async function loadMarkAllRowIds(
 			`SELECT i.rowid
 			   FROM items i
 			   JOIN feeds f ON f.feed_key = i.feed_key
-			  WHERE f.is_active = 1${cutoffClause}`,
+			  WHERE f.is_active = 1 AND i.is_read = 0${cutoffClause}`,
 		)
 			.bind(...cutoffBind)
 			.all<{ rowid: number }>();
@@ -1402,7 +1400,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 				env,
 				rowids,
 				{
-					sql: `UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND ${MARK_ALL_CUTOFF_CLAUSE}`,
+					sql: `UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1) AND ${MARK_ALL_CUTOFF_CLAUSE}${MARK_ALL_UNREAD_ONLY}`,
 					binds: [feedKey, parsedTs.seconds],
 				},
 				clientFamily,
@@ -1412,7 +1410,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 			await runMarkAllUpdate(
 				env,
 				rowids,
-				{ sql: 'UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)', binds: [feedKey] },
+				{ sql: `UPDATE items SET is_read = 1 WHERE feed_key = ? AND feed_key IN (SELECT feed_key FROM feeds WHERE is_active = 1)${MARK_ALL_UNREAD_ONLY}`, binds: [feedKey] },
 				clientFamily,
 			);
 		}
@@ -1426,7 +1424,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 		      FROM feeds f
 		     WHERE f.is_active = 1
 		       AND (f.category = ? OR EXISTS (SELECT 1 FROM feed_tags ft WHERE ft.feed_key = f.feed_key AND ft.label = ?))
-		  )${tsClause}`;
+		  )${tsClause}${MARK_ALL_UNREAD_ONLY}`;
 		const binds = parsedTs.kind === 'cutoff' ? [label, label, parsedTs.seconds] : [label, label];
 		try {
 			const rowids = await loadMarkAllRowIds(env, { streamId, feedKey: null, cutoff: parsedTs });
@@ -1437,7 +1435,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 			}
 			const fallbackSql = `UPDATE items
 			    SET is_read = 1
-			  WHERE feed_key IN (SELECT feed_key FROM feeds WHERE category = ? AND is_active = 1)${tsClause}`;
+			  WHERE feed_key IN (SELECT feed_key FROM feeds WHERE category = ? AND is_active = 1)${tsClause}${MARK_ALL_UNREAD_ONLY}`;
 			const fallbackBinds = parsedTs.kind === 'cutoff' ? [label, parsedTs.seconds] : [label];
 			const rowids = await loadMarkAllRowIds(env, { streamId, feedKey: null, cutoff: parsedTs });
 			await runMarkAllUpdate(env, rowids, { sql: fallbackSql, binds: fallbackBinds }, clientFamily);
@@ -1450,7 +1448,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 				env,
 				rowids,
 				{
-					sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause} AND ${MARK_ALL_CUTOFF_CLAUSE}`,
+					sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause} AND ${MARK_ALL_CUTOFF_CLAUSE}${MARK_ALL_UNREAD_ONLY}`,
 					binds: [parsedTs.seconds],
 				},
 				clientFamily,
@@ -1459,7 +1457,7 @@ async function handleMarkAllAsRead(request: Request, env: Env): Promise<Response
 			await runMarkAllUpdate(
 				env,
 				rowids,
-				{ sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause}`, binds: [] },
+				{ sql: `UPDATE items SET is_read = 1 WHERE ${activeFeedClause}${MARK_ALL_UNREAD_ONLY}`, binds: [] },
 				clientFamily,
 			);
 		}

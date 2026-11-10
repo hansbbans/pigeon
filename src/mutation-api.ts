@@ -275,7 +275,8 @@ async function statusMutationStatements(
 			.bind(value ? 1 : 0, rowidsJSON),
 		env.DB.prepare(
 			`UPDATE item_statuses SET mutation_id = ?, updated_at = ?
-			 WHERE item_id IN (SELECT id FROM items WHERE rowid IN (SELECT value FROM json_each(?)))`,
+			 WHERE account_id = 'default'
+			   AND item_id IN (SELECT id FROM items WHERE rowid IN (SELECT value FROM json_each(?)))`,
 		).bind(mutation.id, appliedAt, rowidsJSON),
 		env.DB.prepare(
 			`INSERT OR IGNORE INTO engagement_events
