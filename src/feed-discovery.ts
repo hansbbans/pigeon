@@ -309,7 +309,8 @@ function addCandidate(
 	metadata: Omit<CandidateUrl, 'url' | 'aliases'>,
 ): void {
 	try {
-		const safeUrl = assertSafeFeedUrl(new URL(decodeHtmlEntities(href), pageUrl));
+		// `href` is already entity-decoded by parseHtmlAttributes; decoding again would corrupt `&amp;amp;`.
+		const safeUrl = assertSafeFeedUrl(new URL(href, pageUrl));
 		const url = canonicalizeYouTubeFeedUrl(safeUrl) ?? safeUrl;
 		const alias = safeUrl.href === url.href ? [] : [safeUrl.href];
 		if (seen.has(url.href)) {
@@ -416,13 +417,15 @@ function feedAcceptHeader(): string {
 	return 'application/rss+xml, application/atom+xml, application/feed+json, application/rdf+xml, application/xml, text/xml, text/html;q=0.8, */*;q=0.1';
 }
 
+const NAMED_ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' };
+
+// Single pass, so `&amp;amp;` decodes to `&amp;` and is not decoded again.
 function decodeHtmlEntities(value: string): string {
-	return value
-		.replaceAll('&amp;', '&')
-		.replaceAll('&quot;', '"')
-		.replaceAll('&#39;', "'")
-		.replaceAll('&lt;', '<')
-		.replaceAll('&gt;', '>');
+	return value.replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|(amp|quot|apos|lt|gt));/gi, (entity, hex?: string, decimal?: string, name?: string) => {
+		if (name) return NAMED_ENTITIES[name.toLowerCase()] ?? entity;
+		const codePoint = hex ? parseInt(hex, 16) : parseInt(decimal!, 10);
+		return codePoint > 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+	});
 }
 
 function redactedFailure(error: unknown): string {

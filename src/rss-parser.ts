@@ -51,6 +51,8 @@ const XML_OPTIONS = {
 	parseTagValue: false,
 	trimValues: true,
 	processEntities: true,
+	// Also decode numeric character references (`&#8217;`, `&#x2013;`), which WordPress emits in titles.
+	htmlEntities: true,
 	removeNSPrefix: false,
 };
 
@@ -166,11 +168,6 @@ export function parseFeed(feedText: string, options: ParseFeedOptions = {}): Par
 	}
 
 	throw new Error('Unsupported feed format (expected RSS, RDF, Atom, or JSON Feed)');
-}
-
-/** Kept for existing callers and Google Reader compatibility tests. */
-export function parseRssFeed(feedText: string, options: ParseFeedOptions = {}): ParsedFeed {
-	return parseFeed(feedText, options);
 }
 
 export function detectFeedFormat(feedText: string, contentType?: string | null): FeedFormat | null {
@@ -529,7 +526,15 @@ function attributeValue(record: FeedRecord, candidates: string[]): string | unde
 function textValue(value: unknown): string | undefined {
 	if (typeof value === 'string') return value.trim() || undefined;
 	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-	if (!value || Array.isArray(value) || typeof value !== 'object') return undefined;
+	if (!value || typeof value !== 'object') return undefined;
+	if (Array.isArray(value)) {
+		// A repeated element (two `<dc:creator>`): use the first one that has text.
+		for (const entry of value) {
+			const text = textValue(entry);
+			if (text) return text;
+		}
+		return undefined;
+	}
 
 	const record = value as FeedRecord;
 	return textValue(findKey(record, ['#text', '__cdata']));

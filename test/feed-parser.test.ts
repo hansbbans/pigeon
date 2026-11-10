@@ -296,3 +296,24 @@ test('RSS empty preferred elements fall back to later candidates', () => {
 	assert.equal(feed.items[0].author, 'Jane');
 	assert.ok(feed.items[0].pubDate?.startsWith('2026-10-01'));
 });
+
+test('XML numeric character references are decoded in titles and bylines', () => {
+	const feed = parseFeed(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
+<title>Tom &#038; Jerry&#8217;s Blog</title><link>https://example.com/</link>
+<item><guid>1</guid><title>Don&#8217;t Panic &#038; Carry On &#x2013; Part 1</title><dc:creator>Zo&#235; O&#8217;Neil</dc:creator><description>It&amp;#8217;s &lt;b&gt;escaped&lt;/b&gt; HTML</description></item>
+</channel></rss>`);
+	assert.equal(feed.title, 'Tom & Jerry’s Blog');
+	assert.equal(feed.items[0].title, 'Don’t Panic & Carry On – Part 1');
+	assert.equal(feed.items[0].author, 'Zoë O’Neil');
+	// Escaped HTML is decoded exactly once: its own character references stay for the HTML layer.
+	assert.equal(feed.items[0].content, 'It&#8217;s <b>escaped</b> HTML');
+});
+
+test('a repeated RSS element uses its first value instead of dropping the field', () => {
+	const feed = parseFeed(`<?xml version="1.0"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>T</title>
+		<item><guid>a</guid><title>x</title><dc:creator>Jane</dc:creator><dc:creator>Bob</dc:creator><description>First</description><description>Second</description></item>
+	</channel></rss>`);
+	assert.equal(feed.items[0].author, 'Jane');
+	assert.equal(feed.items[0].content, 'First');
+});

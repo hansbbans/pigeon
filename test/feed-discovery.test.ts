@@ -190,3 +190,15 @@ test('merges aliases from lower-scoring duplicates regardless of completion orde
 		'https://example.com/feed/',
 	]);
 });
+
+test('feed links with numeric character references in the href resolve to the real URL', () => {
+	const candidates = collectCandidateUrls(
+		'<link rel="alternate" type="application/rss+xml" href="/?feed=rss2&#038;cat=3"><link rel="alternate" type="application/atom+xml" href="/atom?a=1&amp;amp;b=2">',
+		new URL('https://example.com/'),
+	);
+	assert.deepEqual(candidates.slice(0, 2).map((candidate) => candidate.url.href), [
+		'https://example.com/?feed=rss2&cat=3',
+		// Decoded once: `&amp;amp;` is a literal `&amp;` in the URL, not a second separator.
+		'https://example.com/atom?a=1&amp;b=2',
+	]);
+});
