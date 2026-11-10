@@ -1,8 +1,8 @@
 # Project audit 2026-11-09
 
 Scope: whole repo (Worker, web reader, extension, iOS app, CI, docs), with state machines traced per area. Not time-boxed: one full read of every area by eight read-only auditors, then fixes.
-Branch: claude/bug-hunt-2026-11-09 (cut from origin/main f5ce68e, rebased onto 895f74a after PR #177 merged mid-audit). Not pushed.
-After the fixes: `npm test` 1131 tests, 1129 pass, 2 skipped; `tsc` clean; `npm audit` clean; `.mjs` tests 68 pass; extension `npm run check` green with 92 tests.
+Branch: claude/bug-hunt-2026-11-09 (cut from origin/main f5ce68e, rebased onto 895f74a after PR #177 merged mid-audit).
+After the fixes and the review round: `npm test` 1140 tests, 1138 pass, 2 skipped; `tsc` clean; `npm audit` clean; `.mjs` tests 68 pass; extension `npm run check` green with 93 tests.
 Tests for everything below that was not fixed are in `tasks/bug-hunt-proofs.md`.
 Baseline: `npm test` 1106 tests, 1104 pass, 2 skipped, 0 fail; `tsc` clean; `npm audit` clean; `.mjs` tests 67 pass; extension 87 pass; main CI green on f5ce68e, including the nightly full iOS UI suite.
 
@@ -12,25 +12,25 @@ Tiers: **proven** = a failing test was run, or the fact is mechanically checkabl
 Each has a test that failed before the fix, and fails again with the fix reverted.
 
 Worker ingest
-- Feed titles and bylines kept `&#8217;` and `&#038;` verbatim (the form WordPress emits); a repeated element such as two `dc:creator` dropped the field; discovery cut `/?feed=rss2&#038;cat=3` at the `#` and decoded every href twice. Tests in `feed-parser.test.ts`, `feed-discovery.test.ts`. d4c84b3
-- A List-Id with no ASCII letters or digits produced the feed key `''`; an RFC 2047 encoded List-Id was stored raw as the feed name; a forwarded email whose subject was only `Fwd:` was stored with an empty subject (which fails the iOS sync page); every email from a known sender wrote a no-op feed sync row. Tests in `email-integrity.test.ts`. 6053f26
-- Feeds in a declared non-UTF-8 charset became mojibake. Tests in `feed-network.test.ts`. 800594f
-- A 302/303/307 redirect replaced the stored `source_url`, so a signed or expiring target broke the feed for good; two entries with one guid overwrote each other on every changed poll. Tests in `rss-refresh-redirects-duplicates.test.ts`. 912f57a
+- Feed titles and bylines kept `&#8217;` and `&#038;` verbatim (the form WordPress emits); a repeated element such as two `dc:creator` dropped the field; discovery cut `/?feed=rss2&#038;cat=3` at the `#` and decoded every href twice. Only display fields are decoded: guids, links and bodies are untouched, and item identity is unchanged across the 62-document corpus. Existing rows keep their old titles. Tests in `feed-parser.test.ts`, `feed-discovery.test.ts`.
+- A List-Id with no ASCII letters or digits produced the feed key `''`; an RFC 2047 encoded List-Id was stored raw as the feed name; a forwarded email whose subject was only `Fwd:` was stored with an empty subject (which fails the iOS sync page); every email from a known sender wrote a no-op feed sync row. Tests in `email-integrity.test.ts`.
+- Feeds in a declared non-UTF-8 charset became mojibake. Valid UTF-8 always wins over a declared charset, so a UTF-8 feed with a wrong header is unaffected. Tests in `feed-network.test.ts`.
+- A 302/303/307 redirect replaced the stored `source_url`, so a signed or expiring target broke the feed for good. Refresh, discovery and subscribe now store only the permanent URL, as source, canonical and alias. Two entries with one guid overwrote each other on every changed poll. Tests in `rss-refresh-redirects-duplicates.test.ts`, `feed-discovery.test.ts`.
 
 Worker API
-- ClientLogin threw on JSON, text or empty POSTs (the one unauthenticated route); mark-all-as-read rewrote and loaded every row in the stream, read or not; the status mutation scanned all of `item_statuses` for want of an `account_id` predicate. Tests in `write-path-costs.test.ts`. 3c3bc10
+- ClientLogin threw on JSON, text or empty POSTs (the one unauthenticated route); mark-all-as-read rewrote and loaded every row in the stream, read or not; the status mutation scanned all of `item_statuses` for want of an `account_id` predicate. Tests in `write-path-costs.test.ts`.
 
 Web reader
-- "Save library offline" could never succeed: `/app` has been served `Cache-Control: private` since b2f9fa5 and the service worker refuses private responses. Now `no-cache`. **This changes two existing header assertions in `browser-app.test.ts`.** Live production shows the broken header today. Test in `browser-service-worker.test.ts`. 6e0ba79
-- A 503 from `/app/status` during session restore discarded a valid token. Test in `browser-app-client-shell.test.ts`. 50a7989
-- Reading position was not restored when the body loaded after the article opened. Test in `browser-app-client-reader.test.ts`. 68d2379
+- "Save library offline" could never succeed: `/app` has been served `Cache-Control: private` since b2f9fa5 and the service worker refuses private responses. Now `no-cache`. **This changes two existing header assertions in `browser-app.test.ts`.** Live production shows the broken header today. Test in `browser-service-worker.test.ts`.
+- A 5xx from `/app/status` (or a network failure) during session restore discarded a valid token. Test in `browser-app-client-shell.test.ts`.
+- Reading position was not restored when the body loaded after the article opened. Test in `browser-app-client-reader.test.ts`.
 
 Extension
-- One queued save never backed off; a flush re-sent a save that had finished meanwhile; a flush that threw left the queue with no retry alarm; sign-out and settings errors were written into a hidden form. Tests in `retry.test.ts`, `save.test.ts`, `manifest.test.ts`. d9e274c
+- One queued save never backed off while Pigeon was unreachable; a flush re-sent a save that had finished meanwhile; a flush that threw left the queue with no retry alarm; sign-out and settings errors were written into a hidden form. Tests in `retry.test.ts`, `save.test.ts`, `manifest.test.ts`.
 
 Release tooling and hygiene
-- `app-store-connect-verify.mjs` returned its default timeout and poll interval in seconds where milliseconds are expected (900 ms, 15 ms) when the env vars are unset; `npm run test:testflight` ran one of three `.mjs` test files. 167f52c
-- Untracked two `.pyc` files, ignored `__pycache__/` and `HANDOFF.md`; removed `parseRssFeed`, `tokenOverlapSimilarity` and `clearMonitoredTopics` (no references); README schema version 13 to 16, Readwise and Safari facts. b1e0258
+- `app-store-connect-verify.mjs` returned its default timeout and poll interval in seconds where milliseconds are expected (900 ms, 15 ms) when the env vars are unset; `npm run test:testflight` ran one of three `.mjs` test files.
+- Untracked two `.pyc` files, ignored `__pycache__/` and `HANDOFF.md`; removed `parseRssFeed`, `tokenOverlapSimilarity` and `clearMonitoredTopics` (no references); README schema version 13 to 16, Readwise and Safari facts.
 
 ## iOS: nothing fixed, nothing verified
 The iOS auditors read the code but were told not to build. When it was time to run their tests the shared Mac had a load average above 600, two CI runners working and more iOS jobs queued, so no local simulator run was started. Every iOS item below is therefore unrun; the tests are written out in `tasks/bug-hunt-proofs.md`. One server-side cause is fixed already (the empty forwarded subject).
@@ -139,4 +139,5 @@ The iOS auditors read the code but were told not to build. When it was time to r
 - Dropped after trying: conditional `site_url`/`source_url` in the RSS refresh UPDATE (five existing tests pin it; listed above as a decision).
 - Not attempted: all iOS work, for the reason above. Nothing under `ios/` changed except two README sentences.
 - Auditor reports not acted on because the evidence was thin: none were contradicted by a test. The iOS items are the unverified ones.
-- Not pushed, no PR opened: this was asked for as fix-and-list, not ship.
+- Code review of the branch before pushing found ten issues, all fixed in four `fix(review)` commits. The two that mattered: decoding entities parser-wide would have changed the identity of stored articles whose guid contains `&#038;` (duplicates after deploy), and trusting the header charset would have broken UTF-8 feeds served with a legacy default.
+- After the review fixes: `npm test` 1140 tests, 1138 pass, 2 skipped; extension 93 tests.
