@@ -67,7 +67,7 @@ Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` for Bookerly); the re
 - Don't use raw `.red`, `.orange` or `.secondary` for text; use `danger`, `keep` and `label-secondary`.
 
 ## Drift
-Design value first, then the code value. Nothing has been changed in code; each entry needs a decision on which one wins.
+Design value first, then the code value on `main` when this was written. Hans decided the design wins on every entry. The fixes are hansbbans/pigeon#177 (web) and hansbbans/pigeon#178 (iOS); remove each entry once its fix is on `main`.
 - Column width: design `reader-measure` 640 vs code `defaultColumnWidth = 720.0` (`ios/…/PigeonReader/Core/ReaderTypographySettings.swift:93`). The web also defaults to 720 (`--reader-measure`).
 - List titles: design `story-title` (Bookerly Bold 17) vs code `.body.weight(.semibold)` (`ios/…/PigeonReader/Features/Reader/ArticleRowView.swift:101`).
 - Secondary text: design `label-secondary` (opaque) vs `.foregroundStyle(.secondary)`, used throughout `Features/` (about 3.5:1 on white).
@@ -78,7 +78,8 @@ Design value first, then the code value. Nothing has been changed in code; each 
 - Sepia chrome: the design gives Sepia its own `bg-grouped`, `separator` and `rule`. The code tints only the reader background (`ArticleReaderView.swift:951`) and the article CSS (`StructuredHTMLJavaScript.swift:377`). Sepia `hr` and table borders fall back to the light greys.
 - `rule`: the design merges the `hr` colour `#aeb7bd` with the table border colour `#b7c0c6` (`StructuredHTMLJavaScript.swift:357`).
 - Web sepia: `#40362c` on `#f4ecd8`, links `#765b2d` (`src/browser-reading-preferences.ts`), vs iOS and the design `#433a2c` on `#f6ecd1`, links `#735c17`.
-- Swipe actions: `.tint(.orange)` and `.tint(.green)` (`ArticleListView.swift:670,677`) are outside the design palette, and the design discourages swipe-first triage.
+- Swipe actions: `.tint(.orange)` and `.tint(.green)` (`ArticleListView.swift:670,677`) are outside the design palette, and the design discourages swipe-first triage. #178 changes the fills to tint, `keep` and teal (`kicker-2`). The swipes themselves stay.
+- Image placeholders (`.pigeon-image-failure`, `.pigeon-image-blocked`) keep the `#b7c0c6` border; the design does not specify one. Not changed.
 
 ## Principle
 
