@@ -34,9 +34,11 @@
 			<p id="password-error" class="error" hidden></p>
 
 			<button id="submit" type="submit">Sign in</button>
-			<p id="general-error" class="error" role="alert" hidden></p>
 			<p class="hint">The password is sent once to get a token. Only the token is stored.</p>
 		</form>
+
+		<!-- Outside the form: it also reports sign-out and settings errors, when the form is hidden. -->
+		<p id="general-error" class="error" role="alert" hidden></p>
 
 		<p id="queue" class="hint" hidden></p>
 	</main>

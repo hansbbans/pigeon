@@ -400,13 +400,3 @@ export function scoreTopics(
 		evidenceCount: profile.evidenceCount,
 	};
 }
-
-/** A small overlap metric used as a diversity penalty, not as a topic score. */
-export function tokenOverlapSimilarity(left: string, right: string): number {
-	const leftTokens = new Set(extractTopicFeatures({ title: left }).values());
-	const rightTokens = new Set(extractTopicFeatures({ title: right }).values());
-	if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
-	let intersection = 0;
-	for (const token of leftTokens) if (rightTokens.has(token)) intersection += 1;
-	return intersection / (leftTokens.size + rightTokens.size - intersection);
-}

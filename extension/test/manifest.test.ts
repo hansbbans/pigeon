@@ -66,3 +66,10 @@ test('the build rejects unknown, missing and repeated arguments', () => {
 		assert.throws(() => parseBuildArgs(args), UsageError, args.join(' '));
 	}
 });
+
+test('the options page keeps its general error outside the sign-in form, which is hidden when signed in', () => {
+	const html = readFileSync(join(root, 'static', 'options.html'), 'utf8');
+	const form = html.slice(html.indexOf('<form id="sign-in"'), html.indexOf('</form>'));
+	assert.ok(html.includes('id="general-error"'));
+	assert.ok(!form.includes('id="general-error"'), 'sign-out and settings errors would be written into a hidden form');
+});

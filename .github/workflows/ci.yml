@@ -74,7 +74,7 @@ jobs:
         with:
           node-version: 22
       - name: Verify TestFlight release tooling
-        run: node --test test/app-store-connect-verify.test.mjs test/testflight-ci-gate.test.mjs test/testflight-release-monitor.test.mjs
+        run: npm run test:testflight
       - name: Verify simulator ownership guards
         run: python3 .github/scripts/test_ios_simulator_session.py
       - name: Verify iOS smoke UI test list

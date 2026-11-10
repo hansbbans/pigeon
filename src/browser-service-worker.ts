@@ -4,7 +4,8 @@ export function renderBrowserServiceWorker(): string {
 const SHELL_CACHE = 'pigeon-public-shell-v1';
 const SHELL_URL = new URL('/app', self.location.origin).href;
 async function fetchPublicShell() {
- const response = await fetch(SHELL_URL, { credentials: 'omit', cache: 'no-store', redirect: 'error' });
+ // 'no-cache' revalidates on every load, so an unchanged shell costs a 304; 'no-store' downloaded it whole each time.
+ const response = await fetch(SHELL_URL, { credentials: 'omit', cache: 'no-cache', redirect: 'error' });
  if (response.status === 200 && /text\\/html/i.test(response.headers.get('Content-Type') || '') && !/private|no-store/i.test(response.headers.get('Cache-Control') || '')) {
   try { const cache = await caches.open(SHELL_CACHE); await cache.put(SHELL_URL, response.clone()); } catch (_) {}
  }
