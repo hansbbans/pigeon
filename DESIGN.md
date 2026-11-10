@@ -67,24 +67,29 @@ Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` for Bookerly); the re
 - Don't use raw `.red`, `.orange` or `.secondary` for text; use `danger`, `keep` and `label-secondary`.
 
 ## Drift
-Where the code on `main` still differs from the design. hansbbans/pigeon#177 (web) and hansbbans/pigeon#178 (iOS) closed the original list: tint, sepia, column width 640, opaque secondary text, `keep` and `danger`, Bookerly list titles, Front Page radius and padding, sepia rules and table borders, and swipe fills.
+Where the code on `main` still differs from the design. hansbbans/pigeon#177 (web) and hansbbans/pigeon#178 (iOS) closed the original list: tint (iOS and web), sepia page colours (iOS and web), column width 640, and on iOS opaque secondary text, `keep` and `danger`, Bookerly list titles, Front Page radius and padding, sepia rules and table borders, and swipe fills.
 - Sepia chrome: the design gives Sepia its own `bg-grouped`, `separator` and `rule`. The code paints Sepia only in the reader (page, bottom controls, compact back bar, article CSS). Settings, sheets and lists stay on system greys.
 - `kicker-6` (`#2e7d32`) reads 4.36:1 on Sepia, under the 4.5:1 rule. Not changed.
-- Image placeholders (`.pigeon-image-failure`, `.pigeon-image-blocked`) keep the `#b7c0c6` border; the design does not specify one. Not changed.
+- Image placeholders (`.pigeon-image-failure`, `.pigeon-image-blocked`) keep the `#b7c0c6` border (`#636366` in Dark Gray); the design does not specify one. Not changed.
+- Figure captions: `figcaption` is `#66727b` (`StructuredHTMLJavaScript.swift`) vs `text-caption` `#5e6971`, and there is no Sepia override, so Sepia captions are 4.19:1 instead of `#6b5d45`.
+- Web `keep` and `danger`: `--star` `#e3a008` / `#f0b429` (about 2.3:1 on white) and `--danger` `#c4382b` / `#ff8a7a` in `src/browser-app-styles.ts` vs `keep` `#a05a00` / `#ffb340` and `danger` `#d70015` / `#ff6961`.
+- Web Sepia sets only text, background and link (`frameCSS()` in `src/browser-reading-preferences.ts`); headings, quotes, rules and captions get no Sepia colours.
+- Selection wash: iOS uses opacity 0.1 (0.16 in the sidebar) in every mode vs `tint-soft` 0.10 light and 0.18 dark.
+- Radii and kickers: article images use 10 (`ArticleBodyView.swift`, `RemoteArticleImageView.swift`), the boundary pull panel 14 (target 16), and only Front Page thumbnails use continuous corners. Feed kickers use `.tracking(0.9)` and the dateline `.caption2.weight(.semibold)` vs `kicker` 700 with tracking 0.8.
 - Swipe actions remain on the Classic list; the design discourages swipe-first triage but the swipes stay.
 
 ## Principle
 
 Design rule (from `CLAUDE.md`): the reader must not look like Mail. No sender/subject/preview rows, no swipe-to-triage as the main interaction, no unread dots as the organizing idea. Lean editorial or magazine. Before proposing a redesign, ask what Hans dislikes about the current screen.
 
-The editorial direction is clearest in the iOS Front Page layout and the Bookerly reader. The Classic iOS list and the web article list still use source + title + preview rows and swipe actions. Treat those as legacy, not as patterns to copy.
+The editorial direction is clearest in the iOS Front Page layout and the Bookerly reader. The Classic iOS list (title first, one meta line, no preview, swipe actions) and the web article list (title plus a two-line preview) are closer to an inbox. Treat those as legacy, not as patterns to copy.
 
 ## iOS (PigeonReader, SwiftUI)
 
 **Tokens.** `Resources/Assets.xcassets` has an `AccentColor` set (`#0063d1` / `#409cff`, the design's `tint`), wired through `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` in `project.yml`. `Core/PigeonPalette.swift` holds the design colours SwiftUI lacks: `labelSecondary` (`.pigeonSecondary`, `#6c6c70` / `#98989f`, used instead of `.secondary`), `keep` (`.pigeonKeep`), `danger` (`.pigeonDanger`), `positive` (`kicker-6`), the fixed `SwipeFill` colours and the sepia and dark-gray grounds. `PigeonPaletteTests` pins the 4.5:1 floor. Otherwise UI uses system semantics (`.primary`, `.bar`, `.systemBackground`). Named colors are:
-- Reader background, `readerBackground` in `Features/Reader/ArticleReaderView.swift`: `PigeonPalette.sepiaBackground` (`#f6ecd1`), `darkGrayBackground` (`#1c1c1e`), otherwise `.systemBackground`. The bottom controls bar and the compact back bar use the same ground.
-- Kicker palette, `FrontPageKickerPalette` (`Core/FrontPageLayout.swift` picks the index by FNV-1a hash of `feedKey`; the colors are in `Features/Reader/FrontPageView.swift`): 8 light/dark pairs, `0xB3261E/0xFF8A80`, `0x1F6F6A/0x6FD6CC`, `0x3A5BA0/0x9DB6FF`, `0x8A5A00/0xF2C14E`, `0x6A57C9/0xBCAEFF`, `0x2E7D32/0x8BD48F`, `0xA2386B/0xF59AC4`, `0x5D4037/0xD7B8A8`.
-- Selection: `Color.accentColor.opacity(0.1)` for rows and stories, `0.16` for folder rows (`ReaderFolderNavigationRowView.swift`).
+- Reader background, `readerBackground` in `Features/Reader/ArticleReaderView.swift`: `PigeonPalette.sepiaBackground` (`#f6ecd1`), `darkGrayBackground` (`#1c1c1e`), otherwise `.systemBackground`. In Sepia the bottom controls bar and the compact back bar use the page colour; in every other theme they use `.bar`.
+- Kicker palette, `FrontPageKickerPalette` (`Features/Reader/FrontPageLayout.swift` picks the index by FNV-1a hash of `feedKey`; the colors are in `Features/Reader/FrontPageView.swift`): 8 light/dark pairs, `0xB3261E/0xFF8A80`, `0x1F6F6A/0x6FD6CC`, `0x3A5BA0/0x9DB6FF`, `0x8A5A00/0xF2C14E`, `0x6A57C9/0xBCAEFF`, `0x2E7D32/0x8BD48F`, `0xA2386B/0xF59AC4`, `0x5D4037/0xD7B8A8`.
+- Selection: `Color.accentColor.opacity(0.1)` for article rows, Front Page stories and Read It Later rows; `0.16` for sidebar rows (`ReaderNavigationRowView.swift`, `ReaderFolderNavigationRowView.swift`). Same opacity in light and dark.
 - Article HTML CSS, inline in `Core/StructuredHTMLJavaScript.swift` (~lines 316-390): body `#202124`, headings `#151515`, links `#075f9a`, `pre`/table header `#eef1f3`, `hr` and table borders `#aeb7bd` (sepia `#b9a57c`), image placeholder borders `#b7c0c6`. There are per-theme overrides on `body[data-theme="light|dark|dark-gray|sepia"]`, for example sepia text `#433a2c` and links `#735c17`, dark-gray background `#1c1c1e` and links `#64d2ff`, plus a `prefers-color-scheme: dark` fallback.
 
 **Themes.** `ReaderTheme` in `Core/ReaderTypographySettings.swift` has `system`, `light`, `darkGray` ("Dark Gray"), `dark` ("Black") and `sepia`. `ReaderThemeColorSchemePlacement` (`Core/ReaderTypography.swift`) applies the scheme as a window-level `preferredColorScheme` only in compact readers. In the iPad split view it is environment-only, so the sidebar and list do not get tinted.
