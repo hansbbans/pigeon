@@ -431,9 +431,17 @@ export async function handleGreaderRequest(request: Request, env: Env): Promise<
 // --- Endpoint handlers ---
 
 async function handleClientLogin(request: Request, env: Env): Promise<Response> {
-	// parseRequestParams tolerates any content type; request.formData() throws on a non-form POST.
-	const params = await parseRequestParams(request, new URL(request.url));
-	const passwd = params.get('Passwd');
+	// This route is unauthenticated, so a body that cannot be parsed (a non-form content type, a
+	// malformed multipart body) must end in a 401, never in an exception.
+	const url = new URL(request.url);
+	let passwd = url.searchParams.get('Passwd');
+	if (!passwd && request.method !== 'GET') {
+		try {
+			passwd = (await parseRequestParams(request, url)).get('Passwd');
+		} catch {
+			passwd = null;
+		}
+	}
 
 	if (!env.API_PASSWORD || !passwd || !constantTimeEqual(passwd, env.API_PASSWORD)) {
 		return new Response('Error=BadAuthentication', { status: 401, headers: { 'Content-Type': 'text/plain' } });

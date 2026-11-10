@@ -2392,9 +2392,10 @@ export function renderBrowserAppRuntimeScript(): string {
     });
 
     if (response.status === 200) return true;
-    if (response.status === 401) return false;
-    // A server error says nothing about the token. Fail like an unreachable server instead.
-    throw new Error('Session check failed: ' + response.status);
+    // A server error says nothing about the token: fail like an unreachable server and keep it.
+    // Any other answer (401, or a 403/404 from something in front of the Worker) rejects it.
+    if (response.status >= 500) throw new Error('Session check failed: ' + response.status);
+    return false;
   }
 
   function createViewButton(view, extraClassNames) {
@@ -3433,7 +3434,11 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
-    if (!preparedReading) { preparedReaderKey = ''; readerPositionAppliedFor = null; }
+    if (!preparedReading) preparedReaderKey = '';
+    // A different article (or none) in the frame: the next time this one is shown, restore it again.
+    // The loading placeholder of the same article must not reset this, or a re-render mid-read
+    // would jump back to the last saved position.
+    if (renderedReaderItemId !== itemId) readerPositionAppliedFor = null;
     const shouldReplace = renderedReaderItemId !== itemId || readerFrame.srcdoc !== documentHtml;
     if (!shouldReplace) {
       return;

@@ -42,6 +42,7 @@ for (const [name, init] of [
 	['a JSON body', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"Passwd":"nope"}' }],
 	['a plain-text body', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'hello' }],
 	['an empty body', { method: 'POST' }],
+	['a malformed multipart body', { method: 'POST', headers: { 'Content-Type': 'multipart/form-data' }, body: 'not multipart at all' }],
 ] as const) {
 	test(`ClientLogin answers ${name} with BadAuthentication instead of throwing`, async () => {
 		const s = await setup();
@@ -61,6 +62,17 @@ test('ClientLogin still accepts a form-encoded password', async () => {
 	}, false);
 	assert.equal(response.status, 200);
 	assert.match(await response.text(), /^SID=pigeon\//);
+	s.database.close();
+});
+
+test('ClientLogin takes the password from the query string even when the form body has an empty one', async () => {
+	const s = await setup();
+	const response = await s.request(`/accounts/ClientLogin?Passwd=${PASSWORD}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+		body: 'Email=pigeon&Passwd=',
+	}, false);
+	assert.equal(response.status, 200);
 	s.database.close();
 });
 

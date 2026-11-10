@@ -65,6 +65,18 @@ test('a server error while restoring the session keeps the saved token', async (
 	assert.equal(elements.get('login-error')?.textContent, 'Could not restore session.');
 });
 
+test('a 403 or 404 while restoring the session rejects the saved token like a 401', async () => {
+	for (const status of [403, 404]) {
+		const { elements, storage } = await createBrowserHarness({
+			storedToken: 'rejected-token',
+			fetchImpl: async () => new Response('No', { status }),
+		});
+		await flushBrowserTasks();
+		assert.equal(storage.has(AUTH_STORAGE_KEY), false, String(status));
+		assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false, String(status));
+	}
+});
+
 test('clear saved session cancels a pending startup validation and returns focus to the password field', async () => {
 	const startupValidation = createDeferred<Response>();
 	const { elements, storage, getActiveElement } = await createBrowserHarness({
