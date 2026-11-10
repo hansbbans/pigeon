@@ -2344,13 +2344,13 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReader();
   }
 
-  function setLoggedOut(message) {
+  function setLoggedOut(message, keepStoredToken) {
     activeLoginAttemptId += 1;
     setMobilePane('stream');
     setSearchOpen(false);
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
-    clearStoredToken();
+    if (!keepStoredToken) clearStoredToken();
     cancelPendingValidation();
     resetReaderState();
     detachFrameNavigationListener();
@@ -2388,7 +2388,10 @@ export function renderBrowserAppRuntimeScript(): string {
       },
     });
 
-    return response.status === 200;
+    if (response.status === 200) return true;
+    if (response.status === 401) return false;
+    // A server error says nothing about the token. Fail like an unreachable server instead.
+    throw new Error('Session check failed: ' + response.status);
   }
 
   function createViewButton(view, extraClassNames) {
@@ -5648,7 +5651,7 @@ export function renderBrowserAppRuntimeScript(): string {
       try {const library=await openOfflineLibrary(true);if(!isActiveValidation(validationId))return;
         if(library){offlineSession=true;setLoggedIn();await restoreOrBootstrapReader();return;}
       }catch(_){}
-      if(isActiveValidation(validationId))setLoggedOut('Could not restore session.');
+      if(isActiveValidation(validationId))setLoggedOut('Could not restore session.', true);
     });
   } else {
     setLoggedOut('');

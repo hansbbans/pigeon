@@ -49,6 +49,22 @@ test('runtime script validates a stored token before restoring the logged-in she
 	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), true);
 });
 
+test('a server error while restoring the session keeps the saved token', async () => {
+	const { elements, storage } = await createBrowserHarness({
+		storedToken: 'valid-token',
+		fetchImpl: async (input) => {
+			if (input === '/app/status') return new Response('Database migration failed', { status: 503 });
+			throw new Error(`Unexpected fetch: ${input}`);
+		},
+	});
+	await flushBrowserTasks();
+
+	// The token may still be good, so a reload can retry; only a 401 proves it is not.
+	assert.equal(storage.get(AUTH_STORAGE_KEY), 'valid-token');
+	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false);
+	assert.equal(elements.get('login-error')?.textContent, 'Could not restore session.');
+});
+
 test('clear saved session cancels a pending startup validation and returns focus to the password field', async () => {
 	const startupValidation = createDeferred<Response>();
 	const { elements, storage, getActiveElement } = await createBrowserHarness({
