@@ -4,6 +4,8 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.11.0] - 2026-11-11
+
 ### Changed
 
 - The iPhone home screen is a grid of tiles instead of a list with unread counts. Each view (For You, Today, Read It Later) is a tile, and each folder is a tile in its own colour showing its newest headline and the icons of its feeds. The large "Pigeon" title is gone; the date and how many stories arrived today sit in the toolbar. Unread no longer appears on the home screen. "All Feeds" opens the full list of folders and feeds with their counts, and a list still shows its count in its title. iPad keeps the list.
