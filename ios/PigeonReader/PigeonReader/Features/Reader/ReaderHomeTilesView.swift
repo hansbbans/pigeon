@@ -17,7 +17,6 @@ struct ReaderHomeTilesView: View {
 	let onShowLibrary: () -> Void
 
 	var body: some View {
-		@Bindable var model = model
 		let tiles = makeTiles()
 
 		ScrollView {
@@ -93,26 +92,7 @@ struct ReaderHomeTilesView: View {
 				ReaderHomeDateline(newTodayCount: tiles.newTodayCount)
 			}
 			.sharedBackgroundVisibility(.hidden)
-			ToolbarItem(placement: .topBarTrailing) {
-				Button("Add Feed", systemImage: "plus") {
-					editorRoute = .addFeed
-				}
-				.accessibilityIdentifier("add-feed")
-				.accessibilityHint("Subscribe to a website or feed URL")
-			}
-			ToolbarItem(placement: .topBarTrailing) {
-				Menu("Filter", systemImage: "line.3.horizontal.decrease") {
-					Picker("Filter collections", selection: $model.sidebarFilter) {
-						ForEach(ReaderSidebarFilter.allCases) { filter in
-							Text(filter.title)
-								.tag(filter)
-						}
-					}
-				}
-				.accessibilityLabel(ReaderAccessibilityText.filterCollections)
-				.accessibilityValue(model.sidebarFilter.title)
-				.accessibilityHint(ReaderAccessibilityText.filterCollectionsHint)
-			}
+			ReaderLibraryToolbarItems(editorRoute: $editorRoute)
 			ReaderSettingsToolbarItem()
 		}
 		.refreshable {
@@ -156,14 +136,17 @@ private struct ReaderHomeDateline: View {
 	let newTodayCount: Int
 
 	var body: some View {
-		HStack(spacing: 6) {
-			Text(Date.now, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-			if newTodayCount > 0 {
-				Text(verbatim: "·")
-					.accessibilityHidden(true)
-				Text("\(newTodayCount) new")
-					.monospacedDigit()
-					.contentTransition(reduceMotion ? .identity : .numericText(value: Double(newTodayCount)))
+		// The count may not change at midnight, so the date keeps its own clock.
+		TimelineView(.everyMinute) { context in
+			HStack(spacing: 6) {
+				Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+				if newTodayCount > 0 {
+					Text(verbatim: "·")
+						.accessibilityHidden(true)
+					Text("\(newTodayCount) new")
+						.monospacedDigit()
+						.contentTransition(reduceMotion ? .identity : .numericText(value: Double(newTodayCount)))
+				}
 			}
 		}
 		.font(.caption2.weight(.bold))
@@ -212,7 +195,7 @@ private struct ReaderHomeFolderTile: View {
 	let folder: ReaderHomeTiles.FolderTile
 
 	var body: some View {
-		let color = FrontPageKickerPalette.color(for: folder.id)
+		let color = FrontPageKickerPalette.color(at: folder.colorIndex)
 
 		VStack(alignment: .leading, spacing: 8) {
 			Text(folder.item.title)

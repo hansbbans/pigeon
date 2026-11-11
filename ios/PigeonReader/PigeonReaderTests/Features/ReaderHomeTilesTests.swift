@@ -80,6 +80,46 @@ struct ReaderHomeTilesTests {
 		#expect(folder.feedTitles == ["feed-1", "feed-2", "feed-3"])
 	}
 
+	@Test func feedsSharingAnIconShowItOnce() throws {
+		let shared = URL(string: "https://example.com/shared.png")
+		let navigation = ReaderNavigationState(items: [
+			item("folder-a", kind: .folder),
+			item("feed-1", kind: .feed, parentID: "folder-a", iconURL: shared),
+			item("feed-2", kind: .feed, parentID: "folder-a", iconURL: shared),
+			item("feed-3", kind: .feed, parentID: "folder-a", iconURL: URL(string: "https://example.com/other.png")),
+		])
+
+		let tiles = ReaderHomeTiles.make(snapshot: makeSnapshot(navigation), navigation: navigation) { _ in nil }
+
+		#expect(try #require(tiles.folders.first).iconURLs.map(\.lastPathComponent) == ["shared.png", "other.png"])
+	}
+
+	@Test func foldersGetDistinctColoursUntilThePaletteRunsOut() {
+		let ids = (1...8).map { "user/-/label/Folder \($0)" }
+
+		let indices = ReaderHomeTiles.colorIndices(for: ids)
+
+		#expect(Set(indices).count == 8)
+		#expect(indices.first == FrontPageKickerPalette.colorIndex(for: ids[0]))
+		// A ninth folder cannot be unique; it falls back to its own hash.
+		let nine = ReaderHomeTiles.colorIndices(for: ids + ["user/-/label/Ninth"])
+		#expect(nine.last == FrontPageKickerPalette.colorIndex(for: "user/-/label/Ninth"))
+		#expect(Array(nine.prefix(8)) == indices)
+	}
+
+	@Test func unreadFilterKeepsEachVisibleFoldersColour() {
+		let navigation = ReaderNavigationState(items: [
+			item("folder-a", kind: .folder, unread: 0),
+			item("folder-b", kind: .folder, unread: 3),
+		])
+
+		let all = ReaderHomeTiles.make(snapshot: makeSnapshot(navigation), navigation: navigation) { _ in nil }
+		let unread = ReaderHomeTiles.make(snapshot: makeSnapshot(navigation, filter: .unread), navigation: navigation) { _ in nil }
+
+		#expect(all.folders[0].colorIndex != all.folders[1].colorIndex)
+		#expect(unread.folders.first?.colorIndex == all.folders[1].colorIndex)
+	}
+
 	@Test func unreadFilterHidesFoldersWithNothingUnread() {
 		let navigation = ReaderNavigationState(items: [
 			item("folder-a", kind: .folder, unread: 0),

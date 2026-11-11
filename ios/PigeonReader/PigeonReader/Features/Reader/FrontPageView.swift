@@ -297,6 +297,10 @@ extension FrontPageKickerPalette {
 		colors[colorIndex(for: feedKey) % colors.count]
 	}
 
+	static func color(at index: Int) -> Color {
+		colors[((index % colors.count) + colors.count) % colors.count]
+	}
+
 	/// UIKit may resolve dynamic colours off the main thread.
 	nonisolated private static func dynamic(light: UInt32, dark: UInt32) -> Color {
 		Color(uiColor: UIColor { traits in

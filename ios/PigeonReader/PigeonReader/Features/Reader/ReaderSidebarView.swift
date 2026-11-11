@@ -145,26 +145,7 @@ struct ReaderSidebarView: View {
 						.accessibilityHint("Returns to the tile view")
 				}
 			}
-			ToolbarItem(placement: .topBarTrailing) {
-				Button("Add Feed", systemImage: "plus") {
-					editorRoute = .addFeed
-				}
-				.accessibilityIdentifier("add-feed")
-				.accessibilityHint("Subscribe to a website or feed URL")
-			}
-			ToolbarItem(placement: .topBarTrailing) {
-				Menu("Filter", systemImage: "line.3.horizontal.decrease") {
-					Picker("Filter collections", selection: $model.sidebarFilter) {
-						ForEach(ReaderSidebarFilter.allCases) { filter in
-							Text(filter.title)
-								.tag(filter)
-						}
-					}
-				}
-				.accessibilityLabel(ReaderAccessibilityText.filterCollections)
-				.accessibilityValue(model.sidebarFilter.title)
-				.accessibilityHint(ReaderAccessibilityText.filterCollectionsHint)
-			}
+			ReaderLibraryToolbarItems(editorRoute: $editorRoute)
 			ReaderSettingsToolbarItem()
 		}
 		.refreshable {
