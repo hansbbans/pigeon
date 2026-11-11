@@ -1,3 +1,15 @@
+# iPhone home tiles (started 2026-11-11)
+
+Branch `claude/home-tiles`, worktree `~/code/pigeon-home-tiles`. Goal: replace the sterile list home with a tile grid (Hans: no big counts, no top pick, no Unread, no masthead; motion from the Matter notes).
+
+- [x] `ReaderHomeTiles` projection (views minus Unread, folder headline + icons, today count) with unit tests
+- [x] `ReaderHomeTilesView` + `ReaderHomeView` (tiles on compact width, list via All Feeds / Home)
+- [x] Existing UI tests pinned to the list with `PIGEON_UI_TEST_HOME=list`; `PigeonHomeTilesUITests` covers the tiles
+- [x] DESIGN.md and CHANGELOG
+- [x] Unit tests (967), tile UI tests (4) and 7 sidebar UI tests green on `Pigeon Claude`; checked in the simulator in dark and light
+- [ ] Not yet checked: real library data, feed favicons (sample data has none), iPad, accessibility text sizes, the full UI suite (CI)
+- [ ] For You ideas (daily edition, reasons in words, archive lane) go to the recommendations v2 spec, not this branch
+
 # Perf: fast folder/feed opening (started 2026-10-26)
 
 Branch `claude/perf-navigation`, worktree `~/code/pigeon-perf`. Goal: tapping a folder or feed shows stories as fast as possible on iOS and web.
