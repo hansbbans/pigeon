@@ -24,7 +24,7 @@ struct ReaderShellView: View {
 				}
 			} else {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
-					ReaderSidebarView()
+					ReaderHomeView(allowsTiles: horizontalSizeClass == .compact)
 				} content: {
 					ReaderCollectionPane()
 				} detail: {

@@ -18,6 +18,8 @@ struct ReaderSidebarView: View {
 	@State private var sidebarNativeScrollView = ReaderSidebarNativeScrollViewProxy()
 	@State private var sidebarPresentationState = ReaderSidebarPresentationState()
 	@State private var prewarmRequest: ReaderSidebarPrewarmRequest?
+	/// Set on iPhone, where this list is reached from the tile home.
+	var onShowHome: (() -> Void)?
 
 	var body: some View {
 		@Bindable var model = model
@@ -136,6 +138,13 @@ struct ReaderSidebarView: View {
 		}
 		.navigationTitle("Pigeon")
 		.toolbar {
+			if let onShowHome {
+				ToolbarItem(placement: .topBarLeading) {
+					Button("Home", systemImage: "square.grid.2x2", action: onShowHome)
+						.accessibilityIdentifier(ReaderHomeAccessibility.showTiles)
+						.accessibilityHint("Returns to the tile view")
+				}
+			}
 			ToolbarItem(placement: .topBarTrailing) {
 				Button("Add Feed", systemImage: "plus") {
 					editorRoute = .addFeed

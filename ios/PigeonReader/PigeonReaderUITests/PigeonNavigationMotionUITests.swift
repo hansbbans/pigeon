@@ -9,6 +9,8 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 		// XCTest can abort a rotating case before its Swift defer executes.
 		XCUIDevice.shared.orientation = .portrait
 		app = XCUIApplication()
+		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
+		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
 		launchFixture()
 	}
 

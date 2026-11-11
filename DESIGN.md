@@ -1,6 +1,6 @@
 # Pigeon design system
 
-Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles. Reading (article text, story titles, the Front Page) is set in Bookerly with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
+Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles; the one exception is the iPhone home, which is a tile grid (see **iOS**). Reading (article text, story titles, the Front Page) is set in Bookerly with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
 
 The first half of this file is the target system from Claude Design. The second half, from **Principle** on, is what the code does today, with file references. Where they disagree, see **Drift**. Paths are relative to the repo root; `ios/…/PigeonReader/` means `ios/PigeonReader/PigeonReader/`.
 
@@ -119,6 +119,13 @@ They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them throu
   - newspaper masthead with `FrontPageRule` hairlines (2pt / 0.5pt) and an uppercase dateline (`.caption2`, tracking 0.8)
   - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes
   - colored feed kicker, a 240-char deck, and an `isEditorialImage` aspect filter of 0.6–2.4
+- `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (iPhone home; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):
+  - no large title; the toolbar's leading item is a dateline in kicker type ("Wed, Nov 11 · 8 new"), the only number on the screen
+  - one row of equal view tiles (For You, Today, Read It Later, plus Starred when enabled; four tiles become two rows of two). Unread never gets a tile
+  - a 2-column grid of folder tiles: 3pt bar and name in the folder's `kicker` colour (`FrontPageKickerPalette` by folder id), the newest cached story title in `story-title` (four lines at most; the first feed names until a story is cached), up to four feed favicons. No featured story and no unread counts; a list shows its count in its title once opened
+  - "All Feeds" swaps the column to the library list (`ReaderSidebarView`), whose leading Home button swaps back. iPad and regular width always use the list
+  - tiles are `secondarySystemGroupedBackground` on `systemGroupedBackground`, radius 12 continuous, one column at accessibility sizes
+  - motion: favicons and headlines fade in and crossfade, the dateline count rolls (`numericText`), tiles press to 0.97, content fades under the toolbar (`scrollEdgeEffectStyle(.soft)`); all of it is off or reduced with Reduce Motion
 - Other: `ArticleReaderHeaderView`, `ArticleBodyView`, `StructuredHTMLView`, `ReaderReadingSettingsView`, `ScoreBadge`, `PaywallLabel`, `ReadingLengthLabel`, `ReaderMotion`. All are under `Features/Reader/`.
 - Classic list swipe actions (`ArticleListView.swift`) use `PigeonPalette.SwipeFill`: tint (read), keep (star) and teal `kicker-2` (Read It Later).
 
@@ -182,5 +189,5 @@ The dark table above leaves out `--scrim` and `--shadow`, which are also redefin
 
 - Web: use the existing `--*` vars in `browser-app-styles.ts`. Add any new token to both `:root` and `html[data-theme="dark"]`. Check light, dark and the ≤760px single-pane layout.
 - iOS reader: change fonts through `ReaderTypography` (Bookerly, scaled by `textScale`). Check all five `ReaderTheme` values, because article HTML colors are per-theme CSS in `StructuredHTMLJavaScript.swift`, separate from the SwiftUI background.
-- New list or home surfaces should grow from the Front Page vocabulary (masthead, rules, kickers, decks, lead + grid), not from Classic rows. Follow the principle above.
+- New list or home surfaces should grow from the Front Page vocabulary (masthead, rules, kickers, decks, lead + grid) or the home tiles (kicker colours, Bookerly headlines, no counts), not from Classic rows. Follow the principle above.
 - Check Dynamic Type at accessibility sizes (Front Page collapses to one column) and reduced motion (`ReaderMotion`, `prefers-reduced-motion`).

@@ -9,6 +9,8 @@ final class PigeonMotionPerformanceUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
+		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
 		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state",
 			"-reader-navigation-fixture", "-reader-motion-stress-fixture"]
 		app.launch()

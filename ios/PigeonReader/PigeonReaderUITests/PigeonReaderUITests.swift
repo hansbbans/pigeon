@@ -22,6 +22,8 @@ final class PigeonReaderUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
+		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
 		// Each test launches once. Tests that need another fixture replace or
 		// extend these arguments; the rest call launchShowingArticle().
 		app.launchArguments = [
@@ -1424,6 +1426,8 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
+		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
 		XCUIDevice.shared.orientation = .portrait
 	}
 
@@ -1599,6 +1603,8 @@ final class PigeonDeepLinkUITests: XCTestCase {
 			springboard.alerts.buttons["Cancel"].firstMatch.tap()
 		}
 		app = XCUIApplication()
+		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
+		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
 		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state"]
 		app.launchWithoutAnimations()
 		XCTAssertTrue(app.buttons["reader-sidebar-item-forYou"].waitForExistence(timeout: 15))
