@@ -17,7 +17,7 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 ## iOS
 - `xcodegen generate` in `ios/PigeonReader` after adding or removing files.
 - Tests: `xcodebuild test -project ios/PigeonReader/PigeonReader.xcodeproj -scheme PigeonReader -destination 'platform=iOS Simulator,name=Pigeon Claude' -parallel-testing-enabled NO CODE_SIGNING_ALLOWED=NO`. Boot `Pigeon Claude` first; never use the shared `iPhone 17 Pro`.
-- Fast local loop: add `-only-testing:PigeonReaderTests` plus `-only-testing:PigeonReaderUITests/<Class>` for only the UI test classes you touched. The full UI suite (77 tests, about 28 minutes) is CI's job: nightly, `CI` dispatched with `ui_suite: full`, or the release.
+- Fast local loop: add `-only-testing:PigeonReaderTests` plus `-only-testing:PigeonReaderUITests/<Class>` for only the UI test classes you touched. The full UI suite (about 28 minutes) is CI's job: nightly, `CI` dispatched with `ui_suite: full`, or the release.
 - Do not rename or remove a test in `.github/ios-smoke-ui-tests.txt` without updating the list.
 - Design rule: the reader must not look like Mail. No sender/subject/preview rows, no swipe-to-triage as the main interaction, no unread dots as the organizing idea. Lean editorial or magazine. Before proposing a redesign, ask what Hans dislikes about the current screen.
 
