@@ -382,17 +382,14 @@ struct SavedItemsTests {
 		let itemLink = try #require(SharedShareItem.link(
 			fromItemText: "Slow software",
 			contentText: "https://example.com/essays/slow-software",
-			userInfo: nil,
 		))
 		#expect(itemLink.url.absoluteString == "https://example.com/essays/slow-software")
 		#expect(itemLink.title == "Slow software")
 
-		let jsLink = try #require(SharedShareItem.link(
-			fromItemText: nil,
-			contentText: nil,
-			userInfo: [NSExtensionJavaScriptPreprocessingResultsKey: ["URL": "https://example.com/from-js"]],
+		let jsLink = try #require(SharedShareItem.webURLFromJavaScriptShare(
+			["NSExtensionJavaScriptPreprocessingResultsKey": ["URL": "https://example.com/from-js"]],
 		))
-		#expect(jsLink.url.absoluteString == "https://example.com/from-js")
+		#expect(jsLink.absoluteString == "https://example.com/from-js")
 	}
 
 	@Test func aPendingSharedSaveLandsInReadItLaterAfterSync() async throws {

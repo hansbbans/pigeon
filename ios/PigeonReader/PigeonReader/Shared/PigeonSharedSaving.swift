@@ -312,23 +312,33 @@ nonisolated enum SharedShareItem {
 		if let data = payload as? Data, let string = String(data: data, encoding: .utf8) {
 			return firstWebURL(in: string)
 		}
-		if let dictionary = payload as? [AnyHashable: Any] {
-			return webURL(from: dictionary)
-		}
 		return nil
 	}
 
 	/// Title and URL from the item's own text fields, used when attachments
 	/// are a web archive / HTML page with no `public.url` provider.
-	static func link(fromItemText title: String?, contentText: String?, userInfo: [AnyHashable: Any]?) -> Link? {
+	static func link(fromItemText title: String?, contentText: String?) -> Link? {
 		if let url = firstWebURL(in: contentText ?? "") {
-			return Link(url: url, title: normalizedTitle(title))
-		}
-		if let url = webURL(from: userInfo ?? [:]) {
 			return Link(url: url, title: normalizedTitle(title))
 		}
 		if let url = firstWebURL(in: title ?? "") {
 			return Link(url: url, title: nil)
+		}
+		return nil
+	}
+
+	/// Safari's JavaScript preprocessor puts `{ "URL": "https://..." }` under this key.
+	static func webURLFromJavaScriptShare(_ userInfo: [AnyHashable: Any]?) -> URL? {
+		let results = userInfo?["NSExtensionJavaScriptPreprocessingResultsKey"]
+		if let nested = results as? [AnyHashable: Any] {
+			for key in ["URL", "url"] {
+				if let string = nested[key] as? String, let url = firstWebURL(in: string) {
+					return url
+				}
+			}
+		}
+		if let string = results as? String {
+			return firstWebURL(in: string)
 		}
 		return nil
 	}
@@ -350,18 +360,6 @@ nonisolated enum SharedShareItem {
 	private static func absoluteWebURL(_ string: String) -> URL? {
 		if let url = URL(string: string), isWebURL(url) { return url }
 		if let url = URL(string: string, encodingInvalidCharacters: true), isWebURL(url) { return url }
-		return nil
-	}
-
-	private static func webURL(from dictionary: [AnyHashable: Any]) -> URL? {
-		let nestedKeys: [AnyHashable] = [
-			"url", "URL", "public.url",
-			NSExtensionJavaScriptPreprocessingResultsKey,
-		]
-		for key in nestedKeys {
-			guard let value = dictionary[key] else { continue }
-			if let url = webURL(from: value) { return url }
-		}
 		return nil
 	}
 }

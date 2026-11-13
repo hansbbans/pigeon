@@ -139,9 +139,11 @@ final class ShareViewController: UIViewController {
 			if let link = SharedShareItem.link(
 				fromItemText: item.attributedTitle?.string,
 				contentText: item.attributedContentText?.string,
-				userInfo: item.userInfo,
 			) {
 				return SharedLink(url: link.url, title: title ?? link.title)
+			}
+			if let url = SharedShareItem.webURLFromJavaScriptShare(item.userInfo) {
+				return SharedLink(url: url, title: title)
 			}
 		}
 		return nil
