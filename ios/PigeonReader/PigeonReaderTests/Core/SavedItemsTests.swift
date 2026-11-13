@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import Testing
+import UniformTypeIdentifiers
 @testable import PigeonReader
 
 struct SavedItemsTests {
@@ -334,10 +335,143 @@ struct SavedItemsTests {
 
 	@Test func onlyRefusedLinksLeaveTheQueueOnFailure() {
 		#expect(SavedLinkFailure.classify(statusCode: nil) == .retryLater)
-		#expect(SavedLinkFailure.classify(statusCode: 401) == .retryLater)
 		#expect(SavedLinkFailure.classify(statusCode: 503) == .retryLater)
 		#expect(SavedLinkFailure.classify(statusCode: 400) == .rejected)
 		#expect(SavedLinkFailure.classify(statusCode: 413) == .rejected)
+		#expect(SavedLinkFailure.classify(statusCode: 401) == .unauthorized)
+		#expect(SavedLinkFailure.classify(statusCode: 403) == .unauthorized)
+	}
+
+	@Test func shareExtensionDoesNotClaimSuccessWhenTheAppGroupIsMissing() {
+		#expect(
+			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, noSession: true)
+				== .rejected("Open Pigeon and sign in, then try again."),
+		)
+		#expect(
+			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, noSession: false)
+				== .rejected("Pigeon couldn’t save this link. Open the app and try again."),
+		)
+		#expect(SharedShareHandoff.queue(hasSharedContainer: true, enqueued: true, noSession: false) == .queued)
+		#expect(
+			SharedShareHandoff.queue(hasSharedContainer: true, enqueued: false, noSession: false)
+				== .rejected("Only web links can be saved."),
+		)
+	}
+
+	@Test func shareExtensionShowsAuthAndServerFailuresInsteadOfQueueingThem() {
+		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 401) == "Open Pigeon and sign in, then try again.")
+		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 403) == "Open Pigeon and sign in, then try again.")
+		let body = Data(#"{"error":"url must use http or https"}"#.utf8)
+		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 400, body: body) == "url must use http or https")
+		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 422) == "Pigeon can’t save this kind of link.")
+	}
+
+	@Test func sharePayloadReadsSafariStringsAttributedTextAndWrappedLinks() throws {
+		let safari = try #require(SharedShareItem.webURL(from: "https://example.com/from-safari" as NSString))
+		#expect(safari.absoluteString == "https://example.com/from-safari")
+
+		let attributed = try #require(SharedShareItem.webURL(from: NSAttributedString(string: "https://example.com/from-messages")))
+		#expect(attributed.absoluteString == "https://example.com/from-messages")
+
+		let wrapped = try #require(SharedShareItem.firstWebURL(in: "Look at this: https://example.com/in-a-sentence?utm_source=share"))
+		#expect(wrapped.absoluteString == "https://example.com/in-a-sentence?utm_source=share")
+
+		#expect(SharedShareItem.webURL(from: URL(filePath: "/tmp/page.html")) == nil)
+		#expect(SharedShareItem.firstWebURL(in: "no link here") == nil)
+		#expect(SharedShareItem.webURL(from: Data("https://example.com/from-data".utf8))?.absoluteString == "https://example.com/from-data")
+
+		let itemLink = try #require(SharedShareItem.link(
+			fromItemText: "Slow software",
+			contentText: "https://example.com/essays/slow-software",
+			userInfo: nil,
+		))
+		#expect(itemLink.url.absoluteString == "https://example.com/essays/slow-software")
+		#expect(itemLink.title == "Slow software")
+
+		let jsLink = try #require(SharedShareItem.link(
+			fromItemText: nil,
+			contentText: nil,
+			userInfo: [NSExtensionJavaScriptPreprocessingResultsKey: ["URL": "https://example.com/from-js"]],
+		))
+		#expect(jsLink.url.absoluteString == "https://example.com/from-js")
+	}
+
+	@Test func sharePayloadLoadsAStringRegisteredAsAURL() async throws {
+		let provider = NSItemProvider(item: "https://example.com/safari-string-url" as NSString, typeIdentifier: UTType.url.identifier)
+		let loaded = try await provider.loadItem(forTypeIdentifier: UTType.url.identifier)
+		#expect(
+			SharedShareItem.webURL(from: loaded)?.absoluteString == "https://example.com/safari-string-url",
+			"Safari registers a string under public.url; the share extension used to keep only URL objects",
+		)
+	}
+
+	@Test func aPendingSharedSaveLandsInReadItLaterAfterSync() async throws {
+		let decoder = JSONDecoder()
+		decoder.dateDecodingStrategy = .custom { decoder in
+			let value = try decoder.singleValueContainer().decode(String.self)
+			let formatter = ISO8601DateFormatter()
+			formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+			if let date = formatter.date(from: value) { return date }
+			formatter.formatOptions = [.withInternetDateTime]
+			guard let date = formatter.date(from: value) else {
+				throw DecodingError.dataCorruptedError(
+					in: try decoder.singleValueContainer(),
+					debugDescription: "Expected an ISO 8601 date",
+				)
+			}
+			return date
+		}
+		let page = try decoder.decode(IncrementalSyncPage.self, from: Data("""
+		{
+		  "cursor": "v1:2",
+		  "hasMore": false,
+		  "changes": [
+		    {
+		      "sequence": 1,
+		      "entityType": "feed",
+		      "entityId": "pigeon:saved",
+		      "operation": "upsert",
+		      "changedAt": "2026-11-13T12:00:00.000Z",
+		      "payload": {
+		        "feedKey": "pigeon:saved",
+		        "streamId": "feed/4",
+		        "title": "Read It Later",
+		        "isActive": true,
+		        "sourceType": "saved",
+		        "folders": []
+		      }
+		    },
+		    {
+		      "sequence": 2,
+		      "entityType": "article",
+		      "entityId": "abde2a43-22dc-8734-9049-5cd424e03007",
+		      "operation": "upsert",
+		      "changedAt": "2026-11-13T12:00:00.000Z",
+		      "payload": {
+		        "id": "abde2a43-22dc-8734-9049-5cd424e03007",
+		        "readerId": "tag:google.com,2005:reader/item/0000000000000005",
+		        "feedKey": "pigeon:saved",
+		        "source": "Read It Later",
+		        "title": "example.com/from-share",
+		        "html": "",
+		        "originalURL": "https://example.com/from-share",
+		        "receivedAt": "2026-11-13T12:00:00.000Z",
+		        "isRead": false,
+		        "isStarred": false,
+		        "extractionState": "pending"
+		      }
+		    }
+		  ]
+		}
+		""".utf8))
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(page, accountID: "share-later")
+		let snapshot = try await store.loadSnapshot(accountID: "share-later")
+		let saved = try #require(snapshot.articlesByCollection[ReaderSection.saved.rawValue]?.first)
+		#expect(saved.title == "example.com/from-share")
+		#expect(saved.savedState == .pending)
+		#expect(saved.isRead == false)
+		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue, default: []].isEmpty)
 	}
 
 	@Test func feedLikeLinksOfferAddAsFeedFirst() throws {

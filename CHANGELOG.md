@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Sharing a link to Pigeon from Safari, Messages and other apps now saves it to Read It Later. The share extension used to keep only `URL` objects, so a string or attributed-text share (what those apps actually send) was dropped; a failed save no longer claims “Saved, will sync”.
+
 ## [0.1.11.0] - 2026-11-11
 
 ### Changed

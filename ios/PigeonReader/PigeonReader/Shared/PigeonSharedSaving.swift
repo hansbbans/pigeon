@@ -160,10 +160,20 @@ nonisolated struct PendingSavedLinkQueue: Sendable {
 	/// The app group container's queue (the app's own Library when the group is
 	/// unavailable, as in unsigned simulator builds).
 	static var shared: PendingSavedLinkQueue {
-		let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: PigeonSharedData.appGroup)
+		let base = sharedContainerURL
 			?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
 		return PendingSavedLinkQueue(directory: base.appending(path: directoryName, directoryHint: .isDirectory))
 	}
+
+	/// Nil when this process has no App Group (unsigned simulator, a profile
+	/// without `group.com.hans.pigeon.reader`). The share extension must not
+	/// treat a write to its private Library as a successful handoff: the app
+	/// will never see that file.
+	static var sharedContainerURL: URL? {
+		FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: PigeonSharedData.appGroup)
+	}
+
+	static var hasSharedContainer: Bool { sharedContainerURL != nil }
 
 	func all() -> [PendingSavedLink] {
 		let files = (try? FileManager.default.contentsOfDirectory(
@@ -233,14 +243,147 @@ nonisolated enum SavedLinkFailure: Equatable, Sendable {
 	case retryLater
 	/// The server refused the link itself (bad URL, too large). Retrying cannot help.
 	case rejected
+	/// The session is missing or rejected. Queueing would only fail again.
+	case unauthorized
 
 	static func classify(statusCode: Int?) -> Self {
 		guard let statusCode else { return .retryLater }
+		if statusCode == 401 || statusCode == 403 { return .unauthorized }
 		return [400, 405, 413, 422].contains(statusCode) ? .rejected : .retryLater
+	}
+
+	/// Copy the share extension shows. Never "Saved" for these statuses.
+	static func shareExtensionMessage(statusCode: Int?, body: Data? = nil) -> String {
+		switch classify(statusCode: statusCode) {
+		case .unauthorized:
+			return "Open Pigeon and sign in, then try again."
+		case .rejected:
+			return serverMessage(from: body) ?? "Pigeon can’t save this kind of link."
+		case .retryLater:
+			return "Pigeon couldn’t reach the server."
+		}
+	}
+
+	static func serverMessage(from data: Data?) -> String? {
+		guard let data,
+			let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+			let message = object["error"] as? String else {
+			return nil
+		}
+		let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+		return trimmed.isEmpty ? nil : String(trimmed.prefix(200))
 	}
 }
 
 // MARK: - Share extension helpers
+
+/// One http(s) link taken from a share-sheet payload. Safari, Messages, and
+/// many other apps do not hand over a `URL`: they register a string, an
+/// attributed string, or put the address on the `NSExtensionItem` itself.
+nonisolated enum SharedShareItem {
+	struct Link: Equatable, Sendable {
+		let url: URL
+		let title: String?
+	}
+
+	static func isWebURL(_ url: URL) -> Bool {
+		guard url.isFileURL == false, url.user == nil, url.password == nil, url.host != nil else { return false }
+		guard let scheme = url.scheme?.lowercased() else { return false }
+		return scheme == "http" || scheme == "https"
+	}
+
+	static func normalizedTitle(_ raw: String?) -> String? {
+		let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return trimmed.isEmpty ? nil : String(trimmed.prefix(500))
+	}
+
+	/// Coerces whatever `NSItemProvider.loadItem` actually returned. Safari's
+	/// `public.url` is often an `NSString`; Messages' `public.plain-text` is
+	/// often an `NSAttributedString`.
+	static func webURL(from payload: Any) -> URL? {
+		if let url = payload as? URL { return isWebURL(url) ? url : nil }
+		if let url = payload as? NSURL {
+			let swiftURL = url as URL
+			return isWebURL(swiftURL) ? swiftURL : nil
+		}
+		if let string = payload as? String { return firstWebURL(in: string) }
+		if let string = payload as? NSString { return firstWebURL(in: string as String) }
+		if let attributed = payload as? NSAttributedString { return firstWebURL(in: attributed.string) }
+		if let data = payload as? Data, let string = String(data: data, encoding: .utf8) {
+			return firstWebURL(in: string)
+		}
+		if let dictionary = payload as? [AnyHashable: Any] {
+			return webURL(from: dictionary)
+		}
+		return nil
+	}
+
+	/// Title and URL from the item's own text fields, used when attachments
+	/// are a web archive / HTML page with no `public.url` provider.
+	static func link(fromItemText title: String?, contentText: String?, userInfo: [AnyHashable: Any]?) -> Link? {
+		if let url = firstWebURL(in: contentText ?? "") {
+			return Link(url: url, title: normalizedTitle(title))
+		}
+		if let url = webURL(from: userInfo ?? [:]) {
+			return Link(url: url, title: normalizedTitle(title))
+		}
+		if let url = firstWebURL(in: title ?? "") {
+			return Link(url: url, title: nil)
+		}
+		return nil
+	}
+
+	/// Messages and other apps often share a sentence with a link in it.
+	static func firstWebURL(in text: String) -> URL? {
+		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+		if trimmed.isEmpty { return nil }
+		if let url = absoluteWebURL(trimmed) { return url }
+		guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+			return nil
+		}
+		let range = NSRange(trimmed.startIndex..., in: trimmed)
+		return detector.matches(in: trimmed, range: range)
+			.compactMap(\.url)
+			.first(where: isWebURL)
+	}
+
+	private static func absoluteWebURL(_ string: String) -> URL? {
+		if let url = URL(string: string), isWebURL(url) { return url }
+		if let url = URL(string: string, encodingInvalidCharacters: true), isWebURL(url) { return url }
+		return nil
+	}
+
+	private static func webURL(from dictionary: [AnyHashable: Any]) -> URL? {
+		let nestedKeys: [AnyHashable] = [
+			"url", "URL", "public.url",
+			NSExtensionJavaScriptPreprocessingResultsKey,
+		]
+		for key in nestedKeys {
+			guard let value = dictionary[key] else { continue }
+			if let url = webURL(from: value) { return url }
+		}
+		return nil
+	}
+}
+
+/// Whether the share extension may claim a queued save. A write to the
+/// extension's private Library is not a handoff: the app never reads it.
+nonisolated enum SharedShareHandoff: Equatable, Sendable {
+	case queued
+	case rejected(String)
+
+	static func queue(hasSharedContainer: Bool, enqueued: Bool, noSession: Bool) -> Self {
+		guard hasSharedContainer else {
+			return .rejected(
+				noSession
+					? "Open Pigeon and sign in, then try again."
+					: "Pigeon couldn’t save this link. Open the app and try again.",
+			)
+		}
+		guard enqueued else { return .rejected("Only web links can be saved.") }
+		return .queued
+	}
+}
 
 nonisolated enum SharedLinkClassifier {
 	/// Whether a shared URL is probably a feed (or a YouTube channel) rather
