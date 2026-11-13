@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import Testing
+import UniformTypeIdentifiers
 @testable import PigeonReader
 
 struct SavedItemsTests {
@@ -390,6 +391,15 @@ struct SavedItemsTests {
 			["NSExtensionJavaScriptPreprocessingResultsKey": ["URL": "https://example.com/from-js"]],
 		))
 		#expect(jsLink.absoluteString == "https://example.com/from-js")
+	}
+
+	@Test func sharePayloadLoadsAStringRegisteredAsAURL() async throws {
+		let provider = NSItemProvider(item: "https://example.com/safari-string-url" as NSString, typeIdentifier: UTType.url.identifier)
+		let loaded = try await provider.loadItem(forTypeIdentifier: UTType.url.identifier)
+		#expect(
+			SharedShareItem.webURL(from: loaded)?.absoluteString == "https://example.com/safari-string-url",
+			"Safari registers a string under public.url; the share extension used to keep only URL objects",
+		)
 	}
 
 	@Test func aPendingSharedSaveLandsInReadItLaterAfterSync() async throws {
