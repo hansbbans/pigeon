@@ -84,8 +84,11 @@ final class ShareViewController: UIViewController {
 		switch await ShareSaver.save(url: shared.url, title: shared.title) {
 		case .saved:
 			show(status: "Saved to Read It Later", detail: shared.title ?? shared.url.host(), symbol: "bookmark.fill")
-		case .queued:
-			show(status: "Saved, will sync", detail: "It’ll show up in Read It Later when you open Pigeon.", symbol: "clock")
+		case .queued(let needsSignIn):
+			let detail = needsSignIn
+				? "Open Pigeon and sign in to finish saving it."
+				: "It’ll show up in Read It Later when you open Pigeon."
+			show(status: "Saved, will sync", detail: detail, symbol: "clock")
 		case .rejected(let message):
 			show(status: "Couldn’t save this link", detail: message, symbol: "exclamationmark.triangle")
 			showButtons([("Done", .prominent, { [weak self] in self?.finish() })])
@@ -140,10 +143,7 @@ final class ShareViewController: UIViewController {
 				fromItemText: item.attributedTitle?.string,
 				contentText: item.attributedContentText?.string,
 			) {
-				return SharedLink(url: link.url, title: title ?? link.title)
-			}
-			if let url = SharedShareItem.webURLFromJavaScriptShare(item.userInfo) {
-				return SharedLink(url: url, title: title)
+				return SharedLink(url: link.url, title: link.title)
 			}
 		}
 		return nil
@@ -152,7 +152,7 @@ final class ShareViewController: UIViewController {
 	/// `loadItem` returns whatever the host registered (often a string, not a
 	/// `URL`). Coercion lives in `SharedShareItem.webURL(from:)`.
 	private static func webURL(from provider: NSItemProvider) async -> URL? {
-		for identifier in [UTType.url.identifier, UTType.plainText.identifier, "public.utf8-plain-text"]
+		for identifier in [UTType.url.identifier, UTType.plainText.identifier]
 			where provider.hasItemConformingToTypeIdentifier(identifier) {
 			if let value = try? await provider.loadItem(forTypeIdentifier: identifier),
 				let url = SharedShareItem.webURL(from: value) {
@@ -171,7 +171,7 @@ private struct SharedLink {
 private enum ShareSaver {
 	enum Outcome {
 		case saved
-		case queued
+		case queued(needsSignIn: Bool)
 		case rejected(String)
 	}
 
@@ -183,7 +183,7 @@ private enum ShareSaver {
 		guard let data = try? SharedSessionKeychain().load(migratingLegacyItem: false),
 			let session = try? JSONDecoder().decode(PigeonSession.self, from: data),
 			let request = try? SharedLinkClassifier.saveRequest(baseURL: session.baseURL, token: session.token, url: url, title: title) else {
-			return queue(url: url, title: title, noSession: true)
+			return queue(url: url, title: title, needsSignIn: true)
 		}
 		do {
 			let (body, response) = try await URLSession.shared.data(for: request)
@@ -192,21 +192,23 @@ private enum ShareSaver {
 				return .saved
 			}
 			switch SavedLinkFailure.classify(statusCode: statusCode) {
-			case .rejected, .unauthorized:
-				return .rejected(SavedLinkFailure.shareExtensionMessage(statusCode: statusCode, body: body))
+			case .rejected:
+				return .rejected(SavedLinkFailure.rejectionMessage(body: body))
 			case .retryLater:
-				return queue(url: url, title: title, noSession: false)
+				// A stale shared session (401/403) still queues: the app sends
+				// the link once the user signs in again.
+				return queue(url: url, title: title, needsSignIn: statusCode == 401 || statusCode == 403)
 			}
 		} catch {
-			return queue(url: url, title: title, noSession: false)
+			return queue(url: url, title: title, needsSignIn: false)
 		}
 	}
 
-	private static func queue(url: URL, title: String?, noSession: Bool) -> Outcome {
+	private static func queue(url: URL, title: String?, needsSignIn: Bool) -> Outcome {
 		let hasSharedContainer = PendingSavedLinkQueue.hasSharedContainer
 		let enqueued = hasSharedContainer && PendingSavedLinkQueue.shared.enqueue(url: url, title: title) != nil
-		switch SharedShareHandoff.queue(hasSharedContainer: hasSharedContainer, enqueued: enqueued, noSession: noSession) {
-		case .queued: return .queued
+		switch SharedShareHandoff.queue(hasSharedContainer: hasSharedContainer, enqueued: enqueued, needsSignIn: needsSignIn) {
+		case .queued(let needsSignIn): return .queued(needsSignIn: needsSignIn)
 		case .rejected(let message): return .rejected(message)
 		}
 	}

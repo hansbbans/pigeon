@@ -335,46 +335,60 @@ struct SavedItemsTests {
 
 	@Test func onlyRefusedLinksLeaveTheQueueOnFailure() {
 		#expect(SavedLinkFailure.classify(statusCode: nil) == .retryLater)
+		#expect(SavedLinkFailure.classify(statusCode: 401) == .retryLater)
+		#expect(SavedLinkFailure.classify(statusCode: 403) == .retryLater)
 		#expect(SavedLinkFailure.classify(statusCode: 503) == .retryLater)
 		#expect(SavedLinkFailure.classify(statusCode: 400) == .rejected)
 		#expect(SavedLinkFailure.classify(statusCode: 413) == .rejected)
-		#expect(SavedLinkFailure.classify(statusCode: 401) == .unauthorized)
-		#expect(SavedLinkFailure.classify(statusCode: 403) == .unauthorized)
 	}
 
-	@Test func shareExtensionDoesNotClaimSuccessWhenTheAppGroupIsMissing() {
+	@Test func shareExtensionQueuesSignedOutSavesButNeverIntoItsOwnLibrary() {
 		#expect(
-			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, noSession: true)
+			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, needsSignIn: true)
 				== .rejected("Open Pigeon and sign in, then try again."),
 		)
 		#expect(
-			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, noSession: false)
+			SharedShareHandoff.queue(hasSharedContainer: false, enqueued: false, needsSignIn: false)
 				== .rejected("Pigeon couldn’t save this link. Open the app and try again."),
 		)
-		#expect(SharedShareHandoff.queue(hasSharedContainer: true, enqueued: true, noSession: false) == .queued)
 		#expect(
-			SharedShareHandoff.queue(hasSharedContainer: true, enqueued: false, noSession: false)
-				== .rejected("Only web links can be saved."),
+			SharedShareHandoff.queue(hasSharedContainer: true, enqueued: true, needsSignIn: false)
+				== .queued(needsSignIn: false),
+		)
+		// A stale or missing session keeps the link: the app sends it after sign-in.
+		#expect(
+			SharedShareHandoff.queue(hasSharedContainer: true, enqueued: true, needsSignIn: true)
+				== .queued(needsSignIn: true),
+		)
+		#expect(
+			SharedShareHandoff.queue(hasSharedContainer: true, enqueued: false, needsSignIn: false)
+				== .rejected("Pigeon couldn’t save this link. Try again."),
 		)
 	}
 
-	@Test func shareExtensionShowsAuthAndServerFailuresInsteadOfQueueingThem() {
-		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 401) == "Open Pigeon and sign in, then try again.")
-		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 403) == "Open Pigeon and sign in, then try again.")
+	@Test func shareExtensionShowsTheServersReasonForARefusedLink() {
 		let body = Data(#"{"error":"url must use http or https"}"#.utf8)
-		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 400, body: body) == "url must use http or https")
-		#expect(SavedLinkFailure.shareExtensionMessage(statusCode: 422) == "Pigeon can’t save this kind of link.")
+		#expect(SavedLinkFailure.rejectionMessage(body: body) == "url must use http or https")
+		#expect(SavedLinkFailure.rejectionMessage(body: Data("<html>".utf8)) == "Pigeon can’t save this kind of link.")
+		#expect(SavedLinkFailure.rejectionMessage(body: nil) == "Pigeon can’t save this kind of link.")
 	}
 
 	@Test func sharePayloadReadsSafariStringsAttributedTextAndWrappedLinks() throws {
 		let safari = try #require(SharedShareItem.webURL(from: "https://example.com/from-safari" as NSString))
 		#expect(safari.absoluteString == "https://example.com/from-safari")
 
+		let nsURL = try #require(SharedShareItem.webURL(from: NSURL(string: "https://example.com/from-nsurl")!))
+		#expect(nsURL.absoluteString == "https://example.com/from-nsurl")
+
 		let attributed = try #require(SharedShareItem.webURL(from: NSAttributedString(string: "https://example.com/from-messages")))
 		#expect(attributed.absoluteString == "https://example.com/from-messages")
 
 		let wrapped = try #require(SharedShareItem.firstWebURL(in: "Look at this: https://example.com/in-a-sentence?utm_source=share"))
 		#expect(wrapped.absoluteString == "https://example.com/in-a-sentence?utm_source=share")
+
+		// URL(string:) percent-encodes spaces, so the trailing words must not join the path.
+		let leading = try #require(SharedShareItem.firstWebURL(in: "https://example.com/post check this out"))
+		#expect(leading.absoluteString == "https://example.com/post")
 
 		#expect(SharedShareItem.webURL(from: URL(filePath: "/tmp/page.html")) == nil)
 		#expect(SharedShareItem.firstWebURL(in: "no link here") == nil)
@@ -387,10 +401,10 @@ struct SavedItemsTests {
 		#expect(itemLink.url.absoluteString == "https://example.com/essays/slow-software")
 		#expect(itemLink.title == "Slow software")
 
-		let jsLink = try #require(SharedShareItem.webURLFromJavaScriptShare(
-			["NSExtensionJavaScriptPreprocessingResultsKey": ["URL": "https://example.com/from-js"]],
-		))
-		#expect(jsLink.absoluteString == "https://example.com/from-js")
+		// A title that is only the link is not a title.
+		let titleOnly = try #require(SharedShareItem.link(fromItemText: "https://example.com/a", contentText: nil))
+		#expect(titleOnly.url.absoluteString == "https://example.com/a")
+		#expect(titleOnly.title == nil)
 	}
 
 	@Test func sharePayloadLoadsAStringRegisteredAsAURL() async throws {

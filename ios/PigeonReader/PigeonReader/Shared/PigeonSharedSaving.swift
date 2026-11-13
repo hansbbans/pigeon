@@ -239,32 +239,23 @@ nonisolated struct PendingSavedLinkQueue: Sendable {
 
 /// How a failed save should be handled.
 nonisolated enum SavedLinkFailure: Equatable, Sendable {
-	/// Keep it queued: offline, a server error, or no session yet.
+	/// Keep it queued: offline, a server error, or no valid session yet.
 	case retryLater
 	/// The server refused the link itself (bad URL, too large). Retrying cannot help.
 	case rejected
-	/// The session is missing or rejected. Queueing would only fail again.
-	case unauthorized
 
 	static func classify(statusCode: Int?) -> Self {
 		guard let statusCode else { return .retryLater }
-		if statusCode == 401 || statusCode == 403 { return .unauthorized }
 		return [400, 405, 413, 422].contains(statusCode) ? .rejected : .retryLater
 	}
 
-	/// Copy the share extension shows. Never "Saved" for these statuses.
-	static func shareExtensionMessage(statusCode: Int?, body: Data? = nil) -> String {
-		switch classify(statusCode: statusCode) {
-		case .unauthorized:
-			return "Open Pigeon and sign in, then try again."
-		case .rejected:
-			return serverMessage(from: body) ?? "Pigeon can’t save this kind of link."
-		case .retryLater:
-			return "Pigeon couldn’t reach the server."
-		}
+	/// What the share extension shows for a `.rejected` link: the server's own
+	/// reason when it sent one.
+	static func rejectionMessage(body: Data?) -> String {
+		serverMessage(from: body) ?? "Pigeon can’t save this kind of link."
 	}
 
-	static func serverMessage(from data: Data?) -> String? {
+	private static func serverMessage(from data: Data?) -> String? {
 		guard let data,
 			let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
 			let message = object["error"] as? String else {
@@ -279,7 +270,7 @@ nonisolated enum SavedLinkFailure: Equatable, Sendable {
 
 /// One http(s) link taken from a share-sheet payload. Safari, Messages, and
 /// many other apps do not hand over a `URL`: they register a string, an
-/// attributed string, or put the address on the `NSExtensionItem` itself.
+/// attributed string, or put the address in the `NSExtensionItem` text.
 nonisolated enum SharedShareItem {
 	struct Link: Equatable, Sendable {
 		let url: URL
@@ -298,16 +289,12 @@ nonisolated enum SharedShareItem {
 	}
 
 	/// Coerces whatever `NSItemProvider.loadItem` actually returned. Safari's
-	/// `public.url` is often an `NSString`; Messages' `public.plain-text` is
-	/// often an `NSAttributedString`.
+	/// `public.url` can be a string; Messages' `public.plain-text` is often an
+	/// `NSAttributedString`. (`as? URL` and `as? String` also bridge `NSURL`
+	/// and `NSString`.)
 	static func webURL(from payload: Any) -> URL? {
 		if let url = payload as? URL { return isWebURL(url) ? url : nil }
-		if let url = payload as? NSURL {
-			let swiftURL = url as URL
-			return isWebURL(swiftURL) ? swiftURL : nil
-		}
 		if let string = payload as? String { return firstWebURL(in: string) }
-		if let string = payload as? NSString { return firstWebURL(in: string as String) }
 		if let attributed = payload as? NSAttributedString { return firstWebURL(in: attributed.string) }
 		if let data = payload as? Data, let string = String(data: data, encoding: .utf8) {
 			return firstWebURL(in: string)
@@ -315,8 +302,8 @@ nonisolated enum SharedShareItem {
 		return nil
 	}
 
-	/// Title and URL from the item's own text fields, used when attachments
-	/// are a web archive / HTML page with no `public.url` provider.
+	/// Title and URL from the item's own text fields, for items whose
+	/// attachments carry no usable URL or text.
 	static func link(fromItemText title: String?, contentText: String?) -> Link? {
 		if let url = firstWebURL(in: contentText ?? "") {
 			return Link(url: url, title: normalizedTitle(title))
@@ -327,27 +314,15 @@ nonisolated enum SharedShareItem {
 		return nil
 	}
 
-	/// Safari's JavaScript preprocessor puts `{ "URL": "https://..." }` under this key.
-	static func webURLFromJavaScriptShare(_ userInfo: [AnyHashable: Any]?) -> URL? {
-		let results = userInfo?["NSExtensionJavaScriptPreprocessingResultsKey"]
-		if let nested = results as? [AnyHashable: Any] {
-			for key in ["URL", "url"] {
-				if let string = nested[key] as? String, let url = firstWebURL(in: string) {
-					return url
-				}
-			}
-		}
-		if let string = results as? String {
-			return firstWebURL(in: string)
-		}
-		return nil
-	}
-
 	/// Messages and other apps often share a sentence with a link in it.
 	static func firstWebURL(in text: String) -> URL? {
 		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 		if trimmed.isEmpty { return nil }
-		if let url = absoluteWebURL(trimmed) { return url }
+		// URL(string:) percent-encodes spaces, so only a single token can be the
+		// whole link; anything longer goes through the link detector.
+		if trimmed.contains(where: \.isWhitespace) == false, let url = URL(string: trimmed), isWebURL(url) {
+			return url
+		}
 		guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
 			return nil
 		}
@@ -356,30 +331,27 @@ nonisolated enum SharedShareItem {
 			.compactMap(\.url)
 			.first { isWebURL($0) }
 	}
-
-	private static func absoluteWebURL(_ string: String) -> URL? {
-		if let url = URL(string: string), isWebURL(url) { return url }
-		if let url = URL(string: string, encodingInvalidCharacters: true), isWebURL(url) { return url }
-		return nil
-	}
 }
 
 /// Whether the share extension may claim a queued save. A write to the
 /// extension's private Library is not a handoff: the app never reads it.
 nonisolated enum SharedShareHandoff: Equatable, Sendable {
-	case queued
+	/// In the app group queue. The app sends it on its next launch or sync,
+	/// after sign-in when `needsSignIn`.
+	case queued(needsSignIn: Bool)
 	case rejected(String)
 
-	static func queue(hasSharedContainer: Bool, enqueued: Bool, noSession: Bool) -> Self {
+	static func queue(hasSharedContainer: Bool, enqueued: Bool, needsSignIn: Bool) -> Self {
 		guard hasSharedContainer else {
 			return .rejected(
-				noSession
+				needsSignIn
 					? "Open Pigeon and sign in, then try again."
 					: "Pigeon couldn’t save this link. Open the app and try again.",
 			)
 		}
-		guard enqueued else { return .rejected("Only web links can be saved.") }
-		return .queued
+		// The URL was already checked, so a failed enqueue is a write failure.
+		guard enqueued else { return .rejected("Pigeon couldn’t save this link. Try again.") }
+		return .queued(needsSignIn: needsSignIn)
 	}
 }
 
