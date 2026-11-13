@@ -147,31 +147,15 @@ final class ShareViewController: UIViewController {
 		return nil
 	}
 
-	/// `loadObject(ofClass: URL.self)` coerces Safari's string URLs; `loadItem`
-	/// is the fallback for hosts that only register plain text.
+	/// `loadItem` returns whatever the host registered (often a string, not a
+	/// `URL`). Coercion lives in `SharedShareItem.webURL(from:)`.
 	private static func webURL(from provider: NSItemProvider) async -> URL? {
-		if provider.canLoadObject(ofClass: URL.self) {
-			let loaded: URL? = await withCheckedContinuation { continuation in
-				_ = provider.loadObject(ofClass: URL.self) { url, _ in
-					continuation.resume(returning: url)
-				}
-			}
-			if let loaded, SharedShareItem.isWebURL(loaded) { return loaded }
-		}
 		for identifier in [UTType.url.identifier, UTType.plainText.identifier, "public.utf8-plain-text"]
 			where provider.hasItemConformingToTypeIdentifier(identifier) {
 			if let value = try? await provider.loadItem(forTypeIdentifier: identifier),
 				let url = SharedShareItem.webURL(from: value) {
 				return url
 			}
-		}
-		if provider.canLoadObject(ofClass: String.self) {
-			let loaded: String? = await withCheckedContinuation { continuation in
-				_ = provider.loadObject(ofClass: String.self) { string, _ in
-					continuation.resume(returning: string)
-				}
-			}
-			if let loaded, let url = SharedShareItem.firstWebURL(in: loaded) { return url }
 		}
 		return nil
 	}

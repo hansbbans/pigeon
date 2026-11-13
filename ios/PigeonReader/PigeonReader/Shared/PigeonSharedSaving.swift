@@ -344,7 +344,7 @@ nonisolated enum SharedShareItem {
 		let range = NSRange(trimmed.startIndex..., in: trimmed)
 		return detector.matches(in: trimmed, range: range)
 			.compactMap(\.url)
-			.first(where: isWebURL)
+			.first { isWebURL($0) }
 	}
 
 	private static func absoluteWebURL(_ string: String) -> URL? {
