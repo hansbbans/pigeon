@@ -160,10 +160,20 @@ nonisolated struct PendingSavedLinkQueue: Sendable {
 	/// The app group container's queue (the app's own Library when the group is
 	/// unavailable, as in unsigned simulator builds).
 	static var shared: PendingSavedLinkQueue {
-		let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: PigeonSharedData.appGroup)
+		let base = sharedContainerURL
 			?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
 		return PendingSavedLinkQueue(directory: base.appending(path: directoryName, directoryHint: .isDirectory))
 	}
+
+	/// Nil when this process has no App Group (unsigned simulator, a profile
+	/// without `group.com.hans.pigeon.reader`). The share extension must not
+	/// treat a write to its private Library as a successful handoff: the app
+	/// will never see that file.
+	static var sharedContainerURL: URL? {
+		FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: PigeonSharedData.appGroup)
+	}
+
+	static var hasSharedContainer: Bool { sharedContainerURL != nil }
 
 	func all() -> [PendingSavedLink] {
 		let files = (try? FileManager.default.contentsOfDirectory(
@@ -229,7 +239,7 @@ nonisolated struct PendingSavedLinkQueue: Sendable {
 
 /// How a failed save should be handled.
 nonisolated enum SavedLinkFailure: Equatable, Sendable {
-	/// Keep it queued: offline, a server error, or no session yet.
+	/// Keep it queued: offline, a server error, or no valid session yet.
 	case retryLater
 	/// The server refused the link itself (bad URL, too large). Retrying cannot help.
 	case rejected
@@ -238,9 +248,112 @@ nonisolated enum SavedLinkFailure: Equatable, Sendable {
 		guard let statusCode else { return .retryLater }
 		return [400, 405, 413, 422].contains(statusCode) ? .rejected : .retryLater
 	}
+
+	/// What the share extension shows for a `.rejected` link: the server's own
+	/// reason when it sent one.
+	static func rejectionMessage(body: Data?) -> String {
+		serverMessage(from: body) ?? "Pigeon can’t save this kind of link."
+	}
+
+	private static func serverMessage(from data: Data?) -> String? {
+		guard let data,
+			let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+			let message = object["error"] as? String else {
+			return nil
+		}
+		let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+		return trimmed.isEmpty ? nil : String(trimmed.prefix(200))
+	}
 }
 
 // MARK: - Share extension helpers
+
+/// One http(s) link taken from a share-sheet payload. Safari, Messages, and
+/// many other apps do not hand over a `URL`: they register a string, an
+/// attributed string, or put the address in the `NSExtensionItem` text.
+nonisolated enum SharedShareItem {
+	struct Link: Equatable, Sendable {
+		let url: URL
+		let title: String?
+	}
+
+	static func isWebURL(_ url: URL) -> Bool {
+		guard url.isFileURL == false, url.user == nil, url.password == nil, url.host != nil else { return false }
+		guard let scheme = url.scheme?.lowercased() else { return false }
+		return scheme == "http" || scheme == "https"
+	}
+
+	static func normalizedTitle(_ raw: String?) -> String? {
+		let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return trimmed.isEmpty ? nil : String(trimmed.prefix(500))
+	}
+
+	/// Coerces whatever `NSItemProvider.loadItem` actually returned. Safari's
+	/// `public.url` can be a string; Messages' `public.plain-text` is often an
+	/// `NSAttributedString`. (`as? URL` and `as? String` also bridge `NSURL`
+	/// and `NSString`.)
+	static func webURL(from payload: Any) -> URL? {
+		if let url = payload as? URL { return isWebURL(url) ? url : nil }
+		if let string = payload as? String { return firstWebURL(in: string) }
+		if let attributed = payload as? NSAttributedString { return firstWebURL(in: attributed.string) }
+		if let data = payload as? Data, let string = String(data: data, encoding: .utf8) {
+			return firstWebURL(in: string)
+		}
+		return nil
+	}
+
+	/// Title and URL from the item's own text fields, for items whose
+	/// attachments carry no usable URL or text.
+	static func link(fromItemText title: String?, contentText: String?) -> Link? {
+		if let url = firstWebURL(in: contentText ?? "") {
+			return Link(url: url, title: normalizedTitle(title))
+		}
+		if let url = firstWebURL(in: title ?? "") {
+			return Link(url: url, title: nil)
+		}
+		return nil
+	}
+
+	/// Messages and other apps often share a sentence with a link in it.
+	static func firstWebURL(in text: String) -> URL? {
+		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+		if trimmed.isEmpty { return nil }
+		// URL(string:) percent-encodes spaces, so only a single token can be the
+		// whole link; anything longer goes through the link detector.
+		if trimmed.contains(where: \.isWhitespace) == false, let url = URL(string: trimmed), isWebURL(url) {
+			return url
+		}
+		guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+			return nil
+		}
+		let range = NSRange(trimmed.startIndex..., in: trimmed)
+		return detector.matches(in: trimmed, range: range)
+			.compactMap(\.url)
+			.first { isWebURL($0) }
+	}
+}
+
+/// Whether the share extension may claim a queued save. A write to the
+/// extension's private Library is not a handoff: the app never reads it.
+nonisolated enum SharedShareHandoff: Equatable, Sendable {
+	/// In the app group queue. The app sends it on its next launch or sync,
+	/// after sign-in when `needsSignIn`.
+	case queued(needsSignIn: Bool)
+	case rejected(String)
+
+	static func queue(hasSharedContainer: Bool, enqueued: Bool, needsSignIn: Bool) -> Self {
+		guard hasSharedContainer else {
+			return .rejected(
+				needsSignIn
+					? "Open Pigeon and sign in, then try again."
+					: "Pigeon couldn’t save this link. Open the app and try again.",
+			)
+		}
+		// The URL was already checked, so a failed enqueue is a write failure.
+		guard enqueued else { return .rejected("Pigeon couldn’t save this link. Try again.") }
+		return .queued(needsSignIn: needsSignIn)
+	}
+}
 
 nonisolated enum SharedLinkClassifier {
 	/// Whether a shared URL is probably a feed (or a YouTube channel) rather

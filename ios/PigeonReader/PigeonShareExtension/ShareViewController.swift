@@ -84,8 +84,11 @@ final class ShareViewController: UIViewController {
 		switch await ShareSaver.save(url: shared.url, title: shared.title) {
 		case .saved:
 			show(status: "Saved to Read It Later", detail: shared.title ?? shared.url.host(), symbol: "bookmark.fill")
-		case .queued:
-			show(status: "Saved, will sync", detail: "Pigeon sends it when it’s back online.", symbol: "clock")
+		case .queued(let needsSignIn):
+			let detail = needsSignIn
+				? "Open Pigeon and sign in to finish saving it."
+				: "It’ll show up in Read It Later when you open Pigeon."
+			show(status: "Saved, will sync", detail: detail, symbol: "clock")
 		case .rejected(let message):
 			show(status: "Couldn’t save this link", detail: message, symbol: "exclamationmark.triangle")
 			showButtons([("Done", .prominent, { [weak self] in self?.finish() })])
@@ -130,35 +133,33 @@ final class ShareViewController: UIViewController {
 
 	private func firstSharedLink() async -> SharedLink? {
 		for item in extensionContext?.inputItems.compactMap({ $0 as? NSExtensionItem }) ?? [] {
-			let title = item.attributedTitle?.string.trimmingCharacters(in: .whitespacesAndNewlines)
+			let title = SharedShareItem.normalizedTitle(item.attributedTitle?.string)
 			for provider in item.attachments ?? [] {
-				if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
-					let value = try? await provider.loadItem(forTypeIdentifier: UTType.url.identifier),
-					let url = value as? URL, url.isFileURL == false {
-					return SharedLink(url: url, title: title?.isEmpty == false ? title : nil)
+				if let url = await Self.webURL(from: provider) {
+					return SharedLink(url: url, title: title)
 				}
-				if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
-					let value = try? await provider.loadItem(forTypeIdentifier: UTType.plainText.identifier),
-					let string = value as? String,
-					let url = Self.firstWebURL(in: string) {
-					return SharedLink(url: url, title: title?.isEmpty == false ? title : nil)
-				}
+			}
+			if let link = SharedShareItem.link(
+				fromItemText: item.attributedTitle?.string,
+				contentText: item.attributedContentText?.string,
+			) {
+				return SharedLink(url: link.url, title: link.title)
 			}
 		}
 		return nil
 	}
 
-	/// Messages and other apps often share a sentence with a link in it.
-	private static func firstWebURL(in text: String) -> URL? {
-		let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-		if let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) {
-			return url
+	/// `loadItem` returns whatever the host registered (often a string, not a
+	/// `URL`). Coercion lives in `SharedShareItem.webURL(from:)`.
+	private static func webURL(from provider: NSItemProvider) async -> URL? {
+		for identifier in [UTType.url.identifier, UTType.plainText.identifier]
+			where provider.hasItemConformingToTypeIdentifier(identifier) {
+			if let value = try? await provider.loadItem(forTypeIdentifier: identifier),
+				let url = SharedShareItem.webURL(from: value) {
+				return url
+			}
 		}
-		guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return nil }
-		let range = NSRange(trimmed.startIndex..., in: trimmed)
-		return detector.matches(in: trimmed, range: range)
-			.compactMap(\.url)
-			.first { ["http", "https"].contains($0.scheme?.lowercased() ?? "") }
+		return nil
 	}
 }
 
@@ -170,40 +171,45 @@ private struct SharedLink {
 private enum ShareSaver {
 	enum Outcome {
 		case saved
-		case queued
+		case queued(needsSignIn: Bool)
 		case rejected(String)
 	}
 
 	/// Posts the link with the app's session. Anything short of a definite
-	/// answer queues it in the app group, where the app sends it later.
+	/// answer queues it in the app group, where the app sends it later — but
+	/// only when that group exists. A write to the extension's private Library
+	/// would look like success and never reach Read It Later.
 	static func save(url: URL, title: String?) async -> Outcome {
 		guard let data = try? SharedSessionKeychain().load(migratingLegacyItem: false),
 			let session = try? JSONDecoder().decode(PigeonSession.self, from: data),
 			let request = try? SharedLinkClassifier.saveRequest(baseURL: session.baseURL, token: session.token, url: url, title: title) else {
-			// No shared session yet: the app has not run since updating.
-			return queue(url: url, title: title)
+			return queue(url: url, title: title, needsSignIn: true)
 		}
 		do {
-			let (_, response) = try await URLSession.shared.data(for: request)
+			let (body, response) = try await URLSession.shared.data(for: request)
 			let statusCode = (response as? HTTPURLResponse)?.statusCode
 			if let statusCode, 200..<300 ~= statusCode {
 				return .saved
 			}
 			switch SavedLinkFailure.classify(statusCode: statusCode) {
 			case .rejected:
-				return .rejected("Pigeon can’t save this kind of link.")
+				return .rejected(SavedLinkFailure.rejectionMessage(body: body))
 			case .retryLater:
-				return queue(url: url, title: title)
+				// A stale shared session (401/403) still queues: the app sends
+				// the link once the user signs in again.
+				return queue(url: url, title: title, needsSignIn: statusCode == 401 || statusCode == 403)
 			}
 		} catch {
-			return queue(url: url, title: title)
+			return queue(url: url, title: title, needsSignIn: false)
 		}
 	}
 
-	private static func queue(url: URL, title: String?) -> Outcome {
-		guard PendingSavedLinkQueue.shared.enqueue(url: url, title: title) != nil else {
-			return .rejected("Only web links can be saved.")
+	private static func queue(url: URL, title: String?, needsSignIn: Bool) -> Outcome {
+		let hasSharedContainer = PendingSavedLinkQueue.hasSharedContainer
+		let enqueued = hasSharedContainer && PendingSavedLinkQueue.shared.enqueue(url: url, title: title) != nil
+		switch SharedShareHandoff.queue(hasSharedContainer: hasSharedContainer, enqueued: enqueued, needsSignIn: needsSignIn) {
+		case .queued(let needsSignIn): return .queued(needsSignIn: needsSignIn)
+		case .rejected(let message): return .rejected(message)
 		}
-		return .queued
 	}
 }
