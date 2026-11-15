@@ -14,6 +14,8 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	let onNearEndChange: (Bool) -> Void
 	let onUserScroll: () -> Void
 	let onScrollingChange: (Bool) -> Void
+	/// A story became, or stopped being, at least half visible (reading log).
+	let onStoryVisibilityChange: (String, Bool) -> Void
 	@ViewBuilder let storyMenu: (Recommendation) -> StoryMenu
 	@ViewBuilder let footer: () -> Footer
 
@@ -78,6 +80,9 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 			select: { select(article) },
 		)
 		.contextMenu { storyMenu(article) }
+		.onScrollVisibilityChange(threshold: 0.5) { isVisible in
+			onStoryVisibilityChange(article.id, isVisible)
+		}
 	}
 }
 
