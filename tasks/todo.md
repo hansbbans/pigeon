@@ -1,3 +1,32 @@
+# Reading log: collect a month of evidence before redesigning the ranker (started 2026-11-15)
+
+Hans reads little in the app, so the recommendations redesign waits for data.
+Branch `claude/reading-log` (Worker + web), worktree `~/code/pigeon-reading-log`.
+The iOS half is a separate branch, `claude/reading-log-ios`. Details: `docs/reading-log.md`.
+The paused design lives on branch `claude/recommendations-v2`.
+
+- [x] Schema v17: `reading_log` table (loosely typed, no foreign keys)
+- [x] `POST /api/v1/reading-log`: validated, idempotent, skips deleted items
+- [x] Web: impressions from every list (half visible for one second, once per list session, batched)
+- [x] Web: open, exact reading time, scroll depth and outbound links (none were sent before)
+- [x] `npm run reading-log:report` and `docs/reading-log.md`
+- [ ] iOS: impressions from all three lists; exact reading time on close (branch `claude/reading-log-ios`)
+- [ ] Deploy the Worker (schema bump is one-way) and release the iOS build
+- [ ] Revisit around 2026-12-15: run the report; redesign once there are a few hundred shown items and 50+ reads
+
+## Review (Worker + web)
+- Verified in real Chromium against local Workers at 1280 px and 375 px: impressions equal the cards on screen,
+  no duplicates, auto-selected article logs nothing, reading time exact, tab close still reports.
+- That run caught one bug the fake-DOM tests could not: on a phone, reading time kept counting after going
+  back to the list. Fixed and pinned by a test.
+- A fresh-eyes review then found the report crediting an open to every list the article ever appeared in, and
+  four ways the web client lost events (view switch and back, keyboard step past a 200-article window, logout,
+  keyboard opens timed by wall clock). All fixed with tests; the report's SQL now has its own tests.
+- Not done: offline queueing of log events (dropped by design), pruning of `reading_log`; `engagement_events`
+  cannot tell the web app from the iOS app (only `reading_log` can).
+
+---
+
 # iPhone home tiles (started 2026-11-11)
 
 Branch `claude/home-tiles`, worktree `~/code/pigeon-home-tiles`. Goal: replace the sterile list home with a tile grid (Hans: no big counts, no top pick, no Unread, no masthead; motion from the Matter notes).

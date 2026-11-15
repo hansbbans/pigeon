@@ -12,6 +12,7 @@ Pigeon is a Cloudflare Worker that turns newsletters and RSS into Atom feeds and
 - Production bugs: check live data and the live Worker version before reading code.
 - Worker invariants: dates are ISO 8601 UTC; Atom entries wrap HTML in CDATA; the email handler catches and logs instead of rethrowing (a rethrow makes Cloudflare retry the message); D1 rows are capped at 1 MB, so check content size before inserting (`MAX_CONTENT_SIZE` in `src/email-handler.ts`); dedupe with `INSERT OR IGNORE` against the `message_id` UNIQUE index; the email handler cannot run locally, so test it with saved `.eml` fixtures.
 - Code conventions: TypeScript strict, ESM only. Worker code in `src/` uses Web APIs only (no `fs`, `Buffer`, `require()`, `node:` imports, even though `nodejs_compat` is on); Node is fine in `scripts/`. Parse email with `postal-mime` (`mailparser` does not run in Workers). Atom output is hand-rolled in `src/feed.ts` (the `feed` npm package needs Node); `fast-xml-parser` is used only on the input side, in `src/rss-parser.ts`. IDs come from `crypto.randomUUID()`; multi-statement D1 writes go through `DB.batch()`. Feed keys are URL-safe lowercase (`normalizeFeedKey` in `src/normalize.ts`).
+- Reading log (impressions, opens, reading time for judging ranker changes): `docs/reading-log.md`; `npm run reading-log:report` summarises production.
 - Writers to `items` must avoid no-op updates (they bloat `sync_changes`, see the compaction in the sync route). Never delete `sync_changes` rows; web push relies on each article's first event.
 
 ## iOS

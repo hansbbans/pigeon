@@ -18,7 +18,8 @@
     "audit": "npm audit --audit-level=high",
     "check": "npm test && npm run typecheck && npm run audit",
     "vendor:defuddle": "node scripts/vendor-defuddle.mjs",
-    "visual:check": "node scripts/visual-check.mjs"
+    "visual:check": "node scripts/visual-check.mjs",
+    "reading-log:report": "node scripts/reading-log-report.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",

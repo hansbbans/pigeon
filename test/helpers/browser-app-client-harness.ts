@@ -293,6 +293,8 @@ export async function createBrowserHarness(options?: {
 }) {
 	const documentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
 	const windowHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
+	// Recorded, never run: tests call the handlers themselves with their own clock.
+	const intervals: Array<{ handler: () => void; milliseconds: number }> = [];
 	let visibilityState = 'visible';
 	let activeElement: ReturnType<typeof createElement> | null = null;
 	const revealCalls: Array<{ id: string; block?: string; inline?: string }> = [];
@@ -561,6 +563,8 @@ export async function createBrowserHarness(options?: {
 			},
 			__PIGEON_BROWSER_CLIENT__: undefined as unknown,
 			__readArticleState: undefined as ((id: string) => { body: string[]; metadata: string[] }) | undefined,
+			setInterval(handler: () => void, milliseconds: number) { intervals.push({ handler, milliseconds }); return intervals.length; },
+			__readyReaderItemId: undefined as (() => string | null) | undefined,
 			__readCacheSizes: undefined as (() => { bodies: number; metadata: number; active: number; queued: number; pending: number; paging: boolean; membership: number }) | undefined,
 			open() {},
 			addEventListener(type: string, handler: (event: Record<string, unknown>) => unknown) {
@@ -633,6 +637,7 @@ export async function createBrowserHarness(options?: {
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
     active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
   window.__readArticleState = (id) => ({ body: articleCache.get(id)?.categories || [], metadata: articleMetadataCache.get(id)?.categories || [] });
+  window.__readyReaderItemId = () => readyReaderItemId;
 })();`);
 	vm.runInNewContext(runtime, context);
 	await flushBrowserTasks();
@@ -759,6 +764,7 @@ export async function createBrowserHarness(options?: {
 			return frameDocumentElement.scrollTop;
 		},
 		dispatchDocumentEvent,
+		intervals,
 		setVisibility,
 		setOnline,
 		getActiveElement() {
