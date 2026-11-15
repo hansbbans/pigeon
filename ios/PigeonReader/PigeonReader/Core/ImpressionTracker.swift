@@ -95,6 +95,14 @@ nonisolated struct ImpressionTracker: Sendable {
 		}
 	}
 
+	/// The reader picked this article, so it was seen, even inside its first
+	/// second on screen. Nil when it is already logged or no session is open.
+	mutating func markChosen(itemId: String, position: Int, at date: Date) -> Impression? {
+		guard let sessionId, loggedItemIDs.insert(itemId).inserted else { return nil }
+		sightings[itemId] = nil
+		return Impression(itemId: itemId, position: position, sessionId: sessionId, occurredAt: date)
+	}
+
 	/// Stops the clock. Returns what had already qualified by `date`.
 	mutating func pause(at date: Date) -> [Impression] {
 		guard pausedAt == nil else { return [] }

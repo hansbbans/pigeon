@@ -367,6 +367,34 @@ struct ReadingLogTests {
 		#expect(batches.last?.allSatisfy { $0["sessionId"] as? String == secondSession } == true)
 	}
 
+	@Test func aRowTappedInItsFirstSecondIsLoggedAsShown() async throws {
+		let transport = ReadingLogTransport()
+		let model = try makeModel(transport)
+		let clock = ManualClock(start)
+		let recorder = ReaderImpressionRecorder(now: { clock.now })
+		let list = ReadingLogList.list(for: .smart(.unread))
+
+		recorder.updateRows(["a", "b", "c"])
+		recorder.apply(.init(sessionKey: "unread", list: list, isPaused: false), model: model)
+		recorder.setRowVisible("c", true)
+		clock.advance(0.25)
+		// Tapped before its second was up; then the reader covers the list.
+		recorder.rowChosen("c")
+		recorder.rowChosen("c")
+		recorder.rowChosen("not-in-this-list")
+		recorder.apply(.init(sessionKey: "unread", list: list, isPaused: true), model: model)
+		clock.advance(120)
+		recorder.apply(.init(sessionKey: "unread", list: list, isPaused: false), model: model)
+		clock.advance(2)
+		recorder.evaluate()
+		recorder.endSession()
+		await model.waitForReadingAnalytics()
+
+		let events = try await readingLogBatches(transport).flatMap { $0 }
+		#expect(events.map { $0["itemId"] as? String } == ["c"])
+		#expect(events.first?["position"] as? Int == 2)
+	}
+
 	@Test func timeUnderTheReaderOrInTheBackgroundDoesNotCount() async throws {
 		let transport = ReadingLogTransport()
 		let model = try makeModel(transport)

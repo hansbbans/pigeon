@@ -26,7 +26,10 @@ struct ReadItLaterListView: View {
 							article: article,
 							remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 							imageProxySession: model.session,
-							select: { model.select(article: article) },
+							select: {
+								impressions.rowChosen(article.id)
+								model.select(article: article)
+							},
 						)
 						.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
 						.contextMenu { actions(for: article) }

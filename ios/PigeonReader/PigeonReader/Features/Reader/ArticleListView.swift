@@ -150,6 +150,7 @@ struct ArticleListView: View {
 								thumbnailScope: model.session?.storageIdentity,
 								imageProxySession: model.session,
 								select: {
+									impressions.rowChosen(article.id)
 									model.retainPresentedArticles(articles, in: collection)
 									model.select(article: article)
 								},
@@ -410,6 +411,7 @@ struct ArticleListView: View {
 				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 				thumbnailScope: model.session?.storageIdentity,
 				select: { article in
+					impressions.rowChosen(article.id)
 					model.retainPresentedArticles(articles, in: collection)
 					model.select(article: article)
 				},

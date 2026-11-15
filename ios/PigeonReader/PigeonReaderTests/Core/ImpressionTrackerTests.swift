@@ -31,6 +31,22 @@ struct ImpressionTrackerTests {
 		#expect(tracker.nextQualificationDate == nil)
 	}
 
+	@Test func anArticleTheReaderPicksCountsAtOnceAndOnlyOnce() {
+		var tracker = ImpressionTracker()
+		#expect(tracker.markChosen(itemId: "a", position: 0, at: at(0)) == nil)
+
+		tracker.beginSession(id: "session-1")
+		#expect(tracker.update(visible: [item("a", 3), item("b", 4)], at: at(0)).isEmpty)
+		// Tapped a quarter second after it appeared.
+		#expect(tracker.markChosen(itemId: "a", position: 3, at: at(0.25))
+			== ImpressionTracker.Impression(itemId: "a", position: 3, sessionId: "session-1", occurredAt: at(0.25)))
+		#expect(tracker.markChosen(itemId: "a", position: 3, at: at(0.5)) == nil)
+		// Its second on screen does not log it again; the other row is unaffected.
+		#expect(tracker.update(visible: [item("a", 3), item("b", 4)], at: at(1)).map(\.itemId) == ["b"])
+		// A row already logged by the one-second rule is not logged again when picked.
+		#expect(tracker.markChosen(itemId: "b", position: 4, at: at(2)) == nil)
+	}
+
 	@Test func leavingBeforeOneSecondRestartsTheTimerOnReentry() {
 		var tracker = ImpressionTracker()
 		tracker.beginSession(id: "session-1")

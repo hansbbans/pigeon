@@ -102,6 +102,14 @@ final class ReaderImpressionRecorder {
 		viewportDidChange()
 	}
 
+	/// The reader picked a row. Call before the selection changes, while the
+	/// list is still the one on screen.
+	func rowChosen(_ itemID: String) {
+		guard let position = measuresViewport ? viewport?.position(of: itemID) : rowPositions[itemID],
+			let impression = tracker.markChosen(itemId: itemID, position: position, at: now()) else { return }
+		deliver([impression])
+	}
+
 	/// Something the list shows may have moved. Called for every scroll frame
 	/// of a classic list, so the common path is two comparisons.
 	func viewportDidChange() {

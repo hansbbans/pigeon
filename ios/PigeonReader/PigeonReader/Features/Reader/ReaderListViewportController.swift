@@ -485,23 +485,28 @@ final class ReaderListViewportController {
 			nativeTransitionID == nil else { return nil }
 		let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
 		let bottom = scrollView.contentOffset.y + scrollView.bounds.height - scrollView.adjustedContentInset.bottom
-		if articlePositions == nil {
-			articlePositions = Dictionary(
-				articleIDs.enumerated().map { ($0.element, $0.offset) },
-				uniquingKeysWith: { first, _ in first },
-			)
-		}
 		var visible: [ImpressionTracker.VisibleItem] = []
 		for row in rows.values {
 			guard let view = row.view, view.window != nil,
 				view.isDescendant(of: scrollView), view.bounds.height > 0,
-				let position = articlePositions?[row.articleID] else { continue }
+				let position = position(of: row.articleID) else { continue }
 			let frame = view.convert(view.bounds, to: scrollView)
 			if Self.isAtLeastHalfVisible(minY: frame.minY, maxY: frame.maxY, top: top, bottom: bottom) {
 				visible.append(ImpressionTracker.VisibleItem(itemId: row.articleID, position: position))
 			}
 		}
 		return visible
+	}
+
+	/// The article's 0-based index in the list as displayed.
+	func position(of articleID: String) -> Int? {
+		if articlePositions == nil {
+			articlePositions = Dictionary(
+				articleIDs.enumerated().map { ($0.element, $0.offset) },
+				uniquingKeysWith: { first, _ in first },
+			)
+		}
+		return articlePositions?[articleID]
 	}
 
 	/// A row taller than the viewport can never show half of itself, so
