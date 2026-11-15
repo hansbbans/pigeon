@@ -36,6 +36,8 @@ struct ReadItLaterListView: View {
 						.onScrollVisibilityChange(threshold: 0.5) { isVisible in
 							impressions.setRowVisible(article.id, isVisible)
 						}
+						// A row can leave the list without being told it is no longer visible.
+						.onDisappear { impressions.setRowVisible(article.id, false) }
 					}
 				}
 				.listStyle(.plain)

@@ -81,6 +81,12 @@ web list.
 The For You position table leaves out impressions from a re-sorted list, where
 position is not the ranker's order.
 
+Known limits on iOS, small enough to leave: a list under a sheet (Settings,
+say) still counts as on screen; each change of the search text is a new list
+session, so slow typing logs the same results again; and a For You score is
+the one current when the impression is sent, which after a refresh can be
+newer than the ranking on screen.
+
 `reading_log` has no foreign keys, so the history survives a deleted article.
 Nothing prunes it yet: at a few hundred impressions a day it grows by roughly
 2 MB a month against the 500 MB D1 cap. Add pruning before leaving it on for

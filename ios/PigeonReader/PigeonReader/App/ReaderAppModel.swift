@@ -276,6 +276,8 @@ final class ReaderAppModel {
 	private var readingMonitorIDs: [String: UUID] = [:]
 	/// Impressions waiting for the next batched `reading-log` request.
 	private var readingLogBuffer: [ReadingLogEvent] = []
+	/// How long a backgrounded scene waits for analytics requests to finish.
+	var analyticsBackgroundWaitLimit: Duration = .seconds(5)
 	private var readingLogFlushTimer: Task<Void, Never>?
 	/// Reading-log and final reading-time requests in flight. They never
 	/// report errors; the scene background flush waits for them.
@@ -1196,7 +1198,7 @@ final class ReaderAppModel {
 		guard Task.isCancelled == false else { return }
 		await writeWidgetSnapshotOffMain()
 		guard Task.isCancelled == false else { return }
-		await waitForSilentAnalyticsSends()
+		await waitForSilentAnalyticsSends(atMost: analyticsBackgroundWaitLimit)
 	}
 
 	private func finishSceneBackgroundFlush(id: UUID) {
@@ -4864,7 +4866,11 @@ final class ReaderAppModel {
 					at: now(),
 					minimumDuration: minimumActiveDuration,
 				) {
-					_ = await send(event, reportErrors: false)
+					// On its own task, like the final report: the delta is already
+					// taken, so a reader closing mid-request must not cancel it.
+					await startSilentAnalyticsSend { apiClient in
+						try await apiClient.sendEngagement([event])
+					}?.value
 					guard isCurrentAccountOperation(context) else { return }
 				}
 				completedIntervals += 1
@@ -4932,6 +4938,8 @@ final class ReaderAppModel {
 		} else if readingLogFlushTimer == nil {
 			readingLogFlushTimer = Task { [weak self] in
 				do { try await Task.sleep(for: flushInterval) } catch { return }
+				// Cancelled after the sleep ended: a newer timer may be in place.
+				guard Task.isCancelled == false else { return }
 				self?.readingLogFlushTimer = nil
 				self?.flushReadingLog()
 			}
@@ -4970,18 +4978,32 @@ final class ReaderAppModel {
 		}
 	}
 
+	/// The background flush's wait. Analytics are best effort: a request
+	/// hanging on a bad network must not hold the flush open, because the
+	/// next backgrounding skips its own flush while this one is running.
+	private func waitForSilentAnalyticsSends(atMost limit: Duration) async {
+		let clock = ContinuousClock()
+		let deadline = clock.now.advanced(by: limit)
+		while silentAnalyticsSends.isEmpty == false, clock.now < deadline, Task.isCancelled == false {
+			try? await Task.sleep(for: .milliseconds(20))
+		}
+	}
+
 	/// Runs an analytics request that must never surface: no `errorMessage`,
 	/// no banner, no retry. It keeps the client of the account that produced
 	/// the events, so it cannot post them to another account.
+	@discardableResult
 	private func startSilentAnalyticsSend(
 		_ operation: @escaping @MainActor (PigeonAPIClient) async throws -> Void,
-	) {
-		guard let apiClient else { return }
+	) -> Task<Void, Never>? {
+		guard let apiClient else { return nil }
 		let id = UUID()
-		silentAnalyticsSends[id] = Task { [weak self] in
+		let send = Task { [weak self] in
 			try? await operation(apiClient)
 			self?.silentAnalyticsSends[id] = nil
 		}
+		silentAnalyticsSends[id] = send
+		return send
 	}
 
 	private func resetReadingLogForAccountChange() {

@@ -182,7 +182,8 @@ final class ReaderImpressionRecorder {
 		let delay = max(0, date.timeIntervalSince(now())) + 0.01
 		wakeTask = Task { [weak self] in
 			do { try await Task.sleep(for: .seconds(delay)) } catch { return }
-			guard let self else { return }
+			// Cancelled after the sleep ended: a newer wake may be in place.
+			guard let self, Task.isCancelled == false else { return }
 			self.wakeDate = nil
 			self.wakeTask = nil
 			self.evaluate()

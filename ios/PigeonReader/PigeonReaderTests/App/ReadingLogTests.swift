@@ -195,6 +195,29 @@ struct ReadingLogTests {
 		#expect(try await readingLogBatches(transport).map(\.count) == [3])
 	}
 
+	@Test(.timeLimit(.minutes(1))) func aHungAnalyticsRequestDoesNotHoldTheBackgroundFlushOpen() async throws {
+		let transport = ReadingLogTransport(gatedPath: Self.readingLogPath)
+		let runner = RecordingSceneBackgroundTaskRunner()
+		let model = try makeModel(transport, sceneBackgroundTasks: runner)
+		model.analyticsBackgroundWaitLimit = .milliseconds(50)
+
+		model.recordImpressions(impressions(3), in: .list(for: .smart(.forYou)), flushInterval: .seconds(3_600))
+		model.handleScenePhase(.background)
+		await transport.waitUntilGated()
+		// The request never answers; the flush gives up on it and finishes.
+		await model.waitForSceneBackgroundFlush()
+		#expect(runner.endCount == 1)
+
+		// So the next backgrounding runs its own flush.
+		model.handleScenePhase(.active)
+		model.handleScenePhase(.background)
+		await model.waitForSceneBackgroundFlush()
+		#expect(runner.beginCount == 2)
+		#expect(runner.endCount == 2)
+		await transport.releaseGate()
+		await model.waitForReadingAnalytics()
+	}
+
 	// MARK: - Exact reading time
 
 	@Test(.timeLimit(.minutes(1))) func closingAfterFourSecondsReportsThoseFourSeconds() async throws {
@@ -229,6 +252,26 @@ struct ReadingLogTests {
 
 		let durations = try await activeReadingEvents(transport).map { $0["durationSeconds"] as? Double }
 		#expect(durations == [15, 10])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func closingWhileAPolledChunkIsInFlightStillDeliversIt() async throws {
+		let transport = ReadingLogTransport(gatedPath: Self.engagementPath)
+		let model = try makeModel(transport)
+		let clock = ScriptedClock([start, start.addingTimeInterval(15), start.addingTimeInterval(18)])
+
+		let reading = Task { await model.monitorActiveReading(for: "story", interval: .zero, now: { clock.next() }) }
+		// The 15 s chunk is on the wire when the reader closes.
+		await transport.waitUntilGated()
+		reading.cancel()
+		await transport.releaseGate()
+		await reading.value
+		await model.waitForReadingAnalytics()
+
+		let durations = try await transport.deliveredRequests(path: Self.engagementPath)
+			.flatMap { try events(in: $0) }
+			.filter { $0["type"] as? String == "active_reading" }
+			.map { $0["durationSeconds"] as? Double }
+		#expect(durations == [15, 3])
 	}
 
 	@Test func aReadUnderOneSecondSendsNothing() async throws {
@@ -612,6 +655,7 @@ private actor ReadingLogTransport: HTTPClient {
 	private let loginToken: String
 	private let gatedPath: String?
 	private var recorded: [URLRequest] = []
+	private var delivered: [URLRequest] = []
 	private var gate: CheckedContinuation<Void, Never>?
 	private var didGate = false
 	private var gateWaiters: [CheckedContinuation<Void, Never>] = []
@@ -633,6 +677,9 @@ private actor ReadingLogTransport: HTTPClient {
 				gateWaiters.removeAll()
 			}
 		}
+		// URLSession fails a request whose task was cancelled while it was in flight.
+		try Task.checkCancellation()
+		delivered.append(request)
 		var status = statuses[url.path] ?? 200
 		let body: Data
 		switch url.path {
@@ -664,6 +711,11 @@ private actor ReadingLogTransport: HTTPClient {
 
 	func requestCount(path: String) -> Int {
 		requests(path: path).count
+	}
+
+	/// Requests that reached the server: not cancelled while in flight.
+	func deliveredRequests(path: String) -> [URLRequest] {
+		delivered.filter { $0.url?.path == path }
 	}
 
 }

@@ -83,6 +83,9 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		.onScrollVisibilityChange(threshold: 0.5) { isVisible in
 			onStoryVisibilityChange(article.id, isVisible)
 		}
+		// A row can leave the hierarchy (a reload, a jump to the top) without
+		// being told it is no longer visible.
+		.onDisappear { onStoryVisibilityChange(article.id, false) }
 	}
 }
 
