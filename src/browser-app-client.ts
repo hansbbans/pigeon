@@ -1059,9 +1059,12 @@ export function readingLogView(
 }
 
 export function outboundLinkHost(href: unknown): string | null {
-	if (typeof href !== 'string' || !/^https?:\/\//i.test(href.trim())) return null;
+	if (typeof href !== 'string') return null;
+	// A protocol-relative link (//example.com/x) leaves the app too.
+	const link = href.trim().startsWith('//') ? 'https:' + href.trim() : href.trim();
+	if (!/^https?:\/\//i.test(link)) return null;
 	try {
-		return new URL(href.trim()).hostname.toLowerCase() || null;
+		return new URL(link).hostname.toLowerCase() || null;
 	} catch (_error) {
 		return null;
 	}
@@ -1099,10 +1102,11 @@ export function createReadingMeter(idleLimitMs = 120000, maximumStepMs = 2000) {
 		interact(nowMs: number) {
 			lastInteraction = nowMs;
 		},
-		tick(nowMs: number, isReading: boolean) {
+		// idleMs overrides the idle limit for this tick (a video needs a longer one).
+		tick(nowMs: number, isReading: boolean, idleMs?: number) {
 			const elapsed = nowMs - lastTick;
 			lastTick = nowMs;
-			if (itemId !== null && isReading && elapsed > 0 && nowMs - lastInteraction <= idleLimitMs) {
+			if (itemId !== null && isReading && elapsed > 0 && nowMs - lastInteraction <= (idleMs ?? idleLimitMs)) {
 				unreportedMs += Math.min(elapsed, maximumStepMs);
 				readMs += Math.min(elapsed, maximumStepMs);
 			}

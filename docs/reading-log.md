@@ -10,7 +10,7 @@ compared with real behaviour. Plan: collect for about a month, then revisit
 
 | Signal | Where | Clients |
 |---|---|---|
-| Impression: a card was at least half visible in a list for one continuous second, or was picked sooner. Once per card per list session. Carries the list (`view`), the 0-based `position` as displayed, a `session_id`, and for For You the ranker's `score`. | `reading_log` | web, iOS |
+| Impression: a card was at least half visible in a list for one continuous second, or was picked sooner. Once per card per list session. Carries the list (`view`), the 0-based `position` as displayed, a `session_id`, and for For You the ranker's `score` (the web app adds `sort` when the list is re-sorted). | `reading_log` | web, iOS |
 | Open: the reader chose an article. | `engagement_events` `explicit_open` | web, iOS |
 | Reading time, exact to a tenth of a second, sent in 15 second chunks plus the remainder when reading stops. | `engagement_events` `active_reading` | web, iOS |
 | Scroll depth, once per quarter of the article. | `engagement_events` `scroll_depth` | web, iOS |
@@ -33,8 +33,10 @@ minutes away. A card seen in two sessions is two impressions.
 - Reading time counts only while the article is on screen and the page or app
   is in the foreground. On the web it also stops after two minutes without a
   scroll, key press or click, so a tab left open does not look like a long
-  read. A video is the exception: it is watched without input, so it counts
-  for as long as its player is on screen.
+  read. A video is watched without input, so it gets 30 minutes instead (the
+  player cannot tell Pigeon whether it is paused).
+- Restoring a saved reading position is not scrolling: scroll depth is
+  reported only once the reader moves from there.
 - The article the reader opened stays "the opened article" while another one
   is showing, so switching lists and coming back keeps counting.
 - A hidden page or backgrounded app logs no impressions.
@@ -55,7 +57,10 @@ authentication as the rest of `/api/v1`. Each event: `itemId` and `type`
 (`impression`) are required; `view` is required for impressions; `id`,
 `position`, `value`, `sessionId`, `occurredAt` and a small `metadata` object
 are optional. Idempotent per `id`. Events for items that no longer exist are
-skipped and counted in `skipped`. Validation lives in `src/reading-log.ts`;
+skipped and counted in `skipped`; a malformed event is dropped by itself and
+counted in `rejected` (the clients send once, so one bad event must not cost
+its batch). A batch with no valid event is a 400. Validation lives in
+`src/reading-log.ts`;
 `event_type` has no CHECK constraint, so a new kind of event needs no schema
 change.
 
@@ -69,7 +74,12 @@ An open is credited to the impression it came from: the latest impression of
 that article from an hour before the open to ten seconds after it. So an
 article opened from Unread and later shown in For You counts for Unread only.
 Opens with no impression on record (Reeder, or a build without logging) are
-counted separately.
+counted separately. Opens do not say which app they came from, so an article
+shown on the web and opened on the phone within the hour is credited to the
+web list.
+
+The For You position table leaves out impressions from a re-sorted list, where
+position is not the ranker's order.
 
 `reading_log` has no foreign keys, so the history survives a deleted article.
 Nothing prunes it yet: at a few hundred impressions a day it grows by roughly

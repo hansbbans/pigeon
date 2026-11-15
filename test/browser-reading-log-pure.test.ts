@@ -80,6 +80,7 @@ test('outbound link hosts come only from http and https links', () => {
 	assert.equal(outboundLinkHost('mailto:a@example.com'), null);
 	assert.equal(outboundLinkHost('javascript:alert(1)'), null);
 	assert.equal(outboundLinkHost('/relative/path'), null);
+	assert.equal(outboundLinkHost('//Cdn.Example.net/x'), 'cdn.example.net', 'a protocol-relative link leaves the app too');
 	assert.equal(outboundLinkHost(''), null);
 	assert.equal(outboundLinkHost(null), null);
 });
@@ -116,6 +117,13 @@ test('the reading meter ignores a stalled timer and stops counting when the read
 	meter.interact(200_000);
 	meter.tick(201_000, true);
 	assert.deepEqual(meter.take(0), { itemId: 'b', durationSeconds: 1, scrollDepth: null });
+});
+
+test('a longer idle limit can be given per tick, as for a video, and still ends', () => {
+	const meter = createReadingMeter(120_000, 2_000);
+	meter.open('video', 0);
+	for (let now = 1_000; now <= 2_400_000; now += 1_000) meter.tick(now, true, 1_800_000);
+	assert.deepEqual(meter.take(0), { itemId: 'video', durationSeconds: 1_800, scrollDepth: null });
 });
 
 test('the reading meter reports each scroll quartile once and carries the deepest scroll', () => {

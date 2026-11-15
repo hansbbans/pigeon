@@ -379,7 +379,7 @@ CREATE TABLE IF NOT EXISTS reading_log (
   session_id TEXT,
   metadata_json TEXT,
   occurred_at TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_reading_log_item

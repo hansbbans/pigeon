@@ -61,7 +61,19 @@ function boundedString(value: unknown, name: string, maximum: number): string | 
 	return value;
 }
 
-export function validateReadingLogEvents(body: unknown): ValidatedReadingLogEvent[] {
+export interface ReadingLogValidation {
+	events: ValidatedReadingLogEvent[];
+	/** Events dropped for being malformed, and what was wrong with the first one. */
+	rejected: number;
+	firstError: string | null;
+}
+
+/**
+ * Throws when the envelope is wrong. A malformed event is dropped by itself:
+ * the client sends once and never retries, so one bad event must not cost the
+ * rest of its batch.
+ */
+export function validateReadingLogEvents(body: unknown): ReadingLogValidation {
 	if (!isRecord(body) || !Array.isArray(body.events)) {
 		throw new Error('Request body must contain an events array');
 	}
@@ -69,68 +81,82 @@ export function validateReadingLogEvents(body: unknown): ValidatedReadingLogEven
 		throw new Error(`events must contain between 1 and ${MAX_EVENTS_PER_REQUEST} entries`);
 	}
 
-	return body.events.map((rawEvent, index) => {
-		const field = (name: string) => `events[${index}].${name}`;
-		if (!isRecord(rawEvent)) {
-			throw new Error(`events[${index}] must be an object`);
+	const events: ValidatedReadingLogEvent[] = [];
+	let rejected = 0;
+	let firstError: string | null = null;
+	body.events.forEach((rawEvent, index) => {
+		try {
+			events.push(validateReadingLogEvent(rawEvent, index));
+		} catch (error) {
+			rejected += 1;
+			firstError ??= error instanceof Error ? error.message : String(error);
 		}
-		const itemId = boundedString(rawEvent.itemId, field('itemId'), MAX_ID_LENGTH);
-		if (itemId === null) throw new Error(`${field('itemId')} is invalid`);
-		const type = rawEvent.type;
-		if (typeof type !== 'string' || !(READING_LOG_EVENT_TYPES as readonly string[]).includes(type)) {
-			throw new Error(`${field('type')} is invalid`);
-		}
-
-		const view = boundedString(rawEvent.view, field('view'), 40);
-		if (view !== null && !VIEW_PATTERN.test(view)) throw new Error(`${field('view')} is invalid`);
-		if (type === 'impression' && view === null) throw new Error(`${field('view')} is required for impressions`);
-
-		const position = isAbsent(rawEvent.position) ? null : rawEvent.position;
-		if (position !== null && (typeof position !== 'number' || !Number.isInteger(position) || position < 0 || position > MAX_POSITION)) {
-			throw new Error(`${field('position')} must be an integer between 0 and ${MAX_POSITION}`);
-		}
-		const value = isAbsent(rawEvent.value) ? null : rawEvent.value;
-		if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > MAX_VALUE)) {
-			throw new Error(`${field('value')} must be between 0 and ${MAX_VALUE}`);
-		}
-
-		let metadataJson: string | null = null;
-		if (!isAbsent(rawEvent.metadata)) {
-			if (!isRecord(rawEvent.metadata)) throw new Error(`${field('metadata')} must be an object`);
-			metadataJson = JSON.stringify(rawEvent.metadata);
-			if (new TextEncoder().encode(metadataJson).byteLength > MAX_METADATA_BYTES) {
-				throw new Error(`${field('metadata')} must be at most ${MAX_METADATA_BYTES} bytes`);
-			}
-		}
-
-		let occurredAt: string;
-		if (isAbsent(rawEvent.occurredAt)) {
-			occurredAt = new Date().toISOString();
-		} else if (typeof rawEvent.occurredAt === 'string' && Number.isFinite(Date.parse(rawEvent.occurredAt))) {
-			occurredAt = new Date(rawEvent.occurredAt).toISOString();
-		} else {
-			throw new Error(`${field('occurredAt')} must be a valid ISO 8601 timestamp`);
-		}
-
-		return {
-			id: boundedString(rawEvent.id, field('id'), MAX_ID_LENGTH) ?? crypto.randomUUID(),
-			itemId,
-			type: type as ReadingLogEventType,
-			view,
-			position,
-			value,
-			sessionId: boundedString(rawEvent.sessionId, field('sessionId'), MAX_SESSION_ID_LENGTH),
-			metadataJson,
-			occurredAt,
-		};
 	});
+	return { events, rejected, firstError };
+}
+
+function validateReadingLogEvent(rawEvent: unknown, index: number): ValidatedReadingLogEvent {
+	const field = (name: string) => `events[${index}].${name}`;
+	if (!isRecord(rawEvent)) {
+		throw new Error(`events[${index}] must be an object`);
+	}
+	const itemId = boundedString(rawEvent.itemId, field('itemId'), MAX_ID_LENGTH);
+	if (itemId === null) throw new Error(`${field('itemId')} is invalid`);
+	const type = rawEvent.type;
+	if (typeof type !== 'string' || !(READING_LOG_EVENT_TYPES as readonly string[]).includes(type)) {
+		throw new Error(`${field('type')} is invalid`);
+	}
+
+	const view = boundedString(rawEvent.view, field('view'), 40);
+	if (view !== null && !VIEW_PATTERN.test(view)) throw new Error(`${field('view')} is invalid`);
+	if (type === 'impression' && view === null) throw new Error(`${field('view')} is required for impressions`);
+
+	const position = isAbsent(rawEvent.position) ? null : rawEvent.position;
+	if (position !== null && (typeof position !== 'number' || !Number.isInteger(position) || position < 0 || position > MAX_POSITION)) {
+		throw new Error(`${field('position')} must be an integer between 0 and ${MAX_POSITION}`);
+	}
+	const value = isAbsent(rawEvent.value) ? null : rawEvent.value;
+	if (value !== null && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > MAX_VALUE)) {
+		throw new Error(`${field('value')} must be between 0 and ${MAX_VALUE}`);
+	}
+
+	let metadataJson: string | null = null;
+	if (!isAbsent(rawEvent.metadata)) {
+		if (!isRecord(rawEvent.metadata)) throw new Error(`${field('metadata')} must be an object`);
+		metadataJson = JSON.stringify(rawEvent.metadata);
+		if (new TextEncoder().encode(metadataJson).byteLength > MAX_METADATA_BYTES) {
+			throw new Error(`${field('metadata')} must be at most ${MAX_METADATA_BYTES} bytes`);
+		}
+	}
+
+	let occurredAt: string;
+	if (isAbsent(rawEvent.occurredAt)) {
+		occurredAt = new Date().toISOString();
+	} else if (typeof rawEvent.occurredAt === 'string' && Number.isFinite(Date.parse(rawEvent.occurredAt))) {
+		occurredAt = new Date(rawEvent.occurredAt).toISOString();
+	} else {
+		throw new Error(`${field('occurredAt')} must be a valid ISO 8601 timestamp`);
+	}
+
+	return {
+		id: boundedString(rawEvent.id, field('id'), MAX_ID_LENGTH) ?? crypto.randomUUID(),
+		itemId,
+		type: type as ReadingLogEventType,
+		view,
+		position,
+		value,
+		sessionId: boundedString(rawEvent.sessionId, field('sessionId'), MAX_SESSION_ID_LENGTH),
+		metadataJson,
+		occurredAt,
+	};
 }
 
 /**
  * POST /api/v1/reading-log, JSON {events: [...]}, 1 to 200 events.
  * Idempotent per client event id. Events for items that no longer exist are
- * skipped rather than failing the batch: a card can be logged after its
- * article was deleted, and one stale row must not cost the other 199.
+ * skipped and malformed events rejected, each by itself: a card can be logged
+ * after its article was deleted, and one bad row must not cost the other 199.
+ * A batch with no valid event at all is a 400.
  */
 export async function handleReadingLogIngestion(request: Request, env: Env): Promise<Response> {
 	let body: unknown;
@@ -140,11 +166,15 @@ export async function handleReadingLogIngestion(request: Request, env: Env): Pro
 		return Response.json({ error: 'Request body must be valid JSON' }, { status: 400 });
 	}
 
-	let events: ValidatedReadingLogEvent[];
+	let validation: ReadingLogValidation;
 	try {
-		events = validateReadingLogEvents(body);
+		validation = validateReadingLogEvents(body);
 	} catch (error) {
 		return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
+	}
+	const { events, rejected } = validation;
+	if (events.length === 0) {
+		return Response.json({ error: validation.firstError }, { status: 400 });
 	}
 
 	const clientFamily = classifyReadingLogClient(request);
@@ -167,5 +197,5 @@ export async function handleReadingLogIngestion(request: Request, env: Env): Pro
 			 FROM json_each(?)`,
 		).bind(clientFamily, JSON.stringify(stored)).run();
 	}
-	return Response.json({ accepted: stored.length, skipped: events.length - stored.length, clientFamily });
+	return Response.json({ accepted: stored.length, skipped: events.length - stored.length, rejected, clientFamily });
 }

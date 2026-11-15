@@ -1518,6 +1518,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let pendingImpressions = [];
   let pendingKeyboardOpen = null;
   let pendingKeyboardWindowStep = null;
+  let restoredReaderScrollTop = null;
   let readingLogTicks = 0;
   let readingLogHiddenAt = 0;
 
@@ -1580,6 +1581,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const recommendation = logView.view === 'for-you' ? recommendationDetails.get(card.id) : null;
     if (typeof recommendation?.score === 'number') metadata.score = recommendation.score;
     if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
+    // Position says nothing about the ranker once the reader re-sorts For You.
+    if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -1635,6 +1638,11 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function noteReaderScroll() {
+    // Restoring a saved position scrolls the frame too; that is not the reader scrolling.
+    if (restoredReaderScrollTop !== null) {
+      if (Math.abs(readReaderFrameScrollTop() - restoredReaderScrollTop) < 2) return;
+      restoredReaderScrollTop = null;
+    }
     readingMeter.interact(Date.now());
     if (readingMeter.itemId() !== selectedItemId || readyReaderItemId !== selectedItemId) return;
     try {
@@ -1651,6 +1659,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function noteOutboundLink(href) {
     const destinationHost = client.outboundLinkHost(href);
+    // A link back into Pigeon is not a link out.
+    if (destinationHost && destinationHost === client.outboundLinkHost(window.location?.href)) return;
     if (destinationHost && selectedItemId) sendEngagementEvent({ itemId: selectedItemId, type: 'outbound_link', destinationHost });
   }
 
@@ -1672,9 +1682,9 @@ export function renderBrowserAppRuntimeScript(): string {
     // The opened article stays the opened article while another one is showing
     // (a view switch, say), so coming back to it keeps counting.
     if (openedId && openedId !== selectedItemId) reportReadingTime(1);
-    // A video is watched without touching anything; do not let it go idle.
-    if (!readerPlayerShell.classList.contains('hidden')) readingMeter.interact(now);
-    readingMeter.tick(now, isReadingOpenedArticle());
+    // A video is watched without touching anything, so it gets 30 minutes
+    // before it counts as idle, not two. The player cannot say whether it is paused.
+    readingMeter.tick(now, isReadingOpenedArticle(), readerPlayerShell.classList.contains('hidden') ? undefined : 1800000);
     if (pendingKeyboardOpen && pendingKeyboardOpen === openedId && readingMeter.readSeconds() >= 3) {
       sendEngagementEvent({ itemId: openedId, type: 'explicit_open' });
       pendingKeyboardOpen = null;
@@ -1789,7 +1799,9 @@ export function renderBrowserAppRuntimeScript(): string {
     const request=pendingNotificationAction,button=document.getElementById('notification-confirm-button');if(!request||button.disabled||pendingArticleMutation)return;
     button.disabled=true;
     try {await ensureArticleContent([request.itemId],request);if(pendingNotificationAction!==request||!requestBelongsToCurrentSession(request.generation,request.token))return;
-      selectedItemId=request.itemId;heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};renderReader();
+      selectedItemId=request.itemId;heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};
+      // Confirming an action shows the story too; that counts as opening it only once it is read.
+      noteArticleOpened(request.itemId,Boolean(request.action));renderReader();
       if(request.action)await mutateArticleState(request.itemId,request.action==='read'?'read':'starred',true);
       if(!requestBelongsToCurrentSession(request.generation,request.token))return;
       if(request.action&&!getArticleState(loadedItemsById[request.itemId],request.action==='read'?'read':'starred'))throw new Error('Article action was not confirmed. Retry.');
@@ -3572,6 +3584,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function handleReaderFrameLoad() {
     attachFrameNavigationListener();
     readyReaderItemId = renderedReaderItemId;
+    restoredReaderScrollTop = null;
     if (pendingReaderFrameScrollTop !== null) {
       const scrollTop = pendingReaderFrameScrollTop;
       pendingReaderFrameScrollTop = null;
@@ -3588,6 +3601,7 @@ export function renderBrowserAppRuntimeScript(): string {
           frameDocument.body.scrollTop = scrollTop;
         }
         readerFrameScrollTop = scrollTop;
+        if (scrollTop > 0) restoredReaderScrollTop = readReaderFrameScrollTop();
       } catch (_error) {
         // The frame may be unavailable while navigating to the refreshed article.
       }
@@ -3598,7 +3612,7 @@ export function renderBrowserAppRuntimeScript(): string {
       const viewport=readerFrame.contentWindow?.innerHeight||readerFrame.contentDocument?.documentElement?.clientHeight||0;const top=Math.max(0,height-viewport)*fraction;
       if(readerFrame.contentDocument?.documentElement)readerFrame.contentDocument.documentElement.scrollTop=top;
       if(readerFrame.contentDocument?.body)readerFrame.contentDocument.body.scrollTop=top;
-      readerFrame.contentWindow?.scrollTo?.(0,top);readerFrameScrollTop=top;
+      readerFrame.contentWindow?.scrollTo?.(0,top);readerFrameScrollTop=top;if(top>0)restoredReaderScrollTop=readReaderFrameScrollTop();
     }
     maybeAutoMarkRead();
   }

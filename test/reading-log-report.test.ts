@@ -14,11 +14,11 @@ function setup() {
 		database.prepare("INSERT INTO items (id, feed_key, subject, html_content, message_id, received_at) VALUES (?, 'feed', ?, '<p>x</p>', ?, '2026-11-01T00:00:00.000Z')").run(id, id, id);
 	}
 	let sequence = 0;
-	const shown = (item: string, view: string, position: number, at: string, client = 'pigeon_web') => {
+	const shown = (item: string, view: string, position: number, at: string, client = 'pigeon_web', metadata: object | null = null) => {
 		sequence += 1;
 		database.prepare(
-			"INSERT INTO reading_log (id, event_key, event_type, item_id, feed_key, client_family, view, position, occurred_at) VALUES (?, ?, 'impression', ?, 'feed', ?, ?, ?, ?)",
-		).run(`imp-${sequence}`, `imp-${sequence}`, item, client, view, position, at);
+			"INSERT INTO reading_log (id, event_key, event_type, item_id, feed_key, client_family, view, position, occurred_at, metadata_json) VALUES (?, ?, 'impression', ?, 'feed', ?, ?, ?, ?, ?)",
+		).run(`imp-${sequence}`, `imp-${sequence}`, item, client, view, position, at, metadata ? JSON.stringify(metadata) : null);
 	};
 	const event = (item: string, type: string, at: string, seconds: number | null = null) => {
 		sequence += 1;
@@ -58,6 +58,20 @@ test('For You positions are the position the article was opened from, not the be
 	assert.deepEqual(run('forYouByPosition'), [
 		{ position: '1-5', times_shown: 2, opened_from_here: 0, of_those_read_15s: 0 },
 		{ position: '21+', times_shown: 1, opened_from_here: 1, of_those_read_15s: 1 },
+	]);
+});
+
+test('a re-sorted For You list is left out of the position table but still counts as shown', () => {
+	const { shown, event, run } = setup();
+	shown('a', 'for-you', 0, '2026-11-02T09:00:00.000Z', 'pigeon_web', { score: 80, rank: 0 });
+	shown('b', 'for-you', 0, '2026-11-02T10:00:00.000Z', 'pigeon_web', { score: 20, rank: 40, sort: 'newest' });
+	event('b', 'explicit_open', '2026-11-02T10:00:05.000Z');
+
+	assert.deepEqual(run('forYouByPosition'), [
+		{ position: '1-5', times_shown: 1, opened_from_here: 0, of_those_read_15s: 0 },
+	]);
+	assert.deepEqual(run('byView'), [
+		{ view: 'for-you', items_shown: 2, opened_from_here: 1, of_those_read_15s: 0, open_pct: 50 },
 	]);
 });
 

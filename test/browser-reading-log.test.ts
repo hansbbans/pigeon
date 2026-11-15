@@ -213,10 +213,12 @@ test('scrolling an opened article records each quarter once, and links out recor
 	const link = (href: string) => ({ target: { closest: () => ({ getAttribute: () => href }) } });
 	harness.dispatchFrameEvent('auxclick', link('https://News.Example.com/story?x=1'));
 	harness.dispatchFrameEvent('auxclick', link('#footnote-1'));
+	harness.dispatchFrameEvent('auxclick', link('//cdn.example.net/paper.pdf'));
 	harness.dispatchFrameEvent('auxclick', { ...link('https://menu.example.com/'), button: 2 });
 	harness.dispatchFrameEvent('auxclick', { target: { closest: () => null } });
 	await settle();
-	assert.deepEqual(ofType('outbound_link').map((row) => [row.item_id, row.destination_host]), [['today-2', 'news.example.com']]);
+	assert.deepEqual(ofType('outbound_link').map((row) => row.item_id), ['today-2', 'today-2']);
+	assert.deepEqual(ofType('outbound_link').map((row) => row.destination_host).sort(), ['cdn.example.net', 'news.example.com']);
 
 	await run(1_000);
 	harness.dispatchWindowEvent('pagehide');
@@ -388,4 +390,66 @@ test('stepping past the end of a 200-article window with the keyboard still coun
 	await settle();
 	const read = engagement().filter((row) => row.event_type === 'active_reading' && itemRowid(String(row.item_id)) === next);
 	assert.equal(read.reduce((sum, row) => sum + Number(row.duration_seconds), 0), 4);
+});
+
+test('a story opened from a notification is logged as opened and read', async () => {
+	const { harness, run, engagement } = await openBrowser({ locationHref: 'https://pigeon.example/app?article=1' });
+	await waitForBrowserCondition(() => !harness.elements.get('notification-action-panel')!.classList.contains('hidden'), 100);
+	harness.elements.get('notification-confirm-button')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('notification-action-panel')!.classList.contains('hidden'), 100);
+	await waitForBrowserCondition(() => harness.window.__readyReaderItemId() === '1', 100);
+	await run(4_000);
+	harness.dispatchWindowEvent('pagehide');
+	await run(0);
+
+	const opened = (database_row: Record<string, unknown>) => [database_row.item_id, database_row.event_type];
+	assert.deepEqual(engagement().filter((row) => row.event_type === 'explicit_open').map(opened), [['today-1', 'explicit_open']]);
+	const read = engagement().filter((row) => row.event_type === 'active_reading');
+	assert.deepEqual([...new Set(read.map((row) => row.item_id))], ['today-1']);
+	assert.equal(read.reduce((sum, row) => sum + Number(row.duration_seconds), 0), 4);
+});
+
+test('a video keeps counting past the two-minute idle limit; an article does not', async () => {
+	const watch = async (showPlayer: boolean) => {
+		const { harness, run, openByClick, engagement } = await openBrowser();
+		await openByClick('today-2');
+		if (showPlayer) harness.elements.get('reader-player-shell')!.classList.remove('hidden');
+		await run(180_000);
+		harness.dispatchWindowEvent('pagehide');
+		await run(0);
+		return engagement().filter((row) => row.event_type === 'active_reading').reduce((sum, row) => sum + Number(row.duration_seconds), 0);
+	};
+	assert.equal(await watch(true), 180);
+	assert.equal(await watch(false), 120);
+});
+
+test('restoring a saved reading position is not the reader scrolling', async () => {
+	// Saved positions belong to the reading tools, which the page loads separately.
+	const preferences = { theme: 'sepia', font: 'serif', fontSize: 18, lineHeight: 1.6, width: 720, margins: 24, density: 'comfortable', imagePolicy: 'load', shortcuts: {} };
+	const readingTools = {
+		readPreferences: () => preferences,
+		savePreferences: (next: unknown) => next,
+		frameCSS: () => '',
+		applyImagePolicy: async (html: string) => ({ html, images: [], blockedCount: 0 }),
+	};
+	const { harness, openByClick, engagement, settle } = await openBrowser({ readingTools, frameHeight: 2_000, viewportHeight: 500 });
+	(harness.window as any).innerHeight = 500;
+	await openByClick('today-2');
+	harness.dispatchReaderFrameScroll(1_100);
+	await settle();
+	const depths = () => engagement().filter((row) => row.event_type === 'scroll_depth').map((row) => row.scroll_depth);
+	assert.deepEqual(depths(), [0.8]);
+
+	await openByClick('today-3');
+	await openByClick('today-2');
+	const restored = harness.getReaderFrameScrollTop();
+	assert.ok(restored > 0, 'the saved position was restored');
+	// The browser fires a scroll event for the restore itself.
+	harness.dispatchReaderFrameScroll(restored);
+	await settle();
+	assert.deepEqual(depths(), [0.8], 'the restore alone reports nothing');
+
+	harness.dispatchReaderFrameScroll(restored + 50);
+	await settle();
+	assert.equal(depths().length, 2, 'scrolling on from there is the reader again');
 });

@@ -20,6 +20,8 @@ import { parseArgs } from 'node:util';
  * can be picked before its one second on screen is up). An open with no such
  * impression (another client, or from before logging began) is credited to no
  * list. An article counts as read once its reading time adds up to 15 seconds.
+ * The For You position table leaves out impressions from a re-sorted list
+ * (metadata.sort is set): there, position is not the ranker's order.
  */
 export function reportQueries(since) {
 	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(since)) throw new Error('since must be an ISO 8601 UTC timestamp');
@@ -37,7 +39,8 @@ export function reportQueries(since) {
 	     WHERE event_type = 'active_reading' AND occurred_at > '${since}'
 	     GROUP BY item_id HAVING SUM(duration_seconds) >= 15
 	   ), shown AS (
-	     SELECT id, item_id, view, position FROM reading_log WHERE event_type = 'impression' AND occurred_at > '${since}'
+	     SELECT id, item_id, view, position, json_extract(metadata_json, '$.sort') AS sort
+	     FROM reading_log WHERE event_type = 'impression' AND occurred_at > '${since}'
 	   )`;
 	return {
 		impressionsByClient: `SELECT client_family AS client, COUNT(*) AS impressions, MAX(occurred_at) AS latest
@@ -80,7 +83,7 @@ export function reportQueries(since) {
 		   FROM shown
 		   LEFT JOIN opens ON opens.impression_id = shown.id
 		   LEFT JOIN reads ON reads.item_id = opens.item_id
-		   WHERE shown.view = 'for-you'
+		   WHERE shown.view = 'for-you' AND shown.sort IS NULL
 		   GROUP BY 1 ORDER BY MIN(shown.position)`,
 		totals: `${attributed}
 		   SELECT (SELECT COUNT(DISTINCT item_id) FROM shown) AS items_shown,
@@ -133,7 +136,7 @@ function main() {
 	table('Reading events (the two Pigeon apps are not told apart here)', query(queries.engagementByKind));
 	table('By week', query(queries.byWeek));
 	table('Shown versus opened, by the list the open came from', query(queries.byView));
-	table('For You: are higher positions opened more?', query(queries.forYouByPosition));
+	table('For You in its ranked order: are higher positions opened more?', query(queries.forYouByPosition));
 	const [totals] = query(queries.totals);
 	console.log(`\nTotals: ${totals.items_shown} articles shown, ${totals.items_opened} opened, ${totals.items_read_15s} read for 15 seconds or more.`);
 	if (totals.opened_without_impression > 0) {
