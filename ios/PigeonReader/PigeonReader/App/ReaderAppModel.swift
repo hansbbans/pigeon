@@ -271,6 +271,23 @@ final class ReaderAppModel {
 	}
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
+	/// The reading monitor that owns each article's clock, so a monitor that
+	/// unwinds late cannot stop the one that replaced it.
+	private var readingMonitorIDs: [String: UUID] = [:]
+	/// Impressions waiting for the next batched `reading-log` request.
+	private var readingLogBuffer: [ReadingLogEvent] = []
+	private var readingLogFlushTimer: Task<Void, Never>?
+	/// Reading-log and final reading-time requests in flight. They never
+	/// report errors; the scene background flush waits for them.
+	private var silentAnalyticsSends: [UUID: Task<Void, Never>] = [:]
+	/// Bumped when the app returns after `keptArticlesForegroundResetInterval`:
+	/// lists then start a new impression session.
+	private(set) var readingLogSessionEpoch = 0
+	static let readingLogFlushThreshold = 50
+	static let readingLogMaximumBatchSize = 200
+	static let readingLogFlushInterval: Duration = .seconds(5)
+	/// The unreported tail of a read is sent when reading stops, if it is at least this long.
+	static let minimumFinalReadingDuration: TimeInterval = 1
 	private var hasLoadedNavigation = false
 	private var activeNavigationLoadID: UUID?
 	private var activeNavigationLoadIDs: Set<UUID> = []
@@ -870,6 +887,7 @@ final class ReaderAppModel {
 			scrollReadTriggered = []
 			engagement = EngagementAggregator()
 			sentScrollThresholds = [:]
+			resetReadingLogForAccountChange()
 			offlineStorageStats = .empty
 			isSynchronizingOfflineLibrary = false
 			isOffline = false
@@ -1121,6 +1139,7 @@ final class ReaderAppModel {
 			if let inactiveSince,
 				now.timeIntervalSince(inactiveSince) >= Self.keptArticlesForegroundResetInterval {
 				resetKeptArticles()
+				readingLogSessionEpoch &+= 1
 			}
 			inactiveSince = nil
 			setApplicationActive(true)
@@ -1130,9 +1149,13 @@ final class ReaderAppModel {
 		case .resignActive:
 			inactiveSince = inactiveSince ?? now
 			setApplicationActive(false)
+			reportRemainingReadingForActiveArticles(at: now)
 		case .flushInBackground:
 			inactiveSince = inactiveSince ?? now
 			setApplicationActive(false)
+			// Both only start a request; the background flush waits for them.
+			reportRemainingReadingForActiveArticles(at: now)
+			flushReadingLog()
 			startSceneBackgroundFlush()
 		}
 	}
@@ -1172,6 +1195,8 @@ final class ReaderAppModel {
 		_ = await offlinePersistenceTask?.value
 		guard Task.isCancelled == false else { return }
 		await writeWidgetSnapshotOffMain()
+		guard Task.isCancelled == false else { return }
+		await waitForSilentAnalyticsSends()
 	}
 
 	private func finishSceneBackgroundFlush(id: UUID) {
@@ -4808,15 +4833,22 @@ final class ReaderAppModel {
 		interval: Duration = .seconds(15),
 		minimumActiveDuration: TimeInterval = 10,
 		maximumIntervals: Int? = nil,
+		now: () -> Date = { .now },
 	) async {
 		guard let apiClient, let context = accountContext(for: apiClient),
 			Task.isCancelled == false,
-			engagement.resume(itemId: articleId, at: .now) else {
+			engagement.resume(itemId: articleId, at: now()) else {
 			return
 		}
+		let monitorID = UUID()
+		readingMonitorIDs[articleId] = monitorID
 		defer {
-			if isCurrentAccountOperation(context) {
-				engagement.pause(itemId: articleId, at: .now)
+			// Reading stopped: the reader closed, another article took over, or
+			// the scene left `.active`. Send what the polling below has not
+			// reported yet, however this task ended.
+			if isCurrentAccountOperation(context), readingMonitorIDs[articleId] == monitorID {
+				readingMonitorIDs[articleId] = nil
+				reportRemainingReading(itemId: articleId, at: now())
 			}
 		}
 		guard maximumIntervals != 0 else { return }
@@ -4829,7 +4861,7 @@ final class ReaderAppModel {
 				guard isCurrentAccountOperation(context) else { return }
 				if let event = engagement.activeReadingDeltaEvent(
 					itemId: articleId,
-					at: .now,
+					at: now(),
 					minimumDuration: minimumActiveDuration,
 				) {
 					_ = await send(event, reportErrors: false)
@@ -4843,6 +4875,120 @@ final class ReaderAppModel {
 		} catch {
 			return
 		}
+	}
+
+	/// Stops the article's reading clock and sends the exact active time the
+	/// polling loop has not reported yet, as one more `active_reading` event.
+	/// The request runs on its own task, so a cancelled monitor cannot lose it.
+	private func reportRemainingReading(itemId: String, at date: Date) {
+		guard let event = engagement.stopReading(
+			itemId: itemId,
+			at: date,
+			minimumDuration: Self.minimumFinalReadingDuration,
+		) else { return }
+		startSilentAnalyticsSend { apiClient in
+			try await apiClient.sendEngagement([event])
+		}
+	}
+
+	/// The scene left `.active`. Cheap enough for a scene-phase callback: it
+	/// only stops clocks and starts requests.
+	private func reportRemainingReadingForActiveArticles(at date: Date) {
+		for itemId in engagement.activeItemIDs {
+			reportRemainingReading(itemId: itemId, at: date)
+		}
+	}
+
+	// MARK: - Reading log
+
+	/// Buffers impressions for the reading log. They go out in batches: at
+	/// `readingLogFlushThreshold`, about every `flushInterval` while any are
+	/// waiting, when a list session ends, and when the scene is backgrounded.
+	func recordImpressions(
+		_ impressions: [ImpressionTracker.Impression],
+		in list: ReadingLogList,
+		flushInterval: Duration = ReaderAppModel.readingLogFlushInterval,
+	) {
+		guard impressions.isEmpty == false, apiClient != nil else { return }
+		let forYouArticles = list.view == ReaderSection.forYou.apiValue
+			? articleCache[ReaderSection.forYou.rawValue] ?? []
+			: []
+		for impression in impressions {
+			let metadata = ReadingLogMetadata(
+				score: forYouArticles.first { $0.id == impression.itemId }?.score,
+				stream: list.stream,
+			)
+			readingLogBuffer.append(ReadingLogEvent(
+				itemId: impression.itemId,
+				view: list.view,
+				position: impression.position,
+				sessionId: impression.sessionId,
+				occurredAt: impression.occurredAt,
+				metadata: metadata.isEmpty ? nil : metadata,
+			))
+		}
+		if readingLogBuffer.count >= Self.readingLogFlushThreshold {
+			flushReadingLog()
+		} else if readingLogFlushTimer == nil {
+			readingLogFlushTimer = Task { [weak self] in
+				do { try await Task.sleep(for: flushInterval) } catch { return }
+				self?.readingLogFlushTimer = nil
+				self?.flushReadingLog()
+			}
+		}
+	}
+
+	/// Sends everything buffered in one request (several only past the
+	/// server's 200-event limit). A failed request is dropped, not retried.
+	func flushReadingLog() {
+		readingLogFlushTimer?.cancel()
+		readingLogFlushTimer = nil
+		guard readingLogBuffer.isEmpty == false else { return }
+		let events = readingLogBuffer
+		readingLogBuffer.removeAll(keepingCapacity: true)
+		startSilentAnalyticsSend { apiClient in
+			var remaining = events[...]
+			while remaining.isEmpty == false {
+				let batch = remaining.prefix(Self.readingLogMaximumBatchSize)
+				remaining = remaining.dropFirst(batch.count)
+				try await apiClient.sendReadingLog(Array(batch))
+			}
+		}
+	}
+
+	/// Waits for the reading-log timer and every request it or a finished
+	/// read started. Tests use this; the app never needs the result.
+	func waitForReadingAnalytics() async {
+		await readingLogFlushTimer?.value
+		await waitForSilentAnalyticsSends()
+	}
+
+	private func waitForSilentAnalyticsSends() async {
+		// Each send removes itself before it finishes.
+		while let send = silentAnalyticsSends.values.first {
+			await send.value
+		}
+	}
+
+	/// Runs an analytics request that must never surface: no `errorMessage`,
+	/// no banner, no retry. It keeps the client of the account that produced
+	/// the events, so it cannot post them to another account.
+	private func startSilentAnalyticsSend(
+		_ operation: @escaping @MainActor (PigeonAPIClient) async throws -> Void,
+	) {
+		guard let apiClient else { return }
+		let id = UUID()
+		silentAnalyticsSends[id] = Task { [weak self] in
+			try? await operation(apiClient)
+			self?.silentAnalyticsSends[id] = nil
+		}
+	}
+
+	private func resetReadingLogForAccountChange() {
+		readingMonitorIDs = [:]
+		readingLogFlushTimer?.cancel()
+		readingLogFlushTimer = nil
+		readingLogBuffer = []
 	}
 
 	/// Feed stories follow the mark-read setting. A saved text item is archived
@@ -6542,6 +6688,7 @@ final class ReaderAppModel {
 		scrollReadTriggered = []
 		engagement = EngagementAggregator()
 		sentScrollThresholds = [:]
+		resetReadingLogForAccountChange()
 		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
