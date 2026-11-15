@@ -998,6 +998,138 @@ export function createScriptLoader(doc: any, src: string, timeoutMs: number): ()
 	};
 }
 
+// --- Reading log -----------------------------------------------------------
+
+export interface ImpressionState {
+	since: Record<string, number>;
+	logged: Record<string, boolean>;
+}
+
+// A card is an impression once it has stayed visible for thresholdMs without
+// a gap, and only once per state (one state per list session). Returns the
+// cards that qualified on this sample.
+export function advanceImpressions(
+	state: ImpressionState,
+	visible: Array<{ id: string; position: number }>,
+	nowMs: number,
+	thresholdMs = 1000,
+): Array<{ id: string; position: number }> {
+	const present: Record<string, boolean> = {};
+	const qualified: Array<{ id: string; position: number }> = [];
+	for (const card of visible) {
+		present[card.id] = true;
+		if (state.logged[card.id]) continue;
+		const since = state.since[card.id];
+		if (since === undefined) {
+			state.since[card.id] = nowMs;
+		} else if (nowMs - since >= thresholdMs) {
+			state.logged[card.id] = true;
+			delete state.since[card.id];
+			qualified.push(card);
+		}
+	}
+	for (const id of Object.keys(state.since)) {
+		if (!present[id]) delete state.since[id];
+	}
+	return qualified;
+}
+
+// At least half the card is inside the viewport; a card taller than the
+// viewport counts once it fills half of the viewport.
+export function isHalfVisible(top: number, bottom: number, viewportTop: number, viewportBottom: number): boolean {
+	const height = bottom - top;
+	const viewportHeight = viewportBottom - viewportTop;
+	if (!(height > 0) || !(viewportHeight > 0)) return false;
+	const overlap = Math.min(bottom, viewportBottom) - Math.max(top, viewportTop);
+	return overlap >= Math.min(height, viewportHeight) / 2;
+}
+
+// The list name the reading log uses, matching the iOS app: smart views by
+// their API value, feeds and folders by kind with their stream alongside.
+export function readingLogView(
+	view: { id: string; kind: string; streamId: string } | null | undefined,
+	isSearching: boolean,
+): { view: string; stream: string | null } | null {
+	if (!view) return null;
+	const stream = view.kind === 'feed' || view.kind === 'folder' ? view.streamId : null;
+	if (isSearching) return { view: 'search', stream };
+	if (view.kind === 'recommended') return { view: 'for-you', stream: null };
+	if (stream !== null) return { view: view.kind, stream };
+	return ['all', 'unread', 'today', 'recent', 'starred', 'saved'].includes(view.kind) ? { view: view.kind, stream: null } : null;
+}
+
+export function outboundLinkHost(href: unknown): string | null {
+	if (typeof href !== 'string') return null;
+	// A protocol-relative link (//example.com/x) leaves the app too.
+	const link = href.trim().startsWith('//') ? 'https:' + href.trim() : href.trim();
+	if (!/^https?:\/\//i.test(link)) return null;
+	try {
+		return new URL(link).hostname.toLowerCase() || null;
+	} catch (_error) {
+		return null;
+	}
+}
+
+// Measures active reading time for the article the reader explicitly opened.
+// The page drives it with a regular tick; time counts only while isReading,
+// a stalled timer adds at most maximumStepMs, and counting stops once nothing
+// has been scrolled, typed or clicked for idleLimitMs.
+export function createReadingMeter(idleLimitMs = 120000, maximumStepMs = 2000) {
+	let itemId: string | null = null;
+	let lastTick = 0;
+	let lastInteraction = 0;
+	let unreportedMs = 0;
+	let readMs = 0;
+	let deepestScroll = 0;
+	let reportedQuartile = 0;
+	return {
+		itemId: () => itemId,
+		// Reading time counted since this article was opened.
+		readSeconds: () => readMs / 1000,
+		open(id: string, nowMs: number) {
+			itemId = id;
+			lastTick = nowMs;
+			lastInteraction = nowMs;
+			unreportedMs = 0;
+			readMs = 0;
+			deepestScroll = 0;
+			reportedQuartile = 0;
+		},
+		close() {
+			itemId = null;
+			unreportedMs = 0;
+		},
+		interact(nowMs: number) {
+			lastInteraction = nowMs;
+		},
+		// idleMs overrides the idle limit for this tick (a video needs a longer one).
+		tick(nowMs: number, isReading: boolean, idleMs?: number) {
+			const elapsed = nowMs - lastTick;
+			lastTick = nowMs;
+			if (itemId !== null && isReading && elapsed > 0 && nowMs - lastInteraction <= (idleMs ?? idleLimitMs)) {
+				unreportedMs += Math.min(elapsed, maximumStepMs);
+				readMs += Math.min(elapsed, maximumStepMs);
+			}
+		},
+		// The depth to report when the reader reaches a new quarter of the article.
+		scroll(depth: number): number | null {
+			if (itemId === null || !(depth > 0)) return null;
+			deepestScroll = Math.max(deepestScroll, Math.min(1, depth));
+			const quartile = Math.floor(deepestScroll * 4);
+			if (quartile <= reportedQuartile) return null;
+			reportedQuartile = quartile;
+			return deepestScroll;
+		},
+		// Unreported reading time, if it reaches minimumSeconds. Taking it resets it.
+		take(minimumSeconds: number): { itemId: string; durationSeconds: number; scrollDepth: number | null } | null {
+			const durationSeconds = Math.round(unreportedMs / 100) / 10;
+			if (itemId === null || durationSeconds <= 0 || durationSeconds < minimumSeconds) return null;
+			unreportedMs = 0;
+			return { itemId, durationSeconds, scrollDepth: deepestScroll > 0 ? deepestScroll : null };
+		},
+	};
+}
+
 export function renderBrowserAppClientScript(): string {
 	return `
 function __name(target) { return target; }
@@ -1036,6 +1168,11 @@ ${normalizeBrowserItemId.toString()}
 ${formatArticleListTime.toString()}
 ${createScriptLoader.toString()}
 ${followInPageLink.toString()}
+${advanceImpressions.toString()}
+${isHalfVisible.toString()}
+${readingLogView.toString()}
+${outboundLinkHost.toString()}
+${createReadingMeter.toString()}
 
 window.__PIGEON_BROWSER_CLIENT__ = {
   AUTH_STORAGE_KEY: ${JSON.stringify(AUTH_STORAGE_KEY)},
@@ -1072,6 +1209,11 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   createArticleFrameDocument,
   selectArticleHeroImageUrl,
   normalizeBrowserItemId,
+  advanceImpressions,
+  isHalfVisible,
+  readingLogView,
+  outboundLinkHost,
+  createReadingMeter,
 };
 `.trim();
 }

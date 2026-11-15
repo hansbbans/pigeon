@@ -150,7 +150,7 @@ class SqliteD1Database {
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
 			);
-			INSERT INTO _meta (key, value) VALUES ('schema_version', '16');
+			INSERT INTO _meta (key, value) VALUES ('schema_version', '17');
 			CREATE TABLE refresh_activity (
 				id TEXT PRIMARY KEY,
 				feed_key TEXT NOT NULL,
