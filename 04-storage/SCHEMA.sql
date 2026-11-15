@@ -1,12 +1,12 @@
 -- Pigeon: Newsletter-to-RSS
--- D1 Schema v16
+-- D1 Schema v17
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS _meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
-INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '16');
+INSERT OR IGNORE INTO _meta (key, value) VALUES ('schema_version', '17');
 
 -- Feeds metadata
 CREATE TABLE IF NOT EXISTS feeds (
@@ -362,6 +362,30 @@ CREATE INDEX IF NOT EXISTS idx_engagement_events_item
   ON engagement_events(item_id, event_type, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_engagement_events_occurred
   ON engagement_events(occurred_at DESC);
+
+-- Reading log: what the reader was shown and did, for evaluating ranking.
+-- event_type is validated in src/reading-log.ts so new kinds of event need no
+-- schema change. No foreign keys: the history outlives a deleted article.
+CREATE TABLE IF NOT EXISTS reading_log (
+  id TEXT PRIMARY KEY,
+  event_key TEXT NOT NULL UNIQUE,
+  event_type TEXT NOT NULL,
+  item_id TEXT,
+  feed_key TEXT,
+  client_family TEXT NOT NULL DEFAULT 'other',
+  view TEXT,
+  position INTEGER,
+  value REAL,
+  session_id TEXT,
+  metadata_json TEXT,
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reading_log_item
+  ON reading_log(item_id, event_type, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reading_log_occurred
+  ON reading_log(occurred_at DESC);
 
 -- Routing rules: override feed key based on subject/sender patterns
 CREATE TABLE IF NOT EXISTS routing_rules (

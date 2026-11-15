@@ -561,6 +561,8 @@ export async function createBrowserHarness(options?: {
 			},
 			__PIGEON_BROWSER_CLIENT__: undefined as unknown,
 			__readArticleState: undefined as ((id: string) => { body: string[]; metadata: string[] }) | undefined,
+			__readingLogTick: undefined as (() => void) | undefined,
+			__readyReaderItemId: undefined as (() => string | null) | undefined,
 			__readCacheSizes: undefined as (() => { bodies: number; metadata: number; active: number; queued: number; pending: number; paging: boolean; membership: number }) | undefined,
 			open() {},
 			addEventListener(type: string, handler: (event: Record<string, unknown>) => unknown) {
@@ -633,6 +635,8 @@ export async function createBrowserHarness(options?: {
   window.__readCacheSizes = () => ({ bodies: articleCache.size, metadata: articleMetadataCache.size,
     active: activeContentRequestJobs.size, queued: contentRequestQueue.length, pending: inFlightContentIds.length, paging: isLoadingItemIdsPage, membership: inFlightMembershipRequests.size });
   window.__readArticleState = (id) => ({ body: articleCache.get(id)?.categories || [], metadata: articleMetadataCache.get(id)?.categories || [] });
+  window.__readingLogTick = readingLogTick;
+  window.__readyReaderItemId = () => readyReaderItemId;
 })();`);
 	vm.runInNewContext(runtime, context);
 	await flushBrowserTasks();

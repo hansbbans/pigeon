@@ -1,11 +1,32 @@
 import type { Env } from './types';
 
-const REQUIRED_SCHEMA_VERSION = '16';
+const REQUIRED_SCHEMA_VERSION = '17';
 const REQUIRED_SCHEMA_VERSION_NUMBER = Number(REQUIRED_SCHEMA_VERSION);
 const LEGACY_SYNC_SCHEMA_VERSION = 12;
 const RETENTION_INDEX_SCHEMA_VERSION = 13;
 const STATUS_TRIGGER_SCHEMA_VERSION = 14;
 const CONTENT_VERSION_SCHEMA_VERSION = 15;
+const ITEM_METADATA_SCHEMA_VERSION = 16;
+
+// v17: the reading log. One append-only table for what the reader was shown
+// and did, kept apart from engagement_events so new kinds of event need no
+// schema change: event_type is validated in src/reading-log.ts, not by a
+// CHECK. No foreign keys, so the history outlives a deleted article or feed.
+export const READING_LOG_TABLE_SQL = `CREATE TABLE IF NOT EXISTS reading_log (
+		   id TEXT PRIMARY KEY,
+		   event_key TEXT NOT NULL UNIQUE,
+		   event_type TEXT NOT NULL,
+		   item_id TEXT,
+		   feed_key TEXT,
+		   client_family TEXT NOT NULL DEFAULT 'other',
+		   view TEXT,
+		   position INTEGER,
+		   value REAL,
+		   session_id TEXT,
+		   metadata_json TEXT,
+		   occurred_at TEXT NOT NULL,
+		   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		 )`;
 
 // v16 adds the reading-length and saved-item metadata columns to the article
 // trigger. Their writers are single items (a reported count, a fetched video
@@ -500,7 +521,20 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 			.prepare(
 				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
 			)
-			.bind(REQUIRED_SCHEMA_VERSION, String(CONTENT_VERSION_SCHEMA_VERSION)),
+			.bind(String(ITEM_METADATA_SCHEMA_VERSION), String(CONTENT_VERSION_SCHEMA_VERSION)),
+	]);
+
+	await db.batch([
+		db.prepare(READING_LOG_TABLE_SQL),
+		db.prepare(
+			'CREATE INDEX IF NOT EXISTS idx_reading_log_item ON reading_log(item_id, event_type, occurred_at DESC)',
+		),
+		db.prepare('CREATE INDEX IF NOT EXISTS idx_reading_log_occurred ON reading_log(occurred_at DESC)'),
+		db
+			.prepare(
+				"UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?",
+			)
+			.bind(REQUIRED_SCHEMA_VERSION, String(ITEM_METADATA_SCHEMA_VERSION)),
 	]);
 }
 

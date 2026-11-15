@@ -531,6 +531,24 @@ class LegacySchemaDb {
 			return;
 		}
 
+		if (statements[0]?.sql.startsWith('CREATE TABLE IF NOT EXISTS reading_log')) {
+			for (const statement of statements) {
+				const snapshot = statement.snapshot();
+				if (snapshot.sql.startsWith('CREATE TABLE IF NOT EXISTS reading_log')) {
+					this.state.operations.push('create-reading_log');
+				} else if (snapshot.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_reading_log_')) {
+					this.state.operations.push('create-reading-log-index');
+				} else if (snapshot.sql === "UPDATE _meta SET value = ? WHERE key = 'schema_version' AND value = ?") {
+					const nextValue = String(snapshot.values[0] ?? '');
+					if (nextValue === '17' && this.state.schemaVersion === String(snapshot.values[1] ?? '')) {
+						this.state.schemaVersion = nextValue;
+						this.state.operations.push('set-schema-version:17');
+					}
+				}
+			}
+			return;
+		}
+
 		if (statements[0]?.sql === 'DROP TRIGGER IF EXISTS trg_items_update_status') {
 			for (const statement of statements) {
 				const snapshot = statement.snapshot();
@@ -653,7 +671,7 @@ test('fetch upgrades a legacy schema before reading feed rows that require site_
 	);
 
 	assert.equal(response.status, 200);
-	assert.equal(db.state.schemaVersion, '16');
+	assert.equal(db.state.schemaVersion, '17');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedTagsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
@@ -689,7 +707,7 @@ test('email upgrades a legacy schema before inserting feed and item rows with si
 		{} as ExecutionContext,
 	);
 
-	assert.equal(db.state.schemaVersion, '16');
+	assert.equal(db.state.schemaVersion, '17');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -721,7 +739,7 @@ test('scheduled upgrades a legacy schema before RSS refresh writes site_url and 
 
 	await app.scheduled({} as ScheduledController, createEnv(db) as never);
 
-	assert.equal(db.state.schemaVersion, '16');
+	assert.equal(db.state.schemaVersion, '17');
 	assert.equal(db.state.hasEngagementEventsTable, true);
 	assert.equal(db.state.hasFeedUrlAliasesTable, true);
 	assert.equal(db.state.hasRefreshActivityTable, true);
@@ -748,7 +766,7 @@ test('a fresh DB wrapper skips completed migrations using the persisted schema v
 	);
 
 	assert.equal(firstResponse.status, 200);
-	assert.equal(persistedState.schemaVersion, '16');
+	assert.equal(persistedState.schemaVersion, '17');
 	assert.equal(persistedState.operations.filter((operation) => operation === 'seed-sync_changes').length, 3);
 
 	persistedState.operations.length = 0;
@@ -859,7 +877,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	assert.deepEqual(loser.legacyBackfillMetrics.inserted, { itemStatus: 0, feedTag: 0 });
 	assert.deepEqual(loser.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 
-	assert.equal(winner.batches.length, 5);
+	assert.equal(winner.batches.length, 6);
 	const migrationBatch = winner.batches[0];
 	assert.equal(migrationBatch[0]?.sql, 'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)');
 	const entityIndexPosition = migrationBatch.findIndex((statement) => statement.sql.startsWith('CREATE INDEX IF NOT EXISTS idx_sync_changes_entity'));
@@ -897,7 +915,7 @@ test('SQLite v11 migration claims every source backfill once across independent 
 	const schemaVersion = database.prepare(
 		"SELECT value FROM _meta WHERE key = 'schema_version'",
 	).get() as { value: string };
-	assert.equal(schemaVersion.value, '16');
+	assert.equal(schemaVersion.value, '17');
 
 	const indexMigrationBatch = winner.batches[1];
 	assert.equal(
@@ -1050,7 +1068,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
 	assert.deepEqual(db.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 	assert.deepEqual(db.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
@@ -1060,7 +1078,7 @@ test('SQLite v12 migration creates only v13 indexes without legacy source scans'
 		),
 		false,
 	);
-	assert.equal(db.batches.length, 4);
+	assert.equal(db.batches.length, 5);
 	assert.equal(
 		db.batches[0][0]?.sql,
 		'CREATE INDEX IF NOT EXISTS idx_sync_changes_entity ON sync_changes(entity_type, entity_id)',
@@ -1185,7 +1203,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	]);
 
 	for (const wrapper of [firstDb, secondDb]) {
-		assert.equal(wrapper.batches.length, 4);
+		assert.equal(wrapper.batches.length, 5);
 		assert.deepEqual(wrapper.metrics.sourceRowsRead, { feed: 0, article: 0, status: 0 });
 		assert.deepEqual(wrapper.legacyBackfillMetrics.sourceRowsRead, { itemStatus: 0, feedTag: 0 });
 		assert.equal(
@@ -1197,7 +1215,7 @@ test('SQLite v12 migration serializes two cold wrappers without legacy scans', a
 	}
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
 	assert.equal(
 		database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_state'").get() !== undefined,
@@ -1262,7 +1280,7 @@ test('SQLite v13 migration recreates the status trigger so plain writes clear mu
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
 	database.exec("UPDATE items SET is_read = 1 WHERE id = 'article-a'");
 	assert.deepEqual(
@@ -1302,11 +1320,12 @@ test('SQLite v14 migration adds content_version and a covering unread feed index
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
-	assert.equal(db.batches.length, 4);
+	assert.equal(db.batches.length, 5);
 	assert.deepEqual(db.batches[2].at(-1)?.values, ['15', '14']);
 	assert.deepEqual(db.batches[3].at(-1)?.values, ['16', '15']);
+	assert.deepEqual(db.batches[4].at(-1)?.values, ['17', '16']);
 	assert.deepEqual(
 		{ ...(database.prepare("SELECT content_version FROM items WHERE id = 'article-a'").get() as object) },
 		{ content_version: 0 },
@@ -1368,9 +1387,10 @@ test('SQLite v15 migration adds reading-length metadata, transcripts, and backfi
 
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
-	assert.deepEqual(db.batches.at(-1)?.at(-1)?.values, ['16', '15']);
+	assert.deepEqual(db.batches.at(-2)?.at(-1)?.values, ['16', '15']);
+	assert.deepEqual(db.batches.at(-1)?.at(-1)?.values, ['17', '16']);
 	const row = database.prepare(`SELECT ${V16_ITEM_COLUMNS.join(', ')} FROM items WHERE id = 'article-a'`).get() as Record<string, unknown>;
 	for (const column of V16_ITEM_COLUMNS) assert.equal(row[column], null, column);
 	const tables = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
@@ -1454,7 +1474,66 @@ test('a fresh SCHEMA.sql database is already at the required version and runs no
 	]);
 	assert.equal(
 		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
-		'16',
+		'17',
 	);
 	database.close();
+});
+
+test('v16 databases gain the reading_log table and its indexes at v17', async () => {
+	const database = new DatabaseSync(':memory:');
+	database.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	database.exec(`
+		DROP INDEX idx_reading_log_item;
+		DROP INDEX idx_reading_log_occurred;
+		DROP TABLE reading_log;
+		UPDATE _meta SET value = '16' WHERE key = 'schema_version';
+	`);
+	const db = new SqliteMigrationDatabase(database, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	});
+
+	await ensureDatabaseSchema({ DB: db } as never);
+
+	assert.equal(
+		(database.prepare("SELECT value FROM _meta WHERE key = 'schema_version'").get() as { value: string }).value,
+		'17',
+	);
+	assert.deepEqual(db.batches.at(-1)?.at(-1)?.values, ['17', '16']);
+	const columns = (database.prepare('PRAGMA table_info(reading_log)').all() as Array<{ name: string }>).map(({ name }) => name);
+	assert.deepEqual(columns, [
+		'id', 'event_key', 'event_type', 'item_id', 'feed_key', 'client_family', 'view', 'position',
+		'value', 'session_id', 'metadata_json', 'occurred_at', 'created_at',
+	]);
+	const indexes = (database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'reading_log'").all() as Array<{ name: string }>).map(({ name }) => name);
+	assert.equal(indexes.includes('idx_reading_log_item'), true);
+	assert.equal(indexes.includes('idx_reading_log_occurred'), true);
+	// The log must outlive its article: no foreign key, so a deleted item keeps its history.
+	assert.equal((database.prepare('PRAGMA foreign_key_list(reading_log)').all() as unknown[]).length, 0);
+	database.close();
+});
+
+test('the fresh SCHEMA.sql reading_log matches the migrated v17 table', async () => {
+	const fresh = new DatabaseSync(':memory:');
+	fresh.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	const migrated = new DatabaseSync(':memory:');
+	migrated.exec(readFileSync(new URL('../04-storage/SCHEMA.sql', import.meta.url), 'utf8'));
+	migrated.exec(`
+		DROP INDEX idx_reading_log_item;
+		DROP INDEX idx_reading_log_occurred;
+		DROP TABLE reading_log;
+		UPDATE _meta SET value = '16' WHERE key = 'schema_version';
+	`);
+	await ensureDatabaseSchema({ DB: new SqliteMigrationDatabase(migrated, {
+		batchTail: Promise.resolve(),
+		versionReadBarrier: createVersionReadBarrier(1),
+	}) } as never);
+	const shape = (database: DatabaseSync) => JSON.stringify({
+		columns: database.prepare('PRAGMA table_info(reading_log)').all(),
+		indexes: (database.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'reading_log' AND sql IS NOT NULL ORDER BY name").all() as Array<{ name: string; sql: string }>)
+			.map(({ name, sql }) => ({ name, sql: sql.replace(/\s+/g, ' ').replace('IF NOT EXISTS ', '') })),
+	});
+	assert.equal(shape(migrated), shape(fresh));
+	fresh.close();
+	migrated.close();
 });

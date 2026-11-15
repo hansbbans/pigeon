@@ -1,5 +1,6 @@
 import { requireApiAuth } from './api-auth';
 import { handleEngagementIngestion } from './engagement';
+import { handleReadingLogIngestion } from './reading-log';
 import { ensureDatabaseSchema } from './migrations';
 import { handleIncrementalSync } from './sync-api';
 import { handleMutationBatch } from './mutation-api';
@@ -49,6 +50,9 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 
 	if (path === '/api/v1/engagement' && request.method === 'POST') {
 		return handleEngagementIngestion(request, env);
+	}
+	if (path === '/api/v1/reading-log' && request.method === 'POST') {
+		return handleReadingLogIngestion(request, env);
 	}
 	if (path === '/api/v1/sync' && request.method === 'GET') {
 		return handleIncrementalSync(request, env);

@@ -28,7 +28,7 @@ interface SqliteMasterRow {
 
 export function createCurrentSchemaState(): SchemaState {
 	return {
-		schemaVersion: '16',
+		schemaVersion: '17',
 		hasMetaTable: true,
 		hasFeedsTable: true,
 		hasItemsTable: true,

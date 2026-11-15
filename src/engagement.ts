@@ -178,7 +178,7 @@ function chunkValues<T>(values: T[], size: number): T[][] {
 	return chunks;
 }
 
-async function loadItemsByIDs(env: Env, itemIds: string[]): Promise<Map<string, { id: string; feed_key: string }>> {
+export async function loadItemsByIDs(env: Env, itemIds: string[]): Promise<Map<string, { id: string; feed_key: string }>> {
 	const uniqueIds = [...new Set(itemIds)];
 	const storedIds: string[] = [];
 	const rowids: number[] = [];

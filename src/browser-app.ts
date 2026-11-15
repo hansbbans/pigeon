@@ -1509,6 +1509,166 @@ export function renderBrowserAppRuntimeScript(): string {
     return response.json();
   }
 
+  // Reading log: which cards were on screen, and how the opened article was
+  // read. Sends are fire-and-forget; a failure is dropped and never reaches
+  // the UI, so logging cannot get in the way of reading.
+  const readingMeter = client.createReadingMeter();
+  let renderedArticleCards = [];
+  let impressionSession = null;
+  let pendingImpressions = [];
+  let pendingKeyboardOpen = null;
+  let readingLogTicks = 0;
+  let readingLogHiddenAt = 0;
+
+  function sendReadingEvents(path, events) {
+    if (events.length === 0 || session.status !== 'authenticated' || !session.token || window.navigator?.onLine === false) return;
+    try {
+      void fetch(path, {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json', ...getAuthorizationHeader(), 'X-Pigeon-Client': client.PIGEON_CLIENT_ID },
+        body: JSON.stringify({ events }),
+      }).catch(() => {});
+    } catch (_error) {
+      // Dropped: see above.
+    }
+  }
+
+  function sendEngagementEvent(event) {
+    sendReadingEvents('/api/v1/engagement', [{ id: crypto.randomUUID(), occurredAt: new Date().toISOString(), ...event }]);
+  }
+
+  function flushImpressions() {
+    const events = pendingImpressions;
+    pendingImpressions = [];
+    sendReadingEvents('/api/v1/reading-log', events);
+  }
+
+  function sampleImpressions(now) {
+    const logView = client.readingLogView(getActiveView(), Boolean(articleSearchQuery));
+    const container = getArticleScrollContainer();
+    if (!logView || session.status !== 'authenticated' || document.visibilityState === 'hidden' ||
+        !container || typeof container.getBoundingClientRect !== 'function') {
+      if (impressionSession) impressionSession.since = {};
+      return;
+    }
+    // One session per showing of a list: a new view, search, filter or sort starts over.
+    const key = getViewQueryKey(activeViewId);
+    if (!impressionSession || impressionSession.key !== key) {
+      impressionSession = { key, id: crypto.randomUUID(), since: {}, logged: {} };
+    }
+    const viewport = container.getBoundingClientRect();
+    const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    const visible = [];
+    for (let index = 0; index < renderedArticleCards.length; index += 1) {
+      const card = renderedArticleCards[index];
+      if (!loadedItemsById[card.id] || typeof card.node.getBoundingClientRect !== 'function') continue;
+      const rect = card.node.getBoundingClientRect();
+      if (rect.top >= viewport.bottom) break;
+      if (client.isHalfVisible(rect.top, rect.bottom, viewport.top, viewport.bottom)) {
+        visible.push({ id: card.id, position: windowStart + index });
+      }
+    }
+    for (const card of client.advanceImpressions(impressionSession, visible, now)) {
+      const metadata = {};
+      if (logView.stream) metadata.stream = logView.stream;
+      const recommendation = logView.view === 'for-you' ? recommendationDetails.get(card.id) : null;
+      if (typeof recommendation?.score === 'number') metadata.score = recommendation.score;
+      if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
+      pendingImpressions.push({
+        id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
+        sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
+        ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+      });
+    }
+    if (pendingImpressions.length >= 50) flushImpressions();
+  }
+
+  function isReadingOpenedArticle() {
+    const openedId = readingMeter.itemId();
+    if (!openedId || openedId !== selectedItemId || readyReaderItemId !== openedId ||
+        document.visibilityState === 'hidden' || !isReaderVisible()) return false;
+    // On a phone the reader pane is display:none while the list is showing.
+    const rect = typeof readerScroll.getBoundingClientRect === 'function' ? readerScroll.getBoundingClientRect() : null;
+    return !rect || (rect.width > 0 && rect.height > 0);
+  }
+
+  function reportReadingTime(minimumSeconds) {
+    const reading = readingMeter.take(minimumSeconds);
+    if (!reading) return;
+    sendEngagementEvent({
+      itemId: reading.itemId, type: 'active_reading', durationSeconds: reading.durationSeconds,
+      ...(reading.scrollDepth === null ? {} : { scrollDepth: reading.scrollDepth }),
+    });
+  }
+
+  // Only an article the reader chose counts as opened: the list also selects
+  // its first article by itself, and that must not look like reading. Stepping
+  // through articles with the keyboard counts once the reader stays 3 seconds.
+  function noteArticleOpened(itemId, fromKeyboard) {
+    const now = Date.now();
+    if (readingMeter.itemId() === itemId) {
+      readingMeter.interact(now);
+      return;
+    }
+    reportReadingTime(1);
+    readingMeter.open(itemId, now);
+    pendingKeyboardOpen = fromKeyboard ? { itemId, at: now } : null;
+    if (!fromKeyboard) sendEngagementEvent({ itemId, type: 'explicit_open' });
+  }
+
+  function stopReadingMeter() {
+    reportReadingTime(1);
+    readingMeter.close();
+    pendingKeyboardOpen = null;
+  }
+
+  function noteReaderScroll() {
+    readingMeter.interact(Date.now());
+    if (readingMeter.itemId() !== selectedItemId || readyReaderItemId !== selectedItemId) return;
+    try {
+      const frameDocument = readerFrame.contentDocument;
+      const height = Math.max(frameDocument?.documentElement?.scrollHeight || 0, frameDocument?.body?.scrollHeight || 0);
+      const viewport = readerFrame.contentWindow?.innerHeight || frameDocument?.documentElement?.clientHeight || 0;
+      if (!viewport || height <= viewport) return;
+      const depth = readingMeter.scroll(Math.round(((readReaderFrameScrollTop() + viewport) / height) * 1000) / 1000);
+      if (depth !== null) sendEngagementEvent({ itemId: selectedItemId, type: 'scroll_depth', value: depth, scrollDepth: depth });
+    } catch (_error) {
+      // The frame may be unavailable while navigating to another article.
+    }
+  }
+
+  function noteOutboundLink(href) {
+    const destinationHost = client.outboundLinkHost(href);
+    if (destinationHost && selectedItemId) sendEngagementEvent({ itemId: selectedItemId, type: 'outbound_link', destinationHost });
+  }
+
+  // Also bound to auxclick for middle-click; a right-click only opens the link menu.
+  function handleFrameLinkClick(event) {
+    if (event?.button === 2) return;
+    noteOutboundLink(event?.target?.closest?.('a[href]')?.getAttribute('href'));
+  }
+
+  function flushReadingLog() {
+    reportReadingTime(1);
+    flushImpressions();
+  }
+
+  function readingLogTick() {
+    const now = Date.now();
+    readingLogTicks += 1;
+    if (readingMeter.itemId() && readingMeter.itemId() !== selectedItemId) stopReadingMeter();
+    const isReading = isReadingOpenedArticle();
+    readingMeter.tick(now, isReading);
+    if (isReading && pendingKeyboardOpen && now - pendingKeyboardOpen.at >= 3000) {
+      sendEngagementEvent({ itemId: pendingKeyboardOpen.itemId, type: 'explicit_open' });
+      pendingKeyboardOpen = null;
+    }
+    reportReadingTime(15);
+    sampleImpressions(now);
+    if (readingLogTicks % 10 === 0) flushImpressions();
+  }
+
   // Subscriptions minus the Read It Later feed: what feed settings and notifications list.
   function getFeedSubscriptions(){return subscriptions.filter(subscription=>subscription.sourceType!=='saved');}
   function isOfflineReading(){return Boolean(offlineLibrary&&(offlineSession||window.navigator?.onLine===false));}
@@ -2248,6 +2408,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
     activeFrameDocument.removeEventListener('keydown', handleArticleNavigationKeydown);
     activeFrameDocument.removeEventListener('scroll', handleReaderProgress);
+    activeFrameDocument.removeEventListener('click', handleFrameLinkClick);
+    activeFrameDocument.removeEventListener('auxclick', handleFrameLinkClick);
     activeFrameDocument.removeEventListener('click', zoomReadingImage);
     activeFrameDocument.removeEventListener('click', client.followInPageLink);
     activeFrameDocument.removeEventListener('contextmenu', handleFrameContextMenu);
@@ -2257,6 +2419,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   // The parent document never sees pointer events inside the frame.
   function handleFramePointerDown(event) {
+    readingMeter.interact(Date.now());
     if (event?.button !== 2) closeLinkContextMenu(false);
   }
 
@@ -2275,6 +2438,8 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     frameDocument.addEventListener('keydown', handleArticleNavigationKeydown);
     frameDocument.addEventListener('scroll', handleReaderProgress);
+    frameDocument.addEventListener('click', handleFrameLinkClick);
+    frameDocument.addEventListener('auxclick', handleFrameLinkClick);
     frameDocument.addEventListener('click', zoomReadingImage);
     frameDocument.addEventListener('click', client.followInPageLink);
     frameDocument.addEventListener('contextmenu', handleFrameContextMenu);
@@ -2327,6 +2492,10 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function resetReaderState() {
+    flushReadingLog();
+    readingMeter.close();
+    pendingKeyboardOpen = null;
+    impressionSession = null;
     cancelViewLoads();
     cancelContentLoads();
     itemIds = [];
@@ -2632,6 +2801,7 @@ export function renderBrowserAppRuntimeScript(): string {
     visiblePreviewSources=new Set(entries.map(entry=>entry.heroImageUrl).filter(Boolean));
 
     clearElement(articlesList);
+    renderedArticleCards = [];
 
     if (entries.length === 0) {
       const activeView = getActiveView();
@@ -2670,6 +2840,7 @@ export function renderBrowserAppRuntimeScript(): string {
           'data-starred': isStarred ? 'true' : 'false',
         },
       });
+      renderedArticleCards.push({ id: entry.id, node: button });
       button.addEventListener('click', () => {
         setMobilePane('reader', true);
         void selectArticle(entry.id);
@@ -2923,7 +3094,7 @@ export function renderBrowserAppRuntimeScript(): string {
     closeLinkContextMenu(true);
     if (!target || target.generation !== accountGeneration) return;
     if (action === 'save') void saveLink(target.url, target.title);
-    else if (action === 'open') openInNewTab(target.url);
+    else if (action === 'open') { noteOutboundLink(target.url); openInNewTab(target.url); }
     else void copyLinkWithToast(target.url);
   }
 
@@ -4869,6 +5040,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function handleReaderProgress() {
     closeLinkContextMenu(false);
+    noteReaderScroll();
     saveReadingPosition();
     maybeAutoMarkRead(true);
   }
@@ -5067,6 +5239,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     heldReaderArticle = null;
     selectedItemId = itemId;
+    noteArticleOpened(itemId, Boolean(options?.keyboard));
     keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
     renderArticles();
@@ -5273,6 +5446,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!href || openOriginalButton.disabled || typeof window.open !== 'function') {
       return;
     }
+    noteOutboundLink(href);
     window.open(href, '_blank', 'noopener');
   });
 
@@ -5284,7 +5458,11 @@ export function renderBrowserAppRuntimeScript(): string {
   linkCopyButton.addEventListener('click', () => { runLinkContextAction('copy'); });
   copyLinkButton.addEventListener('click', () => { void copyLinkWithToast(loadedItemsById[selectedItemId]?.alternate?.[0]?.href); });
   removeSavedButton.addEventListener('click', () => { void removeSelectedSavedItem(); });
-  savedOpenOriginalButton.addEventListener('click', () => { openInNewTab(loadedItemsById[selectedItemId]?.alternate?.[0]?.href); });
+  savedOpenOriginalButton.addEventListener('click', () => {
+    const href = loadedItemsById[selectedItemId]?.alternate?.[0]?.href;
+    noteOutboundLink(href);
+    openInNewTab(href);
+  });
   savedRetryButton.addEventListener('click', () => {
     const itemId = selectedItemId;
     if (!isSavedItem(loadedItemsById[itemId]) || savedExtractionJobs.has(itemId)) return;
@@ -5597,10 +5775,20 @@ export function renderBrowserAppRuntimeScript(): string {
   if (typeof document.addEventListener === 'function') {
     document.addEventListener('visibilitychange', () => {
       if (!document.visibilityState || document.visibilityState === 'visible') {
+        readingMeter.tick(Date.now(), false);
+        // Coming back after half an hour is a new look at the list, not the same one.
+        if (readingLogHiddenAt && Date.now() - readingLogHiddenAt >= 30 * 60 * 1000) impressionSession = null;
+        readingLogHiddenAt = 0;
         void revalidateActiveView();
+      } else {
+        flushReadingLog();
+        readingLogHiddenAt = Date.now();
+        if (impressionSession) impressionSession.since = {};
       }
     });
   }
+  if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', flushReadingLog);
+  if (typeof window.setInterval === 'function') window.setInterval(readingLogTick, 500);
 
   if (config.baseUrl) {
     document.documentElement.setAttribute('data-base-url', config.baseUrl);
