@@ -5808,8 +5808,8 @@ export function renderBrowserAppRuntimeScript(): string {
     document.addEventListener('visibilitychange', () => {
       if (!document.visibilityState || document.visibilityState === 'visible') {
         readingMeter.tick(Date.now(), false);
-        // Coming back after half an hour is a new look at the list, not the same one.
-        if (readingLogHiddenAt && Date.now() - readingLogHiddenAt >= 30 * 60 * 1000) impressionSession = null;
+        // Coming back after 15 minutes is a new look at the list, not the same one (the iOS app uses the same interval).
+        if (readingLogHiddenAt && Date.now() - readingLogHiddenAt >= 15 * 60 * 1000) impressionSession = null;
         readingLogHiddenAt = 0;
         void revalidateActiveView();
       } else {

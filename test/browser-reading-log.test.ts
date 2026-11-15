@@ -103,7 +103,7 @@ test('cards on screen for a second are logged once per list session, in one batc
 	assert.equal(afterSwitch.at(-1)!.view, 'unread');
 });
 
-test('returning to the page soon keeps the list session; returning after half an hour starts a new one', async () => {
+test('returning to the page soon keeps the list session; returning after 15 minutes starts a new one', async () => {
 	const { harness, run, impressions, settle } = await openBrowser();
 	await run(5_000);
 	const shown = impressions().length;
@@ -117,7 +117,7 @@ test('returning to the page soon keeps the list session; returning after half an
 	assert.equal(impressions().length, shown, 'a short absence does not log the same cards again');
 
 	harness.setVisibility('hidden');
-	await run(31 * 60_000);
+	await run(15 * 60_000);
 	harness.setVisibility('visible');
 	await settle();
 	await run(5_000);

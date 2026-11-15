@@ -22,8 +22,8 @@ compared with real behaviour. Plan: collect for about a month, then revisit
 one, `metadata_json.stream` names the feed or folder.
 
 A list session is one showing of one list: changing view, search, filter or
-sort starts a new one, and so does coming back to the page after half an
-hour away. A card seen in two sessions is two impressions.
+sort starts a new one, and so does coming back to the page or app after 15
+minutes away. A card seen in two sessions is two impressions.
 
 ## Rules that keep the data honest
 
