@@ -130,6 +130,40 @@ struct APIContractTests {
 		try Self.expectJSON(try #require(request.body), equalsFixture: "engagement.request.json")
 	}
 
+	@Test func readingLogRequestMatchesTheContract() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"accepted":2,"skipped":0,"clientFamily":"ios"}"#.utf8))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+		let session = "7b2e0c3e-00aa-4b00-9000-0000000000aa"
+
+		try await client.sendReadingLog([
+			ReadingLogEvent(
+				id: "7b2e0c3e-0001-4b00-9000-000000000001",
+				itemId: "tag:google.com,2005:reader/item/0000000000000001",
+				view: ReaderSection.forYou.apiValue,
+				position: 0,
+				sessionId: session,
+				occurredAt: Self.date("2026-11-15T09:00:00Z"),
+				metadata: ReadingLogMetadata(score: 82),
+			),
+			ReadingLogEvent(
+				id: "7b2e0c3e-0002-4b00-9000-000000000002",
+				itemId: "tag:google.com,2005:reader/item/0000000000000002",
+				view: "feed",
+				position: 3,
+				sessionId: session,
+				occurredAt: Self.date("2026-11-15T09:00:05Z"),
+				metadata: ReadingLogMetadata(stream: "feed/7"),
+			),
+		])
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path() == "/api/v1/reading-log")
+		#expect(request.method == "POST")
+		#expect(request.authorization == "GoogleLogin auth=pigeon/token")
+		#expect(request.contentType == "application/json")
+		try Self.expectJSON(try #require(request.body), equalsFixture: "reading-log.request.json")
+	}
+
 	// MARK: - Personalization and settings
 
 	@Test func personalizationFixturesDecode() async throws {

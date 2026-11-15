@@ -178,6 +178,47 @@ struct ReaderListViewportControllerResizeTests {
 		#expect(abs(fixture.rowViewportOffset - before.viewportOffset) <= 0.5)
 	}
 
+	@Test func halfVisibleRowsFollowTheViewportForImpressionLogging() async throws {
+		let fixture = try ReaderListViewportResizeFixture()
+		defer { fixture.teardown() }
+		var changes = 0
+		fixture.controller.onViewportChange = { changes += 1 }
+		await fixture.settle()
+
+		// The 80 pt row at y 300 is 50 pt inside a viewport that starts at 330.
+		#expect(fixture.controller.halfVisibleRows() == [
+			ImpressionTracker.VisibleItem(itemId: fixture.articleID, position: 0),
+		])
+		#expect(changes > 0)
+
+		let changesBeforeScroll = changes
+		fixture.scroll(to: 345)
+		await fixture.settle()
+		// 35 pt of 80 is under half.
+		#expect(fixture.controller.halfVisibleRows() == [])
+		#expect(changes > changesBeforeScroll)
+
+		fixture.controller.deactivate()
+		#expect(fixture.controller.halfVisibleRows() == nil)
+	}
+
+	@Test func halfVisibilityCountsTheVisibleShareOfARow() {
+		func isHalfVisible(_ minY: CGFloat, _ maxY: CGFloat) -> Bool {
+			ReaderListViewportController.isAtLeastHalfVisible(minY: minY, maxY: maxY, top: 100, bottom: 600)
+		}
+		#expect(isHalfVisible(200, 300))
+		#expect(isHalfVisible(50, 150))
+		#expect(isHalfVisible(49, 149) == false)
+		#expect(isHalfVisible(550, 650))
+		#expect(isHalfVisible(551, 651) == false)
+		#expect(isHalfVisible(600, 700) == false)
+		#expect(isHalfVisible(0, 100) == false)
+		#expect(isHalfVisible(300, 300) == false)
+		// A row taller than the viewport counts once it fills half of the viewport.
+		#expect(isHalfVisible(-900, 350))
+		#expect(isHalfVisible(-900, 349) == false)
+	}
+
 	@Test func densityReflowMeasuresTheRowAfterItsNativeContainerFinishesLayout() async throws {
 		let fixture = try ReaderListViewportResizeFixture()
 		defer { fixture.teardown() }

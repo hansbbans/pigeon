@@ -1,0 +1,28 @@
+{
+	"events": [
+		{
+			"id": "7b2e0c3e-0001-4b00-9000-000000000001",
+			"itemId": "tag:google.com,2005:reader/item/0000000000000001",
+			"type": "impression",
+			"view": "for-you",
+			"position": 0,
+			"sessionId": "7b2e0c3e-00aa-4b00-9000-0000000000aa",
+			"occurredAt": "2026-11-15T09:00:00Z",
+			"metadata": {
+				"score": 82
+			}
+		},
+		{
+			"id": "7b2e0c3e-0002-4b00-9000-000000000002",
+			"itemId": "tag:google.com,2005:reader/item/0000000000000002",
+			"type": "impression",
+			"view": "feed",
+			"position": 3,
+			"sessionId": "7b2e0c3e-00aa-4b00-9000-0000000000aa",
+			"occurredAt": "2026-11-15T09:00:05Z",
+			"metadata": {
+				"stream": "feed/7"
+			}
+		}
+	]
+}

@@ -29,6 +29,7 @@ Worker.
 | `mutations.response.json`, `mutations-replay.response.json` | `POST /api/v1/mutations` (applied, then replayed) |
 | `sync-after-mutations.response.json` | `GET /api/v1/sync` after those mutations |
 | `engagement.request.json` | `POST /api/v1/engagement` body sent by the app |
+| `reading-log.request.json` | `POST /api/v1/reading-log` body sent by the app |
 | `personalization.response.json` | `GET /api/v1/personalization` |
 | `personalization-update.response.json` | `PUT /api/v1/personalization` |
 | `subscription-list.response.json` | `GET /reader/api/0/subscription/list` |

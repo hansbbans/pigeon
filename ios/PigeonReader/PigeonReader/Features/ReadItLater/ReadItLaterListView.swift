@@ -6,12 +6,16 @@ struct ReadItLaterListView: View {
 	let collection: ReaderNavigationItem
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.scenePhase) private var scenePhase
 	@State private var actionFeedbackCount = 0
 	@State private var copyConfirmation: ReaderSaveConfirmation?
+	@State private var impressions = ReaderImpressionRecorder()
 
 	var body: some View {
 		let articles = model.articles(for: collection)
 		let isArchive = model.articleFilter(for: collection) == .read
+		let impressionState = impressionState
 		Group {
 			if articles.isEmpty {
 				emptyState(isArchive: isArchive)
@@ -22,10 +26,18 @@ struct ReadItLaterListView: View {
 							article: article,
 							remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 							imageProxySession: model.session,
-							select: { model.select(article: article) },
+							select: {
+								impressions.rowChosen(article.id)
+								model.select(article: article)
+							},
 						)
 						.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
 						.contextMenu { actions(for: article) }
+						.onScrollVisibilityChange(threshold: 0.5) { isVisible in
+							impressions.setRowVisible(article.id, isVisible)
+						}
+						// A row can leave the list without being told it is no longer visible.
+						.onDisappear { impressions.setRowVisible(article.id, false) }
 					}
 				}
 				.listStyle(.plain)
@@ -49,6 +61,42 @@ struct ReadItLaterListView: View {
 		}
 		.sensoryFeedback(.selection, trigger: actionFeedbackCount)
 		.modifier(ReaderSaveConfirmationModifier(confirmation: $copyConfirmation))
+		// Reading log: which saved items this list showed. No view state changes here.
+		.onChange(of: articles.map(\.id), initial: true) { _, ids in impressions.updateRows(ids) }
+		.onChange(of: impressionState, initial: true) { _, state in
+			impressions.apply(state, model: model)
+		}
+		.onAppear {
+			impressions.apply(impressionState, model: model)
+		}
+		.onDisappear {
+			impressions.endSession()
+		}
+	}
+
+	/// One impression session per continuous showing of one filter and sort.
+	/// Paused while the scene is inactive or the reader covers the list on iPhone.
+	private var impressionState: ReaderImpressionRecorder.ListState {
+		let isOnScreen = model.selectedNavigationID == collection.id && model.preferredCompactColumn != .sidebar
+		let filter = model.savedListFilter
+		let context = [
+			model.session?.storageIdentity ?? "none",
+			collection.id,
+			model.articleFilter(for: collection).rawValue,
+			model.sortOrder(for: collection).rawValue,
+			"\(filter.kind)",
+			"\(filter.length)",
+			"\(model.readingLogSessionEpoch)",
+		].joined(separator: "|")
+		return ReaderImpressionRecorder.ListState(
+			sessionKey: isOnScreen ? context : nil,
+			list: ReadingLogList.list(for: collection),
+			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
+				horizontalSizeClass: horizontalSizeClass,
+				preferredColumn: model.preferredCompactColumn,
+				hasSelectedArticle: model.selectedArticleID != nil,
+			),
+		)
 	}
 
 	@ViewBuilder

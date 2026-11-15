@@ -63,7 +63,14 @@ final class ReaderListViewportController {
 	private var store: ReaderListPositionStore?
 	private var context: String?
 	private var scope: ReaderListCollectionScope?
-	private var articleIDs: [String] = []
+	private var articleIDs: [String] = [] {
+		didSet { articlePositions = nil }
+	}
+	/// Index of each article in the list, built on first use after a change.
+	private var articlePositions: [String: Int]?
+	/// Called after every steady viewport pass (scroll, row layout). Impression
+	/// logging listens here and throttles itself; the call allocates nothing.
+	var onViewportChange: (() -> Void)?
 	private var pendingRestore: ReaderListPosition?
 	private var coarseRestoreFinished = false
 	private var pendingReflow: PendingReflow?
@@ -466,6 +473,50 @@ final class ReaderListViewportController {
 		)
 		let tail = Set(articleIDs.suffix(5))
 		onNearEnd?(visible.contains { tail.contains($0.0) })
+		onViewportChange?()
+	}
+
+	/// Rows at least half inside the visible viewport, with their index in the
+	/// list. Nil while the list cannot be measured: off window, restoring a
+	/// position, reflowing, or inside a navigation transition.
+	func halfVisibleRows() -> [ImpressionTracker.VisibleItem]? {
+		guard active, let scrollView, scrollView.window != nil,
+			pendingRestore == nil, pendingReflow == nil, pendingViewportResize == nil,
+			nativeTransitionID == nil else { return nil }
+		let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+		let bottom = scrollView.contentOffset.y + scrollView.bounds.height - scrollView.adjustedContentInset.bottom
+		var visible: [ImpressionTracker.VisibleItem] = []
+		for row in rows.values {
+			guard let view = row.view, view.window != nil,
+				view.isDescendant(of: scrollView), view.bounds.height > 0,
+				let position = position(of: row.articleID) else { continue }
+			let frame = view.convert(view.bounds, to: scrollView)
+			if Self.isAtLeastHalfVisible(minY: frame.minY, maxY: frame.maxY, top: top, bottom: bottom) {
+				visible.append(ImpressionTracker.VisibleItem(itemId: row.articleID, position: position))
+			}
+		}
+		return visible
+	}
+
+	/// The article's 0-based index in the list as displayed.
+	func position(of articleID: String) -> Int? {
+		if articlePositions == nil {
+			articlePositions = Dictionary(
+				articleIDs.enumerated().map { ($0.element, $0.offset) },
+				uniquingKeysWith: { first, _ in first },
+			)
+		}
+		return articlePositions?[articleID]
+	}
+
+	/// A row taller than the viewport can never show half of itself, so
+	/// filling half of the viewport counts as well.
+	nonisolated static func isAtLeastHalfVisible(minY: CGFloat, maxY: CGFloat, top: CGFloat, bottom: CGFloat) -> Bool {
+		let height = maxY - minY
+		let viewport = bottom - top
+		guard height > 0, viewport > 0 else { return false }
+		let visible = min(maxY, bottom) - max(minY, top)
+		return visible >= min(height, viewport) / 2
 	}
 
 	private func currentLayoutSnapshot() -> LayoutSnapshot? {

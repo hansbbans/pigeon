@@ -70,6 +70,20 @@ struct EngagementAggregator: Sendable {
 		)
 	}
 
+	/// Articles whose reading clock is running.
+	var activeItemIDs: [String] {
+		sessions.compactMap { $0.value.activeSince == nil ? nil : $0.key }
+	}
+
+	/// Reading stopped (reader closed, another article opened, scene left
+	/// `.active`): stops the clock and returns the exact time not yet reported
+	/// by `activeReadingDeltaEvent`. Anything shorter than `minimumDuration`
+	/// stays unreported and is added to the next report for this article.
+	mutating func stopReading(itemId: String, at date: Date, minimumDuration: TimeInterval = 1) -> EngagementEvent? {
+		pause(itemId: itemId, at: date)
+		return activeReadingDeltaEvent(itemId: itemId, at: date, minimumDuration: minimumDuration)
+	}
+
 	mutating func finish(itemId: String) -> ReadingSessionSummary? {
 		guard let session = sessions.removeValue(forKey: itemId) else {
 			return nil

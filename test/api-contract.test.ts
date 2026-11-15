@@ -256,6 +256,18 @@ test('engagement ingestion accepts the app payload and feeds personalization', a
 	await assertMatchesFixture(await state.request('/api/v1/personalization'), 'personalization.response.json');
 });
 
+test('reading log accepts the app payload and stores every event', async (t) => {
+	const state = await library(t);
+	const response = await state.request('/api/v1/reading-log', json('POST', requestFixture('reading-log.request.json')));
+	assert.equal(response.status, 200, await response.clone().text());
+	assert.deepEqual(await response.json(), { accepted: 2, skipped: 0, rejected: 0, clientFamily: 'pigeon_ios' });
+	const rows = state.database.prepare('SELECT view, position, session_id, metadata_json, occurred_at FROM reading_log ORDER BY occurred_at').all();
+	assert.deepEqual(rows.map((row) => ({ ...row })), [
+		{ view: 'for-you', position: 0, session_id: '7b2e0c3e-00aa-4b00-9000-0000000000aa', metadata_json: '{"score":82}', occurred_at: '2026-11-15T09:00:00.000Z' },
+		{ view: 'feed', position: 3, session_id: '7b2e0c3e-00aa-4b00-9000-0000000000aa', metadata_json: '{"stream":"feed/7"}', occurred_at: '2026-11-15T09:00:05.000Z' },
+	]);
+});
+
 test('personalization update returns the snapshot', async (t) => {
 	const state = await library(t);
 	await assertMatchesFixture(

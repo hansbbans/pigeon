@@ -552,6 +552,19 @@ struct PigeonAPIClient: Sendable {
 		try Self.validate(response: response, data: data)
 	}
 
+	/// The server accepts 1 to 200 events per request. Servers that predate the
+	/// endpoint answer 404; callers treat every failure as silent.
+	func sendReadingLog(_ events: [ReadingLogEvent]) async throws {
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/reading-log"))
+		request.httpMethod = "POST"
+		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		let encoder = JSONEncoder()
+		encoder.dateEncodingStrategy = .iso8601
+		request.httpBody = try encoder.encode(ReadingLogEnvelope(events: events))
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+	}
+
 	func personalization() async throws -> PersonalizationSnapshot {
 		let (data, _) = try await requestJSON(path: "api/v1/personalization")
 		return try decoder.decode(PersonalizationSnapshot.self, from: data)
@@ -809,6 +822,10 @@ struct PigeonAPIClient: Sendable {
 
 private struct EngagementEnvelope: Codable, Sendable {
 	let events: [EngagementEvent]
+}
+
+private struct ReadingLogEnvelope: Codable, Sendable {
+	let events: [ReadingLogEvent]
 }
 
 private struct PersonalizationTopicsUpdate: Codable, Sendable {

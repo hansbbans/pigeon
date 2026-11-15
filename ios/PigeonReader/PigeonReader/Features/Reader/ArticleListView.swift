@@ -7,6 +7,7 @@ struct ArticleListView: View {
 	@Environment(\.readerCollectionIsTransitioning) private var isCollectionTransitioning
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	@Environment(\.scenePhase) private var scenePhase
 	@State private var searchText = ""
 	@State private var searchScope = ReaderSearchScope.collection
 	@State private var searchPresentation = ReaderArticleSearchPresentation()
@@ -17,6 +18,7 @@ struct ArticleListView: View {
 	@State private var actionFeedbackCount = 0
 	@State private var presentationID = UUID()
 	@State private var viewport = ReaderListViewportController()
+	@State private var impressions = ReaderImpressionRecorder()
 	@State private var isNearEnd = false
 	@State private var paginationGate = ReaderAutomaticPaginationGate()
 	@State private var paginationContext = ""
@@ -73,6 +75,7 @@ struct ArticleListView: View {
 			scope: preparesThumbnails ? model.session?.storageIdentity : nil,
 			articles: preparesThumbnails ? Array(articles.prefix(ReaderFeedThumbnailPolicy.firstScreenLimit)) : [],
 		)
+		let impressionState = impressionState(isSearchActive: isSearchActive)
 
 		ZStack {
 			if presentation == .loading {
@@ -133,6 +136,7 @@ struct ArticleListView: View {
 						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
 						await ReaderFeedThumbnailStore.shared.prefetch(articles: thumbnailRequest.articles, scope: scope)
 					}
+					.onChange(of: articles.map(\.id), initial: true) { _, ids in impressions.updateRows(ids) }
 					.transition(.opacity)
 			} else {
 				ScrollViewReader { proxy in
@@ -146,6 +150,7 @@ struct ArticleListView: View {
 								thumbnailScope: model.session?.storageIdentity,
 								imageProxySession: model.session,
 								select: {
+									impressions.rowChosen(article.id)
 									model.retainPresentedArticles(articles, in: collection)
 									model.select(article: article)
 								},
@@ -303,6 +308,16 @@ struct ArticleListView: View {
 		.onChange(of: dynamicTypeSize) {
 			prepareForDynamicTypeReflow()
 		}
+		// Reading log: which stories this list showed. No view state changes here.
+		.onChange(of: impressionState, initial: true) { _, state in
+			impressions.apply(state, viewport: usesFrontPage ? nil : viewport, model: model)
+		}
+		.onAppear {
+			impressions.apply(impressionState, viewport: usesFrontPage ? nil : viewport, model: model)
+		}
+		.onDisappear {
+			impressions.endSession()
+		}
 		.allowsHitTesting(model.selectedNavigationID == collection.id)
 		.accessibilityHidden(model.selectedNavigationID != collection.id)
 		.accessibilityElement(children: .contain)
@@ -396,6 +411,7 @@ struct ArticleListView: View {
 				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 				thumbnailScope: model.session?.storageIdentity,
 				select: { article in
+					impressions.rowChosen(article.id)
 					model.retainPresentedArticles(articles, in: collection)
 					model.select(article: article)
 				},
@@ -404,6 +420,7 @@ struct ArticleListView: View {
 					if paginationGate.userDidScroll() { paginationMovement &+= 1 }
 				},
 				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
+				onStoryVisibilityChange: { impressions.setRowVisible($0, $1) },
 			) { article in
 				readButton(for: article)
 				starButton(for: article)
@@ -436,6 +453,24 @@ struct ArticleListView: View {
 				isNearEnd = false
 			}
 		}
+	}
+
+	/// One impression session per continuous showing of one list context. The
+	/// list is off screen while another collection or Home is selected, and
+	/// paused while the scene is inactive or the reader covers it on iPhone.
+	private func impressionState(isSearchActive: Bool) -> ReaderImpressionRecorder.ListState {
+		let isOnScreen = model.selectedNavigationID == collection.id && model.preferredCompactColumn != .sidebar
+		return ReaderImpressionRecorder.ListState(
+			sessionKey: isOnScreen
+				? "\(listContext)|\(usesFrontPage ? "front-page" : "classic")|\(model.readingLogSessionEpoch)"
+				: nil,
+			list: ReadingLogList.list(for: collection, search: isSearchActive ? searchScope : nil),
+			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
+				horizontalSizeClass: horizontalSizeClass,
+				preferredColumn: model.preferredCompactColumn,
+				hasSelectedArticle: model.selectedArticleID != nil,
+			),
+		)
 	}
 
 	private var loadRequestKey: String {
