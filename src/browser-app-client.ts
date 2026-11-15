@@ -1076,15 +1076,19 @@ export function createReadingMeter(idleLimitMs = 120000, maximumStepMs = 2000) {
 	let lastTick = 0;
 	let lastInteraction = 0;
 	let unreportedMs = 0;
+	let readMs = 0;
 	let deepestScroll = 0;
 	let reportedQuartile = 0;
 	return {
 		itemId: () => itemId,
+		// Reading time counted since this article was opened.
+		readSeconds: () => readMs / 1000,
 		open(id: string, nowMs: number) {
 			itemId = id;
 			lastTick = nowMs;
 			lastInteraction = nowMs;
 			unreportedMs = 0;
+			readMs = 0;
 			deepestScroll = 0;
 			reportedQuartile = 0;
 		},
@@ -1100,6 +1104,7 @@ export function createReadingMeter(idleLimitMs = 120000, maximumStepMs = 2000) {
 			lastTick = nowMs;
 			if (itemId !== null && isReading && elapsed > 0 && nowMs - lastInteraction <= idleLimitMs) {
 				unreportedMs += Math.min(elapsed, maximumStepMs);
+				readMs += Math.min(elapsed, maximumStepMs);
 			}
 		},
 		// The depth to report when the reader reaches a new quarter of the article.

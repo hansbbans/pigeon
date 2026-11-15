@@ -1517,6 +1517,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let impressionSession = null;
   let pendingImpressions = [];
   let pendingKeyboardOpen = null;
+  let pendingKeyboardWindowStep = null;
   let readingLogTicks = 0;
   let readingLogHiddenAt = 0;
 
@@ -1569,19 +1570,34 @@ export function renderBrowserAppRuntimeScript(): string {
         visible.push({ id: card.id, position: windowStart + index });
       }
     }
-    for (const card of client.advanceImpressions(impressionSession, visible, now)) {
-      const metadata = {};
-      if (logView.stream) metadata.stream = logView.stream;
-      const recommendation = logView.view === 'for-you' ? recommendationDetails.get(card.id) : null;
-      if (typeof recommendation?.score === 'number') metadata.score = recommendation.score;
-      if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
-      pendingImpressions.push({
-        id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
-        sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
-        ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-      });
-    }
+    for (const card of client.advanceImpressions(impressionSession, visible, now)) queueImpression(card, logView, now);
     if (pendingImpressions.length >= 50) flushImpressions();
+  }
+
+  function queueImpression(card, logView, now) {
+    const metadata = {};
+    if (logView.stream) metadata.stream = logView.stream;
+    const recommendation = logView.view === 'for-you' ? recommendationDetails.get(card.id) : null;
+    if (typeof recommendation?.score === 'number') metadata.score = recommendation.score;
+    if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
+    pendingImpressions.push({
+      id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
+      sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    });
+  }
+
+  // A card the reader picks was seen, even when picked within its first second
+  // on screen (on a phone the list is already hidden by the time it would count).
+  function noteCardChosen(itemId) {
+    const now = Date.now();
+    sampleImpressions(now);
+    const logView = client.readingLogView(getActiveView(), Boolean(articleSearchQuery));
+    const index = renderedArticleCards.findIndex((card) => card.id === itemId);
+    if (!logView || !impressionSession || impressionSession.logged[itemId] || index === -1) return;
+    impressionSession.logged[itemId] = true;
+    delete impressionSession.since[itemId];
+    queueImpression({ id: itemId, position: (getViewState(activeViewId, false)?.windowStart || 0) + index }, logView, now);
   }
 
   function isReadingOpenedArticle() {
@@ -1606,6 +1622,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // its first article by itself, and that must not look like reading. Stepping
   // through articles with the keyboard counts once the reader stays 3 seconds.
   function noteArticleOpened(itemId, fromKeyboard) {
+    pendingKeyboardWindowStep = null;
     const now = Date.now();
     if (readingMeter.itemId() === itemId) {
       readingMeter.interact(now);
@@ -1613,14 +1630,8 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     reportReadingTime(1);
     readingMeter.open(itemId, now);
-    pendingKeyboardOpen = fromKeyboard ? { itemId, at: now } : null;
+    pendingKeyboardOpen = fromKeyboard ? itemId : null;
     if (!fromKeyboard) sendEngagementEvent({ itemId, type: 'explicit_open' });
-  }
-
-  function stopReadingMeter() {
-    reportReadingTime(1);
-    readingMeter.close();
-    pendingKeyboardOpen = null;
   }
 
   function noteReaderScroll() {
@@ -1657,11 +1668,15 @@ export function renderBrowserAppRuntimeScript(): string {
   function readingLogTick() {
     const now = Date.now();
     readingLogTicks += 1;
-    if (readingMeter.itemId() && readingMeter.itemId() !== selectedItemId) stopReadingMeter();
-    const isReading = isReadingOpenedArticle();
-    readingMeter.tick(now, isReading);
-    if (isReading && pendingKeyboardOpen && now - pendingKeyboardOpen.at >= 3000) {
-      sendEngagementEvent({ itemId: pendingKeyboardOpen.itemId, type: 'explicit_open' });
+    const openedId = readingMeter.itemId();
+    // The opened article stays the opened article while another one is showing
+    // (a view switch, say), so coming back to it keeps counting.
+    if (openedId && openedId !== selectedItemId) reportReadingTime(1);
+    // A video is watched without touching anything; do not let it go idle.
+    if (!readerPlayerShell.classList.contains('hidden')) readingMeter.interact(now);
+    readingMeter.tick(now, isReadingOpenedArticle());
+    if (pendingKeyboardOpen && pendingKeyboardOpen === openedId && readingMeter.readSeconds() >= 3) {
+      sendEngagementEvent({ itemId: openedId, type: 'explicit_open' });
       pendingKeyboardOpen = null;
     }
     reportReadingTime(15);
@@ -2206,6 +2221,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const visible = getVisibleItemIds();
     selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
     state.selectedItemId = selectedItemId;
+    // Stepping past the end of a window is still the reader choosing the next
+    // article. When that window is not loaded yet, the list picks its first
+    // article once it arrives (renderArticles), and that pick is the open.
+    if (keyboard && selectedItemId) noteArticleOpened(selectedItemId, true);
+    else pendingKeyboardWindowStep = keyboard ? { viewId: activeViewId, windowStart: start } : null;
     keyboardRevealSelection = keyboard && selectedItemId ? { itemId: selectedItemId, viewId: activeViewId, generation: accountGeneration } : null;
     restoreArticleScrollTop(0);
     renderArticles();
@@ -2373,6 +2393,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function handleArticleNavigationKeydown(event) {
+    readingMeter.interact(Date.now());
     if (!libraryPanel.classList.contains('hidden') || !settingsPanel.classList.contains('hidden')) return false;
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     const shortcuts = readingPreferences?.shortcuts || {next:'j',previous:'k',read:'m',star:'s'};
@@ -2495,6 +2516,7 @@ export function renderBrowserAppRuntimeScript(): string {
     flushReadingLog();
     readingMeter.close();
     pendingKeyboardOpen = null;
+    pendingKeyboardWindowStep = null;
     impressionSession = null;
     cancelViewLoads();
     cancelContentLoads();
@@ -2511,6 +2533,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function setLoggedOut(message, keepStoredToken) {
+    flushReadingLog();
     activeLoginAttemptId += 1;
     setMobilePane('stream');
     setSearchOpen(false);
@@ -2792,6 +2815,13 @@ export function renderBrowserAppRuntimeScript(): string {
       selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
       const state = getViewState(activeViewId, false);
       if (state) state.selectedItemId = selectedItemId;
+      if (pendingKeyboardWindowStep) {
+        if (pendingKeyboardWindowStep.viewId !== activeViewId || pendingKeyboardWindowStep.windowStart !== state?.windowStart) {
+          pendingKeyboardWindowStep = null;
+        } else if (selectedItemId) {
+          noteArticleOpened(selectedItemId, true);
+        }
+      }
     }
     renderArticleWindowControls();
     const entries = client.buildArticleListEntries({
@@ -5238,6 +5268,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     heldReaderArticle = null;
+    noteCardChosen(itemId);
     selectedItemId = itemId;
     noteArticleOpened(itemId, Boolean(options?.keyboard));
     keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
@@ -5712,6 +5743,7 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
   document.addEventListener('pointerdown', (event) => {
+    readingMeter.interact(Date.now());
     const target = event.target;
     if (isLinkContextMenuOpen() && !(typeof linkContextMenu.contains === 'function' && linkContextMenu.contains(target))) {
       closeLinkContextMenu(false);

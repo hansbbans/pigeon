@@ -505,16 +505,19 @@ async function runDatabaseMigrations(db: D1Database): Promise<void> {
 		),
 		// Tag existing YouTube feed items so the duration backfill finds them.
 		// YouTube Atom entries are stored with canonical watch URLs. This runs
-		// before the trigger gains media_kind, so it adds no sync events.
-		db.prepare(
-			`UPDATE items SET media_kind = 'video'
-			 WHERE media_kind IS NULL AND content_pruned_at IS NULL
-			   AND original_url LIKE 'https://www.youtube.com/watch?v=%'
-			   AND feed_key IN (
-			     SELECT feed_key FROM feeds
-			     WHERE source_type = 'rss' AND source_url LIKE 'https://www.youtube.com/feeds/videos.xml?%'
-			   )`,
-		),
+		// before the trigger gains media_kind, so it adds no sync events; a
+		// database already at v16 has that trigger and must skip it.
+		...(persistedVersion < ITEM_METADATA_SCHEMA_VERSION
+			? [db.prepare(
+				`UPDATE items SET media_kind = 'video'
+				 WHERE media_kind IS NULL AND content_pruned_at IS NULL
+				   AND original_url LIKE 'https://www.youtube.com/watch?v=%'
+				   AND feed_key IN (
+				     SELECT feed_key FROM feeds
+				     WHERE source_type = 'rss' AND source_url LIKE 'https://www.youtube.com/feeds/videos.xml?%'
+				   )`,
+			)]
+			: []),
 		db.prepare('DROP TRIGGER IF EXISTS trg_sync_article_update'),
 		db.prepare(ARTICLE_UPDATE_SYNC_TRIGGER_V16),
 		db

@@ -19,7 +19,11 @@ The paused design lives on branch `claude/recommendations-v2`.
   no duplicates, auto-selected article logs nothing, reading time exact, tab close still reports.
 - That run caught one bug the fake-DOM tests could not: on a phone, reading time kept counting after going
   back to the list. Fixed and pinned by a test.
-- Not done: offline queueing of log events (dropped by design), pruning of `reading_log`.
+- A fresh-eyes review then found the report crediting an open to every list the article ever appeared in, and
+  four ways the web client lost events (view switch and back, keyboard step past a 200-article window, logout,
+  keyboard opens timed by wall clock). All fixed with tests; the report's SQL now has its own tests.
+- Not done: offline queueing of log events (dropped by design), pruning of `reading_log`; `engagement_events`
+  cannot tell the web app from the iOS app (only `reading_log` can).
 
 ---
 

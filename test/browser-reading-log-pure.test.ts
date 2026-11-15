@@ -96,7 +96,9 @@ test('the reading meter counts only time spent reading and reports it once', () 
 	for (let now = 5_500; now <= 9_000; now += 500) meter.tick(now, false);
 	for (let now = 9_500; now <= 10_000; now += 500) meter.tick(now, true);
 	assert.equal(meter.take(10), null);
+	assert.equal(meter.readSeconds(), 5);
 	assert.deepEqual(meter.take(1), { itemId: 'a', durationSeconds: 5, scrollDepth: null });
+	assert.equal(meter.readSeconds(), 5, 'reporting does not reset the time read since opening');
 	assert.equal(meter.take(0.1), null);
 	meter.tick(10_500, true);
 	assert.deepEqual(meter.take(0.1), { itemId: 'a', durationSeconds: 0.5, scrollDepth: null });
@@ -131,6 +133,7 @@ test('the reading meter reports each scroll quartile once and carries the deepes
 	assert.deepEqual(meter.take(1), { itemId: 'a', durationSeconds: 1, scrollDepth: 1 });
 
 	meter.open('b', 2_000);
+	assert.equal(meter.readSeconds(), 0, 'a newly opened article starts from zero');
 	meter.tick(3_000, true);
 	assert.deepEqual(meter.take(1), { itemId: 'b', durationSeconds: 1, scrollDepth: null });
 	meter.close();

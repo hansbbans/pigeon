@@ -3,11 +3,13 @@ import { test } from 'node:test';
 
 import {
 	createStatefulArticleBrowser,
+	drainBrowserMembershipPages,
 	findListButtonByItemId,
 	findListButtonByViewId,
 	flushBrowserTasks,
 	renderedArticleIds,
 	waitForBrowserCondition,
+	waitForTodayWindow,
 } from './helpers/browser-app-client-harness';
 
 const START = new Date(2026, 9, 12, 12).getTime();
@@ -37,14 +39,17 @@ async function openBrowser(options: Parameters<typeof createStatefulArticleBrows
 		await waitForBrowserCondition(() => inFlight === 0, 500);
 		await flushBrowserTasks();
 	};
+	// The page registers exactly one timer, the reading-log tick, every 500 ms.
+	assert.deepEqual(harness.intervals.map((interval) => interval.milliseconds), [500]);
 	/** Advance the page clock in 500 ms steps, running the reading-log tick at each. */
 	const run = async (milliseconds: number) => {
 		for (let elapsed = 0; elapsed < milliseconds; elapsed += 500) {
 			now += 500;
-			harness.window.__readingLogTick();
+			harness.intervals[0].handler();
 		}
 		await settle();
 	};
+	const sleep = (milliseconds: number) => { now += milliseconds; };
 	const itemRowid = (id: string) => String((database.prepare('SELECT rowid FROM items WHERE id = ?').get(id) as { rowid: number }).rowid);
 	const openByClick = async (id: string) => {
 		findListButtonByItemId(harness.elements.get('articles-list'), itemRowid(id))!.dispatch('click');
@@ -62,7 +67,7 @@ async function openBrowser(options: Parameters<typeof createStatefulArticleBrows
 	const impressions = () => database.prepare(
 		'SELECT item_id, view, position, session_id, client_family, metadata_json FROM reading_log ORDER BY rowid',
 	).all().map((row) => ({ ...row })) as Array<Record<string, unknown>>;
-	return { ...browser, requests, run, settle, openByClick, itemRowid, engagement, impressions };
+	return { ...browser, requests, run, sleep, settle, openByClick, itemRowid, engagement, impressions };
 }
 
 test('cards on screen for a second are logged once per list session, in one batch', async () => {
@@ -82,7 +87,7 @@ test('cards on screen for a second are logged once per list session, in one batc
 	assert.equal(new Set(rows.map((row) => row.session_id)).size, 1);
 	assert.equal(new Set(rows.map((row) => row.item_id)).size, shown);
 	assert.deepEqual([...new Set(rows.map((row) => row.view))], ['all']);
-	assert.deepEqual([...new Set(rows.map((row) => row.client_family))], ['pigeon']);
+	assert.deepEqual([...new Set(rows.map((row) => row.client_family))], ['pigeon_web']);
 
 	await run(10_000);
 	assert.equal(impressions().length, shown, 'a card is logged once per session');
@@ -263,4 +268,124 @@ test('reading time stops while the reader pane is not on screen, as on a phone s
 		['explicit_open', null],
 		['active_reading', 4],
 	]);
+});
+
+test('cards below the fold are not logged until they scroll into view', async () => {
+	const { harness, run, impressions, itemRowid } = await openBrowser();
+	const ids = renderedArticleIds(harness);
+	const belowFold = ids.slice(2);
+	const cards = belowFold.map((id) => findListButtonByItemId(harness.elements.get('articles-list'), id)!);
+	const onScreen = cards[0].getBoundingClientRect;
+	// The list viewport is 900 px tall; put every card after the second below it.
+	cards.forEach((card, index) => {
+		card.getBoundingClientRect = () => ({ width: 400, height: 100, left: 0, right: 400, top: 900 + index * 100, bottom: 1_000 + index * 100 });
+	});
+	await run(6_000);
+	assert.deepEqual(impressions().map((row) => row.position), [0, 1]);
+
+	// Scrolling brings the third card half into view and no further.
+	cards[0].getBoundingClientRect = () => ({ width: 400, height: 100, left: 0, right: 400, top: 850, bottom: 950 });
+	await run(6_000);
+	assert.deepEqual(impressions().map((row) => row.position), [0, 1, 2]);
+	assert.equal(itemRowid(String(impressions()[2].item_id)), ids[2]);
+	cards.forEach((card) => { card.getBoundingClientRect = onScreen; });
+});
+
+test('a card picked in its first second on screen is logged as seen', async () => {
+	const { run, openByClick, impressions, settle } = await openBrowser();
+	await openByClick('today-2');
+	await settle();
+	// Nothing has been on screen for a second yet, but the picked card is queued.
+	await run(5_000);
+	const picked = impressions().filter((row) => row.item_id === 'today-2');
+	assert.equal(picked.length, 1, 'once, not again when its second on screen is up');
+	assert.equal(typeof picked[0].position, 'number');
+});
+
+test('reading keeps counting when the opened article comes back after a view switch', async () => {
+	const { harness, run, openByClick, engagement } = await openBrowser();
+	await openByClick('today-2');
+	await run(2_000);
+
+	const backOnScreen = async (viewId: string) => {
+		findListButtonByViewId(harness.elements.get('views-list'), viewId)!.dispatch('click');
+		await waitForBrowserCondition(() => harness.getCacheSizes().membership === 0 && harness.getCacheSizes().pending === 0, 200);
+		await waitForBrowserCondition(() => harness.window.__readyReaderItemId() !== null, 200);
+	};
+	await backOnScreen('unread');
+	assert.notEqual(harness.elements.get('reader-title')!.textContent, 'Story 2', 'another article is showing meanwhile');
+	await run(5_000);
+	await backOnScreen('all');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 2', 200);
+	await waitForBrowserCondition(() => harness.window.__readyReaderItemId() !== null, 200);
+	await run(6_000);
+	harness.dispatchWindowEvent('pagehide');
+	await run(0);
+
+	const read = engagement().filter((row) => row.event_type === 'active_reading');
+	assert.deepEqual([...new Set(read.map((row) => row.item_id))], ['today-2']);
+	assert.equal(read.reduce((sum, row) => sum + Number(row.duration_seconds), 0), 8, 'two seconds before the switch, six after coming back');
+	assert.equal(engagement().filter((row) => row.event_type === 'explicit_open').length, 1);
+});
+
+test('logging out sends what was read and seen before the session ends', async () => {
+	const { harness, requests, run, openByClick, engagement, impressions, settle } = await openBrowser();
+	await openByClick('today-2');
+	await run(4_000);
+	const impressionsBefore = impressions().length;
+	const pendingBefore = requests.filter((path) => path === '/api/v1/reading-log').length;
+
+	harness.elements.get('logout-button')!.dispatch('click');
+	await settle();
+	assert.deepEqual(engagement().filter((row) => row.event_type === 'active_reading').map((row) => [row.item_id, row.duration_seconds]), [['today-2', 4]]);
+	assert.ok(impressions().length > impressionsBefore);
+	assert.equal(requests.filter((path) => path === '/api/v1/reading-log').length, pendingBefore + 1);
+
+	const sent = requests.length;
+	await run(10_000);
+	assert.equal(requests.length, sent, 'nothing is logged once logged out');
+});
+
+test('the keyboard three seconds are seconds of reading, not seconds since the key press', async () => {
+	const { harness, run, sleep, engagement, settle } = await openBrowser();
+	const ready = () => harness.window.__readyReaderItemId();
+	const before = ready();
+	assert.equal(harness.dispatchKeydown('j'), true);
+	await waitForBrowserCondition(() => ready() !== before && ready() !== null, 100);
+	await settle();
+	await run(500);
+	harness.setVisibility('hidden');
+	sleep(60_000);
+	harness.setVisibility('visible');
+	await settle();
+	await run(2_000);
+	assert.deepEqual(engagement().filter((row) => row.event_type === 'explicit_open'), [], 'two and a half seconds of reading is not three');
+	await run(500);
+	assert.equal(engagement().filter((row) => row.event_type === 'explicit_open').length, 1);
+});
+
+test('stepping past the end of a 200-article window with the keyboard still counts as opening', async () => {
+	const { harness, run, engagement, itemRowid, settle } = await openBrowser({ count: 205 });
+	await drainBrowserMembershipPages(harness);
+	await waitForTodayWindow(harness);
+	const ids = renderedArticleIds(harness);
+	assert.equal(ids.length, 200);
+	const last = findListButtonByItemId(harness.elements.get('articles-list'), ids[199])!;
+	last.dispatch('click');
+	await waitForBrowserCondition(() => harness.window.__readyReaderItemId() === ids[199], 200);
+	await settle();
+	const opensBefore = engagement().filter((row) => row.event_type === 'explicit_open').length;
+
+	assert.equal(harness.dispatchKeydown('j'), true);
+	await waitForBrowserCondition(() => renderedArticleIds(harness)[0] !== ids[0] && harness.window.__readyReaderItemId() === renderedArticleIds(harness)[0], 400);
+	await settle();
+	const next = renderedArticleIds(harness)[0];
+	await run(4_000);
+	const opens = engagement().filter((row) => row.event_type === 'explicit_open');
+	assert.equal(opens.length, opensBefore + 1);
+	assert.equal(itemRowid(String(opens.at(-1)!.item_id)), next);
+	harness.dispatchWindowEvent('pagehide');
+	await settle();
+	const read = engagement().filter((row) => row.event_type === 'active_reading' && itemRowid(String(row.item_id)) === next);
+	assert.equal(read.reduce((sum, row) => sum + Number(row.duration_seconds), 0), 4);
 });

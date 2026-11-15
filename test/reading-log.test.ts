@@ -36,6 +36,12 @@ test('reading log requires authentication and POST', async () => {
 		body: JSON.stringify({ events: [{ itemId: 'item-1', type: 'impression', view: 'for-you' }] }),
 	}), env as never);
 	assert.equal(unauthorized.status, 401);
+
+	const token = await generateApiToken(PASSWORD);
+	const wrongMethod = await app.fetch(new Request(`${BASE_URL}/api/v1/reading-log`, {
+		headers: { Authorization: `GoogleLogin auth=pigeon/${token}` },
+	}), env as never);
+	assert.equal(wrongMethod.status, 404);
 	assert.equal(rows().length, 0);
 });
 
@@ -51,14 +57,14 @@ test('reading log stores impressions with view, position, visible time, session 
 		],
 	});
 	assert.equal(response.status, 200);
-	assert.deepEqual(await response.json(), { accepted: 2, skipped: 0, clientFamily: 'pigeon' });
+	assert.deepEqual(await response.json(), { accepted: 2, skipped: 0, clientFamily: 'pigeon_ios' });
 
 	const [first, second] = rows();
 	assert.deepEqual(
 		{ ...first, created_at: null },
 		{
-			id: 'imp-1', event_key: 'client:pigeon:imp-1', event_type: 'impression', item_id: 'item-1', feed_key: 'daily-feed',
-			client_family: 'pigeon', view: 'for-you', position: 0, value: 4.25, session_id: 'session-a',
+			id: 'imp-1', event_key: 'client:pigeon_ios:imp-1', event_type: 'impression', item_id: 'item-1', feed_key: 'daily-feed',
+			client_family: 'pigeon_ios', view: 'for-you', position: 0, value: 4.25, session_id: 'session-a',
 			metadata_json: '{"score":82,"ranker":"v1"}', occurred_at: '2026-11-15T09:00:00.000Z', created_at: null,
 		},
 	);
@@ -88,7 +94,7 @@ test('reading log resolves Google Reader item ids and skips unknown items withou
 		],
 	});
 	assert.equal(response.status, 200);
-	assert.deepEqual(await response.json(), { accepted: 1, skipped: 1, clientFamily: 'pigeon' });
+	assert.deepEqual(await response.json(), { accepted: 1, skipped: 1, clientFamily: 'pigeon_ios' });
 	assert.deepEqual(rows().map((row) => [row.id, row.item_id]), [['imp-known', 'item-2']]);
 });
 
@@ -99,17 +105,14 @@ test('reading log keeps history after its article is deleted', async () => {
 	assert.equal(rows().length, 1);
 });
 
-test('reading log classifies the client and accepts action events without a view', async () => {
+test('reading log tells the web app, the iOS app and other clients apart, and stamps a missing time', async () => {
 	const { post, rows } = await setup();
-	const response = await post(
-		{ events: [{ id: 'save-1', itemId: 'item-1', type: 'save_external', metadata: { target: 'readwise' } }] },
-		{ 'User-Agent': 'Mozilla/5.0' },
-	);
-	assert.equal(response.status, 200);
-	assert.deepEqual(await response.json(), { accepted: 1, skipped: 0, clientFamily: 'other' });
-	assert.equal(rows()[0].event_type, 'save_external');
-	assert.equal(rows()[0].view, null);
-	assert.match(String(rows()[0].occurred_at), /^\d{4}-\d{2}-\d{2}T/);
+	const event = (id: string) => ({ events: [{ id, itemId: 'item-1', type: 'impression', view: 'unread' }] });
+	assert.deepEqual(await (await post(event('web'), { 'X-Pigeon-Client': 'pigeon-web/1' })).json(), { accepted: 1, skipped: 0, clientFamily: 'pigeon_web' });
+	assert.deepEqual(await (await post(event('ios'), { 'X-Pigeon-Client': 'pigeon-reader/1' })).json(), { accepted: 1, skipped: 0, clientFamily: 'pigeon_ios' });
+	assert.deepEqual(await (await post(event('other'), { 'User-Agent': 'Mozilla/5.0' })).json(), { accepted: 1, skipped: 0, clientFamily: 'other' });
+	assert.deepEqual(rows().map((row) => row.client_family).sort(), ['other', 'pigeon_ios', 'pigeon_web']);
+	for (const row of rows()) assert.match(String(row.occurred_at), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 });
 
 test('reading log rejects malformed batches without writing anything', async () => {

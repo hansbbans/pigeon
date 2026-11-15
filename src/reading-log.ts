@@ -9,9 +9,8 @@ import type { Env } from './types';
  *
  * - impression: a card was at least half visible in a list for a second.
  *   `view` names the list, `position` is its 0-based rank as displayed.
- * - save_external: the article was sent to another reading app.
  */
-export const READING_LOG_EVENT_TYPES = ['impression', 'save_external'] as const;
+export const READING_LOG_EVENT_TYPES = ['impression'] as const;
 export type ReadingLogEventType = (typeof READING_LOG_EVENT_TYPES)[number];
 
 export interface ValidatedReadingLogEvent {
@@ -24,6 +23,18 @@ export interface ValidatedReadingLogEvent {
 	sessionId: string | null;
 	metadataJson: string | null;
 	occurredAt: string;
+}
+
+/**
+ * engagement_events can only say "pigeon" for both first-party apps (its
+ * client_family has a CHECK). The reading log has no such limit, so it keeps
+ * them apart: whether each app is still logging is the first thing to check.
+ */
+export function classifyReadingLogClient(request: Request): string {
+	const client = (request.headers.get('X-Pigeon-Client') ?? '').toLowerCase();
+	if (client.startsWith('pigeon-web')) return 'pigeon_web';
+	if (client.startsWith('pigeon-reader')) return 'pigeon_ios';
+	return classifyClientFamily(request);
 }
 
 const MAX_EVENTS_PER_REQUEST = 200;
@@ -136,7 +147,7 @@ export async function handleReadingLogIngestion(request: Request, env: Env): Pro
 		return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
 	}
 
-	const clientFamily = classifyClientFamily(request);
+	const clientFamily = classifyReadingLogClient(request);
 	const itemsByID = await loadItemsByIDs(env, events.map((event) => event.itemId));
 	const stored = events.flatMap((event) => {
 		const item = itemsByID.get(event.itemId);
