@@ -4,6 +4,12 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.12.0] - 2026-11-15
+
+### Added
+
+- Pigeon keeps a private reading log, in the web reader and the iOS app. It records which articles each list showed you, which ones you opened, how long you read them, how far you scrolled and which links you followed out. It is stored only in your own Pigeon database and nothing in the app looks different. Its purpose is to measure whether For You puts the articles you actually read near the top, before the ranking is changed. `npm run reading-log:report` summarises it; `docs/reading-log.md` describes what is recorded.
+
 ### Fixed
 
 - Sharing a link to Pigeon from Safari, Messages and other apps now saves it to Read It Later. The share extension used to keep only `URL` objects, so a string or attributed-text share (what those apps actually send) was dropped; a failed save no longer claims “Saved, will sync”.
