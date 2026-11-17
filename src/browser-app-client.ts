@@ -315,6 +315,47 @@ export function sortSubscriptionsByTitle(subscriptions: BrowserSubscription[]): 
 	});
 }
 
+/**
+ * The folder "By feed" order, identical to GET /api/v1/browser/articles?sort=feed:
+ * feed title with only ASCII letters case-folded, compared by code point (SQLite
+ * COLLATE NOCASE over UTF-8), then feed ID, then newest first, then item ID.
+ * Items lookup cannot find (not loaded yet) sort last, newest ID first.
+ */
+export function createFeedOrderComparator(
+	lookup: (itemId: string) => { published?: number; origin?: { title?: string; streamId?: string } } | null | undefined,
+): (leftId: string, rightId: string) => number {
+	// A sort compares each item many times; fold each distinct title once.
+	const foldedTitles = new Map<string, string>();
+	const foldedTitle = (title: string | undefined) => {
+		const raw = String(title ?? '');
+		let folded = foldedTitles.get(raw);
+		if (folded === undefined) {
+			folded = raw.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+			foldedTitles.set(raw, folded);
+		}
+		return folded;
+	};
+	const feedNumber = (streamId: string | undefined) => {
+		const match = /^feed\/(\d+)$/.exec(streamId ?? '');
+		return match ? Number(match[1]) : 0;
+	};
+	return (leftId, rightId) => {
+		const left = lookup(leftId);
+		const right = lookup(rightId);
+		if (!left || !right) return left ? -1 : right ? 1 : Number(rightId) - Number(leftId);
+		const a = foldedTitle(left.origin?.title);
+		const b = foldedTitle(right.origin?.title);
+		for (let index = 0; index < a.length && index < b.length;) {
+			const x = a.codePointAt(index) as number;
+			const y = b.codePointAt(index) as number;
+			if (x !== y) return x - y;
+			index += x > 0xffff ? 2 : 1;
+		}
+		return a.length - b.length || feedNumber(left.origin?.streamId) - feedNumber(right.origin?.streamId) ||
+			(right.published || 0) - (left.published || 0) || Number(rightId) - Number(leftId);
+	};
+}
+
 export function createArticleFrameDocument(
 	articleHtml: string | undefined,
 	theme: BrowserTheme = 'light',
@@ -1139,6 +1180,7 @@ ${createSessionFromToken.toString()}
 ${normalizeBrowserTheme.toString()}
 ${applyUnauthorizedState.toString()}
 ${sortSubscriptionsByTitle.toString()}
+${createFeedOrderComparator.toString()}
 ${buildFeedViews.toString()}
 ${getLocalDayBounds.toString()}
 ${filterItemIdsForLocalDay.toString()}
@@ -1189,6 +1231,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   formatArticleListTime,
   applyUnauthorizedState,
   sortSubscriptionsByTitle,
+  createFeedOrderComparator,
   buildFeedViews,
   getLocalDayBounds,
   filterItemIdsForLocalDay,

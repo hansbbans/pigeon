@@ -2,6 +2,7 @@ import * as assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getLocalDayBounds } from '../src/browser-app-client';
 import { handleGreaderRequest } from '../src/greader';
+import { handleNativeApiRequest } from '../src/native-api';
 import { generateApiToken } from '../src/api-auth';
 import {
 	browserRegressionItem,
@@ -76,9 +77,12 @@ for (const view of ['unread', 'recent', 'folder']) {
 			if (view === 'recent') state.database.exec('UPDATE items SET is_read = 1');
 			if (view === 'folder') state.database.exec("UPDATE feeds SET category = 'Today folder'");
 			const token = await generateApiToken('today-test-password');
+			// Folders open "By feed" through the browser articles API; one feed keeps newest-first order.
 			const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => input === '/accounts/ClientLogin'
 				? new Response(`Auth=pigeon/${token}`)
-				: handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env) });
+				: input.startsWith('/api/v1/')
+					? handleNativeApiRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env)
+					: handleGreaderRequest(new Request(`https://pigeon.example${input}`, init as RequestInit), state.env) });
 			await h.elements.get('login-form')!.dispatch('submit');
 			await waitForBrowserCondition(() => h.elements.get('reader-title')!.textContent === `Story ${count + 1}`);
 			const id = view === 'folder' ? 'user/-/label/Today folder' : view;
