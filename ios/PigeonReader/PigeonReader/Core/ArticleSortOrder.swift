@@ -126,8 +126,9 @@ nonisolated enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable 
 		return left.id < right.id
 	}
 
-	/// Feeds by title ignoring case (numbers by value, like the sidebar), then
-	/// by feed ID so equal titles stay separate groups; within a feed, Newest.
+	/// Feeds by title with the sidebar's own comparison (`localizedStandardCompare`,
+	/// as `ReaderNavigationCatalog` sorts feed rows), then by feed ID so equal
+	/// titles stay separate groups; within a feed, Newest.
 	private static func feedOrder(
 		_ leftFeed: ArticleFeedDirectory.Feed,
 		_ left: Recommendation,
@@ -135,11 +136,7 @@ nonisolated enum ArticleSortOrder: String, CaseIterable, Identifiable, Sendable 
 		_ right: Recommendation,
 	) -> Bool {
 		if leftFeed.id != rightFeed.id {
-			let titles = leftFeed.title.compare(
-				rightFeed.title,
-				options: [.caseInsensitive, .numeric, .widthInsensitive],
-				locale: .current,
-			)
+			let titles = leftFeed.title.localizedStandardCompare(rightFeed.title)
 			if titles != .orderedSame {
 				return titles == .orderedAscending
 			}

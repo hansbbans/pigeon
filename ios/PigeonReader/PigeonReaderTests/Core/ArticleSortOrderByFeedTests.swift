@@ -18,7 +18,7 @@ struct ArticleSortOrderByFeedTests {
 			== ["alpha-new", "alpha-old", "beta-new", "beta-old", "gamma"])
 	}
 
-	@Test func titlesDifferingOnlyByCaseAreOneTitleAndTieBreakOnFeedID() {
+	@Test func titlesDifferingOnlyByCaseStayTwoUninterleavedGroups() {
 		let articles = [
 			story("lower-new", feed: "feed/1", source: "the verge", at: 9),
 			story("upper-old", feed: "feed/0", source: "The Verge", at: 1),
@@ -26,9 +26,12 @@ struct ArticleSortOrderByFeedTests {
 			story("upper-new", feed: "feed/0", source: "The Verge", at: 8),
 		]
 
-		// Not interleaved by date: feed/0 first, then feed/1, each newest first.
-		#expect(ArticleSortOrder.byFeed.sorted(articles).map(\.id)
-			== ["upper-new", "upper-old", "lower-new", "lower-old"])
+		// Ordered like the sidebar (`localizedStandardCompare` puts one case
+		// first); never interleaved by date, each feed newest first.
+		let lowerFirst = "the verge".localizedStandardCompare("The Verge") == .orderedAscending
+		#expect(ArticleSortOrder.byFeed.sorted(articles).map(\.id) == (lowerFirst
+			? ["lower-new", "lower-old", "upper-new", "upper-old"]
+			: ["upper-new", "upper-old", "lower-new", "lower-old"]))
 	}
 
 	@Test func sameTitleOnDifferentFeedsMakesSeparateGroups() {

@@ -48,6 +48,24 @@ struct ReaderFolderSortTests {
 		#expect(model.allArticles(for: folder).map(\.id) == ["alpha-new", "alpha-old", "beta-new", "beta-old"])
 	}
 
+	@Test func renamingAFeedMovesItsGroupInAnOpenFolder() async throws {
+		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "folder-rename")
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(Self.navigation(), accountID: session.storageIdentity)
+		let model = try makeModel(session: session, offlineStore: store, httpClient: MockHTTPClient(shouldFail: true))
+		await model.prepareOfflineLibrary()
+		let folder = try #require(Self.navigation().item(withID: Self.folderID))
+		model.setArticles(Self.folderStories, for: folder)
+		#expect(model.allArticles(for: folder).map(\.id) == ["alpha-new", "alpha-old", "beta-new", "beta-old"])
+
+		// "alpha" becomes "Zulu": its group moves after Beta, not just its label.
+		model.setNavigation(Self.navigation(alphaTitle: "Zulu"))
+
+		#expect(model.allArticles(for: folder).map(\.id) == ["beta-new", "beta-old", "alpha-new", "alpha-old"])
+		#expect(model.feedSections(for: folder, articles: model.allArticles(for: folder)).map { $0.map(\.feed.title) }
+			== ["Beta", "Zulu"])
+	}
+
 	@Test func restoredFoldersUseTheirSavedChoiceOrByFeed() async throws {
 		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "folder-sort")
 		let store = OfflineLibraryStore.inMemory()
@@ -85,7 +103,7 @@ struct ReaderFolderSortTests {
 		story("beta-new", feed: "beta", at: 4),
 	]
 
-	private static func navigation() -> ReaderNavigationState {
+	private static func navigation(alphaTitle: String = "alpha") -> ReaderNavigationState {
 		ReaderNavigationCatalog.make(
 			subscriptions: [
 				ReaderSubscription(
@@ -94,7 +112,7 @@ struct ReaderFolderSortTests {
 					url: "https://pigeon.test/feed/beta",
 				),
 				ReaderSubscription(
-					id: "feed/7", title: "alpha",
+					id: "feed/7", title: alphaTitle,
 					categories: [
 						ReaderSubscriptionCategory(id: folderID, label: "Work"),
 						ReaderSubscriptionCategory(id: otherFolderID, label: "News"),

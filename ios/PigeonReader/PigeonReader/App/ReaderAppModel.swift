@@ -165,8 +165,9 @@ final class ReaderAppModel {
 	private(set) var navigation = ReaderNavigationState.initial {
 		didSet { refreshArticleFeedDirectory() }
 	}
-	/// The sidebar's feeds, for folders shown By Feed. Rebuilt only when a feed
-	/// row's identity, title or icon changes, not on every count update.
+	/// The sidebar's feeds, for folders shown By Feed. Recomputed on every
+	/// navigation change but replaced (and folders re-sorted) only when a feed
+	/// row's identity, title or icon changes, not on count updates.
 	private(set) var articleFeedDirectory = ArticleFeedDirectory.empty
 	private(set) var enabledSmartViewSections: Set<ReaderSection>
 	private(set) var isLoadingNavigation = false
@@ -4049,8 +4050,15 @@ final class ReaderAppModel {
 
 	private func refreshArticleFeedDirectory() {
 		let directory = ArticleFeedDirectory(navigationItems: navigation.items)
-		if directory != articleFeedDirectory {
-			articleFeedDirectory = directory
+		guard directory != articleFeedDirectory else { return }
+		articleFeedDirectory = directory
+		// A renamed, added or removed feed moves its group: re-sort the folders
+		// already shown By Feed so their order matches the new labels.
+		for (collectionID, articles) in articleCache where sortOrder(for: collectionID) == .byFeed {
+			let resorted = ArticleSortOrder.byFeed.sorted(articles, feeds: directory)
+			if resorted.map(\.id) != articles.map(\.id) {
+				articleCache[collectionID] = resorted
+			}
 		}
 	}
 

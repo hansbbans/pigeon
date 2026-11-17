@@ -132,12 +132,9 @@ struct ArticleListView: View {
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
 			} else if usesFrontPage {
-				frontPage(
-					articles: articles,
-					feedSections: feedSections,
-					isSearchActive: isSearchActive,
-					holdsUpdates: holdsUpdates,
-				)
+				// Front Page keeps its own pages; By Feed only orders them, and every
+				// story's kicker already names its feed.
+				frontPage(articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
 					.task(id: thumbnailRequest) {
 						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
 						await ReaderFeedThumbnailStore.shared.prefetch(articles: thumbnailRequest.articles, scope: scope)
@@ -428,18 +425,12 @@ struct ArticleListView: View {
 		}
 	}
 
-	private func frontPage(
-		articles: [Recommendation],
-		feedSections: [ArticleFeedSection]?,
-		isSearchActive: Bool,
-		holdsUpdates: Bool,
-	) -> some View {
+	private func frontPage(articles: [Recommendation], isSearchActive: Bool, holdsUpdates: Bool) -> some View {
 		ScrollViewReader { proxy in
 			FrontPageView(
 				title: collection.title,
 				unreadCount: model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount,
 				articles: articles,
-				feedSections: feedSections,
 				selectedArticleID: model.selectedArticleID,
 				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 				thumbnailScope: model.session?.storageIdentity,

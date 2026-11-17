@@ -7,8 +7,6 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	let title: String
 	let unreadCount: Int
 	let articles: [Recommendation]
-	/// Set when a folder is shown By Feed: each feed gets its own pages.
-	let feedSections: [ArticleFeedSection]?
 	let selectedArticleID: String?
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let thumbnailScope: String?
@@ -31,18 +29,21 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 				FrontPageMasthead(title: title, unreadCount: unreadCount)
 					.padding(.bottom, 18)
 					.id(FrontPageLayout.topAnchorID)
-				if let feedSections {
-					ForEach(Array(feedSections.enumerated()), id: \.element.id) { index, section in
-						if index > 0 {
-							FrontPageRule(thickness: 2)
-								.padding(.vertical, 22)
-						}
-						ArticleFeedSectionLabel(feed: section.feed, remoteImagePolicy: remoteImagePolicy)
-							.padding(.bottom, 12)
-						pages(for: section.articles)
+				ForEach(Array(FrontPageLayout.pages(for: articles).enumerated()), id: \.element.id) { index, page in
+					if index > 0 {
+						FrontPageRule(thickness: 2)
+							.padding(.vertical, 22)
 					}
-				} else {
-					pages(for: articles)
+					story(page.lead, role: .lead)
+					if page.grid.isEmpty == false {
+						FrontPageRule(thickness: 0.5)
+							.padding(.vertical, 18)
+						LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 22) {
+							ForEach(page.grid) { article in
+								story(article, role: .column)
+							}
+						}
+					}
 				}
 				VStack(spacing: 12) {
 					footer()
@@ -61,26 +62,6 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		.onScrollPhaseChange { _, phase in
 			onScrollingChange(phase != .idle)
 			if phase == .interacting { onUserScroll() }
-		}
-	}
-
-	@ViewBuilder
-	private func pages(for articles: [Recommendation]) -> some View {
-		ForEach(Array(FrontPageLayout.pages(for: articles).enumerated()), id: \.element.id) { index, page in
-			if index > 0 {
-				FrontPageRule(thickness: 2)
-					.padding(.vertical, 22)
-			}
-			story(page.lead, role: .lead)
-			if page.grid.isEmpty == false {
-				FrontPageRule(thickness: 0.5)
-					.padding(.vertical, 18)
-				LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 22) {
-					ForEach(page.grid) { article in
-						story(article, role: .column)
-					}
-				}
-			}
 		}
 	}
 
