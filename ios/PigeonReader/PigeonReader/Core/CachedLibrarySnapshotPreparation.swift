@@ -7,13 +7,20 @@ nonisolated enum CachedLibrarySnapshotPreparation {
 	struct Ordering: Equatable, Sendable {
 		var sortOrders: [String: ArticleSortOrder]
 		var canonicalOrder: [String: [String]]
+		/// Feeds of the navigation being restored, for folders shown By Feed.
+		var feeds: ArticleFeedDirectory = .empty
 	}
 
 	typealias Prepare = @Sendable ([String: [Recommendation]], Ordering) async -> [String: [Recommendation]]
 
 	static func prepare(_ articles: [String: [Recommendation]], ordering: Ordering) async -> [String: [Recommendation]] {
 		await Task.detached(priority: .utility) {
-			sortedArticlesByCollection(articles, sortOrders: ordering.sortOrders, canonicalOrder: ordering.canonicalOrder)
+			sortedArticlesByCollection(
+				articles,
+				sortOrders: ordering.sortOrders,
+				canonicalOrder: ordering.canonicalOrder,
+				feeds: ordering.feeds,
+			)
 		}.value
 	}
 
@@ -21,13 +28,13 @@ nonisolated enum CachedLibrarySnapshotPreparation {
 		_ articlesByCollection: [String: [Recommendation]],
 		sortOrders: [String: ArticleSortOrder],
 		canonicalOrder: [String: [String]],
+		feeds: ArticleFeedDirectory = .empty,
 	) -> [String: [Recommendation]] {
 		articlesByCollection.reduce(into: [:]) { result, pair in
-			let order = sortOrders[pair.key]
-				?? ReaderSection(rawValue: pair.key).map(ArticleSortOrder.defaultOrder)
-				?? .newest
+			let order = ArticleSortOrder.resolved(sortOrders[pair.key], forCollectionID: pair.key)
 			result[pair.key] = order.sorted(
 				canonicalArticles(pair.value, canonicalIDs: canonicalOrder[pair.key]),
+				feeds: feeds,
 			)
 		}
 	}

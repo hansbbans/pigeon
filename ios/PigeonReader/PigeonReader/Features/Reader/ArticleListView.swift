@@ -76,6 +76,7 @@ struct ArticleListView: View {
 			articles: preparesThumbnails ? Array(articles.prefix(ReaderFeedThumbnailPolicy.firstScreenLimit)) : [],
 		)
 		let impressionState = impressionState(isSearchActive: isSearchActive)
+		let feedSections = model.feedSections(for: collection, articles: articles)
 
 		ZStack {
 			if presentation == .loading {
@@ -131,6 +132,8 @@ struct ArticleListView: View {
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
 			} else if usesFrontPage {
+				// Front Page keeps its own pages; By Feed only orders them, and every
+				// story's kicker already names its feed.
 				frontPage(articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
 					.task(id: thumbnailRequest) {
 						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
@@ -141,36 +144,24 @@ struct ArticleListView: View {
 			} else {
 				ScrollViewReader { proxy in
 					List {
-						ForEach(articles) { article in
-							ArticleRowView(
-								article: article,
-								density: model.readerTypography.timelineDensity,
-								remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-								thumbnailStore: ReaderFeedThumbnailStore.shared,
-								thumbnailScope: model.session?.storageIdentity,
-								imageProxySession: model.session,
-								select: {
-									impressions.rowChosen(article.id)
-									model.retainPresentedArticles(articles, in: collection)
-									model.select(article: article)
-								},
-							)
-							.id(article.id)
-							.background { ReaderListRowAnchor(articleID: article.id, controller: viewport) }
-							.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
-							.swipeActions(edge: .leading, allowsFullSwipe: true) {
-								readButton(for: article)
+						if let feedSections {
+							// Labels are plain rows without an anchor or id: the viewport,
+							// impressions and selection only ever see the story rows.
+							ForEach(feedSections) { section in
+								ArticleFeedSectionLabel(
+									feed: section.feed,
+									remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+								)
+								.padding(.top, 12)
+								.listRowSeparator(.hidden)
+								.listRowBackground(Color.clear)
+								ForEach(section.articles) { article in
+									articleRow(article, presentedArticles: articles)
+								}
 							}
-							.swipeActions(edge: .trailing, allowsFullSwipe: true) {
-								readItLaterButton(for: article)
-								starButton(for: article)
-							}
-							.contextMenu {
-								readButton(for: article)
-								starButton(for: article)
-								Divider()
-								markAboveButton(for: article)
-								markBelowButton(for: article)
+						} else {
+							ForEach(articles) { article in
+								articleRow(article, presentedArticles: articles)
 							}
 						}
 						Text(model.collectionStatusText(for: collection))
@@ -399,6 +390,39 @@ struct ArticleListView: View {
 	/// Front Page is an iPhone layout; iPad keeps Classic rows in its split view.
 	private var usesFrontPage: Bool {
 		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+	}
+
+	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {
+		ArticleRowView(
+			article: article,
+			density: model.readerTypography.timelineDensity,
+			remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+			thumbnailStore: ReaderFeedThumbnailStore.shared,
+			thumbnailScope: model.session?.storageIdentity,
+			imageProxySession: model.session,
+			select: {
+				impressions.rowChosen(article.id)
+				model.retainPresentedArticles(articles, in: collection)
+				model.select(article: article)
+			},
+		)
+		.id(article.id)
+		.background { ReaderListRowAnchor(articleID: article.id, controller: viewport) }
+		.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
+		.swipeActions(edge: .leading, allowsFullSwipe: true) {
+			readButton(for: article)
+		}
+		.swipeActions(edge: .trailing, allowsFullSwipe: true) {
+			readItLaterButton(for: article)
+			starButton(for: article)
+		}
+		.contextMenu {
+			readButton(for: article)
+			starButton(for: article)
+			Divider()
+			markAboveButton(for: article)
+			markBelowButton(for: article)
+		}
 	}
 
 	private func frontPage(articles: [Recommendation], isSearchActive: Bool, holdsUpdates: Bool) -> some View {
