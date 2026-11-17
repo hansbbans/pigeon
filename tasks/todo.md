@@ -1,3 +1,23 @@
+# iOS folders sort By Feed by default (started 2026-11-17)
+
+Branch `claude/folder-by-feed-ios`, worktree `~/code/pigeon-folder-by-feed-ios`. The web half is built separately with the same rules.
+
+- [x] Tests first: comparator, availability, folder default, restoration of saved orders, header projection
+- [x] `ArticleSortOrder.byFeed`: folders only, their default; feeds by sidebar title (case-insensitive), then feed id, then newest
+- [x] Feed directory from navigation, so `feed/N` (stream) and plain keys (sync) of one feed group together
+- [x] Model, cached snapshot preparation and kept-article reinsertion use it
+- [x] Section label per feed in the Classic list and Front Page; headers are not articles
+- [x] Unit tests green; screenshot a folder on `Pigeon Claude`
+
+## Review
+- 17 new unit tests plus `testFolderListsStoriesByFeedByDefault` (UI); full unit suite 1033/1033 green.
+- Screenshot of the Design fixture folder (Classic layout) shows one label per feed. Front Page not screenshotted.
+- Folder detection is by ID (`user/-/label/`), so restoration and cached preparation work before navigation loads.
+- Not done: re-sorting a loaded folder when a feed is renamed; it re-sorts on its next load.
+
+
+---
+
 # Reading log: collect a month of evidence before redesigning the ranker (started 2026-11-15)
 
 Hans reads little in the app, so the recommendations redesign waits for data.

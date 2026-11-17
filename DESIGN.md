@@ -127,6 +127,7 @@ They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them throu
   - tiles are `secondarySystemGroupedBackground` on `systemGroupedBackground`, radius 12 continuous, one column at accessibility sizes
   - motion: favicons and headlines fade in and crossfade, the dateline count rolls (`numericText`), tiles press to 0.97, content fades under the toolbar (`scrollEdgeEffectStyle(.soft)`); all of it is off or reduced with Reduce Motion
 - Other: `ArticleReaderHeaderView`, `ArticleBodyView`, `StructuredHTMLView`, `ReaderReadingSettingsView`, `ScoreBadge`, `PaywallLabel`, `ReadingLengthLabel`, `ReaderMotion`. All are under `Features/Reader/`.
+- Folders sort By Feed by default (`ArticleSortOrder.byFeed`; Newest, Oldest and Score stay in the sort menu). Each feed's run of stories sits under `ArticleFeedSectionLabel`: the feed's sidebar title in `.footnote` semibold, uppercase, tracking 0.8, `label-secondary`, with its favicon at 16pt under the Load Normally image policy. In the Classic list it is a plain row above the feed's first story. The Front Page has no labels: it keeps its normal pages in By Feed order, and each story's kicker already names its feed.
 - Classic list swipe actions (`ArticleListView.swift`) use `PigeonPalette.SwipeFill`: tint (read), keep (star) and teal `kicker-2` (Read It Later).
 
 ## Web (Worker `/app`)

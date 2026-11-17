@@ -162,7 +162,13 @@ final class ReaderAppModel {
 	}
 	private(set) var subscriptions: [FeedSubscription] = []
 	var isLoadingLibrary = false
-	private(set) var navigation = ReaderNavigationState.initial
+	private(set) var navigation = ReaderNavigationState.initial {
+		didSet { refreshArticleFeedDirectory() }
+	}
+	/// The sidebar's feeds, for folders shown By Feed. Recomputed on every
+	/// navigation change but replaced (and folders re-sorted) only when a feed
+	/// row's identity, title or icon changes, not on count updates.
+	private(set) var articleFeedDirectory = ArticleFeedDirectory.empty
 	private(set) var enabledSmartViewSections: Set<ReaderSection>
 	private(set) var isLoadingNavigation = false
 	/// Keeps the reader shell from treating the in-memory defaults as a loaded
@@ -3357,7 +3363,7 @@ final class ReaderAppModel {
 					combinedArticles.append(article)
 				}
 			}
-			combinedArticles = sortOrder(for: collection.id).sorted(combinedArticles)
+			combinedArticles = sortOrder(for: collection.id).sorted(combinedArticles, feeds: articleFeedDirectory)
 			let nextSeenContinuations: Set<String>
 			let nextStreamContinuation: String?
 			if let nextContinuation = page.continuation,
@@ -4028,15 +4034,36 @@ final class ReaderAppModel {
 	}
 
 	func availableSortOrders(for collection: ReaderNavigationItem) -> [ArticleSortOrder] {
-		ArticleSortOrder.available(for: collection.smartSection)
+		ArticleSortOrder.available(forCollectionID: collection.id)
+	}
+
+	/// Feed sections for `articles` (the list as displayed) when `collection`
+	/// shows By Feed; nil for every other order.
+	func feedSections(for collection: ReaderNavigationItem, articles: [Recommendation]) -> [ArticleFeedSection]? {
+		guard sortOrder(for: collection) == .byFeed else { return nil }
+		return ArticleFeedSection.sections(for: articles, feeds: articleFeedDirectory)
 	}
 
 	private func sortOrder(for collectionID: String) -> ArticleSortOrder {
-		sortOrders[collectionID] ?? (ReaderSection(rawValue: collectionID).map(ArticleSortOrder.defaultOrder) ?? .newest)
+		ArticleSortOrder.resolved(sortOrders[collectionID], forCollectionID: collectionID)
+	}
+
+	private func refreshArticleFeedDirectory() {
+		let directory = ArticleFeedDirectory(navigationItems: navigation.items)
+		guard directory != articleFeedDirectory else { return }
+		articleFeedDirectory = directory
+		// A renamed, added or removed feed moves its group: re-sort the folders
+		// already shown By Feed so their order matches the new labels.
+		for (collectionID, articles) in articleCache where sortOrder(for: collectionID) == .byFeed {
+			let resorted = ArticleSortOrder.byFeed.sorted(articles, feeds: directory)
+			if resorted.map(\.id) != articles.map(\.id) {
+				articleCache[collectionID] = resorted
+			}
+		}
 	}
 
 	private func setSortOrder(_ newSortOrder: ArticleSortOrder, for collectionID: String) {
-		guard ArticleSortOrder.available(for: ReaderSection(rawValue: collectionID)).contains(newSortOrder) else {
+		guard ArticleSortOrder.available(forCollectionID: collectionID).contains(newSortOrder) else {
 			return
 		}
 		guard sortOrder(for: collectionID) != newSortOrder else {
@@ -4048,10 +4075,11 @@ final class ReaderAppModel {
 		if let cachedArticles = articleCache[collectionID] {
 			articleCache[collectionID] = newSortOrder.sorted(
 				canonicalArticles(for: collectionID, fallback: cachedArticles),
+				feeds: articleFeedDirectory,
 			)
 		}
 		if activeSearchCollectionID == collectionID {
-			searchResults = newSortOrder.sorted(searchResults)
+			searchResults = newSortOrder.sorted(searchResults, feeds: articleFeedDirectory)
 		}
 		if isApplyingRestoration == false,
 			isShowingBootstrapSnapshot,
@@ -4088,7 +4116,7 @@ final class ReaderAppModel {
 		let articlesToSort = preserveOpenSelection
 			? articlesPreservingOpenSelection(canonicalized, for: collectionID)
 			: canonicalized
-		let sortedArticles = sortOrder(for: collectionID).sorted(articlesToSort)
+		let sortedArticles = sortOrder(for: collectionID).sorted(articlesToSort, feeds: articleFeedDirectory)
 		articleCache[collectionID] = sortedArticles
 		if let previouslySelectedArticle,
 			let refreshedSelectedArticle = sortedArticles.first(where: { articlesMatch($0, previouslySelectedArticle) }) {
@@ -4346,13 +4374,19 @@ final class ReaderAppModel {
 			return filter.filtering(allArticles(for: collectionID))
 		}
 		guard collectionID == ReaderSection.today.rawValue else {
-			return keptArticles.displayed(allArticles(for: collectionID), filter: filter, order: sortOrder(for: collectionID))
+			return keptArticles.displayed(
+				allArticles(for: collectionID),
+				filter: filter,
+				order: sortOrder(for: collectionID),
+				feeds: articleFeedDirectory,
+			)
 		}
 		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
 		return keptArticles.displayed(
 			allArticles(for: collectionID),
 			filter: filter,
 			order: sortOrder(for: collectionID),
+			feeds: articleFeedDirectory,
 			isEligible: { bounds.contains($0.receivedAt) },
 		)
 	}
@@ -4757,7 +4791,7 @@ final class ReaderAppModel {
 			)
 			try Task.checkCancellation()
 			guard activeSearchID == searchID else { return .cancelled }
-			searchResults = sortOrder.sorted(results)
+			searchResults = sortOrder.sorted(results, feeds: articleFeedDirectory)
 			return .completed
 		} catch let error where isCancellation(error) {
 			return .cancelled
@@ -5702,7 +5736,7 @@ final class ReaderAppModel {
 					changed = true
 				}
 				if changed {
-					articleCache[collectionID] = sortOrder(for: collectionID).sorted(mergedArticles)
+					articleCache[collectionID] = sortOrder(for: collectionID).sorted(mergedArticles, feeds: articleFeedDirectory)
 					changedCollections.insert(collectionID)
 				}
 			}
@@ -6166,7 +6200,7 @@ final class ReaderAppModel {
 		if articleCache[collectionID]?.contains(where: { articlesMatch($0, kept) }) != true {
 			var cached = articleCache[collectionID] ?? []
 			cached.append(kept)
-			articleCache[collectionID] = sortOrder(for: collectionID).sorted(cached)
+			articleCache[collectionID] = sortOrder(for: collectionID).sorted(cached, feeds: articleFeedDirectory)
 		}
 		return articleCache[collectionID]?.first(where: { articlesMatch($0, kept) }) ?? kept
 	}
@@ -6302,6 +6336,8 @@ final class ReaderAppModel {
 		return CachedLibrarySnapshotPreparation.Ordering(
 			sortOrders: effectiveSortOrders,
 			canonicalOrder: effectiveCanonicalOrder,
+			// The snapshot's navigation becomes current when it is applied.
+			feeds: ArticleFeedDirectory(navigationItems: (snapshot.navigation ?? navigation).items),
 		)
 	}
 
@@ -6551,6 +6587,7 @@ final class ReaderAppModel {
 			canonicalizedByCollection[collectionID] = canonicalized
 			articleCache[collectionID] = sortOrder(for: collectionID).sorted(
 				articlesPreservingOpenSelection(canonicalized, for: collectionID),
+				feeds: articleFeedDirectory,
 			)
 			if ReaderSection(rawValue: collectionID) == .forYou {
 				canonicalArticleOrder[collectionID] = canonicalized.map(ReaderArticleIdentity.key(for:))
@@ -6959,7 +6996,7 @@ final class ReaderAppModel {
 		// complete body is already cached in another collection. Use the same
 		// shared-body merge as foreground loads, retaining fresh server status.
 		let canonicalized = canonicalizedArticles(mutationIntentResult.articles, for: feed.id)
-		let loadedArticles = sortOrder(for: feed.id).sorted(canonicalized)
+		let loadedArticles = sortOrder(for: feed.id).sorted(canonicalized, feeds: articleFeedDirectory)
 		articleCache[feed.id] = loadedArticles
 		propagateSharedArticleUpdates(from: canonicalized, excluding: feed.id)
 		unpersistedPrewarmCollectionIDs.insert(feed.id)
@@ -7141,7 +7178,7 @@ final class ReaderAppModel {
 			merged.append(oldArticle)
 			seenAliases.formUnion(aliases)
 		}
-		return sortOrder(for: collection.id).sorted(merged)
+		return sortOrder(for: collection.id).sorted(merged, feeds: articleFeedDirectory)
 	}
 
 	private func hasCachedPaginationContinuation(_ collectionID: String) -> Bool {
@@ -8000,7 +8037,7 @@ final class ReaderAppModel {
 		for article in articles where combined.contains(where: { articlesMatch($0, article) }) == false {
 			combined.append(article)
 		}
-		articleCache[collectionID] = sortOrder(for: collectionID).sorted(combined)
+		articleCache[collectionID] = sortOrder(for: collectionID).sorted(combined, feeds: articleFeedDirectory)
 	}
 
 	private func rebuildNavigationFromSubscriptions() {
@@ -8466,7 +8503,7 @@ final class ReaderAppModel {
 				copy.isStarred = true
 				starredArticles.append(copy)
 			}
-			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles)
+			articleCache[starredID] = sortOrder(for: starredID).sorted(starredArticles, feeds: articleFeedDirectory)
 			return
 		}
 
@@ -8530,7 +8567,7 @@ final class ReaderAppModel {
 				clearDetachedSelectedArticle()
 			}
 		}
-		articleCache[unreadID] = sortOrder(for: unreadID).sorted(unreadArticles)
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(unreadArticles, feeds: articleFeedDirectory)
 	}
 
 	private func syncUnreadMembership(for article: Recommendation, read: Bool) {
@@ -8576,7 +8613,7 @@ final class ReaderAppModel {
 			copy.isRead = false
 			unreadArticles.append(copy)
 		}
-		articleCache[unreadID] = sortOrder(for: unreadID).sorted(deduplicatedArticles(unreadArticles))
+		articleCache[unreadID] = sortOrder(for: unreadID).sorted(deduplicatedArticles(unreadArticles), feeds: articleFeedDirectory)
 		if let detachedSelectedArticle, articlesMatch(detachedSelectedArticle, article) {
 			clearDetachedSelectedArticle()
 		}
