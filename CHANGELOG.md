@@ -4,6 +4,16 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.13.0] - 2026-11-17
+
+### Added
+
+- Folders open grouped by feed, in the iOS app and the web reader. Feeds are listed alphabetically, each under a small label with its name, newest story first within each feed. "Newest" and "Oldest" are still in the sort menu for the mixed-by-date view, and changing the sort in a folder does not change other views. On iOS the Front Page layout keeps its normal pages in feed order (each story already names its feed); the labels appear in the Classic list.
+
+### Changed
+
+- In the web reader, read articles are compact: source and time over a one-line grey title, with no summary or picture, so unread articles stand out by shape and not only by a lighter grey. A list never shrinks a row it has already shown you in full, so nothing moves while you read; those rows only turn grey. Read rows are compact again in a list you have not opened yet or after a reload.
+
 ## [0.1.12.0] - 2026-11-15
 
 ### Added
