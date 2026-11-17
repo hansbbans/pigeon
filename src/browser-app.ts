@@ -1199,30 +1199,6 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  // Rows above the reader's place can change height between renders (a row
-  // just left shrinks to one line once read), so restoring scrollTop alone lets
-  // the list jump. Keep the open row, or else the first row on screen, where it was.
-  function captureArticleScrollAnchor() {
-    const container = getArticleScrollContainer();
-    if (!container || !renderedArticleCards.length || renderedArticleListKey !== getViewQueryKey(activeViewId)) return null;
-    const viewport = container.getBoundingClientRect();
-    const onScreen = (card) => {
-      const rect = card.node.getBoundingClientRect();
-      return rect.bottom > viewport.top && rect.top < viewport.bottom;
-    };
-    const selected = renderedArticleCards.find((card) => card.id === selectedItemId);
-    const card = selected && onScreen(selected) ? selected : renderedArticleCards.find(onScreen);
-    return card ? { id: card.id, offset: card.node.getBoundingClientRect().top - viewport.top } : null;
-  }
-
-  function restoreArticleScrollAnchor(anchor) {
-    const container = getArticleScrollContainer();
-    const card = anchor && container ? renderedArticleCards.find((candidate) => candidate.id === anchor.id) : null;
-    if (!card) return;
-    const shift = card.node.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
-    if (shift) container.scrollTop += shift;
-  }
-
   function saveActiveViewState() {
     const state = getViewState(activeViewId);
     if (!state) {
@@ -1538,8 +1514,12 @@ export function renderBrowserAppRuntimeScript(): string {
   // the UI, so logging cannot get in the way of reading.
   const readingMeter = client.createReadingMeter();
   let renderedArticleCards = [];
-  // The list (view and query) the rendered cards belong to, for scroll anchoring.
-  let renderedArticleListKey = '';
+  // Read rows render as one line (is-compact), except rows already shown in full
+  // during this visit to the list: those stay full, only dimmed, so no row
+  // changes height while the reader works through the list. Another view or
+  // query starts a new visit, where read rows are compact.
+  let fullRowVisitKey = '';
+  let fullRowIds = new Set();
   let impressionSession = null;
   let pendingImpressions = [];
   let pendingKeyboardOpen = null;
@@ -2847,8 +2827,13 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderArticles() {
     renderOfflineBanner();
+    // Before any early return: an empty showing of another list still ends this visit.
+    const visitKey = getViewQueryKey(activeViewId);
+    if (visitKey !== fullRowVisitKey) {
+      fullRowVisitKey = visitKey;
+      fullRowIds = new Set();
+    }
     const preservedScrollTop = getArticleScrollTop();
-    const scrollAnchor = captureArticleScrollAnchor();
     const visibleItemIds = getVisibleItemIds();
     if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
       selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
@@ -2871,7 +2856,6 @@ export function renderBrowserAppRuntimeScript(): string {
 
     clearElement(articlesList);
     renderedArticleCards = [];
-    renderedArticleListKey = getViewQueryKey(activeViewId);
 
     if (entries.length === 0) {
       const activeView = getActiveView();
@@ -2895,13 +2879,17 @@ export function renderBrowserAppRuntimeScript(): string {
       const article = loadedItemsById[entry.id];
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
+      const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
+      // Only a loaded row counts as shown: a placeholder has no read state yet.
+      if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
           entry.id === selectedItemId ? 'is-active' : '',
-          savedView && article ? 'saved-card' : articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+          isCompact ? 'is-compact' : '',
+          savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
         attributes: {
           type: 'button',
@@ -2929,14 +2917,14 @@ export function renderBrowserAppRuntimeScript(): string {
       if (isStarred) title.appendChild(createNode('span', {
         classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
       }));
-      title.appendChild(createNode('span', { text: entry.title }));
+      title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
       if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
       copy.appendChild(title);
-      if (getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
+      if (!isCompact && getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
         const detail = recommendationDetails.get(entry.id);
         copy.appendChild(createNode('span', {classNames:['article-meta'], text: 'Score ' + Number(detail.score || 0).toFixed(1) + (detail.explanation ? ' · ' + (typeof detail.explanation === 'string' ? detail.explanation : JSON.stringify(detail.explanation)) : '')}));
       }
-      if (articleListMode !== 'titles' && entry.preview) {
+      if (articleListMode !== 'titles' && !isCompact && entry.preview) {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       if (articleListMode !== 'titles') {
@@ -2951,7 +2939,7 @@ export function renderBrowserAppRuntimeScript(): string {
         }
       }
       cardGrid.appendChild(copy);
-      if (articleListMode !== 'titles' && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
+      if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
         const image = createNode('img', {
             classNames: ['article-hero'],
             attributes: {
@@ -2975,7 +2963,6 @@ export function renderBrowserAppRuntimeScript(): string {
       !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
-    restoreArticleScrollAnchor(scrollAnchor);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
   }

@@ -19,14 +19,6 @@ import { renderBrowserLibraryManagementScript } from '../../src/browser-library-
 import { renderBrowserTranscriptScript } from '../../src/browser-transcript';
 import { generateApiToken } from '../../src/api-auth';
 
-type FakeRect = { width: number; height: number; left: number; right: number; top: number; bottom: number };
-let fakeLayout: ((element: ReturnType<typeof createElement>) => FakeRect | undefined) | null = null;
-
-/** Lets a test give elements a layout; return undefined for the default full-window rect. */
-export function setFakeLayout(layout: typeof fakeLayout) {
-	fakeLayout = layout;
-}
-
 export function createElement(
 	initialValue = '',
 	initialClasses: string[] = [],
@@ -153,8 +145,8 @@ export function createElement(
 		scrollIntoViewCalls: [] as Array<{ block?: string; inline?: string }>,
 		scrollIntoView(options: { block?: string; inline?: string }) { element.scrollIntoViewCalls.push(options); onReveal?.(dataset.itemId ?? '', options); },
 		setPointerCapture() {},
-		getBoundingClientRect(): FakeRect {
-			return fakeLayout?.(element) ?? { width: 1440, height: 900, left: 0, right: 1440, top: 0, bottom: 900 };
+		getBoundingClientRect() {
+			return { width: 1440, height: 900, left: 0, right: 1440, top: 0, bottom: 900 };
 		},
 	};
 
