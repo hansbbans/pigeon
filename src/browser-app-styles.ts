@@ -727,17 +727,16 @@ ${iconVariables()}
         line-height: 1.4;
       }
 
-      .article-card.is-read:not(.is-active) .article-title { color: var(--text-secondary); font-weight: 500; }
-      /* Not saved rows: weight stays as unread so a title never rewraps (and the
-         row never changes height) when it is read; the muted grey carries it. */
-      .article-card.is-read:not(.is-active):not(.saved-card) .article-title { color: var(--muted); font-weight: 600; }
+      .article-card.saved-card.is-read:not(.is-active) .article-title { color: var(--text-secondary); font-weight: 500; }
       .article-card.is-read:not(.is-active) .article-preview { color: var(--muted); }
-      /* A read row that was already full during this visit stays full, only
-         dimmed further; read rows on a new visit are one line (is-compact, set
-         by renderArticles, never on the open row): source and time, then the
-         title. Unread rows stand out by shape, not only by grey. */
+      /* Article rows. A read row the list already showed in full stays full,
+         title and preview muted at the same weight, so it never rewraps or
+         changes height. Other read rows are compact (is-compact, set by
+         renderArticles, never on the open row): source and time over a
+         one-line title, no preview or image. Unread rows stand out by shape. */
+      .article-card.is-read:not(.is-active):not(.saved-card) .article-title { color: var(--muted); }
       .article-card.is-compact { padding-top: 0.45rem; padding-bottom: 0.5rem; }
-      .article-card.is-read.is-compact:not(.is-active):not(.saved-card) .article-title { display: flex; align-items: baseline; font-weight: 400; }
+      .article-card.is-compact .article-title { display: flex; align-items: baseline; font-weight: 400; }
       .article-card.is-compact .article-title-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
       .article-card.is-compact .article-paywall { flex: none; }
 

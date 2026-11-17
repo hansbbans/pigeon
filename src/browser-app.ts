@@ -594,6 +594,11 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSortOrder = 'newest';
   // Folders keep their own sort, "By feed" until changed, apart from every other view.
   let folderSortOrder = 'feed';
+  // Read rows render compact, except rows a list has already shown in full this
+  // page session: those stay full, only dimmed. So a loaded row never changes
+  // height in a list, and a list's saved scrollTop stays valid when the reader
+  // comes back to it. Keyed by list (view and query); a reload starts over.
+  const fullRowIdsByList = new Map();
   let membershipRootRequestId = 0;
   let activeLoadedQueryKey = '';
   let queuedQueryReload = null;
@@ -1439,6 +1444,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
     folderSortOrder = 'feed';
+    fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
     queuedQueryReload = null;
@@ -1524,12 +1530,6 @@ export function renderBrowserAppRuntimeScript(): string {
   // the UI, so logging cannot get in the way of reading.
   const readingMeter = client.createReadingMeter();
   let renderedArticleCards = [];
-  // Read rows render as one line (is-compact), except rows already shown in full
-  // during this visit to the list: those stay full, only dimmed, so no row
-  // changes height while the reader works through the list. Another view or
-  // query starts a new visit, where read rows are compact.
-  let fullRowVisitKey = '';
-  let fullRowIds = new Set();
   let impressionSession = null;
   let pendingImpressions = [];
   let pendingKeyboardOpen = null;
@@ -1599,6 +1599,9 @@ export function renderBrowserAppRuntimeScript(): string {
     if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
     // Position says nothing about the ranker once the reader re-sorts For You.
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
+    // Compact read rows are shorter, so more fit on screen: mark them so the
+    // report can keep row shape apart from reading behaviour.
+    if (renderedArticleCards.find((rendered) => rendered.id === card.id)?.node.classList.contains('is-compact')) metadata.row = 'compact';
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -2841,12 +2844,6 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function renderArticles() {
     renderOfflineBanner();
-    // Before any early return: an empty showing of another list still ends this visit.
-    const visitKey = getViewQueryKey(activeViewId);
-    if (visitKey !== fullRowVisitKey) {
-      fullRowVisitKey = visitKey;
-      fullRowIds = new Set();
-    }
     const preservedScrollTop = getArticleScrollTop();
     const visibleItemIds = getVisibleItemIds();
     if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
@@ -2889,6 +2886,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const savedView = isSavedView();
     articlesStatus.textContent = entries.length + (savedView ? ' saved item' : ' article') + (entries.length === 1 ? '' : 's');
+    const listKey = getViewQueryKey(activeViewId);
+    if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
+    const fullRowIds = fullRowIdsByList.get(listKey);
     // "By feed": a quiet label before each feed's run. Labels are not articles:
     // they are not in renderedArticleCards, so selection, keys and impressions skip them.
     const groupByFeed = getActiveView()?.kind === 'folder' && getArticleQuery().sort === 'feed';

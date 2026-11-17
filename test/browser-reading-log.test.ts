@@ -453,3 +453,19 @@ test('restoring a saved reading position is not the reader scrolling', async () 
 	await settle();
 	assert.equal(depths().length, 2, 'scrolling on from there is the reader again');
 });
+
+test('impressions of compact read rows are marked, so row shape stays apart from reading', async () => {
+	const { harness, run, impressions, itemRowid } = await openBrowser({
+		seed: (database) => { database.prepare("UPDATE items SET is_read = 1 WHERE id IN ('today-1', 'today-2')").run(); },
+	});
+	const list = harness.elements.get('articles-list')!;
+	const compact = new Set(renderedArticleIds(harness).filter((id) => findListButtonByItemId(list, id)!.classList.contains('is-compact')));
+	assert.ok(compact.size > 0, 'a seeded read row renders compact');
+	await run(6_000);
+	const logged = impressions();
+	assert.ok(logged.length >= 2);
+	for (const row of logged) {
+		const metadata = row.metadata_json ? JSON.parse(String(row.metadata_json)) : {};
+		assert.equal(metadata.row === 'compact', compact.has(itemRowid(String(row.item_id))), `item ${row.item_id}`);
+	}
+});

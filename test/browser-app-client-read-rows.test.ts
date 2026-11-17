@@ -11,10 +11,10 @@ import {
 	waitForBrowserCondition,
 } from './helpers/browser-app-client-harness';
 
-// Read rows are one line so unread ones stand out, but a row the reader has
-// already seen in full keeps its height for the rest of the visit: nothing
-// above the reader's place shrinks while they work through the list.
-test('read rows stay full during a visit and are one line on the next visit', async (t) => {
+// Read rows are compact so unread ones stand out, but a row a list has shown in
+// full keeps its height in that list for the session: nothing above the
+// reader's place shrinks while they work through it, or when they come back.
+test('a list never shrinks a row it has shown; read rows are compact in a list not shown yet', async (t) => {
 	const { database, harness } = await createStatefulArticleBrowser({ count: 6, policy: 'opened' });
 	t.after(() => database.close());
 	const list = harness.elements.get('articles-list')!;
@@ -41,20 +41,30 @@ test('read rows stay full during a visit and are one line on the next visit', as
 	}
 	assert.deepEqual(compactIds(), []);
 
-	// A new visit: the read rows are one line, the open one stays full.
+	// Back to a list already shown: same shapes, so its saved scroll position still fits.
 	findListButtonByViewId(views, 'unread')!.dispatch('click');
 	await flushBrowserTasks();
 	findListButtonByViewId(views, 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => row(ids[1]) !== undefined && row(ids[5]).classList.contains('is-active'), 100);
+	await flushBrowserTasks();
+	assert.deepEqual(compactIds(), []);
+
+	// A list this session has not shown (here: the same view with another sort)
+	// shows read rows compact; the open one stays full.
+	const sort = harness.elements.get('article-sort-select')!;
+	sort.value = 'oldest';
+	sort.dispatch('change');
 	await waitForBrowserCondition(() => compactIds().length > 0, 100);
 	await flushBrowserTasks();
-	const open5 = row(ids[5]);
-	assert.ok(open5.classList.contains('is-active') && !open5.classList.contains('is-compact'));
-	// Only read rows are ever one line (a row read after this visit showed it stays full).
+	// Changing the sort opens the first story of the new order; it is never compact.
+	const openIds = renderedArticleIds(harness).filter((id) => row(id).classList.contains('is-active'));
+	assert.equal(openIds.length, 1);
+	assert.ok(!row(openIds[0]).classList.contains('is-compact'));
 	assert.ok(compactIds().every((id) => row(id).getAttribute('data-read') === 'true'));
 	for (const id of ids.slice(1, 5)) {
 		assert.ok(row(id).classList.contains('is-compact'));
-		assert.equal(findDescendantByClass(row(id), 'article-preview'), undefined, 'one line: no preview');
-		assert.equal(findDescendantByClass(row(id), 'article-hero'), undefined, 'one line: no image is loaded');
+		assert.equal(findDescendantByClass(row(id), 'article-preview'), undefined, 'compact: no preview');
+		assert.equal(findDescendantByClass(row(id), 'article-hero'), undefined, 'compact: no image is loaded');
 	}
 
 	// Rereading a one-line row brings it back in full, and it stays full after.
