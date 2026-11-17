@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- The web reader uses Geist Serif, Vercel's open-source serif, as its reading typeface: article titles, article text, saved-story titles and transcripts. Choose System, Serif or Sans serif instead under Settings → Reading → Typeface. If you never picked a typeface, you get Geist Serif.
+
 ## [0.1.13.0] - 2026-11-17
 
 ### Added

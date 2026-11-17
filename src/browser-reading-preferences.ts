@@ -5,11 +5,15 @@
  * optional baseURL resolves relative newsletter links. No raw credentials are persisted.
  * The main app owns iframe sandbox/CSP, zoom, one-time image consent and URL cleanup.
  */
+import { GEIST_SERIF_FONT_FACE } from './browser-fonts';
+
 export function renderBrowserReadingScript(): string {
  return String.raw`(function () {
  'use strict';
  var STORAGE_KEY = 'pigeon.browser.reading.v1';
- var DEFAULTS = {theme:'app',font:'system',fontSize:18,lineHeight:1.65,width:640,margins:24,density:'comfortable',imagePolicy:'load',shortcuts:{next:'j',previous:'k',read:'m',star:'s'}};
+ var DEFAULTS = {theme:'app',font:'geist',fontSize:18,lineHeight:1.65,width:640,margins:24,density:'comfortable',imagePolicy:'load',shortcuts:{next:'j',previous:'k',read:'m',star:'s'}};
+ var FONT_STACKS = {geist:"'Geist Serif', 'New York', 'Iowan Old Style', Georgia, serif",serif:'Georgia, Charter, serif',sans:'Arial, Helvetica, sans-serif',system:'-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'};
+ var GEIST_SERIF_FONT_FACE = ${JSON.stringify(GEIST_SERIF_FONT_FACE)};
  var IMAGE_TYPES = ['image/avif','image/gif','image/heic','image/heif','image/jpeg','image/png','image/webp'];
  function choice(value, values, fallback) { return values.includes(value) ? value : fallback; }
  function bounded(value, minimum, maximum, fallback) { var number=typeof value==='number' || typeof value==='string' && value.trim() ? Number(value) : NaN; return Number.isFinite(number) ? Math.round(Math.min(maximum,Math.max(minimum,number))*100)/100 : fallback; }
@@ -17,13 +21,14 @@ export function renderBrowserReadingScript(): string {
  function normalizePreferences(input) {
   var raw=input && typeof input==='object' ? input : {}; var shortcuts={}; var used=new Set();
   ['next','previous','read','star'].forEach(function(action) { var key=raw.shortcuts && raw.shortcuts[action]; key=validKey(key) ? key.toLowerCase() : DEFAULTS.shortcuts[action]; if(used.has(key)) key=[DEFAULTS.shortcuts[action],'j','k','m','s','n','p','r','t'].find(function(candidate){return !used.has(candidate);}); used.add(key); shortcuts[action]=key; });
-  return {theme:choice(raw.theme,['app','light','dark','sepia','system'],DEFAULTS.theme),font:choice(raw.font,['system','serif','sans'],DEFAULTS.font),fontSize:bounded(raw.fontSize,14,28,DEFAULTS.fontSize),lineHeight:bounded(raw.lineHeight,1.2,2.2,DEFAULTS.lineHeight),width:bounded(raw.width,480,960,DEFAULTS.width),margins:bounded(raw.margins,0,64,DEFAULTS.margins),density:choice(raw.density,['comfortable','compact'],DEFAULTS.density),imagePolicy:choice(raw.imagePolicy,['load','ask','proxy'],DEFAULTS.imagePolicy),shortcuts:shortcuts};
+  return {theme:choice(raw.theme,['app','light','dark','sepia','system'],DEFAULTS.theme),font:choice(raw.font,Object.keys(FONT_STACKS),DEFAULTS.font),fontSize:bounded(raw.fontSize,14,28,DEFAULTS.fontSize),lineHeight:bounded(raw.lineHeight,1.2,2.2,DEFAULTS.lineHeight),width:bounded(raw.width,480,960,DEFAULTS.width),margins:bounded(raw.margins,0,64,DEFAULTS.margins),density:choice(raw.density,['comfortable','compact'],DEFAULTS.density),imagePolicy:choice(raw.imagePolicy,['load','ask','proxy'],DEFAULTS.imagePolicy),shortcuts:shortcuts};
  }
- // Records saved before schema 2 stored "light" because light was the only default; read those as "app".
- function readPreferences(storage) { try { var value=(storage || localStorage).getItem(STORAGE_KEY); var raw=value ? JSON.parse(value) : null; if(raw && typeof raw==='object' && raw.schema!==2 && raw.theme==='light') raw.theme='app'; return normalizePreferences(raw); } catch (_) { return normalizePreferences(null); } }
+ // Saving stores every field, so a record holds the default of its day for fields nobody chose.
+ // Before schema 2 that was theme "light" (read as "app"); before schema 3 it was font "system" (read as "geist").
+ function readPreferences(storage) { try { var value=(storage || localStorage).getItem(STORAGE_KEY); var raw=value ? JSON.parse(value) : null; if(raw && typeof raw==='object') { var schema=Number(raw.schema) || 1; if(schema<2 && raw.theme==='light') raw.theme='app'; if(schema<3 && raw.font==='system') raw.font='geist'; } return normalizePreferences(raw); } catch (_) { return normalizePreferences(null); } }
  function savePreferences(input,storage) {
   if(input && input.shortcuts) { var keys=['next','previous','read','star'].map(function(action){return input.shortcuts[action];}); if(keys.some(function(key){return !validKey(key);}) || new Set(keys.map(function(key){return key.toLowerCase();})).size!==4) throw new Error('Choose a different single printable key for each reader shortcut.'); }
-  var preferences=normalizePreferences(input); try {(storage || localStorage).setItem(STORAGE_KEY,JSON.stringify(Object.assign({schema:2},preferences)));} catch (_) {throw new Error('Reading preferences could not be saved. Allow browser storage and retry.');} return preferences;
+  var preferences=normalizePreferences(input); try {(storage || localStorage).setItem(STORAGE_KEY,JSON.stringify(Object.assign({schema:3},preferences)));} catch (_) {throw new Error('Reading preferences could not be saved. Allow browser storage and retry.');} return preferences;
  }
  // Light, dark, "app" and "system" colors come from the frame document's data-theme, which the app
  // sets from this preference (frameTheme) and keeps in step with the app and the OS. Only sepia
@@ -36,10 +41,12 @@ export function renderBrowserReadingScript(): string {
   return 'light';
  }
  function frameCSS(input) {
-  var p=normalizePreferences(input); var font=p.font==='serif' ? 'Georgia, Charter, serif' : p.font==='sans' ? 'Arial, Helvetica, sans-serif' : '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  var p=normalizePreferences(input); var font=FONT_STACKS[p.font];
   var colors=p.theme==='sepia' ? ':root{color-scheme:light;color:#433a2c;background:#f6ecd1}a{color:#735c17}' : '';
-  return colors+'*{box-sizing:border-box}html{overflow-wrap:anywhere}body{font-family:'+font+';font-size:'+p.fontSize+'px;line-height:'+p.lineHeight+';max-width:'+p.width+'px;margin:0 auto;padding:'+p.margins+'px}p,figure,ul,ol{margin:0 0 '+(p.density==='compact'?'0.65':'1')+'em}h1,h2,h3,h4,h5,h6{line-height:1.25}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.75em}blockquote{margin:1em 0;padding-left:1em;border-left:3px solid #b6bbc1}.pigeon-image-hidden{display:block;padding:.75em;border:1px dashed #a5a9af;color:inherit}';
+  return (p.font==='geist' ? GEIST_SERIF_FONT_FACE : '')+colors+'*{box-sizing:border-box}html{overflow-wrap:anywhere}body{font-family:'+font+';font-size:'+p.fontSize+'px;line-height:'+p.lineHeight+';max-width:'+p.width+'px;margin:0 auto;padding:'+p.margins+'px}p,figure,ul,ol{margin:0 0 '+(p.density==='compact'?'0.65':'1')+'em}h1,h2,h3,h4,h5,h6{line-height:1.25}img{max-width:100%;height:auto}table{max-width:100%;border-collapse:collapse}td,th{overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:.75em}blockquote{margin:1em 0;padding-left:1em;border-left:3px solid #b6bbc1}.pigeon-image-hidden{display:block;padding:.75em;border:1px dashed #a5a9af;color:inherit}';
  }
+ // The CSS font-family list for the chosen typeface; the app uses it for the reader title and saved cards.
+ function fontStack(input) { return FONT_STACKS[normalizePreferences(input).font]; }
  function safeURL(raw,base,links) {
   if(typeof raw!=='string' || !raw.trim() || raw.length>8192 || /[\u0000-\u001f\u007f]/.test(raw)) return null;
   try { var url=new URL(raw,base); if(url.username || url.password) return null; if(!['http:','https:'].includes(url.protocol) && !(links && ['mailto:','tel:'].includes(url.protocol))) return null; return url.href; } catch (_) {return null;}
@@ -95,6 +102,6 @@ export function renderBrowserReadingScript(): string {
    guard();return {html:template.innerHTML,images:imageRecords,blockedCount:imageRecords.filter(function(image){return !image.loaded;}).length};
   } catch(error) {revokeAll();throw error;}
  }
- window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,applyImagePolicy:applyImagePolicy,frameTheme:frameTheme};
+ window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,fontStack:fontStack,applyImagePolicy:applyImagePolicy,frameTheme:frameTheme};
 })();`;
 }

@@ -164,13 +164,14 @@ The dark table above leaves out `--scrim` and `--shadow`, which are also redefin
 
 **Typography.**
 - UI: `--font` = `-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', sans-serif`, at `14px/1.45`.
-- Serif stack `'New York', 'Iowan Old Style', Charter, Georgia, …` is used only for `.saved-title` and `.transcript-segment`.
-- Reader title: `clamp(1.5rem, 2.3vw, 2rem)`, weight 700.
+- Reading typeface: `--reading-font`, set from the reading preference by `fontStack()` in `src/browser-reading-preferences.ts`. It styles the reader title, `.saved-title`, `.transcript-segment` and the article iframe body. The default is Geist Serif (`'Geist Serif', 'New York', 'Iowan Old Style', Georgia, serif`). The empty-reader placeholder stays in `--font`.
+- Geist Serif (Vercel, SIL OFL 1.1, `docs/licenses/GeistSerif-OFL.txt`) ships one weight. `scripts/vendor-geist-serif.mjs` pins it by tag and SHA-256 into `src/browser-font-geist-serif.ts`, and the Worker serves it at `/app/fonts/geist-serif-<version>.woff2` (immutable). Its `@font-face` declares weight 400 only, so browsers synthesize bold and italic. A weight range would claim a real bold and render `<strong>` at Regular. The frame loads the font only when Geist Serif is chosen.
+- Reader title: `clamp(1.5rem, 2.3vw, 2rem)`, weight 700 (synthesized bold in Geist Serif).
 - List titles: `.article-title` 0.92rem/600, with a 2-line `.article-preview`.
 - Iframe default: `16px/1.7` system sans.
 
-**Reading preferences** (`pigeon.browser.reading.v1`, schema 2):
-- font: `system`, `serif` (Georgia, Charter) or `sans`
+**Reading preferences** (`pigeon.browser.reading.v1`, schema 3):
+- font: `geist` (Geist Serif, default), `system`, `serif` (Georgia, Charter) or `sans`. Records older than schema 3 saved `system` as the old default, so they read as `geist`.
 - fontSize 14–28 (default 18)
 - lineHeight 1.2–2.2 (default 1.65)
 - width 480–960 (default 640)
