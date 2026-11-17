@@ -594,6 +594,11 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSortOrder = 'newest';
   // Folders keep their own sort, "By feed" until changed, apart from every other view.
   let folderSortOrder = 'feed';
+  // Read rows render compact, except rows a list has already shown in full this
+  // page session: those stay full, only dimmed. So a loaded row never changes
+  // height in a list, and a list's saved scrollTop stays valid when the reader
+  // comes back to it. Keyed by list (view and query); a reload starts over.
+  const fullRowIdsByList = new Map();
   let membershipRootRequestId = 0;
   let activeLoadedQueryKey = '';
   let queuedQueryReload = null;
@@ -1439,6 +1444,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
     folderSortOrder = 'feed';
+    fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
     queuedQueryReload = null;
@@ -1593,6 +1599,9 @@ export function renderBrowserAppRuntimeScript(): string {
     if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
     // Position says nothing about the ranker once the reader re-sorts For You.
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
+    // Compact read rows are shorter, so more fit on screen: mark them so the
+    // report can keep row shape apart from reading behaviour.
+    if (renderedArticleCards.find((rendered) => rendered.id === card.id)?.node.classList.contains('is-compact')) metadata.row = 'compact';
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -2877,6 +2886,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const savedView = isSavedView();
     articlesStatus.textContent = entries.length + (savedView ? ' saved item' : ' article') + (entries.length === 1 ? '' : 's');
+    const listKey = getViewQueryKey(activeViewId);
+    if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
+    const fullRowIds = fullRowIdsByList.get(listKey);
     // "By feed": a quiet label before each feed's run. Labels are not articles:
     // they are not in renderedArticleCards, so selection, keys and impressions skip them.
     const groupByFeed = getActiveView()?.kind === 'folder' && getArticleQuery().sort === 'feed';
@@ -2889,13 +2901,17 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
+      const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
+      // Only a loaded row counts as shown: a placeholder has no read state yet.
+      if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
           entry.id === selectedItemId ? 'is-active' : '',
-          savedView && article ? 'saved-card' : articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+          isCompact ? 'is-compact' : '',
+          savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
         attributes: {
           type: 'button',
@@ -2923,14 +2939,14 @@ export function renderBrowserAppRuntimeScript(): string {
       if (isStarred) title.appendChild(createNode('span', {
         classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
       }));
-      title.appendChild(createNode('span', { text: entry.title }));
+      title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
       if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
       copy.appendChild(title);
-      if (getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
+      if (!isCompact && getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
         const detail = recommendationDetails.get(entry.id);
         copy.appendChild(createNode('span', {classNames:['article-meta'], text: 'Score ' + Number(detail.score || 0).toFixed(1) + (detail.explanation ? ' · ' + (typeof detail.explanation === 'string' ? detail.explanation : JSON.stringify(detail.explanation)) : '')}));
       }
-      if (articleListMode !== 'titles' && entry.preview) {
+      if (articleListMode !== 'titles' && !isCompact && entry.preview) {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       if (articleListMode !== 'titles') {
@@ -2945,7 +2961,7 @@ export function renderBrowserAppRuntimeScript(): string {
         }
       }
       cardGrid.appendChild(copy);
-      if (articleListMode !== 'titles' && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
+      if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
         const image = createNode('img', {
             classNames: ['article-hero'],
             attributes: {
