@@ -1199,6 +1199,30 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
+  // Rows above the reader's place can change height between renders (a row
+  // just left shrinks to one line once read), so restoring scrollTop alone lets
+  // the list jump. Keep the open row, or else the first row on screen, where it was.
+  function captureArticleScrollAnchor() {
+    const container = getArticleScrollContainer();
+    if (!container || !renderedArticleCards.length || renderedArticleListKey !== getViewQueryKey(activeViewId)) return null;
+    const viewport = container.getBoundingClientRect();
+    const onScreen = (card) => {
+      const rect = card.node.getBoundingClientRect();
+      return rect.bottom > viewport.top && rect.top < viewport.bottom;
+    };
+    const selected = renderedArticleCards.find((card) => card.id === selectedItemId);
+    const card = selected && onScreen(selected) ? selected : renderedArticleCards.find(onScreen);
+    return card ? { id: card.id, offset: card.node.getBoundingClientRect().top - viewport.top } : null;
+  }
+
+  function restoreArticleScrollAnchor(anchor) {
+    const container = getArticleScrollContainer();
+    const card = anchor && container ? renderedArticleCards.find((candidate) => candidate.id === anchor.id) : null;
+    if (!card) return;
+    const shift = card.node.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+    if (shift) container.scrollTop += shift;
+  }
+
   function saveActiveViewState() {
     const state = getViewState(activeViewId);
     if (!state) {
@@ -1514,6 +1538,8 @@ export function renderBrowserAppRuntimeScript(): string {
   // the UI, so logging cannot get in the way of reading.
   const readingMeter = client.createReadingMeter();
   let renderedArticleCards = [];
+  // The list (view and query) the rendered cards belong to, for scroll anchoring.
+  let renderedArticleListKey = '';
   let impressionSession = null;
   let pendingImpressions = [];
   let pendingKeyboardOpen = null;
@@ -2822,6 +2848,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderArticles() {
     renderOfflineBanner();
     const preservedScrollTop = getArticleScrollTop();
+    const scrollAnchor = captureArticleScrollAnchor();
     const visibleItemIds = getVisibleItemIds();
     if (!hasHeldReaderSelection() && (!selectedItemId || !visibleItemIds.includes(selectedItemId))) {
       selectedItemId = visibleItemIds.find((id) => loadedItemsById[id]) || null;
@@ -2844,6 +2871,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     clearElement(articlesList);
     renderedArticleCards = [];
+    renderedArticleListKey = getViewQueryKey(activeViewId);
 
     if (entries.length === 0) {
       const activeView = getActiveView();
@@ -2947,6 +2975,7 @@ export function renderBrowserAppRuntimeScript(): string {
       !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
+    restoreArticleScrollAnchor(scrollAnchor);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
   }

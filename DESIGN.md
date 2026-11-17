@@ -155,6 +155,8 @@ The header comment of `browser-app-styles.ts` describes the direction as quiet, 
 
 The dark table above leaves out `--scrim` and `--shadow`, which are also redefined for dark. `--radius: 8px` is light-only and inherited. The article iframe has its own set, `--frame-page`, `--frame-text`, `--frame-link` (`#0063d1` / `#409cff`), `--frame-border`, `--frame-pre`, `--frame-quote` and `--frame-muted`, in `browser-app-client.ts` (~line 335). It forces newsletter backgrounds transparent in dark mode.
 
+**Article list read state.** A read row that is not open shrinks to one quiet line: source and time, then the title in `--muted` at regular weight, truncated, with no preview or image. Unread rows keep the bold title, two-line preview and image, so read and unread differ by shape, not only by grey. The open row always shows in full, and Read It Later rows keep their own treatment. Because rows above the reader's place change height, `renderArticles()` keeps the open row (or the first row on screen) where it was across re-renders; at the very top of the list there is no scroll to give back, so the open row moves up as the row above it shrinks.
+
 **Themes.**
 - App theme: `data-theme` on `<html>`, light or dark. It is stored in `pigeon.browser.theme` and falls back to `prefers-color-scheme`. `browser-app.ts` sets the `theme-color` meta to `#f5f5f6` / `#19191b`.
 - Article theme: `app`, `light`, `dark`, `sepia` or `system`, mapped by `frameTheme()` in `src/browser-reading-preferences.ts`. Only sepia paints its own colors (`#433a2c` on `#f6ecd1`, links `#735c17`, the same as iOS) in `frameCSS()` there.

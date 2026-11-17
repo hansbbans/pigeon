@@ -712,6 +712,19 @@ ${iconVariables()}
 
       .article-card.is-read:not(.is-active) .article-title { color: var(--text-secondary); font-weight: 500; }
       .article-card.is-read:not(.is-active) .article-preview { color: var(--muted); }
+      /* Read rows shrink to one quiet line (source and time, then the title) so
+         unread ones stand out by shape, not only by a lighter grey. The open
+         row stays full; Read It Later rows keep their own treatment. */
+      .article-card.is-read:not(.is-active):not(.saved-card) { padding-top: 0.45rem; padding-bottom: 0.5rem; }
+      .article-card.is-read:not(.is-active):not(.saved-card) .article-title {
+        overflow: hidden;
+        color: var(--muted);
+        font-weight: 400;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .article-card.is-read:not(.is-active):not(.saved-card) .article-preview,
+      .article-card.is-read:not(.is-active):not(.saved-card) .article-hero { display: none; }
 
       .article-star {
         position: absolute;
