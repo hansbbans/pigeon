@@ -8,6 +8,7 @@ import {
 	buildFeedViews,
 	createArticleFrameDocument,
 	createContentLoadPlan,
+	createFeedOrderComparator,
 	createLoggedOutSession,
 	createSessionFromToken,
 	extractAuthToken,
@@ -681,4 +682,26 @@ test('formatArticleListTime gives short Reeder-style row times', () => {
 	assert.match(formatArticleListTime(seconds(new Date(2025, 2, 20, 8, 0)), now), /2025/);
 	assert.equal(formatArticleListTime(0, now), '');
 	assert.equal(formatArticleListTime(undefined, now), '');
+});
+
+test('createFeedOrderComparator groups by folded feed title and feed ID, newest first, unloaded items last', () => {
+	const items: Record<string, { published: number; origin?: { title?: string; streamId?: string } }> = {
+		'1': { published: 100, origin: { title: 'beta', streamId: 'feed/3' } },
+		'2': { published: 300, origin: { title: 'Alpha', streamId: 'feed/9' } },
+		'3': { published: 200, origin: { title: 'ALPHA', streamId: 'feed/2' } },
+		'4': { published: 300, origin: { title: 'Alpha', streamId: 'feed/9' } },
+		'5': { published: 400, origin: { title: 'Beta', streamId: 'feed/3' } },
+		'6': { published: 500, origin: { title: 'Écho', streamId: 'feed/4' } },
+	};
+	const compare = createFeedOrderComparator((id) => items[id]);
+	assert.deepEqual(['1', '2', '3', '4', '5', '6', '8', '7'].sort(compare), ['3', '4', '2', '5', '1', '6', '8', '7']);
+	assert.equal(compare('1', '1'), 0);
+});
+
+test('createFeedOrderComparator survives serialization into the browser script', () => {
+	const script = renderBrowserAppClientScript();
+	const window: Record<string, any> = {};
+	new Function('window', script)(window);
+	const compare = window.__PIGEON_BROWSER_CLIENT__.createFeedOrderComparator((id: string) => ({ published: Number(id), origin: { title: id === '1' ? 'b' : 'A', streamId: 'feed/' + id } }));
+	assert.deepEqual(['1', '2', '3'].sort(compare), ['2', '3', '1']);
 });

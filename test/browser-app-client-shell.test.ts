@@ -18,6 +18,7 @@ import {
 	findListButtonByViewId,
 	finishArticleMutation,
 	flushBrowserTasks,
+	renderedArticleIds,
 	waitForBrowserCondition,
 } from './helpers/browser-app-client-harness';
 
@@ -1189,6 +1190,12 @@ test('runtime script expands folder feeds and requests the folder label stream w
 				});
 			}
 
+			// Folders open "By feed", a browser articles query.
+			if (String(input).startsWith('/api/v1/browser/articles?')) {
+				streamRequests.push(String(input));
+				return Response.json({ itemIds: ['101'], continuation: null, hasMore: false, sort: 'feed' });
+			}
+
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
 				return Response.json({
 					items: [
@@ -1219,8 +1226,10 @@ test('runtime script expands folder feeds and requests the folder label stream w
 
 	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
 	const folderRequestUrl = new URL(`https://pigeon.example${streamRequests.at(-1) ?? ''}`);
-	assert.equal(folderRequestUrl.searchParams.get('s'), 'user/-/label/Daily Reads');
-	assert.equal(folderRequestUrl.searchParams.get('xt'), null);
+	assert.equal(folderRequestUrl.pathname, '/api/v1/browser/articles');
+	assert.equal(folderRequestUrl.searchParams.get('stream'), 'user/-/label/Daily Reads');
+	assert.equal(folderRequestUrl.searchParams.get('sort'), 'feed');
+	assert.equal(folderRequestUrl.searchParams.get('filter'), 'all');
 
 	const requestCountBeforeToggle = streamRequests.length;
 	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
@@ -1233,6 +1242,109 @@ test('runtime script expands folder feeds and requests the folder label stream w
 
 	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
 	await waitForBrowserCondition(() => !findListButtonByViewId(elements.get('folders-list'), 'feed/1'));
+});
+
+test('folders open By feed with a label per feed; their sort stays apart from other views', async () => {
+	const requests: URL[] = [];
+	const items: Record<string, { feed: string; title: string; published: number }> = {
+		'101': { feed: 'feed/1', title: 'Alpha', published: 1_742_460_100 },
+		'102': { feed: 'feed/2', title: 'Bravo', published: 1_742_460_300 },
+		'103': { feed: 'feed/1', title: 'Alpha', published: 1_742_460_200 },
+	};
+	const order: Record<string, string[]> = { feed: ['103', '101', '102'], newest: ['102', '103', '101'], oldest: ['101', '103', '102'] };
+	const { elements, dispatchKeydown } = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			if (input === '/reader/api/0/subscription/list') {
+				const folder = [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }];
+				return Response.json({ subscriptions: [
+					{ id: 'feed/1', title: 'Alpha', iconUrl: 'https://icons.example/alpha.png', categories: folder },
+					{ id: 'feed/2', title: 'Bravo', categories: folder },
+					{ id: 'feed/3', title: 'Charlie' },
+				] });
+			}
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/reader/api/0/stream/items/ids') {
+				requests.push(url);
+				const ids = url.searchParams.get('s') === 'user/-/label/Daily Reads' ? order.newest : [];
+				return Response.json({ itemRefs: ids.map((id) => ({ id })) });
+			}
+			if (url.pathname === '/api/v1/browser/articles') {
+				requests.push(url);
+				const ids = url.searchParams.get('stream') === 'user/-/label/Daily Reads' ? order[url.searchParams.get('sort')!] : [];
+				return Response.json({ itemIds: ids, continuation: null, hasMore: false, sort: url.searchParams.get('sort') });
+			}
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => items[id]).map((id) => ({
+					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+					title: `Story ${id}`, published: items[id].published,
+					origin: { title: items[id].title, streamId: items[id].feed },
+					summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
+				})) });
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	const list = () => elements.get('articles-list')!.children;
+	const headers = () => list().filter((row) => row.classList.contains('article-feed-header'));
+	const sortSelect = elements.get('article-sort-select')!;
+	async function chooseSort(value: string) {
+		sortSelect.value = value;
+		sortSelect.dispatch('change');
+		await flushBrowserTasks();
+	}
+	async function openView(listId: string, viewId: string) {
+		await findListButtonByViewId(elements.get(listId), viewId)!.dispatch('click');
+		await flushBrowserTasks();
+	}
+
+	await elements.get('login-form')!.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')));
+	await openView('folders-list', 'user/-/label/Daily Reads');
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+
+	assert.equal(requests.at(-1)!.searchParams.get('sort'), 'feed');
+	assert.equal(sortSelect.value, 'feed');
+	assert.deepEqual(renderedArticleIds({ elements } as any), order.feed);
+	// Label, 103, 101, label, 102: labels are list rows without an article button.
+	assert.deepEqual(list().map((row) => row.classList.contains('article-feed-header') ? 'header' : 'article'), ['header', 'article', 'article', 'header', 'article']);
+	assert.deepEqual(headers().map((row) => findDescendantByClass(row, 'article-feed-header-title')?.textContent), ['Alpha', 'Bravo']);
+	assert.deepEqual(headers().map((row) => row.getAttribute('data-feed-stream')), ['feed/1', 'feed/2']);
+	assert.equal(findDescendantByClass(headers()[0], 'feed-icon')?.getAttribute('src'), 'https://icons.example/alpha.png');
+	assert.equal(findDescendantByClass(headers()[1], 'feed-icon'), undefined);
+	assert.ok(headers().every((row) => !findDescendantByAttribute(row, 'data-item-id')));
+	// Under a label the row leaves out the repeated feed name.
+	assert.equal(findDescendantByClass(findListButtonByItemId(elements.get('articles-list'), '103'), 'article-source'), undefined);
+	// The first article, not a label, is selected; j moves across a feed boundary to the next article.
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 103');
+	dispatchKeydown('j');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 101');
+	dispatchKeydown('j');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 102');
+
+	// Newest first in a folder mixes feeds and drops the labels.
+	await chooseSort('newest');
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).join() === order.newest.join());
+	assert.equal(headers().length, 0);
+	assert.ok(findDescendantByClass(findListButtonByItemId(elements.get('articles-list'), '103'), 'article-source'));
+
+	// Other views keep their own sort and never send sort=feed.
+	await openView('views-list', 'all');
+	assert.equal(sortSelect.value, 'newest');
+	await openView('folders-list', 'user/-/label/Daily Reads');
+	assert.equal(sortSelect.value, 'newest', 'the folder sort sticks for folders');
+	await chooseSort('feed');
+	await waitForBrowserCondition(() => headers().length === 2);
+	const requestsBeforeAll = requests.length;
+	await openView('views-list', 'all');
+	assert.equal(sortSelect.value, 'newest');
+	await chooseSort('oldest');
+	await openView('folders-list', 'user/-/label/Daily Reads');
+	assert.equal(sortSelect.value, 'feed', 'Oldest first in All does not change the folder sort');
+	await openView('feeds-list', 'feed/3');
+	assert.equal(sortSelect.value, 'oldest');
+	assert.ok(requests.slice(requestsBeforeAll).every((url) => url.searchParams.get('sort') !== 'feed' || url.searchParams.get('stream') === 'user/-/label/Daily Reads'));
 });
 
 for (const scope of ['feed', 'folder']) {

@@ -1,3 +1,5 @@
+import { createFeedOrderComparator } from './browser-app-client';
+
 /**
  * Browser-owned IndexedDB library, emitted separately so the UI can opt in.
  * Adapter: create({ token, getSessionKey, authenticatedJson(path, init), onProgress?, onError?, storageFactory? }).
@@ -12,6 +14,8 @@
 export function renderBrowserOfflineScript(): string {
  return String.raw`(function () {
  'use strict';
+ function __name(target) { return target; }
+ ${createFeedOrderComparator.toString()}
  var STORES = ['meta', 'feeds', 'articles', 'bodies', 'statuses', 'positions', 'outbox'];
  function offlineError(code, message) { var error = new Error(message); error.code = code; return error; }
  async function accountHash(token) {
@@ -229,7 +233,7 @@ export function renderBrowserOfflineScript(): string {
     var query = options || {}; var outbox = await pending(); var feeds = await all('feeds'); var byFeed = new Map(feeds.map(function (feed) { return [feed.feedKey, feed]; }));
     var articles = await all('articles'); var matching = []; var needle = String(query.q || '').trim().toLocaleLowerCase(); var stream = query.stream || 'all';
     if (!['all','reading-list','unread','read','starred','saved','user/-/state/com.google/reading-list','user/-/state/com.google/read','user/-/state/com.google/starred'].includes(stream) && !/^feed\/[1-9][0-9]*$/.test(stream) && !(stream.indexOf('user/-/label/') === 0 && stream.slice('user/-/label/'.length).length > 0)) throw offlineError('query', 'This view is not supported in the locally saved library.');
-    if (needle.length > 200 || query.filter && !['all','read','unread'].includes(query.filter) || query.sort && !['newest','oldest','shortest','longest'].includes(query.sort) || query.kind && !['all','text','video'].includes(query.kind) || query.length && !['any','short','medium','long'].includes(query.length)) throw offlineError('query', 'Unsupported offline search, filter or sort.');
+    if (needle.length > 200 || query.filter && !['all','read','unread'].includes(query.filter) || query.sort && !['newest','oldest','shortest','longest','feed'].includes(query.sort) || query.sort === 'feed' && stream.indexOf('user/-/label/') !== 0 || query.kind && !['all','text','video'].includes(query.kind) || query.length && !['any','short','medium','long'].includes(query.length)) throw offlineError('query', 'Unsupported offline search, filter or sort.');
     for (var saved of articles) {
      var article = overlay(saved, outbox); var feed = byFeed.get(article.feedKey);
      if (feed && feed.isActive === false) continue;
@@ -252,7 +256,12 @@ export function renderBrowserOfflineScript(): string {
      if (needle && !searchable.includes(needle)) { var body = await read('bodies', article.id); if (!body || !String(body.text || '').toLocaleLowerCase().includes(needle)) continue; }
      matching.push(article);
     }
-    if (query.sort === 'shortest' || query.sort === 'longest') {
+    if (query.sort === 'feed') {
+     // The browser's "By feed" order, from the fields contents() reports as origin and published.
+     var byId = new Map(matching.map(function (article) { var feed = byFeed.get(article.feedKey); return [article.decimalId, { published: Math.floor(new Date(article.receivedAt).getTime() / 1000), origin: { title: feed && feed.title || article.source, streamId: feed && feed.streamId || '' } }]; }));
+     var compareByFeed = createFeedOrderComparator(function (id) { return byId.get(id); });
+     matching.sort(function (a, b) { return compareByFeed(a.decimalId, b.decimalId); });
+    } else if (query.sort === 'shortest' || query.sort === 'longest') {
      var direction = query.sort === 'shortest' ? 1 : -1;
      matching.sort(function (a, b) { if (a.lengthKey === null || b.lengthKey === null) return a.lengthKey === b.lengthKey ? direction * (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1) : a.lengthKey === null ? 1 : -1; return direction * (a.lengthKey - b.lengthKey) || direction * (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1); });
     } else matching.sort(function (a, b) { var difference = new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime() || (BigInt(a.decimalId) > BigInt(b.decimalId) ? 1 : -1); return query.sort === 'oldest' ? difference : -difference; });

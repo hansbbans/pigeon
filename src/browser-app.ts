@@ -205,7 +205,7 @@ ${renderBrowserAppStyles()}
                     <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
                     <div class="menu-panel">
                       <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
-                      <label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                      <label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="feed">By feed</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
                       <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
                       <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
                       <hr />
@@ -592,6 +592,13 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
   let articleSortOrder = 'newest';
+  // Folders keep their own sort, "By feed" until changed, apart from every other view.
+  let folderSortOrder = 'feed';
+  // Read rows render compact, except rows a list has already shown in full this
+  // page session: those stay full, only dimmed. So a loaded row never changes
+  // height in a list, and a list's saved scrollTop stays valid when the reader
+  // comes back to it. Keyed by list (view and query); a reload starts over.
+  const fullRowIdsByList = new Map();
   let membershipRootRequestId = 0;
   let activeLoadedQueryKey = '';
   let queuedQueryReload = null;
@@ -1075,12 +1082,17 @@ export function renderBrowserAppRuntimeScript(): string {
     if (view?.kind === 'saved') return { q: articleSearchQuery, filter: savedFilters.status === 'archive' ? 'read' : 'unread',
       sort: savedFilters.sort, kind: savedFilters.kind, length: savedFilters.length };
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
-      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: view?.kind === 'recommended' ? recommendationSort : articleSortOrder };
+      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: getListSortOrder(view) };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
     if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
       query.dayBounds = client.getLocalDayBounds();
     }
     return query;
+  }
+
+  function getListSortOrder(view) {
+    if (view?.kind === 'recommended') return recommendationSort;
+    return view?.kind === 'folder' ? folderSortOrder : articleSortOrder;
   }
 
   function getViewQueryKey(viewId) {
@@ -1098,6 +1110,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if (sort === 'score') return (left, right) => (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
       if (sort === 'recommended') return (left, right) => (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
     }
+    // Matches the server's sort=feed exactly, so kept rows land where the server puts them.
+    if (sort === 'feed') return client.createFeedOrderComparator((id) => loadedItemsById[id]);
     if (sort === 'shortest' || sort === 'longest') {
       // Matches the server: unknown lengths last, then length, then id.
       const sign = sort === 'shortest' ? 1 : -1;
@@ -1429,6 +1443,8 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = '';
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
+    folderSortOrder = 'feed';
+    fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
     queuedQueryReload = null;
@@ -1583,6 +1599,9 @@ export function renderBrowserAppRuntimeScript(): string {
     if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
     // Position says nothing about the ranker once the reader re-sorts For You.
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
+    // Compact read rows are shorter, so more fit on screen: mark them so the
+    // report can keep row shape apart from reading behaviour.
+    if (renderedArticleCards.find((rendered) => rendered.id === card.id)?.node.classList.contains('is-compact')) metadata.row = 'compact';
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -2783,8 +2802,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const savedView = view?.kind === 'saved';
     articleReadFilterSelect.value = savedView ? articleReadFilter : getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || savedView || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
-    articleSortSelect.value = view?.kind === 'recommended' ? recommendationSort : articleSortOrder;
-    for (const option of articleSortSelect.querySelectorAll('option')) option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
+    for (const option of articleSortSelect.querySelectorAll('option')) {
+      option.hidden = (['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended') ||
+        (option.value === 'feed' && view?.kind !== 'folder');
+    }
+    articleSortSelect.value = getListSortOrder(view);
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
     articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || savedView || Boolean(pendingArticleMutation) ||
@@ -2798,12 +2820,13 @@ export function renderBrowserAppRuntimeScript(): string {
     saveActiveViewState();
     const query = articleSearchInput.value.trim();
     const filter = ['unread', 'read'].includes(articleReadFilterSelect.value) ? articleReadFilterSelect.value : 'all';
-    const sort = articleSortSelect.value === 'oldest' ? 'oldest' : 'newest';
+    const sort = articleSortSelect.value;
     const currentView = getActiveView();
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
-    if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(articleSortSelect.value) ? articleSortSelect.value : 'recommended';
-    else articleSortOrder = sort;
+    if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(sort) ? sort : 'recommended';
+    else if (currentView?.kind === 'folder') folderSortOrder = ['feed','newest','oldest'].includes(sort) ? sort : 'feed';
+    else articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
     heldReaderArticle = null;
     articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
     await loadActiveView();
@@ -2863,17 +2886,32 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const savedView = isSavedView();
     articlesStatus.textContent = entries.length + (savedView ? ' saved item' : ' article') + (entries.length === 1 ? '' : 's');
+    const listKey = getViewQueryKey(activeViewId);
+    if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
+    const fullRowIds = fullRowIdsByList.get(listKey);
+    // "By feed": a quiet label before each feed's run. Labels are not articles:
+    // they are not in renderedArticleCards, so selection, keys and impressions skip them.
+    const groupByFeed = getActiveView()?.kind === 'folder' && getArticleQuery().sort === 'feed';
+    let groupStreamId = null;
     for (const entry of entries) {
       const article = loadedItemsById[entry.id];
+      if (groupByFeed && article && (article.origin?.streamId || '') !== groupStreamId) {
+        groupStreamId = article.origin?.streamId || '';
+        articlesList.appendChild(createFeedGroupHeader(groupStreamId, entry.feedTitle));
+      }
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
+      const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
+      // Only a loaded row counts as shown: a placeholder has no read state yet.
+      if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
       const listItem = createNode('li');
       const button = createNode('button', {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
           entry.id === selectedItemId ? 'is-active' : '',
-          savedView && article ? 'saved-card' : articleListMode !== 'titles' && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
+          isCompact ? 'is-compact' : '',
+          savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
         attributes: {
           type: 'button',
@@ -2901,14 +2939,14 @@ export function renderBrowserAppRuntimeScript(): string {
       if (isStarred) title.appendChild(createNode('span', {
         classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
       }));
-      title.appendChild(createNode('span', { text: entry.title }));
+      title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
       if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
       copy.appendChild(title);
-      if (getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
+      if (!isCompact && getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
         const detail = recommendationDetails.get(entry.id);
         copy.appendChild(createNode('span', {classNames:['article-meta'], text: 'Score ' + Number(detail.score || 0).toFixed(1) + (detail.explanation ? ' · ' + (typeof detail.explanation === 'string' ? detail.explanation : JSON.stringify(detail.explanation)) : '')}));
       }
-      if (articleListMode !== 'titles' && entry.preview) {
+      if (articleListMode !== 'titles' && !isCompact && entry.preview) {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       if (articleListMode !== 'titles') {
@@ -2916,14 +2954,14 @@ export function renderBrowserAppRuntimeScript(): string {
         const readingLength = showReadingTime ? entry.readingLength : null;
         if (entry.feedTitle || listTime || readingLength) {
           const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
-          if (entry.feedTitle) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
+          if (entry.feedTitle && !groupByFeed) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
           if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
           if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
           copy.appendChild(meta);
         }
       }
       cardGrid.appendChild(copy);
-      if (articleListMode !== 'titles' && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
+      if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
         const image = createNode('img', {
             classNames: ['article-hero'],
             attributes: {
@@ -2949,6 +2987,14 @@ export function renderBrowserAppRuntimeScript(): string {
     restoreArticleScrollTop(preservedScrollTop);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
+  }
+
+  function createFeedGroupHeader(streamId, title) {
+    const header = createNode('li', { classNames: ['article-feed-header'], attributes: { 'data-feed-stream': streamId } });
+    const iconUrl = views.find((view) => view.kind === 'feed' && view.streamId === streamId)?.iconUrl;
+    if (iconUrl) header.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: iconUrl, alt: '', width: '14', height: '14' } }));
+    header.appendChild(createNode('span', { classNames: ['article-feed-header-title'], text: title || 'Unknown feed' }));
+    return header;
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
@@ -4011,7 +4057,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function usesBrowserArticlesQuery(view) {
     // Read It Later exists only as the browser/articles saved stream.
     if (view?.kind === 'saved') return true;
-    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest');
+    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || getListSortOrder(view) !== 'newest');
   }
 
   function buildStreamParams(view, continuation) {

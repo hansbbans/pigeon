@@ -217,3 +217,20 @@ test('offline Read It Later: saved items stay in their own stream and keep their
  assert.equal(saved.extractionState, 'done'); assert.equal(saved.imageUrl, 'https://example.com/a.jpg'); assert.equal(saved.siteName, 'Example'); assert.equal(saved.nativeId, 'native-2');
  assert.deepEqual(plain(await library.feeds()).map((feed: any) => feed.sourceType), ['rss', 'saved']);
 });
+
+test('offline folder sort=feed groups by feed title like the server and is refused outside folders', async () => {
+ const state = fixture();
+ state.setResponse(async () => page([
+  { sequence: 1, entityType: 'feed', entityId: 'one', operation: 'upsert', payload: { feedKey: 'one', streamId: 'feed/1', title: 'zine', folders: ['Design'], isActive: true } },
+  { sequence: 2, entityType: 'feed', entityId: 'two', operation: 'upsert', payload: { feedKey: 'two', streamId: 'feed/2', title: 'Alpha', folders: ['Design'], isActive: true } },
+  { sequence: 3, entityType: 'feed', entityId: 'three', operation: 'upsert', payload: { feedKey: 'three', streamId: 'feed/3', title: 'ALPHA', folders: ['Design'], isActive: true } },
+  article(1, { feedKey: 'one', receivedAt: '2026-10-12T09:00:00.000Z' }), article(2, { feedKey: 'two', receivedAt: '2026-10-12T08:00:00.000Z' }),
+  article(3, { feedKey: 'three', receivedAt: '2026-10-12T11:00:00.000Z' }), article(4, { feedKey: 'one', receivedAt: '2026-10-12T12:00:00.000Z' }),
+  article(5, { feedKey: 'two', receivedAt: '2026-10-12T10:00:00.000Z' }),
+ ], 'v1:6'));
+ const library = await state.api.create(state.adapter()); await library.sync();
+ assert.deepEqual(plain((await library.query({ stream: 'user/-/label/Design', sort: 'feed' })).itemIds), ['5', '2', '3', '4', '1']);
+ assert.deepEqual(plain((await library.query({ stream: 'user/-/label/Design', sort: 'feed', limit: 2, offset: 2 })).itemIds), ['3', '4']);
+ assert.deepEqual(plain((await library.query({ stream: 'user/-/label/Design' })).itemIds), ['4', '3', '5', '1', '2']);
+ for (const stream of ['all', 'feed/1', 'starred', 'saved']) await assert.rejects(library.query({ stream, sort: 'feed' }), /Unsupported/);
+});
