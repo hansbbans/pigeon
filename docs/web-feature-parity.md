@@ -5,7 +5,7 @@ Implementation order requested by Hans, 2026-10-12. Continue PR #126 and preserv
 ## Acceptance checklist
 
 - [x] Read/unread and stars: persistent toggles, Starred view, read indicators, undo, optional automatic read, race/session-safe state.
-- [x] Search/filter/sort: usable search, All/Unread/Read filters, newest/oldest ordering and For You score ordering, coherent paginated results; bulk above/below/age read and undo.
+- [x] Search/filter/sort: usable search, All/Unread/Read filters, newest/oldest ordering, folders grouped By feed by default (alphabetical by feed, newest first within each), and For You score ordering, coherent paginated results; bulk above/below/age read and undo.
 - [x] Library management: add/discover RSS and YouTube, rename/unsubscribe, multi-folder assignment and folder rename/delete, OPML preview/import, stale-feed cleanup/undo.
 - [x] For You: recommendations, scores/explanations, feedback, monitored topics and personalization history/delete/export/reset.
 - [x] Reading controls and integrations: typography/themes/density, reader modes and feed preference, image privacy/zoom, sharing/Readwise, keyboard preferences and reading position.

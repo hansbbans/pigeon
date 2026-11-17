@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { generateApiToken } from '../src/api-auth';
+import { createFeedOrderComparator } from '../src/browser-app-client';
 import { handleNativeApiRequest } from '../src/native-api';
 import worker from '../src/index';
 import { SAVED_FEED_KEY } from '../src/saved-items';
@@ -158,9 +159,125 @@ test('cursor is tied to the complete normalized query and rejects malformed posi
 	}
 	assert.deepEqual((await state.query({ stream: 'all', limit: '100', continuation: page.continuation! })).itemIds, ['1']);
 	const cursor = JSON.parse(atob(page.continuation!.replace(/-/g, '+').replace(/_/g, '/')));
-	for (const invalid of ['', 'invalid!', 'x'.repeat(1025), btoa('{}'), btoa(JSON.stringify({ ...cursor, rowid: -1 })), btoa(JSON.stringify({ ...cursor, date: 'bad' })), btoa(JSON.stringify({ ...cursor, v: 2 }))]) {
+	for (const invalid of ['', 'invalid!', 'x'.repeat(4097), btoa('{}'), btoa(JSON.stringify({ ...cursor, rowid: -1 })), btoa(JSON.stringify({ ...cursor, date: 'bad' })), btoa(JSON.stringify({ ...cursor, v: 2 }))]) {
 		assert.equal((await handleNativeApiRequest(state.request({ continuation: invalid }), state.env)).status, 400);
 	}
+});
+
+// Folder "By feed": feed title case-insensitively (custom title first), then feed ID, then newest first.
+async function feedSortFixture(t: TestContext) {
+	const state = await fixture(t);
+	state.database.exec(`INSERT INTO feeds (rowid, feed_key, display_name, custom_title, source_type, category, is_active)
+		VALUES (10, 'k-beta', 'beta', NULL, 'rss', NULL, 1),
+		(11, 'k-custom', 'Zeta Original', 'Alpha', 'rss', NULL, 1),
+		(12, 'k-upper', 'ALPHA', NULL, 'rss', NULL, 1),
+		(13, 'k-empty-custom', 'Gamma', '', 'rss', NULL, 1),
+		(14, 'k-outside', 'Aardvark', NULL, 'rss', NULL, 1);
+		INSERT INTO feed_tags (feed_key, label) VALUES ('k-beta', 'Mixed'), ('k-custom', 'Mixed'), ('k-upper', 'Mixed'), ('k-empty-custom', 'Mixed');`);
+	// Dates interleave across feeds so a date sort would mix them.
+	const rows: [number, string, string][] = [
+		[1, 'k-beta', '2026-10-12T09:00:00.000Z'], [2, 'k-custom', '2026-10-12T08:00:00.000Z'],
+		[3, 'k-upper', '2026-10-12T10:00:00.000Z'], [4, 'k-empty-custom', '2026-10-12T07:00:00.000Z'],
+		[5, 'k-beta', '2026-10-12T11:00:00.000Z'], [6, 'k-custom', '2026-10-12T12:00:00.000Z'],
+		[7, 'k-upper', '2026-10-12T06:00:00.000Z'], [8, 'k-empty-custom', '2026-10-12T13:00:00.000Z'],
+		[9, 'k-custom', '2026-10-12T12:00:00.000Z'], [10, 'k-outside', '2026-10-12T14:00:00.000Z'],
+		[11, 'k-beta', '2026-10-12 05:00:00'],
+	];
+	for (const [id, feed, date] of rows) state.insert(id, { feed, date });
+	return state;
+}
+
+// Alpha (custom title, feed 11) ties ALPHA (feed 12) and wins on feed ID; empty custom_title falls back to Gamma.
+const FEED_ORDER = ['9', '6', '2', '3', '7', '5', '1', '11', '8', '4'];
+
+test('feed sort groups a folder by feed title, case-insensitively, newest first within each feed', async (t) => {
+	const state = await feedSortFixture(t);
+	const page = await state.query({ stream: 'user/-/label/Mixed', sort: 'feed', limit: '100' });
+	assert.deepEqual(page.itemIds, FEED_ORDER);
+	assert.equal(page.sort, 'feed');
+	assert.deepEqual((await state.query({ stream: 'user/-/label/Mixed', sort: 'feed', filter: 'unread' })).itemIds, FEED_ORDER);
+	// The date sorts still mix feeds in the same folder.
+	assert.deepEqual((await state.query({ stream: 'user/-/label/Mixed' })).itemIds, ['8', '9', '6', '5', '3', '1', '2', '4', '7', '11']);
+});
+
+for (const limit of ['1', '2', '3']) {
+	test(`feed sort paginates across feed boundaries with limit ${limit}`, async (t) => {
+		const state = await feedSortFixture(t);
+		const actual: string[] = [];
+		let continuation: string | null = null;
+		let pages = 0;
+		do {
+			const page = await state.query({ stream: 'user/-/label/Mixed', sort: 'feed', limit, ...(continuation ? { continuation } : {}) });
+			assert.equal(page.hasMore, page.continuation !== null);
+			actual.push(...page.itemIds);
+			continuation = page.continuation;
+			assert.ok(++pages <= FEED_ORDER.length);
+		} while (continuation);
+		assert.deepEqual(actual, FEED_ORDER);
+	});
+}
+
+test('feed sort cursor keeps long non-Latin-1 titles and is rejected for any other query', async (t) => {
+	const state = await feedSortFixture(t);
+	// Ü is not case-folded (as SQLite NOCASE), so this feed now sorts after Gamma.
+	state.database.prepare('UPDATE feeds SET custom_title = ? WHERE rowid = 10').run('Ünïcode ’title’ 🐦 '.repeat(60));
+	const folder = { stream: 'user/-/label/Mixed', sort: 'feed' };
+	const first = await state.query({ ...folder, limit: '8' });
+	assert.deepEqual(first.itemIds, ['9', '6', '2', '3', '7', '8', '4', '5']);
+	assert.ok(first.continuation!.length > 1024);
+	assert.deepEqual((await state.query({ ...folder, limit: '100', continuation: first.continuation! })).itemIds, ['1', '11']);
+	for (const changes of [{ sort: 'newest' }, { stream: 'user/-/label/Other' }, { filter: 'unread' }]) {
+		assert.equal((await handleNativeApiRequest(state.request({ ...folder, ...changes, continuation: first.continuation! }), state.env)).status, 400);
+	}
+	const dated = await state.query({ stream: 'user/-/label/Mixed', limit: '1' });
+	assert.equal((await handleNativeApiRequest(state.request({ ...folder, continuation: dated.continuation! }), state.env)).status, 400);
+	const second = await state.query({ ...folder, limit: '2' });
+	const cursor = JSON.parse(atob(second.continuation!.replace(/-/g, '+').replace(/_/g, '/')));
+	assert.deepEqual({ title: cursor.title, feed: cursor.feed }, { title: 'Alpha', feed: 11 });
+	for (const invalid of [{ ...cursor, title: undefined }, { ...cursor, title: 7 }, { ...cursor, feed: undefined }, { ...cursor, feed: 0 }, { ...cursor, feed: 1.5 }]) {
+		assert.equal((await handleNativeApiRequest(state.request({ ...folder, continuation: btoa(JSON.stringify(invalid)).replace(/=+$/, '') }), state.env)).status, 400);
+	}
+});
+
+test('the browser comparator orders a folder exactly as the server feed sort', async (t) => {
+	const state = await fixture(t);
+	const titles = ['Feed 10', 'feed 2', 'École', 'eclair', 'Zebra', '_under', 'Über', '🐦 Bird', 'a', 'A', 'ab', 'Ab', '[x]', 'z'];
+	titles.forEach((title, index) => {
+		const rowid = 20 + index;
+		state.database.prepare(`INSERT INTO feeds (rowid, feed_key, display_name, custom_title, source_type, is_active) VALUES (?, ?, ?, ?, 'rss', 1)`)
+			.run(rowid, `k${rowid}`, index % 3 === 0 ? title : 'Ignored display name', index % 3 === 0 ? null : title);
+		state.database.prepare(`INSERT INTO feed_tags (feed_key, label) VALUES (?, 'Agree')`).run(`k${rowid}`);
+	});
+	let id = 0;
+	for (let round = 0; round < 3; round++) {
+		for (let index = 0; index < titles.length; index++) {
+			id += 1;
+			state.insert(id, { feed: `k${20 + index}`, date: `2026-10-${String(10 + ((id * 7) % 5)).padStart(2, '0')}T12:00:00.000Z` });
+		}
+	}
+	const server = (await state.query({ stream: 'user/-/label/Agree', sort: 'feed', limit: '100' })).itemIds;
+	assert.equal(server.length, id);
+	const rows = state.database.prepare(`SELECT i.rowid, i.received_at, f.rowid AS feed, f.custom_title, f.display_name
+		FROM items i JOIN feeds f ON f.feed_key = i.feed_key`).all() as { rowid: number; received_at: string; feed: number; custom_title: string | null; display_name: string }[];
+	// The same fields the browser has for a loaded item (greader origin and published seconds).
+	const items = new Map(rows.map((row) => [String(row.rowid), { published: Math.floor(Date.parse(row.received_at) / 1000),
+		origin: { title: row.custom_title || row.display_name, streamId: `feed/${row.feed}` } }]));
+	const client = [...items.keys()].reverse().sort(createFeedOrderComparator((itemId) => items.get(itemId)));
+	assert.deepEqual(client, server);
+});
+
+test('sort=feed is accepted only for folder streams, in the list and the count', async (t) => {
+	const state = await feedSortFixture(t);
+	for (const stream of ['all', 'reading-list', 'read', 'starred', 'saved', 'feed/10', 'user/-/state/com.google/reading-list']) {
+		assert.equal((await handleNativeApiRequest(state.request({ stream, sort: 'feed' }), state.env)).status, 400, stream);
+	}
+	const auth = state.request().headers.get('Authorization')!;
+	const count = (params: Record<string, string>) => worker.fetch(new Request(
+		`https://pigeon.example/api/v1/browser/articles/count?${new URLSearchParams(params)}`, { headers: { Authorization: auth } }), state.env);
+	const folderCount = await count({ stream: 'user/-/label/Mixed', sort: 'feed' });
+	assert.equal(folderCount.status, 200);
+	assert.deepEqual(await folderCount.json(), { count: 10 });
+	assert.equal((await count({ stream: 'all', sort: 'feed' })).status, 400);
 });
 
 test('invalid query inputs fail closed, including unsupported score sort and ambiguous duplicates', async (t) => {

@@ -664,6 +664,23 @@ ${iconVariables()}
         #articles-list > li:hover + li::before { visibility: hidden; }
       }
 
+      /* Folder "By feed": a quiet section label above each feed's articles. */
+      #articles-list > li.article-feed-header {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 1.1rem 0.7rem 0.35rem 1rem;
+        color: var(--muted);
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      #articles-list > li.article-feed-header:first-child { padding-top: 0.45rem; }
+      #articles-list > li.article-feed-header + li::before { visibility: hidden; }
+      .article-feed-header .feed-icon { width: 14px; height: 14px; border-radius: 3px; }
+      .article-feed-header-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
       .article-card {
         position: relative;
         width: 100%;
