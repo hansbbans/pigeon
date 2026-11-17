@@ -109,6 +109,7 @@ nonisolated struct ReaderKeptArticles: Sendable {
 		_ articles: [Recommendation],
 		filter: ReaderArticleFilter,
 		order: ArticleSortOrder,
+		feeds: ArticleFeedDirectory = .empty,
 		isEligible: (Recommendation) -> Bool = { _ in true },
 	) -> [Recommendation] {
 		var present = Set<Int>()
@@ -138,7 +139,7 @@ nonisolated struct ReaderKeptArticles: Sendable {
 			var high = result.count
 			while low < high {
 				let middle = (low + high) / 2
-				if order.areInIncreasingOrder(result[middle], article) {
+				if order.areInIncreasingOrder(result[middle], article, feeds: feeds) {
 					low = middle + 1
 				} else {
 					high = middle

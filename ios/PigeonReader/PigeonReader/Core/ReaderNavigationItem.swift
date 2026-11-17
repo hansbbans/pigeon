@@ -25,6 +25,13 @@ nonisolated struct ReaderNavigationItem: Codable, Hashable, Identifiable, Sendab
 		kind == .feed
 	}
 
+	/// Folder rows use their label's stream ID, `user/-/label/<name>`, as the
+	/// Pigeon server and every local folder edit spell it. Usable where only a
+	/// collection ID is at hand (restoration, cached snapshot preparation).
+	static func isFolderID(_ id: String) -> Bool {
+		id.hasPrefix("user/-/label/")
+	}
+
 	static func smart(_ section: ReaderSection, unreadCount: Int = 0, streamID savedStreamID: String? = nil) -> Self {
 		let streamID: String = switch section {
 		case .starred: "user/-/state/com.google/starred"

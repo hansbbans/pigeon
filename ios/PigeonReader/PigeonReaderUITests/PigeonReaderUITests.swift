@@ -146,6 +146,26 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertEqual(sidebarValue(of: unrelatedFeed), "1 unread")
 	}
 
+	func testFolderListsStoriesByFeedByDefault() throws {
+		app.launchArguments = [
+			"-reader-sample-data", "-reader-folder-read-data",
+			"-reader-show-sidebar", "-reader-reset-reader-state",
+		]
+		app.launchWithoutAnimations()
+
+		let folder = app.staticTexts["Design"]
+		XCTAssertTrue(revealSidebar(containing: folder))
+		folder.tap()
+		XCTAssertTrue(app.navigationBars["Design"].firstMatch.waitForExistence(timeout: 5))
+		// Both feeds' stories arrive (the second on the next page), each under its feed's label.
+		let firstLabel = app.descendants(matching: .any)["article-feed-section-feed/1"]
+		let secondLabel = app.descendants(matching: .any)["article-feed-section-feed/2"]
+		XCTAssertTrue(firstLabel.waitForExistence(timeout: 10))
+		XCTAssertTrue(secondLabel.waitForExistence(timeout: 10))
+		XCTAssertLessThan(firstLabel.frame.minY, secondLabel.frame.minY)
+		attachScreenshot(named: "folder-by-feed")
+	}
+
 	func testFeedMarkReadShowsProgressWhileCompleting() throws {
 		try verifyMarkAllReadProgress(isFeed: true)
 	}
