@@ -217,14 +217,15 @@ for (const limit of ['1', '2', '3']) {
 	});
 }
 
-test('feed sort cursor keeps long non-Latin-1 titles and is rejected for any other query', async (t) => {
+test('feed sort cursor stays short with a long non-Latin-1 title and is rejected for any other query', async (t) => {
 	const state = await feedSortFixture(t);
 	// Ü is not case-folded (as SQLite NOCASE), so this feed now sorts after Gamma.
-	state.database.prepare('UPDATE feeds SET custom_title = ? WHERE rowid = 10').run('Ünïcode ’title’ 🐦 '.repeat(60));
+	// Far longer than a cursor may be: the cursor carries the feed row ID, not its title.
+	state.database.prepare('UPDATE feeds SET custom_title = ? WHERE rowid = 10').run('Ünïcode ’title’ 🐦 '.repeat(600));
 	const folder = { stream: 'user/-/label/Mixed', sort: 'feed' };
 	const first = await state.query({ ...folder, limit: '8' });
 	assert.deepEqual(first.itemIds, ['9', '6', '2', '3', '7', '8', '4', '5']);
-	assert.ok(first.continuation!.length > 1024);
+	assert.ok(first.continuation!.length < 300);
 	assert.deepEqual((await state.query({ ...folder, limit: '100', continuation: first.continuation! })).itemIds, ['1', '11']);
 	for (const changes of [{ sort: 'newest' }, { stream: 'user/-/label/Other' }, { filter: 'unread' }]) {
 		assert.equal((await handleNativeApiRequest(state.request({ ...folder, ...changes, continuation: first.continuation! }), state.env)).status, 400);
@@ -233,8 +234,8 @@ test('feed sort cursor keeps long non-Latin-1 titles and is rejected for any oth
 	assert.equal((await handleNativeApiRequest(state.request({ ...folder, continuation: dated.continuation! }), state.env)).status, 400);
 	const second = await state.query({ ...folder, limit: '2' });
 	const cursor = JSON.parse(atob(second.continuation!.replace(/-/g, '+').replace(/_/g, '/')));
-	assert.deepEqual({ title: cursor.title, feed: cursor.feed }, { title: 'Alpha', feed: 11 });
-	for (const invalid of [{ ...cursor, title: undefined }, { ...cursor, title: 7 }, { ...cursor, feed: undefined }, { ...cursor, feed: 0 }, { ...cursor, feed: 1.5 }]) {
+	assert.deepEqual({ title: cursor.title, feed: cursor.feed }, { title: undefined, feed: 11 });
+	for (const invalid of [{ ...cursor, feed: undefined }, { ...cursor, feed: '11' }, { ...cursor, feed: 0 }, { ...cursor, feed: 1.5 }]) {
 		assert.equal((await handleNativeApiRequest(state.request({ ...folder, continuation: btoa(JSON.stringify(invalid)).replace(/=+$/, '') }), state.env)).status, 400);
 	}
 });

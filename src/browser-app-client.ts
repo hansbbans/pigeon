@@ -324,7 +324,17 @@ export function sortSubscriptionsByTitle(subscriptions: BrowserSubscription[]): 
 export function createFeedOrderComparator(
 	lookup: (itemId: string) => { published?: number; origin?: { title?: string; streamId?: string } } | null | undefined,
 ): (leftId: string, rightId: string) => number {
-	const foldedTitle = (title: string | undefined) => String(title ?? '').replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+	// A sort compares each item many times; fold each distinct title once.
+	const foldedTitles = new Map<string, string>();
+	const foldedTitle = (title: string | undefined) => {
+		const raw = String(title ?? '');
+		let folded = foldedTitles.get(raw);
+		if (folded === undefined) {
+			folded = raw.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+			foldedTitles.set(raw, folded);
+		}
+		return folded;
+	};
 	const feedNumber = (streamId: string | undefined) => {
 		const match = /^feed\/(\d+)$/.exec(streamId ?? '');
 		return match ? Number(match[1]) : 0;

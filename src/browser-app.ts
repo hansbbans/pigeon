@@ -4041,8 +4041,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function usesBrowserArticlesQuery(view) {
     // Read It Later exists only as the browser/articles saved stream.
     if (view?.kind === 'saved') return true;
-    const sort = view?.kind === 'folder' ? folderSortOrder : articleSortOrder;
-    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || sort !== 'newest');
+    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || getListSortOrder(view) !== 'newest');
   }
 
   function buildStreamParams(view, continuation) {

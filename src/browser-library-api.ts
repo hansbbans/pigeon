@@ -7,8 +7,7 @@ const READ = 'user/-/state/com.google/read';
 const STARRED = 'user/-/state/com.google/starred';
 const LABEL = 'user/-/label/';
 const SAVED = 'saved';
-// Room for a long feed title in a sort=feed cursor.
-const MAX_CURSOR_LENGTH = 4096;
+const MAX_CURSOR_LENGTH = 1024;
 // Membership filters shared by the list and its count; sort is validated by both
 // so a list query string can be reused for the count.
 const FILTER_PARAMS = ['stream', 'q', 'filter', 'sort', 'kind', 'length', 'since', 'before'];
@@ -37,8 +36,8 @@ interface ArticleCursor {
 	rowid: number;
 	// Length sorts only: the row's length key, null when unknown.
 	len?: number | null;
-	// Feed sort only: the row's feed title and feed row ID.
-	title?: string;
+	// Feed sort only: the row's feed row ID. Its title is read back from
+	// feeds, so a long title never has to fit in the cursor.
 	feed?: number;
 }
 
@@ -46,7 +45,6 @@ interface ArticleRow {
 	rowid: number;
 	date: number;
 	len: number | null;
-	title: string | null;
 	feed: number;
 }
 
@@ -61,6 +59,8 @@ const LENGTH_KEY_SQL = `(CASE WHEN i.media_kind = 'video'
 const MINUTE_KEY = 14_280;
 /** A feed's display title, as the subscription list and item origin report it. */
 const FEED_TITLE_SQL = `COALESCE(NULLIF(f.custom_title, ''), f.display_name)`;
+/** The title of the cursor's feed (bind: feed row ID), the same expression as FEED_TITLE_SQL. */
+const CURSOR_FEED_TITLE_SQL = `(SELECT COALESCE(NULLIF(cf.custom_title, ''), cf.display_name) FROM feeds cf WHERE cf.rowid = ?)`;
 
 /**
  * GET /api/v1/browser/articles (authenticated by handleNativeApiRequest).
@@ -99,9 +99,9 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		let order: string;
 		if (feedSort) {
 			if (cursor) {
-				where.push(`(${FEED_TITLE_SQL} > ? COLLATE NOCASE OR (${FEED_TITLE_SQL} = ? COLLATE NOCASE AND (f.rowid > ? OR (f.rowid = ?
-					AND (julianday(i.received_at) < ? OR (julianday(i.received_at) = ? AND i.rowid < ?))))))`);
-				binds.push(cursor.title!, cursor.title!, cursor.feed!, cursor.feed!, cursor.date, cursor.date, cursor.rowid);
+				where.push(`(${FEED_TITLE_SQL} > ${CURSOR_FEED_TITLE_SQL} COLLATE NOCASE OR (${FEED_TITLE_SQL} = ${CURSOR_FEED_TITLE_SQL} COLLATE NOCASE
+					AND (f.rowid > ? OR (f.rowid = ? AND (julianday(i.received_at) < ? OR (julianday(i.received_at) = ? AND i.rowid < ?))))))`);
+				binds.push(cursor.feed!, cursor.feed!, cursor.feed!, cursor.feed!, cursor.date, cursor.date, cursor.rowid);
 			}
 			order = `${FEED_TITLE_SQL} COLLATE NOCASE ASC, f.rowid ASC, julianday(i.received_at) DESC, i.rowid DESC`;
 		} else if (lengthSort) {
@@ -128,9 +128,7 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 			order = `julianday(i.received_at) ${direction}, i.rowid ${direction}`;
 		}
 		const lengthColumn = query.stream === SAVED ? LENGTH_KEY_SQL : 'NULL';
-		const titleColumn = feedSort ? FEED_TITLE_SQL : 'NULL';
-		const { results } = await env.DB.prepare(`SELECT i.rowid, julianday(i.received_at) AS date, ${lengthColumn} AS len,
-			${titleColumn} AS title, f.rowid AS feed
+		const { results } = await env.DB.prepare(`SELECT i.rowid, julianday(i.received_at) AS date, ${lengthColumn} AS len, f.rowid AS feed
 			FROM items i JOIN feeds f ON f.feed_key = i.feed_key
 			WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ?`)
 			.bind(...binds, limit + 1).all<ArticleRow>();
@@ -140,7 +138,7 @@ export async function handleBrowserArticles(request: Request, env: Env): Promise
 		return Response.json({
 			itemIds: rows.map((row) => String(row.rowid)),
 			continuation: hasMore && last ? encodeCursor({ v: 1, query: fingerprint, date: last.date, rowid: last.rowid,
-				...(lengthSort ? { len: last.len ?? null } : {}), ...(feedSort ? { title: last.title ?? '', feed: last.feed } : {}) }) : null,
+				...(lengthSort ? { len: last.len ?? null } : {}), ...(feedSort ? { feed: last.feed } : {}) }) : null,
 			hasMore,
 			sort: query.sort,
 		}, { headers: { 'Cache-Control': 'no-store' } });
@@ -178,7 +176,7 @@ function buildArticleFilter(query: ArticleQuery): { where: string[]; binds: (str
 		// Bind the escaped pattern so SQL punctuation and LIKE wildcards are literal.
 		const pattern = `%${query.q.replace(/[\\%_]/g, '\\$&')}%`;
 		where.push(`(i.subject LIKE ? ESCAPE '\\' OR ${ARTICLE_AUTHOR_SQL} LIKE ? ESCAPE '\\'
-			OR COALESCE(f.custom_title, f.display_name) LIKE ? ESCAPE '\\' OR i.text_content LIKE ? ESCAPE '\\')`);
+			OR ${FEED_TITLE_SQL} LIKE ? ESCAPE '\\' OR i.text_content LIKE ? ESCAPE '\\')`);
 		binds.push(pattern, pattern, pattern, pattern);
 	}
 	if (query.since) {
@@ -300,7 +298,7 @@ function parseCursor(value: string | null, fingerprint: string, sort: ArticleSor
 		if (!cursor || cursor.v !== 1 || cursor.query !== fingerprint || !Number.isFinite(cursor.date)
 			|| cursor.date < 1721059.5 || cursor.date > 5373484.5 || !Number.isSafeInteger(cursor.rowid) || cursor.rowid < 1
 			|| (cursor.len !== undefined && cursor.len !== null && (!Number.isSafeInteger(cursor.len) || cursor.len < 0))
-			|| (sort === 'feed' && (typeof cursor.title !== 'string' || !Number.isSafeInteger(cursor.feed) || cursor.feed! < 1))) throw new Error();
+			|| (sort === 'feed' && (!Number.isSafeInteger(cursor.feed) || cursor.feed! < 1))) throw new Error();
 		return cursor;
 	} catch { throw new InvalidQuery('Invalid article continuation'); }
 }
