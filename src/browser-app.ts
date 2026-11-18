@@ -398,6 +398,12 @@ export function renderBrowserAppRuntimeScript(): string {
 (() => {
   const config = window.__PIGEON_CONFIG__ || {};
   const client = window.__PIGEON_BROWSER_CLIENT__;
+  {
+    const standalone = window.matchMedia?.('(display-mode: standalone)')?.matches === true || window.navigator?.standalone === true;
+    const rootAddress = window.location?.href ? client.rootAppAddress(window.location.href, standalone) : null;
+    if (rootAddress && window.history?.replaceState) window.history.replaceState(window.history.state, '', rootAddress);
+    void client.ensureRootServiceWorker(window.navigator?.serviceWorker).catch(() => {});
+  }
   const loadDefuddle = client.createScriptLoader(document, ${JSON.stringify('/app/defuddle.js?v=' + DEFUDDLE_VERSION)}, 3000);
   const storageKey = client.AUTH_STORAGE_KEY;
   const themeStorageKey = client.THEME_STORAGE_KEY;
@@ -1781,10 +1787,10 @@ export function renderBrowserAppRuntimeScript(): string {
     const current=()=>requestBelongsToCurrentSession(generation,token);
     try {const library=await openOfflineLibrary(!downloadBodies);if(!library||!current())return;
       if(!window.navigator?.serviceWorker||!window.caches)throw new Error('This browser cannot save the app for offline reload.');
-      await window.navigator.serviceWorker.register('/app/sw.js',{scope:'/app'});
+      await window.navigator.serviceWorker.register('/app/sw.js',{scope:'/'});
       let readyTimer;try {await Promise.race([window.navigator.serviceWorker.ready,new Promise((_,reject)=>{readyTimer=setTimeout(()=>reject(new Error('Offline app setup timed out. Retry online.')),15000);})]);}finally{clearTimeout(readyTimer);}
       if(!current())return;
-      const shell=await (await window.caches.open('pigeon-public-shell-v1')).match(new URL('/app',config.baseUrl).href);
+      const shell=await (await window.caches.open('pigeon-public-shell-v2')).match(new URL('/',config.baseUrl).href);
       if(!shell||shell.status!==200||!shell.headers.get('Content-Type')?.includes('text/html'))throw new Error('The app shell has not been saved. Reload online and retry before relying on offline reload.');
       const replay=await library.replay();if(!current())return;if(replay.pending)throw new Error('Some pending changes were not confirmed. Retry sync before continuing.');
       await library.sync();if(!current())return;

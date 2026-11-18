@@ -42,7 +42,9 @@ export default {
 		if (path === '/app/sw.js' && request.method === 'GET') {
 			return new Response(renderBrowserServiceWorker(), { headers: {
 				'Content-Type': 'application/javascript; charset=utf-8',
-				'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/app',
+				// '/' lets the offline worker control the app at the root URL. Push stays on the older
+				// '/app' registration of this same script, so existing subscriptions keep working.
+				'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/',
 			} });
 		}
 
@@ -74,7 +76,9 @@ export default {
 			return handleFeedList(env);
 		}
 
-		if (path === '/app' || path === '/app/') {
+		// The app lives at the root. '/app' still serves it for Home Screen installs and bookmarks made
+		// before the move; in a browser tab the shell rewrites that address to '/'.
+		if (path === '/' || path === '/app' || path === '/app/') {
 			const shell = renderBrowserAppShell(env.BASE_URL);
 			const headers = {
 				'Content-Type': 'text/html; charset=utf-8',
