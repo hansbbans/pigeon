@@ -1,6 +1,6 @@
 import Foundation
 
-struct RecommendationsResponse: Codable, Sendable {
+nonisolated struct RecommendationsResponse: Codable, Sendable {
 	let generatedAt: Date
 	let view: String
 	let items: [Recommendation]
@@ -114,7 +114,7 @@ struct PigeonAPIClient: Sendable {
 			}
 			let (data, _) = try await requestJSON(components: components)
 			try Task.checkCancellation()
-			let page = try decoder.decode(RecommendationsResponse.self, from: data)
+			let page = try await Self.decodeOffMain(RecommendationsResponse.self, from: data)
 			let newArticles = page.items.filter { seenIDs.insert($0.id).inserted }
 			articles.append(contentsOf: newArticles)
 			continuation = section == .forYou ? page.continuation : nil
@@ -172,7 +172,7 @@ struct PigeonAPIClient: Sendable {
 		}
 		components.queryItems = queryItems
 		let (data, _) = try await requestJSON(components: components)
-		return try decoder.decode(IncrementalSyncPage.self, from: data)
+		return try await Self.decodeOffMain(IncrementalSyncPage.self, from: data)
 	}
 
 	func sendMutations(_ mutations: [OfflineMutation]) async throws -> OfflineMutationBatchResponse {
@@ -309,7 +309,7 @@ struct PigeonAPIClient: Sendable {
 		}
 		components.queryItems = queryItems
 		let (data, _) = try await requestJSON(components: components)
-		return try decoder.decode(ReaderStreamContentsResponse.self, from: data)
+		return try await Self.decodeOffMain(ReaderStreamContentsResponse.self, from: data)
 	}
 
 	func streamItemIDs(
@@ -348,7 +348,7 @@ struct PigeonAPIClient: Sendable {
 		request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
 		let (data, response) = try await httpClient.data(for: request)
 		try Self.validate(response: response, data: data)
-		return try decoder.decode(ReaderStreamContentsResponse.self, from: data)
+		return try await Self.decodeOffMain(ReaderStreamContentsResponse.self, from: data)
 	}
 
 	func recommendations(from streamID: String, dayBounds: ReaderLocalDayBounds? = nil) async throws -> [Recommendation] {
@@ -746,26 +746,50 @@ struct PigeonAPIClient: Sendable {
 	}
 
 	private var decoder: JSONDecoder {
+		Self.makeDecoder()
+	}
+
+	/// Decodes a large response away from the main actor. This client takes the
+	/// target's main-actor default, and a sync page or a page of story bodies is
+	/// megabytes of JSON: decoded inline, each one stalls scrolling.
+	private static func decodeOffMain<Response: Decodable & Sendable>(
+		_ type: Response.Type,
+		from data: Data,
+	) async throws -> Response {
+		try await Task.detached(priority: .userInitiated) {
+			try makeDecoder().decode(type, from: data)
+		}.value
+	}
+
+	nonisolated private static func makeDecoder() -> JSONDecoder {
 		let decoder = JSONDecoder()
 		decoder.dateDecodingStrategy = .custom { decoder in
-			let value = try decoder.singleValueContainer().decode(String.self)
-			let fractionalFormatter = ISO8601DateFormatter()
-			fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-			if let date = fractionalFormatter.date(from: value) {
+			let container = try decoder.singleValueContainer()
+			let value = try container.decode(String.self)
+			// Every story decodes a date. ISO8601DateFormatter is thread-safe, so
+			// the two formatters are shared instead of allocated per value.
+			if let date = fractionalISO8601Formatter.date(from: value) {
 				return date
 			}
-			let formatter = ISO8601DateFormatter()
-			formatter.formatOptions = [.withInternetDateTime]
-			guard let date = formatter.date(from: value) else {
-				throw DecodingError.dataCorruptedError(
-					in: try decoder.singleValueContainer(),
-					debugDescription: "Expected an ISO 8601 date.",
-				)
+			guard let date = standardISO8601Formatter.date(from: value) else {
+				throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected an ISO 8601 date.")
 			}
 			return date
 		}
 		return decoder
 	}
+
+	nonisolated(unsafe) private static let fractionalISO8601Formatter: ISO8601DateFormatter = {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		return formatter
+	}()
+
+	nonisolated(unsafe) private static let standardISO8601Formatter: ISO8601DateFormatter = {
+		let formatter = ISO8601DateFormatter()
+		formatter.formatOptions = [.withInternetDateTime]
+		return formatter
+	}()
 
 	private func endpointComponents(path: String) throws -> URLComponents {
 		guard let components = URLComponents(url: session.baseURL.appending(path: path), resolvingAgainstBaseURL: false) else {

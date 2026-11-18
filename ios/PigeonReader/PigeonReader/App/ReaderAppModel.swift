@@ -4175,11 +4175,19 @@ final class ReaderAppModel {
 		let incomingLookup = ReaderArticleLookup(incomingArticles)
 		for otherCollectionID in articleCache.keys where otherCollectionID != collectionID {
 			guard let existingArticles = articleCache[otherCollectionID] else { continue }
-			articleCache[otherCollectionID] = existingArticles.map { existing in
+			var changed = false
+			let updatedArticles = existingArticles.map { existing in
 				guard let index = incomingLookup.firstIndex(matching: existing) else {
 					return existing
 				}
-				return sharedFields(from: incomingArticles[index], preserving: existing)
+				let updated = sharedFields(from: incomingArticles[index], preserving: existing)
+				if updated != existing { changed = true }
+				return updated
+			}
+			// Most collections do not hold the incoming stories. Writing an equal
+			// array back still invalidates every view that reads the cache.
+			if changed {
+				articleCache[otherCollectionID] = updatedArticles
 			}
 			if otherCollectionID == ReaderSection.forYou.rawValue {
 				let unreadDelta = (articleCache[otherCollectionID]?.count(where: { $0.isRead == false }) ?? 0)
@@ -6638,6 +6646,10 @@ final class ReaderAppModel {
 	private func incrementalReloadScope(for changes: [IncrementalSyncChange]) -> IncrementalReloadScope {
 		guard changes.isEmpty == false else { return .collections([]) }
 		var collectionIDs = Set<String>()
+		// Built on the first article or status change, then shared by the rest of
+		// the page. Scanning every cached row for every change made a 200-change
+		// page cost millions of comparisons on the main actor.
+		var cachedCollectionIDsByAlias: [String: [String]]?
 		for change in changes {
 			switch change.entityType {
 			case .feed:
@@ -6652,12 +6664,9 @@ final class ReaderAppModel {
 					payload?.readerId,
 					payload?.itemId,
 				].compactMap { $0 }.map(ReaderArticleIdentity.normalized).filter { $0.isEmpty == false })
-				let matchingCollections = articleCache.compactMap { collectionID, articles in
-					articles.contains(where: { article in
-						!ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
-							.isDisjoint(with: aliases)
-					}) ? collectionID : nil
-				}
+				let collectionIDsByAlias = cachedCollectionIDsByAlias ?? makeCachedCollectionIDsByAlias()
+				cachedCollectionIDsByAlias = collectionIDsByAlias
+				let matchingCollections = Set(aliases.flatMap { collectionIDsByAlias[$0] ?? [] })
 				collectionIDs.formUnion(matchingCollections)
 
 				let destinationKeys = [payload?.feedKey, payload?.streamId]
@@ -6678,6 +6687,25 @@ final class ReaderAppModel {
 			}
 		}
 		return collectionIDs.isEmpty ? .full : .collections(collectionIDs)
+	}
+
+	/// Every cached collection that holds an article, by each of the article's
+	/// normalized ids.
+	private func makeCachedCollectionIDsByAlias() -> [String: [String]] {
+		var collectionIDsByAlias: [String: [String]] = [:]
+		for (collectionID, articles) in articleCache {
+			for article in articles {
+				let id = ReaderArticleIdentity.normalized(article.id)
+				if id.isEmpty == false {
+					collectionIDsByAlias[id, default: []].append(collectionID)
+				}
+				let readerID = ReaderArticleIdentity.normalized(article.readerId)
+				if readerID.isEmpty == false, readerID != id {
+					collectionIDsByAlias[readerID, default: []].append(collectionID)
+				}
+			}
+		}
+		return collectionIDsByAlias
 	}
 
 	private func collectionIDsForFeedKey(_ feedKey: String) -> Set<String> {
