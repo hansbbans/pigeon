@@ -4,13 +4,13 @@ Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. No pull requ
 
 ## Read this first: nothing here has been compiled
 
-The session ran in a Linux container with no Swift toolchain, and the self-hosted Mac was asleep for almost all of it. It picked up one job at 04:06 UTC and dropped off ten minutes later with no log, and has not taken a job since. So:
+The session ran in a Linux container with no Swift toolchain, and the self-hosted Mac was asleep for almost all of it. It picked up a job at 04:06 UTC and another at 06:40 UTC, and each time went offline within seconds: both jobs were failed ten minutes later with their test step never reported and no log uploaded. That is what a laptop waking briefly and sleeping again looks like. Each of those half-runs may have left a simulator booting or an `xcodebuild` suspended on the Mac; the next run's first steps clean those up. So:
 
 - No Swift in this branch has been through a compiler, a unit test or a simulator. It was written against the existing code, re-read, and reviewed once by a second read-only pass that was asked to act as the compiler. That pass found one real error (store counters declared inside `#if DEBUG` and used outside it, which would have broken only the Release build), now fixed. It will not have found everything.
 - No screen was looked at. The UI findings are from reading code.
 - The timings under Performance are complexity arguments, not measurements. A benchmark test prints real numbers the first time the unit tests run.
 
-One run of the new `iOS device layout` workflow is queued for the branch head and will start when the Mac wakes. It builds, runs every unit test once, and runs the layout walk on three simulators. Its last step prints compile errors, failed tests, `_BENCH` timings and one line per screen with element frames. Read that log before anything else here is trusted. `PigeonReader.xcodeproj` is not regenerated: one test file was added, so run `xcodegen generate` (the workflow's last step prints the diff).
+One run of the new `iOS device layout` workflow (run 8) is queued and will start when the Mac next comes online. If that is another brief wake it will fail the same way, with no log; re-request it by bumping `run=` in `.github/ios-device-layout.request` once the Mac is awake for good. It builds, runs every unit test once, and runs the layout walk on three simulators. Its last step prints compile errors, failed tests, `_BENCH` timings and one line per screen with element frames. Read that log before anything else here is trusted. `PigeonReader.xcodeproj` is not regenerated: one test file was added, so run `xcodegen generate` (the workflow's last step prints the diff).
 
 ## What changed
 
