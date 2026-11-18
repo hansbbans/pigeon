@@ -90,6 +90,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 }
 
 private struct FrontPageMasthead: View {
+	@Environment(\.readerTypeface) private var readerTypeface
 	let title: String
 	let unreadCount: Int
 
@@ -97,7 +98,7 @@ private struct FrontPageMasthead: View {
 		VStack(spacing: 8) {
 			FrontPageRule(thickness: 2)
 			Text(title)
-				.font(.custom("Bookerly-Italic", size: 38, relativeTo: .largeTitle))
+				.font(ReaderTypography.italic(readerTypeface, size: 38, relativeTo: .largeTitle))
 				.multilineTextAlignment(.center)
 				.lineLimit(2)
 				.minimumScaleFactor(0.7)
@@ -177,6 +178,7 @@ struct FrontPageStoryView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.showsReadingTime) private var showsReadingTime
 	@Environment(\.displayScale) private var displayScale
+	@Environment(\.readerTypeface) private var readerTypeface
 	@State private var image: CGImage?
 	@State private var imageRequestID: String?
 
@@ -202,14 +204,14 @@ struct FrontPageStoryView: View {
 					.lineLimit(1)
 				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
 					.font(role == .lead
-						? .custom("Bookerly-Bold", size: 27, relativeTo: .title)
-						: ReaderTypography.storyTitle)
+						? ReaderTypography.title(readerTypeface, size: 27, relativeTo: .title)
+						: ReaderTypography.storyTitle(readerTypeface))
 					.foregroundStyle(.primary)
 					.lineLimit(role == .lead ? 5 : 4)
 					.fixedSize(horizontal: false, vertical: true)
 				if role == .lead, let deck = FrontPageLayout.deck(from: article.text) {
 					Text(deck)
-						.font(.custom("Bookerly-Regular", size: 16, relativeTo: .callout))
+						.font(ReaderTypography.body(readerTypeface, size: 16, relativeTo: .callout))
 						.foregroundStyle(.pigeonSecondary)
 						.lineLimit(3)
 				}

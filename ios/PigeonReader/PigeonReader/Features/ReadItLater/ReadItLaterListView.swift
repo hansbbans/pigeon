@@ -235,13 +235,14 @@ struct ReadItLaterRowView: View {
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let imageProxySession: PigeonSession?
 	let select: () -> Void
+	@Environment(\.readerTypeface) private var readerTypeface
 
 	var body: some View {
 		Button(action: select) {
 			HStack(alignment: .top, spacing: 14) {
 				VStack(alignment: .leading, spacing: 6) {
 					Text(article.title)
-						.font(ReaderTypography.storyTitle)
+						.font(ReaderTypography.storyTitle(readerTypeface))
 						.foregroundStyle(.primary)
 						.multilineTextAlignment(.leading)
 						.lineLimit(3)

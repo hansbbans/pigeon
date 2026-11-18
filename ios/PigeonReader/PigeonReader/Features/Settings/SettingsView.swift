@@ -128,6 +128,12 @@ struct SettingsView: View {
 							Text(theme.title).tag(theme)
 						}
 					}
+					Picker("Typeface", selection: $typography.typeface) {
+						ForEach(ReaderTypeface.allCases) { typeface in
+							Text(typeface.title).tag(typeface)
+						}
+					}
+					.accessibilityIdentifier("reader-typeface-picker")
 					Picker("Layout", selection: $typography.homeLayout) {
 						ForEach(ReaderHomeLayout.allCases) { layout in
 							Text(layout.title).tag(layout)

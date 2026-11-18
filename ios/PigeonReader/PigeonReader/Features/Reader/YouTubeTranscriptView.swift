@@ -113,6 +113,7 @@ struct YouTubeTranscriptList: View {
 	@State private var isBoxVisible = false
 	@ScaledMetric(relativeTo: .body) private var boxHeight = 340
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.readerTypeface) private var readerTypeface
 
 	init(layout: YouTubeTranscriptLayout, playback: YouTubePlaybackLink?, textScale: Double) {
 		self.layout = layout
@@ -126,7 +127,7 @@ struct YouTubeTranscriptList: View {
 	var body: some View {
 		VStack(alignment: .leading, spacing: 10) {
 			Text("Transcript")
-				.font(.custom("Bookerly-Bold", size: ReaderTypography.scaledPointSize(20, textScale: textScale), relativeTo: .title3))
+				.font(ReaderTypography.title(readerTypeface, size: ReaderTypography.scaledPointSize(20, textScale: textScale), relativeTo: .title3))
 				.accessibilityAddTraits(.isHeader)
 			ScrollView {
 				LazyVStack(alignment: .leading, spacing: 2) {
@@ -178,7 +179,7 @@ struct YouTubeTranscriptList: View {
 						.foregroundStyle(.pigeonSecondary)
 						.frame(minWidth: 44, alignment: .leading)
 					Text(chapter.title)
-						.font(.custom("Bookerly-Bold", size: ReaderTypography.scaledPointSize(17, textScale: textScale), relativeTo: .headline))
+						.font(ReaderTypography.title(readerTypeface, size: ReaderTypography.scaledPointSize(17, textScale: textScale), relativeTo: .headline))
 						.frame(maxWidth: .infinity, alignment: .leading)
 				}
 				.padding(.horizontal, 10)
@@ -203,7 +204,7 @@ struct YouTubeTranscriptList: View {
 						.foregroundStyle(isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(PigeonPalette.labelSecondary))
 						.frame(minWidth: 44, alignment: .leading)
 					Text(segment.text)
-						.font(.custom("Bookerly-Regular", size: ReaderTypography.scaledPointSize(16, textScale: textScale), relativeTo: .body))
+						.font(ReaderTypography.body(readerTypeface, size: ReaderTypography.scaledPointSize(16, textScale: textScale), relativeTo: .body))
 						.foregroundStyle(isActive ? Color.primary : PigeonPalette.labelSecondary)
 						.multilineTextAlignment(.leading)
 						.frame(maxWidth: .infinity, alignment: .leading)

@@ -136,4 +136,25 @@ struct ReaderTypographySettingsTests {
 		settings.showsReadingTime = true
 		#expect(ReaderTypographySettings(defaults: defaults).showsReadingTime)
 	}
+
+	@Test
+	func typefaceDefaultsToGeistSerifAndPersistsAChoice() throws {
+		let suiteName = "pigeon-reader-typeface-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+
+		let settings = ReaderTypographySettings(defaults: defaults)
+		#expect(settings.typeface == .geistSerif)
+
+		settings.typeface = .bookerly
+		#expect(defaults.string(forKey: ReaderTypographySettings.typefaceKey) == "bookerly")
+		#expect(ReaderTypographySettings(defaults: defaults).typeface == .bookerly)
+
+		settings.reset()
+		#expect(settings.typeface == .geistSerif)
+		#expect(ReaderTypographySettings(defaults: defaults).typeface == .geistSerif)
+
+		defaults.set("comic-sans", forKey: ReaderTypographySettings.typefaceKey)
+		#expect(ReaderTypographySettings(defaults: defaults).typeface == .geistSerif)
+	}
 }

@@ -3,6 +3,7 @@ import SwiftUI
 struct ArticleRowView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.showsReadingTime) private var showsReadingTime
+	@Environment(\.readerTypeface) private var readerTypeface
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
@@ -98,7 +99,7 @@ struct ArticleRowView: View {
 		VStack(alignment: .leading, spacing: density == .compact ? 2 : 4) {
 			HStack(alignment: .firstTextBaseline, spacing: 7) {
 				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-					.font(ReaderTypography.storyTitle)
+					.font(ReaderTypography.storyTitle(readerTypeface))
 					.lineLimit(density == .titleOnly ? 1 : 2)
 				Spacer(minLength: 4)
 				if article.sampleCount > 0 || article.score > 0 {
