@@ -38,6 +38,7 @@ struct ArticleBodyView: View {
 	@State private var asynchronouslyPreparedBody: PreparedReaderBody?
 	@State private var asynchronouslyPreparedBodyID: ArticleBodyPreparationID?
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	@Environment(\.readerTypeface) private var readerTypeface
 
 	init(
 		content: String,
@@ -220,7 +221,7 @@ struct ArticleBodyView: View {
 				ArticleBodyPreparationPlaceholder()
 			} else if sanitizedContent.isEmpty {
 				Text(fallbackText)
-				.font(ReaderTypography.articleBody(textScale: self.textScale))
+				.font(ReaderTypography.articleBody(textScale: self.textScale, typeface: readerTypeface))
 					.textSelection(.enabled)
 			} else {
 				structuredContent(textScale: textScale)
@@ -260,6 +261,7 @@ struct ArticleBodyView: View {
 			textScale: textScale,
 			lineHeight: lineHeight,
 			theme: theme,
+			typeface: readerTypeface,
 			remoteImagePolicy: remoteImagePolicy,
 			findQuery: findQuery,
 			imageProxySession: imageProxySession,

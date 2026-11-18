@@ -192,6 +192,7 @@ private struct ReaderHomeViewTile: View {
 
 private struct ReaderHomeFolderTile: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.readerTypeface) private var readerTypeface
 	let folder: ReaderHomeTiles.FolderTile
 
 	var body: some View {
@@ -206,7 +207,7 @@ private struct ReaderHomeFolderTile: View {
 				.lineLimit(1)
 			if let headline = folder.headline {
 				Text(headline)
-					.font(ReaderTypography.storyTitle)
+					.font(ReaderTypography.storyTitle(readerTypeface))
 					.foregroundStyle(.primary)
 					.lineLimit(4)
 					.multilineTextAlignment(.leading)

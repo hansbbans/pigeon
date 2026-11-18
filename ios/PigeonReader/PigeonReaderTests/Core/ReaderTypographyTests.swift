@@ -13,6 +13,25 @@ struct ReaderTypographyTests {
 		#expect(UIFont(name: postScriptName, size: 17) != nil)
 	}
 
+	@Test func bundledGeistSerifIsRegistered() {
+		let font = UIFont(name: "GeistSerif-Regular", size: 17)
+		#expect(font?.familyName == "Geist Serif")
+	}
+
+	@Test(arguments: ReaderTypeface.allCases)
+	func everyTypefaceNamesBundledFaces(typeface: ReaderTypeface) {
+		for name in [typeface.regularFontName, typeface.titleFontName, typeface.italicFontName] {
+			#expect(UIFont(name: name, size: 17) != nil, "\(typeface) uses \(name)")
+		}
+	}
+
+	@Test func geistSerifSetsTitlesAndItalicsInItsOnlyFace() {
+		#expect(ReaderTypeface.geistSerif.titleFontName == "GeistSerif-Regular")
+		#expect(ReaderTypeface.geistSerif.italicFontName == "GeistSerif-Regular")
+		#expect(ReaderTypeface.bookerly.titleFontName == "Bookerly-Bold")
+		#expect(ReaderTypeface.bookerly.italicFontName == "Bookerly-Italic")
+	}
+
 	@Test func articleTitleAndFallbackBodyScaleWithReadingTextSize() {
 		#expect(ReaderTypography.scaledPointSize(ReaderTypography.articleTitlePointSize, textScale: 1) == 25)
 		#expect(ReaderTypography.scaledPointSize(ReaderTypography.articleTitlePointSize, textScale: 1.2) == 30)

@@ -311,15 +311,22 @@ enum StructuredHTMLJavaScript {
 	<html>
 	<head>
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https: pigeon-image:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https: pigeon-image:; font-src pigeon-font:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 		<style>
+			/* WebKit cannot see UIAppFonts fonts, so each face is served by ReaderFontSchemeHandler.
+			   Faces load only when text uses them. Geist Serif has one face; WebKit synthesizes bold and italic. */
+			@font-face { font-family: "Geist Serif"; src: url("pigeon-font://font/GeistSerif-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; }
+			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; }
+			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Bold.ttf") format("truetype"); font-weight: 700; font-style: normal; }
+			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; }
+			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-BoldItalic.ttf") format("truetype"); font-weight: 700; font-style: italic; }
 			:root { color-scheme: light dark; }
 			* { box-sizing: border-box; }
 			html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: hidden; width: 100%; }
 			body {
 				background: transparent;
 				color: #202124;
-				font-family: Bookerly, "Iowan Old Style", Georgia, serif;
+				font-family: "Geist Serif", "Iowan Old Style", Georgia, serif;
 				font-size: calc(18px * var(--pigeon-text-scale));
 				line-height: var(--pigeon-line-height);
 				word-wrap: break-word;
@@ -329,7 +336,11 @@ enum StructuredHTMLJavaScript {
 			#pigeon-content { width: 100%; }
 			#pigeon-content > :first-child { margin-top: 0; }
 			#pigeon-content > :last-child { margin-bottom: 0; }
-			h1, h2, h3, h4, h5, h6 { color: #151515; font-family: Bookerly, "Iowan Old Style", Georgia, serif; line-height: 1.16; margin: 1.45em 0 .48em; overflow-wrap: anywhere; }
+			h1, h2, h3, h4, h5, h6 { color: #151515; font-family: inherit; line-height: 1.16; margin: 1.45em 0 .48em; overflow-wrap: anywhere; }
+			/* Geist Serif ships only Regular. Headings stay Regular like the SwiftUI title above them;
+			   WebKit synthesizes bold and italic for strong and em. */
+			body:not([data-typeface="bookerly"]) :is(h1, h2, h3, h4, h5, h6) { font-weight: 400; }
+			body[data-typeface="bookerly"] { font-family: Bookerly, "Iowan Old Style", Georgia, serif; }
 			h1 { font-size: 1.72em; }
 			h2 { font-size: 1.45em; }
 			h3 { font-size: 1.24em; }
@@ -338,8 +349,6 @@ enum StructuredHTMLJavaScript {
 			p { text-wrap: pretty; }
 			ul, ol { padding-left: 1.45em; }
 			li + li { margin-top: .35em; }
-			strong { font-family: Bookerly-Bold, Bookerly, Georgia, serif; }
-			em, i { font-family: Bookerly-Italic, Bookerly, Georgia, serif; }
 			a { color: #075f9a; text-decoration-thickness: .07em; text-underline-offset: .16em; }
 			blockquote { border-inline-start: .22em solid #9aa6af; color: #4c5660; padding: .15em 0 .15em 1em; }
 			hr { border: 0; border-top: 1px solid #aeb7bd; margin: 1.7em 0; }
@@ -402,6 +411,7 @@ enum StructuredHTMLJavaScript {
 				document.documentElement.style.setProperty("--pigeon-text-scale", String(payload.textScale || 1));
 				document.documentElement.style.setProperty("--pigeon-line-height", String(payload.lineHeight || 1.55));
 				document.body.dataset.theme = payload.theme || "system";
+				document.body.dataset.typeface = payload.typeface || "geist-serif";
 				const contentSignature = String(payload.contentSignature || "");
 				if (content.dataset.pigeonContentSignature !== contentSignature) {
 					const template = document.createElement("template");

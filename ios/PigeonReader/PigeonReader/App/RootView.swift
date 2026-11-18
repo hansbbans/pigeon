@@ -13,5 +13,6 @@ struct RootView: View {
 		}
 		// Read in a view body so toggling the setting re-renders open lists.
 		.environment(\.showsReadingTime, model.readerTypography.showsReadingTime)
+		.environment(\.readerTypeface, model.readerTypography.typeface)
 	}
 }

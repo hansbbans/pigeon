@@ -33,6 +33,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 	let textScale: Double
 	let lineHeight: Double
 	let theme: ReaderTheme
+	let typeface: ReaderTypeface
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let findQuery: String
 	let imageProxySession: PigeonSession?
@@ -49,6 +50,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		textScale: Double,
 		lineHeight: Double,
 		theme: ReaderTheme = .system,
+		typeface: ReaderTypeface = .geistSerif,
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
 		findQuery: String = "",
 		imageProxySession: PigeonSession? = nil,
@@ -64,6 +66,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		self.textScale = textScale
 		self.lineHeight = lineHeight
 		self.theme = theme
+		self.typeface = typeface
 		self.remoteImagePolicy = remoteImagePolicy
 		self.findQuery = findQuery
 		self.imageProxySession = imageProxySession
@@ -98,6 +101,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			PrivacyImageSchemeHandler(session: imageProxySession),
 			forURLScheme: "pigeon-image",
 		)
+		configuration.setURLSchemeHandler(ReaderFontSchemeHandler(), forURLScheme: ReaderFontSchemeHandler.scheme)
 
 		let webView = WKWebView(frame: .zero, configuration: configuration)
 		webView.navigationDelegate = context.coordinator
@@ -136,6 +140,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			textScale: textScale,
 			lineHeight: lineHeight,
 			theme: theme,
+			typeface: typeface,
 			remoteImagePolicy: remoteImagePolicy,
 		)
 		context.coordinator.find(findQuery)
@@ -186,6 +191,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			textScale: Double,
 			lineHeight: Double,
 			theme: ReaderTheme,
+			typeface: ReaderTypeface,
 			remoteImagePolicy: ReaderRemoteImagePolicy,
 		) {
 			let payload = Payload(
@@ -194,6 +200,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 				textScale: textScale,
 				lineHeight: lineHeight,
 				theme: theme.rawValue,
+				typeface: typeface.rawValue,
 				remoteImagePolicy: remoteImagePolicy.rawValue,
 			)
 			pendingPayload = payload
@@ -332,6 +339,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			let textScale: Double
 			let lineHeight: Double
 			let theme: String
+			let typeface: String
 			let remoteImagePolicy: String
 
 			var contentSignature: String {
@@ -339,7 +347,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			}
 
 			var signature: String {
-				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(remoteImagePolicy)"
+				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(typeface)|\(remoteImagePolicy)"
 			}
 
 			var dictionary: [String: Any] {
@@ -349,6 +357,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 					"textScale": textScale,
 					"lineHeight": lineHeight,
 					"theme": theme,
+					"typeface": typeface,
 					"remoteImagePolicy": remoteImagePolicy,
 				]
 				if let baseURL {

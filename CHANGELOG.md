@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- The iOS app uses Geist Serif, Vercel's open-source serif, as its reading typeface: story titles, the Front Page, article titles and text, and transcripts. Choose Bookerly again under Settings → Typeface or in the reader's Reading controls. Geist Serif has a single weight, so titles are set in Regular; bold text inside articles is still bold.
+
 ## [0.1.13.0] - 2026-11-17
 
 ### Added

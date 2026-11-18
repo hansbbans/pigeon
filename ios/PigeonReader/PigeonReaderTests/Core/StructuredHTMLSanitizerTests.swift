@@ -172,6 +172,82 @@ struct StructuredHTMLSanitizerTests {
 
 	@MainActor
 	@Test
+	func renderingShellSetsArticlesInTheChosenBundledTypeface() async throws {
+		let configuration = WKWebViewConfiguration()
+		configuration.setURLSchemeHandler(ReaderFontSchemeHandler(), forURLScheme: ReaderFontSchemeHandler.scheme)
+		let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 420, height: 700), configuration: configuration)
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView)
+
+		// WebKit cannot see UIAppFonts fonts; without the pigeon-font faces every typeface measured
+		// exactly like Iowan Old Style. Each face must measure unlike that fallback and unlike the other.
+		let result = try await webView.callAsyncJavaScript("""
+			const content = document.getElementById("pigeon-content");
+			content.innerHTML = '<h2 id="h">Heading</h2><p><span id="t">Hamburgefonstiv quick brown</span> <strong><em id="s">bold italic</em></strong></p><span id="f" style="font-family: \\'Iowan Old Style\\'">Hamburgefonstiv quick brown</span>';
+			const measure = async (typeface) => {
+				if (typeface) document.body.dataset.typeface = typeface; else delete document.body.dataset.typeface;
+				await document.fonts.ready;
+				await Promise.all([document.fonts.load('16px "Geist Serif"'), document.fonts.load('16px Bookerly'), document.fonts.load('bold italic 16px Bookerly')]);
+				return {
+					family: getComputedStyle(document.body).fontFamily,
+					width: document.getElementById("t").getBoundingClientRect().width,
+					boldItalicWidth: document.getElementById("s").getBoundingClientRect().width,
+					headingWeight: getComputedStyle(document.getElementById("h")).fontWeight,
+				};
+			};
+			const initial = await measure(null);
+			const geist = await measure("geist-serif");
+			const bookerly = await measure("bookerly");
+			const loaded = [...document.fonts].filter(face => face.status === "loaded").map(face => face.family.replace(/"/g, "") + " " + face.weight + " " + face.style).sort();
+			return JSON.stringify({ fallback: document.getElementById("f").getBoundingClientRect().width, initial, geist, bookerly, loaded });
+			""", contentWorld: .page)
+		let json = try #require(result as? String)
+		let values = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+		let fallback = try #require(values["fallback"] as? Double)
+		let initial = try #require(values["initial"] as? [String: Any])
+		let geist = try #require(values["geist"] as? [String: Any])
+		let bookerly = try #require(values["bookerly"] as? [String: Any])
+		let geistWidth = try #require(geist["width"] as? Double)
+		let bookerlyWidth = try #require(bookerly["width"] as? Double)
+
+		#expect((initial["family"] as? String)?.hasPrefix("\"Geist Serif\"") == true)
+		#expect(initial["width"] as? Double == geistWidth)
+		#expect((bookerly["family"] as? String)?.hasPrefix("Bookerly") == true)
+		#expect(abs(geistWidth - fallback) > 1, "Geist Serif must load, not fall back: \(json)")
+		#expect(abs(bookerlyWidth - fallback) > 1, "Bookerly must load, not fall back: \(json)")
+		#expect(abs(geistWidth - bookerlyWidth) > 1)
+		#expect(geist["headingWeight"] as? String == "400")
+		#expect(bookerly["headingWeight"] as? String == "700" || bookerly["headingWeight"] as? String == "bold")
+		let loaded = try #require(values["loaded"] as? [String])
+		#expect(loaded.contains("Geist Serif 400 normal"))
+		#expect(loaded.contains("Bookerly 400 normal"))
+		#expect(loaded.contains("Bookerly 700 italic"), "strong em uses Bookerly Bold Italic: \(loaded)")
+	}
+
+	@Test
+	func fontSchemeServesOnlyTheBundledReadingFonts() throws {
+		let handler = ReaderFontSchemeHandler()
+		for fileName in ReaderFontSchemeHandler.fileNames {
+			let url = try #require(URL(string: ReaderFontSchemeHandler.url(for: fileName)))
+			let data = try #require(handler.fontData(for: url), "\(fileName)")
+			#expect(data.count > 100_000)
+		}
+		for rejected in [
+			"pigeon-font://font/Readability.js",
+			"pigeon-font://font/../Info.plist",
+			"pigeon-font://font/nested/GeistSerif-Regular.ttf",
+			"pigeon-font://other/GeistSerif-Regular.ttf",
+			"https://font/GeistSerif-Regular.ttf",
+			"pigeon-font://font/GeistSerif-OFL.txt",
+		] {
+			let url = try #require(URL(string: rejected))
+			#expect(handler.fontData(for: url) == nil, "\(rejected)")
+		}
+	}
+
+	@MainActor
+	@Test
 	func paragraphsAndDOMSurviveImageAndTypographyRelayouts() async throws {
 		let configuration = WKWebViewConfiguration()
 		configuration.websiteDataStore = .nonPersistent()

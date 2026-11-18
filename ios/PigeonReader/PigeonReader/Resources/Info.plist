@@ -45,6 +45,7 @@
 		<string>Bookerly-Bold.ttf</string>
 		<string>Bookerly-Italic.ttf</string>
 		<string>Bookerly-BoldItalic.ttf</string>
+		<string>GeistSerif-Regular.ttf</string>
 	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

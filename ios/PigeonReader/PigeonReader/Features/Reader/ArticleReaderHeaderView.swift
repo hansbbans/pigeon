@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ArticleReaderHeaderView: View {
 	@Environment(\.showsReadingTime) private var showsReadingTime
+	@Environment(\.readerTypeface) private var readerTypeface
 	let article: Recommendation
 	let selectedMode: ReaderMode
 	let hasOriginalURL: Bool
@@ -31,7 +32,7 @@ struct ArticleReaderHeaderView: View {
 	@ViewBuilder
 	private var title: some View {
 		let text = PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-			.font(ReaderTypography.articleTitle(textScale: textScale))
+			.font(ReaderTypography.articleTitle(textScale: textScale, typeface: readerTypeface))
 			.bold()
 			.fixedSize(horizontal: false, vertical: true)
 			.frame(maxWidth: .infinity, alignment: .leading)

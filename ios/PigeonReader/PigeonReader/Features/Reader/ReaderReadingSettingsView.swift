@@ -11,6 +11,16 @@ struct ReaderReadingSettingsView: View {
 	var body: some View {
 		NavigationStack {
 			Form {
+				Section("Typeface") {
+					Picker("Typeface", selection: $settings.typeface) {
+						ForEach(ReaderTypeface.allCases) { typeface in
+							Text(typeface.title).tag(typeface)
+						}
+					}
+					.pickerStyle(.menu)
+					.accessibilityIdentifier("reader-reading-typeface")
+				}
+
 				Section("Type size") {
 					ReaderReadingSettingStepper(
 						title: "Text size",

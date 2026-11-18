@@ -1,16 +1,61 @@
 import SwiftUI
 
+extension EnvironmentValues {
+	/// Mirrors Settings → Typeface so story titles and the reader follow it without a parameter.
+	@Entry var readerTypeface: ReaderTypeface = .geistSerif
+}
+
+extension ReaderTypeface {
+	/// PostScript names of the bundled faces. Geist Serif ships only Regular, and SwiftUI does not
+	/// synthesize bold or italic for a custom font, so its titles and italics are set in Regular.
+	nonisolated var regularFontName: String {
+		switch self {
+		case .geistSerif: "GeistSerif-Regular"
+		case .bookerly: "Bookerly-Regular"
+		}
+	}
+
+	nonisolated var titleFontName: String {
+		switch self {
+		case .geistSerif: "GeistSerif-Regular"
+		case .bookerly: "Bookerly-Bold"
+		}
+	}
+
+	nonisolated var italicFontName: String {
+		switch self {
+		case .geistSerif: "GeistSerif-Regular"
+		case .bookerly: "Bookerly-Italic"
+		}
+	}
+}
+
 enum ReaderTypography {
-	static let storyTitle = Font.custom("Bookerly-Bold", size: 17, relativeTo: .body)
 	static let articleTitlePointSize = 25.0
 	static let articleBodyPointSize = 18.0
 
-	static func articleTitle(textScale: Double) -> Font {
-		Font.custom("Bookerly-Bold", size: scaledPointSize(articleTitlePointSize, textScale: textScale), relativeTo: .title)
+	static func storyTitle(_ typeface: ReaderTypeface) -> Font {
+		title(typeface, size: 17, relativeTo: .body)
 	}
 
-	static func articleBody(textScale: Double) -> Font {
-		Font.custom("Bookerly-Regular", size: scaledPointSize(articleBodyPointSize, textScale: textScale), relativeTo: .body)
+	static func title(_ typeface: ReaderTypeface, size: Double, relativeTo style: Font.TextStyle) -> Font {
+		Font.custom(typeface.titleFontName, size: size, relativeTo: style)
+	}
+
+	static func body(_ typeface: ReaderTypeface, size: Double, relativeTo style: Font.TextStyle) -> Font {
+		Font.custom(typeface.regularFontName, size: size, relativeTo: style)
+	}
+
+	static func italic(_ typeface: ReaderTypeface, size: Double, relativeTo style: Font.TextStyle) -> Font {
+		Font.custom(typeface.italicFontName, size: size, relativeTo: style)
+	}
+
+	static func articleTitle(textScale: Double, typeface: ReaderTypeface) -> Font {
+		title(typeface, size: scaledPointSize(articleTitlePointSize, textScale: textScale), relativeTo: .title)
+	}
+
+	static func articleBody(textScale: Double, typeface: ReaderTypeface) -> Font {
+		body(typeface, size: scaledPointSize(articleBodyPointSize, textScale: textScale), relativeTo: .body)
 	}
 
 	static func scaledPointSize(_ base: Double, textScale: Double) -> Double {
