@@ -1457,3 +1457,35 @@ test('a saved reading position is restored whether or not the body was cached wh
 	assert.ok(harness.getCacheSizes().bodies > bodiesBefore, 'story 5 was opened before its body was cached');
 	assert.equal(harness.getReaderFrameScrollTop(), 400, 'body loaded after opening: position restored');
 });
+
+test('frame documents that are not a prepared reading view still use the reading typeface', async (t) => {
+	const preferences = { theme: 'app', font: 'geist', fontSize: 18, lineHeight: 1.6, width: 720, margins: 24, density: 'comfortable', imagePolicy: 'load', shortcuts: { next: 'j', previous: 'k', read: 'm', star: 's' } };
+	const readingTools = {
+		readPreferences: () => preferences,
+		savePreferences: (next: unknown) => next,
+		frameCSS: () => '',
+		frameFontCSS: () => 'body{font-family:READING-TYPEFACE}',
+		frameTheme: () => 'light',
+		async applyImagePolicy(html: string) { return { html, images: [], blockedCount: 0 }; },
+	};
+	const { database, harness } = await createStatefulArticleBrowser({ count: 85, readingTools });
+	t.after(() => database.close());
+	const list = harness.elements.get('articles-list')!;
+	const frame = harness.elements.get('reader-frame')!;
+	await waitForBrowserCondition(() => frame.srcdoc.includes('</p></body>'), 200);
+	assert.ok(!frame.srcdoc.includes('READING-TYPEFACE'), 'a prepared view takes its font from frameCSS alone');
+
+	// Story 5 arrives with a later page, so opening it shows the loading placeholder first.
+	const documents: string[] = [];
+	let current = frame.srcdoc;
+	Object.defineProperty(frame, 'srcdoc', { configurable: true, get: () => current, set: (value: string) => { current = value; documents.push(value); } });
+	harness.elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).includes('5') && harness.getCacheSizes().pending === 0, 200);
+	findListButtonByItemId(list, '5')!.dispatch('click');
+	await waitForBrowserCondition(() => frame.srcdoc.includes('Body 5</p>'), 200);
+	const placeholder = documents.find((html) => html.includes('Loading article content'));
+	assert.ok(placeholder, 'the loading placeholder was shown');
+	assert.ok(placeholder.includes('body{font-family:READING-TYPEFACE}</style>'), 'the placeholder uses the reading typeface');
+	assert.equal(placeholder.split('READING-TYPEFACE').length, 2, 'added once');
+	assert.ok(!frame.srcdoc.includes('READING-TYPEFACE'));
+});

@@ -355,7 +355,7 @@ ${renderBrowserAppStyles()}
         </section>
         <details open><summary>Appearance and shortcuts</summary><form id="reading-settings-form">
           <label>Article theme<select id="reading-theme"><option value="app">Match app</option><option value="light">Light</option><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="system">System</option></select></label>
-          <label>Typeface<select id="reading-font"><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
+          <label>Typeface<select id="reading-font"><option value="geist">Geist Serif</option><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
           <label>Font size<input id="reading-fontSize" type="number" min="14" max="28"></label>
           <label>Line height<input id="reading-lineHeight" type="number" min="1.2" max="2.2" step="0.05"></label>
           <label>Article width<input id="reading-width" type="number" min="480" max="960"></label>
@@ -516,6 +516,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(!readingPreferences) return;
     readerScroll.style.setProperty('--reader-measure', readingPreferences.width+'px');
     readerScroll.style.setProperty('--reader-gutter', readingPreferences.margins+'px');
+    if(typeof readingTools.fontStack==='function') document.documentElement.style.setProperty('--reading-font', readingTools.fontStack(readingPreferences));
   }
   applyReaderMeasure();
   let readingRenderRequest = 0; let preparedReaderKey = ''; let readingAccountHash = ''; let readingData = {modes:{},positions:{}};
@@ -3690,6 +3691,8 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
     if (!preparedReading) preparedReaderKey = '';
+    // Prepared views carry the full reading CSS; give every other frame document the reading typeface.
+    if (!preparedReading && readingPreferences && typeof readingTools?.frameFontCSS === 'function') { const fontCSS = readingTools.frameFontCSS(readingPreferences); documentHtml = documentHtml.replace('</style>', () => fontCSS + '</style>'); }
     // Anything other than the article whose position was applied (another article, nothing, or the
     // placeholder of one not yet restored) means the next prepared render restores again. The
     // prepared path marks its article before calling this, so that render leaves the mark alone.
