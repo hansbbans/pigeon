@@ -5,7 +5,6 @@ struct ArticleListToolbar: ToolbarContent {
 	let onListContextWillChange: () -> Void
 	let onTimelineDensityWillChange: () -> Void
 	@Environment(ReaderAppModel.self) private var model
-	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
 	init(
 		collection: ReaderNavigationItem,
@@ -20,6 +19,7 @@ struct ArticleListToolbar: ToolbarContent {
 	var body: some ToolbarContent {
 		let isLoading = model.isLoading(collection: collection)
 
+		ReaderHomeToolbarItem()
 		ToolbarItemGroup(placement: .topBarTrailing) {
 			if collection.kind == .feed {
 				Button("Mark Read", systemImage: "checkmark.circle") {
@@ -58,14 +58,12 @@ struct ArticleListToolbar: ToolbarContent {
 				.accessibilityIdentifier("article-list-sort")
 
 				Menu("Display", systemImage: "rectangle.grid.1x2") {
-					if horizontalSizeClass == .compact {
-						Picker("Layout", selection: layoutBinding) {
-							ForEach(ReaderHomeLayout.allCases) { layout in
-								Text(layout.title).tag(layout)
-							}
+					Picker("Layout", selection: layoutBinding) {
+						ForEach(ReaderHomeLayout.allCases) { layout in
+							Text(layout.title).tag(layout)
 						}
-						.accessibilityIdentifier("article-list-layout-options")
 					}
+					.accessibilityIdentifier("article-list-layout-options")
 					// Density only shapes Classic rows.
 					if usesFrontPage == false {
 						Picker("Timeline density", selection: densityBinding) {
@@ -138,7 +136,7 @@ struct ArticleListToolbar: ToolbarContent {
 	}
 
 	private var usesFrontPage: Bool {
-		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+		model.readerTypography.homeLayout == .frontPage
 	}
 
 	private var layoutBinding: Binding<ReaderHomeLayout> {

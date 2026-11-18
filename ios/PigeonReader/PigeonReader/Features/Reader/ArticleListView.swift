@@ -387,9 +387,9 @@ struct ArticleListView: View {
 		}
 	}
 
-	/// Front Page is an iPhone layout; iPad keeps Classic rows in its split view.
+	/// Front Page is a reader setting, the same on iPhone and in an iPad column.
 	private var usesFrontPage: Bool {
-		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+		model.readerTypography.homeLayout == .frontPage
 	}
 
 	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {

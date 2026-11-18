@@ -27,6 +27,17 @@ struct FrontPageLayoutTests {
 	}
 
 	@Test
+	func gridUsesOneColumnOnlyForNarrowColumnsAndLargeText() {
+		// Before the first measurement the grid assumes a phone.
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: nil, usesAccessibilitySize: false) == 2)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: false) == 2)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 375, usesAccessibilitySize: false) == 2)
+		// A 320pt iPad list column.
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 320, usesAccessibilitySize: false) == 1)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: true) == 1)
+	}
+
+	@Test
 	func deckCollapsesWhitespaceAndStaysBounded() {
 		#expect(FrontPageLayout.deck(from: nil) == nil)
 		#expect(FrontPageLayout.deck(from: " \n\t ") == nil)

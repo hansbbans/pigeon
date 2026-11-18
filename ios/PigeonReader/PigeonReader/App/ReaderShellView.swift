@@ -24,7 +24,7 @@ struct ReaderShellView: View {
 				}
 			} else {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
-					ReaderHomeView(allowsTiles: horizontalSizeClass == .compact)
+					ReaderHomeView(placement: horizontalSizeClass == .compact ? .compactRoot : .splitSidebar)
 				} content: {
 					ReaderCollectionPane()
 				} detail: {
@@ -37,6 +37,7 @@ struct ReaderShellView: View {
 					}
 				}
 				.navigationSplitViewStyle(.balanced)
+				.environment(\.readerWindowHorizontalSizeClass, horizontalSizeClass)
 				.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
 				.accessibilityHidden(showsCompactArticle || showsRegularHome)
 
@@ -45,7 +46,7 @@ struct ReaderShellView: View {
 					// columns are requested. Present Home explicitly until a view is
 					// chosen, while keeping the library and reader mounted underneath.
 					NavigationStack {
-						ReaderSidebarView()
+						ReaderHomeView(placement: .regularHome)
 					}
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 					.background(.background)

@@ -20,6 +20,8 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	@ViewBuilder let footer: () -> Footer
 
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	/// Width of the scroll view; a narrow iPad column gets a one-column grid.
+	@State private var availableWidth: Double?
 
 	private let nearEndDistance = 900.0
 
@@ -53,6 +55,13 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 			}
 			.padding(.horizontal, 16)
 			.padding(.bottom, 24)
+			.frame(maxWidth: FrontPageLayout.maximumContentWidth)
+			.frame(maxWidth: .infinity)
+		}
+		.onGeometryChange(for: Double.self) { geometry in
+			Double(geometry.size.width)
+		} action: { _, width in
+			availableWidth = width
 		}
 		.onScrollGeometryChange(for: Bool.self) { geometry in
 			geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - nearEndDistance
@@ -67,7 +76,11 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 
 	private var gridColumns: [GridItem] {
 		let column = GridItem(.flexible(), spacing: 18, alignment: .top)
-		return dynamicTypeSize.isAccessibilitySize ? [column] : [column, column]
+		let count = FrontPageLayout.gridColumnCount(
+			availableWidth: availableWidth,
+			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+		)
+		return Array(repeating: column, count: count)
 	}
 
 	private func story(_ article: Recommendation, role: FrontPageStoryView.Role) -> some View {

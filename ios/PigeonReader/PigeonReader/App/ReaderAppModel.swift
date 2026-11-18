@@ -2661,6 +2661,12 @@ final class ReaderAppModel {
 		preferredCompactColumn = .content
 	}
 
+	/// Returns a regular-width window to Home, which covers the split view
+	/// until a view is chosen. A compact window pops to Home natively.
+	func showHome() {
+		preferredCompactColumn = .sidebar
+	}
+
 	@discardableResult
 	func loadNavigation(
 		force: Bool = false,

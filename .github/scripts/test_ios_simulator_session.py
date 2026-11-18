@@ -78,6 +78,52 @@ class SimulatorOwnershipTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(record["boot_confirmed"])
 
+    def test_default_selection_is_an_iphone_and_prefers_iphone_17(self):
+        self.assertIsNone(session.preference("iPad mini (A17 Pro)", ""))
+        self.assertEqual(session.preference("iPhone 17", ""), 2)
+        self.assertEqual(session.preference("iPhone 17 Pro", ""), 1)
+        self.assertEqual(session.preference("iPhone 16", ""), 0)
+
+    def test_requested_device_family_replaces_the_iphone_default(self):
+        self.assertIsNone(session.preference("iPhone 17", "iPad mini"))
+        self.assertEqual(session.preference("iPad mini (A17 Pro)", "iPad mini"), 0)
+        self.assertEqual(session.preference("iPhone 17 Pro", "iPhone 17 Pro"), 1)
+        self.assertEqual(session.preference("iPhone 17 Pro Max", "iPhone 17 Pro"), 0)
+
+    def test_start_boots_only_the_requested_device_family(self):
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+            {"name": "iPhone 17", "udid": "phone", "state": "Shutdown"},
+            {"name": "iPad mini (A17 Pro)", "udid": "owned", "state": "Shutdown"},
+        ]}
+        with patch.dict(os.environ, {"PIGEON_SIMULATOR_DEVICE": "iPad mini"}):
+            record, calls, lock_target, ownership = self.run_start(snapshot)
+        self.assertEqual(record["udid"], "owned")
+        self.assertEqual(calls[0], call(["xcrun", "simctl", "boot", "owned"], check=True))
+
+    def test_ensure_creates_a_missing_family_on_the_newest_runtime(self):
+        device_types = json.dumps({"devicetypes": [
+            {"name": "iPad mini (6th generation)", "identifier": "type.mini-6"},
+            {"name": "iPad mini (A17 Pro)", "identifier": "type.mini-a17"},
+            {"name": "iPhone 17", "identifier": "type.iphone-17"},
+        ]})
+        runtimes = json.dumps({"runtimes": [
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-0", "isAvailable": True},
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "isAvailable": True},
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "isAvailable": False},
+            {"identifier": "com.apple.CoreSimulator.SimRuntime.watchOS-26-0", "isAvailable": True},
+        ]})
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPhone 17", "udid": "phone", "state": "Shutdown"}]}
+        with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run", side_effect=[device_types, runtimes]), patch.object(session.subprocess, "run") as command:
+            session.ensure("iPad mini")
+        command.assert_called_once_with(["xcrun", "simctl", "create", "iPad mini (A17 Pro)", "type.mini-a17", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
+
+    def test_ensure_leaves_an_existing_family_alone(self):
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPad mini (A17 Pro)", "udid": "tablet", "state": "Booted"}]}
+        with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run") as listing, patch.object(session.subprocess, "run") as command:
+            session.ensure("iPad mini")
+        listing.assert_not_called()
+        command.assert_not_called()
+
     def check_cleanup(self, boot_confirmed=True, preexisting=None, processes="", expect_shutdown=False, expect_lock=False):
         with tempfile.TemporaryDirectory() as directory:
             record = Path(directory) / "ownership.json"

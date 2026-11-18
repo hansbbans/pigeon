@@ -5,15 +5,18 @@ nonisolated enum ReaderHomeAccessibility {
 	static let dateline = "reader-home-dateline"
 	static let allFeeds = "reader-home-all-feeds"
 	static let showTiles = "reader-home-show-tiles"
+	static let showHome = "reader-show-home"
 }
 
-/// The iPhone home: a tile for each view and folder. Counts are deliberately
-/// absent here; each list shows its own count once opened.
+/// Home: a tile for each view and folder, on iPhone and iPad alike. Counts are
+/// deliberately absent here; each list shows its own count once opened.
 struct ReaderHomeTilesView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 	@State private var editorRoute: LibraryEditorRoute?
+	/// Width of the scroll view, measured so wide windows get more columns.
+	@State private var availableWidth: Double?
 	let onShowLibrary: () -> Void
 
 	var body: some View {
@@ -79,7 +82,14 @@ struct ReaderHomeTilesView: View {
 			.padding(.horizontal, 16)
 			.padding(.top, 8)
 			.padding(.bottom, 24)
+			.frame(maxWidth: ReaderHomeTiles.maximumContentWidth)
+			.frame(maxWidth: .infinity)
 			.animation(reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), value: tiles.folders.map(\.id))
+		}
+		.onGeometryChange(for: Double.self) { geometry in
+			Double(geometry.size.width)
+		} action: { _, width in
+			availableWidth = width
 		}
 		.scrollEdgeEffectStyle(.soft, for: .top)
 		.background(Color(.systemGroupedBackground))
@@ -120,12 +130,17 @@ struct ReaderHomeTilesView: View {
 		let count = ReaderHomeTiles.viewColumnCount(
 			itemCount: tiles.viewItems.count,
 			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			availableWidth: availableWidth,
 		)
 		return Array(repeating: GridItem(.flexible(), spacing: 10), count: count)
 	}
 
 	private var folderColumns: [GridItem] {
-		Array(repeating: GridItem(.flexible(), spacing: 10), count: dynamicTypeSize.isAccessibilitySize ? 1 : 2)
+		let count = ReaderHomeTiles.folderColumnCount(
+			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			availableWidth: availableWidth,
+		)
+		return Array(repeating: GridItem(.flexible(), spacing: 10), count: count)
 	}
 }
 
