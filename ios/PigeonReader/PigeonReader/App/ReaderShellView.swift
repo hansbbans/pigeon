@@ -25,8 +25,12 @@ struct ReaderShellView: View {
 			} else {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
 					ReaderHomeView(placement: horizontalSizeClass == .compact ? .compactRoot : .splitSidebar)
+						// The system's widths (320 and 375) leave an iPad mini in
+						// portrait a narrower reading column than an iPhone has.
+						.navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 320)
 				} content: {
 					ReaderCollectionPane()
+						.navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 400)
 				} detail: {
 					if showsCompactArticle {
 						ReaderPlaceholderView(collection: model.selectedCollection)

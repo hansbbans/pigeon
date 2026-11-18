@@ -192,6 +192,7 @@ struct FrontPageStoryView: View {
 	@Environment(\.showsReadingTime) private var showsReadingTime
 	@Environment(\.displayScale) private var displayScale
 	@Environment(\.readerTypeface) private var readerTypeface
+	@Environment(\.verticalSizeClass) private var verticalSizeClass
 	@State private var image: CGImage?
 	@State private var imageRequestID: String?
 
@@ -200,7 +201,7 @@ struct FrontPageStoryView: View {
 			VStack(alignment: .leading, spacing: role == .lead ? 9 : 6) {
 				if let image, imageRequestID == requestID {
 					Color.clear
-						.aspectRatio(role == .lead ? 3 / 2 : 4 / 3, contentMode: .fit)
+						.aspectRatio(imageAspectRatio, contentMode: .fit)
 						.overlay {
 							Image(decorative: image, scale: displayScale)
 								.resizable()
@@ -260,6 +261,15 @@ struct FrontPageStoryView: View {
 		.accessibilityIdentifier("front-page-story-\(article.id)")
 		.task(id: requestID) {
 			await loadImage()
+		}
+	}
+
+	/// A 3:2 lead image at full width is taller than an iPhone in landscape, so
+	/// a short window crops the lead to a banner and keeps the headline on screen.
+	private var imageAspectRatio: CGFloat {
+		switch role {
+		case .lead: verticalSizeClass == .compact ? 21 / 9 : 3 / 2
+		case .column: 4 / 3
 		}
 	}
 
