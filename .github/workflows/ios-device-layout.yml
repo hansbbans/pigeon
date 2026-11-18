@@ -49,7 +49,6 @@ jobs:
       APP_DIRECTORY: ios/PigeonReader
       PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
       SCHEME: PigeonReader
-      LAYOUT_OUTPUT: ${{ runner.temp }}/pigeon-layout-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v5
       - name: Read the request
@@ -76,6 +75,8 @@ jobs:
             echo "devices=$devices"
             echo "suite=$suite"
           } >> "$GITHUB_OUTPUT"
+          # The runner context is not available to job-level env.
+          echo "LAYOUT_OUTPUT=$RUNNER_TEMP/pigeon-layout-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Generate Xcode project
         working-directory: ${{ env.APP_DIRECTORY }}
         run: |
