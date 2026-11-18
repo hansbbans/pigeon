@@ -2,11 +2,12 @@
 # Runs the device layout walk on each requested simulator family, one after
 # the other, and collects screenshots, layout dumps and logs.
 #
-#   run-ios-device-layout.sh "<name prefix>,<name prefix>,..." layout|smoke|full
+#   run-ios-device-layout.sh "<name prefix>,<name prefix>,..." layout|smoke|full [unit]
 #
 #   layout: PigeonDeviceLayoutUITests and PigeonHomeTilesUITests.
 #   smoke:  layout plus the UI tests in .github/ios-smoke-ui-tests.txt.
 #   full:   every UI test.
+#   unit:   also run the unit tests, on the first device only.
 #
 # A device that fails does not stop the others; the script exits 1 at the end
 # if any device failed. Required env: PROJECT, SCHEME, DERIVED_DATA_PATH,
@@ -15,8 +16,9 @@ set -uo pipefail
 
 devices_csv="${1:-}"
 suite="${2:-layout}"
-if [[ -z "$devices_csv" || ! "$suite" =~ ^(layout|smoke|full)$ ]]; then
-  echo "usage: $0 \"<device name prefix>,...\" layout|smoke|full" >&2
+unit_tests="${3:-}"
+if [[ -z "$devices_csv" || ! "$suite" =~ ^(layout|smoke|full)$ || ! "$unit_tests" =~ ^(unit)?$ ]]; then
+  echo "usage: $0 \"<device name prefix>,...\" layout|smoke|full [unit]" >&2
   exit 2
 fi
 : "${PROJECT:?}" "${SCHEME:?}" "${DERIVED_DATA_PATH:?}" "${LAYOUT_OUTPUT:?}" "${RUNNER_TEMP:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_RUN_ATTEMPT:?}"
@@ -46,6 +48,11 @@ fi
 
 run_device() {
   local device="$1" output="$2"
+  local tests=("${only_testing[@]}")
+  if [[ "$unit_tests" == "unit" ]]; then
+    tests+=("-only-testing:PigeonReaderTests")
+    unit_tests=""
+  fi
   python3 "$session" ensure "$device" || return 1
   PIGEON_SIMULATOR_DEVICE="$device" python3 "$session" start || return 1
   local udid
@@ -62,10 +69,13 @@ run_device() {
       -parallel-testing-enabled NO \
       -derivedDataPath "$DERIVED_DATA_PATH" \
       -resultBundlePath "$output/result.xcresult" \
-      "${only_testing[@]}" \
+      "${tests[@]}" \
       CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO > "$log" 2>&1 || result=$?
 
-  grep -E "^Test Case .*(passed|failed)|^Test Suite 'All tests'|error:|\*\* TEST|\*\* BUILD|Executed [0-9]+ tests" "$log" | cut -c1-400 || true
+  # UI test results, compile errors, and failures from both XCTest and Swift
+  # Testing. Passing unit tests are left out: there are thousands.
+  grep -E "^Test Case .*UITests.*(passed|failed)|^Test Case .* failed|error:|recorded an issue|\*\* TEST|\*\* BUILD|Executed [0-9]+ tests|Test run with [0-9]+ tests|_BENCH " "$log" \
+    | cut -c1-500 | head -n 300 || true
   if [[ "$result" -ne 0 ]]; then
     echo "xcodebuild exited $result on $device. Last lines of its log:"
     tail -n 60 "$log" | cut -c1-400

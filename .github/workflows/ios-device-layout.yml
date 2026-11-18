@@ -22,6 +22,11 @@ on:
           - layout
           - smoke
           - full
+      unit_tests:
+        description: Also run the unit tests, on the first device
+        required: true
+        default: false
+        type: boolean
   # Temporary: lets a branch request a run before this file is on main.
   push:
     branches-ignore: [main]
@@ -56,14 +61,18 @@ jobs:
         env:
           INPUT_DEVICES: ${{ inputs.devices }}
           INPUT_SUITE: ${{ inputs.suite }}
+          INPUT_UNIT_TESTS: ${{ inputs.unit_tests }}
         run: |
           set -euo pipefail
           devices="$INPUT_DEVICES"
           suite="$INPUT_SUITE"
+          unit=""
+          if [[ "$INPUT_UNIT_TESTS" == "true" ]]; then unit=unit; fi
           request=.github/ios-device-layout.request
           if [[ -z "$devices" && -f "$request" ]]; then
             devices="$(sed -n 's/^devices=//p' "$request" | head -n 1)"
             suite="$(sed -n 's/^suite=//p' "$request" | head -n 1)"
+            if [[ "$(sed -n 's/^unit=//p' "$request" | head -n 1)" == "first" ]]; then unit=unit; fi
           fi
           devices="${devices:-iPhone 17 Pro,iPad Pro 11-inch,iPad mini}"
           suite="${suite:-layout}"
@@ -74,6 +83,7 @@ jobs:
           {
             echo "devices=$devices"
             echo "suite=$suite"
+            echo "unit=$unit"
           } >> "$GITHUB_OUTPUT"
           # The runner context is not available to job-level env.
           echo "LAYOUT_OUTPUT=$RUNNER_TEMP/pigeon-layout-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
@@ -95,9 +105,10 @@ jobs:
         env:
           DEVICES: ${{ steps.request.outputs.devices }}
           SUITE: ${{ steps.request.outputs.suite }}
+          UNIT_TESTS: ${{ steps.request.outputs.unit }}
           DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-layout-build-${{ github.run_id }}-${{ github.run_attempt }}
         shell: bash
-        run: .github/scripts/run-ios-device-layout.sh "$DEVICES" "$SUITE"
+        run: .github/scripts/run-ios-device-layout.sh "$DEVICES" "$SUITE" "$UNIT_TESTS"
       - name: Upload screenshots and layout dumps
         if: always()
         uses: actions/upload-artifact@v4
