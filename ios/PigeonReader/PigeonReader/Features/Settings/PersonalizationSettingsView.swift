@@ -31,7 +31,7 @@ struct PersonalizationSettingsView: View {
 						}
 						.labelStyle(.iconOnly)
 						.accessibilityLabel("Add Topic")
-						.disabled(model.isUpdatingPersonalization)
+						.disabled(model.isUpdatingPersonalization || model.isLoadingPersonalization)
 					}
 
 					if monitoredTopics.isEmpty {
@@ -50,7 +50,7 @@ struct PersonalizationSettingsView: View {
 									removeTopic(topic)
 								}
 								.labelStyle(.iconOnly)
-								.disabled(model.isUpdatingPersonalization)
+								.disabled(model.isUpdatingPersonalization || model.isLoadingPersonalization)
 							}
 						}
 					}
@@ -187,7 +187,9 @@ struct PersonalizationSettingsView: View {
 	}
 
 	private func addTopic() {
-		guard model.isUpdatingPersonalization == false else { return }
+		// While the saved topics are still loading, the list here is empty or
+		// stale. Saving then would replace the server's topics with one topic.
+		guard model.isUpdatingPersonalization == false, model.isLoadingPersonalization == false else { return }
 		model.clearPersonalizationError()
 		topicMessage = nil
 		guard let topic = PersonalizationTopicRules.normalizedTopic(newTopic) else {
@@ -226,7 +228,7 @@ struct PersonalizationSettingsView: View {
 	}
 
 	private func removeTopic(_ topic: String) {
-		guard model.isUpdatingPersonalization == false else { return }
+		guard model.isUpdatingPersonalization == false, model.isLoadingPersonalization == false else { return }
 		let accountID = model.session?.storageIdentity
 		let previousTopics = monitoredTopics
 		monitoredTopics.removeAll { $0 == topic }
