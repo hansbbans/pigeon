@@ -11,6 +11,32 @@ private struct PendingStatusOverlay: Sendable {
 	var starred: PendingStatusValue?
 }
 
+/// One slot per payload of a concurrent decode. Each iteration writes only
+/// its own slot, and the slots are read after every iteration has finished.
+private nonisolated final class ConcurrentDecodeResults: @unchecked Sendable {
+	private let storage: UnsafeMutablePointer<Recommendation?>
+	private let count: Int
+
+	init(count: Int) {
+		self.count = count
+		storage = .allocate(capacity: count)
+		storage.initialize(repeating: nil, count: count)
+	}
+
+	deinit {
+		storage.deinitialize(count: count)
+		storage.deallocate()
+	}
+
+	func set(_ article: Recommendation?, at index: Int) {
+		storage[index] = article
+	}
+
+	var values: [Recommendation?] {
+		Array(UnsafeBufferPointer(start: storage, count: count))
+	}
+}
+
 actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProviding {
 	static let shared = OfflineLibraryStore()
 
@@ -302,25 +328,44 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// article appears in several collections.
 		var decodedArticlesByID: [String: Recommendation] = [:]
 		let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
+		// Rows are read from the connection in batches and each batch is decoded
+		// on every core. Decoding the bodies is nearly all of the time between a
+		// cold launch and the first story list, and no row depends on another.
+		var batchRows: [(id: String, bodyPruned: Bool)] = []
+		var batchPayloads: [Data] = []
+		func decodeBatch() {
+			let decodedArticles = Self.decodeArticles(batchPayloads, decoder: decoder)
+			for (row, decodedArticle) in zip(batchRows, decodedArticles) {
+				guard let decodedArticle else {
+					malformedPayload = true
+					continue
+				}
+				let article = row.bodyPruned ? decodedArticle.replacingHTML("") : decodedArticle
+				decodedArticlesByID[row.id] = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
+				#if DEBUG
+				snapshotArticleDecodeCount += 1
+				#endif
+			}
+			batchRows.removeAll(keepingCapacity: true)
+			batchPayloads.removeAll(keepingCapacity: true)
+		}
 		try query(
 			"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC, id",
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
 			guard let articleID = string(at: 0, statement: statement),
-				let payload = data(at: 2, statement: statement),
-				let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
+				let payload = data(at: 2, statement: statement) else {
 				malformedPayload = true
 				return
 			}
-			let article = sqlite3_column_int64(statement, 1) != 0
-				? decodedArticle.replacingHTML("")
-				: decodedArticle
-			decodedArticlesByID[articleID] = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
-			#if DEBUG
-			snapshotArticleDecodeCount += 1
-			#endif
+			batchRows.append((id: articleID, bodyPruned: sqlite3_column_int64(statement, 1) != 0))
+			batchPayloads.append(payload)
+			if batchRows.count == Self.snapshotDecodeBatchSize {
+				decodeBatch()
+			}
 		}
+		decodeBatch()
 		if decodedArticlesByID.count != articleRowCount {
 			malformedPayload = true
 		}
@@ -1544,6 +1589,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	}
 
 	private static let maximumSanitizedFixedPoints = 20_000
+	/// Bounds how many undecoded payloads a snapshot load holds at once.
+	private static let snapshotDecodeBatchSize = 128
+
+	private nonisolated static func decodeArticles(_ payloads: [Data], decoder: JSONDecoder) -> [Recommendation?] {
+		guard payloads.count > 1 else {
+			return payloads.map { try? decoder.decode(Recommendation.self, from: $0) }
+		}
+		let results = ConcurrentDecodeResults(count: payloads.count)
+		DispatchQueue.concurrentPerform(iterations: payloads.count) { index in
+			results.set(try? decoder.decode(Recommendation.self, from: payloads[index]), at: index)
+		}
+		return results.values
+	}
 
 	/// Saving a collection sanitizes every story in it, and a read or star
 	/// toggle saves every collection that holds the story. Nearly all of those
