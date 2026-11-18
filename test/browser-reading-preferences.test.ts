@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { runInNewContext, Script } from 'node:vm';
 import { createServer } from 'node:http';
 import { renderBrowserReadingScript } from '../src/browser-reading-preferences';
+import { GEIST_SERIF_FONT_FACE, GEIST_SERIF_PATH } from '../src/browser-fonts';
 
 // A deliberately inert DOM adapter exercises sanitizer decisions in Node.
 // Native HTML parsing/no-network behavior is verified separately in a browser.
@@ -58,7 +59,9 @@ test('reading preferences persist typed bounded settings and unique keyboard sho
 test('frame CSS uses only safe enum fonts/colors and bounded numbers; system theme follows media preference',()=>{
  const state=fixture();const css=state.api.frameCSS({theme:'system',font:'url(https://evil.test/font)',fontSize:'18;@import x',width:'NaN',margins:-10});
  assert.equal(state.api.frameTheme({theme:'system'},'light',true),'dark');assert.match(css,/font-size:18px/);assert.match(css,/max-width:640px/);assert.match(css,/padding:0px/);
- assert.doesNotMatch(css,/@import|https:\/\/|javascript:|url\(/);
+ // An unknown font falls back to Geist Serif, whose only url() is the vendored same-origin font.
+ assert.ok(css.startsWith(GEIST_SERIF_FONT_FACE));
+ assert.doesNotMatch(css.slice(GEIST_SERIF_FONT_FACE.length),/@import|https:\/\/|javascript:|url\(/);
  const failing={getItem:()=>{throw new Error('denied');},setItem:()=>{throw new Error('denied');}};
  assert.equal(state.api.readPreferences(failing).theme,'app');assert.throws(()=>state.api.savePreferences({},failing),/could not be saved/);
 });
@@ -88,7 +91,7 @@ test('a light theme saved under the old light default reads as Match app once, t
  assert.equal(state.api.readPreferences().theme,'app');
  assert.equal(state.api.readPreferences().fontSize,20);
  state.api.savePreferences({theme:'light',fontSize:20});
- assert.equal(JSON.parse(state.values.get('pigeon.browser.reading.v1')!).schema,2);
+ assert.equal(JSON.parse(state.values.get('pigeon.browser.reading.v1')!).schema,3);
  assert.equal(state.api.readPreferences().theme,'light');
  state.values.set('pigeon.browser.reading.v1',JSON.stringify({theme:'sepia'}));
  assert.equal(state.api.readPreferences().theme,'sepia');
@@ -237,4 +240,48 @@ test('link targets keep safe ids and code keeps its language',async()=>{
  assert.match(result.html,/<li id="fn:1">/);assert.match(result.html,/<sup id="fnref:1">/);assert.match(result.html,/<a id="f1n">/);
  assert.doesNotMatch(result.html,/bad id/);
  assert.match(result.html,/<code data-lang="python">/);
+});
+
+test('Geist Serif is the default typeface and the frame loads it from the vendored path',()=>{
+ const state=fixture();
+ assert.equal(state.api.readPreferences().font,'geist');
+ const css=state.api.frameCSS({});
+ assert.ok(css.includes("url('"+GEIST_SERIF_PATH+"') format('woff2')"));
+ assert.match(css,/body\{font-family:'Geist Serif', 'New York', 'Iowan Old Style', Georgia, serif;/);
+ assert.match(state.api.fontStack({}),/^'Geist Serif',/);
+ for(const font of ['system','serif','sans']) {
+  const other=state.api.frameCSS({font});
+  assert.ok(!other.includes('@font-face'),font+' must not load Geist Serif');
+  assert.ok(other.includes('font-family:'+state.api.fontStack({font})+';'));
+ }
+ assert.match(state.api.fontStack({font:'serif'}),/^Georgia/);
+ assert.equal(state.api.fontStack({font:'nope'}),state.api.fontStack({}));
+});
+
+test('a font saved as the old System default reads as Geist Serif once, then sticks when chosen again',()=>{
+ const state=fixture();
+ for(const schema of [undefined,2]) {
+  state.values.set('pigeon.browser.reading.v1',JSON.stringify({schema,font:'system',fontSize:21}));
+  assert.equal(state.api.readPreferences().font,'geist');
+  assert.equal(state.api.readPreferences().fontSize,21);
+ }
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({schema:2,font:'sans'}));
+ assert.equal(state.api.readPreferences().font,'sans');
+ state.api.savePreferences({font:'system'});
+ assert.equal(state.api.readPreferences().font,'system');
+ state.api.savePreferences({font:'geist'});
+ assert.equal(state.api.readPreferences().font,'geist');
+});
+
+test('a schema 3 record keeps an explicit Light theme',()=>{
+ const state=fixture();
+ state.values.set('pigeon.browser.reading.v1',JSON.stringify({schema:3,theme:'light'}));
+ assert.equal(state.api.readPreferences().theme,'light');
+});
+
+test('frameFontCSS gives non-prepared frame documents only the typeface',()=>{
+ const state=fixture();
+ assert.equal(state.api.frameFontCSS({}),GEIST_SERIF_FONT_FACE+"body{font-family:"+state.api.fontStack({})+"}");
+ assert.equal(state.api.frameFontCSS({font:'sans'}),'body{font-family:Arial, Helvetica, sans-serif}');
+ assert.equal(state.api.frameFontCSS({font:'url(x)'}),state.api.frameFontCSS({}));
 });

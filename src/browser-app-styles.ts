@@ -1,3 +1,5 @@
+import { GEIST_SERIF_FONT_FACE } from './browser-fonts';
+
 // Visual layer for the browser reader. Quiet, Reeder-style: three hairline-separated
 // columns, icon-only toolbars, one muted accent, and a neutral graphite dark mode.
 
@@ -56,6 +58,7 @@ function iconVariables(): string {
 
 export function renderBrowserAppStyles(): string {
 	return `
+      ${GEIST_SERIF_FONT_FACE}
       :root {
         color-scheme: light;
         --page: #ffffff;
@@ -80,6 +83,8 @@ export function renderBrowserAppStyles(): string {
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 40px rgba(0, 0, 0, 0.12);
         --radius: 8px;
         --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', sans-serif;
+        /* The reading typeface (Settings → Reading → Typeface); the app sets it from the saved preference. */
+        --reading-font: 'Geist Serif', 'New York', 'Iowan Old Style', Georgia, serif;
 ${iconVariables()}
       }
 
@@ -813,7 +818,7 @@ ${iconVariables()}
         overflow: hidden;
         -webkit-line-clamp: 3;
         -webkit-box-orient: vertical;
-        font-family: 'New York', 'Iowan Old Style', Charter, Georgia, 'Times New Roman', serif;
+        font-family: var(--reading-font);
         font-size: 1rem;
         font-weight: 600;
         line-height: 1.28;
@@ -910,6 +915,7 @@ ${iconVariables()}
 
       #reader-title {
         display: block;
+        font-family: var(--reading-font);
         font-size: clamp(1.5rem, 2.3vw, 2rem);
         font-weight: 700;
         line-height: 1.18;
@@ -924,7 +930,7 @@ ${iconVariables()}
 
       .reader-copy.is-empty { margin: auto; padding: 0; text-align: center; }
       .reader-copy.is-empty .reader-kicker { display: none; }
-      .reader-copy.is-empty #reader-title { color: var(--muted); font-size: 0.95rem; font-weight: 500; letter-spacing: 0; }
+      .reader-copy.is-empty #reader-title { color: var(--muted); font-family: var(--font); font-size: 0.95rem; font-weight: 500; letter-spacing: 0; }
       .reader-copy.is-empty #reader-meta { display: none; }
       .reader-scroll.is-empty .reader-frame-shell { display: none; }
 
@@ -946,7 +952,7 @@ ${iconVariables()}
       .reader-transcript:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       .transcript-chapter { display: flex; align-items: baseline; gap: 0.6rem; margin: 0.9rem 0 0.2rem; padding: 0 0.5rem; color: var(--text); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; }
       .transcript-chapter:first-child { margin-top: 0.35rem; }
-      .transcript-segment { display: grid; grid-template-columns: 3.6rem 1fr; gap: 0.35rem; margin: 0; padding: 0.35rem 0.5rem; border-radius: 6px; color: var(--text-secondary); font-family: 'New York', 'Iowan Old Style', Charter, Georgia, serif; font-size: 0.93rem; line-height: 1.5; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
+      .transcript-segment { display: grid; grid-template-columns: 3.6rem 1fr; gap: 0.35rem; margin: 0; padding: 0.35rem 0.5rem; border-radius: 6px; color: var(--text-secondary); font-family: var(--reading-font); font-size: 0.93rem; line-height: 1.5; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
       @media (hover: hover) { .transcript-segment:hover { background: var(--hover); } }
       .transcript-segment.is-active { background: var(--accent-soft); color: var(--text); }
       .transcript-time { justify-self: start; align-self: start; padding: 0; border: 0; background: none; color: var(--muted); font: 500 0.72rem/1.9 var(--font); font-variant-numeric: tabular-nums; cursor: pointer; }

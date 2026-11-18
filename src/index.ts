@@ -16,6 +16,7 @@ import { handleYouTubeChannelSearch } from './youtube-channel-search';
 import { handleReadwiseTokenRequest } from './readwise-token-api';
 import { renderBrowserServiceWorker } from './browser-service-worker';
 import { handleBrowserInstallationAsset } from './browser-manifest';
+import { handleBrowserFontRequest } from './browser-fonts';
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -34,6 +35,9 @@ export default {
 				'Content-Type': 'text/javascript; charset=utf-8',
 				'Cache-Control': 'public, max-age=31536000, immutable',
 			} });
+		}
+		if (path.startsWith('/app/fonts/')) {
+			return handleBrowserFontRequest(request, path) ?? new Response('Not found', { status: 404 });
 		}
 		if (path === '/app/sw.js' && request.method === 'GET') {
 			return new Response(renderBrowserServiceWorker(), { headers: {
