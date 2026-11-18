@@ -113,9 +113,15 @@ nonisolated enum StructuredHTMLSanitizer {
 	}
 
 	static func imageURLs(in html: String, baseURL: URL?) -> [URL] {
-		// No image tag in, no image tag out: skip the sanitizing pass.
-		guard html.range(of: "<img", options: [.caseInsensitive]) != nil else { return [] }
-		let sanitized = sanitize(html: html, baseURL: baseURL)
+		// No image tag in, no image tag out: skip the sanitizing pass. The tag
+		// name is matched loosely because the sanitizer accepts "< img".
+		guard html.range(of: "img", options: [.caseInsensitive]) != nil else { return [] }
+		return imageURLs(inSanitized: sanitize(html: html, baseURL: baseURL), baseURL: baseURL)
+	}
+
+	/// The image URLs of HTML that `sanitize` has already produced. Callers
+	/// that hold the sanitized body use this to avoid sanitizing it again.
+	static func imageURLs(inSanitized sanitized: String, baseURL: URL?) -> [URL] {
 		var urls: [URL] = []
 		var remaining = sanitized[...]
 		while let imageRange = remaining.range(of: "<img", options: [.caseInsensitive]) {
