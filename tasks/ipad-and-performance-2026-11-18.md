@@ -2,15 +2,39 @@
 
 Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. No pull request.
 
-## Read this first: nothing here has been compiled
+## Where verification stands
 
-The session ran in a Linux container with no Swift toolchain, and the self-hosted Mac was asleep for almost all of it. It picked up a job at 04:06 UTC and another at 06:40 UTC, and each time went offline within seconds: both jobs were failed ten minutes later with their test step never reported and no log uploaded. That is what a laptop waking briefly and sleeping again looks like. Each of those half-runs may have left a simulator booting or an `xcodebuild` suspended on the Mac; the next run's first steps clean those up. So:
+The work was written in a Linux container with no Swift toolchain. It was first compiled and run on 2026-11-18 at 12:53 UTC, by run 9 of the new `iOS device layout` workflow on the self-hosted Mac (Debug build, iOS 26.5 simulators).
 
-- No Swift in this branch has been through a compiler, a unit test or a simulator. It was written against the existing code, re-read, and reviewed once by a second read-only pass that was asked to act as the compiler. That pass found one real error (store counters declared inside `#if DEBUG` and used outside it, which would have broken only the Release build), now fixed. It will not have found everything.
-- No screen was looked at. The UI findings are from reading code.
-- The timings under Performance are complexity arguments, not measurements. A benchmark test prints real numbers the first time the unit tests run.
+Verified by run 9:
+- The branch compiles in Debug. The Release build has not been tried.
+- 1,048 of 1,049 unit tests passed. The one failure was a new test calling the store directly and getting a protocol default; fixed in 14f24bc and not yet re-run.
+- `PigeonHomeTilesUITests` (4 tests) passed on the iPhone 17 Pro and on an iPad Pro 11-inch. The two iPad-only tests that CI always skipped (`testIPadLandscapeStartupShowsSavedHomeAndRestoresStories`, `testSwitchingFeedsKeepsTheRegularSidebarStationary`) ran and passed on the iPad Pro.
+- The layout walk completed on the iPhone in both orientations and on the iPad Pro in portrait: Home, library, Classic list, Settings, Front Page, reader, Home from an open story and back, rotation, reading controls. It recorded no control cut off by the window, no small bar button and no overlapping bar buttons on any screen.
+- Measured frames on the iPad Pro 11-inch: in portrait the list column is 340pt and the reader 494pt; in landscape the sidebar is 280pt and the reader 580pt. The Home button is hittable in the list toolbar.
 
-One run of the new `iOS device layout` workflow (run 8) is queued and will start when the Mac next comes online. If that is another brief wake it will fail the same way, with no log; re-request it by bumping `run=` in `.github/ios-device-layout.request` once the Mac is awake for good. It builds, runs every unit test once, and runs the layout walk on three simulators. Its last step prints compile errors, failed tests, `_BENCH` timings and one line per screen with element frames. Read that log before anything else here is trusted. `PigeonReader.xcodeproj` is not regenerated: one test file was added, so run `xcodegen generate` (the workflow's last step prints the diff).
+Not verified:
+- **No screenshot has been looked at.** They are in the run's artifact (`pigeon-device-layout-<run>`), 60 files for run 9.
+- **iPad mini**: no run yet. The workflow tried to create an iPad mini 4 simulator, which iOS 26.5 refuses; fixed in 14f24bc.
+- **iPad Pro in landscape**: the walk stopped at its first tap, because Home covers a sidebar whose rows share identifiers with the tiles and the test tapped an ambiguous match. The test is fixed in 14f24bc. The duplicate elements under Home are real for VoiceOver and predate this branch.
+- **The wide tile grid**: the sample library has two folders, so run 9 could not tell two columns from three. The walk now checks tile width instead.
+- The Release configuration, the full UI suite, and a warning-free build log (CI fails on first-party warnings; the workflow's filter does not print them).
+
+Run 10 was requested with those fixes. Earlier runs (2, 5, 8) were picked up while the laptop was briefly awake and failed ten minutes later with no log; the workflow now holds the Mac awake with `caffeinate` while it runs.
+
+### Measured (run 9, simulator on the Mac, Debug)
+From `statusTogglePathBenchmark`, 150 stories with 38 KB bodies:
+
+| | ms |
+|---|---|
+| First save of the collection (what every re-save used to cost) | 2,190 |
+| Re-save of the same collection (what a read or star toggle does now) | 80 |
+| Decode the whole collection (what every status change used to do first) | 29 |
+| Enqueue one read mutation now | 1.8 |
+| Sanitize one 38 KB body now | 14.3 |
+| Regex compilations removed from that sanitize (880 opening tags) | 7.6 |
+
+So the collection re-save is about 27 times cheaper and the enqueue no longer scales with the library. The sanitizer itself only went from about 22 ms to 14 ms per body: its remaining cost is the character-by-character scan, which is the next thing to fix on that path. The existing `CACHE_BENCH` reported 474 ms to load 5,344 stories (61.5 MB of payloads) with the new parallel decode; there is no before number from the same machine.
 
 ## What changed
 
@@ -48,7 +72,7 @@ Each item names what the work scaled with before and after. N is cached stories 
 | Thumbnail download | cancellation check and `Data` append per byte | per 32 KB |
 | Thumbnail memory cache | 24 images / 4 MB (under two Front Page leads) | 64 images / 16 MB |
 
-On "10x": the first two rows are where an order of magnitude is plausible for something a reader does constantly, because the old cost grew with the whole library and the new one with the one story touched. The sanitizer, the sync merge and the repeated-feed reload are likely several-fold. The rest are smaller or remove main-thread stalls rather than total work. None of it is measured yet.
+On "10x": the first two rows are where an order of magnitude was plausible and is now measured (see above). The sanitizer gained about 1.5x, not several-fold. The sync merge, the repeated-feed reload and the rest are unmeasured.
 
 ## Not fixed
 
