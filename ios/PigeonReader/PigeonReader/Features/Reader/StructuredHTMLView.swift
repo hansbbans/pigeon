@@ -101,7 +101,6 @@ struct StructuredHTMLView: UIViewRepresentable {
 			PrivacyImageSchemeHandler(session: imageProxySession),
 			forURLScheme: "pigeon-image",
 		)
-		configuration.setURLSchemeHandler(ReaderFontSchemeHandler(), forURLScheme: ReaderFontSchemeHandler.scheme)
 
 		let webView = WKWebView(frame: .zero, configuration: configuration)
 		webView.navigationDelegate = context.coordinator
@@ -155,6 +154,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		var onLinkMenuAction: (ArticleLinkMenuAction, URL) -> Void
 		var onHeight: (CGFloat) -> Void
 		private var isShellLoaded = false
+		private var installedTypefaces: Set<ReaderTypeface> = []
 		private var pendingPayload: Payload?
 		private var renderedSignature: String?
 		private var renderingGeneration: UInt = 0
@@ -179,6 +179,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 
 		func loadShell(baseURL: URL?) {
 			isShellLoaded = false
+			installedTypefaces = []
 			pendingPayload = nil
 			renderedSignature = nil
 			renderingGeneration &+= 1
@@ -322,6 +323,12 @@ struct StructuredHTMLView: UIViewRepresentable {
 			guard let data = try? JSONSerialization.data(withJSONObject: payload.dictionary),
 				let json = String(data: data, encoding: .utf8) else {
 				return
+			}
+			// Scripts run in order, so the faces are installed before the render that uses them.
+			if let typeface = ReaderTypeface(rawValue: payload.typeface), installedTypefaces.contains(typeface) == false,
+				let script = ReaderWebFonts.installScript(for: typeface) {
+				installedTypefaces.insert(typeface)
+				webView?.evaluateJavaScript(script)
 			}
 			renderingGeneration &+= 1
 			let generation = renderingGeneration

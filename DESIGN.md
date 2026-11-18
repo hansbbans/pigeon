@@ -98,7 +98,7 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 - `storyTitle` is the title face at 17 (`relativeTo: .body`).
 - `articleTitle` is the title face at 25 and `articleBody` the regular face at 18, both multiplied by `textScale`.
 - Front Page masthead is the italic face at 38, lead headline the title face at 27, deck the regular face at 16.
-- In the HTML, the body uses `"Geist Serif", "Iowan Old Style", Georgia, serif`, or Bookerly when `body[data-typeface="bookerly"]`. Headings inherit it with line-height 1.16, and are weight 400 in Geist Serif to match the SwiftUI title. WebKit synthesizes bold and italic for `strong` and `em` in Geist Serif; Bookerly uses its Bold and Italic faces. Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
+- In the HTML, the body uses `"Geist Serif", "Iowan Old Style", Georgia, serif`, or Bookerly when `body[data-typeface="bookerly"]`. Headings inherit it with line-height 1.16, and are weight 400 in Geist Serif to match the SwiftUI title. WebKit synthesizes bold and italic for `strong` and `em` in Geist Serif; Bookerly uses its Bold and Italic faces. WebKit's content process cannot see `UIAppFonts` fonts, and it blocks fonts fetched from a custom scheme on the article's https page as mixed content. So `ReaderWebFonts` passes the chosen typeface's bytes to `__pigeonInstallFonts`, which adds them with the `FontFace` API before the first render (about 7 ms for Bookerly's four faces in the simulator). Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
 - Classic list rows (`ArticleRowView.swift`) use `storyTitle` for titles and `.caption` for metadata.
 
 **Reading preferences.** `ReaderTypographySettings`:

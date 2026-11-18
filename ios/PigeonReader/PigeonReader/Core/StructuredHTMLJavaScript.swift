@@ -311,15 +311,8 @@ enum StructuredHTMLJavaScript {
 	<html>
 	<head>
 		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https: pigeon-image:; font-src pigeon-font:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src http: https: pigeon-image:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 		<style>
-			/* WebKit cannot see UIAppFonts fonts, so each face is served by ReaderFontSchemeHandler.
-			   Faces load only when text uses them. Geist Serif has one face; WebKit synthesizes bold and italic. */
-			@font-face { font-family: "Geist Serif"; src: url("pigeon-font://font/GeistSerif-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; }
-			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; }
-			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Bold.ttf") format("truetype"); font-weight: 700; font-style: normal; }
-			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; }
-			@font-face { font-family: Bookerly; src: url("pigeon-font://font/Bookerly-BoldItalic.ttf") format("truetype"); font-weight: 700; font-style: italic; }
 			:root { color-scheme: light dark; }
 			* { box-sizing: border-box; }
 			html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: hidden; width: 100%; }
@@ -407,6 +400,18 @@ enum StructuredHTMLJavaScript {
 		<script>
 			\(StructuredHTMLJavaScript.sanitizationFunctions)
 			const content = document.getElementById("pigeon-content");
+			// ReaderWebFonts passes the bundled faces in; WebKit cannot see the app's fonts or fetch them here.
+			const installedFonts = new Set();
+			window.__pigeonInstallFonts = function(faces) {
+				for (const face of faces) {
+					const key = face.family + "|" + face.weight + "|" + face.style;
+					if (installedFonts.has(key)) continue;
+					installedFonts.add(key);
+					const font = new FontFace(face.family, Uint8Array.fromBase64(face.data), { weight: face.weight, style: face.style });
+					document.fonts.add(font);
+					font.load().catch(() => {});
+				}
+			};
 			window.__pigeonRender = function(payload) {
 				document.documentElement.style.setProperty("--pigeon-text-scale", String(payload.textScale || 1));
 				document.documentElement.style.setProperty("--pigeon-line-height", String(payload.lineHeight || 1.55));
