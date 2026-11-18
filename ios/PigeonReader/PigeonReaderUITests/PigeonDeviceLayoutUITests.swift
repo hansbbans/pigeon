@@ -53,12 +53,18 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		// Home: the tile grid at every width.
 		let tiles = element("reader-home-tiles")
 		recorder.expect(tiles.waitForExistence(timeout: 20), "Home shows the tile grid")
-		let folderColumns = columnCount(of: app.buttons.matching(
+		// The sample library has two folders, so the column count shows in the
+		// width of a tile: about 260pt at three across on an iPad in portrait,
+		// about 400pt if the grid stayed at a phone's two.
+		let folderTiles = app.buttons.matching(
 			NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-user/"),
-		))
-		recorder.note("folder-tile-columns", "\(folderColumns)")
+		)
+		let folderTileWidth = folderTiles.allElementsBoundByIndex
+			.first { $0.exists && $0.isHittable }?.frame.width ?? 0
+		recorder.note("folder-tile-columns", "\(columnCount(of: folderTiles))")
+		recorder.note("folder-tile-width", "\(Int(folderTileWidth.rounded()))")
 		if isPad {
-			recorder.expect(folderColumns >= 3, "An iPad shows at least three folder tiles across")
+			recorder.expect(folderTileWidth > 0 && folderTileWidth <= 300, "An iPad lays folder tiles out at least three across")
 		}
 		recorder.capture("home")
 
@@ -81,11 +87,8 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		}
 
 		// A story list in Classic rows.
-		let forYou = app.buttons["reader-sidebar-item-forYou"]
-		for _ in 0..<4 where forYou.exists && forYou.isHittable == false {
-			app.swipeDown()
-		}
-		recorder.expect(forYou.waitForExistence(timeout: 10), "Home offers For You")
+		let forYou = hittableButton("reader-sidebar-item-forYou")
+		recorder.expect(forYou.exists && forYou.isHittable, "Home offers For You")
 		forYou.tap()
 		let firstStory = app.staticTexts["Designing calmer tools for people who read every day"]
 		recorder.expect(firstStory.waitForExistence(timeout: 15), "For You lists its stories")
@@ -138,10 +141,11 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		if showHome.exists, showHome.isHittable {
 			showHome.tap()
 			recorder.expect(tiles.waitForExistence(timeout: 10), "Home covers the split view again")
-			recorder.expect(forYou.waitForExistence(timeout: 5) && forYou.isHittable, "Home is usable after returning to it")
+			let forYouAgain = hittableButton("reader-sidebar-item-forYou")
+			recorder.expect(forYouAgain.exists && forYouAgain.isHittable, "Home is usable after returning to it")
 			recorder.capture("home-returned")
-			if forYou.exists, forYou.isHittable {
-				forYou.tap()
+			if forYouAgain.exists, forYouAgain.isHittable {
+				forYouAgain.tap()
 			}
 			recorder.expect(reader.waitForExistence(timeout: 10), "The open story is still there after Home")
 		}
@@ -156,7 +160,8 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		// Reading controls come last: how they are dismissed differs by device.
 		if controls.waitForExistence(timeout: 5), controls.isHittable {
 			controls.tap()
-			recorder.expect(element("reader-reading-theme").waitForExistence(timeout: 10), "Reading controls open")
+			// The sheet's own controls are below the fold at an iPhone's medium detent.
+			recorder.expect(app.navigationBars["Reading controls"].waitForExistence(timeout: 10), "Reading controls open")
 			recorder.capture("reading-controls")
 		}
 
@@ -188,11 +193,25 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		app.descendants(matching: .any)[identifier].firstMatch
 	}
 
-	/// Distinct left edges among the visible elements of a query.
+	/// On an iPad in landscape, Home covers a split view whose sidebar rows carry
+	/// the same identifiers as the tiles. Returns the match that can be tapped.
+	private func hittableButton(_ identifier: String, timeout: TimeInterval = 10) -> XCUIElement {
+		let query = app.buttons.matching(identifier: identifier)
+		let deadline = Date().addingTimeInterval(timeout)
+		while Date() < deadline {
+			if let match = query.allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable }) {
+				return match
+			}
+			RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+		}
+		return query.firstMatch
+	}
+
+	/// Distinct left edges among the tappable elements of a query.
 	private func columnCount(of query: XCUIElementQuery) -> Int {
 		let window = app.frame
 		var edges: [CGFloat] = []
-		for element in query.allElementsBoundByIndex where element.exists {
+		for element in query.allElementsBoundByIndex where element.exists && element.isHittable {
 			let frame = element.frame
 			guard frame.intersects(window), frame.width > 1 else { continue }
 			if edges.contains(where: { abs($0 - frame.minX) < 4 }) == false {

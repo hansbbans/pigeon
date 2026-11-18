@@ -74,8 +74,17 @@ def ensure(wanted):
     if not matching or not available:
         raise RuntimeError("No simulator device type or iOS runtime is installed for " + wanted)
     newest = max(available, key=lambda runtime: tuple(map(int, runtime["identifier"].rsplit(".iOS-", 1)[1].split("-"))))
-    # "iPhone 17 Pro" must not become an "iPhone 17 Pro Max".
-    device_type = next((candidate for candidate in matching if candidate["name"] == wanted), matching[-1])
+    # The device type list includes retired hardware ("iPad mini 4") that a
+    # current runtime refuses, so choose among the types the runtime supports.
+    supported = [device_type for device_type in newest.get("supportedDeviceTypes", [])
+                 if device_type["name"].startswith(wanted)]
+    candidates = supported or matching
+    existing_names = {device["name"] for device in family}
+    # "iPhone 17 Pro" must not become an "iPhone 17 Pro Max"; otherwise copy the
+    # type of a simulator the Mac already has for this family.
+    device_type = (next((candidate for candidate in candidates if candidate["name"] == wanted), None)
+                   or next((candidate for candidate in candidates if candidate["name"] in existing_names), None)
+                   or candidates[-1])
     name = device_type["name"] + (" (Pigeon CI)" if family else "")
     if any(device["name"] == name for device in family):
         # The CI device exists and is busy too; start() reports that.

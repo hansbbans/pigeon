@@ -137,6 +137,24 @@ class SimulatorOwnershipTests(unittest.TestCase):
         listing.assert_not_called()
         command.assert_not_called()
 
+    def test_ensure_only_creates_device_types_the_runtime_supports(self):
+        device_types = json.dumps({"devicetypes": [
+            {"name": "iPad mini (A17 Pro)", "identifier": "type.mini-a17"},
+            {"name": "iPad mini 4", "identifier": "type.mini-4"},
+        ]})
+        runtimes = json.dumps({"runtimes": [{
+            "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "isAvailable": True,
+            "supportedDeviceTypes": [
+                {"name": "iPad mini (6th generation)", "identifier": "type.mini-6"},
+                {"name": "iPad mini (A17 Pro)", "identifier": "type.mini-a17"},
+                {"name": "iPhone 17", "identifier": "type.iphone-17"},
+            ],
+        }]})
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPad mini (6th generation)", "udid": "busy", "state": "Booted"}]}
+        with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run", side_effect=[device_types, runtimes]), patch.object(session.subprocess, "run") as command:
+            session.ensure("iPad mini")
+        command.assert_called_once_with(["xcrun", "simctl", "create", "iPad mini (6th generation) (Pigeon CI)", "type.mini-6", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
+
     def test_ensure_creates_a_ci_device_when_the_family_is_in_use(self):
         device_types = json.dumps({"devicetypes": [{"name": "iPad mini (A17 Pro)", "identifier": "type.mini-a17"}]})
         runtimes = json.dumps({"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "isAvailable": True}]})

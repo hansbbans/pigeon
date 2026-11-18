@@ -980,7 +980,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	/// changed or not, and the app answers a feed change by reloading the whole
 	/// library; these are the ones it can ignore. Ask before `apply`: afterwards
 	/// every row matches its change.
-	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) throws -> Set<Int64> {
+	///
+	/// `async` on purpose, like `apply`: from an async caller that holds the
+	/// concrete store, Swift prefers an async overload, and would otherwise pick
+	/// the protocol extension's default, which reports nothing.
+	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64> {
 		let feedChanges = page.changes.filter { $0.entityType == .feed && $0.operation == .upsert }
 		guard feedChanges.isEmpty == false else { return [] }
 		let database = try openDatabase()
