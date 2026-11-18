@@ -100,14 +100,16 @@ On "10x": the first two rows are where an order of magnitude was plausible and i
 
 The workflow has a temporary `push` trigger on `.github/ios-device-layout.request`, so this branch could request runs before the file is on `main`. Remove the trigger and the request file before merging; `workflow_dispatch` is the lasting entry point.
 
-## Checking this in the iOS Simulator pane
-The guide for this work is Claude Code Desktop's simulator pane (`code.claude.com/docs/en/desktop-ios-simulator`). That pane exists only in a local Desktop session on the Mac; a cloud session cannot reach the simulators, which is why none of the above has been looked at. To do the check, open the Code tab in Claude Desktop on the Mac with this repo as the project folder and paste:
+## Handing off to a session on the Mac
+The simulator pane in Claude Code Desktop (`code.claude.com/docs/en/desktop-ios-simulator`) exists only in a local session on the Mac, which is why no screen has been looked at. Open the Code tab in Claude Desktop with this repo as the project folder and paste:
 
 ```text
-Fetch origin and check out claude/funny-allen-kd1ox1 in a worktree (git worktree add ../pigeon-ipad-parity claude/funny-allen-kd1ox1). Read tasks/ipad-and-performance-2026-11-18.md first: nothing on this branch has been compiled.
+Finish the work on branch claude/funny-allen-kd1ox1. Follow CLAUDE.md (worktrees, the Pigeon Claude simulator, never cancel a running iOS job).
 
-1. In ios/PigeonReader run xcodegen generate, then build. Fix compile errors and warnings (CI fails on first-party warnings), then run the unit tests on the Pigeon Claude simulator and fix failures. Report the STATUS_TOGGLE_BENCH and SANITIZER_BENCH lines the tests print.
-2. Run the app with -reader-sample-data -reader-show-sidebar -reader-reset-reader-state -reader-folder-read-data on the iPhone 17 Pro simulator, then the iPad Pro 11-inch simulator, then the iPad mini simulator. On each, in portrait and landscape, look at: Home tiles; All Feeds and back; For You in Classic; Display > Layout > Front Page; an open story; the Home button from an open story (iPad) and back into the list; Settings; the reader's Reading controls in Sepia and Dark Gray with the system in Dark.
-3. Check the unverified items under "Not fixed" in that file on the iPads: reader navigation bar colours under each theme, rotating with a story open, the undo banner over the reader's bottom bar, the confirmation dialogs' popover anchors, the reading-controls sheet and the image viewer.
-4. Tell me what looks wrong before changing any layout, then fix what is clearly a bug and commit to this branch.
+1. git fetch origin, then git worktree add ../pigeon-ipad-parity claude/funny-allen-kd1ox1. Read tasks/ipad-and-performance-2026-11-18.md in full: what changed, what run 9 verified and measured, what is open.
+2. See how the latest "iOS device layout" run went: gh run list --workflow ios-device-layout.yml --branch claude/funny-allen-kd1ox1 --limit 3, then gh run view <id> --log | grep -E "PIGEON-LAYOUT|_BENCH|error:|recorded an issue|Test Case .* failed|\*\* TEST". If it is still running, wait; never cancel it. Fix what it reports.
+3. Locally: xcodegen generate in ios/PigeonReader, run the unit tests, then a clean Release build and .github/scripts/fail-on-first-party-warnings.sh on its log. Release and warnings have not been checked.
+4. Look at the screenshots nobody has seen: gh run download <id> -n pigeon-device-layout-<id>-1. Then check the app in the iOS Simulator on an iPhone 17 Pro, an iPad Pro 11-inch and an iPad mini, portrait and landscape, launched with -reader-sample-data -reader-show-sidebar -reader-reset-reader-state -reader-folder-read-data: Home tiles, All Feeds and back, a Classic list, Display > Layout > Front Page, an open story, the Home button from an open story on iPad and back, Settings, Reading controls in Sepia and Dark Gray with the system in Dark. The sample library has two folders, so judge the wide tile grid by tile width (about 260pt at three across on an 834pt iPad).
+5. Go through "Not fixed" in the tasks file on the iPads. Tell me what looks wrong before redesigning anything; fix what is plainly a bug. Known from run 9: on iPad in landscape the split view's sidebar stays in the accessibility tree under Home.
+6. Before a pull request: remove the temporary push trigger from .github/workflows/ios-device-layout.yml, delete .github/ios-device-layout.request, update the tasks file with what you verified. Do not open the pull request until I ask.
 ```
