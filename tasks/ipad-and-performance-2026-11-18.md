@@ -6,7 +6,7 @@ Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. No pull requ
 
 The session ran in a Linux container with no Swift toolchain, and the self-hosted Mac was asleep for almost all of it. It picked up one job at 04:06 UTC and dropped off ten minutes later with no log, and has not taken a job since. So:
 
-- No Swift in this branch has been through a compiler, a unit test or a simulator. It was written against the existing code, re-read, and reviewed once by a second read-only pass that was asked to act as the compiler.
+- No Swift in this branch has been through a compiler, a unit test or a simulator. It was written against the existing code, re-read, and reviewed once by a second read-only pass that was asked to act as the compiler. That pass found one real error (store counters declared inside `#if DEBUG` and used outside it, which would have broken only the Release build), now fixed. It will not have found everything.
 - No screen was looked at. The UI findings are from reading code.
 - The timings under Performance are complexity arguments, not measurements. A benchmark test prints real numbers the first time the unit tests run.
 
