@@ -127,12 +127,23 @@ class SimulatorOwnershipTests(unittest.TestCase):
             session.ensure("iPhone 17 Pro")
         command.assert_called_once_with(["xcrun", "simctl", "create", "iPhone 17 Pro", "type.pro", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
 
-    def test_ensure_leaves_an_existing_family_alone(self):
-        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPad mini (A17 Pro)", "udid": "tablet", "state": "Booted"}]}
+    def test_ensure_leaves_a_family_with_an_idle_device_alone(self):
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
+            {"name": "iPad mini (A17 Pro)", "udid": "busy", "state": "Booted"},
+            {"name": "iPad mini (A17 Pro) (Pigeon CI)", "udid": "idle", "state": "Shutdown"},
+        ]}
         with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run") as listing, patch.object(session.subprocess, "run") as command:
             session.ensure("iPad mini")
         listing.assert_not_called()
         command.assert_not_called()
+
+    def test_ensure_creates_a_ci_device_when_the_family_is_in_use(self):
+        device_types = json.dumps({"devicetypes": [{"name": "iPad mini (A17 Pro)", "identifier": "type.mini-a17"}]})
+        runtimes = json.dumps({"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "isAvailable": True}]})
+        snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPad mini (A17 Pro)", "udid": "busy", "state": "Booted"}]}
+        with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run", side_effect=[device_types, runtimes]), patch.object(session.subprocess, "run") as command:
+            session.ensure("iPad mini")
+        command.assert_called_once_with(["xcrun", "simctl", "create", "iPad mini (A17 Pro) (Pigeon CI)", "type.mini-a17", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
 
     def check_cleanup(self, boot_confirmed=True, preexisting=None, processes="", expect_shutdown=False, expect_lock=False):
         with tempfile.TemporaryDirectory() as directory:

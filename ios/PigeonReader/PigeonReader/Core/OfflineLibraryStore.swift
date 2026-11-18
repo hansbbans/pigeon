@@ -332,24 +332,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// Rows are read from the connection in batches and each batch is decoded
 		// on every core. Decoding the bodies is nearly all of the time between a
 		// cold launch and the first story list, and no row depends on another.
-		var batchRows: [(id: String, bodyPruned: Bool)] = []
+		var batchRows: [SnapshotRow] = []
 		var batchPayloads: [Data] = []
-		func decodeBatch() {
-			let decodedArticles = Self.decodeArticles(batchPayloads, decoder: decoder)
-			for (row, decodedArticle) in zip(batchRows, decodedArticles) {
-				guard let decodedArticle else {
-					malformedPayload = true
-					continue
-				}
-				let article = row.bodyPruned ? decodedArticle.replacingHTML("") : decodedArticle
-				decodedArticlesByID[row.id] = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
-				#if DEBUG
-				snapshotArticleDecodeCount += 1
-				#endif
-			}
-			batchRows.removeAll(keepingCapacity: true)
-			batchPayloads.removeAll(keepingCapacity: true)
-		}
 		try query(
 			"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC, id",
 			bindings: [.text(accountID)],
@@ -360,13 +344,31 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				malformedPayload = true
 				return
 			}
-			batchRows.append((id: articleID, bodyPruned: sqlite3_column_int64(statement, 1) != 0))
+			batchRows.append(SnapshotRow(id: articleID, bodyPruned: sqlite3_column_int64(statement, 1) != 0))
 			batchPayloads.append(payload)
 			if batchRows.count == Self.snapshotDecodeBatchSize {
-				decodeBatch()
+				let decodedEveryRow = decodeSnapshotBatch(
+					rows: batchRows,
+					payloads: batchPayloads,
+					overlays: pendingOverlays,
+					into: &decodedArticlesByID,
+				)
+				if decodedEveryRow == false {
+					malformedPayload = true
+				}
+				batchRows.removeAll(keepingCapacity: true)
+				batchPayloads.removeAll(keepingCapacity: true)
 			}
 		}
-		decodeBatch()
+		let decodedEveryRemainingRow = decodeSnapshotBatch(
+			rows: batchRows,
+			payloads: batchPayloads,
+			overlays: pendingOverlays,
+			into: &decodedArticlesByID,
+		)
+		if decodedEveryRemainingRow == false {
+			malformedPayload = true
+		}
 		if decodedArticlesByID.count != articleRowCount {
 			malformedPayload = true
 		}
@@ -1646,6 +1648,35 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	private static let maximumSanitizedFixedPoints = 20_000
 	/// Bounds how many undecoded payloads a snapshot load holds at once.
 	private static let snapshotDecodeBatchSize = 128
+
+	private struct SnapshotRow {
+		let id: String
+		let bodyPruned: Bool
+	}
+
+	/// Decodes one batch of snapshot rows and files each article under its row
+	/// id. Returns false when any payload in the batch could not be decoded.
+	private func decodeSnapshotBatch(
+		rows: [SnapshotRow],
+		payloads: [Data],
+		overlays: [String: PendingStatusOverlay],
+		into decodedArticlesByID: inout [String: Recommendation],
+	) -> Bool {
+		var decodedEveryRow = true
+		let decodedArticles = Self.decodeArticles(payloads, decoder: decoder)
+		for (row, decodedArticle) in zip(rows, decodedArticles) {
+			guard let decodedArticle else {
+				decodedEveryRow = false
+				continue
+			}
+			let article = row.bodyPruned ? decodedArticle.replacingHTML("") : decodedArticle
+			decodedArticlesByID[row.id] = applyPendingStatusOverlay(to: article, overlays: overlays)
+			#if DEBUG
+			snapshotArticleDecodeCount += 1
+			#endif
+		}
+		return decodedEveryRow
+	}
 
 	private nonisolated static func decodeArticles(_ payloads: [Data], decoder: JSONDecoder) -> [Recommendation?] {
 		guard payloads.count > 1 else {

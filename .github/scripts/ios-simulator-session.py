@@ -56,12 +56,16 @@ def preference(name, wanted):
 
 
 def ensure(wanted):
-    """Create a simulator of the wanted family when the Mac has none, on the
-    newest installed iOS runtime. It is named after its device type, like the
-    simulators Xcode creates, and is kept for later runs."""
-    for runtime, group in devices().items():
-        if ".iOS-" in runtime and any(device["name"].startswith(wanted) for device in group):
-            return
+    """Make sure the wanted family has a simulator this job can reserve, which
+    means one that is shut down. When the Mac has none of that family, create
+    one named after its device type, like the simulators Xcode creates. When
+    every one is in use (booted in Simulator or by another session), create a
+    separate "(Pigeon CI)" device rather than take one over. Created devices
+    are on the newest installed iOS runtime and are kept for later runs."""
+    family = [device for runtime, group in devices().items() if ".iOS-" in runtime
+              for device in group if device["name"].startswith(wanted)]
+    if any(device["state"] == "Shutdown" for device in family):
+        return
     device_types = json.loads(run("xcrun", "simctl", "list", "devicetypes", "--json"))["devicetypes"]
     runtimes = json.loads(run("xcrun", "simctl", "list", "runtimes", "--json"))["runtimes"]
     matching = [device_type for device_type in device_types if device_type["name"].startswith(wanted)]
@@ -72,8 +76,12 @@ def ensure(wanted):
     newest = max(available, key=lambda runtime: tuple(map(int, runtime["identifier"].rsplit(".iOS-", 1)[1].split("-"))))
     # "iPhone 17 Pro" must not become an "iPhone 17 Pro Max".
     device_type = next((candidate for candidate in matching if candidate["name"] == wanted), matching[-1])
-    subprocess.run(["xcrun", "simctl", "create", device_type["name"], device_type["identifier"], newest["identifier"]], check=True)
-    print("Created simulator " + device_type["name"] + " on " + newest["identifier"], flush=True)
+    name = device_type["name"] + (" (Pigeon CI)" if family else "")
+    if any(device["name"] == name for device in family):
+        # The CI device exists and is busy too; start() reports that.
+        return
+    subprocess.run(["xcrun", "simctl", "create", name, device_type["identifier"], newest["identifier"]], check=True)
+    print("Created simulator " + name + " on " + newest["identifier"], flush=True)
 
 
 def start():

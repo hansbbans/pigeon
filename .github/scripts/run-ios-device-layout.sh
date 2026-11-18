@@ -29,6 +29,12 @@ session="$script_dir/ios-simulator-session.py"
 ownership_file="$RUNNER_TEMP/pigeon-simulator-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
 mkdir -p "$LAYOUT_OUTPUT"
 
+# A laptop runner that goes to sleep mid-run loses its connection, and GitHub
+# fails the job ten minutes later with no log. Stay awake while this runs.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -is -w $$ >/dev/null 2>&1 &
+fi
+
 only_testing=()
 case "$suite" in
   layout|smoke)
