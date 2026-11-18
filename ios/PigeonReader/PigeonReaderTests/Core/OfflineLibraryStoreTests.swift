@@ -1401,6 +1401,52 @@ struct OfflineLibraryStoreTests {
 		#expect(stats.lastSyncAt == success)
 	}
 
+	@Test func repeatedFeedChangeIsRecognizedBeforeItIsApplied() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		func feedPage(sequence: Int, title: String, folders: String) throws -> IncrementalSyncPage {
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:\(sequence)",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": \(sequence),
+				    "entityType": "feed",
+				    "entityId": "daily",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-15T12:00:00.000Z",
+				    "payload": {
+				      "feedKey": "daily",
+				      "streamId": "feed/7",
+				      "title": "\(title)",
+				      "feedURL": "https://example.com/feed.xml",
+				      "siteURL": "https://example.com",
+				      "isActive": true,
+				      "folders": \(folders)
+				    }
+				  }]
+				}
+				"""
+			)
+		}
+
+		// A feed the cache has never seen is a change.
+		let first = try feedPage(sequence: 1, title: "Daily Brief", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: first, accountID: "account-a").isEmpty)
+		try await store.apply(first, accountID: "account-a")
+
+		// What every RSS refresh sends: the same feed again.
+		let repeated = try feedPage(sequence: 2, title: "Daily Brief", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: repeated, accountID: "account-a") == [2])
+		#expect(try await store.unchangedFeedChangeSequences(in: repeated, accountID: "account-b").isEmpty)
+		try await store.apply(repeated, accountID: "account-a")
+
+		let renamed = try feedPage(sequence: 3, title: "Daily Briefing", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: renamed, accountID: "account-a").isEmpty)
+		let moved = try feedPage(sequence: 4, title: "Daily Brief", folders: "[]")
+		#expect(try await store.unchangedFeedChangeSequences(in: moved, accountID: "account-a").isEmpty)
+	}
+
 	@Test func feedSyncKeepsTheOfflineSubscriptionLibraryCurrent() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let upsert = try decodePage(

@@ -972,6 +972,48 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		try await apply(page, accountID: accountID, dayBounds: nil)
 	}
 
+	/// Sequences of the feed changes in `page` that repeat what is already
+	/// cached. The server writes a feed change for every successful RSS refresh,
+	/// changed or not, and the app answers a feed change by reloading the whole
+	/// library; these are the ones it can ignore. Ask before `apply`: afterwards
+	/// every row matches its change.
+	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) throws -> Set<Int64> {
+		let feedChanges = page.changes.filter { $0.entityType == .feed && $0.operation == .upsert }
+		guard feedChanges.isEmpty == false else { return [] }
+		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
+		var unchanged = Set<Int64>()
+		for change in feedChanges {
+			guard let payload = change.payload,
+				let feedKey = payload.feedKey, feedKey == change.entityId,
+				let streamID = payload.streamId, streamID.isEmpty == false,
+				let title = payload.title, title.isEmpty == false else {
+				continue
+			}
+			let folders = try encoder.encode(payload.folders ?? [])
+			let isUnchanged = try queryOne(
+				"""
+				SELECT stream_id, title, feed_url, site_url, icon_url, is_active, folders_json
+				FROM cached_feeds WHERE account_id = ? AND feed_key = ?
+				""",
+				bindings: [.text(storageAccountID), .text(feedKey)],
+				database: database,
+			) { statement in
+				string(at: 0, statement: statement) == streamID
+					&& string(at: 1, statement: statement) == title
+					&& string(at: 2, statement: statement) == payload.feedURL?.absoluteString
+					&& string(at: 3, statement: statement) == payload.siteURL?.absoluteString
+					&& string(at: 4, statement: statement) == payload.iconURL?.absoluteString
+					&& (sqlite3_column_int64(statement, 5) != 0) == (payload.isActive != false)
+					&& data(at: 6, statement: statement) == folders
+			}
+			if isUnchanged == true {
+				unchanged.insert(change.sequence)
+			}
+		}
+		return unchanged
+	}
+
 	func apply(
 		_ page: IncrementalSyncPage,
 		accountID: String,

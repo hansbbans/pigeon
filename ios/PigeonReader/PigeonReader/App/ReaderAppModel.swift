@@ -6052,6 +6052,13 @@ final class ReaderAppModel {
 			// A smaller page only gets past the heavy stretch that failed. Grow back
 			// gradually so the rest of the sync does not crawl at the reduced size.
 			requestLimit = min(response.limit * 2, preferredLimit)
+			// The server reports a feed change for every RSS refresh, changed or
+			// not. Those that repeat the cached feed must not cost a reload of the
+			// whole library. Asked before the page is applied.
+			let unchangedFeedSequences = (try? await offlineStore.unchangedFeedChangeSequences(
+				in: page,
+				accountID: accountID,
+			)) ?? []
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
@@ -6064,7 +6071,9 @@ final class ReaderAppModel {
 				return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 			}
 			receivedChanges = receivedChanges || page.changes.isEmpty == false
-			receivedChangesList.append(contentsOf: page.changes)
+			receivedChangesList.append(
+				contentsOf: page.changes.filter { unchangedFeedSequences.contains($0.sequence) == false },
+			)
 			cursor = page.cursor
 			offlineSyncCursor = page.cursor
 			if page.hasMore == false { break }

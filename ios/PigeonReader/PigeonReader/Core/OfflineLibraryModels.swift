@@ -399,6 +399,8 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	/// and staged rows remain available for cleanup by the next rebuild attempt.
 	func abandonFullRebuild(accountID: String, startedAt: Date) async throws
 	func apply(_ page: IncrementalSyncPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws
+	/// Sequences of the feed changes in `page` that repeat what is already cached.
+	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64>
 	func finishSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
 	func finishWarmSynchronization(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
 	func markDataSynchronizedWithoutNavigation(accountID: String, at date: Date, dayBounds: ReaderLocalDayBounds?) async throws
@@ -414,6 +416,11 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 extension OfflineLibraryStoring {
 	/// Test doubles without article rows have nothing to remove.
 	func removeArticles(ids: [String], accountID: String) async throws {}
+
+	/// A store that cannot tell treats every feed change as a change.
+	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64> {
+		[]
+	}
 
 	/// Compatibility fallback for lightweight stores and test doubles. The SQLite
 	/// implementation overrides this with a scoped membership query.
