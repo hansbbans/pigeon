@@ -2101,3 +2101,21 @@ test('a browser tab at an old /app address shows the root address; installed app
 	assert.equal(rootAppAddress('https://pigeon.example/application', false), null);
 	assert.equal(rootAppAddress('https://pigeon.example/app/status', false), null);
 });
+
+test('browsers with only the old /app worker get a / worker for offline reload', async () => {
+	const { ensureRootServiceWorker } = await import('../src/browser-app-client');
+	const container = (scopes: string[]) => {
+		const registered: unknown[] = [];
+		return { registered, getRegistrations: async () => scopes.map((scope) => ({ scope: 'https://pigeon.example' + scope })), register: async (...args: unknown[]) => { registered.push(args); } };
+	};
+	const legacy = container(['/app']);
+	assert.equal(await ensureRootServiceWorker(legacy), true);
+	assert.deepEqual(legacy.registered, [['/app/sw.js', { scope: '/' }]]);
+	for (const scopes of [[], ['/'], ['/', '/app']]) {
+		const current = container(scopes);
+		assert.equal(await ensureRootServiceWorker(current), false, scopes.join(','));
+		assert.deepEqual(current.registered, []);
+	}
+	assert.equal(await ensureRootServiceWorker(undefined), false);
+	assert.equal(await ensureRootServiceWorker({}), false);
+});

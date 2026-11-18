@@ -49,7 +49,11 @@ self.addEventListener('notificationclick', event => {
  event.waitUntil((async () => {
   const id = event.notification.data && event.notification.data.articleId;
   if (typeof id !== 'string' || id.length > 512) return;
-  const url = new URL('/', self.location.origin); url.searchParams.set('article', id);
+  // Open under this registration's scope. Push lives on the /app registration, and iOS Home Screen
+  // installs keep the /app scope they were installed with: a '/' link would open Safari, signed out.
+  // Browser tabs rewrite /app to / themselves.
+  const scope = self.registration && self.registration.scope ? new URL(self.registration.scope) : null;
+  const url = new URL(scope && scope.origin === self.location.origin ? scope.pathname : '/', self.location.origin); url.searchParams.set('article', id);
   if (event.action === 'read' || event.action === 'star') url.searchParams.set('notificationAction', event.action);
   // Actions open the authenticated app for confirmation; no mutations or account tokens in the SW.
   await self.clients.openWindow(url.href);

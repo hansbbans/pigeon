@@ -402,6 +402,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const standalone = window.matchMedia?.('(display-mode: standalone)')?.matches === true || window.navigator?.standalone === true;
     const rootAddress = window.location?.href ? client.rootAppAddress(window.location.href, standalone) : null;
     if (rootAddress && window.history?.replaceState) window.history.replaceState(window.history.state, '', rootAddress);
+    void client.ensureRootServiceWorker(window.navigator?.serviceWorker).catch(() => {});
   }
   const loadDefuddle = client.createScriptLoader(document, ${JSON.stringify('/app/defuddle.js?v=' + DEFUDDLE_VERSION)}, 3000);
   const storageKey = client.AUTH_STORAGE_KEY;

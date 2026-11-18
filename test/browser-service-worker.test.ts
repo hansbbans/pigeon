@@ -103,3 +103,20 @@ test('the app is served at the root and still at /app, with the same shell', asy
 	const revalidated = await worker.fetch(new Request('https://pigeon.example/', { headers: { 'If-None-Match': etag } }), env);
 	assert.equal(revalidated.status, 304);
 });
+
+test('notification clicks open the article under the push registration scope', async () => {
+ for (const [scope, expected] of [['https://pigeon.example/app', '/app'], ['https://pigeon.example/', '/'], ['https://evil.example/app', '/'], [undefined, '/']] as const) {
+  const listeners: Record<string, Function> = {}; let opened: string | undefined;
+  runInNewContext(renderBrowserServiceWorker(), { URL, self: { location: { origin: 'https://pigeon.example' },
+   addEventListener: (name: string, callback: Function) => { listeners[name] = callback; },
+   registration: { scope, showNotification: async () => {} },
+   clients: { openWindow: async (url: string) => { opened = url; } } } });
+  let waiting: Promise<void>;
+  listeners.notificationclick({ action: 'read', notification: { data: { articleId: '42' }, close() {} }, waitUntil: (promise: Promise<void>) => { waiting = promise; } });
+  await waiting!;
+  const target = new URL(opened!);
+  assert.equal(target.origin, 'https://pigeon.example');
+  assert.equal(target.pathname, expected, String(scope));
+  assert.equal(target.search, '?article=42&notificationAction=read');
+ }
+});

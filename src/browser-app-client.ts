@@ -1024,6 +1024,19 @@ export function rootAppAddress(href: string, standalone: boolean): string | null
 	return '/' + url.search + url.hash;
 }
 
+/**
+ * Browsers set up for offline reading before the move have only the '/app' registration, which
+ * cannot control the root address the app now shows. Add the '/' registration (same script) so
+ * offline reload keeps working without another Sync. Returns true when it registered one.
+ */
+export async function ensureRootServiceWorker(container: any): Promise<boolean> {
+	if (!container || typeof container.getRegistrations !== 'function' || typeof container.register !== 'function') return false;
+	const scopes = (await container.getRegistrations()).map((registration: any) => new URL(registration.scope).pathname);
+	if (!scopes.includes('/app') || scopes.includes('/')) return false;
+	await container.register('/app/sw.js', { scope: '/' });
+	return true;
+}
+
 export function createScriptLoader(doc: any, src: string, timeoutMs: number): () => Promise<boolean> {
 	let state: 'idle' | 'loading' | 'loaded' = 'idle';
 	let loaded: Promise<boolean> | null = null;
@@ -1222,6 +1235,7 @@ ${selectArticleHeroImageUrl.toString()}
 ${normalizeBrowserItemId.toString()}
 ${formatArticleListTime.toString()}
 ${rootAppAddress.toString()}
+${ensureRootServiceWorker.toString()}
 ${createScriptLoader.toString()}
 ${followInPageLink.toString()}
 ${advanceImpressions.toString()}
@@ -1238,6 +1252,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   PIGEON_CLIENT_ID: ${JSON.stringify(PIGEON_CLIENT_ID)},
   extractAuthToken,
   rootAppAddress,
+  ensureRootServiceWorker,
   createScriptLoader,
   followInPageLink,
   createLoggedOutSession,
