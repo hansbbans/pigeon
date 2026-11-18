@@ -33,7 +33,7 @@ A TestFlight release reuses CI only from a green exact-SHA `main` run (push, sch
 
 ## iPad and other devices
 
-CI tests on one iPhone simulator, so nothing above runs a regular-width layout. `.github/workflows/ios-device-layout.yml` (`iOS device layout`, on demand only, not a required check and not release evidence) runs `PigeonDeviceLayoutUITests` and `PigeonHomeTilesUITests` on each simulator family in its `devices` input, by default an iPhone 17 Pro, an iPad Pro 11-inch and an iPad mini, one after the other under the same shared iOS runner lock:
+CI tests on one iPhone simulator, so nothing above runs a regular-width layout. `.github/workflows/ios-device-layout.yml` (`iOS device layout`, on demand only, not a required check and not release evidence) runs `PigeonDeviceLayoutUITests`, `PigeonHomeTilesUITests` and the two iPad-only tests (`testIPadLandscapeStartupShowsSavedHomeAndRestoresStories`, `testSwitchingFeedsKeepsTheRegularSidebarStationary`) on each simulator family in its `devices` input, by default an iPhone 17 Pro, an iPad Pro 11-inch and an iPad mini, one after the other under the same shared iOS runner lock:
 
 `gh workflow run ios-device-layout.yml --ref <branch> -f suite=layout`
 

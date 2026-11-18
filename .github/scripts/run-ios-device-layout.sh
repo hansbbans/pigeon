@@ -4,7 +4,8 @@
 #
 #   run-ios-device-layout.sh "<name prefix>,<name prefix>,..." layout|smoke|full [unit]
 #
-#   layout: PigeonDeviceLayoutUITests and PigeonHomeTilesUITests.
+#   layout: PigeonDeviceLayoutUITests, PigeonHomeTilesUITests and the two
+#           iPad-only tests.
 #   smoke:  layout plus the UI tests in .github/ios-smoke-ui-tests.txt.
 #   full:   every UI test.
 #   unit:   also run the unit tests, on the first device only.
@@ -33,6 +34,9 @@ case "$suite" in
   layout|smoke)
     only_testing+=("-only-testing:PigeonReaderUITests/PigeonDeviceLayoutUITests")
     only_testing+=("-only-testing:PigeonReaderUITests/PigeonHomeTilesUITests")
+    # The two tests that need an iPad, which CI's iPhone always skips.
+    only_testing+=("-only-testing:PigeonReaderUITests/PigeonReaderRealStartupUITests/testIPadLandscapeStartupShowsSavedHomeAndRestoresStories")
+    only_testing+=("-only-testing:PigeonReaderUITests/PigeonNavigationMotionUITests/testSwitchingFeedsKeepsTheRegularSidebarStationary")
     ;;
   full)
     only_testing+=("-only-testing:PigeonReaderUITests")
