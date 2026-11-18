@@ -29,6 +29,7 @@ struct ReaderArticleUndoBanner: View {
 				.padding(.trailing, 4)
 				.padding(.vertical, 4)
 				.background(.regularMaterial, in: .rect(cornerRadius: 16))
+				.frame(maxWidth: 560)
 				.padding(.horizontal)
 				.padding(.bottom, 8)
 				.transition(.opacity)

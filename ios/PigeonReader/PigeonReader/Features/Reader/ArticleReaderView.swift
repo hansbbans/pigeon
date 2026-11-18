@@ -400,7 +400,7 @@ struct ArticleReaderView: View {
 					YouTubeVideoSection(
 						article: article,
 						video: video,
-						playbackAllowed: scenePhase == .active,
+						playbackAllowed: isReadingVisible,
 						textScale: model.readerTypography.textScale,
 						onOpenYouTube: openOriginal,
 						onOpenLink: openYouTubeLink,

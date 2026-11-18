@@ -315,6 +315,39 @@ struct OfflineLibraryStoreTests {
 		#expect(full.articlesByCollection["scope-b"]?.map(\.id) == ["scope-b"])
 	}
 
+	@Test func statusChangeDecodesOnlyTheArticlesItChanges() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<40).map { makeArticle(id: "story-\($0)", isRead: false) }
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "read-one", kind: .setRead, itemIds: ["reader-story-3"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 1)
+
+		// A second action leaves the first one's row alone: its status already matches.
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "star-one", kind: .setStarred, itemIds: ["story-7"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 1)
+
+		// An action that changes nothing decodes nothing.
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "read-again", kind: .setRead, itemIds: ["reader-story-3"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 0)
+
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.filter(\.isRead).map(\.id) == ["story-3"])
+		#expect(stored.filter(\.isStarred).map(\.id) == ["story-7"])
+	}
+
 	@Test func pendingStatusesWinBySequenceAcrossSharedScopesAndAccounts() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let original = makeArticle(id: "shared", isRead: true, isStarred: false)

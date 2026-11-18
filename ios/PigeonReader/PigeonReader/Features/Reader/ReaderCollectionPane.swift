@@ -2,7 +2,8 @@ import SwiftUI
 
 struct ReaderCollectionPane: View {
 	@Environment(ReaderAppModel.self) private var model
-	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.horizontalSizeClass) private var columnHorizontalSizeClass
+	@Environment(\.readerWindowHorizontalSizeClass) private var windowHorizontalSizeClass
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@State private var displayedCollection: ReaderNavigationItem?
 	@State private var displayedAccountID: String?
@@ -34,6 +35,12 @@ struct ReaderCollectionPane: View {
 		.onChange(of: model.session?.storageIdentity) { _, _ in
 			show(model.selectedCollection)
 		}
+	}
+
+	/// The stationary-column fade is for a regular window; the column's own
+	/// size class can read compact inside an iPad split view.
+	private var horizontalSizeClass: UserInterfaceSizeClass? {
+		windowHorizontalSizeClass ?? columnHorizontalSizeClass
 	}
 
 	private var navigationTitle: String {

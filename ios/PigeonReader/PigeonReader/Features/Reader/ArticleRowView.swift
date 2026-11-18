@@ -109,17 +109,23 @@ struct ArticleRowView: View {
 
 			if density != .titleOnly {
 				HStack(spacing: 6) {
+					// Names give way first; a narrow iPad column must not wrap the
+					// date under them.
 					Text(article.displayAuthor ?? article.source)
 						.font(.caption.weight(.semibold))
 						.foregroundStyle(.primary)
+						.lineLimit(1)
 					if article.displayAuthor != nil {
 						Text(article.source)
 							.font(.caption)
 							.foregroundStyle(.pigeonSecondary)
+							.lineLimit(1)
 					}
 					Text(article.receivedAt, format: .relative(presentation: .named))
 						.font(.caption)
 						.foregroundStyle(.pigeonSecondary)
+						.lineLimit(1)
+						.layoutPriority(1)
 					if let readingLength {
 						Text("· \(readingLength)")
 							.font(.caption)

@@ -706,6 +706,12 @@ final class ReaderAppModel {
 		return article(withId: selectedArticleID)
 	}
 
+	/// The next and previous shortcuts can be single keys (J and K). They must
+	/// not open stories behind the Settings sheet, an Add Feed sheet or Home.
+	var canUseArticleShortcuts: Bool {
+		isShowingSettings == false && pendingFeedRequest == nil && preferredCompactColumn != .sidebar
+	}
+
 	func canNavigateArticle(_ direction: ReaderBoundaryNavigationDirection) -> Bool {
 		articleTarget(for: direction, from: selectedArticle) != nil
 	}

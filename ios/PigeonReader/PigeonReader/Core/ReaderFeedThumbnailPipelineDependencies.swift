@@ -36,15 +36,30 @@ nonisolated struct ReaderFeedThumbnailPipelineDependencies: Sendable {
 		if response.expectedContentLength > 0 {
 			data.reserveCapacity(min(Int(response.expectedContentLength), ReaderFeedThumbnailPolicy.maximumResponseBytes))
 		}
+		// The stream yields single bytes. Collect them in a buffer and check for
+		// cancellation once per buffer: doing both per byte cost about a million
+		// checks and `Data` appends for every megabyte of image.
+		var buffer: [UInt8] = []
+		buffer.reserveCapacity(downloadBufferSize)
+		var received = 0
 		for try await byte in bytes {
-			try Task.checkCancellation()
-			guard data.count < ReaderFeedThumbnailPolicy.maximumResponseBytes else {
+			received += 1
+			guard received <= ReaderFeedThumbnailPolicy.maximumResponseBytes else {
 				throw URLError(.dataLengthExceedsMaximum)
 			}
-			data.append(byte)
+			buffer.append(byte)
+			if buffer.count == downloadBufferSize {
+				try Task.checkCancellation()
+				data.append(contentsOf: buffer)
+				buffer.removeAll(keepingCapacity: true)
+			}
 		}
+		try Task.checkCancellation()
+		data.append(contentsOf: buffer)
 		return data
 	}
+
+	private static let downloadBufferSize = 32 * 1024
 
 	private static func decodeLive(
 		data: Data,

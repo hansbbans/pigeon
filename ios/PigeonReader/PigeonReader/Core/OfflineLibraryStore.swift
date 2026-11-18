@@ -49,6 +49,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
 	private var searchArticleDecodeCount = 0
+	private var statusOverlayArticleDecodeCount = 0
 	#endif
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
@@ -652,6 +653,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 
 	func searchArticleDecodeCountForTesting() -> Int {
 		searchArticleDecodeCount
+	}
+
+	func resetStatusOverlayArticleDecodeCount() {
+		statusOverlayArticleDecodeCount = 0
+	}
+
+	func statusOverlayArticleDecodeCountForTesting() -> Int {
+		statusOverlayArticleDecodeCount
 	}
 	#endif
 
@@ -1550,6 +1559,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		return overlays
 	}
 
+	/// The read and starred values pending actions give an article, by either of
+	/// its ids. Nil where no pending action names it.
+	private func pendingStatus(
+		id: String,
+		readerID: String,
+		overlays: [String: PendingStatusOverlay],
+	) -> (read: Bool?, starred: Bool?) {
+		let keys = ReaderArticleIdentity.aliases(id: id, readerID: readerID)
+		let matches = keys.compactMap { overlays[$0] }
+		let read = matches.compactMap(\.read).max { $0.sequence < $1.sequence }
+		let starred = matches.compactMap(\.starred).max { $0.sequence < $1.sequence }
+		return (read?.value, starred?.value)
+	}
+
 	private func applyPendingStatusOverlay(
 		to article: Recommendation,
 		overlays: [String: PendingStatusOverlay],
@@ -1598,27 +1621,48 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	) throws {
 		let overlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
 		guard overlays.isEmpty == false else { return }
-		var records: [StoredArticle] = []
+		// Find the rows whose status a pending action changes from the id and
+		// status columns alone. Decoding every cached payload, bodies included,
+		// made each read or star toggle cost as much as loading the library.
+		var changedIDs: [String] = []
 		try query(
-			"SELECT id, payload, body_pruned FROM cached_articles WHERE account_id = ?",
+			"SELECT id, reader_id, is_read, is_starred FROM cached_articles WHERE account_id = ?",
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
-			guard let id = string(at: 0, statement: statement),
-				let payload = data(at: 1, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload),
-				// Overlay keys are normalized aliases, so a lookup replaces a scan.
-				ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
-					.contains(where: { overlays[$0] != nil }) else {
-				return
-			}
-			records.append(
-				StoredArticle(
-					id: id,
-					article: article,
-					bodyPruned: sqlite3_column_int64(statement, 2) != 0,
-				),
+			guard let id = string(at: 0, statement: statement) else { return }
+			let pending = pendingStatus(
+				id: id,
+				readerID: string(at: 1, statement: statement) ?? "",
+				overlays: overlays,
 			)
+			let isRead = sqlite3_column_int64(statement, 2) != 0
+			let isStarred = sqlite3_column_int64(statement, 3) != 0
+			if (pending.read ?? isRead) != isRead || (pending.starred ?? isStarred) != isStarred {
+				changedIDs.append(id)
+			}
+		}
+		var records: [StoredArticle] = []
+		for changedID in changedIDs {
+			try query(
+				"SELECT id, payload, body_pruned FROM cached_articles WHERE account_id = ? AND id = ?",
+				bindings: [.text(accountID), .text(changedID)],
+				database: database,
+			) { statement in
+				guard let id = string(at: 0, statement: statement),
+					let payload = data(at: 1, statement: statement),
+					let article = try? decoder.decode(Recommendation.self, from: payload) else {
+					return
+				}
+				statusOverlayArticleDecodeCount += 1
+				records.append(
+					StoredArticle(
+						id: id,
+						article: article,
+						bodyPruned: sqlite3_column_int64(statement, 2) != 0,
+					),
+				)
+			}
 		}
 
 		for record in records {

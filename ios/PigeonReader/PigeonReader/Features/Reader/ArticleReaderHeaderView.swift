@@ -51,21 +51,39 @@ struct ArticleReaderHeaderView: View {
 		}
 	}
 
-	var body: some View {
-		VStack(alignment: .leading, spacing: 12) {
-			HStack(alignment: .firstTextBaseline) {
-				Text(article.source)
-					.font(.subheadline.weight(.semibold))
-					.foregroundStyle(.tint)
-				Spacer(minLength: 12)
-				Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
+	private var source: some View {
+		Text(article.source)
+			.font(.subheadline.weight(.semibold))
+			.foregroundStyle(.tint)
+	}
+
+	private var dateline: some View {
+		HStack(alignment: .firstTextBaseline) {
+			Text(article.receivedAt, format: .dateTime.month(.wide).day().year())
+				.font(.subheadline)
+				.foregroundStyle(.pigeonSecondary)
+			if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
+				Text("· \(readingLength)")
 					.font(.subheadline)
 					.foregroundStyle(.pigeonSecondary)
-				if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
-					Text("· \(readingLength)")
-						.font(.subheadline)
-						.foregroundStyle(.pigeonSecondary)
-						.accessibilityIdentifier("article-reading-length")
+					.accessibilityIdentifier("article-reading-length")
+			}
+		}
+	}
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 12) {
+			// A long feed name beside a long date does not fit a narrow column (an
+			// iPad mini split view, large text). Stack them instead of wrapping both.
+			ViewThatFits(in: .horizontal) {
+				HStack(alignment: .firstTextBaseline) {
+					source
+					Spacer(minLength: 12)
+					dateline
+				}
+				VStack(alignment: .leading, spacing: 4) {
+					source
+					dateline
 				}
 			}
 
