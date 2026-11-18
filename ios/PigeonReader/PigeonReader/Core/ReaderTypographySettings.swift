@@ -20,6 +20,20 @@ nonisolated enum ReaderTheme: String, CaseIterable, Identifiable, Sendable {
 	}
 }
 
+/// The reading typeface for story titles and article text. UI chrome stays in the system font.
+nonisolated enum ReaderTypeface: String, CaseIterable, Identifiable, Sendable {
+	case geistSerif = "geist-serif"
+	case bookerly
+
+	var id: Self { self }
+	var title: String {
+		switch self {
+		case .geistSerif: "Geist Serif"
+		case .bookerly: "Bookerly"
+		}
+	}
+}
+
 nonisolated enum ReaderRemoteImagePolicy: String, CaseIterable, Identifiable, Sendable {
 	case normal
 	case blocked
@@ -98,6 +112,7 @@ final class ReaderTypographySettings {
 	private let horizontalMarginKey = "pigeon.reader.typography.horizontal-margin"
 	private let columnWidthKey = "pigeon.reader.typography.column-width"
 	private let themeKey = "pigeon.reader.theme"
+	static let typefaceKey = "pigeon.reader.typography.typeface"
 	private let imagePolicyKey = "pigeon.reader.remote-images"
 	private let densityKey = "pigeon.reader.timeline-density"
 	private let markReadBehaviorKey = "pigeon.reader.mark-read-behavior"
@@ -108,6 +123,7 @@ final class ReaderTypographySettings {
 	private var storedHorizontalMargin: Double
 	private var storedColumnWidth: Double
 	private var storedTheme: ReaderTheme
+	private var storedTypeface: ReaderTypeface
 	private var storedImagePolicy: ReaderRemoteImagePolicy
 	private var storedDensity: ReaderTimelineDensity
 	private var storedMarkReadBehavior: ReaderMarkReadBehavior
@@ -133,6 +149,7 @@ final class ReaderTypographySettings {
 			to: Self.columnWidthRange,
 		)
 		storedTheme = defaults.string(forKey: themeKey).flatMap(ReaderTheme.init(rawValue:)) ?? .system
+		storedTypeface = defaults.string(forKey: Self.typefaceKey).flatMap(ReaderTypeface.init(rawValue:)) ?? .geistSerif
 		storedImagePolicy = defaults.string(forKey: imagePolicyKey).flatMap(ReaderRemoteImagePolicy.init(rawValue:)) ?? .normal
 		storedDensity = defaults.string(forKey: densityKey).flatMap(ReaderTimelineDensity.init(rawValue:)) ?? .comfortable
 		storedMarkReadBehavior = defaults.string(forKey: markReadBehaviorKey).flatMap(ReaderMarkReadBehavior.init(rawValue:)) ?? .onOpen
@@ -177,6 +194,14 @@ final class ReaderTypographySettings {
 		set {
 			storedTheme = newValue
 			defaults.set(newValue.rawValue, forKey: themeKey)
+		}
+	}
+
+	var typeface: ReaderTypeface {
+		get { storedTypeface }
+		set {
+			storedTypeface = newValue
+			defaults.set(newValue.rawValue, forKey: Self.typefaceKey)
 		}
 	}
 
@@ -243,6 +268,7 @@ final class ReaderTypographySettings {
 		horizontalMargin = Self.defaultHorizontalMargin
 		columnWidth = Self.defaultColumnWidth
 		theme = .system
+		typeface = .geistSerif
 	}
 
 	private static func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {

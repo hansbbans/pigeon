@@ -1,6 +1,6 @@
 # Pigeon design system
 
-Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles; the one exception is the iPhone home, which is a tile grid (see **iOS**). Reading (article text, story titles, the Front Page) is set in Bookerly with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
+Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles; the one exception is the iPhone home, which is a tile grid (see **iOS**). Reading (article text, story titles, the Front Page) is set in the reading typeface, Geist Serif by default or Bookerly (Settings → Typeface), with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
 
 The first half of this file is the target system from Claude Design. The second half, from **Principle** on, is what the code does today, with file references. Where they disagree, see **Drift**. Paths are relative to the repo root; `ios/…/PigeonReader/` means `ios/PigeonReader/PigeonReader/`.
 
@@ -37,16 +37,16 @@ Four themes, matching `ReaderTheme`: Light, Black (`dark`), Dark Gray and Sepia.
 ## Typography (target)
 | Style | Font / size / weight / line height | Use |
 |---|---|---|
-| `reader-body` | Bookerly 18 / 400 / 1.55 (28) | Article body; paragraphs 1.08em apart |
-| `reader-title` | Bookerly 25 / 700 / 30 | Article title |
-| `reader-h2` / `reader-h3` | Bookerly 26 / 22, 700, leading 1.16 | Article headings (1.45em / 1.24em) |
-| `story-title` | Bookerly 17 / 700 / 22, relative to `.body` | List story titles, two lines at most |
-| `masthead` / `front-lead` / `front-dek` | Bookerly Italic 38 / Bold 27 / Regular 16 | Front Page |
+| `reader-body` | Reading face 18 / 400 / 1.55 (28) | Article body; paragraphs 1.08em apart |
+| `reader-title` | Reading face 25 / 30; Bookerly 700, Geist Serif 400 | Article title |
+| `reader-h2` / `reader-h3` | Reading face 26 / 22, leading 1.16; Bookerly 700, Geist Serif 400 | Article headings (1.45em / 1.24em) |
+| `story-title` | Reading face 17 / 22, relative to `.body`; Bookerly 700, Geist Serif 400 | List story titles, two lines at most |
+| `masthead` / `front-lead` / `front-dek` | Reading face 38 italic / 27 title / 16 regular (Geist Serif: all Regular) | Front Page |
 | `kicker` | SF 11 / 700, uppercase, tracking 0.8 | Kickers and datelines (`.caption2`) |
 | `large-title` … `caption` | iOS text styles unchanged (34, 20, 17, 17, 15, 13, 12) | All chrome |
 | `code` | system monospace 15 / 22 | `pre` in articles |
 
-Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` for Bookerly); the reader's `textScale` multiplies on top. Body text never goes below 16pt, is never justified, and never uses light weights.
+Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` through `ReaderTypography`); the reader's `textScale` multiplies on top. Body text never goes below 16pt, is never justified, and never uses light weights.
 
 ## Spacing and radius (target)
 - Spacing: 2, 4, 8, 12, 16 (iOS layout margin), 20 (reader margin on iPhone), 24, 32.
@@ -55,7 +55,7 @@ Always use Dynamic Type (`Font.custom(_:size:relativeTo:)` for Bookerly); the re
 - Depth comes from system materials (`.bar`, `.regularMaterial`), never custom shadows.
 
 ## Components (target)
-- **ReaderArticle**: header (feed in `tint`, `reader-title`, `subheadline` meta) and Bookerly body. Lives in `ArticleReaderHeaderView.swift` and `StructuredHTMLView` / `StructuredHTMLJavaScript.swift`.
+- **ReaderArticle**: header (feed in `tint`, `reader-title`, `subheadline` meta) and a body in the reading typeface. Lives in `ArticleReaderHeaderView.swift` and `StructuredHTMLView` / `StructuredHTMLJavaScript.swift`.
 - **ArticleRow**: serif `story-title` first, one `caption` meta line, optional 72×54 thumbnail; read state is a change of weight and colour, not a dot. Lives in `ArticleRowView.swift`.
 - **FrontPage**: masthead between 2pt and 0.5pt rules, lead story plus grid, kicker colours by feed key. Lives in `FrontPageView.swift` and `FrontPageLayout.swift`.
 - **ReadingSettings**: a sheet with theme swatches, text size, line spacing, margins and remote images. Lives in `ReaderReadingSettingsView.swift`.
@@ -94,11 +94,11 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 
 **Themes.** `ReaderTheme` in `Core/ReaderTypographySettings.swift` has `system`, `light`, `darkGray` ("Dark Gray"), `dark` ("Black") and `sepia`. `ReaderThemeColorSchemePlacement` (`Core/ReaderTypography.swift`) applies the scheme as a window-level `preferredColorScheme` only in compact readers. In the iPad split view it is environment-only, so the sidebar and list do not get tinted.
 
-**Typography.** Bookerly (Regular/Bold/Italic/BoldItalic) lives in `Resources/Fonts/` and is registered under `UIAppFonts` in `ios/PigeonReader/project.yml`. `ReaderTypography` (`Core/ReaderTypography.swift`):
-- `storyTitle` is Bookerly-Bold 17 (`relativeTo: .body`).
-- `articleTitle` is Bookerly-Bold 25 and `articleBody` is Bookerly-Regular 18, both multiplied by `textScale`.
-- Front Page masthead is Bookerly-Italic 38, lead headline Bookerly-Bold 27, deck Bookerly-Regular 16.
-- In the HTML, headings and body use `Bookerly, "Iowan Old Style", Georgia, serif` with heading line-height 1.16. Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
+**Typography.** The reading typeface is `ReaderTypeface`: Geist Serif (default) or Bookerly. It is stored in `pigeon.reader.typography.typeface`, chosen in Settings and in the reader's Reading controls, and passed down as the `readerTypeface` environment value from `RootView`. Both faces live in `Resources/Fonts/` and are registered under `UIAppFonts` in `ios/PigeonReader/project.yml`. Geist Serif (Vercel, SIL OFL 1.1, `GeistSerif-OFL.txt` alongside) ships only Regular, and SwiftUI does not synthesize bold or italic for a custom font, so in Geist Serif every title, headline and the masthead is Regular. `ReaderTypography` (`Core/ReaderTypography.swift`) picks the face per role (`title`, `body`, `italic`):
+- `storyTitle` is the title face at 17 (`relativeTo: .body`).
+- `articleTitle` is the title face at 25 and `articleBody` the regular face at 18, both multiplied by `textScale`.
+- Front Page masthead is the italic face at 38, lead headline the title face at 27, deck the regular face at 16.
+- In the HTML, the body uses `"Geist Serif", "Iowan Old Style", Georgia, serif`, or Bookerly when `body[data-typeface="bookerly"]`. Headings inherit it with line-height 1.16, and are weight 400 in Geist Serif to match the SwiftUI title. WebKit synthesizes bold and italic for `strong` and `em` in Geist Serif; Bookerly uses its Bold and Italic faces. WebKit's content process cannot see `UIAppFonts` fonts, and it blocks fonts fetched from a custom scheme on the article's https page as mixed content. So `ReaderWebFonts` passes the chosen typeface's bytes to `__pigeonInstallFonts`, which adds them with the `FontFace` API before the first render (about 7 ms for Bookerly's four faces in the simulator). Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
 - Classic list rows (`ArticleRowView.swift`) use `storyTitle` for titles and `.caption` for metadata.
 
 **Reading preferences.** `ReaderTypographySettings`:
@@ -192,6 +192,6 @@ The dark table above leaves out `--scrim` and `--shadow`, which are also redefin
 ## When changing UI
 
 - Web: use the existing `--*` vars in `browser-app-styles.ts`. Add any new token to both `:root` and `html[data-theme="dark"]`. Check light, dark and the ≤760px single-pane layout.
-- iOS reader: change fonts through `ReaderTypography` (Bookerly, scaled by `textScale`). Check all five `ReaderTheme` values, because article HTML colors are per-theme CSS in `StructuredHTMLJavaScript.swift`, separate from the SwiftUI background.
-- New list or home surfaces should grow from the Front Page vocabulary (masthead, rules, kickers, decks, lead + grid) or the home tiles (kicker colours, Bookerly headlines, no counts), not from Classic rows. Follow the principle above.
+- iOS reader: change fonts through `ReaderTypography` and the `readerTypeface` environment value (never a hard-coded font name), scaled by `textScale`. Check both typefaces. Check all five `ReaderTheme` values, because article HTML colors are per-theme CSS in `StructuredHTMLJavaScript.swift`, separate from the SwiftUI background.
+- New list or home surfaces should grow from the Front Page vocabulary (masthead, rules, kickers, decks, lead + grid) or the home tiles (kicker colours, reading-typeface headlines, no counts), not from Classic rows. Follow the principle above.
 - Check Dynamic Type at accessibility sizes (Front Page collapses to one column) and reduced motion (`ReaderMotion`, `prefers-reduced-motion`).

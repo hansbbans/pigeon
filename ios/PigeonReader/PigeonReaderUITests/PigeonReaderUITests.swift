@@ -1082,6 +1082,31 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertFalse(app.navigationBars["Reading controls"].exists)
 	}
 
+	func testReadingControlsSwitchTheTypefaceAndKeepTheChoice() throws {
+		launchShowingArticle()
+		app.buttons["reader-reading-controls"].tap()
+		XCTAssertTrue(app.navigationBars["Reading controls"].waitForExistence(timeout: 5))
+		let typeface = app.buttons["reader-reading-typeface"]
+		XCTAssertTrue(typeface.waitForExistence(timeout: 5))
+		XCTAssertTrue(typeface.label.contains("Geist Serif") || (typeface.value as? String) == "Geist Serif", "default: \(typeface.label)")
+		typeface.tap()
+		app.buttons["Bookerly"].firstMatch.tap()
+		XCTAssertTrue(app.buttons["reader-reading-typeface"].label.contains("Bookerly") || (app.buttons["reader-reading-typeface"].value as? String) == "Bookerly")
+		app.buttons["Done"].tap()
+
+		let reader = app.scrollViews["article-reader-scroll-view"]
+		XCTAssertTrue(reader.waitForExistence(timeout: 5))
+		XCTAssertTrue(reader.staticTexts["Designing calmer tools for people who read every day"].exists)
+
+		app.terminate()
+		app.launchArguments = ["-reader-sample-data", "-reader-show-article"]
+		app.launchWithoutAnimations()
+		app.buttons["reader-reading-controls"].tap()
+		let restored = app.buttons["reader-reading-typeface"]
+		XCTAssertTrue(restored.waitForExistence(timeout: 5))
+		XCTAssertTrue(restored.label.contains("Bookerly") || (restored.value as? String) == "Bookerly", "kept after relaunch: \(restored.label)")
+	}
+
 	func testReaderMoreMenuProvidesAnAlternativeToThePullGesture() throws {
 		launchShowingArticle()
 		app.buttons["article-reader-more"].tap()

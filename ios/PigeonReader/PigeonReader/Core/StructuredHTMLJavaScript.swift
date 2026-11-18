@@ -319,7 +319,7 @@ enum StructuredHTMLJavaScript {
 			body {
 				background: transparent;
 				color: #202124;
-				font-family: Bookerly, "Iowan Old Style", Georgia, serif;
+				font-family: "Geist Serif", "Iowan Old Style", Georgia, serif;
 				font-size: calc(18px * var(--pigeon-text-scale));
 				line-height: var(--pigeon-line-height);
 				word-wrap: break-word;
@@ -329,7 +329,11 @@ enum StructuredHTMLJavaScript {
 			#pigeon-content { width: 100%; }
 			#pigeon-content > :first-child { margin-top: 0; }
 			#pigeon-content > :last-child { margin-bottom: 0; }
-			h1, h2, h3, h4, h5, h6 { color: #151515; font-family: Bookerly, "Iowan Old Style", Georgia, serif; line-height: 1.16; margin: 1.45em 0 .48em; overflow-wrap: anywhere; }
+			h1, h2, h3, h4, h5, h6 { color: #151515; font-family: inherit; line-height: 1.16; margin: 1.45em 0 .48em; overflow-wrap: anywhere; }
+			/* Geist Serif ships only Regular. Headings stay Regular like the SwiftUI title above them;
+			   WebKit synthesizes bold and italic for strong and em. */
+			body:not([data-typeface="bookerly"]) :is(h1, h2, h3, h4, h5, h6) { font-weight: 400; }
+			body[data-typeface="bookerly"] { font-family: Bookerly, "Iowan Old Style", Georgia, serif; }
 			h1 { font-size: 1.72em; }
 			h2 { font-size: 1.45em; }
 			h3 { font-size: 1.24em; }
@@ -338,8 +342,6 @@ enum StructuredHTMLJavaScript {
 			p { text-wrap: pretty; }
 			ul, ol { padding-left: 1.45em; }
 			li + li { margin-top: .35em; }
-			strong { font-family: Bookerly-Bold, Bookerly, Georgia, serif; }
-			em, i { font-family: Bookerly-Italic, Bookerly, Georgia, serif; }
 			a { color: #075f9a; text-decoration-thickness: .07em; text-underline-offset: .16em; }
 			blockquote { border-inline-start: .22em solid #9aa6af; color: #4c5660; padding: .15em 0 .15em 1em; }
 			hr { border: 0; border-top: 1px solid #aeb7bd; margin: 1.7em 0; }
@@ -398,10 +400,23 @@ enum StructuredHTMLJavaScript {
 		<script>
 			\(StructuredHTMLJavaScript.sanitizationFunctions)
 			const content = document.getElementById("pigeon-content");
+			// ReaderWebFonts passes the bundled faces in; WebKit cannot see the app's fonts or fetch them here.
+			const installedFonts = new Set();
+			window.__pigeonInstallFonts = function(faces) {
+				for (const face of faces) {
+					const key = face.family + "|" + face.weight + "|" + face.style;
+					if (installedFonts.has(key)) continue;
+					installedFonts.add(key);
+					const font = new FontFace(face.family, Uint8Array.fromBase64(face.data), { weight: face.weight, style: face.style });
+					document.fonts.add(font);
+					font.load().catch(() => {});
+				}
+			};
 			window.__pigeonRender = function(payload) {
 				document.documentElement.style.setProperty("--pigeon-text-scale", String(payload.textScale || 1));
 				document.documentElement.style.setProperty("--pigeon-line-height", String(payload.lineHeight || 1.55));
 				document.body.dataset.theme = payload.theme || "system";
+				document.body.dataset.typeface = payload.typeface || "geist-serif";
 				const contentSignature = String(payload.contentSignature || "");
 				if (content.dataset.pigeonContentSignature !== contentSignature) {
 					const template = document.createElement("template");

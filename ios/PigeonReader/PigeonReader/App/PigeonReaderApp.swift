@@ -26,6 +26,7 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.horizontal-margin")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.typography.column-width")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.theme")
+			UserDefaults.standard.removeObject(forKey: ReaderTypographySettings.typefaceKey)
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")

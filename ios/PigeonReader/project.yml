@@ -62,6 +62,7 @@ targets:
           - Bookerly-Bold.ttf
           - Bookerly-Italic.ttf
           - Bookerly-BoldItalic.ttf
+          - GeistSerif-Regular.ttf
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader

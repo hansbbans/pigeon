@@ -170,6 +170,91 @@ struct StructuredHTMLSanitizerTests {
 		#expect(values["dataBorderWidth"] == "1px")
 	}
 
+	/// The app loads the shell with the article's https URL as its base (StructuredHTMLView). A font
+	/// fetched from a custom scheme is blocked there as mixed content, so this covers that base too.
+	@MainActor
+	@Test(arguments: [nil, "https://example.com/2026/11/story", "http://example.com/2026/11/story"])
+	func renderingShellSetsArticlesInTheChosenBundledTypeface(baseURL: String?) async throws {
+		let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 420, height: 700))
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView, baseURL: baseURL.flatMap(URL.init(string:)))
+		for typeface in ReaderTypeface.allCases {
+			_ = try await webView.evaluateJavaScript(try #require(ReaderWebFonts.installScript(for: typeface)))
+		}
+
+		// WebKit cannot see UIAppFonts fonts; without the pigeon-font faces every typeface measured
+		// exactly like Iowan Old Style. Each face must measure unlike that fallback and unlike the other.
+		let result = try await webView.callAsyncJavaScript("""
+			const content = document.getElementById("pigeon-content");
+			content.innerHTML = '<h2 id="h">Heading</h2><p><span id="t">Hamburgefonstiv quick brown</span> <strong><em id="s">bold italic</em></strong></p><span id="f" style="font-family: \\'Iowan Old Style\\'">Hamburgefonstiv quick brown</span>';
+			const measure = async (typeface) => {
+				if (typeface) document.body.dataset.typeface = typeface; else delete document.body.dataset.typeface;
+				await document.fonts.ready;
+				await Promise.all([...document.fonts].map(face => face.loaded));
+				return {
+					family: getComputedStyle(document.body).fontFamily,
+					width: document.getElementById("t").getBoundingClientRect().width,
+					boldItalicWidth: document.getElementById("s").getBoundingClientRect().width,
+					headingWeight: getComputedStyle(document.getElementById("h")).fontWeight,
+				};
+			};
+			const initial = await measure(null);
+			const geist = await measure("geist-serif");
+			const bookerly = await measure("bookerly");
+			const loaded = [...document.fonts].filter(face => face.status === "loaded").map(face => face.family.replace(/"/g, "") + " " + face.weight + " " + face.style).sort();
+			return JSON.stringify({ fallback: document.getElementById("f").getBoundingClientRect().width, initial, geist, bookerly, loaded });
+			""", contentWorld: .page)
+		let json = try #require(result as? String)
+		let values = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+		let fallback = try #require(values["fallback"] as? Double)
+		let initial = try #require(values["initial"] as? [String: Any])
+		let geist = try #require(values["geist"] as? [String: Any])
+		let bookerly = try #require(values["bookerly"] as? [String: Any])
+		let geistWidth = try #require(geist["width"] as? Double)
+		let bookerlyWidth = try #require(bookerly["width"] as? Double)
+
+		#expect((initial["family"] as? String)?.hasPrefix("\"Geist Serif\"") == true)
+		#expect(initial["width"] as? Double == geistWidth)
+		#expect((bookerly["family"] as? String)?.hasPrefix("Bookerly") == true)
+		#expect(abs(geistWidth - fallback) > 1, "Geist Serif must load, not fall back: \(json)")
+		#expect(abs(bookerlyWidth - fallback) > 1, "Bookerly must load, not fall back: \(json)")
+		#expect(abs(geistWidth - bookerlyWidth) > 1)
+		#expect(geist["headingWeight"] as? String == "400")
+		#expect(bookerly["headingWeight"] as? String == "700" || bookerly["headingWeight"] as? String == "bold")
+		let loaded = try #require(values["loaded"] as? [String])
+		#expect(loaded.contains("Geist Serif 400 normal"))
+		#expect(loaded.contains("Bookerly 400 normal"))
+		#expect(loaded.contains("Bookerly 700 italic"), "strong em uses Bookerly Bold Italic: \(loaded)")
+	}
+
+	@MainActor
+	@Test
+	func webFontsCoverEveryFaceOfEachTypefaceAndAreBuiltOnce() throws {
+		#expect(ReaderWebFonts.faces(for: .geistSerif).map(\.fileName) == ["GeistSerif-Regular"])
+		#expect(ReaderWebFonts.faces(for: .bookerly).map(\.fileName) == ["Bookerly-Regular", "Bookerly-Bold", "Bookerly-Italic", "Bookerly-BoldItalic"])
+		for typeface in ReaderTypeface.allCases {
+			let script = try #require(ReaderWebFonts.installScript(for: typeface))
+			#expect(script.hasPrefix("window.__pigeonInstallFonts([{"))
+			#expect(script.count > 100_000)
+			#expect(ReaderWebFonts.installScript(for: typeface) == script)
+		}
+	}
+
+	@MainActor
+	@Test
+	func installingFontsTwiceAddsEachFaceOnce() async throws {
+		let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 420, height: 700))
+		let navigationWaiter = StructuredHTMLNavigationWaiter()
+		webView.navigationDelegate = navigationWaiter
+		try await navigationWaiter.load(StructuredHTMLJavaScript.renderingShell, in: webView, baseURL: URL(string: "https://example.com/story"))
+		let script = try #require(ReaderWebFonts.installScript(for: .bookerly))
+		_ = try await webView.evaluateJavaScript(script)
+		_ = try await webView.evaluateJavaScript(script)
+		let count = try await webView.evaluateJavaScript("document.fonts.size")
+		#expect(count as? Int == 4)
+	}
+
 	@MainActor
 	@Test
 	func paragraphsAndDOMSurviveImageAndTypographyRelayouts() async throws {
@@ -357,10 +442,10 @@ struct StructuredHTMLSanitizerTests {
 private final class StructuredHTMLNavigationWaiter: NSObject, WKNavigationDelegate {
 	private var continuation: CheckedContinuation<Void, any Error>?
 
-	func load(_ html: String, in webView: WKWebView) async throws {
+	func load(_ html: String, in webView: WKWebView, baseURL: URL? = nil) async throws {
 		try await withCheckedThrowingContinuation { continuation in
 			self.continuation = continuation
-			webView.loadHTMLString(html, baseURL: nil)
+			webView.loadHTMLString(html, baseURL: baseURL)
 		}
 	}
 

@@ -33,6 +33,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 	let textScale: Double
 	let lineHeight: Double
 	let theme: ReaderTheme
+	let typeface: ReaderTypeface
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let findQuery: String
 	let imageProxySession: PigeonSession?
@@ -49,6 +50,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		textScale: Double,
 		lineHeight: Double,
 		theme: ReaderTheme = .system,
+		typeface: ReaderTypeface = .geistSerif,
 		remoteImagePolicy: ReaderRemoteImagePolicy = .normal,
 		findQuery: String = "",
 		imageProxySession: PigeonSession? = nil,
@@ -64,6 +66,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		self.textScale = textScale
 		self.lineHeight = lineHeight
 		self.theme = theme
+		self.typeface = typeface
 		self.remoteImagePolicy = remoteImagePolicy
 		self.findQuery = findQuery
 		self.imageProxySession = imageProxySession
@@ -136,6 +139,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			textScale: textScale,
 			lineHeight: lineHeight,
 			theme: theme,
+			typeface: typeface,
 			remoteImagePolicy: remoteImagePolicy,
 		)
 		context.coordinator.find(findQuery)
@@ -150,6 +154,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		var onLinkMenuAction: (ArticleLinkMenuAction, URL) -> Void
 		var onHeight: (CGFloat) -> Void
 		private var isShellLoaded = false
+		private var installedTypefaces: Set<ReaderTypeface> = []
 		private var pendingPayload: Payload?
 		private var renderedSignature: String?
 		private var renderingGeneration: UInt = 0
@@ -174,6 +179,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 
 		func loadShell(baseURL: URL?) {
 			isShellLoaded = false
+			installedTypefaces = []
 			pendingPayload = nil
 			renderedSignature = nil
 			renderingGeneration &+= 1
@@ -186,6 +192,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			textScale: Double,
 			lineHeight: Double,
 			theme: ReaderTheme,
+			typeface: ReaderTypeface,
 			remoteImagePolicy: ReaderRemoteImagePolicy,
 		) {
 			let payload = Payload(
@@ -194,6 +201,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 				textScale: textScale,
 				lineHeight: lineHeight,
 				theme: theme.rawValue,
+				typeface: typeface.rawValue,
 				remoteImagePolicy: remoteImagePolicy.rawValue,
 			)
 			pendingPayload = payload
@@ -316,6 +324,12 @@ struct StructuredHTMLView: UIViewRepresentable {
 				let json = String(data: data, encoding: .utf8) else {
 				return
 			}
+			// Scripts run in order, so the faces are installed before the render that uses them.
+			if let typeface = ReaderTypeface(rawValue: payload.typeface), installedTypefaces.contains(typeface) == false,
+				let script = ReaderWebFonts.installScript(for: typeface) {
+				installedTypefaces.insert(typeface)
+				webView?.evaluateJavaScript(script)
+			}
 			renderingGeneration &+= 1
 			let generation = renderingGeneration
 			webView?.evaluateJavaScript("window.__pigeonRender(\(json));") { [weak self] _, error in
@@ -332,6 +346,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			let textScale: Double
 			let lineHeight: Double
 			let theme: String
+			let typeface: String
 			let remoteImagePolicy: String
 
 			var contentSignature: String {
@@ -339,7 +354,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			}
 
 			var signature: String {
-				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(remoteImagePolicy)"
+				"\(html)|\(baseURL ?? "")|\(textScale)|\(lineHeight)|\(theme)|\(typeface)|\(remoteImagePolicy)"
 			}
 
 			var dictionary: [String: Any] {
@@ -349,6 +364,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 					"textScale": textScale,
 					"lineHeight": lineHeight,
 					"theme": theme,
+					"typeface": typeface,
 					"remoteImagePolicy": remoteImagePolicy,
 				]
 				if let baseURL {
