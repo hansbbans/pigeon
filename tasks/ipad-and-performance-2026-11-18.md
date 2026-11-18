@@ -27,6 +27,8 @@ One run of the new `iOS device layout` workflow is queued for the branch head an
 - The undo banner spanned all three iPad columns; it is capped at 560pt like the status banner.
 - List metadata wrapped under itself in a narrow column; the reader header put a long feed name and a long date on one line. The first stays on one line, the second stacks when it does not fit.
 - A 3:2 Front Page lead image at full width is taller than an iPhone in landscape; a compact-height window crops it to 21:9.
+- A sync that changed the library cleared a search in progress (item 4 of "Act on first" in `tasks/bug-hunt.md`): the list's load task ran again and reset the field. Only a list's first load does that now.
+- Reopening Personalization and adding a topic before the saved topics had reloaded replaced every topic on the server with the new one (item 5 there). Add and Remove wait for the load.
 
 ### Performance
 Each item names what the work scaled with before and after. N is cached stories (about 6,700 in `tasks/todo.md`), B the average body (about 39 KB).
@@ -70,6 +72,6 @@ On "10x": the first two rows are where an order of magnitude is plausible for so
 7. Offline search decodes every payload per query; SQLite FTS5 would replace it.
 
 ## The device layout workflow
-`iOS device layout` (`.github/workflows/ios-device-layout.yml`, `docs/ci-validation.md`) is new and on demand. CI only ever picked iPhone simulators, so no regular-width path has been tested by CI, including the two iPad-only tests that have always been skipped. `PigeonDeviceLayoutUITests` walks Home, the library list, a story list in Classic and Front Page, Settings, the reader, Home again from an open story, a rotation and the reading controls, in both orientations, and records a screenshot and element frames per screen.
+`iOS device layout` (`.github/workflows/ios-device-layout.yml`, `docs/ci-validation.md`) is new and on demand. CI only ever picked iPhone simulators, so no regular-width path has been tested by CI, including the two iPad-only tests that have always been skipped. The run also includes the Home tile tests and those two iPad-only tests. `PigeonDeviceLayoutUITests` walks Home, the library list, a story list in Classic and Front Page, Settings, the reader, Home again from an open story, a rotation and the reading controls, in both orientations, and records a screenshot and element frames per screen.
 
 The workflow has a temporary `push` trigger on `.github/ios-device-layout.request`, so this branch could request runs before the file is on `main`. Remove the trigger and the request file before merging; `workflow_dispatch` is the lasting entry point.
