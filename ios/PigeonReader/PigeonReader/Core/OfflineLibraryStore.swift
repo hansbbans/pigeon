@@ -999,13 +999,23 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				bindings: [.text(storageAccountID), .text(feedKey)],
 				database: database,
 			) { statement in
-				string(at: 0, statement: statement) == streamID
-					&& string(at: 1, statement: statement) == title
-					&& string(at: 2, statement: statement) == payload.feedURL?.absoluteString
-					&& string(at: 3, statement: statement) == payload.siteURL?.absoluteString
-					&& string(at: 4, statement: statement) == payload.iconURL?.absoluteString
-					&& (sqlite3_column_int64(statement, 5) != 0) == (payload.isActive != false)
-					&& data(at: 6, statement: statement) == folders
+				// One comparison per statement keeps the type checker quick.
+				let storedStreamID = string(at: 0, statement: statement)
+				let storedTitle = string(at: 1, statement: statement)
+				guard storedStreamID == streamID, storedTitle == title else { return false }
+				let storedFeedURL = string(at: 2, statement: statement)
+				let storedSiteURL = string(at: 3, statement: statement)
+				let storedIconURL = string(at: 4, statement: statement)
+				guard storedFeedURL == payload.feedURL?.absoluteString,
+					storedSiteURL == payload.siteURL?.absoluteString,
+					storedIconURL == payload.iconURL?.absoluteString else {
+					return false
+				}
+				let storedIsActive = sqlite3_column_int64(statement, 5) != 0
+				let isActive = payload.isActive != false
+				guard storedIsActive == isActive else { return false }
+				let storedFolders = data(at: 6, statement: statement)
+				return storedFolders == folders
 			}
 			if isUnchanged == true {
 				unchanged.insert(change.sequence)
