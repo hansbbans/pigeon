@@ -75,3 +75,15 @@ On "10x": the first two rows are where an order of magnitude is plausible for so
 `iOS device layout` (`.github/workflows/ios-device-layout.yml`, `docs/ci-validation.md`) is new and on demand. CI only ever picked iPhone simulators, so no regular-width path has been tested by CI, including the two iPad-only tests that have always been skipped. The run also includes the Home tile tests and those two iPad-only tests. `PigeonDeviceLayoutUITests` walks Home, the library list, a story list in Classic and Front Page, Settings, the reader, Home again from an open story, a rotation and the reading controls, in both orientations, and records a screenshot and element frames per screen.
 
 The workflow has a temporary `push` trigger on `.github/ios-device-layout.request`, so this branch could request runs before the file is on `main`. Remove the trigger and the request file before merging; `workflow_dispatch` is the lasting entry point.
+
+## Checking this in the iOS Simulator pane
+The guide for this work is Claude Code Desktop's simulator pane (`code.claude.com/docs/en/desktop-ios-simulator`). That pane exists only in a local Desktop session on the Mac; a cloud session cannot reach the simulators, which is why none of the above has been looked at. To do the check, open the Code tab in Claude Desktop on the Mac with this repo as the project folder and paste:
+
+```text
+Fetch origin and check out claude/funny-allen-kd1ox1 in a worktree (git worktree add ../pigeon-ipad-parity claude/funny-allen-kd1ox1). Read tasks/ipad-and-performance-2026-11-18.md first: nothing on this branch has been compiled.
+
+1. In ios/PigeonReader run xcodegen generate, then build. Fix compile errors and warnings (CI fails on first-party warnings), then run the unit tests on the Pigeon Claude simulator and fix failures. Report the STATUS_TOGGLE_BENCH and SANITIZER_BENCH lines the tests print.
+2. Run the app with -reader-sample-data -reader-show-sidebar -reader-reset-reader-state -reader-folder-read-data on the iPhone 17 Pro simulator, then the iPad Pro 11-inch simulator, then the iPad mini simulator. On each, in portrait and landscape, look at: Home tiles; All Feeds and back; For You in Classic; Display > Layout > Front Page; an open story; the Home button from an open story (iPad) and back into the list; Settings; the reader's Reading controls in Sepia and Dark Gray with the system in Dark.
+3. Check the unverified items under "Not fixed" in that file on the iPads: reader navigation bar colours under each theme, rotating with a story open, the undo banner over the reader's bottom bar, the confirmation dialogs' popover anchors, the reading-controls sheet and the image viewer.
+4. Tell me what looks wrong before changing any layout, then fix what is clearly a bug and commit to this branch.
+```
