@@ -4378,6 +4378,28 @@ struct ReaderAppModelTests {
 		}
 	}
 
+	@Test func interruptedWarmSyncResumesFromItsCursorInsteadOfRebuilding() async throws {
+		// A sync that stopped part-way used to mark the cache for a full rebuild,
+		// so the next attempt downloaded the whole library again from an empty
+		// cursor, fifty changes at a time.
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [
+				.init(data: continuingSyncPage(cursor: "page-2"), statusCode: 200),
+				.init(data: Data(#"{"error":"boom"}"#.utf8), statusCode: 500),
+				.init(data: emptySyncPage(cursor: "page-3"), statusCode: 200),
+			],
+		)
+		let model = try await makeWarmPreparationModel(httpClient: client)
+
+		await model.prepareOfflineLibrary()
+		await model.prepareOfflineLibrary(force: true)
+
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == ["warm-cursor", "page-2", "page-2"])
+		#expect(syncRequests.map { $0.query["limit"] } == ["200", "200", "200"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
 	@Test func syncLimitGrowsBackAfterATransientFailure() async throws {
 		// One heavy page used to shrink every later request for the rest of the
 		// sync: a 75,000-change rebuild crawled three changes at a time.
