@@ -1,6 +1,6 @@
 # Pigeon design system
 
-Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles; the one exception is the iPhone home, which is a tile grid (see **iOS**). Reading (article text, story titles, the Front Page) is set in the reading typeface, Geist Serif by default or Bookerly (Settings → Typeface), with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
+Pigeon should feel like part of iOS everywhere except the page, and like a well-set book on the page. Chrome is stock SwiftUI with system materials and text styles; the one exception is Home, which is a tile grid on iPhone and iPad (see **iOS**). Reading (article text, story titles, the Front Page) is set in the reading typeface, Geist Serif by default or Bookerly (Settings → Typeface), with a generous line and a short measure. Hard rules: it must not look like Mail (see Principle), and every text colour reaches 4.5:1 on its background in every reader theme.
 
 The first half of this file is the target system from Claude Design. The second half, from **Principle** on, is what the code does today, with file references. Where they disagree, see **Drift**. Paths are relative to the repo root; `ios/…/PigeonReader/` means `ios/PigeonReader/PigeonReader/`.
 
@@ -115,15 +115,17 @@ They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them throu
 **Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
 
 **Layout and components.**
-- `FrontPageView` / `FrontPageLayout` (iPhone only; see `usesFrontPage` in `ArticleListView.swift`):
+- `FrontPageView` / `FrontPageLayout` (a reader setting on iPhone and in the iPad list column; see `usesFrontPage` in `ArticleListView.swift`):
   - newspaper masthead with `FrontPageRule` hairlines (2pt / 0.5pt) and an uppercase dateline (`.caption2`, tracking 0.8)
-  - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes
+  - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes and in a column narrower than 330pt (`FrontPageLayout.gridColumnCount`)
+  - the page is capped at 640pt (`FrontPageLayout.maximumContentWidth`) and centred, so a wide column or an iPhone in landscape does not stretch the lead image
   - colored feed kicker, a 240-char deck, and an `isEditorialImage` aspect filter of 0.6–2.4
-- `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (iPhone home; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):
+- `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (Home on iPhone and iPad; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):
   - no large title; the toolbar's leading item is a dateline in kicker type ("Wed, Nov 11 · 8 new"), the only number on the screen
   - one row of equal view tiles (For You, Today, Read It Later, plus Starred when enabled; four tiles become two rows of two). Unread never gets a tile
   - a 2-column grid of folder tiles: 3pt bar and name in the folder's `kicker` colour (`FrontPageKickerPalette`, starting from the folder id hash and moved to the next free colour so folders do not share one), the newest cached story title in `story-title` (four lines at most; the first feed names until a story is cached), up to four feed favicons. No featured story and no unread counts; a list shows its count in its title once opened
-  - "All Feeds" swaps the column to the library list (`ReaderSidebarView`), whose leading Home button swaps back. iPad and regular width always use the list
+  - "All Feeds" swaps the column to the library list (`ReaderSidebarView`), whose leading Home button swaps back
+  - iPad and other regular-width windows show the same tiles over the split view until a view is chosen (`ReaderHomeView.Placement.regularHome` in `ReaderShellView`). From 600pt wide the views sit on one row and folders go three or four across (`ReaderHomeTiles.folderColumnCount`), in a grid capped at 960pt and centred. The split view's own sidebar is always the library list, and the list column's toolbar has a Home button (`ReaderHomeToolbarItem`), because a split view has no stack to pop
   - tiles are `secondarySystemGroupedBackground` on `systemGroupedBackground`, radius 12 continuous, one column at accessibility sizes
   - motion: favicons and headlines fade in and crossfade, the dateline count rolls (`numericText`), tiles press to 0.97, content fades under the toolbar (`scrollEdgeEffectStyle(.soft)`); all of it is off or reduced with Reduce Motion
 - Other: `ArticleReaderHeaderView`, `ArticleBodyView`, `StructuredHTMLView`, `ReaderReadingSettingsView`, `ScoreBadge`, `PaywallLabel`, `ReadingLengthLabel`, `ReaderMotion`. All are under `Features/Reader/`.

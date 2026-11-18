@@ -31,6 +31,16 @@ A TestFlight release reuses CI only from a green exact-SHA `main` run (push, sch
 
 `.github/workflows/main-health.yml` watches every CI run on `main` (push, nightly, dispatch). Only runs of the current `main` HEAD count, so an older or overlapping run can't open or close it. A failure opens one `main is red` issue, labelled `main-red` and assigned to the repository owner, and later failures comment on it. The next green run closes it, except that a push run's success does not close an issue a nightly or dispatched run opened (label `main-red-full-suite`), since push runs can run fewer tests. Fix or revert before merging anything else: steps that pull requests skip only run on `main`, so this issue is how a break they would have caught gets noticed.
 
+## iPad and other devices
+
+CI tests on one iPhone simulator, so nothing above runs a regular-width layout. `.github/workflows/ios-device-layout.yml` (`iOS device layout`, on demand only, not a required check and not release evidence) runs `PigeonDeviceLayoutUITests` and `PigeonHomeTilesUITests` on each simulator family in its `devices` input, by default an iPhone 17 Pro, an iPad Pro 11-inch and an iPad mini, one after the other under the same shared iOS runner lock:
+
+`gh workflow run ios-device-layout.yml --ref <branch> -f suite=layout`
+
+`suite` is `layout`, `smoke` (adds the smoke UI list) or `full` (every UI test); `unit_tests=true` also runs the unit tests on the first device. `PigeonDeviceLayoutUITests` walks Home, the library list, a story list in Classic and Front Page, Settings, the reader, Home again from an open story, a rotation and the reading controls, in portrait and in landscape. For every screen it saves a screenshot and a text dump of element frames; both are in the run's `pigeon-device-layout-<run>` artifact, and the last step of the job prints one `PIGEON-LAYOUT-SUMMARY` line per screen (window, bars and panes with their frames) and one `PIGEON-LAYOUT-FINDING` line per observation (a control cut off by the window edge, a bar button under 30pt, bar buttons overlapping). Findings do not fail the run; a screen that does not appear does. The workflow creates a simulator for a family the Mac does not have (`ios-simulator-session.py ensure`) and leaves it in place. `.github/scripts/run-ios-device-layout.sh` is the per-device runner.
+
+The same step prints a diff when the committed `PigeonReader.xcodeproj` differs from what `xcodegen generate` produces.
+
 ## Cancellation
 
 Superseded pull request runs are cancelled. Main and scheduled CI runs and TestFlight releases are not cancelled by that policy. The release workflows retain their separate non-cancelling concurrency groups.
