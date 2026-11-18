@@ -16,6 +16,8 @@ export interface RefreshScheduleInput {
 	outcome: RefreshOutcome;
 	retryAfterAt?: string | null;
 	cacheUntilAt?: string | null;
+	/** Publish time of the feed's newest known item; sets how often a healthy feed is polled. */
+	lastItemAt?: string | null;
 }
 
 export interface HostFeed {
@@ -26,6 +28,15 @@ export interface HostFeed {
 const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 24 * 60;
 const MAX_BACKOFF_MINUTES = 24 * 60;
+const HOUR_MS = 3_600_000;
+// Polling follows how recently a feed published. The refresh queue serves the most overdue feed
+// first, so quiet feeds stepping back is what leaves room to poll active ones more often.
+const CADENCE_TIERS: ReadonlyArray<{ newestItemWithinHours: number; intervalMultiplier: number }> = [
+	{ newestItemWithinHours: 48, intervalMultiplier: 0.5 },
+	{ newestItemWithinHours: 14 * 24, intervalMultiplier: 1 },
+	{ newestItemWithinHours: 60 * 24, intervalMultiplier: 2 },
+];
+const DORMANT_INTERVAL_MULTIPLIER = 4;
 
 export function computeNextFetchAt(now: Date, input: RefreshScheduleInput): string {
 	if (input.retryAfterAt && input.outcome === 'rate_limited') {
@@ -45,7 +56,11 @@ export function computeNextFetchAt(now: Date, input: RefreshScheduleInput): stri
 	const isSuccess = ['success', 'not_modified', 'unchanged'].includes(input.outcome);
 	const failureCount = isSuccess ? 0 : Math.max(1, (input.consecutiveFailures ?? 0) + 1);
 	const backoffMultiplier = isSuccess ? 1 : 2 ** Math.min(failureCount - 1, 8);
-	const minutes = Math.min(baseMinutes * backoffMultiplier, MAX_BACKOFF_MINUTES);
+	// Failures back off from the configured interval; only healthy feeds follow their cadence.
+	const cadenceMinutes = isSuccess
+		? clamp(baseMinutes * cadenceMultiplier(now, input.lastItemAt), MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES)
+		: baseMinutes;
+	const minutes = Math.min(cadenceMinutes * backoffMultiplier, MAX_BACKOFF_MINUTES);
 	const jitter = deterministicJitter(input.feedKey);
 	const delayMinutes = Math.min(minutes * jitter, MAX_BACKOFF_MINUTES);
 	let nextTime = now.getTime() + Math.round(delayMinutes * 60_000);
@@ -56,6 +71,16 @@ export function computeNextFetchAt(now: Date, input: RefreshScheduleInput): stri
 		}
 	}
 	return new Date(nextTime).toISOString();
+}
+
+/** Unknown or unparseable publish times keep the configured interval. */
+function cadenceMultiplier(now: Date, lastItemAt: string | null | undefined): number {
+	if (!lastItemAt) return 1;
+	const newestItem = new Date(lastItemAt).getTime();
+	if (!Number.isFinite(newestItem)) return 1;
+	const ageHours = (now.getTime() - newestItem) / HOUR_MS;
+	return CADENCE_TIERS.find((tier) => ageHours < tier.newestItemWithinHours)?.intervalMultiplier
+		?? DORMANT_INTERVAL_MULTIPLIER;
 }
 
 export function parseRetryAfter(value: string | null, now: Date): string | null {

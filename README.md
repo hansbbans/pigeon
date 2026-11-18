@@ -13,7 +13,7 @@ This file is the current practical guide for how the app works and how to ship u
 - Incoming newsletter address: `rss@hanscho.com`
 - Worker name: `pigeon`
 - D1 database: `pigeon-db`
-- Cron schedule: every hour (`0 * * * *`)
+- Cron schedule: every five minutes (`*/5 * * * *`)
 
 Important: `BASE_URL` must always match the real public URL of the app. For production, that should be the custom domain above. If this value points somewhere else, the app still runs, but it generates broken feed links.
 
@@ -62,13 +62,14 @@ The native Add Feed screen also looks up YouTube handles such as `mkbhd` or `@mk
 
 Both readers show YouTube's embedded player for video entries, with standard playback controls, fullscreen, and an Open in YouTube fallback. Playback starts when the viewer presses Play. The native player stops when the reader closes or the app goes into the background. Videos require an internet connection; saved descriptions remain available offline.
 
-Every hour, the Worker's `scheduled()` handler:
+Every five minutes, the Worker's `scheduled()` handler:
 
-- finds RSS feeds that are due for refresh
+- finds RSS feeds that are due for refresh and takes the five most overdue (the Free plan's per-run database allowance), which caps refreshing at 60 feed polls an hour
 - fetches them with conditional requests when possible
 - parses the response
 - deduplicates items
 - updates feed metadata like counts, fetch timestamps, and last item time
+- schedules the feed's next poll by how recently it published: about every 30 minutes for a feed with an item from the last two days, hourly within two weeks, every two hours within two months, and every four hours after that. Failing feeds back off from the hourly interval instead.
 
 On the first successful scheduled run of each UTC day, the same handler also advances bounded retention work for up to five feeds. It removes at most 500 old read article bodies and 500 old refresh records per feed while preserving unread, starred, and the newest 200 article bodies.
 
@@ -170,7 +171,7 @@ Browser push is disabled until the Worker has a matching P-256 VAPID key pair an
 
 The authenticated capabilities endpoint reports whether the configuration is valid. Each browser opts in separately and selects its feeds. Subscription records are created lazily in D1; they expire after 90 days without renewal. Changing the VAPID key pair requires browsers to subscribe again.
 
-Delivery runs with the existing hourly refresh and uses only its remaining database budget. It is best effort: at most four browsers are considered per run, with one latest unread article from the preceding 24 hours per browser. Provider failures are not replayed, and busy refresh runs can defer notifications. This avoids notification floods but does not guarantee an alert for every article. Notification actions open the signed-in reader for confirmation; the service worker never receives the account token.
+Delivery runs with the feed refresh and uses only its remaining database budget. It is best effort: at most four browsers are considered per run, each at most once every 15 minutes, with one latest unread article from the preceding 24 hours per browser. Provider failures are not replayed, and busy refresh runs can defer notifications. This avoids notification floods but does not guarantee an alert for every article. Notification actions open the signed-in reader for confirmation; the service worker never receives the account token.
 
 ## Deploying Code Updates
 
@@ -257,7 +258,7 @@ npx wrangler tail pigeon
 
 If the deploy touched email handling, send a real test email to `rss@hanscho.com`.
 
-If the deploy touched RSS fetching, wait for the next hourly cron or trigger the logic manually by testing the relevant code path before relying on production.
+If the deploy touched RSS fetching, wait for the next cron run (every five minutes) or trigger the logic manually by testing the relevant code path before relying on production.
 
 ## Deploying Setting Changes Only
 
@@ -285,7 +286,7 @@ If you are changing the public hostname itself, commit the `wrangler.toml` route
 - `src/index.ts`: request routing, email entrypoint, cron entrypoint
 - `src/email-handler.ts`: newsletter ingestion
 - `src/subscribe.ts`: external RSS subscription endpoint
-- `src/rss-fetcher.ts`: hourly RSS refresh logic
+- `src/rss-fetcher.ts`: RSS refresh logic
 - `src/greader.ts`: reader-compatible API
 - `src/browser-app.ts`: authenticated browser Reader shell and client
 - `ios/PigeonReader/project.yml`: authoritative native iOS project definition

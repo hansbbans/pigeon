@@ -1,5 +1,5 @@
 /**
- * Hourly YouTube duration backfill for feed items marked as video.
+ * YouTube duration backfill for feed items marked as video.
  *
  * Runs at the end of the cron within the shared D1 query budget and makes one
  * YouTube API call per run. Each write bumps content_version and fires the
