@@ -315,6 +315,39 @@ struct OfflineLibraryStoreTests {
 		#expect(full.articlesByCollection["scope-b"]?.map(\.id) == ["scope-b"])
 	}
 
+	@Test func resavingACollectionSanitizesAndWritesOnlyWhatChanged() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<12).map { makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>") }
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.count == 12)
+
+		// What a read or star toggle does to every collection holding the story.
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 0)
+		#expect(await store.articleWriteCountForTesting() == 0)
+
+		var changed = stored
+		changed[3].isRead.toggle()
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(changed, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 0)
+		#expect(await store.articleWriteCountForTesting() == 1)
+
+		// A body that needs sanitizing is still sanitized and stored clean.
+		let unsafe = makeArticle(id: "unsafe", html: "<p onclick=\"run()\">Body</p><script>run()</script>")
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(changed + [unsafe], collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 1)
+		#expect(await store.articleWriteCountForTesting() == 1)
+
+		let reloaded = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(reloaded.count == 13)
+		#expect(reloaded.first { $0.id == changed[3].id }?.isRead == changed[3].isRead)
+		#expect(reloaded.first { $0.id == "unsafe" }?.html == "<p>Body</p>")
+	}
+
 	@Test func statusChangeDecodesOnlyTheArticlesItChanges() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let articles = (0..<40).map { makeArticle(id: "story-\($0)", isRead: false) }

@@ -50,6 +50,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	private var snapshotArticleDecodeCount = 0
 	private var searchArticleDecodeCount = 0
 	private var statusOverlayArticleDecodeCount = 0
+	private var sanitizedFixedPoints = Set<SanitizedBodyFingerprint>()
+	private var sanitizedBodyCount = 0
+	private var articleWriteCount = 0
 	#endif
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
@@ -661,6 +664,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 
 	func statusOverlayArticleDecodeCountForTesting() -> Int {
 		statusOverlayArticleDecodeCount
+	}
+
+	func resetSaveWorkCounts() {
+		sanitizedBodyCount = 0
+		articleWriteCount = 0
+	}
+
+	func sanitizedBodyCountForTesting() -> Int {
+		sanitizedBodyCount
+	}
+
+	func articleWriteCountForTesting() -> Int {
+		articleWriteCount
 	}
 	#endif
 
@@ -1519,10 +1535,47 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		return subscriptions
 	}
 
+	/// A body the sanitizer returned byte for byte, with the URL it resolves
+	/// links against. Identified by a hash, so no body is retained.
+	private nonisolated struct SanitizedBodyFingerprint: Hashable, Sendable {
+		let byteCount: Int
+		let hash: Int
+		let baseURL: String?
+	}
+
+	private static let maximumSanitizedFixedPoints = 20_000
+
+	/// Saving a collection sanitizes every story in it, and a read or star
+	/// toggle saves every collection that holds the story. Nearly all of those
+	/// bodies were sanitized when they were first stored, so the sanitizer
+	/// returns them unchanged. Remembering which bodies those are skips the
+	/// pass for them; a body never seen before is always sanitized.
 	private func sanitized(_ article: Recommendation) -> Recommendation {
-		article.replacingHTML(
-			StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
+		let baseURL = article.safeOriginalURL
+		var html = article.html
+		var hasher = Hasher()
+		let byteCount = html.withUTF8 { bytes in
+			hasher.combine(bytes: UnsafeRawBufferPointer(bytes))
+			return bytes.count
+		}
+		let fingerprint = SanitizedBodyFingerprint(
+			byteCount: byteCount,
+			hash: hasher.finalize(),
+			baseURL: baseURL?.absoluteString,
 		)
+		if sanitizedFixedPoints.contains(fingerprint) {
+			return article
+		}
+		sanitizedBodyCount += 1
+		let sanitizedHTML = StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: baseURL)
+		guard sanitizedHTML.utf8.elementsEqual(article.html.utf8) else {
+			return article.replacingHTML(sanitizedHTML)
+		}
+		if sanitizedFixedPoints.count >= Self.maximumSanitizedFixedPoints {
+			sanitizedFixedPoints.removeAll(keepingCapacity: true)
+		}
+		sanitizedFixedPoints.insert(fingerprint)
+		return article
 	}
 
 	private func loadPendingStatusOverlays(
@@ -1864,6 +1917,17 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 		}
+		// Re-saving a collection hands back mostly rows that are already stored
+		// exactly as they would be written. Encoding and writing each body again
+		// changes nothing on disk.
+		if existing.count == 1, let stored = existing.first, stored.id == storageID,
+			stored.bodyPruned == storedBodyPruned {
+			var written = storedArticle
+			written.isBodyPruned = storedBodyPruned ? true : nil
+			if stored.article == written {
+				return storedArticle
+			}
+		}
 		try writeArticle(
 			storedArticle,
 			bodyPruned: storedBodyPruned,
@@ -1881,6 +1945,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	) throws {
 		var storedArticle = article
 		storedArticle.isBodyPruned = bodyPruned ? true : nil
+		articleWriteCount += 1
 		try execute(
 			"""
 			INSERT INTO cached_articles
