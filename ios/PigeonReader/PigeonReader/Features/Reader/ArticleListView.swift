@@ -575,11 +575,16 @@ struct ArticleListView: View {
 		guard model.selectedNavigationID == collection.id else { return }
 		let requestKey = loadRequestKey
 		let requestID = loadingState.begin(context: requestKey)
-		searchText = ""
-		searchPresentation = ReaderArticleSearchPresentation()
-		model.clearArticleSearch()
-		let context = listContext
 		let scope = "\(model.session?.storageIdentity ?? "none")|\(collection.id)"
+		// This also runs when a sync changes the library under the list on
+		// screen. Only the first load of a list starts from an empty search; a
+		// later one must not wipe a search the reader is in the middle of.
+		if initialLoadScope != scope {
+			searchText = ""
+			searchPresentation = ReaderArticleSearchPresentation()
+			model.clearArticleSearch()
+		}
+		let context = listContext
 		let initialLoadID = initialLoadScope == scope
 			? nil
 			: updateBuffer.beginInitialLoad(context: context)
