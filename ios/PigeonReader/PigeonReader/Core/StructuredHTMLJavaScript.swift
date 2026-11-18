@@ -332,8 +332,11 @@ enum StructuredHTMLJavaScript {
 			h1, h2, h3, h4, h5, h6 { color: #151515; font-family: inherit; line-height: 1.16; margin: 1.45em 0 .48em; overflow-wrap: anywhere; }
 			/* Geist Serif ships only Regular. Headings stay Regular like the SwiftUI title above them;
 			   WebKit synthesizes bold and italic for strong and em. */
-			body:not([data-typeface="bookerly"]) :is(h1, h2, h3, h4, h5, h6) { font-weight: 400; }
+			body:not([data-typeface="bookerly"]):not([data-typeface="allo"]) :is(h1, h2, h3, h4, h5, h6) { font-weight: 400; }
 			body[data-typeface="bookerly"] { font-family: Bookerly, "Iowan Old Style", Georgia, serif; }
+			/* Allo headings are SemiBold, like its SwiftUI title. */
+			body[data-typeface="allo"] { font-family: Allo, -apple-system, system-ui, sans-serif; }
+			body[data-typeface="allo"] :is(h1, h2, h3, h4, h5, h6) { font-weight: 600; }
 			h1 { font-size: 1.72em; }
 			h2 { font-size: 1.45em; }
 			h3 { font-size: 1.24em; }

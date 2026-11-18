@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Allo, Josh Puckett's open-source sans (SIL OFL 1.1), is a new reading typeface on the web and iOS: Settings → Reading → Typeface on the web, Settings → Typeface or the reader's Reading controls on iOS. Titles are SemiBold on iOS, with real bold and oblique faces in articles. Geist Serif stays the default.
+
 ## [0.1.14.0] - 2026-11-17
 
 ### Changed

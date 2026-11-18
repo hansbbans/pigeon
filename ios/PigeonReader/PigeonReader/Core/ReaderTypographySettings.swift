@@ -24,12 +24,14 @@ nonisolated enum ReaderTheme: String, CaseIterable, Identifiable, Sendable {
 nonisolated enum ReaderTypeface: String, CaseIterable, Identifiable, Sendable {
 	case geistSerif = "geist-serif"
 	case bookerly
+	case allo
 
 	var id: Self { self }
 	var title: String {
 		switch self {
 		case .geistSerif: "Geist Serif"
 		case .bookerly: "Bookerly"
+		case .allo: "Allo"
 		}
 	}
 }

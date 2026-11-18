@@ -13,6 +13,18 @@ struct ReaderTypographyTests {
 		#expect(UIFont(name: postScriptName, size: 17) != nil)
 	}
 
+	@Test(arguments: [
+		"Allo-Regular",
+		"Allo-SemiBold",
+		"Allo-Bold",
+		"Allo-Oblique",
+		"Allo-BoldOblique",
+	])
+	func bundledAlloFaceIsRegistered(postScriptName: String) {
+		let font = UIFont(name: postScriptName, size: 17)
+		#expect(font?.familyName == "Allo")
+	}
+
 	@Test func bundledGeistSerifIsRegistered() {
 		let font = UIFont(name: "GeistSerif-Regular", size: 17)
 		#expect(font?.familyName == "Geist Serif")
@@ -30,6 +42,8 @@ struct ReaderTypographyTests {
 		#expect(ReaderTypeface.geistSerif.italicFontName == "GeistSerif-Regular")
 		#expect(ReaderTypeface.bookerly.titleFontName == "Bookerly-Bold")
 		#expect(ReaderTypeface.bookerly.italicFontName == "Bookerly-Italic")
+		#expect(ReaderTypeface.allo.titleFontName == "Allo-SemiBold")
+		#expect(ReaderTypeface.allo.italicFontName == "Allo-Oblique")
 	}
 
 	@Test func articleTitleAndFallbackBodyScaleWithReadingTextSize() {

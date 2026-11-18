@@ -202,8 +202,9 @@ struct StructuredHTMLSanitizerTests {
 			const initial = await measure(null);
 			const geist = await measure("geist-serif");
 			const bookerly = await measure("bookerly");
+			const allo = await measure("allo");
 			const loaded = [...document.fonts].filter(face => face.status === "loaded").map(face => face.family.replace(/"/g, "") + " " + face.weight + " " + face.style).sort();
-			return JSON.stringify({ fallback: document.getElementById("f").getBoundingClientRect().width, initial, geist, bookerly, loaded });
+			return JSON.stringify({ fallback: document.getElementById("f").getBoundingClientRect().width, initial, geist, bookerly, allo, loaded });
 			""", contentWorld: .page)
 		let json = try #require(result as? String)
 		let values = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
@@ -213,6 +214,8 @@ struct StructuredHTMLSanitizerTests {
 		let bookerly = try #require(values["bookerly"] as? [String: Any])
 		let geistWidth = try #require(geist["width"] as? Double)
 		let bookerlyWidth = try #require(bookerly["width"] as? Double)
+		let allo = try #require(values["allo"] as? [String: Any])
+		let alloWidth = try #require(allo["width"] as? Double)
 
 		#expect((initial["family"] as? String)?.hasPrefix("\"Geist Serif\"") == true)
 		#expect(initial["width"] as? Double == geistWidth)
@@ -220,12 +223,19 @@ struct StructuredHTMLSanitizerTests {
 		#expect(abs(geistWidth - fallback) > 1, "Geist Serif must load, not fall back: \(json)")
 		#expect(abs(bookerlyWidth - fallback) > 1, "Bookerly must load, not fall back: \(json)")
 		#expect(abs(geistWidth - bookerlyWidth) > 1)
+		#expect((allo["family"] as? String)?.hasPrefix("Allo") == true)
+		#expect(abs(alloWidth - fallback) > 1, "Allo must load, not fall back: \(json)")
+		#expect(abs(alloWidth - geistWidth) > 1)
+		#expect(allo["headingWeight"] as? String == "600")
 		#expect(geist["headingWeight"] as? String == "400")
 		#expect(bookerly["headingWeight"] as? String == "700" || bookerly["headingWeight"] as? String == "bold")
 		let loaded = try #require(values["loaded"] as? [String])
 		#expect(loaded.contains("Geist Serif 400 normal"))
 		#expect(loaded.contains("Bookerly 400 normal"))
 		#expect(loaded.contains("Bookerly 700 italic"), "strong em uses Bookerly Bold Italic: \(loaded)")
+		#expect(loaded.contains("Allo 400 normal"))
+		#expect(loaded.contains("Allo 600 normal"), "headings use Allo SemiBold: \(loaded)")
+		#expect(loaded.contains("Allo 700 italic"), "strong em uses Allo Bold Oblique: \(loaded)")
 	}
 
 	@MainActor
@@ -233,6 +243,8 @@ struct StructuredHTMLSanitizerTests {
 	func webFontsCoverEveryFaceOfEachTypefaceAndAreBuiltOnce() throws {
 		#expect(ReaderWebFonts.faces(for: .geistSerif).map(\.fileName) == ["GeistSerif-Regular"])
 		#expect(ReaderWebFonts.faces(for: .bookerly).map(\.fileName) == ["Bookerly-Regular", "Bookerly-Bold", "Bookerly-Italic", "Bookerly-BoldItalic"])
+		#expect(ReaderWebFonts.faces(for: .allo).map(\.fileName) == ["Allo-Regular", "Allo-SemiBold", "Allo-Bold", "Allo-Oblique", "Allo-BoldOblique"])
+		#expect(ReaderWebFonts.faces(for: .allo).allSatisfy { $0.fileExtension == "otf" })
 		for typeface in ReaderTypeface.allCases {
 			let script = try #require(ReaderWebFonts.installScript(for: typeface))
 			#expect(script.hasPrefix("window.__pigeonInstallFonts([{"))

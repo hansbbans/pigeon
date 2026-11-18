@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { runInNewContext, Script } from 'node:vm';
 import { createServer } from 'node:http';
 import { renderBrowserReadingScript } from '../src/browser-reading-preferences';
-import { GEIST_SERIF_FONT_FACE, GEIST_SERIF_PATH } from '../src/browser-fonts';
+import { ALLO_FONT_FACE, ALLO_OBLIQUE_PATH, ALLO_PATH, GEIST_SERIF_FONT_FACE, GEIST_SERIF_PATH } from '../src/browser-fonts';
 
 // A deliberately inert DOM adapter exercises sanitizer decisions in Node.
 // Native HTML parsing/no-network behavior is verified separately in a browser.
@@ -256,6 +256,21 @@ test('Geist Serif is the default typeface and the frame loads it from the vendor
  }
  assert.match(state.api.fontStack({font:'serif'}),/^Georgia/);
  assert.equal(state.api.fontStack({font:'nope'}),state.api.fontStack({}));
+});
+
+test('Allo loads its variable upright and Regular oblique only when chosen, and survives a save',()=>{
+ const state=fixture();
+ const css=state.api.frameCSS({font:'allo'});
+ assert.ok(css.startsWith(ALLO_FONT_FACE));
+ assert.ok(css.includes("url('"+ALLO_PATH+"') format('woff2');font-weight:100 900;font-style:normal"));
+ assert.ok(css.includes("url('"+ALLO_OBLIQUE_PATH+"') format('woff2');font-weight:400;font-style:italic"));
+ assert.ok(!css.includes(GEIST_SERIF_PATH));
+ assert.doesNotMatch(css.slice(ALLO_FONT_FACE.length),/@import|https:\/\/|javascript:|url\(/);
+ assert.match(state.api.fontStack({font:'allo'}),/^Allo, /);
+ assert.equal(state.api.frameFontCSS({font:'allo'}),ALLO_FONT_FACE+'body{font-family:'+state.api.fontStack({font:'allo'})+'}');
+ for(const font of ['geist','system','serif','sans']) assert.ok(!state.api.frameCSS({font}).includes(ALLO_PATH),font+' must not load Allo');
+ state.api.savePreferences({font:'allo'});
+ assert.equal(state.api.readPreferences().font,'allo');
 });
 
 test('a font saved as the old System default reads as Geist Serif once, then sticks when chosen again',()=>{

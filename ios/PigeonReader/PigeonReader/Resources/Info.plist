@@ -46,6 +46,11 @@
 		<string>Bookerly-Italic.ttf</string>
 		<string>Bookerly-BoldItalic.ttf</string>
 		<string>GeistSerif-Regular.ttf</string>
+		<string>Allo-Regular.otf</string>
+		<string>Allo-SemiBold.otf</string>
+		<string>Allo-Bold.otf</string>
+		<string>Allo-Oblique.otf</string>
+		<string>Allo-BoldOblique.otf</string>
 	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

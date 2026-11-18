@@ -1,4 +1,4 @@
-import { GEIST_SERIF_FONT_FACE } from './browser-fonts';
+import { ALLO_FONT_FACE, GEIST_SERIF_FONT_FACE } from './browser-fonts';
 
 // Visual layer for the browser reader. Quiet, Reeder-style: three hairline-separated
 // columns, icon-only toolbars, one muted accent, and a neutral graphite dark mode.
@@ -59,6 +59,7 @@ function iconVariables(): string {
 export function renderBrowserAppStyles(): string {
 	return `
       ${GEIST_SERIF_FONT_FACE}
+      ${ALLO_FONT_FACE}
       :root {
         color-scheme: light;
         --page: #ffffff;

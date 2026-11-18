@@ -83,6 +83,12 @@
 		3B7A1DF262E8AA8A345BDD9B /* ReaderFeedPrewarm.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9C464A0B105722302787437 /* ReaderFeedPrewarm.swift */; };
 		3D674EE31F884EF5D3889FDC /* PigeonPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ADC8F2D0BBFF34DB9D9F32 /* PigeonPalette.swift */; };
 		3F453F535AA0B700920CECCB /* ArticleLeadImageRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68115AA211046675A2918A78 /* ArticleLeadImageRequestTests.swift */; };
+		CC8927828ABB1D5E5265E14A /* Allo-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = CB04D13CE518DAF6BBDAF2E2 /* Allo-OFL.txt */; };
+		D73D20F676C7571DE5903160 /* Allo-Bold.otf in Resources */ = {isa = PBXBuildFile; fileRef = 1ECF1E06AC3E88F22EB34EE1 /* Allo-Bold.otf */; };
+		11F6054F26548B5D62DC6400 /* Allo-BoldOblique.otf in Resources */ = {isa = PBXBuildFile; fileRef = 10386243AA26BFA3355AAC77 /* Allo-BoldOblique.otf */; };
+		915AF491E6863E1FEE58A573 /* Allo-Oblique.otf in Resources */ = {isa = PBXBuildFile; fileRef = 0F9F598F0E3A73D796D311C3 /* Allo-Oblique.otf */; };
+		06068F1BB3C0BD488FA9FACB /* Allo-Regular.otf in Resources */ = {isa = PBXBuildFile; fileRef = EEEEA09FA61950F237F96AA8 /* Allo-Regular.otf */; };
+		9516F60477D5C833C62AA4B8 /* Allo-SemiBold.otf in Resources */ = {isa = PBXBuildFile; fileRef = 30A6B5EF3C77DF68E3026C48 /* Allo-SemiBold.otf */; };
 		3FA4CD8384F4C290DB8BCFC3 /* GeistSerif-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 18081EC1C28345482B86082F /* GeistSerif-OFL.txt */; };
 		3FC79B852EFBEE59A89FB058 /* PigeonMotionPerformanceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245E6BE17C1BBA7F6E950473 /* PigeonMotionPerformanceUITests.swift */; };
 		4023E27B6D040A30E813BE82 /* ArticleListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A34DA73A78C59435EABE4D5 /* ArticleListView.swift */; };
@@ -393,6 +399,12 @@
 		16AFB281B9F23A02E1347A43 /* StaleFeedsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaleFeedsView.swift; sourceTree = "<group>"; };
 		16D0E57C3EE2B54FF555C3B8 /* ReaderPresentedCollectionActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderPresentedCollectionActions.swift; sourceTree = "<group>"; };
 		16F3C595EE70DA95E5981998 /* PreviewTranscriptFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewTranscriptFetcher.swift; sourceTree = "<group>"; };
+		CB04D13CE518DAF6BBDAF2E2 /* Allo-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Allo-OFL.txt"; sourceTree = "<group>"; };
+		1ECF1E06AC3E88F22EB34EE1 /* Allo-Bold.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-Bold.otf"; sourceTree = "<group>"; };
+		10386243AA26BFA3355AAC77 /* Allo-BoldOblique.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-BoldOblique.otf"; sourceTree = "<group>"; };
+		0F9F598F0E3A73D796D311C3 /* Allo-Oblique.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-Oblique.otf"; sourceTree = "<group>"; };
+		EEEEA09FA61950F237F96AA8 /* Allo-Regular.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-Regular.otf"; sourceTree = "<group>"; };
+		30A6B5EF3C77DF68E3026C48 /* Allo-SemiBold.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-SemiBold.otf"; sourceTree = "<group>"; };
 		18081EC1C28345482B86082F /* GeistSerif-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "GeistSerif-OFL.txt"; sourceTree = "<group>"; };
 		18A38EB490D4ED8F7EB874C7 /* ArticleSortOrder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleSortOrder.swift; sourceTree = "<group>"; };
 		19CDC695545F448E4D0FFB44 /* PigeonPaletteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonPaletteTests.swift; sourceTree = "<group>"; };
@@ -1137,6 +1149,12 @@
 				645A40E6B13B39A5894A3A62 /* Bookerly-BoldItalic.ttf */,
 				E34E19A8FFF75E55D3425237 /* Bookerly-Italic.ttf */,
 				C09092CB3E7A5B6809CAA8D8 /* Bookerly-Regular.ttf */,
+				CB04D13CE518DAF6BBDAF2E2 /* Allo-OFL.txt */,
+				1ECF1E06AC3E88F22EB34EE1 /* Allo-Bold.otf */,
+				10386243AA26BFA3355AAC77 /* Allo-BoldOblique.otf */,
+				0F9F598F0E3A73D796D311C3 /* Allo-Oblique.otf */,
+				EEEEA09FA61950F237F96AA8 /* Allo-Regular.otf */,
+				30A6B5EF3C77DF68E3026C48 /* Allo-SemiBold.otf */,
 				18081EC1C28345482B86082F /* GeistSerif-OFL.txt */,
 				9433A80804B63A1E66BEE05A /* GeistSerif-Regular.ttf */,
 				FD6C4E42AAAC917245AF2018 /* README.md */,
@@ -1400,6 +1418,12 @@
 				EACA26E790D667C6099FE22C /* Bookerly-Regular.ttf in Resources */,
 				D989D8C80E3F7B21D2A4769E /* DEFUDDLE-NOTICE.md in Resources */,
 				0FC959C1461E6ACD31F2CFB9 /* Defuddle.js in Resources */,
+				CC8927828ABB1D5E5265E14A /* Allo-OFL.txt in Resources */,
+				D73D20F676C7571DE5903160 /* Allo-Bold.otf in Resources */,
+				11F6054F26548B5D62DC6400 /* Allo-BoldOblique.otf in Resources */,
+				915AF491E6863E1FEE58A573 /* Allo-Oblique.otf in Resources */,
+				06068F1BB3C0BD488FA9FACB /* Allo-Regular.otf in Resources */,
+				9516F60477D5C833C62AA4B8 /* Allo-SemiBold.otf in Resources */,
 				3FA4CD8384F4C290DB8BCFC3 /* GeistSerif-OFL.txt in Resources */,
 				86B69BC307DF228125885987 /* GeistSerif-Regular.ttf in Resources */,
 				45FA11DA3ADD0931078F81ED /* PrivacyInfo.xcprivacy in Resources */,
