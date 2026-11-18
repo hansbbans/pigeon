@@ -130,7 +130,7 @@ They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them throu
 - Folders sort By Feed by default (`ArticleSortOrder.byFeed`; Newest, Oldest and Score stay in the sort menu). Each feed's run of stories sits under `ArticleFeedSectionLabel`: the feed's sidebar title in `.footnote` semibold, uppercase, tracking 0.8, `label-secondary`, with its favicon at 16pt under the Load Normally image policy. In the Classic list it is a plain row above the feed's first story. The Front Page has no labels: it keeps its normal pages in By Feed order, and each story's kicker already names its feed.
 - Classic list swipe actions (`ArticleListView.swift`) use `PigeonPalette.SwipeFill`: tint (read), keep (star) and teal `kicker-2` (Read It Later).
 
-## Web (Worker `/app`)
+## Web (Worker `/`)
 
 **Files.**
 - `src/browser-app-styles.ts`: `renderBrowserAppStyles()` holds all app CSS, plus Tabler icon masks as `--icon-*` vars.

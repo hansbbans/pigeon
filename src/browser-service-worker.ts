@@ -1,8 +1,11 @@
 /** Public service-worker script. It never receives account tokens or caches private responses. */
 export function renderBrowserServiceWorker(): string {
  return `"use strict";
-const SHELL_CACHE = 'pigeon-public-shell-v1';
-const SHELL_URL = new URL('/app', self.location.origin).href;
+// v2: the shell moved from /app to /. Activation deletes the v1 cache and its /app entry.
+const SHELL_CACHE = 'pigeon-public-shell-v2';
+const SHELL_URL = new URL('/', self.location.origin).href;
+// '/app' and '/app/' still open the app (older installs and bookmarks), from the same shell.
+const SHELL_PATHS = ['/', '/app', '/app/'];
 async function fetchPublicShell() {
  // 'no-cache' revalidates on every load, so an unchanged shell costs a 304; 'no-store' downloaded it whole each time.
  const response = await fetch(SHELL_URL, { credentials: 'omit', cache: 'no-cache', redirect: 'error' });
@@ -22,7 +25,7 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 })()));
 self.addEventListener('fetch', event => {
  const request = event.request; const url = new URL(request.url);
- if (request.method !== 'GET' || request.mode !== 'navigate' || url.origin !== self.location.origin || !['/app','/app/'].includes(url.pathname) || request.headers.has('Authorization')) return;
+ if (request.method !== 'GET' || request.mode !== 'navigate' || url.origin !== self.location.origin || !SHELL_PATHS.includes(url.pathname) || request.headers.has('Authorization')) return;
  event.respondWith((async () => {
   try { return await fetchPublicShell(); } catch (_) {
    const cache = await caches.open(SHELL_CACHE); const saved = await cache.match(SHELL_URL);
@@ -46,7 +49,7 @@ self.addEventListener('notificationclick', event => {
  event.waitUntil((async () => {
   const id = event.notification.data && event.notification.data.articleId;
   if (typeof id !== 'string' || id.length > 512) return;
-  const url = new URL('/app', self.location.origin); url.searchParams.set('article', id);
+  const url = new URL('/', self.location.origin); url.searchParams.set('article', id);
   if (event.action === 'read' || event.action === 'star') url.searchParams.set('notificationAction', event.action);
   // Actions open the authenticated app for confirmation; no mutations or account tokens in the SW.
   await self.clients.openWindow(url.href);

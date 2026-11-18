@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// On-demand visual check of the /app web UI (not run in CI).
+// On-demand visual check of the web UI at / (not run in CI).
 //
 //   npm run visual:check                       # starts both Workers locally, like `npm run dev`
 //   npm run visual:check -- --base-url <url>   # checks an already-running server
@@ -36,7 +36,7 @@ if (args.help) {
 	process.exit(0);
 }
 
-// Each page is a state of the /app single-page app. `auth` pages sign in first.
+// Each page is a state of the single-page app at /. `auth` pages sign in first.
 const PAGES = [
 	{ name: 'login', auth: false, ready: '#login-screen:not(.hidden)' },
 	{ name: 'reader', auth: true, ready: '#reader-shell:not(.hidden)' },
@@ -127,8 +127,8 @@ async function checkPage(browser, baseUrl, spec, width, password) {
 
 	let file = null;
 	try {
-		const response = await page.goto(`${baseUrl}/app`, { waitUntil: 'load' });
-		if (!response?.ok()) throw new Error(`GET /app returned ${response?.status()}`);
+		const response = await page.goto(`${baseUrl}/`, { waitUntil: 'load' });
+		if (!response?.ok()) throw new Error(`GET / returned ${response?.status()}`);
 		if (spec.auth) {
 			await page.locator('#login-screen:not(.hidden)').waitFor({ timeout: 15000 });
 			await page.fill('#password-input', password);

@@ -1,8 +1,9 @@
 /** Public installation metadata and small derivatives of the existing native Pigeon icon. */
 export const BROWSER_APP_MANIFEST = {
+ // id stays '/app' (the old start_url) so existing installs remain the same app after the move to '/'.
  id: '/app', name: 'Pigeon', short_name: 'Pigeon',
  description: 'Read your newsletters and feeds with Pigeon.',
- start_url: '/app', scope: '/app', display: 'standalone',
+ start_url: '/', scope: '/', display: 'standalone',
  theme_color: '#f5f5f2', background_color: '#f5f5f2',
  icons: [
   { src: '/app/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },

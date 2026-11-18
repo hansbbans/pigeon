@@ -39,6 +39,8 @@ export function renderBrowserNotificationsScript(): string {
   }
   function showError(error) { if (!destroyed && sameIdentity(identity, adapter.getSessionIdentity())) { status = error.message || 'Could not update notifications. Retry when online.'; render(); } }
   async function registration() {
+   // Push stays on the '/app' registration even though the app now lives at '/': a subscription
+   // belongs to its registration, so moving it would silently cut off every existing subscription.
    guard(); var reg = await checked(navigator.serviceWorker.register('/app/sw.js', { scope: '/app' }));
    if (reg.active) return reg;
    // register() resolves while a first worker is still installing. Push requires

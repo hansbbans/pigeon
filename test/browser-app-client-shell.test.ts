@@ -2089,3 +2089,15 @@ test('signing out returns the narrow layout to the list and closes search', asyn
 	assert.equal(elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'stream');
 	assert.equal(elements.get('article-query-controls')?.classList.contains('is-searching'), false);
 });
+
+test('a browser tab at an old /app address shows the root address; installed apps keep /app', async () => {
+	const { rootAppAddress } = await import('../src/browser-app-client');
+	assert.equal(rootAppAddress('https://pigeon.example/app', false), '/');
+	assert.equal(rootAppAddress('https://pigeon.example/app/', false), '/');
+	assert.equal(rootAppAddress('https://pigeon.example/app?article=12&notificationAction=read#top', false), '/?article=12&notificationAction=read#top');
+	assert.equal(rootAppAddress('https://pigeon.example/app?article=12', true), null, 'standalone installs are scoped to /app');
+	assert.equal(rootAppAddress('https://pigeon.example/', false), null);
+	assert.equal(rootAppAddress('https://pigeon.example/?article=1', false), null);
+	assert.equal(rootAppAddress('https://pigeon.example/application', false), null);
+	assert.equal(rootAppAddress('https://pigeon.example/app/status', false), null);
+});

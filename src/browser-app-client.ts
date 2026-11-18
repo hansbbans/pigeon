@@ -1011,6 +1011,19 @@ export function followInPageLink(event: any): boolean {
 // mode falls back to Readability). Each call waits at most timeoutMs. A slow
 // script keeps loading in the background and later calls see it; a failed one
 // is retried on the next call rather than disabled for the session.
+/**
+ * The app moved from /app to the site root. A browser tab opened at an old /app address shows the
+ * root address instead, keeping its query and hash (article links). Installed Home Screen apps keep
+ * /app: older installs are scoped to it, and leaving the scope would bring back browser chrome.
+ * Returns the address to show, or null to leave the address alone.
+ */
+export function rootAppAddress(href: string, standalone: boolean): string | null {
+	if (standalone) return null;
+	const url = new URL(href);
+	if (url.pathname !== '/app' && url.pathname !== '/app/') return null;
+	return '/' + url.search + url.hash;
+}
+
 export function createScriptLoader(doc: any, src: string, timeoutMs: number): () => Promise<boolean> {
 	let state: 'idle' | 'loading' | 'loaded' = 'idle';
 	let loaded: Promise<boolean> | null = null;
@@ -1208,6 +1221,7 @@ ${createArticleFrameDocument.toString()}
 ${selectArticleHeroImageUrl.toString()}
 ${normalizeBrowserItemId.toString()}
 ${formatArticleListTime.toString()}
+${rootAppAddress.toString()}
 ${createScriptLoader.toString()}
 ${followInPageLink.toString()}
 ${advanceImpressions.toString()}
@@ -1223,6 +1237,7 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   CONTENT_CHUNK_SIZE: ${CONTENT_CHUNK_SIZE},
   PIGEON_CLIENT_ID: ${JSON.stringify(PIGEON_CLIENT_ID)},
   extractAuthToken,
+  rootAppAddress,
   createScriptLoader,
   followInPageLink,
   createLoggedOutSession,

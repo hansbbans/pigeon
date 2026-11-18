@@ -5,11 +5,11 @@ import { test } from 'node:test';
 import worker from '../src/index';
 import type { Env } from '../src/types';
 
-test('public manifest describes exact app scope and standalone launch without auth or database access', async () => {
+test('public manifest launches the app at the root, keeps its /app identity, and needs no auth or database', async () => {
  const response=await worker.fetch(new Request('https://pigeon.example/app/manifest.webmanifest'),{} as Env);
  assert.equal(response.status,200);assert.match(response.headers.get('Content-Type')!,/^application\/manifest\+json/);assert.equal(response.headers.get('Cache-Control'),'public, max-age=3600');
  const manifest=await response.json() as any;
- assert.equal(manifest.name,'Pigeon');assert.equal(manifest.id,'/app');assert.equal(manifest.start_url,'/app');assert.equal(manifest.scope,'/app');assert.equal(manifest.display,'standalone');assert.equal(manifest.theme_color,'#f5f5f2');
+ assert.equal(manifest.name,'Pigeon');assert.equal(manifest.id,'/app');assert.equal(manifest.start_url,'/');assert.equal(manifest.scope,'/');assert.equal(manifest.display,'standalone');assert.equal(manifest.theme_color,'#f5f5f2');
  assert.deepEqual(manifest.icons,[{src:'/app/icon-192.png',sizes:'192x192',type:'image/png',purpose:'any'},{src:'/app/icon-512.png',sizes:'512x512',type:'image/png',purpose:'any'}]);
  assert.ok(!JSON.stringify(manifest).includes('Authorization'));
 });

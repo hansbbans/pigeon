@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Changed
 
+- The web reader now lives at the site root, `https://pigeon.hanscho.com`, instead of `/app`. Old `/app` links and bookmarks still work; in a browser tab the address changes to the root. Home Screen installs keep working, offline reload works at the new address, and existing push notification subscriptions are untouched.
 - The web reader uses Geist Serif, Vercel's open-source serif, as its reading typeface: article titles, article text, saved-story titles and transcripts. Choose System, Serif or Sans serif instead under Settings → Reading → Typeface. If you never picked a typeface, you get Geist Serif.
 
 ## [0.1.13.0] - 2026-11-17
