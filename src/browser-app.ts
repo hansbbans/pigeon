@@ -3691,6 +3691,8 @@ export function renderBrowserAppRuntimeScript(): string {
   function renderReaderFrame(itemId, documentHtml, preparedReading = false) {
     // Any other document in the frame invalidates the prepared reading view, so revisiting the article rebuilds it.
     if (!preparedReading) preparedReaderKey = '';
+    // Prepared views carry the full reading CSS; give every other frame document the reading typeface.
+    if (!preparedReading && readingPreferences && typeof readingTools?.frameFontCSS === 'function') { const fontCSS = readingTools.frameFontCSS(readingPreferences); documentHtml = documentHtml.replace('</style>', () => fontCSS + '</style>'); }
     // Anything other than the article whose position was applied (another article, nothing, or the
     // placeholder of one not yet restored) means the next prepared render restores again. The
     // prepared path marks its article before calling this, so that render leaves the mark alone.

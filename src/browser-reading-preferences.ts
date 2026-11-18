@@ -47,6 +47,9 @@ export function renderBrowserReadingScript(): string {
  }
  // The CSS font-family list for the chosen typeface; the app uses it for the reader title and saved cards.
  function fontStack(input) { return FONT_STACKS[normalizePreferences(input).font]; }
+ // Just the typeface, for frame documents that are not a prepared reading view (placeholders,
+ // saved-video descriptions), so the font does not switch when the prepared view replaces them.
+ function frameFontCSS(input) { var p=normalizePreferences(input); return (p.font==='geist' ? GEIST_SERIF_FONT_FACE : '')+'body{font-family:'+FONT_STACKS[p.font]+'}'; }
  function safeURL(raw,base,links) {
   if(typeof raw!=='string' || !raw.trim() || raw.length>8192 || /[\u0000-\u001f\u007f]/.test(raw)) return null;
   try { var url=new URL(raw,base); if(url.username || url.password) return null; if(!['http:','https:'].includes(url.protocol) && !(links && ['mailto:','tel:'].includes(url.protocol))) return null; return url.href; } catch (_) {return null;}
@@ -102,6 +105,6 @@ export function renderBrowserReadingScript(): string {
    guard();return {html:template.innerHTML,images:imageRecords,blockedCount:imageRecords.filter(function(image){return !image.loaded;}).length};
   } catch(error) {revokeAll();throw error;}
  }
- window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,fontStack:fontStack,applyImagePolicy:applyImagePolicy,frameTheme:frameTheme};
+ window.PigeonReading={normalizePreferences:normalizePreferences,readPreferences:readPreferences,savePreferences:savePreferences,frameCSS:frameCSS,frameFontCSS:frameFontCSS,fontStack:fontStack,applyImagePolicy:applyImagePolicy,frameTheme:frameTheme};
 })();`;
 }

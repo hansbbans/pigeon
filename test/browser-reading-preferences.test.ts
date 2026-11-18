@@ -278,3 +278,10 @@ test('a schema 3 record keeps an explicit Light theme',()=>{
  state.values.set('pigeon.browser.reading.v1',JSON.stringify({schema:3,theme:'light'}));
  assert.equal(state.api.readPreferences().theme,'light');
 });
+
+test('frameFontCSS gives non-prepared frame documents only the typeface',()=>{
+ const state=fixture();
+ assert.equal(state.api.frameFontCSS({}),GEIST_SERIF_FONT_FACE+"body{font-family:"+state.api.fontStack({})+"}");
+ assert.equal(state.api.frameFontCSS({font:'sans'}),'body{font-family:Arial, Helvetica, sans-serif}');
+ assert.equal(state.api.frameFontCSS({font:'url(x)'}),state.api.frameFontCSS({}));
+});

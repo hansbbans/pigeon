@@ -14,10 +14,19 @@ export const GEIST_SERIF_FONT_FACE = `@font-face{font-family:'${GEIST_SERIF_FAMI
 
 let geistSerifBytes: Uint8Array | null = null;
 
+// A plain loop: Uint8Array.from with a map callback took ~3 ms cold for this font, a third of the
+// Free plan's 10 ms CPU budget; this takes well under 1 ms.
+function decodeBase64(base64: string): Uint8Array {
+	const binary = atob(base64);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return bytes;
+}
+
 /** Serves the vendored font at its versioned path. Decoded once per isolate; public and immutable. */
 export function handleBrowserFontRequest(request: Request, path: string): Response | null {
 	if (path !== GEIST_SERIF_PATH || (request.method !== 'GET' && request.method !== 'HEAD')) return null;
-	if (!geistSerifBytes) geistSerifBytes = Uint8Array.from(atob(GEIST_SERIF_WOFF2_BASE64), (char) => char.charCodeAt(0));
+	if (!geistSerifBytes) geistSerifBytes = decodeBase64(GEIST_SERIF_WOFF2_BASE64);
 	return new Response(request.method === 'HEAD' ? null : geistSerifBytes, {
 		headers: {
 			'Content-Type': 'font/woff2',
