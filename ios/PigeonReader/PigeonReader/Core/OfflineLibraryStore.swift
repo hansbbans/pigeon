@@ -1754,6 +1754,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			// The version names the body held here. Dropping it made every launch
+			// download each collection's first page of bodies again.
+			contentVersion: article.contentVersion,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,
@@ -1997,10 +2000,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		if let existingWithBody = existing.first(where: { $0.article.hasReadableHTML }),
 			storedArticle.hasReadableHTML == false {
 			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned, isPaywalled: existingWithBody.article.isPaywalled)
+			// The kept body keeps the version it was stored under.
+			storedArticle.contentVersion = existingWithBody.article.contentVersion
 			storedBodyPruned = existingWithBody.bodyPruned
 		} else if storedBodyPruned,
 			let existingWithBody = existing.first(where: { $0.bodyPruned == false && $0.article.hasReadableHTML }) {
 			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil, isPaywalled: existingWithBody.article.isPaywalled)
+			storedArticle.contentVersion = existingWithBody.article.contentVersion
 			storedBodyPruned = false
 		}
 
@@ -2096,6 +2102,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			// The version names the body held here. Dropping it made every launch
+			// download each collection's first page of bodies again.
+			contentVersion: article.contentVersion,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,

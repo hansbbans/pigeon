@@ -315,6 +315,33 @@ struct OfflineLibraryStoreTests {
 		#expect(full.articlesByCollection["scope-b"]?.map(\.id) == ["scope-b"])
 	}
 
+	@Test func contentVersionIsStoredWithTheBodyItNames() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		var article = makeArticle(id: "versioned", html: "<p>Body</p>", isRead: false)
+		article.contentVersion = "v7"
+		try await store.saveArticles([article], collectionID: "scope-a", accountID: "account-a")
+		var stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.contentVersion == "v7")
+
+		// A status change must not forget which body is held.
+		try await store.enqueue(
+			OfflineMutation(id: "read", kind: .setRead, itemIds: ["reader-versioned"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.isRead == true)
+		#expect(stored.first?.contentVersion == "v7")
+
+		// A row that arrives without a body keeps the stored body, and so the
+		// version that body was stored under.
+		var bodiless = makeArticle(id: "versioned", html: "", isRead: true)
+		bodiless.contentVersion = "v8"
+		try await store.saveArticles([bodiless], collectionID: "scope-a", accountID: "account-a")
+		stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.html == "<p>Body</p>")
+		#expect(stored.first?.contentVersion == "v7")
+	}
+
 	@Test func resavingACollectionSanitizesAndWritesOnlyWhatChanged() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let articles = (0..<12).map { makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>") }
