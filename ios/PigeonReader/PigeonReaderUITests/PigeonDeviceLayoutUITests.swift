@@ -9,12 +9,19 @@ import XCTest
 /// `PIGEON-LAYOUT-FINDING` lines also go to the test log, so a layout can be
 /// reviewed from the log alone. Findings are observations (a control cut off
 /// by the window edge, a small tap target, bar buttons on top of each other)
-/// and do not fail the test. Only a screen that is missing fails it.
+/// and do not fail the test. Only a screen that is missing fails it. Outside
+/// that workflow (no `PIGEON_LAYOUT_DEVICE`) both tests skip.
 @MainActor
 final class PigeonDeviceLayoutUITests: XCTestCase {
 	private var app: XCUIApplication!
 
 	override func setUp() async throws {
+		// CI's own suites run on one iPhone, where this walk would only add time
+		// and a second way to fail a release.
+		try XCTSkipIf(
+			ProcessInfo.processInfo.environment["PIGEON_LAYOUT_DEVICE"] == nil,
+			"Runs from the iOS device layout workflow",
+		)
 		continueAfterFailure = true
 		app = XCUIApplication()
 		app.launchArguments = [

@@ -40,6 +40,7 @@ case "$suite" in
 esac
 if [[ "$suite" == "smoke" ]]; then
   while IFS= read -r flag; do
+    [[ -n "$flag" ]] || continue
     # The unit tests do not depend on the device; CI already runs them.
     [[ "$flag" == "-only-testing:PigeonReaderTests" ]] && continue
     only_testing+=("$flag")
@@ -48,15 +49,16 @@ fi
 
 run_device() {
   local device="$1" output="$2"
+  python3 "$session" ensure "$device" || return 1
+  PIGEON_SIMULATOR_DEVICE="$device" python3 "$session" start || return 1
+  local udid
+  udid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["udid"])' "$ownership_file")" || return 1
+  # The unit tests go to the first device that boots.
   local tests=("${only_testing[@]}")
   if [[ "$unit_tests" == "unit" ]]; then
     tests+=("-only-testing:PigeonReaderTests")
     unit_tests=""
   fi
-  python3 "$session" ensure "$device" || return 1
-  PIGEON_SIMULATOR_DEVICE="$device" python3 "$session" start || return 1
-  local udid
-  udid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["udid"])' "$ownership_file")" || return 1
 
   local log="$output/xcodebuild.log" result=0
   # xcodebuild hands TEST_RUNNER_* variables to the test runner without the prefix.
@@ -80,7 +82,15 @@ run_device() {
     echo "xcodebuild exited $result on $device. Last lines of its log:"
     tail -n 60 "$log" | cut -c1-400
   fi
+  if [[ "$result" -eq 0 && ! -s "$output/layout-log.txt" ]]; then
+    # The walk skips itself without PIGEON_LAYOUT_DEVICE, so a green run with
+    # no log means the TEST_RUNNER_ variables never reached the test runner.
+    echo "The layout walk recorded nothing on $device."
+    result=1
+  fi
   python3 "$session" finish "$ownership_file" || true
+  # The reservation is released; the workflow's own cleanup has nothing left to do.
+  rm -f "$ownership_file"
   return "$result"
 }
 

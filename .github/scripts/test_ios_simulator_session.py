@@ -117,6 +117,16 @@ class SimulatorOwnershipTests(unittest.TestCase):
             session.ensure("iPad mini")
         command.assert_called_once_with(["xcrun", "simctl", "create", "iPad mini (A17 Pro)", "type.mini-a17", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
 
+    def test_ensure_prefers_the_exactly_named_device_type(self):
+        device_types = json.dumps({"devicetypes": [
+            {"name": "iPhone 17 Pro", "identifier": "type.pro"},
+            {"name": "iPhone 17 Pro Max", "identifier": "type.pro-max"},
+        ]})
+        runtimes = json.dumps({"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "isAvailable": True}]})
+        with patch.object(session, "devices", return_value={}), patch.object(session, "run", side_effect=[device_types, runtimes]), patch.object(session.subprocess, "run") as command:
+            session.ensure("iPhone 17 Pro")
+        command.assert_called_once_with(["xcrun", "simctl", "create", "iPhone 17 Pro", "type.pro", "com.apple.CoreSimulator.SimRuntime.iOS-26-5"], check=True)
+
     def test_ensure_leaves_an_existing_family_alone(self):
         snapshot = {"com.apple.CoreSimulator.SimRuntime.iOS-26-5": [{"name": "iPad mini (A17 Pro)", "udid": "tablet", "state": "Booted"}]}
         with patch.object(session, "devices", return_value=snapshot), patch.object(session, "run") as listing, patch.object(session.subprocess, "run") as command:

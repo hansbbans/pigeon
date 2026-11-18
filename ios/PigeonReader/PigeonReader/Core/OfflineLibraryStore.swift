@@ -76,10 +76,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	private var snapshotArticleDecodeCount = 0
 	private var searchArticleDecodeCount = 0
 	private var statusOverlayArticleDecodeCount = 0
-	private var sanitizedFixedPoints = Set<SanitizedBodyFingerprint>()
 	private var sanitizedBodyCount = 0
 	private var articleWriteCount = 0
 	#endif
+	/// Bodies the sanitizer is known to return unchanged; see `sanitized(_:)`.
+	private var sanitizedFixedPoints = Set<SanitizedBodyFingerprint>()
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
 		self.init(databaseURL: databaseURL, previewSeed: nil)
@@ -1458,7 +1459,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				sampleCount: existing?.article.sampleCount ?? 0,
 				explanation: existing?.article.explanation ?? "From \(source)",
 				learningState: existing?.article.learningState ?? "Synced article",
-				// The flag describes the body, so it follows whichever body is kept.
+				// The version and the flag describe the body, so they follow whichever
+				// body is kept. A body from sync has no version.
+				contentVersion: shouldPreserveBody ? existing?.article.contentVersion : nil,
 				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
 				length: payload.length ?? existing?.article.length,
 				saved: payload.savedMetadata ?? existing?.article.saved,
@@ -1676,7 +1679,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		if sanitizedFixedPoints.contains(fingerprint) {
 			return article
 		}
+		#if DEBUG
 		sanitizedBodyCount += 1
+		#endif
 		let sanitizedHTML = StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: baseURL)
 		guard sanitizedHTML.utf8.elementsEqual(article.html.utf8) else {
 			return article.replacingHTML(sanitizedHTML)
@@ -1820,7 +1825,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					let article = try? decoder.decode(Recommendation.self, from: payload) else {
 					return
 				}
+				#if DEBUG
 				statusOverlayArticleDecodeCount += 1
+				#endif
 				records.append(
 					StoredArticle(
 						id: id,
@@ -2061,7 +2068,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	) throws {
 		var storedArticle = article
 		storedArticle.isBodyPruned = bodyPruned ? true : nil
+		#if DEBUG
 		articleWriteCount += 1
+		#endif
 		try execute(
 			"""
 			INSERT INTO cached_articles

@@ -70,7 +70,8 @@ def ensure(wanted):
     if not matching or not available:
         raise RuntimeError("No simulator device type or iOS runtime is installed for " + wanted)
     newest = max(available, key=lambda runtime: tuple(map(int, runtime["identifier"].rsplit(".iOS-", 1)[1].split("-"))))
-    device_type = matching[-1]
+    # "iPhone 17 Pro" must not become an "iPhone 17 Pro Max".
+    device_type = next((candidate for candidate in matching if candidate["name"] == wanted), matching[-1])
     subprocess.run(["xcrun", "simctl", "create", device_type["name"], device_type["identifier"], newest["identifier"]], check=True)
     print("Created simulator " + device_type["name"] + " on " + newest["identifier"], flush=True)
 
