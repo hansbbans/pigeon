@@ -4,6 +4,8 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.14.0] - 2026-11-17
+
 ### Changed
 
 - The web reader now lives at the site root, `https://pigeon.hanscho.com`, instead of `/app`. Old `/app` links and bookmarks still work; in a browser tab the address changes to the root. Home Screen installs keep working, offline reload works at the new address, and existing push notification subscriptions are untouched.
