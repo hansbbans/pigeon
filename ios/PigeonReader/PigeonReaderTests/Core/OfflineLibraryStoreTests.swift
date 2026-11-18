@@ -348,6 +348,70 @@ struct OfflineLibraryStoreTests {
 		#expect(reloaded.first { $0.id == "unsafe" }?.html == "<p>Body</p>")
 	}
 
+	/// Prints what the store spends on the read and star path at a realistic
+	/// body size. The first save is what every later save of the same stories
+	/// used to cost; decoding the whole library is what every status change
+	/// used to cost. Timings are reported, not asserted.
+	@Test func statusTogglePathBenchmark() async throws {
+		let paragraphCount = 220
+		let body = String(
+			repeating: "<p>A paragraph with <a href=\"https://example.com/a?b=1&amp;c=2\">a link</a>, <em>emphasis</em> "
+				+ "and <img src=\"https://example.com/i.png\" width=\"600\" height=\"400\" alt=\"x\"></p>\n",
+			count: paragraphCount,
+		)
+		let articles = (0..<150).map { makeArticle(id: "bench-\($0)", html: body, isRead: false) }
+		let store = OfflineLibraryStore.inMemory()
+		func milliseconds(since start: UInt64) -> Double {
+			Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+		}
+
+		var start = DispatchTime.now().uptimeNanoseconds
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "bench")
+		let firstSave = milliseconds(since: start)
+		let stored = try await store.loadSnapshot(accountID: "bench").articlesByCollection["scope-a"] ?? []
+		#expect(stored.count == articles.count)
+		// The stored bodies are sanitized once more here, which is when the store
+		// learns that they come back unchanged.
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "bench")
+
+		start = DispatchTime.now().uptimeNanoseconds
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "bench")
+		let resave = milliseconds(since: start)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		let snapshot = try await store.loadSnapshot(accountID: "bench")
+		let decodeAll = milliseconds(since: start)
+		#expect(snapshot.articlesByCollection["scope-a"]?.count == articles.count)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		try await store.enqueue(
+			OfflineMutation(id: "bench-read", kind: .setRead, itemIds: ["reader-bench-7"], value: true, scope: .single),
+			accountID: "bench",
+		)
+		let enqueue = milliseconds(since: start)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		var sanitized = ""
+		for _ in 0..<10 {
+			sanitized = StructuredHTMLSanitizer.sanitize(html: body, baseURL: nil)
+		}
+		let sanitize = milliseconds(since: start) / 10
+		#expect(sanitized.isEmpty == false)
+		// The sanitizer used to compile its attribute expression for every opening tag.
+		let openingTagCount = paragraphCount * 4
+		start = DispatchTime.now().uptimeNanoseconds
+		var compiled = 0
+		for _ in 0..<openingTagCount {
+			let pattern = #"([A-Za-z_:][A-Za-z0-9:._-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#
+			if (try? NSRegularExpression(pattern: pattern)) != nil { compiled += 1 }
+		}
+		let removedCompiles = milliseconds(since: start)
+		#expect(compiled == openingTagCount)
+
+		print("STATUS_TOGGLE_BENCH stories=\(articles.count) bodyBytes=\(body.utf8.count) firstSaveMs=\(firstSave) resaveMs=\(resave) decodeAllMs=\(decodeAll) enqueueMs=\(enqueue)")
+		print("SANITIZER_BENCH bodyBytes=\(body.utf8.count) openingTags=\(openingTagCount) sanitizeMs=\(sanitize) removedRegexCompileMs=\(removedCompiles)")
+	}
+
 	@Test func statusChangeDecodesOnlyTheArticlesItChanges() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let articles = (0..<40).map { makeArticle(id: "story-\($0)", isRead: false) }
