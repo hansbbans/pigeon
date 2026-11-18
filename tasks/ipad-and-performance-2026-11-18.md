@@ -4,25 +4,30 @@ Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. No pull requ
 
 ## Where verification stands
 
-The work was written in a Linux container with no Swift toolchain. It was first compiled and run on 2026-11-18 at 12:53 UTC, by run 9 of the new `iOS device layout` workflow on the self-hosted Mac (Debug build, iOS 26.5 simulators).
+The work was written in a Linux container with no Swift toolchain. It has since been compiled and run by the new `iOS device layout` workflow on the self-hosted Mac (Debug build, iOS 26.5 simulators). Run 10 (commit 14f24bc, 2026-11-18 13:20 UTC) is the latest.
 
-Verified by run 9:
+Verified by run 10:
 - The branch compiles in Debug. The Release build has not been tried.
-- 1,048 of 1,049 unit tests passed. The one failure was a new test calling the store directly and getting a protocol default; fixed in 14f24bc and not yet re-run.
-- `PigeonHomeTilesUITests` (4 tests) passed on the iPhone 17 Pro and on an iPad Pro 11-inch. The two iPad-only tests that CI always skipped (`testIPadLandscapeStartupShowsSavedHomeAndRestoresStories`, `testSwitchingFeedsKeepsTheRegularSidebarStationary`) ran and passed on the iPad Pro.
-- The layout walk completed on the iPhone in both orientations and on the iPad Pro in portrait: Home, library, Classic list, Settings, Front Page, reader, Home from an open story and back, rotation, reading controls. It recorded no control cut off by the window, no small bar button and no overlapping bar buttons on any screen.
-- Measured frames on the iPad Pro 11-inch: in portrait the list column is 340pt and the reader 494pt; in landscape the sidebar is 280pt and the reader 580pt. The Home button is hittable in the list toolbar.
+- All 1,049 unit tests pass.
+- **iPhone 17 Pro: everything passed.** Both layout walks (8 screens each, portrait and landscape) and the four Home tile tests.
+- **iPad Pro 11-inch: everything passed.** Both layout walks (9 screens each), the four Home tile tests, and the two iPad-only tests CI always skipped (`testIPadLandscapeStartupShowsSavedHomeAndRestoresStories`, `testSwitchingFeedsKeepsTheRegularSidebarStationary`).
+- The walk recorded no control cut off by the window, no small bar button and no overlapping bar buttons on any screen of either device.
+- Measured on the iPad Pro 11-inch: folder tiles are 261pt wide in portrait (three across) and 225pt in landscape (four across); the list column is 340pt and the reader 494pt in portrait; the sidebar is 280pt and the reader 580pt in landscape. The Home button is hittable in the list toolbar, Home covers an open story and the story is still there afterwards, and the reader survives rotation both ways.
+- iPhone 17 Pro: folder tiles 180pt in portrait (two across, as before) and 233pt in landscape (three across).
+
+**iPad mini: 7 of 8 UI tests failed, cause unknown.** The simulator (`iPad mini (A17 Pro) (Pigeon CI)`) was created in that job. Home appeared and its tiles report as hittable, but no tap had any effect: the tiles pane stayed full-window on every later screen, Add Feed and All Feeds did nothing, and the two older iPad tests, which start on the list Home, found no hittable control at all. The same tests passed on the iPad Pro in the same run, and the split view underneath has the expected geometry (sidebar 280pt, list 300pt in portrait). Two explanations fit and the log cannot separate them:
+1. Something on a first-boot simulator sits over the app and takes the touches (a system first-run sheet). The iPad mini screenshots in run 10's artifact (`pigeon-device-layout-44312721826-1`) will show it at once.
+2. A real hit-testing problem with Home over the split view at the mini's size. Running `testIPadLandscapeStartupShowsSavedHomeAndRestoresStories` on an iPad mini simulator from `main` settles whether it predates this branch.
 
 Not verified:
-- **No screenshot has been looked at.** They are in the run's artifact (`pigeon-device-layout-<run>`), 60 files for run 9.
-- **iPad mini**: no run yet. The workflow tried to create an iPad mini 4 simulator, which iOS 26.5 refuses; fixed in 14f24bc.
-- **iPad Pro in landscape**: the walk stopped at its first tap, because Home covers a sidebar whose rows share identifiers with the tiles and the test tapped an ambiguous match. The test is fixed in 14f24bc. The duplicate elements under Home are real for VoiceOver and predate this branch.
-- **The wide tile grid**: the sample library has two folders, so run 9 could not tell two columns from three. The walk now checks tile width instead.
+- **No screenshot has been looked at.** Run 10's artifact has 100 files.
+- The iPad mini, as above.
 - The Release configuration, the full UI suite, and a warning-free build log (CI fails on first-party warnings; the workflow's filter does not print them).
+- Pre-existing, seen in the run: on an iPad in landscape the split view's sidebar stays in the accessibility tree under Home, so its rows duplicate the tiles' identifiers (and VoiceOver's elements).
 
-Run 10 was requested with those fixes. Earlier runs (2, 5, 8) were picked up while the laptop was briefly awake and failed ten minutes later with no log; the workflow now holds the Mac awake with `caffeinate` while it runs.
+Earlier runs (2, 5, 8) were picked up while the laptop was briefly awake and failed ten minutes later; the workflow now holds the Mac awake with `caffeinate` while it runs. It also created two simulators on the Mac, `iPad Pro 11-inch (M4) (Pigeon CI)` and `iPad mini (A17 Pro) (Pigeon CI)`, because the existing iPad simulators were booted.
 
-### Measured (run 9, simulator on the Mac, Debug)
+### Measured (runs 9 and 10 agree within 6%; simulator on the Mac, Debug)
 From `statusTogglePathBenchmark`, 150 stories with 38 KB bodies:
 
 | | ms |
@@ -107,9 +112,10 @@ The simulator pane in Claude Code Desktop (`code.claude.com/docs/en/desktop-ios-
 Finish the work on branch claude/funny-allen-kd1ox1. Follow CLAUDE.md (worktrees, the Pigeon Claude simulator, never cancel a running iOS job).
 
 1. git fetch origin, then git worktree add ../pigeon-ipad-parity claude/funny-allen-kd1ox1. Read tasks/ipad-and-performance-2026-11-18.md in full: what changed, what run 9 verified and measured, what is open.
-2. See how the latest "iOS device layout" run went: gh run list --workflow ios-device-layout.yml --branch claude/funny-allen-kd1ox1 --limit 3, then gh run view <id> --log | grep -E "PIGEON-LAYOUT|_BENCH|error:|recorded an issue|Test Case .* failed|\*\* TEST". If it is still running, wait; never cancel it. Fix what it reports.
+2. Run 10 (gh run view 44312721826) passed on the iPhone 17 Pro and the iPad Pro 11-inch and failed on the iPad mini. Its log: gh run view 44312721826 --log | grep -E "PIGEON-LAYOUT|_BENCH|error:|recorded an issue|Test Case .* failed|\*\* TEST". Never cancel a running iOS job.
 3. Locally: xcodegen generate in ios/PigeonReader, run the unit tests, then a clean Release build and .github/scripts/fail-on-first-party-warnings.sh on its log. Release and warnings have not been checked.
 4. Look at the screenshots nobody has seen: gh run download <id> -n pigeon-device-layout-<id>-1. Then check the app in the iOS Simulator on an iPhone 17 Pro, an iPad Pro 11-inch and an iPad mini, portrait and landscape, launched with -reader-sample-data -reader-show-sidebar -reader-reset-reader-state -reader-folder-read-data: Home tiles, All Feeds and back, a Classic list, Display > Layout > Front Page, an open story, the Home button from an open story on iPad and back, Settings, Reading controls in Sepia and Dark Gray with the system in Dark. The sample library has two folders, so judge the wide tile grid by tile width (about 260pt at three across on an 834pt iPad).
-5. Go through "Not fixed" in the tasks file on the iPads. Tell me what looks wrong before redesigning anything; fix what is plainly a bug. Known from run 9: on iPad in landscape the split view's sidebar stays in the accessibility tree under Home.
-6. Before a pull request: remove the temporary push trigger from .github/workflows/ios-device-layout.yml, delete .github/ios-device-layout.request, update the tasks file with what you verified. Do not open the pull request until I ask.
+5. First find out why nothing can be tapped on the iPad mini (see "iPad mini" in the tasks file): look at the iPad mini screenshots in run 10's artifact, then try the app on an iPad mini simulator yourself, on this branch and on main.
+6. Go through "Not fixed" in the tasks file on the iPads. Tell me what looks wrong before redesigning anything; fix what is plainly a bug.
+7. Before a pull request: remove the temporary push trigger from .github/workflows/ios-device-layout.yml, delete .github/ios-device-layout.request, update the tasks file with what you verified. Do not open the pull request until I ask.
 ```
