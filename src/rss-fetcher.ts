@@ -32,6 +32,8 @@ export interface FeedToFetch {
 	consecutive_failures?: number | null;
 	content_hash?: string | null;
 	conditional_checked_at?: string | null;
+	/** Newest stored item's publish time; absent for callers that do not schedule by cadence. */
+	last_item_at?: string | null;
 	refresh_lease_token?: string | null;
 	queryReservation?: RefreshQueryReservation;
 }
@@ -114,6 +116,10 @@ interface SuccessfulContent {
 	itemsProcessed: number;
 	responseBytes: number;
 	performedFullFetch: boolean;
+	/** Identities written by this poll; the feed's stored totals are recounted only if one is new. */
+	messageIds: string[];
+	/** Newest publish time in this poll, which may be ahead of the stored `last_item_at`. */
+	newestItemAt: string | null;
 }
 
 class RefreshFailure extends Error {
@@ -138,6 +144,16 @@ export const MAX_RSS_TEXT_CONTENT_SIZE = 8_000;
 /** Maximum HTML source inspected when deriving a plain-text excerpt. */
 export const MAX_RSS_TEXT_SOURCE_SIZE = 32_000;
 const PERSISTENCE_LEASE_MINUTES = 3;
+// `items.created_at` is D1's clock and the attempt time is the Worker's. The margin only decides
+// whether to recount, so erring wide costs one extra count and never a stale one.
+const NEW_ITEM_CLOCK_MARGIN_MS = 10 * 60_000;
+// True when this poll inserted a row. Looks up at most one poll's identities by the unique
+// `message_id` index, where an unconditional recount reads every row the feed has ever stored.
+const POLL_INSERTED_ITEMS_SQL = `EXISTS (
+	SELECT 1 FROM items
+	WHERE message_id IN (SELECT value FROM json_each(?))
+	  AND datetime(created_at) >= datetime(?)
+)`;
 const USER_AGENT = 'Pigeon RSS Reader/1.0';
 const INITIAL_BASELINE_VERSION = 1;
 const INITIAL_BASELINE_KEY_PREFIX = 'feed_initial_baseline:';
@@ -173,7 +189,13 @@ export async function buildRssItemStatements(
 	parsed: Pick<ParsedFeed, 'link'> & { sourceUrl: string },
 	items: ParsedItem[],
 	fallbackReceivedAt: string,
-	options: { updateExisting?: boolean; compactWrites?: boolean; leaseToken?: string | null } = {},
+	options: {
+		updateExisting?: boolean;
+		compactWrites?: boolean;
+		leaseToken?: string | null;
+		/** Receives each written item's `message_id`, in order. */
+		messageIds?: string[];
+	} = {},
 ): Promise<D1PreparedStatement[]> {
 	assertBoundedIdentifier(feedKey, 'Feed key');
 	const statements: D1PreparedStatement[] = [];
@@ -195,6 +217,7 @@ export async function buildRssItemStatements(
 	};
 	for (const item of items) {
 		const identity = await createRssItemIdentity(feedKey, item);
+		options.messageIds?.push(identity.messageId);
 		const originalUrl = resolveRssItemUrl({
 			itemGuid: item.guid,
 			itemLink: item.link,
@@ -383,6 +406,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 				itemsProcessed: 0,
 				responseBytes: resource.byteLength,
 				performedFullFetch: !useConditionalRequest,
+				messageIds: [],
+				newestItemAt: null,
 			});
 		}
 
@@ -412,13 +437,14 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			: pollWindow;
 		// Two entries with one identity would otherwise overwrite each other on every changed poll.
 		const items = deduplicateParsedItems(filteredItems);
+		const messageIds: string[] = [];
 		const statements = await buildRssItemStatements(
 			env.DB,
 			feed.feed_key,
 			{ link: parsed.link, sourceUrl: resource.finalUrl.href },
 			items,
 			attemptedAt,
-			{ updateExisting: true, compactWrites: true, leaseToken: feed.refresh_lease_token },
+			{ updateExisting: true, compactWrites: true, leaseToken: feed.refresh_lease_token, messageIds },
 		);
 
 		const content: SuccessfulContent = {
@@ -433,6 +459,8 @@ export async function fetchAndStoreRssFeed(env: Env, feed: FeedToFetch): Promise
 			itemsProcessed: items.length,
 			responseBytes: resource.byteLength,
 			performedFullFetch: !useConditionalRequest,
+			messageIds,
+			newestItemAt: latestTimestamp(items.map((item) => item.pubDate)),
 		};
 		const result = makeResult({
 			feed,
@@ -612,12 +640,15 @@ async function persistRefresh(
 		outcome: result.outcome,
 		retryAfterAt: result.retryAt,
 		cacheUntilAt: result.cacheUntilAt,
+		lastItemAt: latestTimestamp([feed.last_item_at, content?.newestItemAt]),
 	});
 	const failureCount = succeeded ? 0 : (feed.consecutive_failures ?? 0) + 1;
 	const statements = [...(content?.statements ?? [])];
 	let feedUpdate: D1PreparedStatement;
 
 	if (content) {
+		const pollMessageIds = JSON.stringify(content.messageIds);
+		const insertedSince = new Date(Date.parse(result.attemptedAt) - NEW_ITEM_CLOCK_MARGIN_MS).toISOString();
 		feedUpdate = env.DB.prepare(
 			`UPDATE feeds
 			 SET last_fetched_at = ?,
@@ -640,8 +671,10 @@ async function persistRefresh(
 			     last_fetch_duration_ms = ?,
 			     refresh_lease_until = NULL,
 			     refresh_lease_token = NULL,
-			     last_item_at = (SELECT MAX(received_at) FROM items WHERE feed_key = ?),
-			     item_count = (SELECT COUNT(*) FROM items WHERE feed_key = ?)
+			     last_item_at = CASE WHEN ${POLL_INSERTED_ITEMS_SQL}
+			       THEN (SELECT MAX(received_at) FROM items WHERE feed_key = ?) ELSE last_item_at END,
+			     item_count = CASE WHEN ${POLL_INSERTED_ITEMS_SQL}
+			       THEN (SELECT COUNT(*) FROM items WHERE feed_key = ?) ELSE item_count END
 			 WHERE feed_key = ?
 			   AND (? IS NULL OR refresh_lease_token = ?)`,
 		).bind(
@@ -660,7 +693,11 @@ async function persistRefresh(
 			content.sourceUrl,
 			result.outcome,
 			result.durationMs,
+			pollMessageIds,
+			insertedSince,
 			feed.feed_key,
+			pollMessageIds,
+			insertedSince,
 			feed.feed_key,
 			feed.feed_key,
 			feed.refresh_lease_token ?? null,
@@ -843,6 +880,16 @@ async function filterItemsForInitialBaseline(
 			return !Number.isFinite(cutoffAt) || !Number.isFinite(publishedAt) || publishedAt >= cutoffAt;
 		})
 		.map(({ item }) => item);
+}
+
+/** Latest parseable timestamp as ISO 8601 UTC, or null when none parses. */
+function latestTimestamp(values: Array<string | null | undefined>): string | null {
+	let latest = Number.NEGATIVE_INFINITY;
+	for (const value of values) {
+		const time = value ? Date.parse(value) : Number.NaN;
+		if (Number.isFinite(time) && time > latest) latest = time;
+	}
+	return Number.isFinite(latest) ? new Date(latest).toISOString() : null;
 }
 
 async function sha256Hex(input: string): Promise<string> {

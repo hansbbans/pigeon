@@ -1327,7 +1327,16 @@ final class ReaderAppModel {
 			)
 		}.value
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
-		await prepareOfflineLibrary()
+		// The system allows a refresh task about 30 seconds and then terminates an
+		// app that has not finished. The sync runs in a shared unstructured task
+		// that never sees this task's cancellation, so forward it.
+		await withTaskCancellationHandler {
+			await self.prepareOfflineLibrary()
+		} onCancel: {
+			Task { @MainActor [weak self] in
+				self?.cancelOfflinePreparationForExpiredBackgroundRefresh()
+			}
+		}
 		guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return false }
 		let currentIdentities = backgroundRefreshIdentities()
 		let newlyArrivedIdentities = await Task.detached(priority: .utility) {
@@ -1349,6 +1358,14 @@ final class ReaderAppModel {
 		lastBackgroundRefreshAt = .now
 		await writeWidgetSnapshotOffMain()
 		return true
+	}
+
+	/// Stops a sync the expired background refresh can no longer wait for. Applied
+	/// pages stay committed with their cursor, so the next refresh resumes there. A
+	/// reader who has since opened the app keeps the sync they are waiting on.
+	private func cancelOfflinePreparationForExpiredBackgroundRefresh() {
+		guard isApplicationActive == false else { return }
+		offlinePreparationTask?.cancel()
 	}
 
 	private func backgroundRefreshIdentities() -> [BackgroundRefreshArticleIdentity] {
@@ -2288,9 +2305,14 @@ final class ReaderAppModel {
 				)
 			}
 			if isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) {
+				// A cancelled incremental sync keeps every page it applied, and the
+				// cursor moved with each one, so the next preparation resumes there.
+				// Only a cancelled rebuild, whose pages sit in an abandoned staging
+				// generation, has to start over.
+				let resumesIncrementally = fullRebuildStartedAt == nil && offlineCacheIntegrity.state == .complete
 				offlineCacheIntegrity = OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-					state: .syncing,
+					state: resumesIncrementally ? .complete : .syncing,
 					navigation: .unverified,
 					lastAttemptAt: synchronizationNow,
 					lastSuccessAt: offlineCacheIntegrity.lastSuccessAt,

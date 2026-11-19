@@ -32,6 +32,9 @@ TRUSTED_FORWARDER = "hans.cho@gmail.com"
 # API_PASSWORD set via `wrangler secret put API_PASSWORD`
 
 # --- Cron Triggers ---
-# Hourly RSS feed refresh
+# RSS feed refresh. Each run refreshes at most five due feeds (the Free plan's per-invocation
+# D1 query allowance), so this cadence sets the ceiling: 60 feed polls an hour. A run with
+# nothing due costs a handful of reads and no writes. Raising the cadence raises D1 rows written
+# (about ten per poll) against the Free plan's daily cap, so size it to the feed count.
 [triggers]
-crons = ["0 * * * *"]
+crons = ["*/5 * * * *"]
