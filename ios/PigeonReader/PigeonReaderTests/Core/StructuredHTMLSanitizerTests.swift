@@ -30,14 +30,48 @@ struct StructuredHTMLSanitizerTests {
 		#expect(StructuredHTMLSanitizer.sanitize(html: "ends with <", baseURL: nil) == "ends with &lt;")
 	}
 
-	@Test(.timeLimit(.minutes(1)))
-	func aDocumentOfUnclosedLessThanSignsStaysCheapAndEscaped() {
-		let html = "<p>Story</p>" + String(repeating: "< ' ", count: 200_000) + "\" >"
+	@Test
+	func anApostropheAfterALessThanSignDoesNotCostTheRestOfTheStory() {
+		let html = "<p>if x<y, don't panic.</p><p>More</p><a href=\"https://e.com/\">Unsubscribe</a>"
 
 		let sanitized = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
 
-		#expect(sanitized.hasPrefix("<p>Story</p>&lt; ' &lt; ' "))
-		#expect(sanitized.dropFirst("<p>Story</p>".count).contains("<") == false)
+		#expect(sanitized == "<p>if x<p>More</p><a href=\"https://e.com/\">Unsubscribe</a>")
+	}
+
+	@Test
+	func aCommentClosedWithABangEndsThere() {
+		#expect(StructuredHTMLSanitizer.sanitize(html: "<!-- x --!><p>Story</p>", baseURL: nil) == "<p>Story</p>")
+	}
+
+	@Test
+	func anUnclosedLessThanSignInsideABlockedTagEmitsNothing() {
+		let html = "<script>a < 'b</script><p>Story</p><style>a <"
+
+		#expect(StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil) == "<p>Story</p>")
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["< ' ", "< ", "<a ' "])
+	func aDocumentOfUnclosedLessThanSignsStaysCheapAndSanitized(unit: String) {
+		let html = "<p>Story</p>" + String(repeating: unit, count: 200_000) + "\" ><em>after</em><script>alert(1)</script>"
+
+		let sanitized = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
+
+		#expect(sanitized.hasPrefix("<p>Story</p>"))
+		#expect(sanitized.replacing("<p>Story</p>", with: "").replacing("<em>after</em>", with: "").contains("<") == false)
+		#expect(sanitized.contains("alert") == false)
+		#expect(StructuredHTMLSanitizer.sanitize(html: sanitized, baseURL: nil) == sanitized)
+	}
+
+	@Test(arguments: [
+		"<p>1 < 2 and 6\" wide</p><em>after</em>",
+		"<p>a <3 b",
+		"<p>if x<y, don't panic.</p><p>More</p>",
+	])
+	func sanitizingTwiceChangesNothing(html: String) {
+		let once = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
+
+		#expect(StructuredHTMLSanitizer.sanitize(html: once, baseURL: nil) == once)
 	}
 
 	@Test
