@@ -2082,7 +2082,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			stored.bodyPruned == storedBodyPruned {
 			var written = storedArticle
 			written.isBodyPruned = storedBodyPruned ? true : nil
-			if stored.article == written {
+			if Self.isStoredUnchanged(stored.article, written) {
 				return storedArticle
 			}
 		}
@@ -2093,6 +2093,26 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			database: database,
 		)
 		return storedArticle
+	}
+
+	/// The store keeps dates to the whole second and the server sends
+	/// milliseconds, so a story fresh from the server differs from its stored
+	/// copy by the dropped fraction alone. That is not a change worth a write.
+	private static func isStoredUnchanged(_ stored: Recommendation, _ written: Recommendation) -> Bool {
+		if stored == written { return true }
+		guard isSameStoredDate(stored.receivedAt, written.receivedAt),
+			isSameStoredDate(stored.saved?.publishedAt, written.saved?.publishedAt) else { return false }
+		var aligned = written.replacingReceivedAt(stored.receivedAt)
+		aligned.saved?.publishedAt = stored.saved?.publishedAt
+		return stored == aligned
+	}
+
+	private static func isSameStoredDate(_ stored: Date?, _ written: Date?) -> Bool {
+		switch (stored, written) {
+		case (nil, nil): true
+		case let (stored?, written?): abs(stored.timeIntervalSince(written)) < 1
+		default: false
+		}
 	}
 
 	private func writeArticle(

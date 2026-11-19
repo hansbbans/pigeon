@@ -57,12 +57,21 @@ if [[ "$suite" == "smoke" ]]; then
   done <<< "$(python3 "$script_dir/ios_smoke_tests.py" args)"
 fi
 
+# Shuts down and unreserves the simulator this run holds, if any. Afterwards the
+# workflow's own cleanup has nothing left to do.
+release_device() {
+  python3 "$session" finish "$ownership_file" || true
+  rm -f "$ownership_file"
+}
+
 run_device() {
   local device="$1" output="$2"
   python3 "$session" ensure "$device" || return 1
-  PIGEON_SIMULATOR_DEVICE="$device" python3 "$session" start || return 1
+  # `start` reserves the simulator before it boots it, so a failed start can
+  # leave a reservation behind. Release it, or no later run can use the device.
+  PIGEON_SIMULATOR_DEVICE="$device" python3 "$session" start || { release_device; return 1; }
   local udid
-  udid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["udid"])' "$ownership_file")" || return 1
+  udid="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["udid"])' "$ownership_file")" || { release_device; return 1; }
   # The unit tests go to the first device that boots.
   local tests=("${only_testing[@]}")
   if [[ "$unit_tests" == "unit" ]]; then
@@ -98,9 +107,7 @@ run_device() {
     echo "The layout walk recorded nothing on $device."
     result=1
   fi
-  python3 "$session" finish "$ownership_file" || true
-  # The reservation is released; the workflow's own cleanup has nothing left to do.
-  rm -f "$ownership_file"
+  release_device
   return "$result"
 }
 

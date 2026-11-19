@@ -342,6 +342,28 @@ struct OfflineLibraryStoreTests {
 		#expect(stored.first?.contentVersion == "v7")
 	}
 
+	@Test func resavingStoriesFreshFromTheServerSkipsTheirDroppedFractionalSeconds() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		// The server sends milliseconds; the store keeps whole seconds.
+		let articles = (0..<6).map {
+			makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>", receivedAt: 300 + Double($0) + ($0.isMultiple(of: 2) ? 0.25 : 0.75))
+		}
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.articleWriteCountForTesting() == 0)
+
+		// A date that really moved is still written.
+		var moved = articles
+		moved[2] = makeArticle(id: "story-2", html: "<p>Body 2</p>", receivedAt: 900.25)
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(moved, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.articleWriteCountForTesting() == 1)
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first(where: { $0.id == "story-2" })?.receivedAt == Date(timeIntervalSince1970: 900))
+	}
+
 	@Test func resavingACollectionSanitizesAndWritesOnlyWhatChanged() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let articles = (0..<12).map { makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>") }
