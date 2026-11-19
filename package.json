@@ -19,6 +19,7 @@
     "check": "npm test && npm run typecheck && npm run audit",
     "vendor:defuddle": "node scripts/vendor-defuddle.mjs",
     "vendor:geist-serif": "node scripts/vendor-geist-serif.mjs",
+    "vendor:allo": "node scripts/vendor-allo.mjs",
     "visual:check": "node scripts/visual-check.mjs",
     "reading-log:report": "node scripts/reading-log-report.mjs"
   },
