@@ -27,11 +27,6 @@ on:
         required: true
         default: false
         type: boolean
-  # Temporary: lets a branch request a run before this file is on main.
-  push:
-    branches-ignore: [main]
-    paths:
-      - .github/ios-device-layout.request
 
 permissions:
   contents: read
@@ -68,12 +63,6 @@ jobs:
           suite="$INPUT_SUITE"
           unit=""
           if [[ "$INPUT_UNIT_TESTS" == "true" ]]; then unit=unit; fi
-          request=.github/ios-device-layout.request
-          if [[ -z "$devices" && -f "$request" ]]; then
-            devices="$(sed -n 's/^devices=//p' "$request" | head -n 1)"
-            suite="$(sed -n 's/^suite=//p' "$request" | head -n 1)"
-            if [[ "$(sed -n 's/^unit=//p' "$request" | head -n 1)" == "first" ]]; then unit=unit; fi
-          fi
           devices="${devices:-iPhone 17 Pro,iPad Pro 11-inch,iPad mini}"
           suite="${suite:-layout}"
           if [[ ! "$devices" =~ ^[A-Za-z0-9\ ,.()-]+$ || ! "$suite" =~ ^(layout|smoke|full)$ ]]; then

@@ -131,6 +131,7 @@ struct ArticleRowView: View {
 							.font(.caption)
 							.foregroundStyle(.pigeonSecondary)
 							.lineLimit(1)
+							.layoutPriority(1)
 					}
 					Spacer()
 				Image(systemName: "star.fill")
