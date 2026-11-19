@@ -38,6 +38,7 @@ nonisolated enum StructuredHTMLSanitizer {
 		var cursor = html.startIndex
 		var blockedTag: String?
 		var blockedDepth = 0
+		var unclosedScans = 0
 
 		while cursor < html.endIndex {
 			guard let tagStart = html[cursor...].firstIndex(of: "<") else {
@@ -51,16 +52,29 @@ nonisolated enum StructuredHTMLSanitizer {
 				output += String(html[cursor..<tagStart])
 			}
 
-			if html[tagStart...].hasPrefix("<!--"), let commentEnd = html[tagStart...].range(of: "-->")?.upperBound {
+			if html[tagStart...].hasPrefix("<!--") {
+				// A comment that never ends hides the rest, as it does in a browser.
+				guard let commentEnd = html[tagStart...].range(of: "-->")?.upperBound else { break }
 				cursor = commentEnd
 				continue
 			}
 
 			guard let tagEnd = findTagEnd(in: html, startingAt: tagStart) else {
-				if blockedTag == nil {
-					output += String(html[tagStart...])
+				// Nothing closes this "<". Never copy what follows it as it stands:
+				// it has not been sanitized, and whatever markup comes after the
+				// body would complete the tag. A browser drops a tag cut off by the
+				// end of the document, and reads "<" as text when no tag name
+				// follows it, so do the same and keep sanitizing after the "<".
+				let next = html.index(after: tagStart)
+				unclosedScans += 1
+				if next < html.endIndex, startsTag(html[next]) || unclosedScans > maxUnclosedScans {
+					break
 				}
-				break
+				if blockedTag == nil {
+					output += "&lt;"
+				}
+				cursor = next
+				continue
 			}
 			let rawTag = String(html[tagStart...tagEnd])
 			cursor = html.index(after: tagEnd)
@@ -344,6 +358,17 @@ nonisolated enum StructuredHTMLSanitizer {
 			}
 			return nil
 		}
+	}
+
+	/// Each "<" that nothing closes costs a scan to the end of the document,
+	/// so a document made of them would take quadratic time. Past this many,
+	/// the rest of the document is dropped.
+	private static let maxUnclosedScans = 16
+
+	/// Whether a browser would start a tag, a closing tag, a comment or a
+	/// declaration at a "<" followed by this character.
+	private static func startsTag(_ character: Character) -> Bool {
+		character == "/" || character == "!" || character == "?" || (character.isASCII && character.isLetter)
 	}
 
 	private static func findTagEnd(in html: String, startingAt start: String.Index) -> String.Index? {
