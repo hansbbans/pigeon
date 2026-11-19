@@ -74,7 +74,7 @@ export function renderBrowserNotificationsScript(): string {
   function render() {
    guard(); var container = adapter.container; container.replaceChildren();
    container.appendChild(node('h3','Background notifications'));
-   var info = node('p', 'Choose feeds to hear about while Pigeon is closed. Delivery is best effort, usually after the hourly refresh; each cycle sends the latest new unread article.'); container.appendChild(info);
+   var info = node('p', 'Choose feeds to hear about while Pigeon is closed. Delivery is best effort, shortly after Pigeon picks up a new article; each cycle sends the latest new unread article.'); container.appendChild(info);
    if (!supported) { container.appendChild(node('p', 'This browser does not support background notifications here. On iPhone or iPad, open Pigeon as a supported Home Screen web app.')); return; }
    if (ready && (!capabilities || !capabilities.enabled)) container.appendChild(node('p', 'Background push is not configured on this Pigeon server.'));
    if (Notification.permission === 'denied') container.appendChild(node('p', 'Notifications are blocked. Allow them in this site’s browser settings, then retry.'));

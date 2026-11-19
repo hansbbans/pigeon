@@ -8,7 +8,9 @@ import type { Env } from './types';
 import { dispatchBrowserPush } from './web-push';
 
 const CANDIDATE_LIMIT = 200;
-// Five is a selection ceiling; the shared D1 statement budget may defer costly writes.
+// Five is a selection ceiling; the shared D1 statement budget may defer costly writes. Throughput
+// comes from how often the cron fires (see wrangler.toml), not from a larger batch: each run has
+// its own Free-plan query allowance.
 const REFRESH_LIMIT = 5;
 const MAX_GLOBAL_CONCURRENCY = 8;
 const MAX_HOST_CONCURRENCY = 2;
@@ -97,6 +99,7 @@ interface RefreshCandidate extends FeedToFetch {
 	content_hash: string | null;
 	conditional_checked_at: string | null;
 	next_fetch_at: string | null;
+	last_item_at: string | null;
 }
 
 export async function handleCronTrigger(env: Env): Promise<void> {
@@ -115,7 +118,7 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 		if (!budget.reserve(1)) return;
 		const { results } = await env.DB.prepare(
 			`SELECT feed_key, source_url, etag, last_modified, fetch_interval_minutes,
-			        consecutive_failures, content_hash, conditional_checked_at, next_fetch_at
+			        consecutive_failures, content_hash, conditional_checked_at, next_fetch_at, last_item_at
 			 FROM feeds
 			 WHERE source_type = 'rss'
 			   AND is_active = 1

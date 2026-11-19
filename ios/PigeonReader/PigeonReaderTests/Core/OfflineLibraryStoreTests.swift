@@ -515,6 +515,36 @@ struct OfflineLibraryStoreTests {
 		#expect(staged.cursor == "v1:1")
 	}
 
+	@Test func interruptedIncrementalSyncStaysResumableFromItsCursor() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.beginFullRebuild(accountID: "account-a", at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:1", hasMore: false, changes: []),
+			accountID: "account-a",
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 0)], expandedFolderIDs: []),
+			accountID: "account-a",
+		)
+		try await store.finishSynchronization(accountID: "account-a", at: Date(timeIntervalSince1970: 1_001))
+
+		// The process ends after this page, with more pages still on the server.
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:2", hasMore: true, changes: []),
+			accountID: "account-a",
+		)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.cursor == "v1:2")
+		#expect(snapshot.integrity.state == .complete)
+		#expect(snapshot.integrity.navigation == .unverified)
+		#expect(snapshot.integrity.lastPageHasMore == true)
+		// Resuming from the cursor is enough; a full rebuild would download the
+		// whole library again.
+		#expect(snapshot.integrity.requiresFullRebuild == false)
+		#expect(snapshot.integrity.usesWarmIncrementalPath == false)
+	}
+
 	@Test func clearingCachedArticlesInvalidatesCursorAndIntegrity() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		try await store.apply(
