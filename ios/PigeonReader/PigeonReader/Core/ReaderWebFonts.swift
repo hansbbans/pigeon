@@ -13,6 +13,7 @@ enum ReaderWebFonts {
 	nonisolated struct Face: Equatable, Sendable {
 		let family: String
 		let fileName: String
+		var fileExtension = "ttf"
 		let weight: Int
 		let italic: Bool
 	}
@@ -29,6 +30,15 @@ enum ReaderWebFonts {
 				Face(family: "Bookerly", fileName: "Bookerly-Italic", weight: 400, italic: true),
 				Face(family: "Bookerly", fileName: "Bookerly-BoldItalic", weight: 700, italic: true),
 			]
+		case .allo:
+			// SemiBold for headings, to match the SwiftUI title; Bold for strong.
+			[
+				Face(family: "Allo", fileName: "Allo-Regular", fileExtension: "otf", weight: 400, italic: false),
+				Face(family: "Allo", fileName: "Allo-SemiBold", fileExtension: "otf", weight: 600, italic: false),
+				Face(family: "Allo", fileName: "Allo-Bold", fileExtension: "otf", weight: 700, italic: false),
+				Face(family: "Allo", fileName: "Allo-Oblique", fileExtension: "otf", weight: 400, italic: true),
+				Face(family: "Allo", fileName: "Allo-BoldOblique", fileExtension: "otf", weight: 700, italic: true),
+			]
 		}
 	}
 
@@ -40,7 +50,7 @@ enum ReaderWebFonts {
 		if let script = scripts[typeface] { return script }
 		var entries: [[String: Any]] = []
 		for face in faces(for: typeface) {
-			guard let url = bundle.url(forResource: face.fileName, withExtension: "ttf"),
+			guard let url = bundle.url(forResource: face.fileName, withExtension: face.fileExtension),
 				let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
 				return nil
 			}

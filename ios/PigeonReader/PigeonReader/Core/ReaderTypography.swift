@@ -8,10 +8,12 @@ extension EnvironmentValues {
 extension ReaderTypeface {
 	/// PostScript names of the bundled faces. Geist Serif ships only Regular, and SwiftUI does not
 	/// synthesize bold or italic for a custom font, so its titles and italics are set in Regular.
+	/// Allo, a sans, sets titles in SemiBold: Bold reads as shouting at list-title sizes.
 	nonisolated var regularFontName: String {
 		switch self {
 		case .geistSerif: "GeistSerif-Regular"
 		case .bookerly: "Bookerly-Regular"
+		case .allo: "Allo-Regular"
 		}
 	}
 
@@ -19,6 +21,7 @@ extension ReaderTypeface {
 		switch self {
 		case .geistSerif: "GeistSerif-Regular"
 		case .bookerly: "Bookerly-Bold"
+		case .allo: "Allo-SemiBold"
 		}
 	}
 
@@ -26,6 +29,7 @@ extension ReaderTypeface {
 		switch self {
 		case .geistSerif: "GeistSerif-Regular"
 		case .bookerly: "Bookerly-Italic"
+		case .allo: "Allo-Oblique"
 		}
 	}
 }

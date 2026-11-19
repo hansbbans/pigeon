@@ -63,6 +63,11 @@ targets:
           - Bookerly-Italic.ttf
           - Bookerly-BoldItalic.ttf
           - GeistSerif-Regular.ttf
+          - Allo-Regular.otf
+          - Allo-SemiBold.otf
+          - Allo-Bold.otf
+          - Allo-Oblique.otf
+          - Allo-BoldOblique.otf
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.hans.pigeon.reader

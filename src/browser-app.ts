@@ -355,7 +355,7 @@ ${renderBrowserAppStyles()}
         </section>
         <details open><summary>Appearance and shortcuts</summary><form id="reading-settings-form">
           <label>Article theme<select id="reading-theme"><option value="app">Match app</option><option value="light">Light</option><option value="dark">Dark</option><option value="sepia">Sepia</option><option value="system">System</option></select></label>
-          <label>Typeface<select id="reading-font"><option value="geist">Geist Serif</option><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
+          <label>Typeface<select id="reading-font"><option value="geist">Geist Serif</option><option value="allo">Allo</option><option value="system">System</option><option value="serif">Serif</option><option value="sans">Sans serif</option></select></label>
           <label>Font size<input id="reading-fontSize" type="number" min="14" max="28"></label>
           <label>Line height<input id="reading-lineHeight" type="number" min="1.2" max="2.2" step="0.05"></label>
           <label>Article width<input id="reading-width" type="number" min="480" max="960"></label>
