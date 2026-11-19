@@ -4,6 +4,76 @@ import WebKit
 @testable import PigeonReader
 
 struct StructuredHTMLSanitizerTests {
+	@Test(arguments: [
+		"<p>Story</p><img src=x onerror=alert(1) ",
+		"<p>Story</p><script src=https://evil.example/x.js",
+		"<p>Story</p></p ",
+		"<p>Story</p><a title=\"><script>alert(1)</script>",
+		"<p>Story</p><!-- <script>alert(1)</script>",
+	])
+	func dropsATagThatNeverCloses(html: String) {
+		#expect(StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil) == "<p>Story</p>")
+	}
+
+	@Test
+	func keepsSanitizingAfterALessThanSignWithAnUnbalancedQuote() {
+		let html = "<p>1 < 2 and 6\" wide</p><img src=x onerror=alert(1)><script>alert(1)</script><em>after</em>"
+
+		let sanitized = StructuredHTMLSanitizer.sanitize(html: html, baseURL: URL(string: "https://example.com/"))
+
+		#expect(sanitized == "<p>1 &lt; 2 and 6\" wide</p><img src=\"https://example.com/x\"><em>after</em>")
+	}
+
+	@Test
+	func keepsALoneLessThanSignAsText() {
+		#expect(StructuredHTMLSanitizer.sanitize(html: "<p>a <3 b", baseURL: nil) == "<p>a &lt;3 b")
+		#expect(StructuredHTMLSanitizer.sanitize(html: "ends with <", baseURL: nil) == "ends with &lt;")
+	}
+
+	@Test
+	func anApostropheAfterALessThanSignDoesNotCostTheRestOfTheStory() {
+		let html = "<p>if x<y, don't panic.</p><p>More</p><a href=\"https://e.com/\">Unsubscribe</a>"
+
+		let sanitized = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
+
+		#expect(sanitized == "<p>if x<p>More</p><a href=\"https://e.com/\">Unsubscribe</a>")
+	}
+
+	@Test
+	func aCommentClosedWithABangEndsThere() {
+		#expect(StructuredHTMLSanitizer.sanitize(html: "<!-- x --!><p>Story</p>", baseURL: nil) == "<p>Story</p>")
+	}
+
+	@Test
+	func anUnclosedLessThanSignInsideABlockedTagEmitsNothing() {
+		let html = "<script>a < 'b</script><p>Story</p><style>a <"
+
+		#expect(StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil) == "<p>Story</p>")
+	}
+
+	@Test(.timeLimit(.minutes(1)), arguments: ["< ' ", "< ", "<a ' "])
+	func aDocumentOfUnclosedLessThanSignsStaysCheapAndSanitized(unit: String) {
+		let html = "<p>Story</p>" + String(repeating: unit, count: 200_000) + "\" ><em>after</em><script>alert(1)</script>"
+
+		let sanitized = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
+
+		#expect(sanitized.hasPrefix("<p>Story</p>"))
+		#expect(sanitized.replacing("<p>Story</p>", with: "").replacing("<em>after</em>", with: "").contains("<") == false)
+		#expect(sanitized.contains("alert") == false)
+		#expect(StructuredHTMLSanitizer.sanitize(html: sanitized, baseURL: nil) == sanitized)
+	}
+
+	@Test(arguments: [
+		"<p>1 < 2 and 6\" wide</p><em>after</em>",
+		"<p>a <3 b",
+		"<p>if x<y, don't panic.</p><p>More</p>",
+	])
+	func sanitizingTwiceChangesNothing(html: String) {
+		let once = StructuredHTMLSanitizer.sanitize(html: html, baseURL: nil)
+
+		#expect(StructuredHTMLSanitizer.sanitize(html: once, baseURL: nil) == once)
+	}
+
 	@Test
 	func preservesStructuredReadingMarkupAndResolvesRelativeURLs() throws {
 		let baseURL = try #require(URL(string: "https://example.com/newsletter/issue"))

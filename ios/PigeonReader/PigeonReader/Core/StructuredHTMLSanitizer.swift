@@ -38,6 +38,8 @@ nonisolated enum StructuredHTMLSanitizer {
 		var cursor = html.startIndex
 		var blockedTag: String?
 		var blockedDepth = 0
+		var unclosedScans = 0
+		var noTagEndRemains = false
 
 		while cursor < html.endIndex {
 			guard let tagStart = html[cursor...].firstIndex(of: "<") else {
@@ -51,16 +53,45 @@ nonisolated enum StructuredHTMLSanitizer {
 				output += String(html[cursor..<tagStart])
 			}
 
-			if html[tagStart...].hasPrefix("<!--"), let commentEnd = html[tagStart...].range(of: "-->")?.upperBound {
+			if html[tagStart...].hasPrefix("<!--") {
+				// A comment that never ends hides the rest, as it does in a browser.
+				guard let commentEnd = commentEnd(in: html[tagStart...]) else { break }
 				cursor = commentEnd
 				continue
 			}
 
-			guard let tagEnd = findTagEnd(in: html, startingAt: tagStart) else {
-				if blockedTag == nil {
-					output += String(html[tagStart...])
+			let tagEnd: String.Index?
+			if noTagEndRemains {
+				tagEnd = nil
+			} else if unclosedScans < maxUnclosedScans {
+				tagEnd = findTagEnd(in: html, startingAt: tagStart)
+				if tagEnd == nil { unclosedScans += 1 }
+			} else {
+				tagEnd = html[tagStart...].firstIndex(of: ">")
+				noTagEndRemains = tagEnd == nil
+			}
+
+			guard let tagEnd else {
+				// Nothing closes this "<", or only an unmatched quote hides its
+				// ">". Never copy what follows as it stands: it has not been
+				// sanitized, and whatever markup comes after the body would
+				// complete the tag. Do what a browser does instead, and keep
+				// sanitizing afterwards.
+				let next = html.index(after: tagStart)
+				guard next < html.endIndex, startsTag(html[next]) else {
+					// No tag name follows, so the "<" is text.
+					if blockedTag == nil {
+						output += "&lt;"
+					}
+					cursor = next
+					continue
 				}
-				break
+				// A tag: it ends at the next ">" whatever the quotes say (an
+				// apostrophe in "x<y, don't" is not an attribute value), and is
+				// dropped. With no ">" left, the end of the document cut it off.
+				guard noTagEndRemains == false, let close = html[next...].firstIndex(of: ">") else { break }
+				cursor = html.index(after: close)
+				continue
 			}
 			let rawTag = String(html[tagStart...tagEnd])
 			cursor = html.index(after: tagEnd)
@@ -344,6 +375,24 @@ nonisolated enum StructuredHTMLSanitizer {
 			}
 			return nil
 		}
+	}
+
+	/// Each "<" whose ">" an unmatched quote hides costs a scan to the end of
+	/// the document, so a document made of them would take quadratic time.
+	/// Past this many, tags end at the next ">" whatever the quotes say, which
+	/// is linear and can only turn part of a tag into text.
+	private static let maxUnclosedScans = 16
+
+	/// The end of a comment, which browsers close at "-->" and at "--!>".
+	private static func commentEnd(in html: Substring) -> String.Index? {
+		let ends = ["-->", "--!>"].compactMap { html.range(of: $0)?.upperBound }
+		return ends.min()
+	}
+
+	/// Whether a browser would start a tag, a closing tag, a comment or a
+	/// declaration at a "<" followed by this character.
+	private static func startsTag(_ character: Character) -> Bool {
+		character == "/" || character == "!" || character == "?" || (character.isASCII && character.isLetter)
 	}
 
 	private static func findTagEnd(in html: String, startingAt start: String.Index) -> String.Index? {
