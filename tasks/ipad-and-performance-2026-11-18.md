@@ -1,6 +1,6 @@
 # iPad parity, UI bugs and performance, 2026-11-18
 
-Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. No pull request yet.
+Branch `claude/funny-allen-kd1ox1`, cut from `origin/main` 8115b24. Pull request #201.
 
 ## Where verification stands
 
@@ -28,6 +28,10 @@ Checked locally on the Mac, 2026-11-18 (Xcode, iOS 26.5 simulators `Pigeon Claud
 Fixed after looking (both caused by this branch's narrower columns):
 - The split view's sidebar showed its title as "Pi…" beside its four toolbar buttons. The title is removed from that column's bar on regular width (`ReaderSidebarView`); iPhone keeps "Pigeon".
 - List metadata truncated at both ends in a narrow column ("YouTube C… 3 months ago · 19 min vi…"). The reading time now keeps its width like the date, so only the name gives way (`ArticleRowView`).
+
+Fixed after the review of #201 (2026-11-19):
+- Re-saving a collection skipped nothing for stories fresh from the server: the store keeps dates to the whole second, the server sends milliseconds, so the stored copy never compared equal. A dropped fraction is now treated as unchanged (`OfflineLibraryStore.isStoredUnchanged`, test `resavingStoriesFreshFromTheServerSkipsTheirDroppedFractionalSeconds`).
+- `run-ios-device-layout.sh` left a simulator reserved when it failed to start, which kept every later run off that device. A failed start now releases it.
 
 Looks wrong, not changed (design calls):
 - **Front Page in the iPad list column.** At 340pt (iPad Pro, and the mini in landscape) the grid is two columns of about 146pt: headlines run to four lines and "3 months ago · 19 min video" wraps. The 330pt threshold sits just under the column's ideal width; at the mini's 300pt portrait column the single column reads well. The bar also shows an inline "For…" title above the page's own "For You" masthead, and the search field under the bar is dimmed.
