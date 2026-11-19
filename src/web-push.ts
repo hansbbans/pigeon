@@ -8,6 +8,9 @@ const encoder = new TextEncoder();
 const MAX_SUBSCRIPTIONS = 32;
 const MAX_FEEDS = 100;
 const MAX_SENDS = 4;
+// The refresh cron fires every few minutes. Without a gap each browser could be notified on every
+// run; a browser is considered again only this long after its last attempt.
+export const PUSH_ATTEMPT_GAP_MS = 15 * 60_000;
 export const PUSH_SCHEMA = `CREATE TABLE IF NOT EXISTS browser_push_subscriptions (
  id TEXT PRIMARY KEY, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
  management_hash TEXT NOT NULL, feed_keys TEXT NOT NULL, vapid_public TEXT NOT NULL,
@@ -164,7 +167,7 @@ export async function handleBrowserPush(request: Request, env: Env): Promise<Res
  return result.meta.changes ? json({ id, managementToken: token }, 201) : json({ error: 'Subscription already exists or browser limit reached' }, 409);
 }
 
-/** Best effort, at most one latest article per browser/tick; refresh always has first use of D1 budget. */
+/** Best effort, at most one latest article per browser per attempt gap; refresh always has first use of D1 budget. */
 export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBudget, 'reserve'>, fetcher: typeof fetch = fetch, now = new Date()): Promise<void> {
  const config = await vapidConfig(env); if (!config || !budget.reserve(1)) return;
  // Never migrate on cron. A missing table means no browser has opted in yet.
@@ -173,7 +176,7 @@ export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBud
  const head = (await env.DB.prepare('SELECT COALESCE(MAX(sequence), 0) AS head FROM sync_changes').first<{ head: number }>())?.head ?? 0;
  const { results } = await env.DB.prepare(`SELECT id, endpoint, p256dh, auth, feed_keys, cursor, last_attempt_at, updated_at FROM browser_push_subscriptions
   WHERE vapid_public = ? AND updated_at >= ? AND last_attempt_at < ? ORDER BY last_attempt_at, id LIMIT ?`)
-  .bind(config.publicKey, new Date(now.getTime() - 90 * 86400_000).toISOString(), new Date(now.getTime() - 60_000).toISOString(), MAX_SENDS).all<Subscription>();
+  .bind(config.publicKey, new Date(now.getTime() - 90 * 86400_000).toISOString(), new Date(now.getTime() - PUSH_ATTEMPT_GAP_MS).toISOString(), MAX_SENDS).all<Subscription>();
  for (const subscription of results) {
   if (!budget.reserve(3)) break; // article lookup + atomic claim + expiry renewal or invalid-subscription deletion
   const item = await env.DB.prepare(`SELECT i.rowid AS row_id, i.subject, f.feed_key, COALESCE(f.custom_title, f.display_name) AS feed_title

@@ -26,6 +26,47 @@ test('successful refresh schedules are deterministic and bounded around the feed
 	assert.ok(delayMinutes >= 54 && delayMinutes <= 66);
 });
 
+test('healthy feeds are polled by how recently they published', () => {
+	const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 3_600_000).toISOString();
+	const delayMinutes = (lastItemAt: string | null | undefined, outcome: 'success' | 'not_modified' = 'success') =>
+		(new Date(computeNextFetchAt(NOW, {
+			feedKey: 'example-feed',
+			fetchIntervalMinutes: 60,
+			consecutiveFailures: 0,
+			outcome,
+			lastItemAt,
+		})).getTime() - NOW.getTime()) / 60_000;
+	const within = (minutes: number, base: number) => minutes >= base * 0.9 && minutes <= base * 1.1;
+
+	assert.ok(within(delayMinutes(hoursAgo(3)), 30), 'published in the last two days');
+	assert.ok(within(delayMinutes(hoursAgo(3), 'not_modified'), 30), 'an unchanged response keeps the active cadence');
+	assert.ok(within(delayMinutes(hoursAgo(5 * 24)), 60), 'published in the last two weeks');
+	assert.ok(within(delayMinutes(hoursAgo(30 * 24)), 120), 'published in the last two months');
+	assert.ok(within(delayMinutes(hoursAgo(400 * 24)), 240), 'dormant');
+	assert.ok(within(delayMinutes(new Date(NOW.getTime() + 3_600_000).toISOString()), 30), 'a future-dated item counts as active');
+	for (const unknown of [null, undefined, 'not a date']) {
+		assert.ok(within(delayMinutes(unknown), 60), 'an unknown publish time keeps the configured interval');
+	}
+});
+
+test('cadence never polls faster than fifteen minutes or changes failure backoff', () => {
+	const recent = new Date(NOW.getTime() - 3_600_000).toISOString();
+	const delay = (input: Partial<Parameters<typeof computeNextFetchAt>[1]>) =>
+		(new Date(computeNextFetchAt(NOW, {
+			feedKey: 'example-feed',
+			fetchIntervalMinutes: 60,
+			consecutiveFailures: 0,
+			outcome: 'success',
+			lastItemAt: recent,
+			...input,
+		})).getTime() - NOW.getTime()) / 60_000;
+
+	const fastest = delay({ fetchIntervalMinutes: 15 });
+	assert.ok(fastest >= 15 * 0.9 && fastest <= 15 * 1.1);
+	const failure = delay({ outcome: 'network_error' });
+	assert.ok(failure >= 54 && failure <= 66, 'a failing active feed retries on the configured interval');
+});
+
 test('failures use exponential backoff with a one-day ceiling', () => {
 	const firstFailure = computeNextFetchAt(NOW, {
 		feedKey: 'feed',

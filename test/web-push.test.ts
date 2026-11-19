@@ -3,7 +3,10 @@ import { test, type TestContext } from 'node:test';
 import { createECDH, hkdfSync, createDecipheriv, createPublicKey, verify } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { base64url, encryptWebPush, createVapidAuthorization, validatePushEndpoint, handleBrowserPush, dispatchBrowserPush } from '../src/web-push';
+import { base64url, encryptWebPush, createVapidAuthorization, validatePushEndpoint, handleBrowserPush, dispatchBrowserPush, PUSH_ATTEMPT_GAP_MS } from '../src/web-push';
+
+// One step past the gap after which a browser is considered for a notification again.
+const NEXT_ATTEMPT_MS = PUSH_ATTEMPT_GAP_MS + 60_000;
 import { RefreshQueryBudget } from '../src/rss-fetcher';
 import worker from '../src/index';
 import type { Env } from '../src/types';
@@ -119,11 +122,11 @@ test('push delivers only latest new unread selected-feed article with encrypted 
   assert.deepEqual(JSON.parse(decrypt(init.body)), { title: 'Private feed', body: 'Private subject latest', articleId: '3', feedKey: 'one' });
   return new Response(null, { status: 201 });
  }) as typeof fetch;
- const now = new Date(Date.now() + 120_000);
+ const now = new Date(Date.now() + NEXT_ATTEMPT_MS);
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now); assert.equal(calls, 1);
  // Body updates also create sync changes, but cannot re-notify an already known article.
  state.db.exec("UPDATE items SET html_content='<p>edited</p>' WHERE id='latest'");
- await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + 120_000)); assert.equal(calls, 1);
+ await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + NEXT_ATTEMPT_MS)); assert.equal(calls, 1);
 });
 
 test('delivery fairness and budgets bound sends; provider expiration deletes only own subscription', async (t) => {
@@ -131,7 +134,7 @@ test('delivery fairness and budgets bound sends; provider expiration deletes onl
  for (let i = 0; i < 6; i++) await state.subscribe(`https://fcm.googleapis.com/wp/browser-${i}`);
  state.insert('new'); let calls = 0;
  const fetcher = (async () => { calls++; return new Response(null, { status: 201 }); }) as typeof fetch;
- const now = new Date(Date.now() + 120_000);
+ const now = new Date(Date.now() + NEXT_ATTEMPT_MS);
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(3), fetcher, now); assert.equal(calls, 0);
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now); assert.equal(calls, 4);
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + 2 * 3600_000)); assert.equal(calls, 6);
@@ -145,11 +148,11 @@ test('no catch-up flood for old inserts, read articles, or empty preferences; pr
  state.insert('old-import', 'one', new Date(Date.now() - 25 * 3600_000).toISOString());
  state.insert('read'); state.db.exec("UPDATE items SET is_read=1 WHERE id='read'");
  let calls = 0; const fetcher = (async () => { calls++; throw new Error('private endpoint failure'); }) as typeof fetch;
- const now = new Date(Date.now() + 120_000);
+ const now = new Date(Date.now() + NEXT_ATTEMPT_MS);
  await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now); assert.equal(calls, 0);
  state.insert('current');
- await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + 120_000)); assert.equal(calls, 1);
- await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + 240_000)); assert.equal(calls, 1);
+ await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + NEXT_ATTEMPT_MS)); assert.equal(calls, 1);
+ await dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, new Date(now.getTime() + 2 * NEXT_ATTEMPT_MS)); assert.equal(calls, 1);
 });
 
 test('bounded registration validates size and key material; cap32 cannot be exceeded and stale slots reclaimed', async (t) => {
@@ -179,7 +182,7 @@ test('capabilities fail closed for malformed or mismatched VAPID key material; p
 test('concurrent notification scans use atomic claim so a browser receives only one delivery', async (t) => {
  const state = await fixture(t); await state.subscribe(); state.insert('new');
  let calls = 0; const fetcher = (async () => { calls++; return new Response(null, { status: 201 }); }) as typeof fetch;
- const now = new Date(Date.now() + 120_000);
+ const now = new Date(Date.now() + NEXT_ATTEMPT_MS);
  await Promise.all([dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now), dispatchBrowserPush(state.env, new RefreshQueryBudget(47), fetcher, now)]);
  assert.equal(calls, 1);
 });
@@ -188,7 +191,7 @@ test('successful deliveries renew a subscription so active browsers never age ou
  const state = await fixture(t);
  const active = await state.subscribe('https://fcm.googleapis.com/wp/active');
  const failing = await state.subscribe('https://fcm.googleapis.com/wp/failing');
- const start = new Date(Date.now() + 120_000);
+ const start = new Date(Date.now() + NEXT_ATTEMPT_MS);
  const savedAt = new Date(start.getTime() - 80 * 86400_000).toISOString();
  state.db.prepare('UPDATE browser_push_subscriptions SET updated_at = ?').run(savedAt);
  const delivered: string[] = [];

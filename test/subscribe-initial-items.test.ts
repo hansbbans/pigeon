@@ -181,7 +181,8 @@ class SqliteD1Database {
 				is_read INTEGER DEFAULT 0,
 				is_starred INTEGER DEFAULT 0,
 				content_pruned_at TEXT,
-				content_version INTEGER NOT NULL DEFAULT 0
+				content_version INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT NOT NULL DEFAULT (datetime('now'))
 			);
 		`);
 	}
@@ -295,6 +296,21 @@ class SqliteD1Database {
 
 	markItemsRead(): void {
 		this.database.prepare('UPDATE items SET is_read = 1').run();
+	}
+
+	storedTotals(feedKey: string): { item_count: number | null; last_item_at: string | null; next_fetch_at: string | null } {
+		return this.database.prepare('SELECT item_count, last_item_at, next_fetch_at FROM feeds WHERE feed_key = ?')
+			.get(feedKey) as { item_count: number | null; last_item_at: string | null; next_fetch_at: string | null };
+	}
+
+	/** Makes every stored item look as if an earlier poll inserted it. */
+	backdateItems(): void {
+		this.database.prepare("UPDATE items SET created_at = datetime('now', '-1 hour')").run();
+	}
+
+	setStoredTotals(feedKey: string, itemCount: number, lastItemAt: string): void {
+		this.database.prepare('UPDATE feeds SET item_count = ?, last_item_at = ? WHERE feed_key = ?')
+			.run(itemCount, lastItemAt, feedKey);
 	}
 
 	insertLegacyFeed(feedKey = 'legacy-feed', sourceUrl = 'https://legacy.example/feed.xml'): void {
@@ -572,6 +588,39 @@ test('initial baseline survives two changed polls while admitting dated and unda
 			[],
 			'initially skipped backlog remains excluded across changed polls',
 		);
+	} finally {
+		db.close();
+	}
+});
+
+test('a poll recounts the stored feed totals only when it inserts an item', async () => {
+	const fetchState = installFeed(RSS_FEED);
+	const db = new SqliteD1Database();
+	try {
+		const result = await subscribeToFeed(env(db) as never, 'https://example.com/feed.xml');
+		assert.equal(db.storedTotals(result.feed_key).item_count, 3);
+		// Sentinels: a recount would overwrite them, so surviving values prove none ran.
+		db.setStoredTotals(result.feed_key, 999, '2000-01-01T00:00:00.000Z');
+		db.backdateItems();
+
+		fetchState.setBody(RSS_FEED.replace('<description>newest</description>', '<description>edited newest</description>'));
+		const edited = await fetchAndStoreRssFeed(env(db) as never, db.feed(result.feed_key));
+		assert.equal(edited.outcome, 'success');
+		assert.match(db.contentFor('Newest'), /edited newest/);
+		assert.equal(db.count('items'), 3);
+		assert.deepEqual(
+			{ ...db.storedTotals(result.feed_key), next_fetch_at: null },
+			{ item_count: 999, last_item_at: '2000-01-01T00:00:00.000Z', next_fetch_at: null },
+			'a poll that only edits known items leaves the stored totals alone',
+		);
+
+		fetchState.setBody(CHANGED_FEED_ONE);
+		const grown = await fetchAndStoreRssFeed(env(db) as never, db.feed(result.feed_key));
+		assert.equal(grown.outcome, 'success');
+		const totals = db.storedTotals(result.feed_key);
+		assert.equal(totals.item_count, db.count('items'));
+		assert.equal(totals.item_count, 6);
+		assert.notEqual(totals.last_item_at, '2000-01-01T00:00:00.000Z');
 	} finally {
 		db.close();
 	}

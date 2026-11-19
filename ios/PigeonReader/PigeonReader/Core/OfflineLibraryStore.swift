@@ -1044,10 +1044,18 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
 				}
 				let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
+				// A page and its cursor commit together, so a complete cache that takes
+				// an incremental page is still complete as of that cursor. Recording it
+				// as `.syncing` made any interruption (the app suspended, a background
+				// refresh running out of time) force the next launch to download the
+				// whole library again instead of resuming. Only navigation counts, which
+				// are rebuilt when the sync finishes, are unverified until then.
+				let continuesCompleteCache = previous.state == .complete
+					&& previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion
 				try saveCacheIntegrity(
 					OfflineCacheIntegrity(
 						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-						state: .syncing,
+						state: continuesCompleteCache ? .complete : .syncing,
 						navigation: .unverified,
 						lastAttemptAt: previous.lastAttemptAt ?? .now,
 						lastSuccessAt: previous.lastSuccessAt,
