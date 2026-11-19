@@ -1595,8 +1595,11 @@ final class PigeonReaderRealStartupUITests: XCTestCase {
 		attachScreenshot(named: "cached-startup-home-with-saved-feeds")
 		feed.tap()
 		let firstSavedStory = app.staticTexts["Saved story remains visible during slow updates"]
+		// The loading placeholder hides its "Loading stories" text from
+		// accessibility and is exposed as one element with this identifier.
+		let loadingPlaceholder = app.descendants(matching: .any)["collection-loading-placeholder"]
 		let selectedFeedReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-			self.app.staticTexts["Loading stories"].exists || firstSavedStory.exists
+			loadingPlaceholder.exists || firstSavedStory.exists
 		}, object: nil)
 		XCTAssertEqual(XCTWaiter.wait(for: [selectedFeedReady], timeout: 2), .completed, file: file, line: line)
 		XCTAssertTrue(
