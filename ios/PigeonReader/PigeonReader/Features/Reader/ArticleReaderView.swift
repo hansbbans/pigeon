@@ -345,8 +345,8 @@ struct ArticleReaderView: View {
 		.onPreferenceChange(ArticleBodyLayoutKey.self) { isLaidOut in
 			isArticleBodyLaidOut = isLaidOut
 		}
-		.task(id: ReadingMonitorID(articleID: current.id, isActive: scenePhase == .active)) {
-			guard scenePhase == .active else {
+		.task(id: ReadingMonitorID(articleID: current.id, isActive: isReadingVisible)) {
+			guard isReadingVisible else {
 				return
 			}
 			await model.monitorActiveReading(for: current.id)
@@ -400,7 +400,7 @@ struct ArticleReaderView: View {
 					YouTubeVideoSection(
 						article: article,
 						video: video,
-						playbackAllowed: scenePhase == .active,
+						playbackAllowed: isReadingVisible,
 						textScale: model.readerTypography.textScale,
 						onOpenYouTube: openOriginal,
 						onOpenLink: openYouTubeLink,
@@ -927,6 +927,12 @@ struct ArticleReaderView: View {
 
 	private var isCompactReader: Bool {
 		horizontalSizeClass != .regular
+	}
+
+	/// Reading time accrues only while the article can be seen: the scene is
+	/// active and Home is not covering a regular-width split view.
+	private var isReadingVisible: Bool {
+		scenePhase == .active && model.preferredCompactColumn != .sidebar
 	}
 
 	@ViewBuilder

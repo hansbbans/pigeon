@@ -140,6 +140,28 @@ struct ReaderHomeTilesTests {
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 3, usesAccessibilitySize: true) == 1)
 	}
 
+	@Test func wideWindowsKeepEveryViewTileOnOneRow() {
+		// iPad mini portrait is 744pt wide; an iPhone is about 400pt.
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 4, usesAccessibilitySize: false, availableWidth: 744) == 4)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 3, usesAccessibilitySize: false, availableWidth: 834) == 3)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 0, usesAccessibilitySize: false, availableWidth: 834) == 1)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 4, usesAccessibilitySize: true, availableWidth: 834) == 2)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 4, usesAccessibilitySize: false, availableWidth: 402) == 2)
+	}
+
+	@Test func folderTilesGainColumnsWithWidthUpToFour() {
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false) == 2)
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: 402) == 2)
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: true, availableWidth: 402) == 1)
+		// iPad mini and iPad Pro 11-inch in portrait.
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: 744) == 3)
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: 834) == 3)
+		// Landscape is capped at the maximum content width.
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: 1_210) == 4)
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: 2_000) == 4)
+		#expect(ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: true, availableWidth: 834) == 2)
+	}
+
 	private func makeSnapshot(
 		_ navigation: ReaderNavigationState,
 		enabled: Set<ReaderSection> = [.forYou, .unread, .starred, .today],

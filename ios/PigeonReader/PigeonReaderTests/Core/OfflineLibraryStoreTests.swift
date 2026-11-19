@@ -315,6 +315,185 @@ struct OfflineLibraryStoreTests {
 		#expect(full.articlesByCollection["scope-b"]?.map(\.id) == ["scope-b"])
 	}
 
+	@Test func contentVersionIsStoredWithTheBodyItNames() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		var article = makeArticle(id: "versioned", html: "<p>Body</p>", isRead: false)
+		article.contentVersion = "v7"
+		try await store.saveArticles([article], collectionID: "scope-a", accountID: "account-a")
+		var stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.contentVersion == "v7")
+
+		// A status change must not forget which body is held.
+		try await store.enqueue(
+			OfflineMutation(id: "read", kind: .setRead, itemIds: ["reader-versioned"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.isRead == true)
+		#expect(stored.first?.contentVersion == "v7")
+
+		// A row that arrives without a body keeps the stored body, and so the
+		// version that body was stored under.
+		var bodiless = makeArticle(id: "versioned", html: "", isRead: true)
+		bodiless.contentVersion = "v8"
+		try await store.saveArticles([bodiless], collectionID: "scope-a", accountID: "account-a")
+		stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first?.html == "<p>Body</p>")
+		#expect(stored.first?.contentVersion == "v7")
+	}
+
+	@Test func resavingStoriesFreshFromTheServerSkipsTheirDroppedFractionalSeconds() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		// The server sends milliseconds; the store keeps whole seconds.
+		let articles = (0..<6).map {
+			makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>", receivedAt: 300 + Double($0) + ($0.isMultiple(of: 2) ? 0.25 : 0.75))
+		}
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.articleWriteCountForTesting() == 0)
+
+		// A date that really moved is still written.
+		var moved = articles
+		moved[2] = makeArticle(id: "story-2", html: "<p>Body 2</p>", receivedAt: 900.25)
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(moved, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.articleWriteCountForTesting() == 1)
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.first(where: { $0.id == "story-2" })?.receivedAt == Date(timeIntervalSince1970: 900))
+	}
+
+	@Test func resavingACollectionSanitizesAndWritesOnlyWhatChanged() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<12).map { makeArticle(id: "story-\($0)", html: "<p>Body \($0)</p>") }
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.count == 12)
+
+		// What a read or star toggle does to every collection holding the story.
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 0)
+		#expect(await store.articleWriteCountForTesting() == 0)
+
+		var changed = stored
+		changed[3].isRead.toggle()
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(changed, collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 0)
+		#expect(await store.articleWriteCountForTesting() == 1)
+
+		// A body that needs sanitizing is still sanitized and stored clean.
+		let unsafe = makeArticle(id: "unsafe", html: "<p onclick=\"run()\">Body</p><script>run()</script>")
+		await store.resetSaveWorkCounts()
+		try await store.saveArticles(changed + [unsafe], collectionID: "scope-a", accountID: "account-a")
+		#expect(await store.sanitizedBodyCountForTesting() == 1)
+		#expect(await store.articleWriteCountForTesting() == 1)
+
+		let reloaded = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(reloaded.count == 13)
+		#expect(reloaded.first { $0.id == changed[3].id }?.isRead == changed[3].isRead)
+		#expect(reloaded.first { $0.id == "unsafe" }?.html == "<p>Body</p>")
+	}
+
+	/// Prints what the store spends on the read and star path at a realistic
+	/// body size. The first save is what every later save of the same stories
+	/// used to cost; decoding the whole library is what every status change
+	/// used to cost. Timings are reported, not asserted.
+	@Test func statusTogglePathBenchmark() async throws {
+		let paragraphCount = 220
+		let body = String(
+			repeating: "<p>A paragraph with <a href=\"https://example.com/a?b=1&amp;c=2\">a link</a>, <em>emphasis</em> "
+				+ "and <img src=\"https://example.com/i.png\" width=\"600\" height=\"400\" alt=\"x\"></p>\n",
+			count: paragraphCount,
+		)
+		let articles = (0..<150).map { makeArticle(id: "bench-\($0)", html: body, isRead: false) }
+		let store = OfflineLibraryStore.inMemory()
+		func milliseconds(since start: UInt64) -> Double {
+			Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+		}
+
+		var start = DispatchTime.now().uptimeNanoseconds
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "bench")
+		let firstSave = milliseconds(since: start)
+		let stored = try await store.loadSnapshot(accountID: "bench").articlesByCollection["scope-a"] ?? []
+		#expect(stored.count == articles.count)
+		// The stored bodies are sanitized once more here, which is when the store
+		// learns that they come back unchanged.
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "bench")
+
+		start = DispatchTime.now().uptimeNanoseconds
+		try await store.saveArticles(stored, collectionID: "scope-a", accountID: "bench")
+		let resave = milliseconds(since: start)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		let snapshot = try await store.loadSnapshot(accountID: "bench")
+		let decodeAll = milliseconds(since: start)
+		#expect(snapshot.articlesByCollection["scope-a"]?.count == articles.count)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		try await store.enqueue(
+			OfflineMutation(id: "bench-read", kind: .setRead, itemIds: ["reader-bench-7"], value: true, scope: .single),
+			accountID: "bench",
+		)
+		let enqueue = milliseconds(since: start)
+
+		start = DispatchTime.now().uptimeNanoseconds
+		var sanitized = ""
+		for _ in 0..<10 {
+			sanitized = StructuredHTMLSanitizer.sanitize(html: body, baseURL: nil)
+		}
+		let sanitize = milliseconds(since: start) / 10
+		#expect(sanitized.isEmpty == false)
+		// The sanitizer used to compile its attribute expression for every opening tag.
+		let openingTagCount = paragraphCount * 4
+		start = DispatchTime.now().uptimeNanoseconds
+		var compiled = 0
+		for _ in 0..<openingTagCount {
+			let pattern = #"([A-Za-z_:][A-Za-z0-9:._-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#
+			if (try? NSRegularExpression(pattern: pattern)) != nil { compiled += 1 }
+		}
+		let removedCompiles = milliseconds(since: start)
+		#expect(compiled == openingTagCount)
+
+		print("STATUS_TOGGLE_BENCH stories=\(articles.count) bodyBytes=\(body.utf8.count) firstSaveMs=\(firstSave) resaveMs=\(resave) decodeAllMs=\(decodeAll) enqueueMs=\(enqueue)")
+		print("SANITIZER_BENCH bodyBytes=\(body.utf8.count) openingTags=\(openingTagCount) sanitizeMs=\(sanitize) removedRegexCompileMs=\(removedCompiles)")
+	}
+
+	@Test func statusChangeDecodesOnlyTheArticlesItChanges() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let articles = (0..<40).map { makeArticle(id: "story-\($0)", isRead: false) }
+		try await store.saveArticles(articles, collectionID: "scope-a", accountID: "account-a")
+
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "read-one", kind: .setRead, itemIds: ["reader-story-3"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 1)
+
+		// A second action leaves the first one's row alone: its status already matches.
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "star-one", kind: .setStarred, itemIds: ["story-7"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 1)
+
+		// An action that changes nothing decodes nothing.
+		await store.resetStatusOverlayArticleDecodeCount()
+		try await store.enqueue(
+			OfflineMutation(id: "read-again", kind: .setRead, itemIds: ["reader-story-3"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		#expect(await store.statusOverlayArticleDecodeCountForTesting() == 0)
+
+		let stored = try await store.loadSnapshot(accountID: "account-a").articlesByCollection["scope-a"] ?? []
+		#expect(stored.filter(\.isRead).map(\.id) == ["story-3"])
+		#expect(stored.filter(\.isStarred).map(\.id) == ["story-7"])
+	}
+
 	@Test func pendingStatusesWinBySequenceAcrossSharedScopesAndAccounts() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let original = makeArticle(id: "shared", isRead: true, isStarred: false)
@@ -1299,6 +1478,52 @@ struct OfflineLibraryStoreTests {
 		#expect(stats.navigationFreshness == .authoritative)
 		#expect(stats.lastSuccessAt == success)
 		#expect(stats.lastSyncAt == success)
+	}
+
+	@Test func repeatedFeedChangeIsRecognizedBeforeItIsApplied() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		func feedPage(sequence: Int, title: String, folders: String) throws -> IncrementalSyncPage {
+			try decodePage(
+				"""
+				{
+				  "cursor": "v1:\(sequence)",
+				  "hasMore": false,
+				  "changes": [{
+				    "sequence": \(sequence),
+				    "entityType": "feed",
+				    "entityId": "daily",
+				    "operation": "upsert",
+				    "changedAt": "2026-08-15T12:00:00.000Z",
+				    "payload": {
+				      "feedKey": "daily",
+				      "streamId": "feed/7",
+				      "title": "\(title)",
+				      "feedURL": "https://example.com/feed.xml",
+				      "siteURL": "https://example.com",
+				      "isActive": true,
+				      "folders": \(folders)
+				    }
+				  }]
+				}
+				"""
+			)
+		}
+
+		// A feed the cache has never seen is a change.
+		let first = try feedPage(sequence: 1, title: "Daily Brief", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: first, accountID: "account-a").isEmpty)
+		try await store.apply(first, accountID: "account-a")
+
+		// What every RSS refresh sends: the same feed again.
+		let repeated = try feedPage(sequence: 2, title: "Daily Brief", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: repeated, accountID: "account-a") == [2])
+		#expect(try await store.unchangedFeedChangeSequences(in: repeated, accountID: "account-b").isEmpty)
+		try await store.apply(repeated, accountID: "account-a")
+
+		let renamed = try feedPage(sequence: 3, title: "Daily Briefing", folders: "[\"Newsletters\"]")
+		#expect(try await store.unchangedFeedChangeSequences(in: renamed, accountID: "account-a").isEmpty)
+		let moved = try feedPage(sequence: 4, title: "Daily Brief", folders: "[]")
+		#expect(try await store.unchangedFeedChangeSequences(in: moved, accountID: "account-a").isEmpty)
 	}
 
 	@Test func feedSyncKeepsTheOfflineSubscriptionLibraryCurrent() async throws {

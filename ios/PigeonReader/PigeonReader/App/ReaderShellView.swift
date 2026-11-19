@@ -24,9 +24,13 @@ struct ReaderShellView: View {
 				}
 			} else {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
-					ReaderHomeView(allowsTiles: horizontalSizeClass == .compact)
+					ReaderHomeView(placement: horizontalSizeClass == .compact ? .compactRoot : .splitSidebar)
+						// The system's widths (320 and 375) leave an iPad mini in
+						// portrait a narrower reading column than an iPhone has.
+						.navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 320)
 				} content: {
 					ReaderCollectionPane()
+						.navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 400)
 				} detail: {
 					if showsCompactArticle {
 						ReaderPlaceholderView(collection: model.selectedCollection)
@@ -37,6 +41,7 @@ struct ReaderShellView: View {
 					}
 				}
 				.navigationSplitViewStyle(.balanced)
+				.environment(\.readerWindowHorizontalSizeClass, horizontalSizeClass)
 				.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
 				.accessibilityHidden(showsCompactArticle || showsRegularHome)
 
@@ -45,7 +50,7 @@ struct ReaderShellView: View {
 					// columns are requested. Present Home explicitly until a view is
 					// chosen, while keeping the library and reader mounted underneath.
 					NavigationStack {
-						ReaderSidebarView()
+						ReaderHomeView(placement: .regularHome)
 					}
 					.frame(maxWidth: .infinity, maxHeight: .infinity)
 					.background(.background)

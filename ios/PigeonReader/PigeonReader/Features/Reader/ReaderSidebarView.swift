@@ -11,6 +11,7 @@ private struct ReaderSidebarPrewarmRequest: Equatable, Sendable {
 struct ReaderSidebarView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.readerWindowHorizontalSizeClass) private var windowHorizontalSizeClass
 	@State private var editorRoute: LibraryEditorRoute?
 	@State private var folderPendingDeletion: String?
 	@State private var feedPendingUnsubscribe: FeedSubscription?
@@ -137,6 +138,9 @@ struct ReaderSidebarView: View {
 			}
 		}
 		.navigationTitle("Pigeon")
+		// The split view's sidebar column has no room for a title beside its
+		// four buttons; it truncated to "Pi…".
+		.toolbar(removing: windowHorizontalSizeClass == .regular ? .title : nil)
 		.toolbar {
 			if let onShowHome {
 				ToolbarItem(placement: .topBarLeading) {

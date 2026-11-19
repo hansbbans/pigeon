@@ -9,8 +9,11 @@ final class ReaderFeedThumbnailStore {
 
 	init(
 		dependencies: ReaderFeedThumbnailPipelineDependencies = ReaderFeedThumbnailPipelineDependencies(),
-		cacheCapacity: Int = 24,
-		cacheByteCapacity: Int = 4 * 1_024 * 1_024,
+		// A Front Page lead image is about 2.4 MB decoded and a row thumbnail
+		// about 140 KB. The earlier 4 MB held one lead image and a few rows, so
+		// scrolling back decoded most images again.
+		cacheCapacity: Int = 64,
+		cacheByteCapacity: Int = 16 * 1_024 * 1_024,
 		maximumConcurrentLoads: Int = ReaderFeedThumbnailPolicy.maximumConcurrentLoads,
 	) {
 		pipeline = ReaderFeedThumbnailPipeline(

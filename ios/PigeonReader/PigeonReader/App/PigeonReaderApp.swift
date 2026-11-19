@@ -115,13 +115,13 @@ struct PigeonReaderApp: App {
 					_ = model.navigateArticle(.previous)
 				}
 				.keyboardShortcut(model.keyboardShortcuts.previous.keyboardShortcut)
-				.disabled(model.canNavigateArticle(.previous) == false)
+				.disabled(model.canUseArticleShortcuts == false || model.canNavigateArticle(.previous) == false)
 
 				Button("Next Article", systemImage: "chevron.down") {
 					_ = model.navigateArticle(.next)
 				}
 				.keyboardShortcut(model.keyboardShortcuts.next.keyboardShortcut)
-				.disabled(model.canNavigateArticle(.next) == false)
+				.disabled(model.canUseArticleShortcuts == false || model.canNavigateArticle(.next) == false)
 			}
 		}
 	}

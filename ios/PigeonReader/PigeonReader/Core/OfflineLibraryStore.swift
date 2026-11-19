@@ -11,6 +11,32 @@ private struct PendingStatusOverlay: Sendable {
 	var starred: PendingStatusValue?
 }
 
+/// One slot per payload of a concurrent decode. Each iteration writes only
+/// its own slot, and the slots are read after every iteration has finished.
+private nonisolated final class ConcurrentDecodeResults: @unchecked Sendable {
+	private let storage: UnsafeMutablePointer<Recommendation?>
+	private let count: Int
+
+	init(count: Int) {
+		self.count = count
+		storage = .allocate(capacity: count)
+		storage.initialize(repeating: nil, count: count)
+	}
+
+	deinit {
+		storage.deinitialize(count: count)
+		storage.deallocate()
+	}
+
+	func set(_ article: Recommendation?, at index: Int) {
+		storage[index] = article
+	}
+
+	var values: [Recommendation?] {
+		Array(UnsafeBufferPointer(start: storage, count: count))
+	}
+}
+
 actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProviding {
 	static let shared = OfflineLibraryStore()
 
@@ -49,7 +75,12 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
 	private var searchArticleDecodeCount = 0
+	private var statusOverlayArticleDecodeCount = 0
+	private var sanitizedBodyCount = 0
+	private var articleWriteCount = 0
 	#endif
+	/// Bodies the sanitizer is known to return unchanged; see `sanitized(_:)`.
+	private var sanitizedFixedPoints = Set<SanitizedBodyFingerprint>()
 
 	init(databaseURL: URL? = OfflineLibraryStore.defaultDatabaseURL()) {
 		self.init(databaseURL: databaseURL, previewSeed: nil)
@@ -298,24 +329,45 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// article appears in several collections.
 		var decodedArticlesByID: [String: Recommendation] = [:]
 		let pendingOverlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
+		// Rows are read from the connection in batches and each batch is decoded
+		// on every core. Decoding the bodies is nearly all of the time between a
+		// cold launch and the first story list, and no row depends on another.
+		var batchRows: [SnapshotRow] = []
+		var batchPayloads: [Data] = []
 		try query(
 			"SELECT id, body_pruned, payload FROM cached_articles WHERE account_id = ? ORDER BY received_at DESC, id",
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
 			guard let articleID = string(at: 0, statement: statement),
-				let payload = data(at: 2, statement: statement),
-				let decodedArticle = try? decoder.decode(Recommendation.self, from: payload) else {
+				let payload = data(at: 2, statement: statement) else {
 				malformedPayload = true
 				return
 			}
-			let article = sqlite3_column_int64(statement, 1) != 0
-				? decodedArticle.replacingHTML("")
-				: decodedArticle
-			decodedArticlesByID[articleID] = applyPendingStatusOverlay(to: article, overlays: pendingOverlays)
-			#if DEBUG
-			snapshotArticleDecodeCount += 1
-			#endif
+			batchRows.append(SnapshotRow(id: articleID, bodyPruned: sqlite3_column_int64(statement, 1) != 0))
+			batchPayloads.append(payload)
+			if batchRows.count == Self.snapshotDecodeBatchSize {
+				let decodedEveryRow = decodeSnapshotBatch(
+					rows: batchRows,
+					payloads: batchPayloads,
+					overlays: pendingOverlays,
+					into: &decodedArticlesByID,
+				)
+				if decodedEveryRow == false {
+					malformedPayload = true
+				}
+				batchRows.removeAll(keepingCapacity: true)
+				batchPayloads.removeAll(keepingCapacity: true)
+			}
+		}
+		let decodedEveryRemainingRow = decodeSnapshotBatch(
+			rows: batchRows,
+			payloads: batchPayloads,
+			overlays: pendingOverlays,
+			into: &decodedArticlesByID,
+		)
+		if decodedEveryRemainingRow == false {
+			malformedPayload = true
 		}
 		if decodedArticlesByID.count != articleRowCount {
 			malformedPayload = true
@@ -653,6 +705,27 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	func searchArticleDecodeCountForTesting() -> Int {
 		searchArticleDecodeCount
 	}
+
+	func resetStatusOverlayArticleDecodeCount() {
+		statusOverlayArticleDecodeCount = 0
+	}
+
+	func statusOverlayArticleDecodeCountForTesting() -> Int {
+		statusOverlayArticleDecodeCount
+	}
+
+	func resetSaveWorkCounts() {
+		sanitizedBodyCount = 0
+		articleWriteCount = 0
+	}
+
+	func sanitizedBodyCountForTesting() -> Int {
+		sanitizedBodyCount
+	}
+
+	func articleWriteCountForTesting() -> Int {
+		articleWriteCount
+	}
 	#endif
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) throws {
@@ -900,6 +973,62 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws {
 		try await apply(page, accountID: accountID, dayBounds: nil)
+	}
+
+	/// Sequences of the feed changes in `page` that repeat what is already
+	/// cached. The server writes a feed change for every successful RSS refresh,
+	/// changed or not, and the app answers a feed change by reloading the whole
+	/// library; these are the ones it can ignore. Ask before `apply`: afterwards
+	/// every row matches its change.
+	///
+	/// `async` on purpose, like `apply`: from an async caller that holds the
+	/// concrete store, Swift prefers an async overload, and would otherwise pick
+	/// the protocol extension's default, which reports nothing.
+	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64> {
+		let feedChanges = page.changes.filter { $0.entityType == .feed && $0.operation == .upsert }
+		guard feedChanges.isEmpty == false else { return [] }
+		let database = try openDatabase()
+		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
+		var unchanged = Set<Int64>()
+		for change in feedChanges {
+			guard let payload = change.payload,
+				let feedKey = payload.feedKey, feedKey == change.entityId,
+				let streamID = payload.streamId, streamID.isEmpty == false,
+				let title = payload.title, title.isEmpty == false else {
+				continue
+			}
+			let folders = try encoder.encode(payload.folders ?? [])
+			let isUnchanged = try queryOne(
+				"""
+				SELECT stream_id, title, feed_url, site_url, icon_url, is_active, folders_json
+				FROM cached_feeds WHERE account_id = ? AND feed_key = ?
+				""",
+				bindings: [.text(storageAccountID), .text(feedKey)],
+				database: database,
+			) { statement in
+				// One comparison per statement keeps the type checker quick.
+				let storedStreamID = string(at: 0, statement: statement)
+				let storedTitle = string(at: 1, statement: statement)
+				guard storedStreamID == streamID, storedTitle == title else { return false }
+				let storedFeedURL = string(at: 2, statement: statement)
+				let storedSiteURL = string(at: 3, statement: statement)
+				let storedIconURL = string(at: 4, statement: statement)
+				guard storedFeedURL == payload.feedURL?.absoluteString,
+					storedSiteURL == payload.siteURL?.absoluteString,
+					storedIconURL == payload.iconURL?.absoluteString else {
+					return false
+				}
+				let storedIsActive = sqlite3_column_int64(statement, 5) != 0
+				let isActive = payload.isActive != false
+				guard storedIsActive == isActive else { return false }
+				let storedFolders = data(at: 6, statement: statement)
+				return storedFolders == folders
+			}
+			if isUnchanged == true {
+				unchanged.insert(change.sequence)
+			}
+		}
+		return unchanged
 	}
 
 	func apply(
@@ -1344,7 +1473,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				sampleCount: existing?.article.sampleCount ?? 0,
 				explanation: existing?.article.explanation ?? "From \(source)",
 				learningState: existing?.article.learningState ?? "Synced article",
-				// The flag describes the body, so it follows whichever body is kept.
+				// The version and the flag describe the body, so they follow whichever
+				// body is kept. A body from sync has no version.
+				contentVersion: shouldPreserveBody ? existing?.article.contentVersion : nil,
 				isPaywalled: shouldPreserveBody ? existing?.article.isPaywalled : payload.isPaywalled,
 				length: payload.length ?? existing?.article.length,
 				saved: payload.savedMetadata ?? existing?.article.saved,
@@ -1518,10 +1649,91 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		return subscriptions
 	}
 
+	/// A body the sanitizer returned byte for byte, with the URL it resolves
+	/// links against. Identified by a hash, so no body is retained.
+	private nonisolated struct SanitizedBodyFingerprint: Hashable, Sendable {
+		let byteCount: Int
+		let hash: Int
+		let baseURL: String?
+	}
+
+	private static let maximumSanitizedFixedPoints = 20_000
+	/// Bounds how many undecoded payloads a snapshot load holds at once.
+	private static let snapshotDecodeBatchSize = 128
+
+	private struct SnapshotRow {
+		let id: String
+		let bodyPruned: Bool
+	}
+
+	/// Decodes one batch of snapshot rows and files each article under its row
+	/// id. Returns false when any payload in the batch could not be decoded.
+	private func decodeSnapshotBatch(
+		rows: [SnapshotRow],
+		payloads: [Data],
+		overlays: [String: PendingStatusOverlay],
+		into decodedArticlesByID: inout [String: Recommendation],
+	) -> Bool {
+		var decodedEveryRow = true
+		let decodedArticles = Self.decodeArticles(payloads, decoder: decoder)
+		for (row, decodedArticle) in zip(rows, decodedArticles) {
+			guard let decodedArticle else {
+				decodedEveryRow = false
+				continue
+			}
+			let article = row.bodyPruned ? decodedArticle.replacingHTML("") : decodedArticle
+			decodedArticlesByID[row.id] = applyPendingStatusOverlay(to: article, overlays: overlays)
+			#if DEBUG
+			snapshotArticleDecodeCount += 1
+			#endif
+		}
+		return decodedEveryRow
+	}
+
+	private nonisolated static func decodeArticles(_ payloads: [Data], decoder: JSONDecoder) -> [Recommendation?] {
+		guard payloads.count > 1 else {
+			return payloads.map { try? decoder.decode(Recommendation.self, from: $0) }
+		}
+		let results = ConcurrentDecodeResults(count: payloads.count)
+		DispatchQueue.concurrentPerform(iterations: payloads.count) { index in
+			results.set(try? decoder.decode(Recommendation.self, from: payloads[index]), at: index)
+		}
+		return results.values
+	}
+
+	/// Saving a collection sanitizes every story in it, and a read or star
+	/// toggle saves every collection that holds the story. Nearly all of those
+	/// bodies were sanitized when they were first stored, so the sanitizer
+	/// returns them unchanged. Remembering which bodies those are skips the
+	/// pass for them; a body never seen before is always sanitized.
 	private func sanitized(_ article: Recommendation) -> Recommendation {
-		article.replacingHTML(
-			StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: article.safeOriginalURL),
+		let baseURL = article.safeOriginalURL
+		var html = article.html
+		var hasher = Hasher()
+		let byteCount = html.withUTF8 { bytes in
+			hasher.combine(bytes: UnsafeRawBufferPointer(bytes))
+			return bytes.count
+		}
+		let fingerprint = SanitizedBodyFingerprint(
+			byteCount: byteCount,
+			hash: hasher.finalize(),
+			baseURL: baseURL?.absoluteString,
 		)
+		if sanitizedFixedPoints.contains(fingerprint) {
+			return article
+		}
+		#if DEBUG
+		sanitizedBodyCount += 1
+		#endif
+		let sanitizedHTML = StructuredHTMLSanitizer.sanitize(html: article.html, baseURL: baseURL)
+		guard sanitizedHTML.utf8.elementsEqual(article.html.utf8) else {
+			return article.replacingHTML(sanitizedHTML)
+		}
+		if sanitizedFixedPoints.count >= Self.maximumSanitizedFixedPoints {
+			sanitizedFixedPoints.removeAll(keepingCapacity: true)
+		}
+		sanitizedFixedPoints.insert(fingerprint)
+		return article
 	}
 
 	private func loadPendingStatusOverlays(
@@ -1558,6 +1770,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		return overlays
 	}
 
+	/// The read and starred values pending actions give an article, by either of
+	/// its ids. Nil where no pending action names it.
+	private func pendingStatus(
+		id: String,
+		readerID: String,
+		overlays: [String: PendingStatusOverlay],
+	) -> (read: Bool?, starred: Bool?) {
+		let keys = ReaderArticleIdentity.aliases(id: id, readerID: readerID)
+		let matches = keys.compactMap { overlays[$0] }
+		let read = matches.compactMap(\.read).max { $0.sequence < $1.sequence }
+		let starred = matches.compactMap(\.starred).max { $0.sequence < $1.sequence }
+		return (read?.value, starred?.value)
+	}
+
 	private func applyPendingStatusOverlay(
 		to article: Recommendation,
 		overlays: [String: PendingStatusOverlay],
@@ -1586,6 +1812,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			// The version names the body held here. Dropping it made every launch
+			// download each collection's first page of bodies again.
+			contentVersion: article.contentVersion,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,
@@ -1606,27 +1835,50 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	) throws {
 		let overlays = try loadPendingStatusOverlays(accountID: accountID, database: database)
 		guard overlays.isEmpty == false else { return }
-		var records: [StoredArticle] = []
+		// Find the rows whose status a pending action changes from the id and
+		// status columns alone. Decoding every cached payload, bodies included,
+		// made each read or star toggle cost as much as loading the library.
+		var changedIDs: [String] = []
 		try query(
-			"SELECT id, payload, body_pruned FROM cached_articles WHERE account_id = ?",
+			"SELECT id, reader_id, is_read, is_starred FROM cached_articles WHERE account_id = ?",
 			bindings: [.text(accountID)],
 			database: database,
 		) { statement in
-			guard let id = string(at: 0, statement: statement),
-				let payload = data(at: 1, statement: statement),
-				let article = try? decoder.decode(Recommendation.self, from: payload),
-				// Overlay keys are normalized aliases, so a lookup replaces a scan.
-				ReaderArticleIdentity.aliases(id: article.id, readerID: article.readerId)
-					.contains(where: { overlays[$0] != nil }) else {
-				return
-			}
-			records.append(
-				StoredArticle(
-					id: id,
-					article: article,
-					bodyPruned: sqlite3_column_int64(statement, 2) != 0,
-				),
+			guard let id = string(at: 0, statement: statement) else { return }
+			let pending = pendingStatus(
+				id: id,
+				readerID: string(at: 1, statement: statement) ?? "",
+				overlays: overlays,
 			)
+			let isRead = sqlite3_column_int64(statement, 2) != 0
+			let isStarred = sqlite3_column_int64(statement, 3) != 0
+			if (pending.read ?? isRead) != isRead || (pending.starred ?? isStarred) != isStarred {
+				changedIDs.append(id)
+			}
+		}
+		var records: [StoredArticle] = []
+		for changedID in changedIDs {
+			try query(
+				"SELECT id, payload, body_pruned FROM cached_articles WHERE account_id = ? AND id = ?",
+				bindings: [.text(accountID), .text(changedID)],
+				database: database,
+			) { statement in
+				guard let id = string(at: 0, statement: statement),
+					let payload = data(at: 1, statement: statement),
+					let article = try? decoder.decode(Recommendation.self, from: payload) else {
+					return
+				}
+				#if DEBUG
+				statusOverlayArticleDecodeCount += 1
+				#endif
+				records.append(
+					StoredArticle(
+						id: id,
+						article: article,
+						bodyPruned: sqlite3_column_int64(statement, 2) != 0,
+					),
+				)
+			}
 		}
 
 		for record in records {
@@ -1808,10 +2060,13 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		if let existingWithBody = existing.first(where: { $0.article.hasReadableHTML }),
 			storedArticle.hasReadableHTML == false {
 			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: existingWithBody.article.isBodyPruned, isPaywalled: existingWithBody.article.isPaywalled)
+			// The kept body keeps the version it was stored under.
+			storedArticle.contentVersion = existingWithBody.article.contentVersion
 			storedBodyPruned = existingWithBody.bodyPruned
 		} else if storedBodyPruned,
 			let existingWithBody = existing.first(where: { $0.bodyPruned == false && $0.article.hasReadableHTML }) {
 			storedArticle = storedArticle.replacingBody(html: existingWithBody.article.html, text: existingWithBody.article.text, isBodyPruned: nil, isPaywalled: existingWithBody.article.isPaywalled)
+			storedArticle.contentVersion = existingWithBody.article.contentVersion
 			storedBodyPruned = false
 		}
 
@@ -1828,6 +2083,17 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 		}
+		// Re-saving a collection hands back mostly rows that are already stored
+		// exactly as they would be written. Encoding and writing each body again
+		// changes nothing on disk.
+		if existing.count == 1, let stored = existing.first, stored.id == storageID,
+			stored.bodyPruned == storedBodyPruned {
+			var written = storedArticle
+			written.isBodyPruned = storedBodyPruned ? true : nil
+			if Self.isStoredUnchanged(stored.article, written) {
+				return storedArticle
+			}
+		}
 		try writeArticle(
 			storedArticle,
 			bodyPruned: storedBodyPruned,
@@ -1835,6 +2101,26 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			database: database,
 		)
 		return storedArticle
+	}
+
+	/// The store keeps dates to the whole second and the server sends
+	/// milliseconds, so a story fresh from the server differs from its stored
+	/// copy by the dropped fraction alone. That is not a change worth a write.
+	private static func isStoredUnchanged(_ stored: Recommendation, _ written: Recommendation) -> Bool {
+		if stored == written { return true }
+		guard isSameStoredDate(stored.receivedAt, written.receivedAt),
+			isSameStoredDate(stored.saved?.publishedAt, written.saved?.publishedAt) else { return false }
+		var aligned = written.replacingReceivedAt(stored.receivedAt)
+		aligned.saved?.publishedAt = stored.saved?.publishedAt
+		return stored == aligned
+	}
+
+	private static func isSameStoredDate(_ stored: Date?, _ written: Date?) -> Bool {
+		switch (stored, written) {
+		case (nil, nil): true
+		case let (stored?, written?): abs(stored.timeIntervalSince(written)) < 1
+		default: false
+		}
 	}
 
 	private func writeArticle(
@@ -1845,6 +2131,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	) throws {
 		var storedArticle = article
 		storedArticle.isBodyPruned = bodyPruned ? true : nil
+		#if DEBUG
+		articleWriteCount += 1
+		#endif
 		try execute(
 			"""
 			INSERT INTO cached_articles
@@ -1895,6 +2184,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			explanation: article.explanation,
 			learningState: article.learningState,
 			isBodyPruned: article.isBodyPruned,
+			// The version names the body held here. Dropping it made every launch
+			// download each collection's first page of bodies again.
+			contentVersion: article.contentVersion,
 			isPaywalled: article.isPaywalled,
 			length: article.length,
 			saved: article.saved,

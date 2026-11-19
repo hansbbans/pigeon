@@ -1,12 +1,23 @@
 import SwiftUI
 
-/// Home for the split view's first column. On iPhone it is the tile grid, with
-/// the full library list one tap away; wider layouts always use the list.
+/// Home is the tile grid, with the full library list one tap away. A compact
+/// window shows it as the split view's first column; a regular window shows it
+/// over the split view until a view is chosen, and that split view's own
+/// sidebar is always the list.
 struct ReaderHomeView: View {
-	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	/// The sidebar column reports a compact size class even on iPad, so the
 	/// shell decides from the window's size class.
-	let allowsTiles: Bool
+	enum Placement {
+		/// The first column of a compact window.
+		case compactRoot
+		/// The sidebar column of a regular window, beside the open list.
+		case splitSidebar
+		/// Home covering a regular window.
+		case regularHome
+	}
+
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	let placement: Placement
 	@State private var showsLibraryList = ReaderHomeView.startsOnLibraryList
 
 	var body: some View {
@@ -17,6 +28,10 @@ struct ReaderHomeView: View {
 			ReaderSidebarView(onShowHome: allowsTiles ? { setShowsLibraryList(false) } : nil)
 				.transition(.opacity)
 		}
+	}
+
+	private var allowsTiles: Bool {
+		placement != .splitSidebar
 	}
 
 	private func setShowsLibraryList(_ shows: Bool) {

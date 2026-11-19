@@ -240,7 +240,7 @@ extension PreparedReaderBody {
 		}
 		return PreparedReaderBody(
 			sanitizedHTML: sanitizedHTML,
-			imageURLs: StructuredHTMLSanitizer.imageURLs(in: sanitizedHTML, baseURL: nil),
+			imageURLs: StructuredHTMLSanitizer.imageURLs(inSanitized: sanitizedHTML, baseURL: nil),
 		)
 	}
 }

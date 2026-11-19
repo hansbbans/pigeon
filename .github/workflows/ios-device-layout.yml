@@ -1,0 +1,141 @@
+name: iOS device layout
+
+# CI tests on one iPhone simulator. This workflow runs the layout walk
+# (PigeonDeviceLayoutUITests) and the Home tile tests on an iPhone Pro, an
+# iPad Pro 11-inch and an iPad mini, in portrait and landscape, and uploads a
+# screenshot and a dump of element frames for every screen. It runs on demand
+# only and is not a required check. See docs/ci-validation.md.
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: Simulator name prefixes, comma separated
+        required: true
+        default: "iPhone 17 Pro,iPad Pro 11-inch,iPad mini"
+        type: string
+      suite:
+        description: layout (layout walk and Home tests), smoke (plus the smoke UI tests) or full (every UI test)
+        required: true
+        default: layout
+        type: choice
+        options:
+          - layout
+          - smoke
+          - full
+      unit_tests:
+        description: Also run the unit tests, on the first device
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pigeon-ios-device-layout
+  cancel-in-progress: false
+
+jobs:
+  layout:
+    name: Layout walk on iPhone and iPad simulators
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - pigeon-ci
+    # Up to 60 minutes may be spent waiting for the shared iOS runner lock.
+    timeout-minutes: 240
+    env:
+      APP_DIRECTORY: ios/PigeonReader
+      PROJECT: ios/PigeonReader/PigeonReader.xcodeproj
+      SCHEME: PigeonReader
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the request
+        id: request
+        env:
+          INPUT_DEVICES: ${{ inputs.devices }}
+          INPUT_SUITE: ${{ inputs.suite }}
+          INPUT_UNIT_TESTS: ${{ inputs.unit_tests }}
+        run: |
+          set -euo pipefail
+          devices="$INPUT_DEVICES"
+          suite="$INPUT_SUITE"
+          unit=""
+          if [[ "$INPUT_UNIT_TESTS" == "true" ]]; then unit=unit; fi
+          devices="${devices:-iPhone 17 Pro,iPad Pro 11-inch,iPad mini}"
+          suite="${suite:-layout}"
+          if [[ ! "$devices" =~ ^[A-Za-z0-9\ ,.()-]+$ || ! "$suite" =~ ^(layout|smoke|full)$ ]]; then
+            echo "Unsupported devices or suite" >&2
+            exit 1
+          fi
+          {
+            echo "devices=$devices"
+            echo "suite=$suite"
+            echo "unit=$unit"
+          } >> "$GITHUB_OUTPUT"
+          # The runner context is not available to job-level env.
+          echo "LAYOUT_OUTPUT=$RUNNER_TEMP/pigeon-layout-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Generate Xcode project
+        working-directory: ${{ env.APP_DIRECTORY }}
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          mkdir -p "$LAYOUT_OUTPUT"
+          # The committed project file should match what xcodegen generates.
+          git --no-pager diff -- PigeonReader.xcodeproj > "$LAYOUT_OUTPUT/xcodeproj.diff" || true
+      - name: Kill xcodebuild orphans from earlier runs
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+      - name: Acquire the shared iOS runner lock
+        timeout-minutes: 65
+        run: bash .github/scripts/ios-runner-lock.sh acquire
+      - name: Run the layout walk on each device
+        timeout-minutes: 150
+        env:
+          DEVICES: ${{ steps.request.outputs.devices }}
+          SUITE: ${{ steps.request.outputs.suite }}
+          UNIT_TESTS: ${{ steps.request.outputs.unit }}
+          DERIVED_DATA_PATH: ${{ runner.temp }}/pigeon-layout-build-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: .github/scripts/run-ios-device-layout.sh "$DEVICES" "$SUITE" "$UNIT_TESTS"
+      - name: Upload screenshots and layout dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pigeon-device-layout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.LAYOUT_OUTPUT }}/**/*.png
+            ${{ env.LAYOUT_OUTPUT }}/**/*.txt
+            ${{ env.LAYOUT_OUTPUT }}/**/*.log
+            ${{ env.LAYOUT_OUTPUT }}/*.diff
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Kill build processes this job left behind
+        if: always()
+        shell: bash
+        env:
+          ORPHAN_INCLUDE_CURRENT_RUN: "1"
+        run: bash .github/scripts/kill-orphaned-xcodebuild.sh
+      - name: Shut down this job's simulator
+        if: always()
+        shell: bash
+        run: |
+          ownership="$RUNNER_TEMP/pigeon-simulator-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          # Each device is shut down as its tests end; this covers a cancelled run.
+          python3 .github/scripts/ios-simulator-session.py finish "$ownership" || true
+      - name: Release the shared iOS runner lock
+        if: always()
+        shell: bash
+        run: bash .github/scripts/ios-runner-lock.sh release
+      # Last, so the end of the job log is the whole review.
+      - name: Layout summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -s "$LAYOUT_OUTPUT/xcodeproj.diff" ]]; then
+            echo "The committed Xcode project differs from xcodegen's output:"
+            cut -c1-300 "$LAYOUT_OUTPUT/xcodeproj.diff"
+          fi
+          find "$LAYOUT_OUTPUT" -name layout-log.txt -print0 | sort -z | xargs -0 cat 2>/dev/null | cut -c1-600 || true
+          cat "$LAYOUT_OUTPUT/results.txt" 2>/dev/null || echo "PIGEON-LAYOUT-RESULT|none|no device ran"
+          rm -rf "$RUNNER_TEMP/pigeon-layout-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

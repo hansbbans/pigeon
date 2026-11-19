@@ -7,6 +7,7 @@ struct ReadItLaterListView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.readerWindowHorizontalSizeClass) private var windowHorizontalSizeClass
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var actionFeedbackCount = 0
 	@State private var copyConfirmation: ReaderSaveConfirmation?
@@ -92,7 +93,7 @@ struct ReadItLaterListView: View {
 			sessionKey: isOnScreen ? context : nil,
 			list: ReadingLogList.list(for: collection),
 			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
-				horizontalSizeClass: horizontalSizeClass,
+				horizontalSizeClass: windowHorizontalSizeClass ?? horizontalSizeClass,
 				preferredColumn: model.preferredCompactColumn,
 				hasSelectedArticle: model.selectedArticleID != nil,
 			),
@@ -157,6 +158,7 @@ struct ReadItLaterToolbar: ToolbarContent {
 	@Environment(ReaderAppModel.self) private var model
 
 	var body: some ToolbarContent {
+		ReaderHomeToolbarItem()
 		ToolbarItemGroup(placement: .topBarTrailing) {
 			Menu("Filter", systemImage: model.savedListFilter.isDefault
 				? "line.3.horizontal.decrease"

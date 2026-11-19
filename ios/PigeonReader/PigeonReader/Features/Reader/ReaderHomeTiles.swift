@@ -1,6 +1,6 @@
 import Foundation
 
-/// What the iPhone tile home shows. It is a projection of the sidebar snapshot:
+/// What the tile home shows. It is a projection of the sidebar snapshot:
 /// the same views and folders, without unread counts as the organising idea.
 nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 	nonisolated struct FolderTile: Equatable, Identifiable, Sendable {
@@ -94,10 +94,29 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 		}
 	}
 
-	/// Three equal tiles in a row; four read better as two rows of two.
-	static func viewColumnCount(itemCount: Int, usesAccessibilitySize: Bool) -> Int {
-		if usesAccessibilitySize { return 1 }
+	/// The grid never grows wider than this, so tiles on an iPad in landscape
+	/// stay close to the size they have on an iPhone.
+	static let maximumContentWidth = 960.0
+	/// From this width on, the layout has room for more than a phone's columns.
+	static let wideLayoutMinimumWidth = 600.0
+	private static let wideFolderTileWidth = 220.0
+	private static let maximumFolderColumns = 4
+
+	/// Three equal tiles in a row; four read better as two rows of two. A wide
+	/// window keeps every view on one row.
+	static func viewColumnCount(itemCount: Int, usesAccessibilitySize: Bool, availableWidth: Double? = nil) -> Int {
+		let isWide = (availableWidth ?? 0) >= wideLayoutMinimumWidth
+		if usesAccessibilitySize { return isWide ? min(max(itemCount, 1), 2) : 1 }
+		if isWide { return min(max(itemCount, 1), 4) }
 		if itemCount == 4 { return 2 }
 		return min(max(itemCount, 1), 3)
+	}
+
+	/// Two folder tiles across on a phone, more as the window widens.
+	static func folderColumnCount(usesAccessibilitySize: Bool, availableWidth: Double? = nil) -> Int {
+		let width = min(availableWidth ?? 0, maximumContentWidth)
+		guard width >= wideLayoutMinimumWidth else { return usesAccessibilitySize ? 1 : 2 }
+		if usesAccessibilitySize { return 2 }
+		return min(max(Int(width / wideFolderTileWidth), 2), maximumFolderColumns)
 	}
 }

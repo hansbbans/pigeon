@@ -42,7 +42,59 @@ def active_use(udid, rows):
 BOOT_TIMEOUT_SECONDS = 300
 
 
+def preference(name, wanted):
+    """Rank a device name, or None when it must not be used. CI tests on an
+    iPhone, ideally an iPhone 17. PIGEON_SIMULATOR_DEVICE (a name prefix such
+    as "iPad mini") selects another family for the device layout workflow."""
+    if wanted:
+        if not name.startswith(wanted):
+            return None
+        return 1 if name == wanted else 0
+    if not name.startswith("iPhone"):
+        return None
+    return 2 if name == "iPhone 17" else 1 if name.startswith("iPhone 17") else 0
+
+
+def ensure(wanted):
+    """Make sure the wanted family has a simulator this job can reserve, which
+    means one that is shut down. When the Mac has none of that family, create
+    one named after its device type, like the simulators Xcode creates. When
+    every one is in use (booted in Simulator or by another session), create a
+    separate "(Pigeon CI)" device rather than take one over. Created devices
+    are on the newest installed iOS runtime and are kept for later runs."""
+    family = [device for runtime, group in devices().items() if ".iOS-" in runtime
+              for device in group if device["name"].startswith(wanted)]
+    if any(device["state"] == "Shutdown" for device in family):
+        return
+    device_types = json.loads(run("xcrun", "simctl", "list", "devicetypes", "--json"))["devicetypes"]
+    runtimes = json.loads(run("xcrun", "simctl", "list", "runtimes", "--json"))["runtimes"]
+    matching = [device_type for device_type in device_types if device_type["name"].startswith(wanted)]
+    available = [runtime for runtime in runtimes
+                 if runtime.get("isAvailable") and ".iOS-" in runtime["identifier"]]
+    if not matching or not available:
+        raise RuntimeError("No simulator device type or iOS runtime is installed for " + wanted)
+    newest = max(available, key=lambda runtime: tuple(map(int, runtime["identifier"].rsplit(".iOS-", 1)[1].split("-"))))
+    # The device type list includes retired hardware ("iPad mini 4") that a
+    # current runtime refuses, so choose among the types the runtime supports.
+    supported = [device_type for device_type in newest.get("supportedDeviceTypes", [])
+                 if device_type["name"].startswith(wanted)]
+    candidates = supported or matching
+    existing_names = {device["name"] for device in family}
+    # "iPhone 17 Pro" must not become an "iPhone 17 Pro Max"; otherwise copy the
+    # type of a simulator the Mac already has for this family.
+    device_type = (next((candidate for candidate in candidates if candidate["name"] == wanted), None)
+                   or next((candidate for candidate in candidates if candidate["name"] in existing_names), None)
+                   or candidates[-1])
+    name = device_type["name"] + (" (Pigeon CI)" if family else "")
+    if any(device["name"] == name for device in family):
+        # The CI device exists and is busy too; start() reports that.
+        return
+    subprocess.run(["xcrun", "simctl", "create", name, device_type["identifier"], newest["identifier"]], check=True)
+    print("Created simulator " + name + " on " + newest["identifier"], flush=True)
+
+
 def start():
+    wanted = os.environ.get("PIGEON_SIMULATOR_DEVICE", "").strip()
     snapshot = devices()
     booted = [d["udid"] for group in snapshot.values() for d in group if d["state"] != "Shutdown"]
     candidates = []
@@ -51,9 +103,9 @@ def start():
             continue
         version = tuple(map(int, runtime.rsplit(".iOS-", 1)[1].split("-")))
         for device in group:
-            if device["state"] == "Shutdown" and device["name"].startswith("iPhone"):
-                preference = 2 if device["name"] == "iPhone 17" else 1 if device["name"].startswith("iPhone 17") else 0
-                candidates.append((version, preference, device["udid"]))
+            rank = preference(device["name"], wanted)
+            if device["state"] == "Shutdown" and rank is not None:
+                candidates.append((version, rank, device["udid"]))
     session = os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"]
     ownership_file = Path(os.environ["RUNNER_TEMP"]) / ("pigeon-simulator-" + session + ".json")
     for _, _, udid in sorted(candidates, reverse=True):
@@ -88,7 +140,7 @@ def start():
                   + str(BOOT_TIMEOUT_SECONDS) + "s; continuing and leaving the wait to xcodebuild", flush=True)
         print("Booted task-owned simulator: " + udid, flush=True)
         return
-    raise RuntimeError("No idle unreserved iPhone simulator is available")
+    raise RuntimeError("No idle unreserved " + (wanted or "iPhone") + " simulator is available")
 
 
 def finish(path):
@@ -130,5 +182,7 @@ if __name__ == "__main__":
         start()
     elif sys.argv[1] == "finish":
         finish(sys.argv[2] if len(sys.argv) > 2 else "")
+    elif sys.argv[1] == "ensure" and len(sys.argv) > 2:
+        ensure(sys.argv[2])
     else:
-        raise SystemExit("Expected start or finish")
+        raise SystemExit("Expected start, finish, or ensure <device name prefix>")

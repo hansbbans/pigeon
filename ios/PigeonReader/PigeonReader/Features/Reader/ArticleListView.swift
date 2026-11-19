@@ -6,6 +6,7 @@ struct ArticleListView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.readerCollectionIsTransitioning) private var isCollectionTransitioning
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.readerWindowHorizontalSizeClass) private var windowHorizontalSizeClass
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
 	@Environment(\.scenePhase) private var scenePhase
 	@State private var searchText = ""
@@ -52,7 +53,7 @@ struct ArticleListView: View {
 			&& isExplicitListTransitioning == false
 		let holdsUpdates = isScrolling || isNativeTransitioning || isCollectionTransitioning
 			|| isExplicitListTransitioning || isLayoutReflowing || isPositionReady == false
-			|| (horizontalSizeClass == .compact && model.preferredCompactColumn == .detail)
+			|| isCoveredByReader
 		let source = ReaderListSourceSnapshot(context: listContext, articles: sourceArticles, allArticles: allArticles,
 			mutationRevision: model.articleListMutationRevision, mutationArticleID: model.articleListMutationArticleID)
 		let listScope = ReaderListCollectionScope(
@@ -387,9 +388,17 @@ struct ArticleListView: View {
 		}
 	}
 
-	/// Front Page is an iPhone layout; iPad keeps Classic rows in its split view.
+	/// In a compact window the open story covers this list, so updates wait for
+	/// the reader to close. An iPad split view keeps the list beside the story;
+	/// its list column reports a compact size class of its own, which is why
+	/// this asks the window.
+	private var isCoveredByReader: Bool {
+		(windowHorizontalSizeClass ?? horizontalSizeClass) == .compact && model.preferredCompactColumn == .detail
+	}
+
+	/// Front Page is a reader setting, the same on iPhone and in an iPad column.
 	private var usesFrontPage: Bool {
-		horizontalSizeClass == .compact && model.readerTypography.homeLayout == .frontPage
+		model.readerTypography.homeLayout == .frontPage
 	}
 
 	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {
@@ -490,7 +499,7 @@ struct ArticleListView: View {
 				: nil,
 			list: ReadingLogList.list(for: collection, search: isSearchActive ? searchScope : nil),
 			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
-				horizontalSizeClass: horizontalSizeClass,
+				horizontalSizeClass: windowHorizontalSizeClass ?? horizontalSizeClass,
 				preferredColumn: model.preferredCompactColumn,
 				hasSelectedArticle: model.selectedArticleID != nil,
 			),
@@ -566,11 +575,16 @@ struct ArticleListView: View {
 		guard model.selectedNavigationID == collection.id else { return }
 		let requestKey = loadRequestKey
 		let requestID = loadingState.begin(context: requestKey)
-		searchText = ""
-		searchPresentation = ReaderArticleSearchPresentation()
-		model.clearArticleSearch()
-		let context = listContext
 		let scope = "\(model.session?.storageIdentity ?? "none")|\(collection.id)"
+		// This also runs when a sync changes the library under the list on
+		// screen. Only the first load of a list starts from an empty search; a
+		// later one must not wipe a search the reader is in the middle of.
+		if initialLoadScope != scope {
+			searchText = ""
+			searchPresentation = ReaderArticleSearchPresentation()
+			model.clearArticleSearch()
+		}
+		let context = listContext
 		let initialLoadID = initialLoadScope == scope
 			? nil
 			: updateBuffer.beginInitialLoad(context: context)
@@ -612,7 +626,7 @@ struct ArticleListView: View {
 		// Oldest-first lists prepend older pages. This is expected paging, so it
 		// waits for a gesture to end without offering them as "new stories".
 		let holding = isScrolling || isNativeTransitioning || isCollectionTransitioning
-			|| (horizontalSizeClass == .compact && model.preferredCompactColumn == .detail)
+			|| isCoveredByReader
 		updateBuffer.receive(model.articles(for: collection), context: context, holding: holding,
 			acceptsReordering: true)
 	}

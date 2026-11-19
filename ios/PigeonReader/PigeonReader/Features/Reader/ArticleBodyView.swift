@@ -179,7 +179,9 @@ struct ArticleBodyView: View {
 		let requestID = preparationID
 		let source = content
 		let sourceURL = baseURL
-		let body = await Task.detached(priority: .utility) {
+		// The reader is waiting on this body, so it must not queue behind
+		// background work such as a sync.
+		let body = await Task.detached(priority: .userInitiated) {
 			PreparedReaderBody.make(sanitizedHTML: source, baseURL: sourceURL)
 		}.value
 		guard Task.isCancelled == false, requestID == preparationID else { return }

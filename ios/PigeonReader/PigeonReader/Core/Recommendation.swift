@@ -67,6 +67,14 @@ nonisolated struct Recommendation: Codable, Equatable, Hashable, Identifiable, S
 
 	/// The paywall flag describes the body, so callers pass the flag of whichever article supplied it.
 	func replacingBody(html: String, text: String?, isBodyPruned: Bool?, isPaywalled: Bool?) -> Recommendation {
+		replacing(html: html, text: text, receivedAt: receivedAt, isBodyPruned: isBodyPruned, isPaywalled: isPaywalled)
+	}
+
+	func replacingReceivedAt(_ receivedAt: Date) -> Recommendation {
+		replacing(html: html, text: text, receivedAt: receivedAt, isBodyPruned: isBodyPruned, isPaywalled: isPaywalled)
+	}
+
+	private func replacing(html: String, text: String?, receivedAt: Date, isBodyPruned: Bool?, isPaywalled: Bool?) -> Recommendation {
 		Recommendation(
 			id: id,
 			readerId: readerId,

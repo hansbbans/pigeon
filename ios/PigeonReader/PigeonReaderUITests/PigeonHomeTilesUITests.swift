@@ -1,6 +1,6 @@
 import XCTest
 
-/// The iPhone tile home. Every other UI test starts on the library list.
+/// The tile home, on iPhone and iPad. Every other UI test starts on the library list.
 @MainActor
 final class PigeonHomeTilesUITests: XCTestCase {
 	private var app: XCUIApplication!
@@ -31,8 +31,9 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		tile("user/-/label/Design").tap()
 		let designBar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "Design")).firstMatch
 		XCTAssertTrue(designBar.waitForExistence(timeout: 10))
-		designBar.buttons.firstMatch.tap()
+		returnHome(from: designBar)
 		XCTAssertTrue(tile("forYou").waitForExistence(timeout: 10))
+		XCTAssertTrue(tile("forYou").isHittable)
 
 		tile("forYou").tap()
 		let forYouBar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "For You")).firstMatch
@@ -65,12 +66,20 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		XCTAssertTrue(app.navigationBars["Add Feed"].waitForExistence(timeout: 10))
 	}
 
-	/// Tiles are the compact-width home; iPad keeps the list.
+	/// Tiles are Home at every width.
 	private func skipUnlessTileHome() throws {
 		let tiles = app.descendants(matching: .any)["reader-home-tiles"].firstMatch
-		if tiles.waitForExistence(timeout: 15) == false {
-			try XCTSkipIf(app.descendants(matching: .any)["reader-sidebar"].firstMatch.exists, "Regular width uses the library list")
-			XCTFail("Neither the tile home nor the library list appeared")
+		XCTAssertTrue(tiles.waitForExistence(timeout: 15), "The tile home did not appear")
+	}
+
+	/// A regular-width split view offers Home in the list's toolbar; a compact
+	/// window pops back to it.
+	private func returnHome(from bar: XCUIElement) {
+		let home = app.buttons["reader-show-home"]
+		if home.waitForExistence(timeout: 2) {
+			home.tap()
+		} else {
+			bar.buttons.firstMatch.tap()
 		}
 	}
 

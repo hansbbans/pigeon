@@ -20,6 +20,19 @@ nonisolated enum StructuredHTMLSanitizer {
 	private static let imageSourceAttributePrecedence = ["src", "data-src", "data-original", "data-lazy-src"]
 	private static let imageSrcsetAttributePrecedence = ["srcset", "data-srcset", "data-lazy-srcset"]
 
+	/// Compiled once. Building these per tag made the sanitizer's cost scale
+	/// with the number of tags times a regex compilation; an article has
+	/// hundreds of tags and is sanitized on every save, sync and open.
+	/// `NSRegularExpression` is immutable and safe to share between threads.
+	nonisolated private struct Expressions: @unchecked Sendable {
+		private static let valuePattern = #"\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#
+		let attribute = try? NSRegularExpression(pattern: #"([A-Za-z_:][A-Za-z0-9:._-]*)"# + Expressions.valuePattern)
+		let src = try? NSRegularExpression(pattern: #"\bsrc"# + Expressions.valuePattern, options: .caseInsensitive)
+		let srcset = try? NSRegularExpression(pattern: #"\bsrcset"# + Expressions.valuePattern, options: .caseInsensitive)
+	}
+
+	private static let expressions = Expressions()
+
 	static func sanitize(html: String, baseURL: URL?) -> String {
 		var output = ""
 		var cursor = html.startIndex
@@ -100,16 +113,24 @@ nonisolated enum StructuredHTMLSanitizer {
 	}
 
 	static func imageURLs(in html: String, baseURL: URL?) -> [URL] {
-		let sanitized = sanitize(html: html, baseURL: baseURL)
+		// No image tag in, no image tag out: skip the sanitizing pass. The tag
+		// name is matched loosely because the sanitizer accepts "< img".
+		guard html.range(of: "img", options: [.caseInsensitive]) != nil else { return [] }
+		return imageURLs(inSanitized: sanitize(html: html, baseURL: baseURL), baseURL: baseURL)
+	}
+
+	/// The image URLs of HTML that `sanitize` has already produced. Callers
+	/// that hold the sanitized body use this to avoid sanitizing it again.
+	static func imageURLs(inSanitized sanitized: String, baseURL: URL?) -> [URL] {
 		var urls: [URL] = []
 		var remaining = sanitized[...]
 		while let imageRange = remaining.range(of: "<img", options: [.caseInsensitive]) {
 			guard let tagEnd = remaining[imageRange.lowerBound...].firstIndex(of: ">") else { break }
 			let tag = String(remaining[imageRange.lowerBound...tagEnd])
-			if let source = attribute(named: "src", in: tag), let url = safeWebURL(source, relativeTo: baseURL) {
+			if let source = attribute(expressions.src, in: tag), let url = safeWebURL(source, relativeTo: baseURL) {
 				if urls.contains(url) == false { urls.append(url) }
 			}
-			if let srcset = attribute(named: "srcset", in: tag) {
+			if let srcset = attribute(expressions.srcset, in: tag) {
 				for url in srcsetURLs(srcset, relativeTo: baseURL) where urls.contains(url) == false {
 					urls.append(url)
 				}
@@ -169,9 +190,8 @@ nonisolated enum StructuredHTMLSanitizer {
 	}
 
 	private static func sanitizedAttributes(_ rawAttributes: String, baseURL: URL?, tagName: String) -> [SanitizedAttribute] {
-		guard let expression = try? NSRegularExpression(
-			pattern: #"([A-Za-z_:][A-Za-z0-9:._-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#,
-		) else {
+		// Every attribute this keeps has a value, so a tag without "=" keeps none.
+		guard rawAttributes.utf8.contains(UInt8(ascii: "=")), let expression = expressions.attribute else {
 			return []
 		}
 		let range = NSRange(rawAttributes.startIndex..<rawAttributes.endIndex, in: rawAttributes)
@@ -215,7 +235,8 @@ nonisolated enum StructuredHTMLSanitizer {
 					attributes.append(SanitizedAttribute(name: name, value: safeSrcset))
 				}
 			case "width", "height", "colspan", "rowspan":
-				guard value.range(of: #"^[0-9]{1,5}$"#, options: .regularExpression) != nil else { continue }
+				guard (1...5).contains(value.utf8.count),
+					value.utf8.allSatisfy({ $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }) else { continue }
 				attributes.append(SanitizedAttribute(name: name, value: value))
 			case "loading":
 				guard value == "lazy" || value == "eager" else { continue }
@@ -254,13 +275,8 @@ nonisolated enum StructuredHTMLSanitizer {
 		}
 	}
 
-	private static func attribute(named name: String, in tag: String) -> String? {
-		guard let expression = try? NSRegularExpression(
-			pattern: #"\b\#(name)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#,
-			options: .caseInsensitive,
-		) else {
-			return nil
-		}
+	private static func attribute(_ expression: NSRegularExpression?, in tag: String) -> String? {
+		guard let expression else { return nil }
 		let range = NSRange(tag.startIndex..<tag.endIndex, in: tag)
 		guard let match = expression.firstMatch(in: tag, range: range) else { return nil }
 		for index in 1...3 {
@@ -272,6 +288,8 @@ nonisolated enum StructuredHTMLSanitizer {
 	}
 
 	private static func decodeHTMLAttributeReferences(_ value: String) -> String {
+		// Most attribute values hold no character reference at all.
+		guard value.utf8.contains(UInt8(ascii: "&")) else { return value }
 		var decoded = value
 		for _ in 0..<4 {
 			let next = decodeHTMLAttributeReferencePass(decoded)

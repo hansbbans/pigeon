@@ -20,6 +20,8 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	@ViewBuilder let footer: () -> Footer
 
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	/// Width of the scroll view; a narrow iPad column gets a one-column grid.
+	@State private var availableWidth: Double?
 
 	private let nearEndDistance = 900.0
 
@@ -53,6 +55,13 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 			}
 			.padding(.horizontal, 16)
 			.padding(.bottom, 24)
+			.frame(maxWidth: FrontPageLayout.maximumContentWidth)
+			.frame(maxWidth: .infinity)
+		}
+		.onGeometryChange(for: Double.self) { geometry in
+			Double(geometry.size.width)
+		} action: { _, width in
+			availableWidth = width
 		}
 		.onScrollGeometryChange(for: Bool.self) { geometry in
 			geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - nearEndDistance
@@ -67,7 +76,11 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 
 	private var gridColumns: [GridItem] {
 		let column = GridItem(.flexible(), spacing: 18, alignment: .top)
-		return dynamicTypeSize.isAccessibilitySize ? [column] : [column, column]
+		let count = FrontPageLayout.gridColumnCount(
+			availableWidth: availableWidth,
+			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+		)
+		return Array(repeating: column, count: count)
 	}
 
 	private func story(_ article: Recommendation, role: FrontPageStoryView.Role) -> some View {
@@ -179,6 +192,7 @@ struct FrontPageStoryView: View {
 	@Environment(\.showsReadingTime) private var showsReadingTime
 	@Environment(\.displayScale) private var displayScale
 	@Environment(\.readerTypeface) private var readerTypeface
+	@Environment(\.verticalSizeClass) private var verticalSizeClass
 	@State private var image: CGImage?
 	@State private var imageRequestID: String?
 
@@ -187,7 +201,7 @@ struct FrontPageStoryView: View {
 			VStack(alignment: .leading, spacing: role == .lead ? 9 : 6) {
 				if let image, imageRequestID == requestID {
 					Color.clear
-						.aspectRatio(role == .lead ? 3 / 2 : 4 / 3, contentMode: .fit)
+						.aspectRatio(imageAspectRatio, contentMode: .fit)
 						.overlay {
 							Image(decorative: image, scale: displayScale)
 								.resizable()
@@ -247,6 +261,15 @@ struct FrontPageStoryView: View {
 		.accessibilityIdentifier("front-page-story-\(article.id)")
 		.task(id: requestID) {
 			await loadImage()
+		}
+	}
+
+	/// A 3:2 lead image at full width is taller than an iPhone in landscape, so
+	/// a short window crops the lead to a banner and keeps the headline on screen.
+	private var imageAspectRatio: CGFloat {
+		switch role {
+		case .lead: verticalSizeClass == .compact ? 21 / 9 : 3 / 2
+		case .column: 4 / 3
 		}
 	}
 
