@@ -4409,6 +4409,32 @@ struct ReaderAppModelTests {
 		#expect(Set(committed.map(\.id)) == ["listed-1", "listed-2"])
 	}
 
+	@Test(.timeLimit(.minutes(1))) func pullToRefreshReturnsWhileARebuildIsStillListing() async throws {
+		// Pull-to-refresh used to await the whole rebuild: an endless spinner.
+		let session = try makeSession(token: "refresh-during-rebuild")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-1"]), statusCode: 200),
+			],
+		)
+		await client.holdLibraryRequests()
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await client.waitForHeldLibraryRequest()
+		let recommendationRequestsBefore = await client.requests().filter { $0.path == "/api/v1/recommendations" }.count
+
+		await model.refresh(collection: .smart(.forYou))
+
+		let recommendationRequestsAfter = await client.requests().filter { $0.path == "/api/v1/recommendations" }.count
+		#expect(recommendationRequestsAfter > recommendationRequestsBefore)
+		#expect(model.offlineStorageStats.cacheState != .complete)
+		await client.releaseLibraryRequests()
+		await preparation.value
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
 	@Test func verifiedWarmCacheUsesOneIncrementalRequestWithoutNavigationRefetch() async throws {
 		let client = IntegritySyncHTTPClient(
 			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
@@ -11130,6 +11156,9 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 	private var libraryResponses: [SyncResponse]
 	private let subscriptionStatusCode: Int
 	private var capturedRequests: [Request] = []
+	private var holdsLibraryRequests = false
+	private var heldLibraryRequests: [CheckedContinuation<Void, Never>] = []
+	private var libraryArrivalWaiters: [CheckedContinuation<Void, Never>] = []
 
 	init(syncResponses: [SyncResponse], libraryResponses: [SyncResponse] = [], subscriptionStatusCode: Int = 200) {
 		self.syncResponses = syncResponses
@@ -11152,6 +11181,13 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 				? SyncResponse(data: Data(#"{"cursor":"default","hasMore":false,"changes":[]}"#.utf8), statusCode: 200)
 				: syncResponses.removeFirst()
 		case "/api/v1/library":
+			if holdsLibraryRequests {
+				await withCheckedContinuation { continuation in
+					heldLibraryRequests.append(continuation)
+					libraryArrivalWaiters.forEach { $0.resume() }
+					libraryArrivalWaiters.removeAll()
+				}
+			}
 			response = libraryResponses.isEmpty
 				? SyncResponse(data: Data(#"{"error":"not found"}"#.utf8), statusCode: 404)
 				: libraryResponses.removeFirst()
@@ -11188,6 +11224,22 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 
 	func libraryRequests() -> [Request] {
 		capturedRequests.filter { $0.path == "/api/v1/library" }
+	}
+
+	/// Library requests wait until `releaseLibraryRequests()`.
+	func holdLibraryRequests() {
+		holdsLibraryRequests = true
+	}
+
+	func waitForHeldLibraryRequest() async {
+		guard heldLibraryRequests.isEmpty else { return }
+		await withCheckedContinuation { libraryArrivalWaiters.append($0) }
+	}
+
+	func releaseLibraryRequests() {
+		holdsLibraryRequests = false
+		heldLibraryRequests.forEach { $0.resume() }
+		heldLibraryRequests.removeAll()
 	}
 }
 

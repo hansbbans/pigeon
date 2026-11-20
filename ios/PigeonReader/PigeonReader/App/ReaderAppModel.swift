@@ -2824,18 +2824,22 @@ final class ReaderAppModel {
 			errorMessage = nil
 		}
 		let freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
-		if offlineSynchronizationEnabled,
-			session != nil,
-			apiClient != nil {
+		let syncsOffline = offlineSynchronizationEnabled && session != nil && apiClient != nil
+		// A rebuild can take a while. Refresh must not wait for it: the rebuild
+		// carries on in the background and the open list loads from the server.
+		let rebuildPending = syncsOffline
+			&& (offlineCacheIntegrity.requiresFullRebuild || offlineRepairInProgress)
+		if rebuildPending {
+			startOfflinePreparationInBackground()
+		} else if syncsOffline {
 			await prepareOfflineLibrary(force: true)
 			guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return }
 		}
 		let loadedDuringPreparation = collectionFreshness[collection.id].map {
 			$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
 		} ?? false
-		let syncBackedCompleteFeed = offlineSynchronizationEnabled
-			&& session != nil
-			&& apiClient != nil
+		let syncBackedCompleteFeed = syncsOffline
+			&& rebuildPending == false
 			&& collection.kind == .feed
 			&& cachedCollectionHasMissingBodies(collection.id) == false
 		if syncBackedCompleteFeed, loadedDuringPreparation == false {
@@ -2847,6 +2851,15 @@ final class ReaderAppModel {
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if hasLoadedNavigation {
 			await loadNavigation(force: true)
+		}
+	}
+
+	/// Starts a forced offline preparation without waiting for it, unless one
+	/// is already running.
+	private func startOfflinePreparationInBackground() {
+		guard offlinePreparationTask == nil else { return }
+		Task { @MainActor [weak self] in
+			await self?.prepareOfflineLibrary(force: true)
 		}
 	}
 
