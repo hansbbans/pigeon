@@ -28,7 +28,7 @@
 2. **Bodies already on the phone survive the swap:** an unread article whose body was downloaded before the rebuild still has it afterwards, so the queue does not refetch it. Pinned in Task 4 (`promotionKeepsCanonicalBodiesForEveryListedArticle`).
 3. **Pull-to-refresh returns while a rebuild is running:** Task 7 (`pullToRefreshReturnsWhileARebuildIsStillListing`).
 4. **The queue never spins on an article the server no longer has:** an ID reported `missing` is not requested again. Task 4 (`unavailableArticlesLeaveTheFetchQueue`) and Task 8 (`missingArticlesAreNotRequestedTwice`).
-5. **A pending local read survives the swap:** an article marked read offline, with the mutation not yet acknowledged, is still read after the listing rebuild promotes. Task 6 (`pendingLocalReadSurvivesAListingRebuild`).
+5. **A pending local read survives the swap:** an article marked read offline, with the mutation not yet acknowledged, is still read after the listing rebuild promotes. Task 5 (`pendingLocalReadSurvivesAListingRebuild`).
 
 ---
 
@@ -78,7 +78,7 @@
   - Response `{ articles: ArticlePayload[] /* full, with html/text/isPaywalled, in request order */, missing: string[] /* requested ids with no item row */ }`.
   - Trimming: walk requested ids in order summing `LENGTH(html_content) + COALESCE(LENGTH(text_content), 0)`; stop before the first article that would exceed the budget, except the first article is always included. Ids neither returned nor missing are simply absent (client re-requests them).
 
-- [ ] **Step 1: Failing tests:** `article fetch returns full payloads in request order`; `article fetch reports ids with no item as missing`; `article fetch trims to the body budget but always returns the first article` (three bodies of `SYNC_PAGE_BODY_BUDGET / 2` chars → 2 returned... assert exactly the first two? No: first (½) + second (½ → total = budget, not exceeding) returned, third absent and not in `missing`); `article fetch rejects an empty list and more than 50 ids` (400). Contract test: `library article fetch` posts `library-articles.request.json` and matches `library-articles.response.json`.
+- [ ] **Step 1: Failing tests:** `article fetch returns full payloads in request order`; `article fetch reports ids with no item as missing`; `article fetch trims to the body budget but always returns the first article` (three items whose html + text total `0.4 × SYNC_PAGE_BODY_BUDGET` each → first two returned, third absent and not in `missing`; one item of `2 × SYNC_PAGE_BODY_BUDGET` alone → returned); `article fetch rejects an empty list and more than 50 ids` (400). Contract test: `library article fetch` posts `library-articles.request.json` and matches `library-articles.response.json`.
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Implement** and route `POST /api/v1/library/articles`.
 - [ ] **Step 4: Run** `npm test && npm run typecheck` → PASS (regenerate the new response fixture once as in Task 1).
@@ -154,6 +154,7 @@
   - `resumedRebuildContinuesFromTheSavedListingContinuation`: begin, apply page 1 (`continuation: "l1:9:3"`), create a **new** `OfflineLibraryStore` on the same database file (simulates relaunch), `beginOrResumeFullRebuild` → returns `"l1:9:3"`, page-1 articles still staged, committed library untouched.
   - `staleRebuildMarkerStartsOver`: same, with `maxAge: 0` → returns `nil` and the old staged rows are gone.
   - `aMarkerWithoutListingProgressStartsOver`: marker from legacy `beginFullRebuild` → `nil`.
+  - `pendingLocalReadSurvivesAListingRebuild`: store holds article X unread; `enqueue` a `set_read` mutation for X (not acknowledged); begin, apply a listing page with X `isRead: false`, save navigation, finish → committed X is read and still in the pending outbox.
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `OfflineLibraryStoreTests` → PASS.
@@ -175,7 +176,6 @@
   - `rebuildUsesTheLibraryListingInsteadOfReplayingTheChangeLog`: legacy cache (as in `legacyCacheAutomaticallyRebuildsOnceThenUsesTheWarmCursor`) with two library pages → no `/api/v1/sync` request during the rebuild, cache `.complete`, then a second `prepareOfflineLibrary()` sends one sync request with `cursor == snapshotCursor`.
   - `rebuildFallsBackToTheChangeLogWhenTheServerHasNoListing`: library 404 → legacy behaviour (the existing test's expectations: sync limit 50, cursor nil).
   - `interruptedListingRebuildResumesFromItsContinuation`: page 1 ok, page 2 HTTP 500 → state not complete; next `prepareOfflineLibrary(force: true)` requests `continuation` = page 1's continuation (not a fresh first page).
-  - `pendingLocalReadSurvivesAListingRebuild`: enqueue a `set_read` mutation that fails to replay (mutations endpoint 503 is fine → replay failure path) … if replay failure aborts preparation before rebuild, instead seed the pending action with a mutations endpoint returning 200 but leave a second unacknowledged read in the outbox after replay; listing says the article is unread → after promotion the article is read in `allArticles(for:)`.
 - [ ] **Step 2: Run** `-only-testing:PigeonReaderTests/ReaderAppModelTests` → FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `PigeonReaderTests` (all unit tests) → PASS. Existing rebuild tests pass unchanged because their clients answer 404 for `/api/v1/library`; any test client that answers 200 for every path is changed to 404 for `/api/v1/library` (list them in the commit message).
