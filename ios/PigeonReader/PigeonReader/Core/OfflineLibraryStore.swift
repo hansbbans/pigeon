@@ -1041,81 +1041,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		do {
 			try transaction(database) {
-				guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-					throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
-				}
-				let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
-				// A page and its cursor commit together, so a complete cache that takes
-				// an incremental page is still complete as of that cursor. Recording it
-				// as `.syncing` made any interruption (the app suspended, a background
-				// refresh running out of time) force the next launch to download the
-				// whole library again instead of resuming. Only navigation counts, which
-				// are rebuilt when the sync finishes, are unverified until then.
-				let continuesCompleteCache = previous.state == .complete
-					&& previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion
-				try saveCacheIntegrity(
-					OfflineCacheIntegrity(
-						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-						state: continuesCompleteCache ? .complete : .syncing,
-						navigation: .unverified,
-						lastAttemptAt: previous.lastAttemptAt ?? .now,
-						lastSuccessAt: previous.lastSuccessAt,
-						lastError: nil,
-						invalidChangeCount: previous.invalidChangeCount,
-						lastPageHasMore: page.hasMore,
-					),
-					accountID: storageAccountID,
-					database: database,
-				)
-
-				let deletedArticleIDs = Set(
-					page.changes
-						.filter { $0.entityType == .article && $0.operation == .delete }
-						.map(\.entityId),
-				)
-				// Article/feed upserts must land before status changes because a page can
-				// contain both records for a newly-created article.
-				var skippedChangeCount = 0
-				for change in page.changes.filter({ $0.entityType != .status }) + page.changes.filter({ $0.entityType == .status }) {
-					do {
-						try apply(
-							change,
-							accountID: storageAccountID,
-							dayBounds: dayBounds,
-							deletedArticleIDs: deletedArticleIDs,
-							database: database,
-						)
-					} catch OfflineLibraryError.invalidSyncChange {
-						// One malformed change must not fail the page and, with it, force
-						// a rebuild of the whole library. Skip it and count it.
-						skippedChangeCount += 1
-					}
-				}
-				if skippedChangeCount > 0 {
-					let integrity = try loadCacheIntegrity(accountID: storageAccountID, database: database)
-					try saveCacheIntegrity(
-						OfflineCacheIntegrity(
-							formatVersion: integrity.formatVersion,
-							state: integrity.state,
-							navigation: integrity.navigation,
-							lastAttemptAt: integrity.lastAttemptAt,
-							lastSuccessAt: integrity.lastSuccessAt,
-							lastError: integrity.lastError,
-							invalidChangeCount: integrity.invalidChangeCount + skippedChangeCount,
-							lastPageHasMore: integrity.lastPageHasMore,
-						),
-						accountID: storageAccountID,
-						database: database,
-					)
-				}
-				try execute(
-					"""
-					INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
-					ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
-					""",
-					bindings: [.text(storageAccountID), .text(page.cursor)],
-					database: database,
-				)
+				try applyPageContents(page, storageAccountID: storageAccountID, dayBounds: dayBounds, database: database)
 			}
 		} catch {
 			// The page transaction rolls back both rows and cursor. Keep a separate
@@ -1123,6 +1049,153 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			try? await markCacheRepairNeeded(accountID: accountID, message: error.localizedDescription)
 			throw error
 		}
+	}
+
+	/// Starts a full rebuild, or picks up the one an earlier launch left
+	/// behind. A rebuild that was listing the library resumes when its marker
+	/// is younger than `maxAge`: the staged rows stay and the result carries the
+	/// original start and the listing continuation to request next (`""` once
+	/// the listing has finished and only navigation and promotion remain).
+	/// Otherwise this starts over exactly like `beginFullRebuild`.
+	func beginOrResumeFullRebuild(
+		accountID: String,
+		at date: Date = .now,
+		maxAge: TimeInterval = 24 * 60 * 60,
+	) async throws -> OfflineRebuildStart {
+		let database = try openDatabase()
+		let marker = try queryOne(
+			"SELECT staging_account_id, created_at, listing_continuation FROM cache_rebuilds WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			(string(at: 0, statement: statement), sqlite3_column_double(statement, 1), string(at: 2, statement: statement))
+		}
+		if let marker, let stagingAccountID = marker.0, let continuation = marker.2 {
+			let age = date.timeIntervalSince1970 - marker.1
+			let staged = try loadCacheIntegrity(accountID: stagingAccountID, database: database)
+			if age >= 0, age < maxAge, staged.formatVersion == OfflineCacheIntegrity.currentFormatVersion {
+				stagingAccountIDs[accountID] = stagingAccountID
+				return OfflineRebuildStart(
+					startedAt: Date(timeIntervalSince1970: marker.1),
+					listingContinuation: continuation,
+				)
+			}
+		}
+		try await beginFullRebuild(accountID: accountID, at: date)
+		return OfflineRebuildStart(startedAt: date, listingContinuation: nil)
+	}
+
+	/// Writes one page of the library listing into the attached rebuild
+	/// generation. The rows, the snapshot cursor and the listing continuation
+	/// commit together, so an interrupted rebuild resumes after the last page
+	/// that landed.
+	func applyLibraryListingPage(
+		_ page: LibraryListingPage,
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+	) async throws {
+		guard let stagingAccountID = stagingAccountIDs[accountID] else {
+			throw OfflineLibraryError.invalidCacheState("No offline rebuild is in progress.")
+		}
+		let database = try openDatabase()
+		try transaction(database) {
+			try applyPageContents(
+				page.syncPage(),
+				storageAccountID: stagingAccountID,
+				dayBounds: dayBounds,
+				database: database,
+			)
+			try execute(
+				"UPDATE cache_rebuilds SET listing_continuation = ? WHERE account_id = ? AND staging_account_id = ?",
+				bindings: [.text(page.continuation ?? ""), .text(accountID), .text(stagingAccountID)],
+				database: database,
+			)
+		}
+	}
+
+	/// Applies a page's changes, integrity and cursor to `storageAccountID`.
+	/// Callers own the transaction.
+	private func applyPageContents(
+		_ page: IncrementalSyncPage,
+		storageAccountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+		database: OpaquePointer,
+	) throws {
+		guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+			throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
+		}
+		let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
+		// A page and its cursor commit together, so a complete cache that takes
+		// an incremental page is still complete as of that cursor. Recording it
+		// as `.syncing` made any interruption (the app suspended, a background
+		// refresh running out of time) force the next launch to download the
+		// whole library again instead of resuming. Only navigation counts, which
+		// are rebuilt when the sync finishes, are unverified until then.
+		let continuesCompleteCache = previous.state == .complete
+			&& previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion
+		try saveCacheIntegrity(
+			OfflineCacheIntegrity(
+				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+				state: continuesCompleteCache ? .complete : .syncing,
+				navigation: .unverified,
+				lastAttemptAt: previous.lastAttemptAt ?? .now,
+				lastSuccessAt: previous.lastSuccessAt,
+				lastError: nil,
+				invalidChangeCount: previous.invalidChangeCount,
+				lastPageHasMore: page.hasMore,
+			),
+			accountID: storageAccountID,
+			database: database,
+		)
+
+		let deletedArticleIDs = Set(
+			page.changes
+				.filter { $0.entityType == .article && $0.operation == .delete }
+				.map(\.entityId),
+		)
+		// Article/feed upserts must land before status changes because a page can
+		// contain both records for a newly-created article.
+		var skippedChangeCount = 0
+		for change in page.changes.filter({ $0.entityType != .status }) + page.changes.filter({ $0.entityType == .status }) {
+			do {
+				try apply(
+					change,
+					accountID: storageAccountID,
+					dayBounds: dayBounds,
+					deletedArticleIDs: deletedArticleIDs,
+					database: database,
+				)
+			} catch OfflineLibraryError.invalidSyncChange {
+				// One malformed change must not fail the page and, with it, force
+				// a rebuild of the whole library. Skip it and count it.
+				skippedChangeCount += 1
+			}
+		}
+		if skippedChangeCount > 0 {
+			let integrity = try loadCacheIntegrity(accountID: storageAccountID, database: database)
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: integrity.formatVersion,
+					state: integrity.state,
+					navigation: integrity.navigation,
+					lastAttemptAt: integrity.lastAttemptAt,
+					lastSuccessAt: integrity.lastSuccessAt,
+					lastError: integrity.lastError,
+					invalidChangeCount: integrity.invalidChangeCount + skippedChangeCount,
+					lastPageHasMore: integrity.lastPageHasMore,
+				),
+				accountID: storageAccountID,
+				database: database,
+			)
+		}
+		try execute(
+			"""
+			INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
+			ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
+			""",
+			bindings: [.text(storageAccountID), .text(page.cursor)],
+			database: database,
+		)
 	}
 
 	func storageStats(accountID: String) throws -> OfflineStorageStats {

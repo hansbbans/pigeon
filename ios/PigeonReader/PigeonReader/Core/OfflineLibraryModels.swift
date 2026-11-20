@@ -8,6 +8,15 @@ nonisolated struct IncrementalSyncPage: Codable, Equatable, Sendable {
 
 /// One page of `GET /api/v1/library`: the unread-first listing that rebuilds
 /// the offline library. Articles carry metadata only; their bodies come from
+/// How a full rebuild started: `startedAt` identifies its staging generation
+/// (pass it to `abandonFullRebuild`). `listingContinuation` is nil for a
+/// fresh rebuild, `""` when a resumed listing had already finished, and
+/// otherwise the continuation to request next.
+nonisolated struct OfflineRebuildStart: Equatable, Sendable {
+	let startedAt: Date
+	let listingContinuation: String?
+}
+
 /// `POST /api/v1/library/articles`. `snapshotCursor` is the `/api/v1/sync`
 /// cursor to continue from once the listing is complete.
 nonisolated struct LibraryListingPage: Codable, Equatable, Sendable {
@@ -15,6 +24,25 @@ nonisolated struct LibraryListingPage: Codable, Equatable, Sendable {
 	let continuation: String?
 	let feeds: [IncrementalSyncPayload]
 	let articles: [IncrementalSyncPayload]
+
+	/// The page as sync upserts (feeds before articles), so it goes through
+	/// the same apply path as `/api/v1/sync`. `hasMore` mirrors whether the
+	/// listing continues.
+	func syncPage(changedAt: Date = .now) -> IncrementalSyncPage {
+		let feedChanges = feeds.map { payload in
+			IncrementalSyncChange(
+				sequence: 0, entityType: .feed, entityId: payload.feedKey ?? "", operation: .upsert,
+				changedAt: changedAt, payload: payload,
+			)
+		}
+		let articleChanges = articles.map { payload in
+			IncrementalSyncChange(
+				sequence: 0, entityType: .article, entityId: payload.id ?? "", operation: .upsert,
+				changedAt: changedAt, payload: payload,
+			)
+		}
+		return IncrementalSyncPage(cursor: snapshotCursor, hasMore: continuation != nil, changes: feedChanges + articleChanges)
+	}
 }
 
 /// `POST /api/v1/library/articles`: full article payloads in request order,
@@ -414,6 +442,9 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func recordMutationFailure(id: String, message: String, accountID: String) async throws
 	func apply(_ page: IncrementalSyncPage, accountID: String) async throws
 	func beginFullRebuild(accountID: String, at date: Date) async throws
+	/// Starts a rebuild or re-attaches the listing rebuild an earlier launch left.
+	func beginOrResumeFullRebuild(accountID: String, at date: Date, maxAge: TimeInterval) async throws -> OfflineRebuildStart
+	func applyLibraryListingPage(_ page: LibraryListingPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws
 	/// Abandon only the caller's in-progress rebuild generation. The durable marker
 	/// and staged rows remain available for cleanup by the next rebuild attempt.
 	func abandonFullRebuild(accountID: String, startedAt: Date) async throws
@@ -445,6 +476,16 @@ extension OfflineLibraryStoring {
 	func applyFetchedArticles(_ articles: [IncrementalSyncPayload], accountID: String, dayBounds: ReaderLocalDayBounds?) async throws -> [Recommendation] { [] }
 
 	func markArticlesUnavailable(ids: [String], accountID: String) async throws {}
+
+	/// Lightweight stores cannot resume a rebuild; they always start over.
+	func beginOrResumeFullRebuild(accountID: String, at date: Date, maxAge: TimeInterval) async throws -> OfflineRebuildStart {
+		try await beginFullRebuild(accountID: accountID, at: date)
+		return OfflineRebuildStart(startedAt: date, listingContinuation: nil)
+	}
+
+	func applyLibraryListingPage(_ page: LibraryListingPage, accountID: String, dayBounds: ReaderLocalDayBounds?) async throws {
+		try await apply(page.syncPage(), accountID: accountID, dayBounds: dayBounds)
+	}
 
 	/// A store that cannot tell treats every feed change as a change.
 	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64> {

@@ -1522,6 +1522,174 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.articleIDsNeedingFetch(accountID: accountID, limit: 10).isEmpty)
 	}
 
+	@Test func listingPagesBuildAStagedLibraryThatPromotes() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+
+		let start = try await store.beginOrResumeFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		#expect(start == OfflineRebuildStart(startedAt: Date(timeIntervalSince1970: 1_000), listingContinuation: nil))
+		try await store.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: "l1:9:1", articles: [Self.listedArticleJSON(id: "one")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		try await store.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: nil, withFeed: false, articles: [Self.listedArticleJSON(id: "two")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(Set(snapshot.articlesByCollection["feed/1"]?.map(\.id) ?? []) == ["one", "two"])
+		#expect(snapshot.cursor == "v1:9")
+		#expect(snapshot.integrity.state == .complete)
+	}
+
+	@Test func resumedRebuildContinuesFromTheSavedListingContinuation() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-listing-resume-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		try await store?.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:old", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "committed", html: "<p>Old</p>", isRead: false),
+			])),
+			accountID: accountID,
+		)
+		_ = try await store?.beginOrResumeFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store?.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: "l1:9:3", articles: [Self.listedArticleJSON(id: "page-one")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		store = nil
+
+		let relaunched = OfflineLibraryStore(databaseURL: databaseURL)
+		let resumed = try await relaunched.beginOrResumeFullRebuild(
+			accountID: accountID,
+			at: Date(timeIntervalSince1970: 1_600),
+		)
+
+		// The original start identifies the generation for abandonFullRebuild.
+		#expect(resumed == OfflineRebuildStart(startedAt: Date(timeIntervalSince1970: 1_000), listingContinuation: "l1:9:3"))
+		let committed = try await relaunched.loadSnapshot(accountID: accountID)
+		#expect(committed.articlesByCollection["feed/1"]?.map(\.id) == ["committed"])
+		try await relaunched.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: nil, withFeed: false, articles: [Self.listedArticleJSON(id: "page-two")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		try await relaunched.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 2)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await relaunched.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+		let promoted = try await relaunched.loadSnapshot(accountID: accountID)
+		#expect(Set(promoted.articlesByCollection["feed/1"]?.map(\.id) ?? []) == ["page-one", "page-two"])
+	}
+
+	@Test func staleRebuildMarkerStartsOver() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-listing-stale-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let accountID = "account-a"
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		_ = try await store?.beginOrResumeFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store?.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: "l1:9:3", articles: [Self.listedArticleJSON(id: "page-one")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		store = nil
+
+		let relaunched = OfflineLibraryStore(databaseURL: databaseURL)
+		let restarted = try await relaunched.beginOrResumeFullRebuild(
+			accountID: accountID,
+			at: Date(timeIntervalSince1970: 1_600),
+			maxAge: 0,
+		)
+
+		#expect(restarted == OfflineRebuildStart(startedAt: Date(timeIntervalSince1970: 1_600), listingContinuation: nil))
+		try await relaunched.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: nil, articles: [Self.listedArticleJSON(id: "fresh")])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		try await relaunched.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await relaunched.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+		let promoted = try await relaunched.loadSnapshot(accountID: accountID)
+		#expect(promoted.articlesByCollection["feed/1"]?.map(\.id) == ["fresh"])
+	}
+
+	@Test func aMarkerWithoutListingProgressStartsOver() async throws {
+		let directory = FileManager.default.temporaryDirectory
+			.appending(path: "pigeon-offline-listing-legacy-\(UUID().uuidString)", directoryHint: .isDirectory)
+		let databaseURL = directory.appending(path: "library.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		var store: OfflineLibraryStore? = OfflineLibraryStore(databaseURL: databaseURL)
+		try await store?.beginFullRebuild(accountID: "account-a", at: Date(timeIntervalSince1970: 1_000))
+		store = nil
+
+		let relaunched = OfflineLibraryStore(databaseURL: databaseURL)
+
+		let start = try await relaunched.beginOrResumeFullRebuild(accountID: "account-a", at: Date(timeIntervalSince1970: 1_100))
+		#expect(start.listingContinuation == nil)
+	}
+
+	@Test func listingPageWithoutAnAttachedRebuildIsRejected() async throws {
+		let store = OfflineLibraryStore.inMemory()
+
+		await #expect(throws: OfflineLibraryError.self) {
+			try await store.applyLibraryListingPage(
+				try decodeListing(Self.listingJSON(continuation: nil, articles: [])),
+				accountID: "account-a",
+				dayBounds: nil,
+			)
+		}
+	}
+
+	@Test func pendingLocalReadSurvivesAListingRebuild() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:old", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "x", html: "<p>Body</p>", isRead: false),
+			])),
+			accountID: accountID,
+		)
+		let read = OfflineMutation(id: "read-x", kind: .setRead, itemIds: ["x"], value: true, scope: .single)
+		try await store.enqueue(read, accountID: accountID)
+
+		_ = try await store.beginOrResumeFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store.applyLibraryListingPage(
+			try decodeListing(Self.listingJSON(continuation: nil, articles: [Self.listedArticleJSON(id: "x", isRead: false)])),
+			accountID: accountID,
+			dayBounds: nil,
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection["feed/1"]?.first?.isRead == true)
+		#expect(try await store.pendingMutations(accountID: accountID, limit: 10).map(\.mutation.id) == ["read-x"])
+	}
+
 	@Test func statusBeforeArticleIsResolvedAfterPageArticlesAreApplied() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let receivedAt = Date(timeIntervalSince1970: 1_000)
@@ -3017,7 +3185,28 @@ struct OfflineLibraryStoreTests {
 		#"{"sequence":\#(sequence),"entityType":"status","entityId":"\#(itemID)","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"itemId":"\#(itemID)","isRead":\#(isRead),"isStarred":\#(isStarred),"updatedAt":"2026-08-15T12:00:00.000Z","version":1}}"#
 	}
 
+	/// A `GET /api/v1/library` page whose snapshot cursor is `v1:9`.
+	private static func listingJSON(continuation: String?, withFeed: Bool = true, articles: [String]) -> String {
+		let continuationJSON = continuation.map { #""\#($0)""# } ?? "null"
+		let feeds = withFeed
+			? #"[{"feedKey":"daily","streamId":"feed/1","title":"Daily","isActive":true,"folders":[],"sourceType":"rss"}]"#
+			: "[]"
+		return #"{"snapshotCursor":"v1:9","continuation":\#(continuationJSON),"feeds":\#(feeds),"articles":[\#(articles.joined(separator: ","))]}"#
+	}
+
+	private static func listedArticleJSON(id: String, isRead: Bool = false) -> String {
+		#"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","receivedAt":"2026-08-15T11:00:00.000Z","isRead":\#(isRead),"isStarred":false,"isBodyPruned":false}"#
+	}
+
+	private func decodeListing(_ json: String) throws -> LibraryListingPage {
+		try syncDecoder().decode(LibraryListingPage.self, from: Data(json.utf8))
+	}
+
 	private func decodePage(_ json: String) throws -> IncrementalSyncPage {
+		try syncDecoder().decode(IncrementalSyncPage.self, from: Data(json.utf8))
+	}
+
+	private func syncDecoder() -> JSONDecoder {
 		let decoder = JSONDecoder()
 		decoder.dateDecodingStrategy = .custom { decoder in
 			let value = try decoder.singleValueContainer().decode(String.self)
@@ -3031,7 +3220,7 @@ struct OfflineLibraryStoreTests {
 			}
 			return date
 		}
-		return try decoder.decode(IncrementalSyncPage.self, from: Data(json.utf8))
+		return decoder
 	}
 
 	private func markBodyPruned(in databaseURL: URL, accountID: String, articleID: String) throws {
