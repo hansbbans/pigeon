@@ -3,6 +3,7 @@ import { handleEngagementIngestion } from './engagement';
 import { handleReadingLogIngestion } from './reading-log';
 import { ensureDatabaseSchema } from './migrations';
 import { handleIncrementalSync } from './sync-api';
+import { handleLibraryListing } from './library-api';
 import { handleMutationBatch } from './mutation-api';
 import { handleImageProxy } from './image-proxy';
 import { handlePersonalization } from './personalization-api';
@@ -56,6 +57,9 @@ export async function handleNativeApiRequest(request: Request, env: Env): Promis
 	}
 	if (path === '/api/v1/sync' && request.method === 'GET') {
 		return handleIncrementalSync(request, env);
+	}
+	if (path === '/api/v1/library' && request.method === 'GET') {
+		return handleLibraryListing(request, env);
 	}
 	if (path === '/api/v1/mutations' && request.method === 'POST') {
 		return handleMutationBatch(request, env);

@@ -1,0 +1,89 @@
+{
+	"snapshotCursor": "v1:16",
+	"continuation": null,
+	"feeds": [
+		{
+			"feedKey": "design-weekly",
+			"streamId": "feed/1",
+			"title": "Design Weekly",
+			"feedURL": "https://feeds.example.com/design.xml",
+			"siteURL": "https://example.com",
+			"iconURL": "https://example.com/icon.png",
+			"isActive": true,
+			"sourceType": "rss",
+			"folders": [
+				"Design"
+			]
+		},
+		{
+			"feedKey": "morning-brief",
+			"streamId": "feed/2",
+			"title": "Morning Brief",
+			"feedURL": null,
+			"siteURL": null,
+			"iconURL": null,
+			"isActive": true,
+			"sourceType": "email",
+			"folders": []
+		},
+		{
+			"feedKey": "quiet-blog",
+			"streamId": "feed/3",
+			"title": "Quiet Blog",
+			"feedURL": "https://quiet.example.org/feed",
+			"siteURL": "https://quiet.example.org",
+			"iconURL": null,
+			"isActive": true,
+			"sourceType": "rss",
+			"folders": [
+				"Blogs"
+			]
+		}
+	],
+	"articles": [
+		{
+			"id": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+			"feedKey": "design-weekly",
+			"source": "Design Weekly",
+			"title": "Typography for a durable reader",
+			"author": "Ada Lovelace",
+			"originalURL": "https://example.com/durable-reader",
+			"receivedAt": "2026-11-01T09:00:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"isBodyPruned": false,
+			"wordCount": 2380,
+			"mediaKind": "text"
+		},
+		{
+			"id": "1c4d8b63-6e2f-4a9f-8b62-2a3e4d5c6b72",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000002",
+			"feedKey": "design-weekly",
+			"source": "Design Weekly",
+			"title": "Notes on margins",
+			"author": null,
+			"originalURL": "https://example.com/margins",
+			"receivedAt": "2026-10-30T08:00:00.000Z",
+			"isRead": true,
+			"isStarred": true,
+			"isBodyPruned": false,
+			"wordCount": 40,
+			"mediaKind": "video",
+			"durationSeconds": 1100
+		},
+		{
+			"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000003",
+			"feedKey": "morning-brief",
+			"source": "Morning Brief",
+			"title": "Your Sunday brief",
+			"author": "Morning Brief",
+			"originalURL": null,
+			"receivedAt": "2026-11-01T06:30:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"isBodyPruned": false
+		}
+	]
+}
