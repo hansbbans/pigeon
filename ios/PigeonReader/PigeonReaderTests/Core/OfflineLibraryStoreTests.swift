@@ -1349,48 +1349,46 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.pendingMutations(accountID: accountID, limit: 100).isEmpty)
 	}
 
-	@Test func missingStatusTargetMarksRepairWithoutAdvancingCursor() async throws {
+	@Test func statusForAMissingArticleIsSkippedInsteadOfFailingThePage() async throws {
+		// The phone keeps only part of the library, so a status for an article it
+		// never held is expected. It used to fail the page and force a full rebuild.
 		let store = OfflineLibraryStore.inMemory()
 		try await store.apply(
-			IncrementalSyncPage(cursor: "v1:previous", hasMore: false, changes: []),
+			try decodePage(Self.libraryPageJSON(cursor: "v1:previous", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "kept", html: "<p>Kept</p>", isRead: false),
+			])),
 			accountID: "account-a",
 		)
-		let page = IncrementalSyncPage(
-			cursor: "v1:missing-status",
-			hasMore: false,
-			changes: [
-				IncrementalSyncChange(
-					sequence: 1,
-					entityType: .status,
-					entityId: "missing-article",
-					operation: .upsert,
-					changedAt: Date(timeIntervalSince1970: 1_000),
-					payload: IncrementalSyncPayload(
-						feedKey: nil, streamId: nil, title: nil, feedURL: nil, siteURL: nil, iconURL: nil,
-						isActive: nil, folders: nil, id: nil, readerId: nil, source: nil, author: nil,
-						html: nil, text: nil, originalURL: nil, receivedAt: nil, isRead: true,
-						isStarred: nil, isBodyPruned: nil, itemId: "missing-article", updatedAt: nil,
-						version: nil, mutationId: nil,
-					),
-				),
-			],
+
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:missing-status", changes: [
+				Self.statusChangeJSON(sequence: 3, itemID: "missing-article", isRead: true),
+			])),
+			accountID: "account-a",
 		)
 
-		do {
-			try await store.apply(page, accountID: "account-a")
-			Issue.record("A missing status target should fail the page transaction.")
-		} catch let error as OfflineLibraryError {
-			#expect(error == .missingStatusTarget("missing-article"))
-		}
-
-		let stats = try await store.storageStats(accountID: "account-a")
 		let snapshot = try await store.loadSnapshot(accountID: "account-a")
-		#expect(stats.cacheState == .needsRepair)
-		#expect(snapshot.integrity.invalidChangeCount == 1)
-		#expect(snapshot.cursor == "v1:previous")
+		#expect(snapshot.cursor == "v1:missing-status")
+		#expect(snapshot.integrity.state != .needsRepair)
+		#expect(snapshot.articlesByCollection["feed/1"]?.map(\.id) == ["kept"])
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
 	}
 
-	@Test func unsupportedStatusDeleteMarksRepairWithoutAdvancingCursor() async throws {
+	@Test func starredStatusForAMissingArticleQueuesItForFetch() async throws {
+		let store = OfflineLibraryStore.inMemory()
+
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:starred", changes: [
+				Self.statusChangeJSON(sequence: 1, itemID: "starred-elsewhere", isRead: true, isStarred: true),
+			])),
+			accountID: "account-a",
+		)
+
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10) == ["starred-elsewhere"])
+	}
+
+	@Test func malformedChangeIsSkippedAndCounted() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let page = IncrementalSyncPage(
 			cursor: "v1:status-delete",
@@ -1407,12 +1405,121 @@ struct OfflineLibraryStoreTests {
 			],
 		)
 
-		await #expect(throws: OfflineLibraryError.invalidSyncChange("The status change for article-1 was malformed.")) {
-			try await store.apply(page, accountID: "account-a")
-		}
+		try await store.apply(page, accountID: "account-a")
+
 		let snapshot = try await store.loadSnapshot(accountID: "account-a")
-		#expect(snapshot.cursor == nil)
-		#expect(snapshot.integrity.state == .needsRepair)
+		#expect(snapshot.cursor == "v1:status-delete")
+		#expect(snapshot.integrity.state != .needsRepair)
+		#expect(snapshot.integrity.invalidChangeCount == 1)
+	}
+
+	@Test func fetchQueueOrdersUnreadNewestFirstThenStarred() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:listing", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "unread-old", receivedAt: "2026-08-15T10:00:00.000Z", isRead: false),
+				Self.articleChangeJSON(sequence: 3, id: "starred", receivedAt: "2026-08-15T11:00:00.000Z", isRead: true, isStarred: true),
+				Self.articleChangeJSON(sequence: 4, id: "unread-new", receivedAt: "2026-08-15T12:00:00.000Z", isRead: false),
+				Self.articleChangeJSON(sequence: 5, id: "read-plain", receivedAt: "2026-08-15T13:00:00.000Z", isRead: true),
+				Self.articleChangeJSON(sequence: 6, id: "unread-with-body", html: "<p>Here</p>", isRead: false),
+			])),
+			accountID: "account-a",
+		)
+
+		let queue = try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10)
+
+		#expect(queue == ["unread-new", "unread-old", "starred"])
+	}
+
+	@Test func applyingFetchedArticlesFillsBodiesWithoutChangingReadState() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:listing", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "story", isRead: false),
+				Self.statusChangeJSON(sequence: 3, itemID: "story", isRead: true),
+			])),
+			accountID: "account-a",
+		)
+		let fetched = try decodePage(Self.libraryPageJSON(cursor: "unused", changes: [
+			Self.articleChangeJSON(sequence: 0, id: "story", html: "<p>Full story</p>", isRead: false),
+		])).changes.compactMap(\.payload)
+
+		let stored = try await store.applyFetchedArticles(fetched, accountID: "account-a", dayBounds: nil)
+
+		#expect(stored.map(\.id) == ["story"])
+		let article = try #require(try await store.loadSnapshot(accountID: "account-a").articlesByCollection["feed/1"]?.first)
+		#expect(article.html == "<p>Full story</p>")
+		#expect(article.isRead)
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
+	}
+
+	@Test func fetchedArticleMissingFromTheStoreIsInserted() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:starred", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.statusChangeJSON(sequence: 2, itemID: "starred-elsewhere", isRead: true, isStarred: true),
+			])),
+			accountID: "account-a",
+		)
+		let fetched = try decodePage(Self.libraryPageJSON(cursor: "unused", changes: [
+			Self.articleChangeJSON(sequence: 0, id: "starred-elsewhere", html: "<p>Old favourite</p>", isRead: true, isStarred: true),
+		])).changes.compactMap(\.payload)
+
+		_ = try await store.applyFetchedArticles(fetched, accountID: "account-a", dayBounds: nil)
+
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		#expect(snapshot.articlesByCollection[ReaderSection.starred.rawValue]?.map(\.id) == ["starred-elsewhere"])
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
+	}
+
+	@Test func unavailableArticlesLeaveTheFetchQueue() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:listing", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "gone", isRead: false),
+				Self.articleChangeJSON(sequence: 3, id: "still-here", isRead: false),
+				Self.statusChangeJSON(sequence: 4, itemID: "queued-gone", isRead: true, isStarred: true),
+			])),
+			accountID: "account-a",
+		)
+
+		try await store.markArticlesUnavailable(ids: ["gone", "queued-gone"], accountID: "account-a")
+
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10) == ["still-here"])
+	}
+
+	@Test func promotionKeepsCanonicalBodiesForEveryListedArticle() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let accountID = "account-a"
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:old", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "downloaded", html: "<p>Already here</p>", isRead: false),
+			])),
+			accountID: accountID,
+		)
+		try await store.beginFullRebuild(accountID: accountID, at: Date(timeIntervalSince1970: 1_000))
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:new", changes: [
+				Self.feedChangeJSON(sequence: 0),
+				Self.articleChangeJSON(sequence: 0, id: "downloaded", isRead: false),
+			])),
+			accountID: accountID,
+		)
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.unread, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: accountID,
+		)
+
+		try await store.finishSynchronization(accountID: accountID, at: Date(timeIntervalSince1970: 2_000))
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection["feed/1"]?.first?.html == "<p>Already here</p>")
+		#expect(try await store.articleIDsNeedingFetch(accountID: accountID, limit: 10).isEmpty)
 	}
 
 	@Test func statusBeforeArticleIsResolvedAfterPageArticlesAreApplied() async throws {
@@ -2880,6 +2987,34 @@ struct OfflineLibraryStoreTests {
 			unreadCounts: feedCounts + folderCounts,
 			smartCounts: ReaderNavigationSmartCounts(forYou: 1, today: 1, unread: 1, starred: 0),
 		)
+	}
+
+
+	// MARK: - Sync page JSON
+
+	private static func libraryPageJSON(cursor: String, hasMore: Bool = false, changes: [String]) -> String {
+		#"{"cursor":"\#(cursor)","hasMore":\#(hasMore),"changes":[\#(changes.joined(separator: ","))]}"#
+	}
+
+	private static func feedChangeJSON(sequence: Int, feedKey: String = "daily", streamID: String = "feed/1") -> String {
+		#"{"sequence":\#(sequence),"entityType":"feed","entityId":"\#(feedKey)","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"feedKey":"\#(feedKey)","streamId":"\#(streamID)","title":"Daily","isActive":true,"folders":[],"sourceType":"rss"}}"#
+	}
+
+	/// An article change. Without `html` it is a listing row: metadata, no body.
+	private static func articleChangeJSON(
+		sequence: Int,
+		id: String,
+		html: String? = nil,
+		receivedAt: String = "2026-08-15T11:00:00.000Z",
+		isRead: Bool,
+		isStarred: Bool = false,
+	) -> String {
+		let body = html.map { #","html":"\#($0)""# } ?? ""
+		return #"{"sequence":\#(sequence),"entityType":"article","entityId":"\#(id)","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)"\#(body),"receivedAt":"\#(receivedAt)","isRead":\#(isRead),"isStarred":\#(isStarred),"isBodyPruned":false}}"#
+	}
+
+	private static func statusChangeJSON(sequence: Int, itemID: String, isRead: Bool, isStarred: Bool = false) -> String {
+		#"{"sequence":\#(sequence),"entityType":"status","entityId":"\#(itemID)","operation":"upsert","changedAt":"2026-08-15T12:00:00.000Z","payload":{"itemId":"\#(itemID)","isRead":\#(isRead),"isStarred":\#(isStarred),"updatedAt":"2026-08-15T12:00:00.000Z","version":1}}"#
 	}
 
 	private func decodePage(_ json: String) throws -> IncrementalSyncPage {

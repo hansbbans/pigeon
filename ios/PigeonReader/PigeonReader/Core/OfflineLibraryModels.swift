@@ -430,11 +430,21 @@ nonisolated protocol OfflineLibraryStoring: Sendable {
 	func clearCachedArticles(accountID: String) async throws
 	func searchArticles(query: String, collectionID: String?, accountID: String, limit: Int) async throws -> [Recommendation]
 	func removeArticles(ids: [String], accountID: String) async throws
+	func articleIDsNeedingFetch(accountID: String, limit: Int) async throws -> [String]
+	func applyFetchedArticles(_ articles: [IncrementalSyncPayload], accountID: String, dayBounds: ReaderLocalDayBounds?) async throws -> [Recommendation]
+	func markArticlesUnavailable(ids: [String], accountID: String) async throws
 }
 
 extension OfflineLibraryStoring {
 	/// Test doubles without article rows have nothing to remove.
 	func removeArticles(ids: [String], accountID: String) async throws {}
+
+	/// Test doubles without article rows have nothing to fetch.
+	func articleIDsNeedingFetch(accountID: String, limit: Int) async throws -> [String] { [] }
+
+	func applyFetchedArticles(_ articles: [IncrementalSyncPayload], accountID: String, dayBounds: ReaderLocalDayBounds?) async throws -> [Recommendation] { [] }
+
+	func markArticlesUnavailable(ids: [String], accountID: String) async throws {}
 
 	/// A store that cannot tell treats every feed change as a change.
 	func unchangedFeedChangeSequences(in page: IncrementalSyncPage, accountID: String) async throws -> Set<Int64> {
