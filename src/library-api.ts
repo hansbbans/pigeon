@@ -1,6 +1,8 @@
 import {
-	ARTICLE_METADATA_SQL,
 	articlePayload,
+	articleSelectSQL,
+	changeLogHead,
+	clampedLimit,
 	encodeCursor,
 	loadArticleBodySizes,
 	loadArticlePayloads,
@@ -26,7 +28,9 @@ import type { Env } from './types';
  * stays valid while new items arrive.
  */
 export const LIBRARY_DEFAULT_LIMIT = 200;
-export const LIBRARY_MAX_LIMIT = 500;
+/** Metadata rows are about half a kilobyte of JSON each, and page one also
+ * carries every feed; 200 keeps a page far inside the 10 ms CPU budget. */
+export const LIBRARY_MAX_LIMIT = 200;
 export const LIBRARY_RECENT_READ_DAYS = 7;
 export const LIBRARY_ARTICLES_MAX_IDS = 50;
 
@@ -45,18 +49,21 @@ export async function handleLibraryListing(request: Request, env: Env, now: Date
 	} catch (error) {
 		return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
 	}
-	const limit = parseLimit(url.searchParams.get('limit'));
+	const limit = clampedLimit(url.searchParams.get('limit'), LIBRARY_DEFAULT_LIMIT, LIBRARY_MAX_LIMIT);
 	const isFirstPage = position === null;
-	const snapshotSequence = position?.snapshotSequence ?? await currentSequence(env);
+	const snapshotSequence = position?.snapshotSequence ?? await changeLogHead(env);
 	const afterRowid = position?.afterRowid ?? 0;
 	const recentCutoff = new Date(now.getTime() - LIBRARY_RECENT_READ_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
 	const [feeds, { results }] = await Promise.all([
 		isFirstPage ? loadFeedPayloads(env, 'all') : Promise.resolve([]),
 		env.DB.prepare(
-			`${ARTICLE_METADATA_SQL}
+			// julianday(): older rows store received_at as `YYYY-MM-DD HH:MM:SS`,
+			// which does not compare as text against an ISO 8601 cutoff.
+			`${articleSelectSQL({ includeBody: false })}
 			 WHERE i.rowid > ?
-			   AND (i.is_read = 0 OR i.is_starred = 1 OR f.source_type = 'saved' OR i.received_at >= ?)
+			   AND (i.is_read = 0 OR i.is_starred = 1 OR f.source_type = 'saved'
+			     OR julianday(i.received_at) >= julianday(?))
 			 ORDER BY i.rowid ASC
 			 LIMIT ?`,
 		)
@@ -74,7 +81,7 @@ export async function handleLibraryListing(request: Request, env: Env, now: Date
 		snapshotCursor: encodeCursor(snapshotSequence),
 		continuation,
 		feeds,
-		articles: rows.map((row) => articlePayload(row, { includeBody: false })),
+		articles: rows.map((row) => articlePayload(row)),
 	});
 }
 
@@ -123,12 +130,6 @@ function parseArticleIDs(body: unknown): string[] {
 	return [...new Set(ids)];
 }
 
-async function currentSequence(env: Env): Promise<number> {
-	const row = await env.DB.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM sync_changes')
-		.first<{ sequence: number }>();
-	return row?.sequence ?? 0;
-}
-
 function encodeContinuation(position: ListingPosition): string {
 	return `${CONTINUATION_PREFIX}${position.snapshotSequence}:${position.afterRowid}`;
 }
@@ -143,10 +144,4 @@ function decodeContinuation(value: string | null): ListingPosition | null {
 		throw new Error('Invalid library continuation');
 	}
 	return { snapshotSequence, afterRowid };
-}
-
-function parseLimit(value: string | null): number {
-	const parsed = Number.parseInt(value ?? String(LIBRARY_DEFAULT_LIMIT), 10);
-	if (!Number.isFinite(parsed)) return LIBRARY_DEFAULT_LIMIT;
-	return Math.min(Math.max(parsed, 1), LIBRARY_MAX_LIMIT);
 }

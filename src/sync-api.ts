@@ -47,8 +47,6 @@ export interface ArticleSyncRow {
 	source: string;
 	title: string;
 	author: string | null;
-	html_content?: string;
-	text_content?: string | null;
 	original_url: string | null;
 	received_at: string;
 	is_read: number;
@@ -62,6 +60,12 @@ export interface ArticleSyncRow {
 	site_name: string | null;
 	extraction_state: string | null;
 	has_transcript: number;
+}
+
+/** An article row read with its body (`articleSelectSQL({ includeBody: true })`). */
+export interface ArticleBodySyncRow extends ArticleSyncRow {
+	html_content: string;
+	text_content: string | null;
 }
 
 interface StatusSyncRow {
@@ -81,7 +85,7 @@ export async function handleIncrementalSync(request: Request, env: Env): Promise
 	} catch (error) {
 		return Response.json({ error: errorMessage(error) }, { status: 400 });
 	}
-	const limit = parseLimit(url.searchParams.get('limit'));
+	const limit = clampedLimit(url.searchParams.get('limit'), DEFAULT_SYNC_LIMIT, MAX_SYNC_LIMIT);
 	// Payloads are read from current rows, so an event followed by a later event
 	// for the same item would only resend data the later event also carries.
 	// Article payloads include read and star state, which also supersedes older
@@ -143,10 +147,18 @@ export function decodeCursor(value: string | null): number {
 	return sequence;
 }
 
-function parseLimit(value: string | null): number {
-	const parsed = Number.parseInt(value ?? String(DEFAULT_SYNC_LIMIT), 10);
-	if (!Number.isFinite(parsed)) return DEFAULT_SYNC_LIMIT;
-	return Math.min(Math.max(parsed, 1), MAX_SYNC_LIMIT);
+/** A `limit` query parameter clamped to 1…`max`; missing or junk gives `fallback`. */
+export function clampedLimit(value: string | null, fallback: number, max: number): number {
+	const parsed = Number.parseInt(value ?? String(fallback), 10);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.min(Math.max(parsed, 1), max);
+}
+
+/** The newest change-log sequence, or 0 for an empty log. */
+export async function changeLogHead(env: Pick<Env, 'DB'>): Promise<number> {
+	const row = await env.DB.prepare('SELECT COALESCE(MAX(sequence), 0) AS head FROM sync_changes')
+		.first<{ head: number }>();
+	return row?.head ?? 0;
 }
 
 /** Trims a page to the events whose article bodies fit the budget. The first
@@ -267,9 +279,16 @@ const ARTICLE_METADATA_COLUMNS = `i.rowid, i.id, i.feed_key,
         i.published_at, i.image_url, i.site_name, i.extraction_state,
         EXISTS (SELECT 1 FROM item_transcripts t WHERE t.item_id = i.id) AS has_transcript`;
 
-/** Selects `ArticleSyncRow` metadata columns (no body) joined to the item's feed. */
-export const ARTICLE_METADATA_SQL = `SELECT ${ARTICLE_METADATA_COLUMNS}
+/**
+ * Selects article rows joined to the item's feed: `ArticleSyncRow` metadata,
+ * plus the body columns of `ArticleBodySyncRow` when `includeBody` is set.
+ * Append a `WHERE` clause.
+ */
+export function articleSelectSQL(options: { includeBody: boolean }): string {
+	const body = options.includeBody ? ', i.html_content, i.text_content' : '';
+	return `SELECT ${ARTICLE_METADATA_COLUMNS}${body}
  FROM items i JOIN feeds f ON f.feed_key = i.feed_key`;
+}
 
 /**
  * Article payloads keyed by item id. Without the body the query never reads
@@ -281,19 +300,21 @@ export async function loadArticlePayloads(
 	ids: string[],
 	options: { includeBody: boolean },
 ): Promise<Map<string, ArticlePayload>> {
-	const columns = options.includeBody
-		? `${ARTICLE_METADATA_COLUMNS}, i.html_content, i.text_content`
-		: ARTICLE_METADATA_COLUMNS;
-	const rows = await loadRows<ArticleSyncRow>(
-		env.DB,
-		ids,
-		`SELECT ${columns} FROM items i JOIN feeds f ON f.feed_key = i.feed_key WHERE i.id IN`,
-	);
-	return new Map(rows.map((row) => [row.id, articlePayload(row, options)]));
+	const sql = `${articleSelectSQL(options)} WHERE i.id IN`;
+	if (options.includeBody) {
+		const rows = await loadRows<ArticleBodySyncRow>(env.DB, ids, sql);
+		return new Map(rows.map((row) => [row.id, articlePayload(row, row)]));
+	}
+	const rows = await loadRows<ArticleSyncRow>(env.DB, ids, sql);
+	return new Map(rows.map((row) => [row.id, articlePayload(row)]));
 }
 
-/** Builds one article payload. Field order matches the sync contract. */
-export function articlePayload(article: ArticleSyncRow, options: { includeBody: boolean }): ArticlePayload {
+/** Builds one article payload. Field order matches the sync contract. Without
+ * `body` the payload leaves out `html`, `text` and `isPaywalled`. */
+export function articlePayload(
+	article: ArticleSyncRow,
+	body?: Pick<ArticleBodySyncRow, 'html_content' | 'text_content'>,
+): ArticlePayload {
 	return {
 		id: article.id,
 		readerId: googleReaderItemId(article.rowid),
@@ -301,13 +322,13 @@ export function articlePayload(article: ArticleSyncRow, options: { includeBody: 
 		source: article.source,
 		title: article.title,
 		author: article.author,
-		...(options.includeBody ? { html: article.html_content, text: article.text_content } : {}),
+		...(body ? { html: body.html_content, text: body.text_content } : {}),
 		originalURL: article.original_url,
 		receivedAt: toISO8601(article.received_at),
 		isRead: article.is_read === 1,
 		isStarred: article.is_starred === 1,
 		isBodyPruned: article.content_pruned_at !== null,
-		...(options.includeBody ? { isPaywalled: isPaywalledHtml(article.html_content ?? '') } : {}),
+		...(body ? { isPaywalled: isPaywalledHtml(body.html_content) } : {}),
 		...readingLengthFields(article),
 		...savedMetadataFields(article, 'imageURL'),
 		// Omitted unless true; fetch the body from GET /api/v1/items/:id/transcript.

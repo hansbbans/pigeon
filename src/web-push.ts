@@ -3,6 +3,7 @@ import type { Env } from './types';
 import type { RefreshQueryBudget } from './rss-fetcher';
 import { truncateUtf8 } from './content-size';
 import { notSavedFeedSql, SAVED_FEED_KEY } from './saved-items';
+import { changeLogHead } from './sync-api';
 
 const encoder = new TextEncoder();
 const MAX_SUBSCRIPTIONS = 32;
@@ -146,12 +147,12 @@ export async function handleBrowserPush(request: Request, env: Env): Promise<Res
  if (found?.count !== feedKeys.length) return json({ error: 'Unknown feed' }, 400);
  await env.DB.prepare(PUSH_SCHEMA).run();
  const now = new Date().toISOString();
- const head = await env.DB.prepare('SELECT COALESCE(MAX(sequence), 0) AS head FROM sync_changes').first<{ head: number }>();
+ const head = await changeLogHead(env);
  if (request.method === 'PUT') {
   if (typeof body.id !== 'string' || typeof body.managementToken !== 'string' || body.managementToken.length > 128) return json({ error: 'Subscription credentials required' }, 400);
   try {
    const result = await env.DB.prepare(`UPDATE browser_push_subscriptions SET endpoint = ?, p256dh = ?, auth = ?, feed_keys = ?, vapid_public = ?, cursor = ?, updated_at = ?
-    WHERE id = ? AND management_hash = ?`).bind(subscription.endpoint, p256dh, auth, JSON.stringify(feedKeys), config.publicKey, head?.head ?? 0, now, body.id, await managementHash(body.managementToken)).run();
+    WHERE id = ? AND management_hash = ?`).bind(subscription.endpoint, p256dh, auth, JSON.stringify(feedKeys), config.publicKey, head, now, body.id, await managementHash(body.managementToken)).run();
    return result.meta.changes ? json({ id: body.id }) : json({ error: 'Subscription not found' }, 404);
   } catch (error) {
    if (error instanceof Error && /UNIQUE constraint failed: browser_push_subscriptions.endpoint/.test(error.message)) return json({ error: 'Endpoint already registered' }, 409);
@@ -163,7 +164,7 @@ export async function handleBrowserPush(request: Request, env: Env): Promise<Res
  const result = await env.DB.prepare(`INSERT OR IGNORE INTO browser_push_subscriptions
   (id, endpoint, p256dh, auth, management_hash, feed_keys, vapid_public, cursor, updated_at, last_attempt_at)
   SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM browser_push_subscriptions) < ?`)
-  .bind(id, subscription.endpoint, p256dh, auth, await managementHash(token), JSON.stringify(feedKeys), config.publicKey, head?.head ?? 0, now, now, MAX_SUBSCRIPTIONS).run();
+  .bind(id, subscription.endpoint, p256dh, auth, await managementHash(token), JSON.stringify(feedKeys), config.publicKey, head, now, now, MAX_SUBSCRIPTIONS).run();
  return result.meta.changes ? json({ id, managementToken: token }, 201) : json({ error: 'Subscription already exists or browser limit reached' }, 409);
 }
 
@@ -173,7 +174,7 @@ export async function dispatchBrowserPush(env: Env, budget: Pick<RefreshQueryBud
  // Never migrate on cron. A missing table means no browser has opted in yet.
  const table = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'browser_push_subscriptions'").first();
  if (!table || !budget.reserve(2)) return;
- const head = (await env.DB.prepare('SELECT COALESCE(MAX(sequence), 0) AS head FROM sync_changes').first<{ head: number }>())?.head ?? 0;
+ const head = await changeLogHead(env);
  const { results } = await env.DB.prepare(`SELECT id, endpoint, p256dh, auth, feed_keys, cursor, last_attempt_at, updated_at FROM browser_push_subscriptions
   WHERE vapid_public = ? AND updated_at >= ? AND last_attempt_at < ? ORDER BY last_attempt_at, id LIMIT ?`)
   .bind(config.publicKey, new Date(now.getTime() - 90 * 86400_000).toISOString(), new Date(now.getTime() - PUSH_ATTEMPT_GAP_MS).toISOString(), MAX_SENDS).all<Subscription>();

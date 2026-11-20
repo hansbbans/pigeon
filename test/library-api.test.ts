@@ -146,6 +146,35 @@ test('listing article payloads carry no body fields and otherwise match sync', a
 	state.database.close();
 });
 
+test('listing keeps a recently read row stored in the legacy SQLite timestamp format', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	// Older rows store `YYYY-MM-DD HH:MM:SS`; a space sorts before the `T` of an
+	// ISO cutoff, so a text comparison dropped rows from the boundary day.
+	const boundaryDay = new Date(NOW.getTime() - 7 * DAY + 3 * 60 * 60 * 1000);
+	const legacy = boundaryDay.toISOString().replace('T', ' ').slice(0, 19);
+	insertItem(state.database, 'read-legacy-format', { receivedAt: legacy, isRead: true });
+
+	const body = await listingBody(state.env);
+
+	assert.deepEqual(body.articles.map((article) => article.id), ['read-legacy-format']);
+	state.database.close();
+});
+
+test('listing pages hold at most 200 articles whatever limit is asked for', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	for (let index = 0; index < 205; index += 1) {
+		insertItem(state.database, `unread-${index}`, { receivedAt: daysAgo(1) });
+	}
+
+	const body = await listingBody(state.env, { limit: '500' });
+
+	assert.equal(body.articles.length, 200);
+	assert.notEqual(body.continuation, null);
+	state.database.close();
+});
+
 test('listing rejects a malformed continuation', async () => {
 	const state = fixture();
 	const response = await listing(state.env, { continuation: 'bogus' });
