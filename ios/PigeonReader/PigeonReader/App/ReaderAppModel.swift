@@ -1908,20 +1908,39 @@ final class ReaderAppModel {
 			await offlinePreparationTask.value
 			return
 		}
+		await beginOfflinePreparationTask().value
+		await processSavedItems()
+	}
 
+	/// Starts a forced offline preparation without waiting for it, unless one
+	/// is already running. The task is registered before this returns, so a
+	/// caller that awaits `prepareOfflineLibrary()` next joins it.
+	private func startOfflinePreparationInBackground() {
+		guard offlineSynchronizationEnabled, session != nil, apiClient != nil, offlinePreparationTask == nil else {
+			return
+		}
+		lastOfflinePreparationFailureAt = nil
+		lastOfflinePreparationFailureAccountID = nil
+		let task = beginOfflinePreparationTask()
+		Task { @MainActor [weak self] in
+			await task.value
+			await self?.processSavedItems()
+		}
+	}
+
+	private func beginOfflinePreparationTask() -> Task<Void, Never> {
 		let taskID = UUID()
 		let task = Task { @MainActor [weak self] in
 			guard let self else { return }
 			await self.performOfflineLibraryPreparation()
+			if self.offlinePreparationTaskID == taskID {
+				self.offlinePreparationTask = nil
+				self.offlinePreparationTaskID = nil
+			}
 		}
 		offlinePreparationTaskID = taskID
 		offlinePreparationTask = task
-		await task.value
-		if offlinePreparationTaskID == taskID {
-			offlinePreparationTask = nil
-			offlinePreparationTaskID = nil
-		}
-		await processSavedItems()
+		return task
 	}
 
 	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
@@ -2851,15 +2870,6 @@ final class ReaderAppModel {
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return }
 		if hasLoadedNavigation {
 			await loadNavigation(force: true)
-		}
-	}
-
-	/// Starts a forced offline preparation without waiting for it, unless one
-	/// is already running.
-	private func startOfflinePreparationInBackground() {
-		guard offlinePreparationTask == nil else { return }
-		Task { @MainActor [weak self] in
-			await self?.prepareOfflineLibrary(force: true)
 		}
 	}
 
