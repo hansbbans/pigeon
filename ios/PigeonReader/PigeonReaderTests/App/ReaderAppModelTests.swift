@@ -4339,6 +4339,76 @@ struct ReaderAppModelTests {
 		#expect(syncRequests[1].query["limit"] == "200")
 	}
 
+	@Test func rebuildUsesTheLibraryListingInsteadOfReplayingTheChangeLog() async throws {
+		let session = try makeSession(token: "listing-rebuild-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "v1:12"), statusCode: 200)],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: "l1:9:1", articleIDs: ["listed-1"]), statusCode: 200),
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-2"], withFeed: false), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.syncRequests().isEmpty)
+		#expect(await client.libraryRequests().map { $0.query["continuation"] } == [nil, "l1:9:1"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		#expect(try await store.loadSnapshot(accountID: session.storageIdentity).cursor == "v1:9")
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(Set(committed.map(\.id)) == ["listed-1", "listed-2"])
+
+		await model.prepareOfflineLibrary()
+
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == ["v1:9"])
+	}
+
+	@Test func rebuildFallsBackToTheChangeLogWhenTheServerHasNoListing() async throws {
+		let session = try makeSession(token: "listing-fallback-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "replayed-cursor"), statusCode: 200)],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.libraryRequests().count == 1)
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == [nil])
+		#expect(syncRequests.map { $0.query["limit"] } == ["50"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
+	@Test func interruptedListingRebuildResumesFromItsContinuation() async throws {
+		let session = try makeSession(token: "listing-resume-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: "l1:9:1", articleIDs: ["listed-1"]), statusCode: 200),
+				.init(data: Data(#"{"error":"boom"}"#.utf8), statusCode: 500),
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-2"], withFeed: false), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+		#expect(model.offlineStorageStats.cacheState != .complete)
+
+		await model.prepareOfflineLibrary(force: true)
+
+		#expect(await client.libraryRequests().map { $0.query["continuation"] } == [nil, "l1:9:1", "l1:9:1"])
+		#expect(await client.syncRequests().isEmpty)
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		// The test server lists no subscriptions, so look at the committed rows.
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(Set(committed.map(\.id)) == ["listed-1", "listed-2"])
+	}
+
 	@Test func verifiedWarmCacheUsesOneIncrementalRequestWithoutNavigationRefetch() async throws {
 		let client = IntegritySyncHTTPClient(
 			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
@@ -10901,6 +10971,34 @@ struct ReaderAppModelTests {
 		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":false,\"changes\":[]}".utf8)
 	}
 
+	/// A `GET /api/v1/library` page with snapshot cursor `v1:9`: the "daily"
+	/// feed (stream `feed/1`) and unread articles without bodies.
+	private func libraryListingPage(continuation: String?, articleIDs: [String], withFeed: Bool = true) -> Data {
+		let continuationJSON = continuation.map { "\"\($0)\"" } ?? "null"
+		let feeds = withFeed
+			? #"[{"feedKey":"daily","streamId":"feed/1","title":"Daily","isActive":true,"folders":[],"sourceType":"rss"}]"#
+			: "[]"
+		let articles = articleIDs.map { id in
+			#"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","receivedAt":"2026-08-15T11:00:00.000Z","isRead":false,"isStarred":false,"isBodyPruned":false}"#
+		}
+		return Data(#"{"snapshotCursor":"v1:9","continuation":\#(continuationJSON),"feeds":\#(feeds),"articles":[\#(articles.joined(separator: ","))]}"#.utf8)
+	}
+
+	/// A cache written before integrity tracking: it has to be rebuilt.
+	private func makeLegacyCacheStore(session: PigeonSession) async throws -> OfflineLibraryStore {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "legacy-article")],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		return store
+	}
+
 	private func statusSyncPage(itemID: String) -> Data {
 		Data("""
 		{"cursor":"status-cursor","hasMore":false,"changes":[{"sequence":2,"entityType":"status","entityId":"\(itemID)","operation":"upsert","changedAt":"2026-08-21T12:00:00.000Z","payload":{"itemId":"\(itemID)","isRead":true,"isStarred":false,"updatedAt":"2026-08-21T12:00:00.000Z","version":2,"mutationId":null}}]}
@@ -11027,11 +11125,15 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 	}
 
 	private var syncResponses: [SyncResponse]
+	/// Served in order for `/api/v1/library`; once empty the server has no
+	/// listing (404), like a Worker from before the listing existed.
+	private var libraryResponses: [SyncResponse]
 	private let subscriptionStatusCode: Int
 	private var capturedRequests: [Request] = []
 
-	init(syncResponses: [SyncResponse], subscriptionStatusCode: Int = 200) {
+	init(syncResponses: [SyncResponse], libraryResponses: [SyncResponse] = [], subscriptionStatusCode: Int = 200) {
 		self.syncResponses = syncResponses
+		self.libraryResponses = libraryResponses
 		self.subscriptionStatusCode = subscriptionStatusCode
 	}
 
@@ -11049,6 +11151,10 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 			response = syncResponses.isEmpty
 				? SyncResponse(data: Data(#"{"cursor":"default","hasMore":false,"changes":[]}"#.utf8), statusCode: 200)
 				: syncResponses.removeFirst()
+		case "/api/v1/library":
+			response = libraryResponses.isEmpty
+				? SyncResponse(data: Data(#"{"error":"not found"}"#.utf8), statusCode: 404)
+				: libraryResponses.removeFirst()
 		case "/reader/api/0/subscription/list":
 			response = SyncResponse(data: Data(#"{"subscriptions":[]}"#.utf8), statusCode: subscriptionStatusCode)
 		case "/reader/api/0/unread-count", "/reader/api/0/stream/items/ids":
@@ -11078,6 +11184,10 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 
 	func syncRequests() -> [Request] {
 		capturedRequests.filter { $0.path == "/api/v1/sync" }
+	}
+
+	func libraryRequests() -> [Request] {
+		capturedRequests.filter { $0.path == "/api/v1/library" }
 	}
 }
 
@@ -12124,6 +12234,10 @@ private actor MutationReplayFailureHTTPClient: HTTPClient {
 		case "/api/v1/sync":
 			statusCode = 200
 			data = Data(#"{"cursor":"launch-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/api/v1/library":
+			// A Worker from before the listing: rebuilds replay the change log.
+			statusCode = 404
+			data = Data(#"{"error":"not found"}"#.utf8)
 		case "/reader/api/0/subscription/list":
 			statusCode = 200
 			data = Data(#"{"subscriptions":[]}"#.utf8)

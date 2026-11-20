@@ -2127,11 +2127,17 @@ final class ReaderAppModel {
 					generation: preparationGeneration,
 				) else { return }
 			}
+			let syncResult: OfflineSyncResult
 			if requiresFullRebuild {
 				// Keep the canonical last-readable cache intact until replay has
-				// succeeded and the first page is already visible.
-				try await offlineStore.beginFullRebuild(accountID: accountID, at: synchronizationNow)
-				fullRebuildStartedAt = synchronizationNow
+				// succeeded and the first page is already visible. A rebuild an
+				// earlier attempt left part-way resumes instead of starting over.
+				let rebuild = try await offlineStore.beginOrResumeFullRebuild(
+					accountID: accountID,
+					at: synchronizationNow,
+					maxAge: Self.listingRebuildMaxAge,
+				)
+				fullRebuildStartedAt = rebuild.startedAt
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -2140,7 +2146,7 @@ final class ReaderAppModel {
 					await abandonFullRebuildIfNeeded(
 						accountID: accountID,
 						preparationID: preparationID,
-						startedAt: synchronizationNow,
+						startedAt: rebuild.startedAt,
 					)
 					return
 				}
@@ -2156,15 +2162,37 @@ final class ReaderAppModel {
 					invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
 					lastPageHasMore: nil,
 				)
+				if try await rebuildFromLibraryListing(
+					accountID: accountID,
+					apiClient: apiClient,
+					preparationID: preparationID,
+					resumeContinuation: rebuild.listingContinuation,
+					dayBounds: dayBounds,
+				) {
+					// The staged library is listed; navigation, promotion and the
+					// hydrate below run as after a replay. Changes made while it was
+					// listed arrive with the next sync from the snapshot cursor.
+					syncResult = OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: true)
+				} else {
+					syncResult = try await synchronizeIncrementally(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						fullRebuild: true,
+						dayBounds: dayBounds,
+						preservingCurrentSelection: isInitialPreparation,
+					)
+				}
+			} else {
+				syncResult = try await synchronizeIncrementally(
+					accountID: accountID,
+					apiClient: apiClient,
+					preparationID: preparationID,
+					fullRebuild: false,
+					dayBounds: dayBounds,
+					preservingCurrentSelection: isInitialPreparation,
+				)
 			}
-			let syncResult = try await synchronizeIncrementally(
-				accountID: accountID,
-				apiClient: apiClient,
-				preparationID: preparationID,
-				fullRebuild: requiresFullRebuild,
-				dayBounds: dayBounds,
-				preservingCurrentSelection: isInitialPreparation,
-			)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				if let fullRebuildStartedAt {
 					await abandonFullRebuildIfNeeded(
@@ -2313,8 +2341,8 @@ final class ReaderAppModel {
 			if isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) {
 				// A cancelled incremental sync keeps every page it applied, and the
 				// cursor moved with each one, so the next preparation resumes there.
-				// Only a cancelled rebuild, whose pages sit in an abandoned staging
-				// generation, has to start over.
+				// A cancelled rebuild stays a rebuild; its staged pages wait for the
+				// next preparation to resume them.
 				let resumesIncrementally = fullRebuildStartedAt == nil && offlineCacheIntegrity.state == .complete
 				offlineCacheIntegrity = OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
@@ -6166,17 +6194,73 @@ final class ReaderAppModel {
 		return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 	}
 
+	/// How long a part-listed rebuild may wait to be resumed before the next
+	/// attempt starts it over.
+	private static let listingRebuildMaxAge: TimeInterval = 24 * 60 * 60
+
+	/// Rebuilds the staged library from the server's unread-first listing:
+	/// metadata for unread, starred, saved and recently read articles in a few
+	/// requests, each page committed with its continuation so an interrupted
+	/// rebuild resumes. Bodies download afterwards. Returns false when the
+	/// server has no listing (a Worker older than this app), and the caller
+	/// replays the change log instead. A superseded preparation stops early and
+	/// leaves the stage for the next one.
+	private func rebuildFromLibraryListing(
+		accountID: String,
+		apiClient: PigeonAPIClient,
+		preparationID: UUID,
+		resumeContinuation: String?,
+		dayBounds: ReaderLocalDayBounds,
+	) async throws -> Bool {
+		// "" means an earlier attempt finished listing; only promotion remains.
+		guard resumeContinuation != "" else { return true }
+		var continuation = resumeContinuation
+		var requestLimit = Self.libraryListingPageLimit
+		var seenContinuations = Set<String>()
+		while true {
+			try Task.checkCancellation()
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return true }
+			let response: (page: LibraryListingPage, limit: Int)
+			do {
+				response = try await withTransientSyncRetry(initialLimit: requestLimit) { limit in
+					try await apiClient.libraryPage(continuation: continuation, limit: limit)
+				}
+			} catch PigeonError.server(statusCode: 404, _) {
+				return false
+			}
+			requestLimit = min(response.limit * 2, Self.libraryListingPageLimit)
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return true }
+			try await offlineStore.applyLibraryListingPage(response.page, accountID: accountID, dayBounds: dayBounds)
+			offlineSyncCursor = response.page.snapshotCursor
+			guard let next = response.page.continuation else { return true }
+			guard seenContinuations.insert(next).inserted else { throw PigeonError.invalidResponse }
+			continuation = next
+		}
+	}
+
+	private static let libraryListingPageLimit = 200
+
 	private func incrementalSyncWithRetry(
 		apiClient: PigeonAPIClient,
 		cursor: String?,
 		initialLimit: Int,
 	) async throws -> (page: IncrementalSyncPage, limit: Int) {
+		try await withTransientSyncRetry(initialLimit: initialLimit) { limit in
+			try await apiClient.incrementalSync(cursor: cursor, limit: limit)
+		}
+	}
+
+	/// Retries a sync or listing request that hit a transient server failure
+	/// (502, 503, Cloudflare 1102) with half the page size each time.
+	private func withTransientSyncRetry<Page>(
+		initialLimit: Int,
+		request: (Int) async throws -> Page,
+	) async throws -> (page: Page, limit: Int) {
 		var limit = max(1, min(initialLimit, 200))
 		let backoffs: [UInt64] = [250_000_000, 500_000_000, 1_000_000_000]
 		for attempt in 0...backoffs.count {
 			do {
-				let page = try await apiClient.incrementalSync(cursor: cursor, limit: limit)
-				return (page, limit)
+				return (try await request(limit), limit)
 			} catch {
 				guard attempt < backoffs.count, isTransientOfflineSyncFailure(error) else {
 					throw error
