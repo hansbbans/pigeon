@@ -1,0 +1,41 @@
+{
+	"articles": [
+		{
+			"id": "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+			"feedKey": "design-weekly",
+			"source": "Design Weekly",
+			"title": "Typography for a durable reader",
+			"author": "Ada Lovelace",
+			"html": "<p>Typography decides whether a long read stays readable.</p>",
+			"text": "Typography decides whether a long read stays readable.",
+			"originalURL": "https://example.com/durable-reader",
+			"receivedAt": "2026-11-01T09:00:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"isBodyPruned": false,
+			"isPaywalled": false,
+			"wordCount": 2380,
+			"mediaKind": "text"
+		},
+		{
+			"id": "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000003",
+			"feedKey": "morning-brief",
+			"source": "Morning Brief",
+			"title": "Your Sunday brief",
+			"author": "Morning Brief",
+			"html": "<p>This week in brief.</p><div data-component-name=\"Paywall\"><p>Keep reading with a paid subscription.</p></div>",
+			"text": null,
+			"originalURL": null,
+			"receivedAt": "2026-11-01T06:30:00.000Z",
+			"isRead": false,
+			"isStarred": false,
+			"isBodyPruned": false,
+			"isPaywalled": true
+		}
+	],
+	"missing": [
+		"9f9f9f9f-0000-4000-8000-000000000000"
+	]
+}

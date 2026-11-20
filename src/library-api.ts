@@ -2,7 +2,10 @@ import {
 	ARTICLE_METADATA_SQL,
 	articlePayload,
 	encodeCursor,
+	loadArticleBodySizes,
+	loadArticlePayloads,
 	loadFeedPayloads,
+	SYNC_PAGE_BODY_BUDGET,
 	type ArticleSyncRow,
 } from './sync-api';
 import type { Env } from './types';
@@ -25,6 +28,7 @@ import type { Env } from './types';
 export const LIBRARY_DEFAULT_LIMIT = 200;
 export const LIBRARY_MAX_LIMIT = 500;
 export const LIBRARY_RECENT_READ_DAYS = 7;
+export const LIBRARY_ARTICLES_MAX_IDS = 50;
 
 const CONTINUATION_PREFIX = 'l1:';
 
@@ -72,6 +76,51 @@ export async function handleLibraryListing(request: Request, env: Env, now: Date
 		feeds,
 		articles: rows.map((row) => articlePayload(row, { includeBody: false })),
 	});
+}
+
+/**
+ * Full article payloads (with bodies) for up to fifty ids, in request order.
+ * The response stops before the article that would take its bodies past the
+ * sync page budget, so a request stays inside the Worker's CPU limit; the
+ * first article is always returned so one oversized body still arrives. Ids
+ * with no item are listed in `missing`; ids neither returned nor missing were
+ * trimmed and should be requested again.
+ */
+export async function handleLibraryArticles(request: Request, env: Env): Promise<Response> {
+	let ids: string[];
+	try {
+		ids = parseArticleIDs(await request.json());
+	} catch (error) {
+		return Response.json({ error: error instanceof Error ? error.message : 'Invalid request body' }, { status: 400 });
+	}
+	const sizes = await loadArticleBodySizes(env, ids);
+	const served: string[] = [];
+	let total = 0;
+	for (const id of ids) {
+		const size = sizes.get(id);
+		if (size === undefined) continue;
+		if (served.length > 0 && total + size > SYNC_PAGE_BODY_BUDGET) break;
+		total += size;
+		served.push(id);
+	}
+	const payloads = await loadArticlePayloads(env, served, { includeBody: true });
+	// An item whose feed row is gone has a size but no payload. Report it as
+	// missing too, or the app would keep requesting it.
+	return Response.json({
+		articles: served.flatMap((id) => payloads.get(id) ?? []),
+		missing: ids.filter((id) => !sizes.has(id) || (served.includes(id) && !payloads.has(id))),
+	});
+}
+
+function parseArticleIDs(body: unknown): string[] {
+	const ids = (body as { ids?: unknown } | null)?.ids;
+	if (!Array.isArray(ids) || ids.length === 0 || ids.length > LIBRARY_ARTICLES_MAX_IDS) {
+		throw new Error(`ids must list 1 to ${LIBRARY_ARTICLES_MAX_IDS} article ids`);
+	}
+	if (!ids.every((id): id is string => typeof id === 'string' && id.length > 0)) {
+		throw new Error('ids must be non-empty strings');
+	}
+	return [...new Set(ids)];
 }
 
 async function currentSequence(env: Env): Promise<number> {

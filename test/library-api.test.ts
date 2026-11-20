@@ -2,8 +2,8 @@ import * as assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import { handleLibraryListing } from '../src/library-api';
-import { handleIncrementalSync } from '../src/sync-api';
+import { handleLibraryArticles, handleLibraryListing, LIBRARY_ARTICLES_MAX_IDS } from '../src/library-api';
+import { handleIncrementalSync, SYNC_PAGE_BODY_BUDGET } from '../src/sync-api';
 import { createSchemaDatabase } from './helpers/sqlite-d1';
 
 const NOW = new Date('2026-11-20T12:00:00.000Z');
@@ -150,5 +150,100 @@ test('listing rejects a malformed continuation', async () => {
 	const state = fixture();
 	const response = await listing(state.env, { continuation: 'bogus' });
 	assert.equal(response.status, 400);
+	state.database.close();
+});
+
+async function fetchArticles(env: never, body: unknown): Promise<Response> {
+	return handleLibraryArticles(new Request('https://pigeon.example/api/v1/library/articles', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	}), env);
+}
+
+interface ArticlesBody {
+	articles: Array<Record<string, unknown> & { id: string; html?: string }>;
+	missing: string[];
+}
+
+function insertBodyOfLength(database: DatabaseSync, id: string, totalLength: number): void {
+	// html + text together make up the body size the page budget counts.
+	const half = Math.floor(totalLength / 2);
+	database.prepare(
+		`INSERT INTO items (id, feed_key, subject, html_content, text_content, message_id, received_at)
+		 VALUES (?, 'design-weekly', ?, ?, ?, ?, ?)`,
+	).run(id, `Title ${id}`, 'h'.repeat(half), 't'.repeat(totalLength - half), `message-${id}`, daysAgo(1));
+}
+
+test('article fetch returns full payloads in request order', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	insertItem(state.database, 'first', { receivedAt: daysAgo(3) });
+	insertItem(state.database, 'second', { receivedAt: daysAgo(1) });
+
+	const response = await fetchArticles(state.env, { ids: ['second', 'first'] });
+	assert.equal(response.status, 200);
+	const body = await response.json() as ArticlesBody;
+
+	assert.deepEqual(body.articles.map((article) => article.id), ['second', 'first']);
+	assert.equal(body.articles[0]?.html, '<p>Body of second');
+	assert.equal(body.articles[0]?.text, 'Body');
+	assert.equal(body.articles[0]?.isPaywalled, false);
+	assert.deepEqual(body.missing, []);
+	state.database.close();
+});
+
+test('article fetch reports ids with no item as missing', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	insertItem(state.database, 'present', { receivedAt: daysAgo(1) });
+
+	const body = await (await fetchArticles(state.env, { ids: ['gone', 'present'] })).json() as ArticlesBody;
+
+	assert.deepEqual(body.articles.map((article) => article.id), ['present']);
+	assert.deepEqual(body.missing, ['gone']);
+	state.database.close();
+});
+
+test('article fetch trims to the body budget but always returns the first article', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	const share = Math.floor(SYNC_PAGE_BODY_BUDGET * 0.4);
+	insertBodyOfLength(state.database, 'a', share);
+	insertBodyOfLength(state.database, 'b', share);
+	insertBodyOfLength(state.database, 'c', share);
+	insertBodyOfLength(state.database, 'huge', SYNC_PAGE_BODY_BUDGET * 2);
+
+	const trimmed = await (await fetchArticles(state.env, { ids: ['a', 'b', 'c'] })).json() as ArticlesBody;
+	const oversized = await (await fetchArticles(state.env, { ids: ['huge', 'a'] })).json() as ArticlesBody;
+
+	assert.deepEqual(trimmed.articles.map((article) => article.id), ['a', 'b']);
+	assert.deepEqual(trimmed.missing, []);
+	assert.deepEqual(oversized.articles.map((article) => article.id), ['huge']);
+	assert.deepEqual(oversized.missing, []);
+	state.database.close();
+});
+
+test('article fetch rejects an empty list, more than 50 ids, and a malformed body', async () => {
+	const state = fixture();
+	const tooMany = Array.from({ length: LIBRARY_ARTICLES_MAX_IDS + 1 }, (_, index) => `id-${index}`);
+
+	assert.equal((await fetchArticles(state.env, { ids: [] })).status, 400);
+	assert.equal((await fetchArticles(state.env, { ids: tooMany })).status, 400);
+	assert.equal((await fetchArticles(state.env, { ids: [1, 2] })).status, 400);
+	assert.equal((await fetchArticles(state.env, 'nope')).status, 400);
+	state.database.close();
+});
+
+test('article fetch reports an item whose feed is gone as missing instead of dropping it silently', async () => {
+	const state = fixture();
+	insertFeeds(state.database);
+	state.database.exec('PRAGMA foreign_keys = OFF');
+	insertItem(state.database, 'orphan', { receivedAt: daysAgo(1), feedKey: 'deleted-feed' });
+
+	const body = await (await fetchArticles(state.env, { ids: ['orphan'] })).json() as ArticlesBody;
+
+	assert.deepEqual(body.articles, []);
+	assert.deepEqual(body.missing, ['orphan']);
 	state.database.close();
 });

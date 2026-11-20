@@ -243,6 +243,14 @@ test('library listing page', async (t) => {
 	await assertMatchesFixture(await state.request('/api/v1/library?limit=200'), 'library.response.json');
 });
 
+test('library article fetch', async (t) => {
+	const state = await library(t);
+	await assertMatchesFixture(
+		await state.request('/api/v1/library/articles', json('POST', requestFixture('library-articles.request.json'))),
+		'library-articles.response.json',
+	);
+});
+
 test('mutation batch: applied, then replayed', async (t) => {
 	const state = await library(t);
 	const request = requestFixture('mutations.request.json');

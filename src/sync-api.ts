@@ -152,20 +152,25 @@ function parseLimit(value: string | null): number {
 /** Trims a page to the events whose article bodies fit the budget. The first
  * event is always kept, so one oversized article still makes progress. */
 async function withinBodyBudget(env: Env, events: SyncEventRow[]): Promise<SyncEventRow[]> {
-	const sizes = new Map(
-		(await loadRows<{ id: string; size: number }>(
-			env.DB,
-			uniqueEntityIDs(events, 'article'),
-			`SELECT id, LENGTH(html_content) + COALESCE(LENGTH(text_content), 0) AS size
-			 FROM items WHERE id IN`,
-		)).map((row) => [row.id, row.size]),
-	);
+	const sizes = await loadArticleBodySizes(env, uniqueEntityIDs(events, 'article'));
 	let total = 0;
 	for (const [index, event] of events.entries()) {
 		total += event.entity_type === 'article' ? (sizes.get(event.entity_id) ?? 0) : 0;
 		if (index > 0 && total > SYNC_PAGE_BODY_BUDGET) return events.slice(0, index);
 	}
 	return events;
+}
+
+/** Body sizes (html plus text, in characters) of the items that exist, keyed by id. */
+export async function loadArticleBodySizes(env: Env, ids: string[]): Promise<Map<string, number>> {
+	return new Map(
+		(await loadRows<{ id: string; size: number }>(
+			env.DB,
+			ids,
+			`SELECT id, LENGTH(html_content) + COALESCE(LENGTH(text_content), 0) AS size
+			 FROM items WHERE id IN`,
+		)).map((row) => [row.id, row.size]),
+	);
 }
 
 async function loadPayloads(env: Env, events: SyncEventRow[]): Promise<Map<string, unknown>> {
