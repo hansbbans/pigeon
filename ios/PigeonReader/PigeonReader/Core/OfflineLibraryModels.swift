@@ -6,6 +6,25 @@ nonisolated struct IncrementalSyncPage: Codable, Equatable, Sendable {
 	let changes: [IncrementalSyncChange]
 }
 
+/// One page of `GET /api/v1/library`: the unread-first listing that rebuilds
+/// the offline library. Articles carry metadata only; their bodies come from
+/// `POST /api/v1/library/articles`. `snapshotCursor` is the `/api/v1/sync`
+/// cursor to continue from once the listing is complete.
+nonisolated struct LibraryListingPage: Codable, Equatable, Sendable {
+	let snapshotCursor: String
+	let continuation: String?
+	let feeds: [IncrementalSyncPayload]
+	let articles: [IncrementalSyncPayload]
+}
+
+/// `POST /api/v1/library/articles`: full article payloads in request order,
+/// trimmed to the server's page budget. Ids in `missing` no longer exist;
+/// ids in neither list were trimmed and can be requested again.
+nonisolated struct LibraryArticlesResponse: Codable, Equatable, Sendable {
+	let articles: [IncrementalSyncPayload]
+	let missing: [String]
+}
+
 nonisolated struct IncrementalSyncChange: Codable, Equatable, Sendable {
 	enum EntityType: String, Codable, Sendable {
 		case feed

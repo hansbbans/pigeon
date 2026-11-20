@@ -55,6 +55,47 @@ struct APIContractTests {
 		#expect(deletion.payload == nil)
 	}
 
+	// MARK: - Library rebuild
+
+	@Test func libraryFixtureDecodesMetadataOnlyArticles() async throws {
+		let page = try await Self.client("library.response.json").libraryPage(continuation: nil)
+
+		#expect(page.snapshotCursor.wholeMatch(of: /v1:\d+/) != nil)
+		#expect(page.continuation == nil)
+		#expect(page.feeds.isEmpty == false)
+		let feedKeys = page.feeds.compactMap(\.feedKey)
+		let streamIDs = page.feeds.compactMap(\.streamId)
+		#expect(feedKeys.count == page.feeds.count)
+		#expect(streamIDs.count == page.feeds.count)
+		#expect(page.articles.isEmpty == false)
+		#expect(page.articles.contains { $0.html != nil } == false)
+		#expect(page.articles.contains { $0.text != nil } == false)
+		let article = try #require(page.articles.first { $0.id == "0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61" })
+		#expect(article.readerId == "tag:google.com,2005:reader/item/0000000000000001")
+		#expect(article.receivedAt == Self.date("2026-11-01T09:00:00Z"))
+		#expect(article.isRead == false)
+	}
+
+	@Test func libraryArticlesRequestAndResponseMatchTheContract() async throws {
+		let mock = MockHTTPClient(responseData: try Self.fixture("library-articles.response.json"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: Self.baseURL, token: "token"), httpClient: mock)
+
+		let response = try await client.libraryArticles(ids: [
+			"0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61",
+			"2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83",
+			"9f9f9f9f-0000-4000-8000-000000000000",
+		])
+
+		let request = try #require(await mock.lastRequest())
+		#expect(request.url.path() == "/api/v1/library/articles")
+		#expect(request.method == "POST")
+		#expect(request.authorization == "GoogleLogin auth=pigeon/token")
+		try Self.expectJSON(try #require(request.body), equalsFixture: "library-articles.request.json")
+		#expect(response.articles.map(\.id) == ["0b3c7a52-5d1e-4f8e-9a51-1f2d3c4b5a61", "2d5e9c74-7f3a-4bae-9c73-3b4f5e6d7c83"])
+		#expect(response.articles.first?.html?.isEmpty == false)
+		#expect(response.missing == ["9f9f9f9f-0000-4000-8000-000000000000"])
+	}
+
 	// MARK: - Mutations and engagement
 
 	@Test func mutationRequestAndResponsesMatchTheContract() async throws {

@@ -241,6 +241,35 @@ struct PigeonAPIClientTests {
 		#expect(query.first(where: { $0.name == "limit" })?.value == "200")
 	}
 
+	@Test func libraryPageSendsContinuationAndLimit() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"snapshotCursor":"v1:9","continuation":"l1:9:4","feeds":[],"articles":[]}"#.utf8))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let page = try await client.libraryPage(continuation: "l1:9:2")
+
+		#expect(page.snapshotCursor == "v1:9")
+		#expect(page.continuation == "l1:9:4")
+		let request = try #require(await mock.lastRequest())
+		let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(request.url.path == "/api/v1/library")
+		#expect(query.first(where: { $0.name == "continuation" })?.value == "l1:9:2")
+		#expect(query.first(where: { $0.name == "limit" })?.value == "200")
+	}
+
+	@Test func libraryPageSurfacesA404AsServerError() async throws {
+		let mock = MockHTTPClient(responseData: Data("Not found".utf8), statusCode: 404)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		await #expect {
+			_ = try await client.libraryPage(continuation: nil)
+		} throws: { error in
+			if case PigeonError.server(404, _) = error { return true }
+			return false
+		}
+	}
+
 	@Test func mutationBatchUsesStableIdsAndDecodesAlreadyAppliedReceipts() async throws {
 		let response = Data(
 			#"{"results":[{"mutationId":"mutation-1","status":"already_applied","appliedAt":"2026-08-15T12:00:00.000Z","error":null}]}"#.utf8,
