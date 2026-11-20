@@ -257,6 +257,29 @@ struct PigeonAPIClientTests {
 		#expect(query.first(where: { $0.name == "limit" })?.value == "200")
 	}
 
+	@Test func libraryPageAsksForNoMoreThanTheServerServes() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"snapshotCursor":"v1:9","continuation":null,"feeds":[],"articles":[]}"#.utf8))
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		_ = try await client.libraryPage(continuation: nil, limit: 500)
+
+		let request = try #require(await mock.lastRequest())
+		let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+		#expect(query.first(where: { $0.name == "limit" })?.value == "200")
+	}
+
+	@Test func libraryArticlesWithNoIDsAnswersWithoutARequest() async throws {
+		let mock = MockHTTPClient(responseData: Data(#"{"error":"ids must list 1 to 50 article ids"}"#.utf8), statusCode: 400)
+		let baseURL = try #require(URL(string: "https://pigeon.test"))
+		let client = PigeonAPIClient(session: PigeonSession(baseURL: baseURL, token: "server-token"), httpClient: mock)
+
+		let response = try await client.libraryArticles(ids: [])
+
+		#expect(response == LibraryArticlesResponse(articles: [], missing: []))
+		#expect(await mock.lastRequest() == nil)
+	}
+
 	@Test func libraryPageSurfacesA404AsServerError() async throws {
 		let mock = MockHTTPClient(responseData: Data("Not found".utf8), statusCode: 404)
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
