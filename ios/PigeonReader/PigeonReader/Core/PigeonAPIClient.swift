@@ -175,6 +175,33 @@ struct PigeonAPIClient: Sendable {
 		return try await Self.decodeOffMain(IncrementalSyncPage.self, from: data)
 	}
 
+	func libraryPage(continuation: String?, limit: Int = 200) async throws -> LibraryListingPage {
+		var components = try endpointComponents(path: "api/v1/library")
+		// The server serves at most 200 rows a page.
+		var queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200)))]
+		if let continuation, continuation.isEmpty == false {
+			queryItems.append(URLQueryItem(name: "continuation", value: continuation))
+		}
+		components.queryItems = queryItems
+		let (data, _) = try await requestJSON(components: components)
+		return try await Self.decodeOffMain(LibraryListingPage.self, from: data)
+	}
+
+	/// Bodies for up to fifty ids; callers batch larger sets.
+	func libraryArticles(ids: [String]) async throws -> LibraryArticlesResponse {
+		guard ids.isEmpty == false else {
+			return LibraryArticlesResponse(articles: [], missing: [])
+		}
+		var request = makeAuthorizedRequest(url: session.baseURL.appending(path: "api/v1/library/articles"))
+		request.httpMethod = "POST"
+		request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+		request.httpBody = try JSONEncoder().encode(["ids": Array(ids.prefix(50))])
+		request.timeoutInterval = 30
+		let (data, response) = try await httpClient.data(for: request)
+		try Self.validate(response: response, data: data)
+		return try await Self.decodeOffMain(LibraryArticlesResponse.self, from: data)
+	}
+
 	func sendMutations(_ mutations: [OfflineMutation]) async throws -> OfflineMutationBatchResponse {
 		guard mutations.isEmpty == false else {
 			return OfflineMutationBatchResponse(results: [])

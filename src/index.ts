@@ -110,6 +110,8 @@ export default {
 			path === '/api/v1/engagement' ||
 			path === '/api/v1/reading-log' ||
 			path === '/api/v1/sync' ||
+			path === '/api/v1/library' ||
+			path === '/api/v1/library/articles' ||
 			path === '/api/v1/mutations' ||
 			path === '/api/v1/personalization' ||
 			path === '/api/v1/image-proxy' ||
