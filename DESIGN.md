@@ -97,7 +97,7 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 **Typography.** The reading typeface is `ReaderTypeface`: Geist Serif (default), Bookerly, or Allo. It is stored in `pigeon.reader.typography.typeface`, chosen in Settings and in the reader's Reading controls, and passed down as the `readerTypeface` environment value from `RootView`. All three live in `Resources/Fonts/` and are registered under `UIAppFonts` in `ios/PigeonReader/project.yml`. Geist Serif (Vercel, SIL OFL 1.1, `GeistSerif-OFL.txt` alongside) ships only Regular, and SwiftUI does not synthesize bold or italic for a custom font, so in Geist Serif every title, headline and the masthead is Regular. Allo (Josh Puckett, SIL OFL 1.1, `Allo-OFL.txt` alongside; vendored by `npm run vendor:allo`) ships as static OTFs: titles in SemiBold, italics in Oblique, `strong` in Bold. `ReaderTypography` (`Core/ReaderTypography.swift`) picks the face per role (`title`, `body`, `italic`):
 - `storyTitle` is the title face at 17 (`relativeTo: .body`).
 - `articleTitle` is the title face at 25 and `articleBody` the regular face at 18, both multiplied by `textScale`.
-- Front Page masthead is the italic face at 38, lead headline the title face at 27, deck the regular face at 16.
+- Front Page masthead is the italic face at 38, lead headline the title face at 27, deck the regular face at 16 (52, 34 and 18 in the wide spread).
 - In the HTML, the body uses `"Geist Serif", "Iowan Old Style", Georgia, serif`, Bookerly when `body[data-typeface="bookerly"]`, or Allo when `body[data-typeface="allo"]`. Headings inherit it with line-height 1.16, and are weight 400 in Geist Serif and 600 in Allo to match the SwiftUI title. WebKit synthesizes bold and italic for `strong` and `em` in Geist Serif; Bookerly and Allo use their own bold and italic faces. WebKit's content process cannot see `UIAppFonts` fonts, and it blocks fonts fetched from a custom scheme on the article's https page as mixed content. So `ReaderWebFonts` passes the chosen typeface's bytes to `__pigeonInstallFonts`, which adds them with the `FontFace` API before the first render (about 7 ms for Bookerly's four faces in the simulator). Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
 - Classic list rows (`ArticleRowView.swift`) use `storyTitle` for titles and `.caption` for metadata.
 
@@ -112,13 +112,15 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 
 They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them through `--pigeon-text-scale` and `--pigeon-line-height`.
 
-**Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
+**Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18; a spread uses padding 28 and a column gap of 28. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
 
 **Layout and components.**
-- `FrontPageView` / `FrontPageLayout` (a reader setting on iPhone and in the iPad list column; see `usesFrontPage` in `ArticleListView.swift`):
+- `FrontPageView` / `FrontPageLayout` (a reader setting on iPhone and iPad; see `usesFrontPage` in `ArticleListView.swift`):
   - newspaper masthead with `FrontPageRule` hairlines (2pt / 0.5pt) and an uppercase dateline (`.caption2`, tracking 0.8)
   - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes and in a column narrower than 330pt (`FrontPageLayout.gridColumnCount`)
-  - the page is capped at 640pt (`FrontPageLayout.maximumContentWidth`) and centred, so a wide column or an iPhone in landscape does not stretch the lead image
+  - the page is capped at 640pt and centred, so an iPhone in landscape does not stretch the lead image
+  - from 760pt wide (an iPad Pro 11-inch in portrait; not an iPad mini in portrait, 744) the page is a spread (`FrontPageLayout.usesSpread`): the lead image takes 58% of the page beside its headline (title face 34) and deck (18, six lines), the grid goes three across with a 28pt gap, the masthead is 52, padding is 28, and the page is capped at 1080pt. Spread images load at 1200×800 (lead) and 640×480 (columns). Accessibility sizes and short windows (a phone in landscape, however wide) keep the stacked page, and a lead without an image keeps stacked typography
+  - Front Page is a page, not a column: a regular-width window reading it navigates the way a phone does, Home then the page then the article, each across the whole window (`ReaderCompactArticlePresentation.navigationSizeClass`, applied in `ReaderShellView`). Classic keeps the three-column split view
   - colored feed kicker, a 240-char deck, and an `isEditorialImage` aspect filter of 0.6–2.4
 - `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (Home on iPhone and iPad; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):
   - no large title; the toolbar's leading item is a dateline in kicker type ("Wed, Nov 11 · 8 new"), the only number on the screen

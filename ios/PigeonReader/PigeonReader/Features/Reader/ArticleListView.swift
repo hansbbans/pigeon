@@ -396,7 +396,8 @@ struct ArticleListView: View {
 		(windowHorizontalSizeClass ?? horizontalSizeClass) == .compact && model.preferredCompactColumn == .detail
 	}
 
-	/// Front Page is a reader setting, the same on iPhone and in an iPad column.
+	/// Front Page is a reader setting on iPhone and iPad. On iPad it fills the
+	/// window (see `ReaderCompactArticlePresentation.navigationSizeClass`).
 	private var usesFrontPage: Bool {
 		model.readerTypography.homeLayout == .frontPage
 	}

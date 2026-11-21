@@ -20,6 +20,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	@ViewBuilder let footer: () -> Footer
 
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	@Environment(\.verticalSizeClass) private var verticalSizeClass
 	/// Width of the scroll view; a narrow iPad column gets a one-column grid.
 	@State private var availableWidth: Double?
 
@@ -28,7 +29,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	var body: some View {
 		ScrollView {
 			LazyVStack(alignment: .leading, spacing: 0) {
-				FrontPageMasthead(title: title, unreadCount: unreadCount)
+				FrontPageMasthead(title: title, unreadCount: unreadCount, usesSpread: usesSpread)
 					.padding(.bottom, 18)
 					.id(FrontPageLayout.topAnchorID)
 				ForEach(Array(FrontPageLayout.pages(for: articles).enumerated()), id: \.element.id) { index, page in
@@ -53,9 +54,9 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 				.frame(maxWidth: .infinity)
 				.padding(.top, 28)
 			}
-			.padding(.horizontal, 16)
+			.padding(.horizontal, horizontalPadding)
 			.padding(.bottom, 24)
-			.frame(maxWidth: FrontPageLayout.maximumContentWidth)
+			.frame(maxWidth: FrontPageLayout.maximumContentWidth(usesSpread: usesSpread))
 			.frame(maxWidth: .infinity)
 		}
 		.onGeometryChange(for: Double.self) { geometry in
@@ -74,11 +75,32 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		}
 	}
 
+	private var usesSpread: Bool {
+		FrontPageLayout.usesSpread(
+			availableWidth: availableWidth,
+			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			isVerticallyCompact: verticalSizeClass == .compact,
+		)
+	}
+
+	private var horizontalPadding: Double {
+		usesSpread ? 28 : 16
+	}
+
+	/// In a spread the lead image takes a little over half the page, beside
+	/// its headline and deck.
+	private var spreadImageWidth: Double? {
+		guard usesSpread, let availableWidth else { return nil }
+		let pageWidth = min(availableWidth, FrontPageLayout.maximumContentWidth(usesSpread: true))
+		return ((pageWidth - horizontalPadding * 2 - FrontPageStoryView.spreadSpacing) * 0.58).rounded(.down)
+	}
+
 	private var gridColumns: [GridItem] {
-		let column = GridItem(.flexible(), spacing: 18, alignment: .top)
+		let column = GridItem(.flexible(), spacing: usesSpread ? 28 : 18, alignment: .top)
 		let count = FrontPageLayout.gridColumnCount(
 			availableWidth: availableWidth,
 			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			isVerticallyCompact: verticalSizeClass == .compact,
 		)
 		return Array(repeating: column, count: count)
 	}
@@ -87,6 +109,8 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		FrontPageStoryView(
 			article: article,
 			role: role,
+			usesSpread: usesSpread,
+			spreadImageWidth: role == .lead ? spreadImageWidth : nil,
 			isSelected: selectedArticleID == article.id,
 			remoteImagePolicy: remoteImagePolicy,
 			thumbnailScope: thumbnailScope,
@@ -106,12 +130,13 @@ private struct FrontPageMasthead: View {
 	@Environment(\.readerTypeface) private var readerTypeface
 	let title: String
 	let unreadCount: Int
+	let usesSpread: Bool
 
 	var body: some View {
 		VStack(spacing: 8) {
 			FrontPageRule(thickness: 2)
 			Text(title)
-				.font(ReaderTypography.italic(readerTypeface, size: 38, relativeTo: .largeTitle))
+				.font(ReaderTypography.italic(readerTypeface, size: usesSpread ? 52 : 38, relativeTo: .largeTitle))
 				.multilineTextAlignment(.center)
 				.lineLimit(2)
 				.minimumScaleFactor(0.7)
@@ -166,10 +191,14 @@ struct FrontPageStoryView: View {
 		case lead
 		case column
 
-		var imageTarget: ReaderFeedThumbnailPixelSize {
-			switch self {
-			case .lead: ReaderFeedThumbnailPixelSize(width: 960, height: 640)
-			case .column: ReaderFeedThumbnailPolicy.rowPixelSize
+		/// A spread draws its lead about 580pt wide and its columns about
+		/// 320pt, so it decodes larger images than the phone page.
+		func imageTarget(usesSpread: Bool) -> ReaderFeedThumbnailPixelSize {
+			switch (self, usesSpread) {
+			case (.lead, false): ReaderFeedThumbnailPixelSize(width: 960, height: 640)
+			case (.lead, true): ReaderFeedThumbnailPixelSize(width: 1200, height: 800)
+			case (.column, false): ReaderFeedThumbnailPolicy.rowPixelSize
+			case (.column, true): ReaderFeedThumbnailPixelSize(width: 640, height: 480)
 			}
 		}
 
@@ -181,8 +210,15 @@ struct FrontPageStoryView: View {
 		}
 	}
 
+	static let spreadSpacing = 24.0
+
 	let article: Recommendation
 	let role: Role
+	/// The page is a spread: images are drawn larger, so they load larger.
+	var usesSpread = false
+	/// Set for the lead of a wide page: the image is this wide and sits
+	/// beside the headline instead of above it.
+	var spreadImageWidth: Double?
 	let isSelected: Bool
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let thumbnailScope: String?
@@ -198,49 +234,21 @@ struct FrontPageStoryView: View {
 
 	var body: some View {
 		Button(action: select) {
-			VStack(alignment: .leading, spacing: role == .lead ? 9 : 6) {
-				if let image, imageRequestID == requestID {
-					Color.clear
-						.aspectRatio(imageAspectRatio, contentMode: .fit)
-						.overlay {
-							Image(decorative: image, scale: displayScale)
-								.resizable()
-								.scaledToFill()
+			Group {
+				if let spreadImageWidth, let image = loadedImage {
+					HStack(alignment: .top, spacing: Self.spreadSpacing) {
+						imageView(image)
+							.frame(width: spreadImageWidth)
+						storyText
+					}
+				} else {
+					VStack(alignment: .leading, spacing: textSpacing) {
+						if let image = loadedImage {
+							imageView(image)
 						}
-						.clipShape(.rect(cornerRadius: 12, style: .continuous))
-						.accessibilityHidden(true)
-				}
-				Text(article.source)
-					.font(.caption2.weight(.bold))
-					.textCase(.uppercase)
-					.tracking(0.9)
-					.foregroundStyle(FrontPageKickerPalette.color(for: article.feedKey))
-					.lineLimit(1)
-				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-					.font(role == .lead
-						? ReaderTypography.title(readerTypeface, size: 27, relativeTo: .title)
-						: ReaderTypography.storyTitle(readerTypeface))
-					.foregroundStyle(.primary)
-					.lineLimit(role == .lead ? 5 : 4)
-					.fixedSize(horizontal: false, vertical: true)
-				if role == .lead, let deck = FrontPageLayout.deck(from: article.text) {
-					Text(deck)
-						.font(ReaderTypography.body(readerTypeface, size: 16, relativeTo: .callout))
-						.foregroundStyle(.pigeonSecondary)
-						.lineLimit(3)
-				}
-				HStack(spacing: 6) {
-					Text(article.receivedAt, format: .relative(presentation: .named))
-					if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
-						Text("· \(readingLength)")
-					}
-					if article.isStarred {
-						Image(systemName: "star.fill")
-							.foregroundStyle(.pigeonKeep)
+						storyText
 					}
 				}
-				.font(.caption2)
-				.foregroundStyle(.pigeonSecondary)
 			}
 			.frame(maxWidth: .infinity, alignment: .leading)
 			.padding(6)
@@ -264,8 +272,72 @@ struct FrontPageStoryView: View {
 		}
 	}
 
+	private var loadedImage: CGImage? {
+		imageRequestID == requestID ? image : nil
+	}
+
+	private var textSpacing: Double {
+		role == .lead ? 9 : 6
+	}
+
+	/// Spread typography only goes with the side-by-side image. A lead
+	/// without one stays a stacked lead across the page.
+	private var isSpreadLead: Bool {
+		spreadImageWidth != nil && loadedImage != nil
+	}
+
+	private func imageView(_ image: CGImage) -> some View {
+		Color.clear
+			.aspectRatio(imageAspectRatio, contentMode: .fit)
+			.overlay {
+				Image(decorative: image, scale: displayScale)
+					.resizable()
+					.scaledToFill()
+			}
+			.clipShape(.rect(cornerRadius: 12, style: .continuous))
+			.accessibilityHidden(true)
+	}
+
+	private var storyText: some View {
+		VStack(alignment: .leading, spacing: textSpacing) {
+			Text(article.source)
+				.font(.caption2.weight(.bold))
+				.textCase(.uppercase)
+				.tracking(0.9)
+				.foregroundStyle(FrontPageKickerPalette.color(for: article.feedKey))
+				.lineLimit(1)
+			PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
+				.font(role == .lead
+					? ReaderTypography.title(readerTypeface, size: isSpreadLead ? 34 : 27, relativeTo: .title)
+					: ReaderTypography.storyTitle(readerTypeface))
+				.foregroundStyle(.primary)
+				.lineLimit(role == .lead ? 5 : 4)
+				.fixedSize(horizontal: false, vertical: true)
+			if role == .lead, let deck = FrontPageLayout.deck(from: article.text) {
+				Text(deck)
+					.font(ReaderTypography.body(readerTypeface, size: isSpreadLead ? 18 : 16, relativeTo: .callout))
+					.foregroundStyle(.pigeonSecondary)
+					.lineLimit(isSpreadLead ? 6 : 3)
+			}
+			HStack(spacing: 6) {
+				Text(article.receivedAt, format: .relative(presentation: .named))
+				if let readingLength = article.readingLengthLabel(showsReadingTime: showsReadingTime) {
+					Text("· \(readingLength)")
+				}
+				if article.isStarred {
+					Image(systemName: "star.fill")
+						.foregroundStyle(.pigeonKeep)
+				}
+			}
+			.font(.caption2)
+			.foregroundStyle(.pigeonSecondary)
+		}
+		.frame(maxWidth: .infinity, alignment: .leading)
+	}
+
 	/// A 3:2 lead image at full width is taller than an iPhone in landscape, so
-	/// a short window crops the lead to a banner and keeps the headline on screen.
+	/// a short window crops the lead to a banner and keeps the headline on
+	/// screen. A short window never gets a spread, whose image keeps 3:2.
 	private var imageAspectRatio: CGFloat {
 		switch role {
 		case .lead: verticalSizeClass == .compact ? 21 / 9 : 3 / 2
@@ -284,7 +356,7 @@ struct FrontPageStoryView: View {
 	/// Images follow the shared thumbnail pipeline, which only loads publisher
 	/// images under the Load Normally policy. Other policies stay text-only.
 	private var requestID: String {
-		"\(article.id)|\(thumbnailScope ?? "none")|\(remoteImagePolicy.rawValue)|\(role)"
+		"\(article.id)|\(thumbnailScope ?? "none")|\(remoteImagePolicy.rawValue)|\(role)|\(usesSpread)"
 	}
 
 	private func loadImage() async {
@@ -297,7 +369,7 @@ struct FrontPageStoryView: View {
 		let loaded = await ReaderFeedThumbnailStore.shared.thumbnail(
 			for: article,
 			scope: thumbnailScope,
-			target: role.imageTarget,
+			target: role.imageTarget(usesSpread: usesSpread),
 		)
 		guard Task.isCancelled == false, request == requestID else { return }
 		if let loaded, FrontPageLayout.isEditorialImage(
