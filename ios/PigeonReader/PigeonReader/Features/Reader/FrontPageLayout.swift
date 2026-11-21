@@ -17,11 +17,13 @@ nonisolated enum FrontPageLayout {
 	static let twoColumnMinimumWidth = 330.0
 	/// From this width (an iPad Pro 11-inch in portrait) the page is a spread:
 	/// the lead image sits beside its headline and the grid is three across.
-	/// An iPad mini in portrait (744) keeps the phone page.
+	/// An iPad mini in portrait (744) keeps the phone page, and so does a
+	/// phone in landscape however wide it is: its window is too short for a
+	/// spread, so it keeps the banner lead.
 	static let spreadMinimumWidth = 760.0
 
-	static func usesSpread(availableWidth: Double?, usesAccessibilitySize: Bool) -> Bool {
-		guard usesAccessibilitySize == false, let availableWidth else { return false }
+	static func usesSpread(availableWidth: Double?, usesAccessibilitySize: Bool, isVerticallyCompact: Bool) -> Bool {
+		guard usesAccessibilitySize == false, isVerticallyCompact == false, let availableWidth else { return false }
 		return availableWidth >= spreadMinimumWidth
 	}
 
@@ -32,10 +34,12 @@ nonisolated enum FrontPageLayout {
 	}
 
 	/// Stories across in the grid under each lead.
-	static func gridColumnCount(availableWidth: Double?, usesAccessibilitySize: Bool) -> Int {
+	static func gridColumnCount(availableWidth: Double?, usesAccessibilitySize: Bool, isVerticallyCompact: Bool) -> Int {
 		if usesAccessibilitySize { return 1 }
 		guard let availableWidth else { return 2 }
-		if usesSpread(availableWidth: availableWidth, usesAccessibilitySize: false) { return 3 }
+		if usesSpread(availableWidth: availableWidth, usesAccessibilitySize: false, isVerticallyCompact: isVerticallyCompact) {
+			return 3
+		}
 		return availableWidth < twoColumnMinimumWidth ? 1 : 2
 	}
 

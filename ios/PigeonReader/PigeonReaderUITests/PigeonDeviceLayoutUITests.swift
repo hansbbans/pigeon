@@ -145,31 +145,32 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			recorder.expect(spansWindow(reader), "An iPad opens a Front Page story across the window")
 			recorder.expect(back.exists && back.isHittable, "The full-window reader leads back to the Front Page")
 			recorder.capture("reader")
-			// Back to the page, and into the story again for the steps below.
+			// Back to the page, on to Home, and into the story again for the
+			// steps below. On Front Page an iPad pops back like a phone; it has
+			// no toolbar Home button.
 			if back.exists, back.isHittable {
 				back.tap()
 				recorder.expect(spansWindow(page), "Back from a story returns to the full Front Page")
 				recorder.capture("front-page-returned")
-				if stories.firstMatch.exists {
+				let homeBack = app.buttons["BackButton"].firstMatch
+				recorder.expect(homeBack.waitForExistence(timeout: 5) && homeBack.isHittable, "The Front Page leads back to Home")
+				if homeBack.exists, homeBack.isHittable {
+					homeBack.tap()
+					let forYouAgain = hittableButton("reader-sidebar-item-forYou")
+					recorder.expect(forYouAgain.exists && forYouAgain.isHittable, "Home is usable after returning to it")
+					recorder.capture("home-returned")
+					if forYouAgain.exists, forYouAgain.isHittable {
+						forYouAgain.tap()
+					}
+					recorder.expect(spansWindow(page), "For You opens as a full Front Page again")
+				}
+				if stories.firstMatch.waitForExistence(timeout: 10) {
 					stories.firstMatch.tap()
 				}
 				recorder.expect(reader.waitForExistence(timeout: 15), "The story opens again")
 			}
 		} else {
 			recorder.capture("reader")
-		}
-
-		// Home again from an open story, and back to the story's list.
-		if showHome.exists, showHome.isHittable {
-			showHome.tap()
-			recorder.expect(tiles.waitForExistence(timeout: 10), "Home covers the split view again")
-			let forYouAgain = hittableButton("reader-sidebar-item-forYou")
-			recorder.expect(forYouAgain.exists && forYouAgain.isHittable, "Home is usable after returning to it")
-			recorder.capture("home-returned")
-			if forYouAgain.exists, forYouAgain.isHittable {
-				forYouAgain.tap()
-			}
-			recorder.expect(reader.waitForExistence(timeout: 10), "The open story is still there after Home")
 		}
 
 		// The other orientation, with the story open.

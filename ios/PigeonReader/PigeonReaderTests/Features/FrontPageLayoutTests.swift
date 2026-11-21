@@ -29,29 +29,34 @@ struct FrontPageLayoutTests {
 	@Test
 	func gridUsesOneColumnOnlyForNarrowColumnsAndLargeText() {
 		// Before the first measurement the grid assumes a phone.
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: nil, usesAccessibilitySize: false) == 2)
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: false) == 2)
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 375, usesAccessibilitySize: false) == 2)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: nil, usesAccessibilitySize: false, isVerticallyCompact: false) == 2)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: false, isVerticallyCompact: false) == 2)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 375, usesAccessibilitySize: false, isVerticallyCompact: false) == 2)
 		// A 320pt iPad list column.
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 320, usesAccessibilitySize: false) == 1)
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: true) == 1)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 320, usesAccessibilitySize: false, isVerticallyCompact: false) == 1)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 402, usesAccessibilitySize: true, isVerticallyCompact: false) == 1)
 	}
 
 	@Test
 	func wideWindowsGetASpreadWithThreeColumns() {
 		// iPhone portrait and an iPad mini column keep the single-column page.
-		#expect(FrontPageLayout.usesSpread(availableWidth: nil, usesAccessibilitySize: false) == false)
-		#expect(FrontPageLayout.usesSpread(availableWidth: 402, usesAccessibilitySize: false) == false)
-		#expect(FrontPageLayout.usesSpread(availableWidth: 744, usesAccessibilitySize: false) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: nil, usesAccessibilitySize: false, isVerticallyCompact: false) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: 402, usesAccessibilitySize: false, isVerticallyCompact: false) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: 744, usesAccessibilitySize: false, isVerticallyCompact: false) == false)
 		// iPad Pro 11-inch, portrait and landscape.
-		#expect(FrontPageLayout.usesSpread(availableWidth: 834, usesAccessibilitySize: false))
-		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: false))
+		#expect(FrontPageLayout.usesSpread(availableWidth: 834, usesAccessibilitySize: false, isVerticallyCompact: false))
+		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: false, isVerticallyCompact: false))
 		// Large text keeps the stacked lead and one column.
-		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: true) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: true, isVerticallyCompact: false) == false)
 
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 834, usesAccessibilitySize: false) == 3)
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: false) == 3)
-		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: true) == 1)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 834, usesAccessibilitySize: false, isVerticallyCompact: false) == 3)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: false, isVerticallyCompact: false) == 3)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: true, isVerticallyCompact: false) == 1)
+
+		// A Pro Max phone in landscape is wide enough but too short: it keeps
+		// the stacked page with its banner lead.
+		#expect(FrontPageLayout.usesSpread(availableWidth: 956, usesAccessibilitySize: false, isVerticallyCompact: true) == false)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 956, usesAccessibilitySize: false, isVerticallyCompact: true) == 2)
 
 		#expect(FrontPageLayout.maximumContentWidth(usesSpread: false) == 640)
 		#expect(FrontPageLayout.maximumContentWidth(usesSpread: true) == 1080)

@@ -26,6 +26,17 @@ nonisolated enum ReaderCompactArticlePresentation {
 		window == .regular && homeLayout == .frontPage ? .compact : window
 	}
 
+	/// Switching a regular window to Front Page collapses it, so a story open
+	/// beside the list would suddenly cover the window. The switch is made from
+	/// the list or Settings, so show the page that was asked for.
+	static func columnAfterLayoutChange(
+		window: UserInterfaceSizeClass?,
+		homeLayout: ReaderHomeLayout,
+		preferredColumn: NavigationSplitViewColumn,
+	) -> NavigationSplitViewColumn {
+		window == .regular && homeLayout == .frontPage && preferredColumn == .detail ? .content : preferredColumn
+	}
+
 	static func splitViewColumn(
 		horizontalSizeClass: UserInterfaceSizeClass?,
 		preferredColumn: NavigationSplitViewColumn,

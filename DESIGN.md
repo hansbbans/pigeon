@@ -112,14 +112,14 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 
 They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them through `--pigeon-text-scale` and `--pigeon-line-height`.
 
-**Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
+**Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18; a spread uses padding 28 and a column gap of 28. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
 
 **Layout and components.**
 - `FrontPageView` / `FrontPageLayout` (a reader setting on iPhone and iPad; see `usesFrontPage` in `ArticleListView.swift`):
   - newspaper masthead with `FrontPageRule` hairlines (2pt / 0.5pt) and an uppercase dateline (`.caption2`, tracking 0.8)
   - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes and in a column narrower than 330pt (`FrontPageLayout.gridColumnCount`)
   - the page is capped at 640pt and centred, so an iPhone in landscape does not stretch the lead image
-  - from 760pt wide (an iPad Pro 11-inch in portrait; not an iPad mini in portrait, 744) the page is a spread (`FrontPageLayout.usesSpread`): the lead image takes 58% of the page beside its headline (title face 34) and deck (18, six lines), the grid goes three across with a 28pt gap, the masthead is 52, padding is 28, and the page is capped at 1080pt. Accessibility sizes keep the stacked page
+  - from 760pt wide (an iPad Pro 11-inch in portrait; not an iPad mini in portrait, 744) the page is a spread (`FrontPageLayout.usesSpread`): the lead image takes 58% of the page beside its headline (title face 34) and deck (18, six lines), the grid goes three across with a 28pt gap, the masthead is 52, padding is 28, and the page is capped at 1080pt. Spread images load at 1200×800 (lead) and 640×480 (columns). Accessibility sizes and short windows (a phone in landscape, however wide) keep the stacked page, and a lead without an image keeps stacked typography
   - Front Page is a page, not a column: a regular-width window reading it navigates the way a phone does, Home then the page then the article, each across the whole window (`ReaderCompactArticlePresentation.navigationSizeClass`, applied in `ReaderShellView`). Classic keeps the three-column split view
   - colored feed kicker, a 240-char deck, and an `isEditorialImage` aspect filter of 0.6–2.4
 - `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (Home on iPhone and iPad; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):

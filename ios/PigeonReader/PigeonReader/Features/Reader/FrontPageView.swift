@@ -20,6 +20,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 	@ViewBuilder let footer: () -> Footer
 
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	@Environment(\.verticalSizeClass) private var verticalSizeClass
 	/// Width of the scroll view; a narrow iPad column gets a one-column grid.
 	@State private var availableWidth: Double?
 
@@ -78,6 +79,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		FrontPageLayout.usesSpread(
 			availableWidth: availableWidth,
 			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			isVerticallyCompact: verticalSizeClass == .compact,
 		)
 	}
 
@@ -98,6 +100,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		let count = FrontPageLayout.gridColumnCount(
 			availableWidth: availableWidth,
 			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			isVerticallyCompact: verticalSizeClass == .compact,
 		)
 		return Array(repeating: column, count: count)
 	}
@@ -106,6 +109,7 @@ struct FrontPageView<StoryMenu: View, Footer: View>: View {
 		FrontPageStoryView(
 			article: article,
 			role: role,
+			usesSpread: usesSpread,
 			spreadImageWidth: role == .lead ? spreadImageWidth : nil,
 			isSelected: selectedArticleID == article.id,
 			remoteImagePolicy: remoteImagePolicy,
@@ -187,10 +191,14 @@ struct FrontPageStoryView: View {
 		case lead
 		case column
 
-		var imageTarget: ReaderFeedThumbnailPixelSize {
-			switch self {
-			case .lead: ReaderFeedThumbnailPixelSize(width: 960, height: 640)
-			case .column: ReaderFeedThumbnailPolicy.rowPixelSize
+		/// A spread draws its lead about 580pt wide and its columns about
+		/// 320pt, so it decodes larger images than the phone page.
+		func imageTarget(usesSpread: Bool) -> ReaderFeedThumbnailPixelSize {
+			switch (self, usesSpread) {
+			case (.lead, false): ReaderFeedThumbnailPixelSize(width: 960, height: 640)
+			case (.lead, true): ReaderFeedThumbnailPixelSize(width: 1200, height: 800)
+			case (.column, false): ReaderFeedThumbnailPolicy.rowPixelSize
+			case (.column, true): ReaderFeedThumbnailPixelSize(width: 640, height: 480)
 			}
 		}
 
@@ -206,6 +214,8 @@ struct FrontPageStoryView: View {
 
 	let article: Recommendation
 	let role: Role
+	/// The page is a spread: images are drawn larger, so they load larger.
+	var usesSpread = false
 	/// Set for the lead of a wide page: the image is this wide and sits
 	/// beside the headline instead of above it.
 	var spreadImageWidth: Double?
@@ -270,8 +280,10 @@ struct FrontPageStoryView: View {
 		role == .lead ? 9 : 6
 	}
 
+	/// Spread typography only goes with the side-by-side image. A lead
+	/// without one stays a stacked lead across the page.
 	private var isSpreadLead: Bool {
-		spreadImageWidth != nil
+		spreadImageWidth != nil && loadedImage != nil
 	}
 
 	private func imageView(_ image: CGImage) -> some View {
@@ -325,10 +337,10 @@ struct FrontPageStoryView: View {
 
 	/// A 3:2 lead image at full width is taller than an iPhone in landscape, so
 	/// a short window crops the lead to a banner and keeps the headline on
-	/// screen. A spread's image is only half the page wide, so it keeps 3:2.
+	/// screen. A short window never gets a spread, whose image keeps 3:2.
 	private var imageAspectRatio: CGFloat {
 		switch role {
-		case .lead: verticalSizeClass == .compact && isSpreadLead == false ? 21 / 9 : 3 / 2
+		case .lead: verticalSizeClass == .compact ? 21 / 9 : 3 / 2
 		case .column: 4 / 3
 		}
 	}
@@ -344,7 +356,7 @@ struct FrontPageStoryView: View {
 	/// Images follow the shared thumbnail pipeline, which only loads publisher
 	/// images under the Load Normally policy. Other policies stay text-only.
 	private var requestID: String {
-		"\(article.id)|\(thumbnailScope ?? "none")|\(remoteImagePolicy.rawValue)|\(role)"
+		"\(article.id)|\(thumbnailScope ?? "none")|\(remoteImagePolicy.rawValue)|\(role)|\(usesSpread)"
 	}
 
 	private func loadImage() async {
@@ -357,7 +369,7 @@ struct FrontPageStoryView: View {
 		let loaded = await ReaderFeedThumbnailStore.shared.thumbnail(
 			for: article,
 			scope: thumbnailScope,
-			target: role.imageTarget,
+			target: role.imageTarget(usesSpread: usesSpread),
 		)
 		guard Task.isCancelled == false, request == requestID else { return }
 		if let loaded, FrontPageLayout.isEditorialImage(

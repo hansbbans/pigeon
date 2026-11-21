@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Home is the tile grid, with the full library list one tap away. A compact
-/// window shows it as the split view's first column; a regular window shows it
-/// over the split view until a view is chosen, and that split view's own
-/// sidebar is always the list.
+/// window, and a regular one on Front Page (which navigates like a phone),
+/// shows it as the split view's first column. A regular window in Classic
+/// shows it over the split view until a view is chosen, and that split view's
+/// own sidebar is always the list.
 struct ReaderHomeView: View {
 	/// The sidebar column reports a compact size class even on iPad, so the
 	/// shell decides from the window's size class.
