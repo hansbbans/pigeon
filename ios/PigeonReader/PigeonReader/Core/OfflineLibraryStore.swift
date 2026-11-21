@@ -1286,7 +1286,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					database: database,
 				)
 				if let existing = try loadArticle(identifier: id, accountID: accountID, database: database) {
-					guard existing.article.hasReadableHTML == false, let html = payload.html, html.isEmpty == false else {
+					guard existing.article.hasReadableHTML == false else { continue }
+					guard let html = payload.html, html.isEmpty == false else {
+						// The server has no body for it either: stop asking.
+						try execute(
+							"UPDATE cached_articles SET body_missing = 0 WHERE account_id = ? AND id = ?",
+							bindings: [.text(accountID), .text(id)],
+							database: database,
+						)
 						continue
 					}
 					let filled = sanitized(existing.article.replacingBody(

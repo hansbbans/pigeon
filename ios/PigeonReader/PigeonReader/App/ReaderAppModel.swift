@@ -316,6 +316,9 @@ final class ReaderAppModel {
 	private var activeOfflinePreparationID: UUID?
 	private var offlinePreparationTask: Task<Void, Never>?
 	private var offlinePreparationTaskID: UUID?
+	private var articleDownloadTask: Task<Void, Never>?
+	private var articleDownloadTaskID: UUID?
+	private static let articleBodyBatchSize = 20
 	private var deferredInitialFeedPaginationCollectionID: String?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
@@ -340,6 +343,8 @@ final class ReaderAppModel {
 	private(set) var markingAllReadCollectionID: String?
 	private var scrollReadTriggered: Set<String> = []
 	private(set) var searchResults: [Recommendation] = []
+	/// Articles whose body is being fetched because the reader opened them.
+	private(set) var articleIDsLoadingBody: Set<String> = []
 	private(set) var articleListMutationRevision: UInt64 = 0
 	private(set) var articleListMutationArticleID: String?
 	var displayedSearchResults: [Recommendation] {
@@ -823,6 +828,8 @@ final class ReaderAppModel {
 			offlinePreparationTask?.cancel()
 			offlinePreparationTask = nil
 			offlinePreparationTaskID = nil
+			cancelArticleDownloads()
+			articleIDsLoadingBody = []
 			deferredInitialFeedPaginationCollectionID = nil
 			invalidateCollectionLoads()
 			collectionLoadCoordinator.removeAll()
@@ -1136,6 +1143,7 @@ final class ReaderAppModel {
 	func setApplicationActive(_ active: Bool) {
 		isApplicationActive = active
 		if active == false {
+			cancelArticleDownloads()
 			lifecycleRefreshTask?.cancel()
 			lifecycleRefreshTask = nil
 			lifecycleRefreshTaskID = nil
@@ -1363,6 +1371,9 @@ final class ReaderAppModel {
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		lastBackgroundRefreshAt = .now
 		await writeWidgetSnapshotOffMain()
+		// Last, so a refresh that runs out of time has already posted its
+		// notifications. Expiry cancels this task, which ends the downloads.
+		await downloadMissingArticles()
 		return true
 	}
 
@@ -1525,6 +1536,126 @@ final class ReaderAppModel {
 			guard isCurrentAccountOperation(context) else { return nil }
 			presentSettingsError(error)
 			return nil
+		}
+	}
+
+	// MARK: - Article bodies
+
+	/// A rebuild lists articles without their bodies. While the app is open,
+	/// fetch them in the background, unread and newest first, so they are
+	/// there to read offline. One download runs at a time.
+	func startArticleDownloadsIfNeeded() {
+		guard isApplicationActive, articleDownloadTask == nil, offlineSynchronizationEnabled, apiClient != nil else {
+			return
+		}
+		let taskID = UUID()
+		articleDownloadTaskID = taskID
+		articleDownloadTask = Task(priority: .utility) { @MainActor [weak self] in
+			await self?.downloadMissingArticles()
+			guard let self, self.articleDownloadTaskID == taskID else { return }
+			self.articleDownloadTask = nil
+			self.articleDownloadTaskID = nil
+		}
+	}
+
+	private func cancelArticleDownloads() {
+		articleDownloadTask?.cancel()
+		articleDownloadTask = nil
+		articleDownloadTaskID = nil
+	}
+
+	/// Fetches missing bodies batch by batch until none are left. Stops when
+	/// cancelled, on the first error (the next preparation tries again), when
+	/// the network rules out background work, or when the account changes.
+	func downloadMissingArticles() async {
+		guard offlineSynchronizationEnabled, let apiClient, let context = accountContext(for: apiClient) else { return }
+		// The store drops an id once it is fetched or reported missing. Should
+		// one come back anyway, this run does not ask for it twice.
+		var handled: Set<String> = []
+		while Task.isCancelled == false, isCurrentAccountOperation(context), allowsArticleBodyDownloads {
+			guard let queued = try? await offlineStore.articleIDsNeedingFetch(
+				accountID: context.accountID,
+				limit: Self.articleBodyBatchSize,
+			) else { return }
+			let ids = queued.filter { handled.contains($0) == false }
+			guard ids.isEmpty == false, Task.isCancelled == false, isCurrentAccountOperation(context) else { return }
+			guard let answered = try? await fetchArticleBodies(ids: ids, apiClient: apiClient, context: context),
+				answered.isEmpty == false else {
+				return
+			}
+			handled.formUnion(answered)
+		}
+	}
+
+	/// Opening an article the phone holds without its body fetches that
+	/// body first; the reader shows progress while it loads.
+	func ensureArticleBody(for article: Recommendation) async {
+		guard article.hasReadableHTML == false,
+			articleIDsLoadingBody.contains(article.id) == false,
+			offlineSynchronizationEnabled,
+			let apiClient,
+			let context = accountContext(for: apiClient) else {
+			return
+		}
+		articleIDsLoadingBody.insert(article.id)
+		defer { articleIDsLoadingBody.remove(article.id) }
+		_ = try? await fetchArticleBodies(ids: [article.id], apiClient: apiClient, context: context)
+	}
+
+	/// Fetches one batch, stores it, and fills the copies on screen. Returns
+	/// the ids the server answered for, with a body or as missing; ids it
+	/// trimmed from the batch stay queued.
+	private func fetchArticleBodies(
+		ids: [String],
+		apiClient: PigeonAPIClient,
+		context: AccountOperationContext,
+	) async throws -> Set<String> {
+		let (response, _) = try await withTransientSyncRetry(initialLimit: ids.count) { limit in
+			try await apiClient.libraryArticles(ids: Array(ids.prefix(limit)))
+		}
+		guard isCurrentAccountOperation(context) else { return [] }
+		let stored = try await offlineStore.applyFetchedArticles(
+			response.articles,
+			accountID: context.accountID,
+			dayBounds: ReaderLocalDayBounds.localDay(containing: .now),
+		)
+		try await offlineStore.markArticlesUnavailable(ids: response.missing, accountID: context.accountID)
+		guard isCurrentAccountOperation(context) else { return [] }
+		fillLoadedBodies(stored)
+		return Set(response.articles.compactMap(\.id)).union(response.missing)
+	}
+
+	private var allowsArticleBodyDownloads: Bool {
+		BackgroundRefreshPolicy.shouldRefresh(
+			pathIsSatisfied: BackgroundRefreshManager.shared.pathIsSatisfied,
+			isConstrained: BackgroundRefreshManager.shared.pathIsConstrained,
+			allowsLowDataMode: allowsLowDataBackgroundRefresh,
+		)
+	}
+
+	/// Gives in-memory copies that lack a body the fetched one. Read and
+	/// starred state stay as they are in memory, which may be newer.
+	private func fillLoadedBodies(_ fetched: [Recommendation]) {
+		let bodies = fetched.filter(\.hasReadableHTML)
+		guard bodies.isEmpty == false else { return }
+		func filled(_ existing: Recommendation) -> Recommendation {
+			guard existing.hasReadableHTML == false,
+				let body = bodies.first(where: { articlesMatch($0, existing) }) else {
+				return existing
+			}
+			return existing.replacingBody(
+				html: body.html,
+				text: body.text,
+				isBodyPruned: body.isBodyPruned,
+				isPaywalled: body.isPaywalled,
+			)
+		}
+		for (collectionID, articles) in articleCache
+		where articles.contains(where: { article in bodies.contains { articlesMatch($0, article) } }) {
+			articleCache[collectionID] = articles.map(filled)
+		}
+		if searchResults.contains(where: { article in bodies.contains { articlesMatch($0, article) } }) {
+			searchResults = searchResults.map(filled)
 		}
 	}
 
@@ -1936,6 +2067,7 @@ final class ReaderAppModel {
 			if self.offlinePreparationTaskID == taskID {
 				self.offlinePreparationTask = nil
 				self.offlinePreparationTaskID = nil
+				self.startArticleDownloadsIfNeeded()
 			}
 		}
 		offlinePreparationTaskID = taskID

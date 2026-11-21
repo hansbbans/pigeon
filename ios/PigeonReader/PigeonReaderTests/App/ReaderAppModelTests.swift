@@ -4366,6 +4366,101 @@ struct ReaderAppModelTests {
 		#expect(syncRequests.map { $0.query["cursor"] } == ["v1:9"])
 	}
 
+	@Test func missingArticleBodiesDownloadNewestUnreadFirst() async throws {
+		let session = try makeSession(token: "body-order-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["older", "newest", "middle"], receivedAt: [
+					"older": "2026-08-15T10:00:00.000Z",
+					"newest": "2026-08-15T12:00:00.000Z",
+					"middle": "2026-08-15T11:00:00.000Z",
+				]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(await client.articleBatches().isEmpty)
+
+		await model.downloadMissingArticles()
+
+		#expect(await client.articleBatches() == [["newest", "middle", "older"]])
+		let stored = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(stored.count == 3)
+		#expect(stored.allSatisfy { $0.html == "<p>Body of \($0.id)</p>" })
+	}
+
+	@Test func missingArticlesAreNotRequestedTwice() async throws {
+		let session = try makeSession(token: "body-missing-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["kept", "gone"]), statusCode: 200),
+			],
+			missingArticleIDs: ["gone"],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await model.downloadMissingArticles()
+		await model.downloadMissingArticles()
+
+		let batches = await client.articleBatches()
+		#expect(batches.count == 1)
+		#expect(Set(batches.first ?? []) == ["kept", "gone"])
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func articleDownloadsStopWhenCancelled() async throws {
+		let session = try makeSession(token: "body-cancel-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: (1...25).map { "story-\($0)" }), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		await client.holdArticleRequests()
+
+		let downloads = Task { await model.downloadMissingArticles() }
+		await client.waitForHeldArticleRequest()
+		downloads.cancel()
+		await client.releaseArticleRequests()
+		await downloads.value
+
+		#expect(await client.articleBatches().count == 1)
+	}
+
+	@Test func openingAnArticleWithoutABodyFetchesItFirst() async throws {
+		let session = try makeSession(token: "body-open-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["first", "opened"]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		let listed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		let opened = try #require(listed.first { $0.id == "opened" })
+		#expect(opened.hasReadableHTML == false)
+		model.setArticles(listed, for: .smart(.forYou, unreadCount: 2))
+
+		await model.ensureArticleBody(for: opened)
+
+		#expect(await client.articleBatches() == [["opened"]])
+		#expect(model.article(withId: "opened")?.html == "<p>Body of opened</p>")
+		#expect(model.article(withId: "first")?.hasReadableHTML == false)
+		#expect(model.articleIDsLoadingBody.isEmpty)
+		let stored = try await store.searchArticles(query: "Story opened", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(stored.first { $0.id == "opened" }?.html == "<p>Body of opened</p>")
+	}
+
 	@Test func rebuildFallsBackToTheChangeLogWhenTheServerHasNoListing() async throws {
 		let session = try makeSession(token: "listing-fallback-token")
 		let store = try await makeLegacyCacheStore(session: session)
@@ -11001,13 +11096,19 @@ struct ReaderAppModelTests {
 
 	/// A `GET /api/v1/library` page with snapshot cursor `v1:9`: the "daily"
 	/// feed (stream `feed/1`) and unread articles without bodies.
-	private func libraryListingPage(continuation: String?, articleIDs: [String], withFeed: Bool = true) -> Data {
+	private func libraryListingPage(
+		continuation: String?,
+		articleIDs: [String],
+		withFeed: Bool = true,
+		receivedAt: [String: String] = [:],
+	) -> Data {
 		let continuationJSON = continuation.map { "\"\($0)\"" } ?? "null"
 		let feeds = withFeed
 			? #"[{"feedKey":"daily","streamId":"feed/1","title":"Daily","isActive":true,"folders":[],"sourceType":"rss"}]"#
 			: "[]"
 		let articles = articleIDs.map { id in
-			#"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","receivedAt":"2026-08-15T11:00:00.000Z","isRead":false,"isStarred":false,"isBodyPruned":false}"#
+			let received = receivedAt[id] ?? "2026-08-15T11:00:00.000Z"
+			return #"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","receivedAt":"\#(received)","isRead":false,"isStarred":false,"isBodyPruned":false}"#
 		}
 		return Data(#"{"snapshotCursor":"v1:9","continuation":\#(continuationJSON),"feeds":\#(feeds),"articles":[\#(articles.joined(separator: ","))]}"#.utf8)
 	}
@@ -11161,10 +11262,23 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 	private var holdsLibraryRequests = false
 	private var heldLibraryRequests: [CheckedContinuation<Void, Never>] = []
 	private var libraryArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+	/// `POST /api/v1/library/articles` answers every other posted id with
+	/// the body `<p>Body of <id></p>`.
+	private let missingArticleIDs: Set<String>
+	private var postedArticleBatches: [[String]] = []
+	private var holdsArticleRequests = false
+	private var heldArticleRequests: [CheckedContinuation<Void, Never>] = []
+	private var articleArrivalWaiters: [CheckedContinuation<Void, Never>] = []
 
-	init(syncResponses: [SyncResponse], libraryResponses: [SyncResponse] = [], subscriptionStatusCode: Int = 200) {
+	init(
+		syncResponses: [SyncResponse],
+		libraryResponses: [SyncResponse] = [],
+		missingArticleIDs: Set<String> = [],
+		subscriptionStatusCode: Int = 200,
+	) {
 		self.syncResponses = syncResponses
 		self.libraryResponses = libraryResponses
+		self.missingArticleIDs = missingArticleIDs
 		self.subscriptionStatusCode = subscriptionStatusCode
 	}
 
@@ -11193,6 +11307,17 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 			response = libraryResponses.isEmpty
 				? SyncResponse(data: Data(#"{"error":"not found"}"#.utf8), statusCode: 404)
 				: libraryResponses.removeFirst()
+		case "/api/v1/library/articles":
+			let posted = try JSONDecoder().decode([String: [String]].self, from: request.httpBody ?? Data())["ids"] ?? []
+			postedArticleBatches.append(posted)
+			if holdsArticleRequests {
+				await withCheckedContinuation { continuation in
+					heldArticleRequests.append(continuation)
+					articleArrivalWaiters.forEach { $0.resume() }
+					articleArrivalWaiters.removeAll()
+				}
+			}
+			response = articlesResponse(for: posted)
 		case "/reader/api/0/subscription/list":
 			response = SyncResponse(data: Data(#"{"subscriptions":[]}"#.utf8), statusCode: subscriptionStatusCode)
 		case "/reader/api/0/unread-count", "/reader/api/0/stream/items/ids":
@@ -11242,6 +11367,38 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 		holdsLibraryRequests = false
 		heldLibraryRequests.forEach { $0.resume() }
 		heldLibraryRequests.removeAll()
+	}
+
+	/// The ids each `POST /api/v1/library/articles` asked for, in order.
+	func articleBatches() -> [[String]] {
+		postedArticleBatches
+	}
+
+	/// Article requests wait until `releaseArticleRequests()`.
+	func holdArticleRequests() {
+		holdsArticleRequests = true
+	}
+
+	func waitForHeldArticleRequest() async {
+		guard heldArticleRequests.isEmpty else { return }
+		await withCheckedContinuation { articleArrivalWaiters.append($0) }
+	}
+
+	func releaseArticleRequests() {
+		holdsArticleRequests = false
+		heldArticleRequests.forEach { $0.resume() }
+		heldArticleRequests.removeAll()
+	}
+
+	private func articlesResponse(for ids: [String]) -> SyncResponse {
+		let articles = ids.filter { missingArticleIDs.contains($0) == false }.map { id in
+			#"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","html":"<p>Body of \#(id)</p>","receivedAt":"2026-08-15T11:00:00.000Z","isRead":false,"isStarred":false,"isBodyPruned":false}"#
+		}
+		let missing = ids.filter { missingArticleIDs.contains($0) }.map { "\"\($0)\"" }
+		return SyncResponse(
+			data: Data(#"{"articles":[\#(articles.joined(separator: ","))],"missing":[\#(missing.joined(separator: ","))]}"#.utf8),
+			statusCode: 200,
+		)
 	}
 }
 

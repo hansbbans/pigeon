@@ -1455,6 +1455,24 @@ struct OfflineLibraryStoreTests {
 		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
 	}
 
+	@Test func fetchedArticleWithoutABodyLeavesTheFetchQueue() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:listing", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "link-only", isRead: false),
+			])),
+			accountID: "account-a",
+		)
+		let fetched = try decodePage(Self.libraryPageJSON(cursor: "unused", changes: [
+			Self.articleChangeJSON(sequence: 0, id: "link-only", isRead: false),
+		])).changes.compactMap(\.payload)
+
+		_ = try await store.applyFetchedArticles(fetched, accountID: "account-a", dayBounds: nil)
+
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
+	}
+
 	@Test func fetchedArticleMissingFromTheStoreIsInserted() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		try await store.apply(
