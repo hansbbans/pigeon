@@ -106,7 +106,7 @@ struct ReaderHomeTilesView: View {
 			ReaderSettingsToolbarItem()
 		}
 		.refreshable {
-			await model.prepareOfflineLibrary()
+			await model.refreshLibrary()
 		}
 		.sheet(item: $editorRoute) { route in
 			LibraryManagementView(route: route)

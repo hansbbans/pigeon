@@ -71,6 +71,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		"cached_collection_states",
 		"sync_state",
 		"cache_integrity",
+		"article_fetch_queue",
 	]
 	#if DEBUG
 	private var snapshotArticleDecodeCount = 0
@@ -1040,66 +1041,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let storageAccountID = stagingAccountIDs[accountID] ?? accountID
 		do {
 			try transaction(database) {
-				guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-					throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
-				}
-				let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
-				// A page and its cursor commit together, so a complete cache that takes
-				// an incremental page is still complete as of that cursor. Recording it
-				// as `.syncing` made any interruption (the app suspended, a background
-				// refresh running out of time) force the next launch to download the
-				// whole library again instead of resuming. Only navigation counts, which
-				// are rebuilt when the sync finishes, are unverified until then.
-				let continuesCompleteCache = previous.state == .complete
-					&& previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion
-				try saveCacheIntegrity(
-					OfflineCacheIntegrity(
-						formatVersion: OfflineCacheIntegrity.currentFormatVersion,
-						state: continuesCompleteCache ? .complete : .syncing,
-						navigation: .unverified,
-						lastAttemptAt: previous.lastAttemptAt ?? .now,
-						lastSuccessAt: previous.lastSuccessAt,
-						lastError: nil,
-						invalidChangeCount: previous.invalidChangeCount,
-						lastPageHasMore: page.hasMore,
-					),
-					accountID: storageAccountID,
-					database: database,
-				)
-
-				let deletedArticleIDs = Set(
-					page.changes
-						.filter { $0.entityType == .article && $0.operation == .delete }
-						.map(\.entityId),
-				)
-				// Article/feed upserts must land before status changes because a page can
-				// contain both records for a newly-created article.
-				for change in page.changes where change.entityType != .status {
-					try apply(
-						change,
-						accountID: storageAccountID,
-						dayBounds: dayBounds,
-						deletedArticleIDs: deletedArticleIDs,
-						database: database,
-					)
-				}
-				for change in page.changes where change.entityType == .status {
-					try apply(
-						change,
-						accountID: storageAccountID,
-						dayBounds: dayBounds,
-						deletedArticleIDs: deletedArticleIDs,
-						database: database,
-					)
-				}
-				try execute(
-					"""
-					INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
-					ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
-					""",
-					bindings: [.text(storageAccountID), .text(page.cursor)],
-					database: database,
-				)
+				try applyPageContents(page, storageAccountID: storageAccountID, dayBounds: dayBounds, database: database)
 			}
 		} catch {
 			// The page transaction rolls back both rows and cursor. Keep a separate
@@ -1107,6 +1049,161 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			try? await markCacheRepairNeeded(accountID: accountID, message: error.localizedDescription)
 			throw error
 		}
+	}
+
+	/// Starts a full rebuild, or picks up the one an earlier launch left
+	/// behind. A rebuild that was listing the library resumes when its marker
+	/// is younger than `maxAge`: the staged rows stay and the result carries the
+	/// original start and the listing continuation to request next (`""` once
+	/// the listing has finished and only navigation and promotion remain).
+	/// Otherwise this starts over exactly like `beginFullRebuild`.
+	func beginOrResumeFullRebuild(
+		accountID: String,
+		at date: Date = .now,
+		maxAge: TimeInterval = 24 * 60 * 60,
+	) async throws -> OfflineRebuildStart {
+		let database = try openDatabase()
+		let marker = try queryOne(
+			"SELECT staging_account_id, created_at, listing_continuation FROM cache_rebuilds WHERE account_id = ?",
+			bindings: [.text(accountID)],
+			database: database,
+		) { statement in
+			(string(at: 0, statement: statement), sqlite3_column_double(statement, 1), string(at: 2, statement: statement))
+		}
+		if let marker, let stagingAccountID = marker.0, let continuation = marker.2 {
+			let age = date.timeIntervalSince1970 - marker.1
+			let staged = try loadCacheIntegrity(accountID: stagingAccountID, database: database)
+			if age >= 0, age < maxAge, staged.formatVersion == OfflineCacheIntegrity.currentFormatVersion {
+				stagingAccountIDs[accountID] = stagingAccountID
+				let stagedCursor = try queryOne(
+					"SELECT cursor FROM sync_state WHERE account_id = ?",
+					bindings: [.text(stagingAccountID)],
+					database: database,
+				) { statement in
+					string(at: 0, statement: statement)
+				} ?? nil
+				return OfflineRebuildStart(
+					startedAt: Date(timeIntervalSince1970: marker.1),
+					listingContinuation: continuation,
+					stagedCursor: stagedCursor,
+				)
+			}
+		}
+		try await beginFullRebuild(accountID: accountID, at: date)
+		return OfflineRebuildStart(startedAt: date, listingContinuation: nil)
+	}
+
+	/// Writes one page of the library listing into the attached rebuild
+	/// generation. The rows, the snapshot cursor and the listing continuation
+	/// commit together, so an interrupted rebuild resumes after the last page
+	/// that landed.
+	func applyLibraryListingPage(
+		_ page: LibraryListingPage,
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+	) async throws {
+		guard let stagingAccountID = stagingAccountIDs[accountID] else {
+			throw OfflineLibraryError.invalidCacheState("No offline rebuild is in progress.")
+		}
+		let database = try openDatabase()
+		try transaction(database) {
+			try applyPageContents(
+				page.syncPage(),
+				storageAccountID: stagingAccountID,
+				dayBounds: dayBounds,
+				database: database,
+			)
+			try execute(
+				"UPDATE cache_rebuilds SET listing_continuation = ? WHERE account_id = ? AND staging_account_id = ?",
+				bindings: [.text(page.continuation ?? ""), .text(accountID), .text(stagingAccountID)],
+				database: database,
+			)
+		}
+	}
+
+	/// Applies a page's changes, integrity and cursor to `storageAccountID`.
+	/// Callers own the transaction.
+	private func applyPageContents(
+		_ page: IncrementalSyncPage,
+		storageAccountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+		database: OpaquePointer,
+	) throws {
+		guard page.cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+			throw OfflineLibraryError.invalidSyncChange("The sync page had no cursor.")
+		}
+		let previous = try loadCacheIntegrity(accountID: storageAccountID, database: database)
+		// A page and its cursor commit together, so a complete cache that takes
+		// an incremental page is still complete as of that cursor. Recording it
+		// as `.syncing` made any interruption (the app suspended, a background
+		// refresh running out of time) force the next launch to download the
+		// whole library again instead of resuming. Only navigation counts, which
+		// are rebuilt when the sync finishes, are unverified until then.
+		let continuesCompleteCache = previous.state == .complete
+			&& previous.formatVersion == OfflineCacheIntegrity.currentFormatVersion
+		try saveCacheIntegrity(
+			OfflineCacheIntegrity(
+				formatVersion: OfflineCacheIntegrity.currentFormatVersion,
+				state: continuesCompleteCache ? .complete : .syncing,
+				navigation: .unverified,
+				lastAttemptAt: previous.lastAttemptAt ?? .now,
+				lastSuccessAt: previous.lastSuccessAt,
+				lastError: nil,
+				invalidChangeCount: previous.invalidChangeCount,
+				lastPageHasMore: page.hasMore,
+			),
+			accountID: storageAccountID,
+			database: database,
+		)
+
+		let deletedArticleIDs = Set(
+			page.changes
+				.filter { $0.entityType == .article && $0.operation == .delete }
+				.map(\.entityId),
+		)
+		// Article/feed upserts must land before status changes because a page can
+		// contain both records for a newly-created article.
+		var skippedChangeCount = 0
+		for change in page.changes.filter({ $0.entityType != .status }) + page.changes.filter({ $0.entityType == .status }) {
+			do {
+				try apply(
+					change,
+					accountID: storageAccountID,
+					dayBounds: dayBounds,
+					deletedArticleIDs: deletedArticleIDs,
+					database: database,
+				)
+			} catch OfflineLibraryError.invalidSyncChange {
+				// One malformed change must not fail the page and, with it, force
+				// a rebuild of the whole library. Skip it and count it.
+				skippedChangeCount += 1
+			}
+		}
+		if skippedChangeCount > 0 {
+			let integrity = try loadCacheIntegrity(accountID: storageAccountID, database: database)
+			try saveCacheIntegrity(
+				OfflineCacheIntegrity(
+					formatVersion: integrity.formatVersion,
+					state: integrity.state,
+					navigation: integrity.navigation,
+					lastAttemptAt: integrity.lastAttemptAt,
+					lastSuccessAt: integrity.lastSuccessAt,
+					lastError: integrity.lastError,
+					invalidChangeCount: integrity.invalidChangeCount + skippedChangeCount,
+					lastPageHasMore: integrity.lastPageHasMore,
+				),
+				accountID: storageAccountID,
+				database: database,
+			)
+		}
+		try execute(
+			"""
+			INSERT INTO sync_state (account_id, cursor, last_sync_at) VALUES (?, ?, NULL)
+			ON CONFLICT(account_id) DO UPDATE SET cursor = excluded.cursor
+			""",
+			bindings: [.text(storageAccountID), .text(page.cursor)],
+			database: database,
+		)
 	}
 
 	func storageStats(accountID: String) throws -> OfflineStorageStats {
@@ -1141,6 +1238,118 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			lastSuccessAt: integrity.lastSuccessAt,
 			lastError: integrity.lastError,
 		)
+	}
+
+	// These three are `async` on purpose, like `apply`: an async caller holding
+	// the concrete store would otherwise pick the protocol extension's no-op.
+
+	/// Article ids to fetch, in the order the body queue should take them:
+	/// queued ids first (articles the phone does not hold yet), then articles
+	/// without a body that an offline reader needs, unread first and newest
+	/// first, then starred and Read It Later.
+	func articleIDsNeedingFetch(accountID: String, limit: Int) async throws -> [String] {
+		let database = try openDatabase()
+		var ids: [String] = []
+		try query(
+			"SELECT article_id FROM article_fetch_queue WHERE account_id = ? ORDER BY created_at, rowid LIMIT ?",
+			bindings: [.text(accountID), .int64(Int64(max(limit, 0)))],
+			database: database,
+		) { statement in
+			if let id = string(at: 0, statement: statement) { ids.append(id) }
+		}
+		guard ids.count < limit else { return ids }
+		try query(
+			"""
+			SELECT id FROM cached_articles
+			WHERE account_id = ? AND body_missing = 1
+			  AND (is_read = 0 OR is_starred = 1 OR feed_key = ?)
+			ORDER BY is_read ASC, received_at DESC
+			LIMIT ?
+			""",
+			bindings: [.text(accountID), .text(SavedItems.feedKey), .int64(Int64(limit - ids.count))],
+			database: database,
+		) { statement in
+			if let id = string(at: 0, statement: statement), ids.contains(id) == false { ids.append(id) }
+		}
+		return ids
+	}
+
+	/// Stores articles fetched by id. An article the phone holds only gains the
+	/// body it is missing; its read and starred state stay as they are, since a
+	/// later sync or a pending local change is newer than this fetch. An article
+	/// the phone does not hold is inserted like a sync upsert.
+	func applyFetchedArticles(
+		_ articles: [IncrementalSyncPayload],
+		accountID: String,
+		dayBounds: ReaderLocalDayBounds?,
+	) async throws -> [Recommendation] {
+		let database = try openDatabase()
+		var stored: [Recommendation] = []
+		try transaction(database) {
+			for payload in articles {
+				guard let id = payload.id, id.isEmpty == false else { continue }
+				try execute(
+					"DELETE FROM article_fetch_queue WHERE account_id = ? AND article_id = ?",
+					bindings: [.text(accountID), .text(id)],
+					database: database,
+				)
+				if let existing = try loadArticle(identifier: id, accountID: accountID, database: database) {
+					guard existing.article.hasReadableHTML == false else {
+						// Already stored; a copy on screen may still lack it.
+						stored.append(existing.article)
+						continue
+					}
+					guard let html = payload.html, html.isEmpty == false else {
+						// The server has no body for it either: stop asking.
+						try execute(
+							"UPDATE cached_articles SET body_missing = 0 WHERE account_id = ? AND id = ?",
+							bindings: [.text(accountID), .text(id)],
+							database: database,
+						)
+						continue
+					}
+					let filled = sanitized(existing.article.replacingBody(
+						html: html,
+						text: payload.text ?? existing.article.text,
+						isBodyPruned: nil,
+						isPaywalled: payload.isPaywalled,
+					))
+					stored.append(try upsertArticle(filled, bodyPruned: false, accountID: accountID, database: database))
+				} else {
+					try apply(
+						IncrementalSyncChange(sequence: 0, entityType: .article, entityId: id, operation: .upsert, changedAt: .now, payload: payload),
+						accountID: accountID,
+						dayBounds: dayBounds,
+						deletedArticleIDs: [],
+						database: database,
+					)
+					if let inserted = try loadArticle(identifier: id, accountID: accountID, database: database)?.article {
+						stored.append(inserted)
+					}
+				}
+			}
+		}
+		return stored
+	}
+
+	/// Takes ids the server no longer has out of the fetch queue for good.
+	func markArticlesUnavailable(ids: [String], accountID: String) async throws {
+		guard ids.isEmpty == false else { return }
+		let database = try openDatabase()
+		try transaction(database) {
+			for id in ids {
+				try execute(
+					"DELETE FROM article_fetch_queue WHERE account_id = ? AND article_id = ?",
+					bindings: [.text(accountID), .text(id)],
+					database: database,
+				)
+				try execute(
+					"UPDATE cached_articles SET body_missing = 0 WHERE account_id = ? AND id = ?",
+					bindings: [.text(accountID), .text(id)],
+					database: database,
+				)
+			}
+		}
 	}
 
 	func cleanupReadBodies(accountID: String, keepingNewest count: Int = 200) throws -> Int {
@@ -1506,7 +1715,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				payload.isRead != nil || payload.isStarred != nil else {
 				throw OfflineLibraryError.invalidSyncChange("The status change for \(change.entityId) was malformed.")
 			}
-			try updateStatus(
+			let updated = try updateStatus(
 				articleID: articleID,
 				isRead: payload.isRead,
 				isStarred: payload.isStarred,
@@ -1514,6 +1723,16 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				accountID: accountID,
 				database: database,
 			)
+			// The phone keeps only part of the library, so a status for an article
+			// it does not hold is expected. An unread one belongs in Unread and a
+			// starred one in Starred: fetch those.
+			if updated == false, payload.isRead == false || payload.isStarred == true {
+				try execute(
+					"INSERT OR IGNORE INTO article_fetch_queue (account_id, article_id, created_at) VALUES (?, ?, ?)",
+					bindings: [.text(accountID), .text(articleID), .double(Date.now.timeIntervalSince1970)],
+					database: database,
+				)
+			}
 		}
 	}
 
@@ -2137,18 +2356,19 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		try execute(
 			"""
 			INSERT INTO cached_articles
-			(account_id, id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(account_id, id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, body_missing, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(account_id, id) DO UPDATE SET
 			reader_id = excluded.reader_id, feed_key = excluded.feed_key,
 			received_at = excluded.received_at, is_read = excluded.is_read,
 			is_starred = excluded.is_starred, body_pruned = excluded.body_pruned,
-			payload = excluded.payload
+			body_missing = excluded.body_missing, payload = excluded.payload
 			""",
 			bindings: [
 				.text(accountID), .text(article.id), .text(article.readerId), .text(article.feedKey),
 				.double(article.receivedAt.timeIntervalSince1970), .int64(article.isRead ? 1 : 0),
 				.int64(article.isStarred ? 1 : 0), .int64(bodyPruned ? 1 : 0),
+				.int64(bodyPruned == false && article.hasReadableHTML == false ? 1 : 0),
 				.blob(try encoder.encode(storedArticle)),
 			],
 			database: database,
@@ -2444,6 +2664,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		}
 	}
 
+	/// Returns `false` when the store does not hold the article.
+	@discardableResult
 	private func updateStatus(
 		articleID: String,
 		isRead: Bool?,
@@ -2451,9 +2673,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		dayBounds: ReaderLocalDayBounds?,
 		accountID: String,
 		database: OpaquePointer,
-	) throws {
+	) throws -> Bool {
 		guard var article = try loadArticle(identifier: articleID, accountID: accountID, database: database)?.article else {
-			throw OfflineLibraryError.missingStatusTarget(articleID)
+			return false
 		}
 		article.isRead = isRead ?? article.isRead
 		article.isStarred = isStarred ?? article.isStarred
@@ -2464,6 +2686,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			accountID: accountID,
 			database: database,
 		)
+		return true
 	}
 
 	private func rebuildMemberships(
@@ -3081,48 +3304,45 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		)
 	}
 
+	/// Carries bodies the phone already downloaded into a rebuilt generation, so
+	/// the body queue does not fetch them again. Matches by id, then by reader id
+	/// (two indexed lookups rather than one `OR` join over the whole library).
 	private func preserveCanonicalArticleBodies(
 		accountID: String,
 		stagingAccountID: String,
 		database: OpaquePointer,
 	) throws {
 		var replacements: [String: Recommendation] = [:]
-		try query(
-			"""
-			SELECT staged.id, staged.payload, canonical.payload
-			FROM cached_articles AS staged
-			JOIN cached_articles AS canonical
-			  ON canonical.account_id = ?
-			 AND (
-				 canonical.id = staged.id
-				 OR (
-					 canonical.reader_id <> ''
-					 AND staged.reader_id <> ''
-					 AND canonical.reader_id = staged.reader_id
-				 )
-				 )
-			JOIN cached_collection_articles AS canonical_recommendation
-			  ON canonical_recommendation.account_id = ?
-			 AND canonical_recommendation.collection_id = ?
-			 AND canonical_recommendation.article_id = canonical.id
-			WHERE staged.account_id = ? AND staged.body_pruned = 1
-			""",
-			bindings: [
-				.text(accountID), .text(accountID), .text(ReaderSection.forYou.rawValue),
-				.text(stagingAccountID),
-			],
-			database: database,
-		) { statement in
-			guard let stageID = string(at: 0, statement: statement),
-				let stagePayload = data(at: 1, statement: statement),
-				let canonicalPayload = data(at: 2, statement: statement),
-				let stagedArticle = try? decoder.decode(Recommendation.self, from: stagePayload),
-				let canonicalArticle = try? decoder.decode(Recommendation.self, from: canonicalPayload),
-				stagedArticle.hasReadableHTML == false,
-				canonicalArticle.hasReadableHTML else {
-				return
+		let matches = [
+			"canonical.id = staged.id",
+			"canonical.reader_id = staged.reader_id AND staged.reader_id <> '' AND canonical.id <> staged.id",
+		]
+		for match in matches {
+			try query(
+				"""
+				SELECT staged.id, staged.payload, canonical.payload
+				FROM cached_articles AS staged
+				JOIN cached_articles AS canonical
+				  ON canonical.account_id = ? AND \(match)
+				WHERE staged.account_id = ?
+				  AND (staged.body_pruned = 1 OR staged.body_missing = 1)
+				  AND canonical.body_pruned = 0
+				""",
+				bindings: [.text(accountID), .text(stagingAccountID)],
+				database: database,
+			) { statement in
+				guard let stageID = string(at: 0, statement: statement),
+					replacements[stageID] == nil,
+					let stagePayload = data(at: 1, statement: statement),
+					let canonicalPayload = data(at: 2, statement: statement),
+					let stagedArticle = try? decoder.decode(Recommendation.self, from: stagePayload),
+					let canonicalArticle = try? decoder.decode(Recommendation.self, from: canonicalPayload),
+					stagedArticle.hasReadableHTML == false,
+					canonicalArticle.hasReadableHTML else {
+					return
+				}
+				replacements[stageID] = articleWithID(stagedArticle.replacingBody(html: canonicalArticle.html, text: stagedArticle.text ?? canonicalArticle.text, isBodyPruned: stagedArticle.isBodyPruned, isPaywalled: canonicalArticle.isPaywalled), id: stageID)
 			}
-			replacements[stageID] = articleWithID(stagedArticle.replacingBody(html: canonicalArticle.html, text: stagedArticle.text, isBodyPruned: stagedArticle.isBodyPruned, isPaywalled: canonicalArticle.isPaywalled), id: stageID)
 		}
 		for article in replacements.values {
 			try writeArticle(article, bodyPruned: false, accountID: stagingAccountID, database: database)
@@ -3202,7 +3422,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			("cached_navigation", "payload, updated_at"),
 			("cached_subscriptions", "id, title, payload"),
 			("cached_feeds", "feed_key, stream_id, title, feed_url, site_url, icon_url, is_active, folders_json"),
-			("cached_articles", "id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, payload"),
+			("cached_articles", "id, reader_id, feed_key, received_at, is_read, is_starred, body_pruned, body_missing, payload"),
 			("cached_collection_articles", "collection_id, article_id, position"),
 			("cached_collection_pagination", "collection_id, continuation"),
 			("sync_state", "cursor, last_sync_at"),
@@ -3220,6 +3440,15 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 		}
+		// Articles the rebuild queued for fetching join the account's queue.
+		try execute(
+			"""
+			INSERT OR IGNORE INTO article_fetch_queue (account_id, article_id, created_at)
+			SELECT ?, article_id, created_at FROM article_fetch_queue WHERE account_id = ?
+			""",
+			bindings: [.text(accountID), .text(stagingAccountID)],
+			database: database,
+		)
 		// A completed authoritative rebuild owns sync-derived collections. Keep the
 		// local ForYou page marker, but discard markers for feed/smart pages so later
 		// repair can reconcile the promoted projection with server state.
@@ -3376,8 +3605,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			"CREATE TABLE IF NOT EXISTS pending_actions (sequence INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at REAL NOT NULL, UNIQUE (account_id, id))",
 			"CREATE INDEX IF NOT EXISTS idx_pending_actions_account ON pending_actions(account_id, sequence)",
 			"CREATE TABLE IF NOT EXISTS reader_state (account_id TEXT PRIMARY KEY, payload BLOB NOT NULL, updated_at REAL NOT NULL)",
+			// Articles to fetch by id ahead of the body queue: a starred status for an
+			// article the phone does not hold.
+			"CREATE TABLE IF NOT EXISTS article_fetch_queue (account_id TEXT NOT NULL, article_id TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (account_id, article_id))",
 		]
 		for sql in statements { try execute(sql, database: database) }
+		// `body_missing`: the article has no body yet and was not pruned, so the
+		// body queue should download it. `listing_continuation`: how far an
+		// unread-first rebuild got, so an interrupted one resumes.
+		try addColumnIfMissing(table: "cached_articles", column: "body_missing", definition: "INTEGER NOT NULL DEFAULT 0", database: database)
+		try addColumnIfMissing(table: "cache_rebuilds", column: "listing_continuation", definition: "TEXT", database: database)
+		try execute(
+			"CREATE INDEX IF NOT EXISTS idx_cached_articles_body_missing ON cached_articles(account_id, body_missing, is_read, received_at DESC)",
+			database: database,
+		)
 		try migrateCacheRebuildIntents(database: database)
 		try migrateCollectionStateMarkers(database: database)
 		try execute(
@@ -3463,6 +3704,17 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 		}
+	}
+
+	private func addColumnIfMissing(table: String, column: String, definition: String, database: OpaquePointer) throws {
+		var columns = Set<String>()
+		try query("PRAGMA table_info(\(table))", database: database) { statement in
+			if let name = string(at: 1, statement: statement) {
+				columns.insert(name)
+			}
+		}
+		guard columns.contains(column) == false else { return }
+		try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)", database: database)
 	}
 
 	private func migrateCacheRebuildIntents(database: OpaquePointer) throws {

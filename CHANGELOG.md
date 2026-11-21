@@ -10,6 +10,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Fixed
 
+- iOS: rebuilding the offline library no longer replays the server's whole change history. The app lists unread, starred, saved and recently read articles in a few requests, newest unread first, and resumes where it stopped if it is interrupted. Article text downloads in the background afterwards, and an article opened before its text arrives fetches it first. Pull-to-refresh, in a list, the sidebar or Home, no longer waits for a rebuild, which could leave it spinning without end. The Worker adds `GET /api/v1/library` and `POST /api/v1/library/articles` for this; older app builds are unaffected.
 - iOS: the article sanitizer no longer passes through a tag or comment that is cut off at the end of a story, or everything after a stray `<` followed by an unmatched quote. A cut-off tag is dropped and a stray `<` is shown as text.
 
 ## [0.1.14.0] - 2026-11-17

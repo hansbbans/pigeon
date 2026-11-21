@@ -406,27 +406,41 @@ struct ArticleReaderView: View {
 						onOpenLink: openYouTubeLink,
 					)
 				}
-				ArticleBodyView(
-					content: article.html,
-					fallbackText: article.text ?? article.title,
-					baseURL: article.safeOriginalURL,
-					leadImageURL: nil,
-					textScale: model.readerTypography.textScale,
-					lineHeight: model.readerTypography.lineHeight,
-					theme: model.readerTypography.theme,
-					remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-					imageProxySession: model.session,
-					preparedBody: model.readerPreparation.preparedBody(for: article),
-					openedDestination: openInlineDestination,
-					saveForLater: saveInlineDestination,
-					onHTMLLayout: { layout in
-						handleReaderLayout(layout, article: article, mode: .feedContent)
-					},
-					onBodyFrameChange: { minY in
-						handleArticleBodyFrameChange(minY, article: article, mode: .feedContent)
-					},
-				)
-				.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
+				if article.hasReadableHTML == false, model.articleIDsLoadingBody.contains(article.id) {
+					HStack(spacing: 10) {
+						ProgressView()
+						Text("Loading the story…")
+							.foregroundStyle(.pigeonSecondary)
+					}
+					.frame(maxWidth: .infinity, alignment: .leading)
+					.accessibilityElement(children: .combine)
+					.accessibilityIdentifier("article-body-loading")
+				} else {
+					ArticleBodyView(
+						content: article.html,
+						fallbackText: article.text ?? article.title,
+						baseURL: article.safeOriginalURL,
+						leadImageURL: nil,
+						textScale: model.readerTypography.textScale,
+						lineHeight: model.readerTypography.lineHeight,
+						theme: model.readerTypography.theme,
+						remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+						imageProxySession: model.session,
+						preparedBody: model.readerPreparation.preparedBody(for: article),
+						openedDestination: openInlineDestination,
+						saveForLater: saveInlineDestination,
+						onHTMLLayout: { layout in
+							handleReaderLayout(layout, article: article, mode: .feedContent)
+						},
+						onBodyFrameChange: { minY in
+							handleArticleBodyFrameChange(minY, article: article, mode: .feedContent)
+						},
+					)
+					.id(ArticleBodyLayoutIdentity(articleID: article.id, content: article.html))
+				}
+			}
+			.task(id: article.id) {
+				await model.ensureArticleBody(for: article)
 			}
 		case .readerView:
 			readerViewContent(for: article)

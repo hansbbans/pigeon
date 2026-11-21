@@ -7,12 +7,26 @@ actor ControlledHTTPClient: HTTPClient {
 		let request: URLRequest
 	}
 
+	/// Tests written against change-log rebuilds model a Worker from before the
+	/// library listing, so `/api/v1/library` answers 404 at once unless the test
+	/// asks to control it like any other request.
+	private let controlsLibraryListing: Bool
 	private var nextID = 0
 	private var pendingContinuations: [Int: CheckedContinuation<(Data, URLResponse), any Error>] = [:]
 	private var unannouncedRequests: [PendingRequest] = []
 	private var requestWaiters: [CheckedContinuation<PendingRequest, Never>] = []
 
+	init(controlsLibraryListing: Bool = false) {
+		self.controlsLibraryListing = controlsLibraryListing
+	}
+
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+		if controlsLibraryListing == false, let url = request.url, url.path == "/api/v1/library" {
+			guard let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil) else {
+				throw PigeonError.invalidResponse
+			}
+			return (Data(#"{"error":"not found"}"#.utf8), response)
+		}
 		let id = nextID
 		nextID += 1
 		let pendingRequest = PendingRequest(id: id, request: request)

@@ -4339,6 +4339,341 @@ struct ReaderAppModelTests {
 		#expect(syncRequests[1].query["limit"] == "200")
 	}
 
+	@Test func rebuildUsesTheLibraryListingInsteadOfReplayingTheChangeLog() async throws {
+		let session = try makeSession(token: "listing-rebuild-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "v1:12"), statusCode: 200)],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: "l1:9:1", articleIDs: ["listed-1"]), statusCode: 200),
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-2"], withFeed: false), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		// One catch-up request from the listing's snapshot cursor, not a replay.
+		#expect(await client.syncRequests().map { $0.query["cursor"] } == ["v1:9"])
+		#expect(await client.libraryRequests().map { $0.query["continuation"] } == [nil, "l1:9:1"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		#expect(try await store.loadSnapshot(accountID: session.storageIdentity).cursor == "v1:12")
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(Set(committed.map(\.id)) == ["listed-1", "listed-2"])
+
+		await model.prepareOfflineLibrary()
+
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == ["v1:9", "v1:12"])
+	}
+
+	@Test func listingRebuildCatchesUpFromItsSnapshotCursorBeforeItPromotes() async throws {
+		// Marked read elsewhere after the listing was taken: the swap must not
+		// bring it back as unread.
+		let session = try makeSession(token: "listing-catch-up-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: statusSyncPage(itemID: "listed-1"), statusCode: 200)],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-1", "listed-2"]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.syncRequests().map { $0.query["cursor"] } == ["v1:9"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(committed.first { $0.id == "listed-1" }?.isRead == true)
+		#expect(committed.first { $0.id == "listed-2" }?.isRead == false)
+		#expect(try await store.loadSnapshot(accountID: session.storageIdentity).cursor == "status-cursor")
+	}
+
+	@Test func aRejectedSavedContinuationStartsTheListingOver() async throws {
+		// A continuation the server no longer accepts (400) must not pin every
+		// preparation to it until the stage expires.
+		let session = try makeSession(token: "listing-rejected-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: "l1:9:1", articleIDs: ["stale-1"]), statusCode: 200),
+				.init(data: Data(#"{"error":"boom"}"#.utf8), statusCode: 500),
+				.init(data: Data(#"{"error":"Invalid library continuation"}"#.utf8), statusCode: 400),
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["fresh-1"]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.offlineStorageStats.cacheState != .complete)
+
+		await model.prepareOfflineLibrary(force: true)
+
+		#expect(await client.libraryRequests().map { $0.query["continuation"] } == [nil, "l1:9:1", "l1:9:1", nil])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(committed.map(\.id) == ["fresh-1"])
+	}
+
+	@Test func missingArticleBodiesDownloadNewestUnreadFirst() async throws {
+		let session = try makeSession(token: "body-order-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["older", "newest", "middle"], receivedAt: [
+					"older": "2026-08-15T10:00:00.000Z",
+					"newest": "2026-08-15T12:00:00.000Z",
+					"middle": "2026-08-15T11:00:00.000Z",
+				]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(await client.articleBatches().isEmpty)
+
+		await model.downloadMissingArticles()
+
+		#expect(await client.articleBatches() == [["newest", "middle", "older"]])
+		let stored = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(stored.count == 3)
+		#expect(stored.allSatisfy { $0.html == "<p>Body of \($0.id)</p>" })
+	}
+
+	@Test func missingArticlesAreNotRequestedTwice() async throws {
+		let session = try makeSession(token: "body-missing-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["kept", "gone"]), statusCode: 200),
+			],
+			missingArticleIDs: ["gone"],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await model.downloadMissingArticles()
+		await model.downloadMissingArticles()
+
+		let batches = await client.articleBatches()
+		#expect(batches.count == 1)
+		#expect(Set(batches.first ?? []) == ["kept", "gone"])
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func articleDownloadsStopWhenCancelled() async throws {
+		let session = try makeSession(token: "body-cancel-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: (1...25).map { "story-\($0)" }), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		await client.holdArticleRequests()
+
+		let downloads = Task { await model.downloadMissingArticles() }
+		await client.waitForHeldArticleRequest()
+		downloads.cancel()
+		await client.releaseArticleRequests()
+		await downloads.value
+
+		#expect(await client.articleBatches().count == 1)
+	}
+
+	@Test func bodiesTheServerCannotFillDoNotStallTheQueue() async throws {
+		// Twenty bodies that sanitize to nothing head the queue; the five
+		// behind them still download.
+		let session = try makeSession(token: "body-stall-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let blank = (1...20).map { "blank-\($0)" }
+		let real = (1...5).map { "real-\($0)" }
+		var receivedAt: [String: String] = [:]
+		for id in blank { receivedAt[id] = "2026-08-15T12:00:00.000Z" }
+		for id in real { receivedAt[id] = "2026-08-15T10:00:00.000Z" }
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: blank + real, receivedAt: receivedAt), statusCode: 200),
+			],
+			blankBodyArticleIDs: Set(blank),
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await model.downloadMissingArticles()
+
+		let batches = await client.articleBatches()
+		#expect(batches.count == 2)
+		#expect(Set(batches.last ?? []) == Set(real))
+	}
+
+	@Test func aBodyFetchedOnOpenReachesTheCopyKeptInAnUnreadList() async throws {
+		// Opening marks the story read; the Unread list keeps a copy of it so
+		// it does not jump away. That copy is the one the reader shows.
+		let session = try makeSession(token: "body-kept-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["first", "opened"]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		let listed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		let unread = ReaderNavigationItem.smart(.unread, unreadCount: 2)
+		model.setArticles(listed, for: unread)
+		model.select(item: unread)
+		let opened = try #require(listed.first { $0.id == "opened" })
+		model.select(article: opened)
+		await model.setRead(opened, read: true)
+		#expect(model.articles(for: unread).contains { $0.id == "opened" && $0.isRead })
+
+		await model.ensureArticleBody(for: opened)
+
+		#expect(model.articles(for: unread).first { $0.id == "opened" }?.html == "<p>Body of opened</p>")
+		#expect(model.article(withId: "opened")?.html == "<p>Body of opened</p>")
+		#expect(model.selectedArticle?.html == "<p>Body of opened</p>")
+	}
+
+	@Test func openingAnArticleWithoutABodyFetchesItFirst() async throws {
+		let session = try makeSession(token: "body-open-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["first", "opened"]), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		let listed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		let opened = try #require(listed.first { $0.id == "opened" })
+		#expect(opened.hasReadableHTML == false)
+		model.setArticles(listed, for: .smart(.forYou, unreadCount: 2))
+
+		await model.ensureArticleBody(for: opened)
+
+		#expect(await client.articleBatches() == [["opened"]])
+		#expect(model.article(withId: "opened")?.html == "<p>Body of opened</p>")
+		#expect(model.article(withId: "first")?.hasReadableHTML == false)
+		#expect(model.articleIDsLoadingBody.isEmpty)
+		let stored = try await store.searchArticles(query: "Story opened", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(stored.first { $0.id == "opened" }?.html == "<p>Body of opened</p>")
+	}
+
+	@Test func rebuildFallsBackToTheChangeLogWhenTheServerHasNoListing() async throws {
+		let session = try makeSession(token: "listing-fallback-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "replayed-cursor"), statusCode: 200)],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+
+		#expect(await client.libraryRequests().count == 1)
+		let syncRequests = await client.syncRequests()
+		#expect(syncRequests.map { $0.query["cursor"] } == [nil])
+		#expect(syncRequests.map { $0.query["limit"] } == ["50"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
+	@Test func interruptedListingRebuildResumesFromItsContinuation() async throws {
+		let session = try makeSession(token: "listing-resume-token")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: "l1:9:1", articleIDs: ["listed-1"]), statusCode: 200),
+				.init(data: Data(#"{"error":"boom"}"#.utf8), statusCode: 500),
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-2"], withFeed: false), statusCode: 200),
+			],
+		)
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+
+		await model.prepareOfflineLibrary()
+		#expect(model.offlineStorageStats.cacheState != .complete)
+
+		await model.prepareOfflineLibrary(force: true)
+
+		#expect(await client.libraryRequests().map { $0.query["continuation"] } == [nil, "l1:9:1", "l1:9:1"])
+		#expect(await client.syncRequests().map { $0.query["cursor"] } == ["v1:9"])
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		// The test server lists no subscriptions, so look at the committed rows.
+		let committed = try await store.searchArticles(query: "Story", collectionID: nil, accountID: session.storageIdentity, limit: 10)
+		#expect(Set(committed.map(\.id)) == ["listed-1", "listed-2"])
+	}
+
+	@Test(.timeLimit(.minutes(1))) func pullToRefreshReturnsWhileARebuildIsStillListing() async throws {
+		// Pull-to-refresh used to await the whole rebuild: an endless spinner.
+		let session = try makeSession(token: "refresh-during-rebuild")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-1"]), statusCode: 200),
+			],
+		)
+		await client.holdLibraryRequests()
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await client.waitForHeldLibraryRequest()
+		let recommendationRequestsBefore = await client.requests().filter { $0.path == "/api/v1/recommendations" }.count
+
+		await model.refresh(collection: .smart(.forYou))
+
+		let recommendationRequestsAfter = await client.requests().filter { $0.path == "/api/v1/recommendations" }.count
+		#expect(recommendationRequestsAfter > recommendationRequestsBefore)
+		#expect(model.offlineStorageStats.cacheState != .complete)
+		await client.releaseLibraryRequests()
+		await preparation.value
+		#expect(model.offlineStorageStats.cacheState == .complete)
+	}
+
+	@Test(.timeLimit(.minutes(1))) func libraryRefreshReturnsWhileARebuildIsStillListing() async throws {
+		// The sidebar and Home pull-to-refresh awaited the whole rebuild.
+		let session = try makeSession(token: "library-refresh-during-rebuild")
+		let store = try await makeLegacyCacheStore(session: session)
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [],
+			libraryResponses: [
+				.init(data: libraryListingPage(continuation: nil, articleIDs: ["listed-1"]), statusCode: 200),
+			],
+		)
+		await client.holdLibraryRequests()
+		let model = try makeModel(httpClient: client, session: session, offlineStore: store)
+		let preparation = Task { await model.prepareOfflineLibrary() }
+		await client.waitForHeldLibraryRequest()
+
+		await model.refreshLibrary()
+
+		#expect(model.offlineStorageStats.cacheState != .complete)
+		await client.releaseLibraryRequests()
+		await preparation.value
+		#expect(model.offlineStorageStats.cacheState == .complete)
+		#expect(await client.libraryRequests().count == 1)
+	}
+
+	@Test func libraryRefreshWaitsForAnIncrementalSync() async throws {
+		let client = IntegritySyncHTTPClient(
+			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
+		)
+		let model = try await makeWarmPreparationModel(httpClient: client)
+		// The app reads the cache at launch; until then it cannot tell a warm
+		// cache from one that needs a rebuild.
+		await model.prepareOfflineLibrary()
+
+		await model.refreshLibrary()
+
+		#expect(await client.syncRequests().count == 2)
+	}
+
 	@Test func verifiedWarmCacheUsesOneIncrementalRequestWithoutNavigationRefetch() async throws {
 		let client = IntegritySyncHTTPClient(
 			syncResponses: [.init(data: emptySyncPage(cursor: "warm-cursor"), statusCode: 200)],
@@ -5227,12 +5562,14 @@ struct ReaderAppModelTests {
 		#expect(persisted.articlesByCollection[collection.id]?.map(\.id) == ["newest", "middle", "older"])
 
 		await model.refresh(collection: collection)
+		// This server never syncs, so the library still needs a rebuild, which
+		// refresh leaves running in the background. Let it finish before counting.
+		await model.prepareOfflineLibrary()
 
 		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
 		#expect(model.canLoadMore(collection: collection) == false)
 		let requests = await httpClient.requests()
 		let itemIDRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
-		#expect(itemIDRequests.count == 3)
 		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil])
 		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 3)
 	}
@@ -10901,6 +11238,40 @@ struct ReaderAppModelTests {
 		Data("{\"cursor\":\"\(cursor)\",\"hasMore\":false,\"changes\":[]}".utf8)
 	}
 
+	/// A `GET /api/v1/library` page with snapshot cursor `v1:9`: the "daily"
+	/// feed (stream `feed/1`) and unread articles without bodies.
+	private func libraryListingPage(
+		continuation: String?,
+		articleIDs: [String],
+		withFeed: Bool = true,
+		receivedAt: [String: String] = [:],
+	) -> Data {
+		let continuationJSON = continuation.map { "\"\($0)\"" } ?? "null"
+		let feeds = withFeed
+			? #"[{"feedKey":"daily","streamId":"feed/1","title":"Daily","isActive":true,"folders":[],"sourceType":"rss"}]"#
+			: "[]"
+		let articles = articleIDs.map { id in
+			let received = receivedAt[id] ?? "2026-08-15T11:00:00.000Z"
+			return #"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","receivedAt":"\#(received)","isRead":false,"isStarred":false,"isBodyPruned":false}"#
+		}
+		return Data(#"{"snapshotCursor":"v1:9","continuation":\#(continuationJSON),"feeds":\#(feeds),"articles":[\#(articles.joined(separator: ","))]}"#.utf8)
+	}
+
+	/// A cache written before integrity tracking: it has to be rebuilt.
+	private func makeLegacyCacheStore(session: PigeonSession) async throws -> OfflineLibraryStore {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.saveNavigation(
+			ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1)], expandedFolderIDs: []),
+			accountID: session.storageIdentity,
+		)
+		try await store.saveArticles(
+			[makeArticle(id: "legacy-article")],
+			collectionID: ReaderSection.forYou.rawValue,
+			accountID: session.storageIdentity,
+		)
+		return store
+	}
+
 	private func statusSyncPage(itemID: String) -> Data {
 		Data("""
 		{"cursor":"status-cursor","hasMore":false,"changes":[{"sequence":2,"entityType":"status","entityId":"\(itemID)","operation":"upsert","changedAt":"2026-08-21T12:00:00.000Z","payload":{"itemId":"\(itemID)","isRead":true,"isStarred":false,"updatedAt":"2026-08-21T12:00:00.000Z","version":2,"mutationId":null}}]}
@@ -11027,11 +11398,35 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 	}
 
 	private var syncResponses: [SyncResponse]
+	/// Served in order for `/api/v1/library`; once empty the server has no
+	/// listing (404), like a Worker from before the listing existed.
+	private var libraryResponses: [SyncResponse]
 	private let subscriptionStatusCode: Int
 	private var capturedRequests: [Request] = []
+	private var holdsLibraryRequests = false
+	private var heldLibraryRequests: [CheckedContinuation<Void, Never>] = []
+	private var libraryArrivalWaiters: [CheckedContinuation<Void, Never>] = []
+	/// `POST /api/v1/library/articles` answers every other posted id with
+	/// the body `<p>Body of <id></p>`.
+	private let missingArticleIDs: Set<String>
+	/// Answered with a body that is only whitespace.
+	private let blankBodyArticleIDs: Set<String>
+	private var postedArticleBatches: [[String]] = []
+	private var holdsArticleRequests = false
+	private var heldArticleRequests: [CheckedContinuation<Void, Never>] = []
+	private var articleArrivalWaiters: [CheckedContinuation<Void, Never>] = []
 
-	init(syncResponses: [SyncResponse], subscriptionStatusCode: Int = 200) {
+	init(
+		syncResponses: [SyncResponse],
+		libraryResponses: [SyncResponse] = [],
+		missingArticleIDs: Set<String> = [],
+		blankBodyArticleIDs: Set<String> = [],
+		subscriptionStatusCode: Int = 200,
+	) {
 		self.syncResponses = syncResponses
+		self.libraryResponses = libraryResponses
+		self.missingArticleIDs = missingArticleIDs
+		self.blankBodyArticleIDs = blankBodyArticleIDs
 		self.subscriptionStatusCode = subscriptionStatusCode
 	}
 
@@ -11049,6 +11444,28 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 			response = syncResponses.isEmpty
 				? SyncResponse(data: Data(#"{"cursor":"default","hasMore":false,"changes":[]}"#.utf8), statusCode: 200)
 				: syncResponses.removeFirst()
+		case "/api/v1/library":
+			if holdsLibraryRequests {
+				await withCheckedContinuation { continuation in
+					heldLibraryRequests.append(continuation)
+					libraryArrivalWaiters.forEach { $0.resume() }
+					libraryArrivalWaiters.removeAll()
+				}
+			}
+			response = libraryResponses.isEmpty
+				? SyncResponse(data: Data(#"{"error":"not found"}"#.utf8), statusCode: 404)
+				: libraryResponses.removeFirst()
+		case "/api/v1/library/articles":
+			let posted = try JSONDecoder().decode([String: [String]].self, from: request.httpBody ?? Data())["ids"] ?? []
+			postedArticleBatches.append(posted)
+			if holdsArticleRequests {
+				await withCheckedContinuation { continuation in
+					heldArticleRequests.append(continuation)
+					articleArrivalWaiters.forEach { $0.resume() }
+					articleArrivalWaiters.removeAll()
+				}
+			}
+			response = articlesResponse(for: posted)
 		case "/reader/api/0/subscription/list":
 			response = SyncResponse(data: Data(#"{"subscriptions":[]}"#.utf8), statusCode: subscriptionStatusCode)
 		case "/reader/api/0/unread-count", "/reader/api/0/stream/items/ids":
@@ -11078,6 +11495,59 @@ private actor IntegritySyncHTTPClient: HTTPClient {
 
 	func syncRequests() -> [Request] {
 		capturedRequests.filter { $0.path == "/api/v1/sync" }
+	}
+
+	func libraryRequests() -> [Request] {
+		capturedRequests.filter { $0.path == "/api/v1/library" }
+	}
+
+	/// Library requests wait until `releaseLibraryRequests()`.
+	func holdLibraryRequests() {
+		holdsLibraryRequests = true
+	}
+
+	func waitForHeldLibraryRequest() async {
+		guard heldLibraryRequests.isEmpty else { return }
+		await withCheckedContinuation { libraryArrivalWaiters.append($0) }
+	}
+
+	func releaseLibraryRequests() {
+		holdsLibraryRequests = false
+		heldLibraryRequests.forEach { $0.resume() }
+		heldLibraryRequests.removeAll()
+	}
+
+	/// The ids each `POST /api/v1/library/articles` asked for, in order.
+	func articleBatches() -> [[String]] {
+		postedArticleBatches
+	}
+
+	/// Article requests wait until `releaseArticleRequests()`.
+	func holdArticleRequests() {
+		holdsArticleRequests = true
+	}
+
+	func waitForHeldArticleRequest() async {
+		guard heldArticleRequests.isEmpty else { return }
+		await withCheckedContinuation { articleArrivalWaiters.append($0) }
+	}
+
+	func releaseArticleRequests() {
+		holdsArticleRequests = false
+		heldArticleRequests.forEach { $0.resume() }
+		heldArticleRequests.removeAll()
+	}
+
+	private func articlesResponse(for ids: [String]) -> SyncResponse {
+		let articles = ids.filter { missingArticleIDs.contains($0) == false }.map { id in
+			let html = blankBodyArticleIDs.contains(id) ? "   " : "<p>Body of \(id)</p>"
+			return #"{"id":"\#(id)","readerId":"reader-\#(id)","feedKey":"daily","source":"Daily","title":"Story \#(id)","html":"\#(html)","receivedAt":"2026-08-15T11:00:00.000Z","isRead":false,"isStarred":false,"isBodyPruned":false}"#
+		}
+		let missing = ids.filter { missingArticleIDs.contains($0) }.map { "\"\($0)\"" }
+		return SyncResponse(
+			data: Data(#"{"articles":[\#(articles.joined(separator: ","))],"missing":[\#(missing.joined(separator: ","))]}"#.utf8),
+			statusCode: 200,
+		)
 	}
 }
 
@@ -12124,6 +12594,10 @@ private actor MutationReplayFailureHTTPClient: HTTPClient {
 		case "/api/v1/sync":
 			statusCode = 200
 			data = Data(#"{"cursor":"launch-cursor","hasMore":false,"changes":[]}"#.utf8)
+		case "/api/v1/library":
+			// A Worker from before the listing: rebuilds replay the change log.
+			statusCode = 404
+			data = Data(#"{"error":"not found"}"#.utf8)
 		case "/reader/api/0/subscription/list":
 			statusCode = 200
 			data = Data(#"{"subscriptions":[]}"#.utf8)

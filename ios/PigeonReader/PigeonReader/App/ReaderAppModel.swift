@@ -316,6 +316,9 @@ final class ReaderAppModel {
 	private var activeOfflinePreparationID: UUID?
 	private var offlinePreparationTask: Task<Void, Never>?
 	private var offlinePreparationTaskID: UUID?
+	private var articleDownloadTask: Task<Void, Never>?
+	private var articleDownloadTaskID: UUID?
+	private static let articleBodyBatchSize = 20
 	private var deferredInitialFeedPaginationCollectionID: String?
 	private var isApplyingRestoration = false
 	private var restorationSaveTask: Task<Void, Never>?
@@ -340,6 +343,8 @@ final class ReaderAppModel {
 	private(set) var markingAllReadCollectionID: String?
 	private var scrollReadTriggered: Set<String> = []
 	private(set) var searchResults: [Recommendation] = []
+	/// Articles whose body is being fetched because the reader opened them.
+	private(set) var articleIDsLoadingBody: Set<String> = []
 	private(set) var articleListMutationRevision: UInt64 = 0
 	private(set) var articleListMutationArticleID: String?
 	var displayedSearchResults: [Recommendation] {
@@ -823,6 +828,8 @@ final class ReaderAppModel {
 			offlinePreparationTask?.cancel()
 			offlinePreparationTask = nil
 			offlinePreparationTaskID = nil
+			cancelArticleDownloads()
+			articleIDsLoadingBody = []
 			deferredInitialFeedPaginationCollectionID = nil
 			invalidateCollectionLoads()
 			collectionLoadCoordinator.removeAll()
@@ -1136,6 +1143,7 @@ final class ReaderAppModel {
 	func setApplicationActive(_ active: Bool) {
 		isApplicationActive = active
 		if active == false {
+			cancelArticleDownloads()
 			lifecycleRefreshTask?.cancel()
 			lifecycleRefreshTask = nil
 			lifecycleRefreshTaskID = nil
@@ -1363,6 +1371,9 @@ final class ReaderAppModel {
 		guard isCurrentAccountOperation(context), Task.isCancelled == false else { return false }
 		lastBackgroundRefreshAt = .now
 		await writeWidgetSnapshotOffMain()
+		// Last, so a refresh that runs out of time has already posted its
+		// notifications. Expiry cancels this task, which ends the downloads.
+		await downloadMissingArticles()
 		return true
 	}
 
@@ -1525,6 +1536,150 @@ final class ReaderAppModel {
 			guard isCurrentAccountOperation(context) else { return nil }
 			presentSettingsError(error)
 			return nil
+		}
+	}
+
+	/// Pull-to-refresh on the sidebar and Home. A rebuild carries on in the
+	/// background instead of holding the spinner; otherwise this waits for
+	/// the sync, which is quick.
+	func refreshLibrary() async {
+		if isOfflineRebuildPending {
+			startOfflinePreparationInBackground()
+			return
+		}
+		await prepareOfflineLibrary()
+	}
+
+	private var isOfflineRebuildPending: Bool {
+		offlineSynchronizationEnabled && session != nil && apiClient != nil
+			&& (offlineCacheIntegrity.requiresFullRebuild || offlineRepairInProgress)
+	}
+
+	// MARK: - Article bodies
+
+	/// A rebuild lists articles without their bodies. While the app is open,
+	/// fetch them in the background, unread and newest first, so they are
+	/// there to read offline. One download runs at a time.
+	func startArticleDownloadsIfNeeded() {
+		guard isApplicationActive, articleDownloadTask == nil, offlineSynchronizationEnabled, apiClient != nil else {
+			return
+		}
+		let taskID = UUID()
+		articleDownloadTaskID = taskID
+		articleDownloadTask = Task(priority: .utility) { @MainActor [weak self] in
+			await self?.downloadMissingArticles()
+			guard let self, self.articleDownloadTaskID == taskID else { return }
+			self.articleDownloadTask = nil
+			self.articleDownloadTaskID = nil
+		}
+	}
+
+	private func cancelArticleDownloads() {
+		articleDownloadTask?.cancel()
+		articleDownloadTask = nil
+		articleDownloadTaskID = nil
+	}
+
+	/// Fetches missing bodies batch by batch until none are left. Stops when
+	/// cancelled, on the first error (the next preparation tries again), when
+	/// the network rules out background work, or when the account changes.
+	func downloadMissingArticles() async {
+		guard offlineSynchronizationEnabled, let apiClient, let context = accountContext(for: apiClient) else { return }
+		// The store drops an id once it is fetched or reported missing. Should
+		// one come back anyway, this run does not ask for it twice.
+		var handled: Set<String> = []
+		while Task.isCancelled == false, isCurrentAccountOperation(context), allowsArticleBodyDownloads {
+			// Ask past the handled ids, so a few that stay queued (a body that
+			// sanitizes to nothing) cannot hide the rest.
+			guard let queued = try? await offlineStore.articleIDsNeedingFetch(
+				accountID: context.accountID,
+				limit: handled.count + Self.articleBodyBatchSize,
+			) else { return }
+			let ids = Array(queued.filter { handled.contains($0) == false }.prefix(Self.articleBodyBatchSize))
+			guard ids.isEmpty == false, Task.isCancelled == false, isCurrentAccountOperation(context) else { return }
+			guard let answered = try? await fetchArticleBodies(ids: ids, apiClient: apiClient, context: context),
+				answered.isEmpty == false else {
+				return
+			}
+			handled.formUnion(answered)
+		}
+	}
+
+	/// Opening an article the phone holds without its body fetches that
+	/// body first; the reader shows progress while it loads.
+	func ensureArticleBody(for article: Recommendation) async {
+		guard article.hasReadableHTML == false,
+			articleIDsLoadingBody.contains(article.id) == false,
+			offlineSynchronizationEnabled,
+			let apiClient,
+			let context = accountContext(for: apiClient) else {
+			return
+		}
+		articleIDsLoadingBody.insert(article.id)
+		defer { articleIDsLoadingBody.remove(article.id) }
+		_ = try? await fetchArticleBodies(ids: [article.id], apiClient: apiClient, context: context)
+	}
+
+	/// Fetches one batch, stores it, and fills the copies on screen. Returns
+	/// the ids the server answered for, with a body or as missing; ids it
+	/// trimmed from the batch stay queued.
+	private func fetchArticleBodies(
+		ids: [String],
+		apiClient: PigeonAPIClient,
+		context: AccountOperationContext,
+	) async throws -> Set<String> {
+		let (response, _) = try await withTransientSyncRetry(initialLimit: ids.count) { limit in
+			try await apiClient.libraryArticles(ids: Array(ids.prefix(limit)))
+		}
+		guard isCurrentAccountOperation(context) else { return [] }
+		let stored = try await offlineStore.applyFetchedArticles(
+			response.articles,
+			accountID: context.accountID,
+			dayBounds: ReaderLocalDayBounds.localDay(containing: .now),
+		)
+		try await offlineStore.markArticlesUnavailable(ids: response.missing, accountID: context.accountID)
+		guard isCurrentAccountOperation(context) else { return [] }
+		fillLoadedBodies(stored)
+		return Set(response.articles.compactMap(\.id)).union(response.missing)
+	}
+
+	private var allowsArticleBodyDownloads: Bool {
+		BackgroundRefreshPolicy.shouldRefresh(
+			pathIsSatisfied: BackgroundRefreshManager.shared.pathIsSatisfied,
+			isConstrained: BackgroundRefreshManager.shared.pathIsConstrained,
+			allowsLowDataMode: allowsLowDataBackgroundRefresh,
+		)
+	}
+
+	/// Gives in-memory copies that lack a body the fetched one. Read and
+	/// starred state stay as they are in memory, which may be newer.
+	private func fillLoadedBodies(_ fetched: [Recommendation]) {
+		let bodies = fetched.filter(\.hasReadableHTML)
+		guard bodies.isEmpty == false else { return }
+		func filled(_ existing: Recommendation) -> Recommendation {
+			guard existing.hasReadableHTML == false,
+				let body = bodies.first(where: { articlesMatch($0, existing) }) else {
+				return existing
+			}
+			return existing.replacingBody(
+				html: body.html,
+				text: body.text,
+				isBodyPruned: body.isBodyPruned,
+				isPaywalled: body.isPaywalled,
+			)
+		}
+		for (collectionID, articles) in articleCache
+		where articles.contains(where: { article in bodies.contains { articlesMatch($0, article) } }) {
+			articleCache[collectionID] = articles.map(filled)
+		}
+		if searchResults.contains(where: { article in bodies.contains { articlesMatch($0, article) } }) {
+			searchResults = searchResults.map(filled)
+		}
+		for body in bodies {
+			updateKeptArticles(matching: body) { $0 = filled($0) }
+		}
+		if let detachedSelectedArticle {
+			self.detachedSelectedArticle = filled(detachedSelectedArticle)
 		}
 	}
 
@@ -1908,20 +2063,40 @@ final class ReaderAppModel {
 			await offlinePreparationTask.value
 			return
 		}
+		await beginOfflinePreparationTask().value
+		await processSavedItems()
+	}
 
+	/// Starts a forced offline preparation without waiting for it, unless one
+	/// is already running. The task is registered before this returns, so a
+	/// caller that awaits `prepareOfflineLibrary()` next joins it.
+	private func startOfflinePreparationInBackground() {
+		guard offlineSynchronizationEnabled, session != nil, apiClient != nil, offlinePreparationTask == nil else {
+			return
+		}
+		lastOfflinePreparationFailureAt = nil
+		lastOfflinePreparationFailureAccountID = nil
+		let task = beginOfflinePreparationTask()
+		Task { @MainActor [weak self] in
+			await task.value
+			await self?.processSavedItems()
+		}
+	}
+
+	private func beginOfflinePreparationTask() -> Task<Void, Never> {
 		let taskID = UUID()
 		let task = Task { @MainActor [weak self] in
 			guard let self else { return }
 			await self.performOfflineLibraryPreparation()
+			if self.offlinePreparationTaskID == taskID {
+				self.offlinePreparationTask = nil
+				self.offlinePreparationTaskID = nil
+				self.startArticleDownloadsIfNeeded()
+			}
 		}
 		offlinePreparationTaskID = taskID
 		offlinePreparationTask = task
-		await task.value
-		if offlinePreparationTaskID == taskID {
-			offlinePreparationTask = nil
-			offlinePreparationTaskID = nil
-		}
-		await processSavedItems()
+		return task
 	}
 
 	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
@@ -2127,11 +2302,17 @@ final class ReaderAppModel {
 					generation: preparationGeneration,
 				) else { return }
 			}
+			let syncResult: OfflineSyncResult
 			if requiresFullRebuild {
 				// Keep the canonical last-readable cache intact until replay has
-				// succeeded and the first page is already visible.
-				try await offlineStore.beginFullRebuild(accountID: accountID, at: synchronizationNow)
-				fullRebuildStartedAt = synchronizationNow
+				// succeeded and the first page is already visible. A rebuild an
+				// earlier attempt left part-way resumes instead of starting over.
+				let rebuild = try await offlineStore.beginOrResumeFullRebuild(
+					accountID: accountID,
+					at: synchronizationNow,
+					maxAge: Self.listingRebuildMaxAge,
+				)
+				fullRebuildStartedAt = rebuild.startedAt
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -2140,7 +2321,7 @@ final class ReaderAppModel {
 					await abandonFullRebuildIfNeeded(
 						accountID: accountID,
 						preparationID: preparationID,
-						startedAt: synchronizationNow,
+						startedAt: rebuild.startedAt,
 					)
 					return
 				}
@@ -2156,15 +2337,67 @@ final class ReaderAppModel {
 					invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
 					lastPageHasMore: nil,
 				)
+				let listed: Bool
+				do {
+					listed = try await rebuildFromLibraryListing(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						resumeContinuation: rebuild.listingContinuation,
+						dayBounds: dayBounds,
+					)
+				} catch PigeonError.server(statusCode: 400, _) where rebuild.listingContinuation?.isEmpty == false {
+					// The server no longer accepts the saved continuation (its
+					// format changed, say). Start the listing over rather than
+					// retry it until the stage expires.
+					let restartedAt = Date.now
+					try await offlineStore.beginFullRebuild(accountID: accountID, at: restartedAt)
+					fullRebuildStartedAt = restartedAt
+					offlineSyncCursor = nil
+					listed = try await rebuildFromLibraryListing(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						resumeContinuation: nil,
+						dayBounds: dayBounds,
+					)
+				}
+				if listed {
+					if rebuild.listingContinuation == "" {
+						offlineSyncCursor = rebuild.stagedCursor
+					}
+					// A stage can wait up to a day to be resumed. Bring it up to
+					// date from the listing's snapshot cursor before it replaces
+					// the library, so nothing read or changed since comes back.
+					syncResult = try await synchronizeIncrementally(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						fullRebuild: true,
+						catchingUpFrom: offlineSyncCursor,
+						dayBounds: dayBounds,
+						preservingCurrentSelection: isInitialPreparation,
+					)
+				} else {
+					syncResult = try await synchronizeIncrementally(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						fullRebuild: true,
+						dayBounds: dayBounds,
+						preservingCurrentSelection: isInitialPreparation,
+					)
+				}
+			} else {
+				syncResult = try await synchronizeIncrementally(
+					accountID: accountID,
+					apiClient: apiClient,
+					preparationID: preparationID,
+					fullRebuild: false,
+					dayBounds: dayBounds,
+					preservingCurrentSelection: isInitialPreparation,
+				)
 			}
-			let syncResult = try await synchronizeIncrementally(
-				accountID: accountID,
-				apiClient: apiClient,
-				preparationID: preparationID,
-				fullRebuild: requiresFullRebuild,
-				dayBounds: dayBounds,
-				preservingCurrentSelection: isInitialPreparation,
-			)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				if let fullRebuildStartedAt {
 					await abandonFullRebuildIfNeeded(
@@ -2313,8 +2546,8 @@ final class ReaderAppModel {
 			if isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) {
 				// A cancelled incremental sync keeps every page it applied, and the
 				// cursor moved with each one, so the next preparation resumes there.
-				// Only a cancelled rebuild, whose pages sit in an abandoned staging
-				// generation, has to start over.
+				// A cancelled rebuild stays a rebuild; its staged pages wait for the
+				// next preparation to resume them.
 				let resumesIncrementally = fullRebuildStartedAt == nil && offlineCacheIntegrity.state == .complete
 				offlineCacheIntegrity = OfflineCacheIntegrity(
 					formatVersion: OfflineCacheIntegrity.currentFormatVersion,
@@ -2796,18 +3029,21 @@ final class ReaderAppModel {
 			errorMessage = nil
 		}
 		let freshnessBeforePreparation = collectionFreshness[collection.id]?.updatedAt
-		if offlineSynchronizationEnabled,
-			session != nil,
-			apiClient != nil {
+		let syncsOffline = offlineSynchronizationEnabled && session != nil && apiClient != nil
+		// A rebuild can take a while. Refresh must not wait for it: the rebuild
+		// carries on in the background and the open list loads from the server.
+		let rebuildPending = isOfflineRebuildPending
+		if rebuildPending {
+			startOfflinePreparationInBackground()
+		} else if syncsOffline {
 			await prepareOfflineLibrary(force: true)
 			guard isCurrentAccountOperation(context), Task.isCancelled == false, isOffline == false else { return }
 		}
 		let loadedDuringPreparation = collectionFreshness[collection.id].map {
 			$0.isCached == false && $0.updatedAt != freshnessBeforePreparation
 		} ?? false
-		let syncBackedCompleteFeed = offlineSynchronizationEnabled
-			&& session != nil
-			&& apiClient != nil
+		let syncBackedCompleteFeed = syncsOffline
+			&& rebuildPending == false
 			&& collection.kind == .feed
 			&& cachedCollectionHasMissingBodies(collection.id) == false
 		if syncBackedCompleteFeed, loadedDuringPreparation == false {
@@ -6046,15 +6282,19 @@ final class ReaderAppModel {
 		apiClient: PigeonAPIClient,
 		preparationID: UUID,
 		fullRebuild: Bool,
+		catchingUpFrom catchUpCursor: String? = nil,
 		dayBounds: ReaderLocalDayBounds,
 		preservingCurrentSelection: Bool,
 	) async throws -> OfflineSyncResult {
-		var cursor = fullRebuild ? nil : offlineSyncCursor
+		// A rebuild replays the change log from the start, unless a listing
+		// already staged the library and only the changes since its snapshot
+		// cursor remain.
+		var cursor = fullRebuild ? catchUpCursor : offlineSyncCursor
 		let canUseIncrementalReload = fullRebuild == false
 			&& cursor != nil
 			&& offlineCacheIntegrity.usesWarmIncrementalPath
 			&& hasLoadedNavigation
-		let preferredLimit = fullRebuild ? 50 : 200
+		let preferredLimit = fullRebuild && catchUpCursor == nil ? 50 : 200
 		var requestLimit = preferredLimit
 		var seenCursors = Set<String>()
 		var receivedChanges = false
@@ -6166,17 +6406,73 @@ final class ReaderAppModel {
 		return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 	}
 
+	/// How long a part-listed rebuild may wait to be resumed before the next
+	/// attempt starts it over.
+	private static let listingRebuildMaxAge: TimeInterval = 24 * 60 * 60
+
+	/// Rebuilds the staged library from the server's unread-first listing:
+	/// metadata for unread, starred, saved and recently read articles in a few
+	/// requests, each page committed with its continuation so an interrupted
+	/// rebuild resumes. Bodies download afterwards. Returns false when the
+	/// server has no listing (a Worker older than this app), and the caller
+	/// replays the change log instead. A superseded preparation stops early and
+	/// leaves the stage for the next one.
+	private func rebuildFromLibraryListing(
+		accountID: String,
+		apiClient: PigeonAPIClient,
+		preparationID: UUID,
+		resumeContinuation: String?,
+		dayBounds: ReaderLocalDayBounds,
+	) async throws -> Bool {
+		// "" means an earlier attempt finished listing; only promotion remains.
+		guard resumeContinuation != "" else { return true }
+		var continuation = resumeContinuation
+		var requestLimit = Self.libraryListingPageLimit
+		var seenContinuations = Set<String>()
+		while true {
+			try Task.checkCancellation()
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return true }
+			let response: (page: LibraryListingPage, limit: Int)
+			do {
+				response = try await withTransientSyncRetry(initialLimit: requestLimit) { limit in
+					try await apiClient.libraryPage(continuation: continuation, limit: limit)
+				}
+			} catch PigeonError.server(statusCode: 404, _) {
+				return false
+			}
+			requestLimit = min(response.limit * 2, Self.libraryListingPageLimit)
+			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return true }
+			try await offlineStore.applyLibraryListingPage(response.page, accountID: accountID, dayBounds: dayBounds)
+			offlineSyncCursor = response.page.snapshotCursor
+			guard let next = response.page.continuation else { return true }
+			guard seenContinuations.insert(next).inserted else { throw PigeonError.invalidResponse }
+			continuation = next
+		}
+	}
+
+	private static let libraryListingPageLimit = 200
+
 	private func incrementalSyncWithRetry(
 		apiClient: PigeonAPIClient,
 		cursor: String?,
 		initialLimit: Int,
 	) async throws -> (page: IncrementalSyncPage, limit: Int) {
+		try await withTransientSyncRetry(initialLimit: initialLimit) { limit in
+			try await apiClient.incrementalSync(cursor: cursor, limit: limit)
+		}
+	}
+
+	/// Retries a sync or listing request that hit a transient server failure
+	/// (502, 503, Cloudflare 1102) with half the page size each time.
+	private func withTransientSyncRetry<Page>(
+		initialLimit: Int,
+		request: (Int) async throws -> Page,
+	) async throws -> (page: Page, limit: Int) {
 		var limit = max(1, min(initialLimit, 200))
 		let backoffs: [UInt64] = [250_000_000, 500_000_000, 1_000_000_000]
 		for attempt in 0...backoffs.count {
 			do {
-				let page = try await apiClient.incrementalSync(cursor: cursor, limit: limit)
-				return (page, limit)
+				return (try await request(limit), limit)
 			} catch {
 				guard attempt < backoffs.count, isTransientOfflineSyncFailure(error) else {
 					throw error
