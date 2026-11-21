@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- iOS: on iPad, the Front Page layout fills the window instead of sitting in the middle of three columns. From an iPad Pro 11-inch upwards it is a magazine spread, with the lead picture beside its headline and three stories across underneath, and a story opens across the whole screen with a back button to the page, as on iPhone. The Classic layout keeps the sidebar, list and article side by side.
+
 ## [0.1.15.0] - 2026-11-20
 
 ### Added

@@ -125,6 +125,11 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		let stories = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-"))
 		recorder.expect(stories.firstMatch.waitForExistence(timeout: 10), "Front Page lays out its stories")
 		recorder.note("front-page-columns", "\(columnCount(of: stories))")
+		let page = app.scrollViews.matching(NSPredicate(format: "identifier BEGINSWITH %@", "collection-pane-")).firstMatch
+		if isPad {
+			// Front Page is a page, not the middle of three columns.
+			recorder.expect(spansWindow(page), "An iPad Front Page spans the window")
+		}
 		recorder.capture("list-front-page")
 
 		// An open story.
@@ -135,7 +140,24 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		recorder.expect(reader.waitForExistence(timeout: 15), "A story opens in the reader")
 		let controls = app.buttons["reader-reading-controls"]
 		recorder.expect(controls.waitForExistence(timeout: 10) && controls.isHittable, "The reader offers its reading controls")
-		recorder.capture("reader")
+		if isPad {
+			let back = element("article-back-to-feed")
+			recorder.expect(spansWindow(reader), "An iPad opens a Front Page story across the window")
+			recorder.expect(back.exists && back.isHittable, "The full-window reader leads back to the Front Page")
+			recorder.capture("reader")
+			// Back to the page, and into the story again for the steps below.
+			if back.exists, back.isHittable {
+				back.tap()
+				recorder.expect(spansWindow(page), "Back from a story returns to the full Front Page")
+				recorder.capture("front-page-returned")
+				if stories.firstMatch.exists {
+					stories.firstMatch.tap()
+				}
+				recorder.expect(reader.waitForExistence(timeout: 15), "The story opens again")
+			}
+		} else {
+			recorder.capture("reader")
+		}
 
 		// Home again from an open story, and back to the story's list.
 		if showHome.exists, showHome.isHittable {
@@ -205,6 +227,16 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			RunLoop.current.run(until: Date().addingTimeInterval(0.25))
 		}
 		return query.firstMatch
+	}
+
+	/// Most of the window in both directions, whichever way it is rotated:
+	/// the middle column of a split view fails, a page under the bars passes.
+	private func spansWindow(_ element: XCUIElement) -> Bool {
+		guard element.waitForExistence(timeout: 10) else { return false }
+		let window = app.frame
+		let frame = element.frame
+		guard window.width > 0, window.height > 0 else { return false }
+		return min(frame.width / window.width, frame.height / window.height) >= 0.75
 	}
 
 	/// Distinct left edges among the tappable elements of a query.

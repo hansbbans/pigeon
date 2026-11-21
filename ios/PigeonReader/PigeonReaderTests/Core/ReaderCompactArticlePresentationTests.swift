@@ -66,4 +66,15 @@ struct ReaderCompactArticlePresentationTests {
 			) == false
 		)
 	}
+
+	@Test func frontPageNavigatesARegularWindowPageByPage() {
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, homeLayout: .frontPage) == .compact)
+	}
+
+	@Test func classicKeepsTheRegularSplitViewAndCompactStaysCompact() {
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, homeLayout: .classic) == .regular)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, homeLayout: .classic) == .compact)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, homeLayout: .frontPage) == .compact)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: nil, homeLayout: .frontPage) == nil)
+	}
 }

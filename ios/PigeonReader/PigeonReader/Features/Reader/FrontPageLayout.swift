@@ -13,16 +13,29 @@ nonisolated struct FrontPagePage: Equatable, Identifiable, Sendable {
 nonisolated enum FrontPageLayout {
 	static let storiesPerPage = 13
 	static let topAnchorID = "front-page-top"
-	/// The page never grows wider than this, so a lead image in a wide column
-	/// (an iPhone in landscape, a resized iPad column) stays on one screen.
-	static let maximumContentWidth = 640.0
 	/// Below this width two columns leave too little room for a headline.
 	static let twoColumnMinimumWidth = 330.0
+	/// From this width (an iPad Pro 11-inch in portrait) the page is a spread:
+	/// the lead image sits beside its headline and the grid is three across.
+	/// An iPad mini in portrait (744) keeps the phone page.
+	static let spreadMinimumWidth = 760.0
+
+	static func usesSpread(availableWidth: Double?, usesAccessibilitySize: Bool) -> Bool {
+		guard usesAccessibilitySize == false, let availableWidth else { return false }
+		return availableWidth >= spreadMinimumWidth
+	}
+
+	/// A stacked page stops at 640 so its lead image stays on one screen; a
+	/// spread stops where a three-column line is still comfortable to read.
+	static func maximumContentWidth(usesSpread: Bool) -> Double {
+		usesSpread ? 1080 : 640
+	}
 
 	/// Stories across in the grid under each lead.
 	static func gridColumnCount(availableWidth: Double?, usesAccessibilitySize: Bool) -> Int {
 		if usesAccessibilitySize { return 1 }
 		guard let availableWidth else { return 2 }
+		if usesSpread(availableWidth: availableWidth, usesAccessibilitySize: false) { return 3 }
 		return availableWidth < twoColumnMinimumWidth ? 1 : 2
 	}
 

@@ -38,6 +38,26 @@ struct FrontPageLayoutTests {
 	}
 
 	@Test
+	func wideWindowsGetASpreadWithThreeColumns() {
+		// iPhone portrait and an iPad mini column keep the single-column page.
+		#expect(FrontPageLayout.usesSpread(availableWidth: nil, usesAccessibilitySize: false) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: 402, usesAccessibilitySize: false) == false)
+		#expect(FrontPageLayout.usesSpread(availableWidth: 744, usesAccessibilitySize: false) == false)
+		// iPad Pro 11-inch, portrait and landscape.
+		#expect(FrontPageLayout.usesSpread(availableWidth: 834, usesAccessibilitySize: false))
+		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: false))
+		// Large text keeps the stacked lead and one column.
+		#expect(FrontPageLayout.usesSpread(availableWidth: 1194, usesAccessibilitySize: true) == false)
+
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 834, usesAccessibilitySize: false) == 3)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: false) == 3)
+		#expect(FrontPageLayout.gridColumnCount(availableWidth: 1194, usesAccessibilitySize: true) == 1)
+
+		#expect(FrontPageLayout.maximumContentWidth(usesSpread: false) == 640)
+		#expect(FrontPageLayout.maximumContentWidth(usesSpread: true) == 1080)
+	}
+
+	@Test
 	func deckCollapsesWhitespaceAndStaysBounded() {
 		#expect(FrontPageLayout.deck(from: nil) == nil)
 		#expect(FrontPageLayout.deck(from: " \n\t ") == nil)

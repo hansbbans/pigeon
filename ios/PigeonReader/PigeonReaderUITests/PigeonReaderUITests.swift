@@ -1291,10 +1291,13 @@ final class PigeonReaderUITests: XCTestCase {
 		app.launchArguments += additionalArguments
 		app.launchWithoutAnimations()
 
-		if app.navigationBars["For You"].exists == false {
-			let forYou = app.buttons["reader-sidebar-item-forYou"]
-			XCTAssertTrue(forYou.waitForExistence(timeout: 5))
-			forYou.tap()
+		// On an iPad, Home covers a split view whose list already reads "For You",
+		// so the bar alone does not mean the list can be used.
+		let more = app.buttons["article-list-more"]
+		if app.navigationBars["For You"].exists == false || (more.exists && more.isHittable == false) {
+			let forYou = app.buttons.matching(identifier: "reader-sidebar-item-forYou")
+			XCTAssertTrue(forYou.firstMatch.waitForExistence(timeout: 5))
+			(forYou.allElementsBoundByIndex.first { $0.isHittable } ?? forYou.firstMatch).tap()
 		}
 		XCTAssertTrue(app.navigationBars["For You"].waitForExistence(timeout: 10))
 		XCTAssertTrue(app.staticTexts["Designing calmer tools for people who read every day"].waitForExistence(timeout: 10))

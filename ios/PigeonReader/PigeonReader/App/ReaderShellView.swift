@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ReaderShellView: View {
 	@Environment(ReaderAppModel.self) private var model
-	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
+	@Environment(\.horizontalSizeClass) private var windowHorizontalSizeClass
 	@Environment(\.scenePhase) private var scenePhase
 
 	var body: some View {
@@ -68,6 +68,11 @@ struct ReaderShellView: View {
 				}
 			}
 		}
+		// Everything below the shell navigates with this size class, so a
+		// regular window on Front Page collapses the split view and gets the
+		// phone's back navigation and full-window reader. Sheets keep the
+		// window's own size class.
+		.environment(\.horizontalSizeClass, horizontalSizeClass)
 		.sheet(isPresented: $model.isShowingSettings) {
 			SettingsView()
 		}
@@ -118,6 +123,13 @@ struct ReaderShellView: View {
 				?? notification.object as? ReaderNotificationAction else { return }
 			Task { await model.handleNotificationAction(action) }
 		}
+	}
+
+	private var horizontalSizeClass: UserInterfaceSizeClass? {
+		ReaderCompactArticlePresentation.navigationSizeClass(
+			window: windowHorizontalSizeClass,
+			homeLayout: model.readerTypography.homeLayout,
+		)
 	}
 
 	private var splitViewColumn: Binding<NavigationSplitViewColumn> {

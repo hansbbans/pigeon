@@ -15,6 +15,17 @@ nonisolated enum ReaderCompactArticlePresentation {
 		horizontalSizeClass != .regular && preferredColumn == .detail && hasSelectedArticle
 	}
 
+	/// The size class the library navigates with. Front Page is a page, not a
+	/// column: a regular window reading it navigates the way a phone does
+	/// (Home, then the page, then the article, each across the whole window)
+	/// instead of squeezing it between the sidebar and an empty reader.
+	static func navigationSizeClass(
+		window: UserInterfaceSizeClass?,
+		homeLayout: ReaderHomeLayout,
+	) -> UserInterfaceSizeClass? {
+		window == .regular && homeLayout == .frontPage ? .compact : window
+	}
+
 	static func splitViewColumn(
 		horizontalSizeClass: UserInterfaceSizeClass?,
 		preferredColumn: NavigationSplitViewColumn,
