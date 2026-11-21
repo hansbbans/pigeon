@@ -4,9 +4,15 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.15.0] - 2026-11-20
+
 ### Added
 
 - Allo, Josh Puckett's open-source sans (SIL OFL 1.1), is a new reading typeface on the web and iOS: Settings → Reading → Typeface on the web, Settings → Typeface or the reader's Reading controls on iOS. Titles are SemiBold on iOS, with real bold and oblique faces in articles. Geist Serif stays the default.
+
+### Changed
+
+- Feeds refresh on a five-minute schedule instead of hourly, and each feed is polled by how recently it published (every 30 minutes to every four hours), so active feeds show new stories sooner. Web push considers a browser at most every 15 minutes.
 
 ### Fixed
 
