@@ -6,17 +6,25 @@ nonisolated struct IncrementalSyncPage: Codable, Equatable, Sendable {
 	let changes: [IncrementalSyncChange]
 }
 
-/// One page of `GET /api/v1/library`: the unread-first listing that rebuilds
-/// the offline library. Articles carry metadata only; their bodies come from
 /// How a full rebuild started: `startedAt` identifies its staging generation
 /// (pass it to `abandonFullRebuild`). `listingContinuation` is nil for a
 /// fresh rebuild, `""` when a resumed listing had already finished, and
-/// otherwise the continuation to request next.
+/// otherwise the continuation to request next. `stagedCursor` is the sync
+/// cursor a resumed stage was listed at.
 nonisolated struct OfflineRebuildStart: Equatable, Sendable {
 	let startedAt: Date
 	let listingContinuation: String?
+	let stagedCursor: String?
+
+	init(startedAt: Date, listingContinuation: String?, stagedCursor: String? = nil) {
+		self.startedAt = startedAt
+		self.listingContinuation = listingContinuation
+		self.stagedCursor = stagedCursor
+	}
 }
 
+/// One page of `GET /api/v1/library`: the unread-first listing that rebuilds
+/// the offline library. Articles carry metadata only; their bodies come from
 /// `POST /api/v1/library/articles`. `snapshotCursor` is the `/api/v1/sync`
 /// cursor to continue from once the listing is complete.
 nonisolated struct LibraryListingPage: Codable, Equatable, Sendable {

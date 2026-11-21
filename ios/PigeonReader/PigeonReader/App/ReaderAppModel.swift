@@ -1539,6 +1539,22 @@ final class ReaderAppModel {
 		}
 	}
 
+	/// Pull-to-refresh on the sidebar and Home. A rebuild carries on in the
+	/// background instead of holding the spinner; otherwise this waits for
+	/// the sync, which is quick.
+	func refreshLibrary() async {
+		if isOfflineRebuildPending {
+			startOfflinePreparationInBackground()
+			return
+		}
+		await prepareOfflineLibrary()
+	}
+
+	private var isOfflineRebuildPending: Bool {
+		offlineSynchronizationEnabled && session != nil && apiClient != nil
+			&& (offlineCacheIntegrity.requiresFullRebuild || offlineRepairInProgress)
+	}
+
 	// MARK: - Article bodies
 
 	/// A rebuild lists articles without their bodies. While the app is open,
@@ -1573,11 +1589,13 @@ final class ReaderAppModel {
 		// one come back anyway, this run does not ask for it twice.
 		var handled: Set<String> = []
 		while Task.isCancelled == false, isCurrentAccountOperation(context), allowsArticleBodyDownloads {
+			// Ask past the handled ids, so a few that stay queued (a body that
+			// sanitizes to nothing) cannot hide the rest.
 			guard let queued = try? await offlineStore.articleIDsNeedingFetch(
 				accountID: context.accountID,
-				limit: Self.articleBodyBatchSize,
+				limit: handled.count + Self.articleBodyBatchSize,
 			) else { return }
-			let ids = queued.filter { handled.contains($0) == false }
+			let ids = Array(queued.filter { handled.contains($0) == false }.prefix(Self.articleBodyBatchSize))
 			guard ids.isEmpty == false, Task.isCancelled == false, isCurrentAccountOperation(context) else { return }
 			guard let answered = try? await fetchArticleBodies(ids: ids, apiClient: apiClient, context: context),
 				answered.isEmpty == false else {
@@ -1656,6 +1674,12 @@ final class ReaderAppModel {
 		}
 		if searchResults.contains(where: { article in bodies.contains { articlesMatch($0, article) } }) {
 			searchResults = searchResults.map(filled)
+		}
+		for body in bodies {
+			updateKeptArticles(matching: body) { $0 = filled($0) }
+		}
+		if let detachedSelectedArticle {
+			self.detachedSelectedArticle = filled(detachedSelectedArticle)
 		}
 	}
 
@@ -2313,17 +2337,47 @@ final class ReaderAppModel {
 					invalidChangeCount: offlineCacheIntegrity.invalidChangeCount,
 					lastPageHasMore: nil,
 				)
-				if try await rebuildFromLibraryListing(
-					accountID: accountID,
-					apiClient: apiClient,
-					preparationID: preparationID,
-					resumeContinuation: rebuild.listingContinuation,
-					dayBounds: dayBounds,
-				) {
-					// The staged library is listed; navigation, promotion and the
-					// hydrate below run as after a replay. Changes made while it was
-					// listed arrive with the next sync from the snapshot cursor.
-					syncResult = OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: true)
+				let listed: Bool
+				do {
+					listed = try await rebuildFromLibraryListing(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						resumeContinuation: rebuild.listingContinuation,
+						dayBounds: dayBounds,
+					)
+				} catch PigeonError.server(statusCode: 400, _) where rebuild.listingContinuation?.isEmpty == false {
+					// The server no longer accepts the saved continuation (its
+					// format changed, say). Start the listing over rather than
+					// retry it until the stage expires.
+					let restartedAt = Date.now
+					try await offlineStore.beginFullRebuild(accountID: accountID, at: restartedAt)
+					fullRebuildStartedAt = restartedAt
+					offlineSyncCursor = nil
+					listed = try await rebuildFromLibraryListing(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						resumeContinuation: nil,
+						dayBounds: dayBounds,
+					)
+				}
+				if listed {
+					if rebuild.listingContinuation == "" {
+						offlineSyncCursor = rebuild.stagedCursor
+					}
+					// A stage can wait up to a day to be resumed. Bring it up to
+					// date from the listing's snapshot cursor before it replaces
+					// the library, so nothing read or changed since comes back.
+					syncResult = try await synchronizeIncrementally(
+						accountID: accountID,
+						apiClient: apiClient,
+						preparationID: preparationID,
+						fullRebuild: true,
+						catchingUpFrom: offlineSyncCursor,
+						dayBounds: dayBounds,
+						preservingCurrentSelection: isInitialPreparation,
+					)
 				} else {
 					syncResult = try await synchronizeIncrementally(
 						accountID: accountID,
@@ -2978,8 +3032,7 @@ final class ReaderAppModel {
 		let syncsOffline = offlineSynchronizationEnabled && session != nil && apiClient != nil
 		// A rebuild can take a while. Refresh must not wait for it: the rebuild
 		// carries on in the background and the open list loads from the server.
-		let rebuildPending = syncsOffline
-			&& (offlineCacheIntegrity.requiresFullRebuild || offlineRepairInProgress)
+		let rebuildPending = isOfflineRebuildPending
 		if rebuildPending {
 			startOfflinePreparationInBackground()
 		} else if syncsOffline {
@@ -6229,15 +6282,19 @@ final class ReaderAppModel {
 		apiClient: PigeonAPIClient,
 		preparationID: UUID,
 		fullRebuild: Bool,
+		catchingUpFrom catchUpCursor: String? = nil,
 		dayBounds: ReaderLocalDayBounds,
 		preservingCurrentSelection: Bool,
 	) async throws -> OfflineSyncResult {
-		var cursor = fullRebuild ? nil : offlineSyncCursor
+		// A rebuild replays the change log from the start, unless a listing
+		// already staged the library and only the changes since its snapshot
+		// cursor remain.
+		var cursor = fullRebuild ? catchUpCursor : offlineSyncCursor
 		let canUseIncrementalReload = fullRebuild == false
 			&& cursor != nil
 			&& offlineCacheIntegrity.usesWarmIncrementalPath
 			&& hasLoadedNavigation
-		let preferredLimit = fullRebuild ? 50 : 200
+		let preferredLimit = fullRebuild && catchUpCursor == nil ? 50 : 200
 		var requestLimit = preferredLimit
 		var seenCursors = Set<String>()
 		var receivedChanges = false

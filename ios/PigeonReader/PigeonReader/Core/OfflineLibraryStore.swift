@@ -1075,9 +1075,17 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			let staged = try loadCacheIntegrity(accountID: stagingAccountID, database: database)
 			if age >= 0, age < maxAge, staged.formatVersion == OfflineCacheIntegrity.currentFormatVersion {
 				stagingAccountIDs[accountID] = stagingAccountID
+				let stagedCursor = try queryOne(
+					"SELECT cursor FROM sync_state WHERE account_id = ?",
+					bindings: [.text(stagingAccountID)],
+					database: database,
+				) { statement in
+					string(at: 0, statement: statement)
+				} ?? nil
 				return OfflineRebuildStart(
 					startedAt: Date(timeIntervalSince1970: marker.1),
 					listingContinuation: continuation,
+					stagedCursor: stagedCursor,
 				)
 			}
 		}
@@ -1286,7 +1294,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					database: database,
 				)
 				if let existing = try loadArticle(identifier: id, accountID: accountID, database: database) {
-					guard existing.article.hasReadableHTML == false else { continue }
+					guard existing.article.hasReadableHTML == false else {
+						// Already stored; a copy on screen may still lack it.
+						stored.append(existing.article)
+						continue
+					}
 					guard let html = payload.html, html.isEmpty == false else {
 						// The server has no body for it either: stop asking.
 						try execute(
@@ -1712,8 +1724,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 			// The phone keeps only part of the library, so a status for an article
-			// it does not hold is expected. A starred one belongs in Starred: fetch it.
-			if updated == false, payload.isStarred == true {
+			// it does not hold is expected. An unread one belongs in Unread and a
+			// starred one in Starred: fetch those.
+			if updated == false, payload.isRead == false || payload.isStarred == true {
 				try execute(
 					"INSERT OR IGNORE INTO article_fetch_queue (account_id, article_id, created_at) VALUES (?, ?, ?)",
 					bindings: [.text(accountID), .text(articleID), .double(Date.now.timeIntervalSince1970)],

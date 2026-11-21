@@ -1413,6 +1413,21 @@ struct OfflineLibraryStoreTests {
 		#expect(snapshot.integrity.invalidChangeCount == 1)
 	}
 
+	@Test func unreadStatusForAMissingArticleQueuesItForFetch() async throws {
+		// Marked unread on the web while the phone holds only recent read
+		// articles: it belongs in Unread, so fetch it.
+		let store = OfflineLibraryStore.inMemory()
+
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:unread", changes: [
+				Self.statusChangeJSON(sequence: 1, itemID: "unread-elsewhere", isRead: false),
+			])),
+			accountID: "account-a",
+		)
+
+		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10) == ["unread-elsewhere"])
+	}
+
 	@Test func fetchQueueOrdersUnreadNewestFirstThenStarred() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		try await store.apply(
@@ -1453,6 +1468,26 @@ struct OfflineLibraryStoreTests {
 		#expect(article.html == "<p>Full story</p>")
 		#expect(article.isRead)
 		#expect(try await store.articleIDsNeedingFetch(accountID: "account-a", limit: 10).isEmpty)
+	}
+
+	@Test func fetchedArticleTheStoreAlreadyHoldsWithABodyIsReturned() async throws {
+		// A copy on screen can lack the body the store already holds; the
+		// caller fills it from what this returns.
+		let store = OfflineLibraryStore.inMemory()
+		try await store.apply(
+			try decodePage(Self.libraryPageJSON(cursor: "v1:listing", changes: [
+				Self.feedChangeJSON(sequence: 1),
+				Self.articleChangeJSON(sequence: 2, id: "story", html: "<p>Stored</p>", isRead: false),
+			])),
+			accountID: "account-a",
+		)
+		let fetched = try decodePage(Self.libraryPageJSON(cursor: "unused", changes: [
+			Self.articleChangeJSON(sequence: 0, id: "story", html: "<p>Fetched</p>", isRead: false),
+		])).changes.compactMap(\.payload)
+
+		let stored = try await store.applyFetchedArticles(fetched, accountID: "account-a", dayBounds: nil)
+
+		#expect(stored.map(\.html) == ["<p>Stored</p>"])
 	}
 
 	@Test func fetchedArticleWithoutABodyLeavesTheFetchQueue() async throws {
@@ -1597,7 +1632,11 @@ struct OfflineLibraryStoreTests {
 		)
 
 		// The original start identifies the generation for abandonFullRebuild.
-		#expect(resumed == OfflineRebuildStart(startedAt: Date(timeIntervalSince1970: 1_000), listingContinuation: "l1:9:3"))
+		#expect(resumed == OfflineRebuildStart(
+			startedAt: Date(timeIntervalSince1970: 1_000),
+			listingContinuation: "l1:9:3",
+			stagedCursor: "v1:9",
+		))
 		let committed = try await relaunched.loadSnapshot(accountID: accountID)
 		#expect(committed.articlesByCollection["feed/1"]?.map(\.id) == ["committed"])
 		try await relaunched.applyLibraryListingPage(

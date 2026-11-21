@@ -153,7 +153,7 @@ struct ReaderSidebarView: View {
 			ReaderSettingsToolbarItem()
 		}
 		.refreshable {
-			await model.prepareOfflineLibrary()
+			await model.refreshLibrary()
 		}
 		.task(id: prewarmRequest?.id) {
 			guard let request = prewarmRequest,
