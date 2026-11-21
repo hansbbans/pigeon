@@ -5323,17 +5323,16 @@ struct ReaderAppModelTests {
 		#expect(persisted.articlesByCollection[collection.id]?.map(\.id) == ["newest", "middle", "older"])
 
 		await model.refresh(collection: collection)
-		// This server never syncs, so the library still needs a rebuild: refresh
-		// loads the page itself and leaves the rebuild, which loads it too, in
-		// the background. Wait for that before counting.
+		// This server never syncs, so the library still needs a rebuild, which
+		// refresh leaves running in the background. Let it finish before counting.
 		await model.prepareOfflineLibrary()
 
 		#expect(model.allArticles(for: collection).map(\.id) == ["newest", "middle", "older"])
 		#expect(model.canLoadMore(collection: collection) == false)
 		let requests = await httpClient.requests()
 		let itemIDRequests = requests.filter { $0.path == "/reader/api/0/stream/items/ids" }
-		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil, nil])
-		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 4)
+		#expect(itemIDRequests.map { $0.query["c"] } == [nil, "page-2", nil])
+		#expect(requests.filter { $0.path == "/reader/api/0/stream/items/contents" }.count == 3)
 	}
 
 	@Test func repeatedFolderContinuationStopsWithoutAppendingDuplicateArticlesOrRequestingAgain() async throws {
