@@ -1,8 +1,26 @@
-# Folder cards: one card language past Home (iOS)
+# Cards and Reeder: two looks, one structure (iOS and web)
 
 Date: 2026-11-22. Status: draft for Hans's approval.
 
-Two parts, one PR each, in this order: **Part 1** folder cards and the All Feeds tiles; **Part 2** a Last 7 Days view on Home.
+## Overview (Hans, 2026-11-22)
+
+iOS and the web app reach parity: the **same structure** on both, shown in **two looks the reader switches between**, **Cards** and **Reeder**.
+
+- **Structure (both looks, both platforms).** The views include a new **Last 7 Days**. A folder shows a **Today** section, then **Last 7 Days**, then **one section per feed** ordered by newest story, with "N more" and an "Older" group (details under Goals).
+- **Cards look.** Home as tiles, folders as cards, All Feeds as tiles (Goals 1 to 3). Smart views (For You, Today, Last 7 Days and the rest) render as the **Front Page**, which folds into Cards instead of being a separate setting. The web app gets the same: a tile Home, folder cards, and a Front Page for smart views.
+- **Reeder look.** The web app's current look (three hairline columns, quiet sidebar, icon-only toolbars, no boxed panels; `src/browser-app-styles.ts`), with the folder structure as hairline-separated sections. iOS gets a real Reeder look in the same spirit, replacing today's stock Classic `List`, which is what Hans objected to ("the screen looking like stock iOS").
+- **Switch.** One setting, Cards or Reeder, in Settings and as a toolbar icon on both platforms, stored per device. On iOS it replaces `ReaderHomeLayout` (classic / front-page): `front-page` migrates to Cards, `classic` to Reeder.
+
+## Delivery, one PR each
+
+Web-only PRs never use the shared Mac, so web and iOS run in parallel worktrees (`CLAUDE.md`). There is no API change.
+
+1. **Web, Reeder: structure.** Last 7 Days view; folder sections Today / Last 7 Days / per feed / Older, growing out of today's `folderSortOrder = 'feed'` grouping in `src/browser-app.ts`.
+2. **iOS, Cards: structure and look.** Last 7 Days view (Goal 4), the Cards/Reeder setting with migration, folder cards and All Feeds tiles (Goals 1 to 3).
+3. **iOS, Reeder look.** Restyle the Classic list and library sidebar into the Reeder look with the same sections. Mockups first; Hans picks.
+4. **Web, Cards look.** Tile Home, folder cards, Front Page for smart views, the switch. Mockups first; Hans picks.
+
+Parts 3 and 4 add new visual designs, so each gets mockups and Hans's choice before its plan. The rest of this document details parts 1 and 2; the structure rules below apply to both platforms and both looks.
 
 ## Intent
 
@@ -28,8 +46,9 @@ What Hans dislikes: **the screen looking like stock iOS.** Inside a folder he pr
 
 ## Non-goals
 
-- Smart views (For You, Today, Last 7 Days, Read It Later, Starred, Unread) keep the Front Page or Classic presentation. They can follow later once folders feel right.
-- The reader (article page) and the web app are unchanged. The web app gets no Last 7 Days view in this work.
+- Smart views (For You, Today, Last 7 Days, Read It Later, Starred, Unread) get no card layout of their own: Front Page in Cards, the plain list in Reeder.
+- The reader (article page) is unchanged on both platforms.
+- The look is not synced across devices; each device remembers its own.
 - No new server API. Everything comes from the folder's existing paginated stream and the navigation items.
 
 ## Anti-goals (a failure even if it works)
@@ -59,13 +78,16 @@ Refinement from Hans: a Today card on top of the feed cards, and today's stories
 
 ## Decided
 
+- Two switchable looks, Cards and Reeder, with the same structure on iOS and web; Front Page folds into Cards as the smart-view layout (Hans).
+- Delivery order above, the per-device setting, the toolbar icon, and the `ReaderHomeLayout` migration (Claude's calls).
+
 - Approach A, the Today card, repetition of today's stories in feed cards (all Hans).
 - Last 7 Days as both a folder card and a Home view (Hans). The folder card leaves out today because the Today card sits above it; the Home view includes today (Claude's calls).
 - Today = since local midnight; feed cards ordered by newest story; "Older" group past 7 days; 5 stories in Today before "N more", 3 to 5 per feed card (Claude's calls, stated to Hans, not objected to).
 - All Feeds as tiles; iPad cards 2 to 3 across (Claude's calls, stated to Hans).
 - Claude's calls after the builder check, all accepted by Hans:
-  - Cards replace Front Page and Classic for folders and single feeds; the layout setting governs only the smart views. Folders lose the sort menu and keep the Unread/All filter.
-  - On iPad a folder fills the window and navigates like Front Page (Home → folder → article), via `ReaderCompactArticlePresentation.navigationSizeClass`. The Classic split view remains for smart views.
+  - In Cards, folders and single feeds are always cards and smart views are always Front Page. Folders lose the sort menu (the sections are the order) and keep the Unread/All filter. The same holds for Reeder's folder sections.
+  - In Cards on iPad, a folder fills the window and navigates like Front Page (Home → folder → article), via `ReaderCompactArticlePresentation.navigationSizeClass`. Reeder keeps the three-column split view.
   - Feed cards expand in place with "N more" like the Today card, loading the next page when the loaded stories run out. Tapping a feed card's header opens that feed on its own, in the same card style with cards by day (Today, Yesterday, Earlier).
   - All Feeds holds, top to bottom: the views as tiles (including Unread, which Home leaves out), then each folder tile followed by its feeds as smaller tiles, then a "Feeds" group for feeds in no folder. It differs from Home by showing every feed.
   - Reading log: a story counts as one impression per visit to the folder, however many cards show it. `metadata.row` is `"card-today"` or `"card-feed"` for the card that recorded it first.
