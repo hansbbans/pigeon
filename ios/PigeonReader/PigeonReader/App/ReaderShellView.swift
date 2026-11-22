@@ -112,6 +112,14 @@ struct ReaderShellView: View {
 				await model.handleNotificationAction(action)
 			}
 		}
+		.task(id: model.session) {
+			// Have a reader web view ready for the first story, made once the
+			// launch work has had a moment to settle.
+			guard let session = model.session else { return }
+			try? await Task.sleep(for: .seconds(2))
+			guard Task.isCancelled == false else { return }
+			ReaderWebViewPool.shared.prewarm(session: session)
+		}
 		.task(id: model.isSynchronizingOfflineLibrary) {
 			guard model.isSynchronizingOfflineLibrary, model.preferredCompactColumn == .sidebar else { return }
 			// Home needs server totals as soon as its cache is restored, even if
