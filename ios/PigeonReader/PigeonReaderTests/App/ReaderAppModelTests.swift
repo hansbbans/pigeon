@@ -6113,13 +6113,17 @@ struct ReaderAppModelTests {
 		defer { Task { await store.resumeEnqueue() } }
 		await store.waitUntilEnqueueIsPaused()
 
-		// The store does not hold the change yet, so the library it returns here
-		// still says unread. Applying it would undo what the reader just did.
-		await model.cleanupOfflineBodies()
+		// The store does not hold the change yet, so a library read now would
+		// still say unread, and applying it would undo what the reader just did.
+		// The reload waits for the store to take the change first.
+		let reload = Task { await model.cleanupOfflineBodies() }
+		for _ in 0..<200 { await Task.yield() }
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 
 		await store.resumeEnqueue()
 		await toggle.value
+		_ = await reload.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 		await model.cleanupOfflineBodies()
 		#expect(model.allArticles(for: .forYou).first?.isRead == true)
 	}
@@ -6159,6 +6163,45 @@ struct ReaderAppModelTests {
 		#expect(pending.map(\.mutation.value) == [false])
 		await model.prepareOfflineLibrary()
 		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func twoRefusedChangesInARowReturnToWhatTheStoreHolds() async throws {
+		let session = try makeSession(token: "optimistic-two-refusals")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "twice-refused-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1), .smart(.starred)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+
+		await store.pauseNextEnqueue()
+		let first = Task { await model.setStarred(story, starred: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+		let second = Task { await model.setStarred(story, starred: false) }
+		while model.allArticles(for: .forYou).first?.isStarred != false {
+			await Task.yield()
+		}
+
+		// The store refuses both: the star, then the removal of a star it never held.
+		await store.failNextEnqueue()
+		await store.resumeEnqueue(failing: true)
+		await first.value
+		await second.value
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		// Nothing is left pending in memory: a fresh read of the library agrees.
+		await model.cleanupOfflineBodies()
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		await model.setStarred(story, starred: true)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
 	}
 
 	@Test(.timeLimit(.minutes(1)))

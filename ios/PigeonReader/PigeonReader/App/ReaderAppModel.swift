@@ -236,6 +236,13 @@ final class ReaderAppModel {
 	/// nothing read from the store while one is listed may replace what is
 	/// shown or correct the pending ledger for that story.
 	private var unsettledArticleStateKeys: [String: Int] = [:]
+	/// What a story's flag was before a change the store refused, kept while a
+	/// newer change for the same flag is still unsettled. If that one is
+	/// refused too, this is the state to return to, not the refused one.
+	private var refusedArticleStateBaselines: [String: ArticleStateBaseline] = [:]
+	/// Bumped whenever the ledgers are emptied, so a store answer from before
+	/// then cannot touch what was built since.
+	private var articleStateEpoch = 0
 	private var sortOrders: [String: ArticleSortOrder] = [:]
 	private var canonicalArticleOrder: [String: [String]] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
@@ -862,6 +869,8 @@ final class ReaderAppModel {
 			pendingArticleStates = [:]
 			pendingArticleStateRevisions = [:]
 			unsettledArticleStateKeys = [:]
+			refusedArticleStateBaselines = [:]
+			articleStateEpoch += 1
 			localArticleStates = [:]
 			localRecommendationRejectionRevisions = [:]
 			localArticleStateRevisions = [:]
@@ -2213,6 +2222,7 @@ final class ReaderAppModel {
 				generation: preparationGeneration,
 			) else { return }
 			do {
+				var readAtRevision = await settledArticleStateRevision()
 				var snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
@@ -2221,7 +2231,9 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				var appliedSnapshot = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation)
+				var appliedSnapshot = await applyCachedSnapshot(
+					snapshot, readAtRevision: readAtRevision, preservingCurrentSelection: isInitialPreparation,
+				)
 				// The preview makes stories tappable while the library is still being
 				// read, and a read or star change in that window invalidates the snapshot
 				// being applied. The change is already in the store, so read it again
@@ -2234,6 +2246,7 @@ final class ReaderAppModel {
 						generation: preparationGeneration,
 					) {
 					snapshotRetries += 1
+					readAtRevision = await settledArticleStateRevision()
 					snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 					guard isCurrentOfflinePreparation(
 						accountID: accountID,
@@ -2242,7 +2255,9 @@ final class ReaderAppModel {
 					) else { return }
 					offlineCacheIntegrity = snapshot.integrity
 					requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-					appliedSnapshot = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation)
+					appliedSnapshot = await applyCachedSnapshot(
+						snapshot, readAtRevision: readAtRevision, preservingCurrentSelection: isInitialPreparation,
+					)
 				}
 				guard let needsTodaySave = appliedSnapshot,
 					isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
@@ -2730,9 +2745,10 @@ final class ReaderAppModel {
 		do {
 			let count = try await offlineStore.cleanupReadBodies(accountID: context.accountID, keepingNewest: 200)
 			guard isCurrentAccountOperation(context) else { return count }
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return count }
-			guard let needsTodaySave = await applyCachedSnapshot(snapshot) else { return count }
+			guard let needsTodaySave = await applyCachedSnapshot(snapshot, readAtRevision: readAtRevision) else { return count }
 			if needsTodaySave {
 				await persistCollections([ReaderSection.today.rawValue])
 			}
@@ -6325,12 +6341,14 @@ final class ReaderAppModel {
 			return nil
 		}
 		do {
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return nil
 			}
 			guard await applyCachedSnapshot(
 				snapshot,
+				readAtRevision: readAtRevision,
 				preservingPagination: true,
 				preservingCurrentSelection: preservingCurrentSelection,
 			) != nil,
@@ -6430,6 +6448,7 @@ final class ReaderAppModel {
 			let reloadScope = fullRebuild
 				? IncrementalReloadScope.full
 				: incrementalReloadScope(for: receivedChangesList)
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot: CachedLibrarySnapshot
 			switch reloadScope {
 			case .full:
@@ -6447,6 +6466,7 @@ final class ReaderAppModel {
 			case .full:
 				guard let needsTodaySave = await applyCachedSnapshot(
 					snapshot,
+					readAtRevision: readAtRevision,
 					preservingPagination: true,
 					preservingCurrentSelection: preservingCurrentSelection,
 				), isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
@@ -6691,11 +6711,20 @@ final class ReaderAppModel {
 		return true
 	}
 
+	/// Waits until the store holds every read or star shown on screen, then
+	/// returns the ledger revision a library read may start from. Pass it to
+	/// `applyCachedSnapshot` with the snapshot read next.
+	private func settledArticleStateRevision() async -> Int {
+		await articleMutationTask?.value
+		return nextPendingArticleStateRevision
+	}
+
 	@discardableResult
 	/// Nil means ownership or a concurrent mutation invalidated the snapshot;
 	/// callers must leave hydration retryable instead of treating it as applied.
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
+		readAtRevision: Int,
 		preservingPagination: Bool = false,
 		preservingCurrentSelection: Bool = false,
 	) async -> Bool? {
@@ -6705,7 +6734,9 @@ final class ReaderAppModel {
 		guard unsettledArticleStateKeys.isEmpty else { return nil }
 		let initialSortOrders = sortOrders
 		let initialCanonicalOrder = canonicalArticleOrder
-		let mutationRevision = nextPendingArticleStateRevision
+		// Counted from before the store was read: a change made while the read
+		// was under way may be missing from it.
+		let mutationRevision = readAtRevision
 		while Task.isCancelled == false {
 			let capturedSortOrders = sortOrders
 			let capturedCanonicalOrder = canonicalArticleOrder
@@ -7152,6 +7183,8 @@ final class ReaderAppModel {
 		pendingArticleStates = [:]
 		pendingArticleStateRevisions = [:]
 		unsettledArticleStateKeys = [:]
+		refusedArticleStateBaselines = [:]
+		articleStateEpoch += 1
 		localArticleStates = [:]
 		localRecommendationRejectionRevisions = [:]
 		localArticleStateRevisions = [:]
@@ -8874,6 +8907,12 @@ final class ReaderAppModel {
 		await replayPendingMutations()
 	}
 
+	/// A story's flag and its pending-ledger entries as they were before a change.
+	private struct ArticleStateBaseline {
+		let value: Bool
+		let pending: [(key: String, state: PendingArticleState?, revisions: PendingArticleStateRevision?)]
+	}
+
 	/// A read or star change that is on screen and not yet in the store.
 	private struct ArticleStateChange {
 		let articleID: String
@@ -8883,8 +8922,9 @@ final class ReaderAppModel {
 		let value: Bool
 		let previousValue: Bool
 		let ledgerKeys: [String]
-		let pendingBefore: [(key: String, state: PendingArticleState?, revisions: PendingArticleStateRevision?)]
+		let baseline: ArticleStateBaseline
 		let writtenRevision: Int
+		let epoch: Int
 		let changedCollections: Set<String>
 		let accountID: String
 	}
@@ -8927,42 +8967,52 @@ final class ReaderAppModel {
 		for key in ledgerKeys { unsettledArticleStateKeys[key, default: 0] += 1 }
 		return ArticleStateChange(
 			articleID: current.id, mutation: mutation, field: field, keyPath: keyPath, value: value,
-			previousValue: previousValue, ledgerKeys: ledgerKeys, pendingBefore: pendingBefore,
-			writtenRevision: writtenRevision, changedCollections: changedCollections, accountID: accountID,
+			previousValue: previousValue, ledgerKeys: ledgerKeys,
+			baseline: ArticleStateBaseline(value: previousValue, pending: pendingBefore),
+			writtenRevision: writtenRevision, epoch: articleStateEpoch,
+			changedCollections: changedCollections, accountID: accountID,
 		)
 	}
 
 	/// Hands the change to the store, and puts the story back if it refuses.
 	private func settleArticleStateChange(_ change: ArticleStateChange) async {
-		// An account change has already emptied the ledgers and the unsettled list.
-		guard session?.storageIdentity == change.accountID else { return }
+		// A sign-out or account change has already emptied the ledgers and the unsettled list.
+		guard session?.storageIdentity == change.accountID, articleStateEpoch == change.epoch else { return }
 		let outcome = await enqueueOfflineMutationOutcome(change.mutation)
-		guard session?.storageIdentity == change.accountID else { return }
+		guard session?.storageIdentity == change.accountID, articleStateEpoch == change.epoch else { return }
 		for key in change.ledgerKeys {
 			let remaining = (unsettledArticleStateKeys[key] ?? 1) - 1
 			unsettledArticleStateKeys[key] = remaining > 0 ? remaining : nil
 		}
 		let isRead = change.mutation.kind == .setRead
+		let baselineKey = "\(isRead ? "read" : "starred")|\(change.articleID)"
 		switch outcome {
 		case .enqueued:
+			refusedArticleStateBaselines[baselineKey] = nil
 			await persistCollections(change.changedCollections)
 		case .superseded:
 			// Stored, and the library was reloaded meanwhile from a store that holds it.
-			return
+			refusedArticleStateBaselines[baselineKey] = nil
 		case .failed:
-			// Nothing was stored, so nothing will be sent: put the story back,
-			// unless a newer choice for the same story has replaced this one.
+			// Nothing was stored, so nothing will be sent. The state to return to
+			// is the one before the oldest refused change, not before this one.
+			let baseline = refusedArticleStateBaselines.removeValue(forKey: baselineKey) ?? change.baseline
 			func revision(_ revisions: PendingArticleStateRevision?) -> Int? {
 				isRead ? revisions?.read : revisions?.starred
 			}
-			guard change.ledgerKeys.allSatisfy({ revision(pendingArticleStateRevisions[$0]) == change.writtenRevision }) else { return }
+			guard change.ledgerKeys.allSatisfy({ revision(pendingArticleStateRevisions[$0]) == change.writtenRevision }) else {
+				// A newer choice for this story is on screen; leave it, and keep
+				// the baseline in case the store refuses that one as well.
+				refusedArticleStateBaselines[baselineKey] = baseline
+				return
+			}
 			// The local ledger takes the restored value at a newer revision, so a
 			// load in flight keeps it. The pending ledger returns, for this field
 			// only, to what it held before: that is what the store still holds.
 			rememberPendingArticleStates(OfflineMutation(
-				kind: change.mutation.kind, itemIds: change.mutation.itemIds, value: change.previousValue, scope: .single,
+				kind: change.mutation.kind, itemIds: change.mutation.itemIds, value: baseline.value, scope: .single,
 			))
-			for entry in change.pendingBefore {
+			for entry in baseline.pending {
 				var state = pendingArticleStates[entry.key, default: PendingArticleState()]
 				var revisions = pendingArticleStateRevisions[entry.key, default: PendingArticleStateRevision()]
 				if isRead {
@@ -8976,9 +9026,10 @@ final class ReaderAppModel {
 				pendingArticleStates[entry.key] = isEmpty ? nil : state
 				pendingArticleStateRevisions[entry.key] = isEmpty ? nil : revisions
 			}
-			guard let shown = self.article(withId: change.articleID), shown[keyPath: change.keyPath] == change.value else { return }
+			guard let shown = self.article(withId: change.articleID),
+				shown[keyPath: change.keyPath] == change.value, baseline.value != change.value else { return }
 			_ = applyArticleStateInMemory(
-				current: shown, value: change.previousValue, previousValue: change.value, field: change.field,
+				current: shown, value: baseline.value, previousValue: change.value, field: change.field,
 				keyPath: change.keyPath, animation: nil, offersUndo: false, expectedValue: nil, accountID: change.accountID,
 			)
 		}
