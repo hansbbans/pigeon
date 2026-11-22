@@ -1369,6 +1369,10 @@ final class PigeonReaderUITests: XCTestCase {
 			}
 			if backButton.waitForExistence(timeout: 1), backButton.isHittable {
 				backButton.tap()
+			} else {
+				// On the library list itself. It is lazy, so a row below the fold
+				// is not in the hierarchy until it scrolls into view.
+				app.swipeUp()
 			}
 			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
 		}

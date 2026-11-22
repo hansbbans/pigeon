@@ -206,6 +206,8 @@ enum PreviewData {
 					unread: articles.count(where: { $0.isRead == false }),
 					starred: 1,
 					saved: savedArticles.count(where: { $0.isRead == false }),
+					// The week includes today.
+					lastSevenDays: 1,
 				),
 			),
 				markAsLoaded: true,
@@ -261,7 +263,7 @@ enum PreviewData {
 				unreadCounts: PreviewCardsFixture.feeds.map { feed in
 					ReaderUnreadCount(id: feed.streamID, count: unread.count(where: { $0.feed.key == feed.key }))
 				} + [ReaderUnreadCount(id: PreviewCardsFixture.folderID, count: unread.count(where: \.feed.inFolder))],
-				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 6, unread: unread.count, starred: 1, saved: 0),
+				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 6, unread: unread.count, starred: 1, saved: 0, lastSevenDays: 6),
 			),
 			markAsLoaded: true,
 		)

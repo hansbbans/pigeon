@@ -18,6 +18,7 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		try skipUnlessTileHome()
 		XCTAssertTrue(tile("forYou").isHittable)
 		XCTAssertTrue(tile("today").exists)
+		XCTAssertTrue(tile("lastSevenDays").exists)
 		XCTAssertTrue(tile("saved").exists)
 		XCTAssertFalse(tile("unread").exists)
 		XCTAssertTrue(app.descendants(matching: .any)["reader-home-dateline"].firstMatch.exists)
@@ -40,6 +41,27 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		tile("forYou").tap()
 		let forYouBar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "For You")).firstMatch
 		XCTAssertTrue(forYouBar.waitForExistence(timeout: 10))
+	}
+
+	func testLastSevenDaysOpensAsAFrontPageInCards() throws {
+		// The sample library's stories are months old; the cards fixture dates
+		// its stories from launch, so the week has something in it.
+		app.terminate()
+		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state", "-reader-cards-fixture"]
+		app.launchWithoutAnimations()
+		try skipUnlessTileHome()
+		attachScreenshot(named: "home-tiles-five-views")
+		let week = tile("lastSevenDays")
+		for _ in 0..<3 where week.isHittable == false {
+			app.swipeUp()
+		}
+		week.tap()
+		let bar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "Last 7 Days")).firstMatch
+		XCTAssertTrue(bar.waitForExistence(timeout: 10))
+		// A smart view in Cards is a Front Page.
+		let story = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-")).firstMatch
+		XCTAssertTrue(story.waitForExistence(timeout: 10))
+		attachScreenshot(named: "home-last-7-days")
 	}
 
 	func testAllFeedsShowsTheLibraryAsTilesAndHomeReturns() throws {
