@@ -3054,7 +3054,20 @@ export function renderBrowserAppRuntimeScript(): string {
       const streamId = item.origin?.streamId || '';
       items.push({ id, published: item.published, streamId, feedTitle: feedTitles.get(streamId) || item.origin?.title || 'Unknown feed' });
     }
-    const sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+    let sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+    // The open story must keep a row (newer stories can push it behind "N more"):
+    // its first section opens, and stays open like one the reader opened.
+    const isDrawn = (id) => sections.some((section) => section.itemIds.includes(id));
+    if (selectedItemId && items.some((item) => item.id === selectedItemId) && !isDrawn(selectedItemId)) {
+      const everyKey = new Set(sections.map((section) => section.key));
+      const holder = client.buildFolderSections(items, Date.now(), { expanded: everyKey })
+        .find((section) => section.itemIds.includes(selectedItemId));
+      if (holder) {
+        if (!expandedFolderSections.has(view.id)) expandedFolderSections.set(view.id, new Set());
+        expandedFolderSections.get(view.id).add(holder.key);
+        sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+      }
+    }
     const order = [];
     const firstSections = new Map();
     for (const section of sections) {

@@ -1313,6 +1313,9 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 	const today = getLocalDayRangeBounds(now, 1).startSeconds;
 	const at = (date: Date) => Math.floor(date.getTime() / 1000);
 	const stories: Record<string, { feed: string; title: string; published: number }> = {
+		// Not in the first page: a refresh can bring them in.
+		'112': { feed: 'feed/1', title: 'Alpha', published: today + 7_000 },
+		'111': { feed: 'feed/1', title: 'Alpha', published: today + 6_000 },
 		'110': { feed: 'feed/1', title: 'Alpha', published: today + 5_000 },
 		'109': { feed: 'feed/2', title: 'Bravo', published: today + 4_000 },
 		'108': { feed: 'feed/1', title: 'Alpha', published: today + 3_000 },
@@ -1410,7 +1413,7 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)));
 	await findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)!.dispatch('click');
 	await waitForBrowserCondition(() => outline().includes('102'));
-	return { ...harness, requests, readingLog, markedRead, rows, outline, copies };
+	return { ...harness, requests, readingLog, markedRead, firstPage, rows, outline, copies };
 }
 
 test('folders open as Today, Last 7 Days and feed sections with N more', async () => {
@@ -1568,6 +1571,27 @@ test('j/k walks each story once in display order of first appearance in a folder
 	await flushBrowserTasks();
 	assert.equal(elements.get('reader-title')!.textContent, 'Story 106');
 	assert.deepEqual(copies('106').map((button) => button.classList.contains('is-active')), [true, true]);
+});
+
+test('the selected story stays drawn when newer stories push it behind N more', async () => {
+	const { elements, dispatchKeydown, firstPage, outline, copies } = await openFolderSections();
+	copies('107')[0].dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 107');
+	// Two newer Alpha stories arrive: 107 would drop below Today's five and Alpha's three.
+	firstPage.unshift('112', '111');
+	elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('112'));
+	await flushBrowserTasks();
+	// Its first section, Today, opens so the open story keeps its row and its place in j/k.
+	assert.deepEqual(outline().slice(0, 9), ['# Today', '112', '111', '110', '109', '108', '107', '106', '105']);
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 107');
+	assert.ok(copies('107').every((button) => button.classList.contains('is-active')));
+	dispatchKeydown('j');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 106');
+	dispatchKeydown('k');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 107');
 });
 
 test('impressions count a story shown twice once, at its first position, with metadata.section', async () => {
