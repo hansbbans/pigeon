@@ -399,6 +399,7 @@ export async function createBrowserHarness(options?: {
 		['clear-article-search-button', createElement('', [], 'button', registerFocus)],
 		['article-read-filter', createElement('all', [], 'select', registerFocus)],
 		['article-sort-select', createElement('newest', [], 'select', registerFocus)],
+		['article-sort-field', createElement('', [], 'label', registerFocus)],
 		['article-bulk-select', createElement('above', [], 'select', registerFocus)],
 		['article-bulk-button', createElement('', [], 'button', registerFocus)],
 		['article-query-status', createElement('', [], 'p', registerFocus)],
@@ -964,7 +965,13 @@ export async function collectBrowserWindowIds(harness: Awaited<ReturnType<typeof
 	for (let page = 0; page < 30; page += 1) {
 		await drainBrowserMembershipPages(harness);
 		await waitForTodayWindow(harness);
-		const visible = renderedArticleIds(harness);
+		// A folder shows sections with "N more": open them all, and count a story shown twice once.
+		for (let opened = 0; opened < 20; opened += 1) {
+			const more = harness.elements.get('articles-list')!.children.map((row) => row.children[0]).find((button) => button?.classList.contains('article-more-button'));
+			if (!more) break;
+			more.dispatch('click');
+		}
+		const visible = [...new Set(renderedArticleIds(harness))];
 		assert.ok(visible.length <= 200);
 		for (const id of visible) ids.add(id);
 		if (harness.elements.get('article-older-button')!.disabled || harness.elements.get('article-page-controls')!.classList.contains('hidden')) return [...ids];

@@ -26,6 +26,7 @@ import {
 	selectArticleHeroImageUrl,
 	sortSubscriptionsByTitle,
 } from '../src/browser-app-client';
+import { renderBrowserAppStyles } from '../src/browser-app-styles';
 
 test('extractAuthToken parses the Auth token from a ClientLogin response', () => {
 	assert.equal(
@@ -128,6 +129,15 @@ test('Today and Last 7 Days are time-window views over one and seven local days'
 	const week = getLocalDayRangeBounds(now, 7);
 	assert.deepEqual(getViewDayBounds({ kind: 'today' }, now), { startSeconds: day.startSeconds, endSeconds: day.endSeconds });
 	assert.deepEqual(getViewDayBounds({ kind: 'last-7-days' }, now), { startSeconds: week.startSeconds, endSeconds: week.endSeconds });
+});
+
+test('every built-in view has a sidebar icon', () => {
+	const styles = renderBrowserAppStyles();
+	for (const view of buildFeedViews([], []).filter((candidate) => candidate.section === 'views')) {
+		const rule = new RegExp(`\\.list-button\\[data-view-kind="${view.kind}"\\] \\{ --icon: var\\(--icon-([a-z-]+)\\); \\}`).exec(styles);
+		assert.ok(rule, `${view.kind} has an icon rule`);
+		assert.match(styles, new RegExp(`--icon-${rule[1]}: url\\(`), `${view.kind} icon ${rule[1]} is defined`);
+	}
 });
 
 test('buildFeedViews returns built-in views plus sorted uncategorized feeds', () => {
@@ -745,13 +755,6 @@ test('createFeedOrderComparator groups by folded feed title and feed ID, newest 
 	assert.equal(compare('1', '1'), 0);
 });
 
-test('createFeedOrderComparator survives serialization into the browser script', () => {
-	const script = renderBrowserAppClientScript();
-	const window: Record<string, any> = {};
-	new Function('window', script)(window);
-	const compare = window.__PIGEON_BROWSER_CLIENT__.createFeedOrderComparator((id: string) => ({ published: Number(id), origin: { title: id === '1' ? 'b' : 'A', streamId: 'feed/' + id } }));
-	assert.deepEqual(['1', '2', '3'].sort(compare), ['2', '3', '1']);
-});
 
 function withTimeZone<T>(timeZone: string, run: () => T): T {
 	const previous = process.env.TZ;

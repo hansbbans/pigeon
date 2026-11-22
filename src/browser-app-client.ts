@@ -339,7 +339,7 @@ export function sortSubscriptionsByTitle(subscriptions: BrowserSubscription[]): 
 }
 
 /**
- * The folder "By feed" order, identical to GET /api/v1/browser/articles?sort=feed:
+ * The folder "By feed" order of the offline store (src/browser-offline.ts), identical to GET /api/v1/browser/articles?sort=feed:
  * feed title with only ASCII letters case-folded, compared by code point (SQLite
  * COLLATE NOCASE over UTF-8), then feed ID, then newest first, then item ID.
  * Items lookup cannot find (not loaded yet) sort last, newest ID first.
@@ -1321,7 +1321,6 @@ ${createSessionFromToken.toString()}
 ${normalizeBrowserTheme.toString()}
 ${applyUnauthorizedState.toString()}
 ${sortSubscriptionsByTitle.toString()}
-${createFeedOrderComparator.toString()}
 ${buildFeedViews.toString()}
 ${getLocalDayRangeBounds.toString()}
 ${getLocalDayBounds.toString()}
@@ -1380,7 +1379,6 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   formatArticleListTime,
   applyUnauthorizedState,
   sortSubscriptionsByTitle,
-  createFeedOrderComparator,
   buildFeedViews,
   getLocalDayRangeBounds,
   getLocalDayBounds,

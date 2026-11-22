@@ -205,7 +205,7 @@ ${renderBrowserAppStyles()}
                     <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
                     <div class="menu-panel">
                       <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
-                      <label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="feed">By feed</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                      <label id="article-sort-field">Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
                       <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
                       <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
                       <hr />
@@ -466,6 +466,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
   const articleSortSelect = document.getElementById('article-sort-select');
+  const articleSortField = document.getElementById('article-sort-field');
   document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';clearKeptItemIds();renderArticles();void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
@@ -598,8 +599,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
   let articleSortOrder = 'newest';
-  // Folders keep their own sort, "By feed" until changed, apart from every other view.
-  let folderSortOrder = 'feed';
+  // Folder sections a reader opened with "N more", per folder for the page session.
+  const expandedFolderSections = new Map();
   // Read rows render compact, except rows a list has already shown in full this
   // page session: those stay full, only dimmed. So a loaded row never changes
   // height in a list, and a list's saved scrollTop stays valid when the reader
@@ -1099,7 +1100,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getListSortOrder(view) {
     if (view?.kind === 'recommended') return recommendationSort;
-    return view?.kind === 'folder' ? folderSortOrder : articleSortOrder;
+    // A folder's sections are its order; its stories load newest first.
+    return view?.kind === 'folder' ? 'newest' : articleSortOrder;
   }
 
   function getViewQueryKey(viewId) {
@@ -1117,8 +1119,6 @@ export function renderBrowserAppRuntimeScript(): string {
       if (sort === 'score') return (left, right) => (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
       if (sort === 'recommended') return (left, right) => (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
     }
-    // Matches the server's sort=feed exactly, so kept rows land where the server puts them.
-    if (sort === 'feed') return client.createFeedOrderComparator((id) => loadedItemsById[id]);
     if (sort === 'shortest' || sort === 'longest') {
       // Matches the server: unknown lengths last, then length, then id.
       const sign = sort === 'shortest' ? 1 : -1;
@@ -1450,7 +1450,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = '';
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
-    folderSortOrder = 'feed';
+    expandedFolderSections.clear();
     fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
@@ -1583,15 +1583,17 @@ export function renderBrowserAppRuntimeScript(): string {
       impressionSession = { key, id: crypto.randomUUID(), since: {}, logged: {} };
     }
     const viewport = container.getBoundingClientRect();
-    const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    // A story shown twice (a folder's Today and its feed section) is visible
+    // while either copy is, and keeps the position of its first appearance.
     const visible = [];
-    for (let index = 0; index < renderedArticleCards.length; index += 1) {
-      const card = renderedArticleCards[index];
+    const seen = new Set();
+    for (const card of renderedArticleCards) {
       if (!loadedItemsById[card.id] || typeof card.node.getBoundingClientRect !== 'function') continue;
       const rect = card.node.getBoundingClientRect();
       if (rect.top >= viewport.bottom) break;
-      if (client.isHalfVisible(rect.top, rect.bottom, viewport.top, viewport.bottom)) {
-        visible.push({ id: card.id, position: windowStart + index });
+      if (!seen.has(card.id) && client.isHalfVisible(rect.top, rect.bottom, viewport.top, viewport.bottom)) {
+        seen.add(card.id);
+        visible.push({ id: card.id, position: card.position });
       }
     }
     for (const card of client.advanceImpressions(impressionSession, visible, now)) queueImpression(card, logView, now);
@@ -1608,7 +1610,10 @@ export function renderBrowserAppRuntimeScript(): string {
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
     // Compact read rows are shorter, so more fit on screen: mark them so the
     // report can keep row shape apart from reading behaviour.
-    if (renderedArticleCards.find((rendered) => rendered.id === card.id)?.node.classList.contains('is-compact')) metadata.row = 'compact';
+    const rendered = renderedArticleCards.find((candidate) => candidate.id === card.id);
+    if (rendered?.node.classList.contains('is-compact')) metadata.row = 'compact';
+    // In a folder: the section that showed the story first.
+    if (rendered?.section) metadata.section = rendered.section;
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -1622,11 +1627,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const now = Date.now();
     sampleImpressions(now);
     const logView = client.readingLogView(getActiveView(), Boolean(articleSearchQuery));
-    const index = renderedArticleCards.findIndex((card) => card.id === itemId);
-    if (!logView || !impressionSession || impressionSession.logged[itemId] || index === -1) return;
+    const card = renderedArticleCards.find((candidate) => candidate.id === itemId);
+    if (!logView || !impressionSession || impressionSession.logged[itemId] || !card) return;
     impressionSession.logged[itemId] = true;
     delete impressionSession.since[itemId];
-    queueImpression({ id: itemId, position: (getViewState(activeViewId, false)?.windowStart || 0) + index }, logView, now);
+    queueImpression({ id: itemId, position: card.position }, logView, now);
   }
 
   function isReadingOpenedArticle() {
@@ -2261,7 +2266,7 @@ export function renderBrowserAppRuntimeScript(): string {
     state.windowNavigation = true;
     state.windowStart = start;
     state.windowAnchorId = candidates[start] || null;
-    const visible = getVisibleItemIds();
+    const visible = getNavigableItemIds();
     selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
     state.selectedItemId = selectedItemId;
     // Stepping past the end of a window is still the reader choosing the next
@@ -2381,9 +2386,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return false;
   }
 
-  function getSelectedItemIndex() {
-    const visibleItemIds = getVisibleItemIds();
-    return selectedItemId ? visibleItemIds.indexOf(selectedItemId) : -1;
+  // The order j and k walk: the list as shown, each story once. In a folder
+  // that is the first appearance of each story across its sections.
+  function getNavigableItemIds() {
+    return getFolderSectionLayout()?.order || getVisibleItemIds();
   }
 
   async function loadAdjacentKeyboardArticle() {
@@ -2393,7 +2399,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.requestId !== activeViewRequestId ||
         owner.viewId !== activeViewId || owner.itemId !== selectedItemId ||
         owner.epoch !== getViewState(activeViewId).membershipEpoch) return;
-    const visible = getVisibleItemIds();
+    const visible = getNavigableItemIds();
     const index = visible.indexOf(owner.itemId);
     const adjacentId = index >= 0 ? visible[index + 1] : null;
     // A failed page/body remains explicitly retryable without immediately
@@ -2410,20 +2416,19 @@ export function renderBrowserAppRuntimeScript(): string {
       renderArticles();
       renderReader();
     }
-    const selectedIndex = getSelectedItemIndex();
+    const navigableIds = getNavigableItemIds();
+    const selectedIndex = selectedItemId ? navigableIds.indexOf(selectedItemId) : -1;
     if (selectedIndex === -1) {
       if (hasHeldReaderSelection()) {
-        const visible = getVisibleItemIds();
-        const itemId = direction > 0 ? visible[0] : visible[visible.length - 1];
+        const itemId = direction > 0 ? navigableIds[0] : navigableIds[navigableIds.length - 1];
         if (itemId) { void selectArticle(itemId, { keyboard: true }); return true; }
       }
       return false;
     }
 
     const nextIndex = selectedIndex + direction;
-    const visibleItemIds = getVisibleItemIds();
-    if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedWindowBoundary()) {
+    if (nextIndex < 0 || nextIndex >= navigableIds.length) {
+      if (direction > 0 && getVisibleItemIds().length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedWindowBoundary()) {
         if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || (window.navigator?.onLine === false && !offlineLibrary)) return false;
         void loadAdjacentKeyboardArticle();
         return true;
@@ -2431,7 +2436,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return moveArticleWindow(direction, true);
     }
 
-    void selectArticle(visibleItemIds[nextIndex], { keyboard: true });
+    void selectArticle(navigableIds[nextIndex], { keyboard: true });
     return true;
   }
 
@@ -2817,9 +2822,9 @@ export function renderBrowserAppRuntimeScript(): string {
     articleReadFilterSelect.value = savedView ? articleReadFilter : getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || savedView || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
     for (const option of articleSortSelect.querySelectorAll('option')) {
-      option.hidden = (['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended') ||
-        (option.value === 'feed' && view?.kind !== 'folder');
+      option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     }
+    articleSortField.classList.toggle('hidden', view?.kind === 'folder');
     articleSortSelect.value = getListSortOrder(view);
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
@@ -2839,8 +2844,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
     if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(sort) ? sort : 'recommended';
-    else if (currentView?.kind === 'folder') folderSortOrder = ['feed','newest','oldest'].includes(sort) ? sort : 'feed';
-    else articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
+    else if (currentView?.kind !== 'folder') articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
     heldReaderArticle = null;
     articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
     await loadActiveView();
@@ -2873,12 +2877,17 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     }
     renderArticleWindowControls();
+    // Today, Last 7 Days and Starred enable Mark all from the loaded list, so it follows each render.
+    renderMarkAllAsReadAction();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
     });
     visiblePreviewSources=new Set(entries.map(entry=>entry.heroImageUrl).filter(Boolean));
 
+    // Folder sections grow in place (a page lands, a section opens), so their
+    // list keeps its first visible row where it was rather than its offset.
+    const folderAnchor = captureFolderListAnchor();
     clearElement(articlesList);
     renderedArticleCards = [];
 
@@ -2903,22 +2912,17 @@ export function renderBrowserAppRuntimeScript(): string {
     const listKey = getViewQueryKey(activeViewId);
     if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
     const fullRowIds = fullRowIdsByList.get(listKey);
-    // "By feed": a quiet label before each feed's run. Labels are not articles:
-    // they are not in renderedArticleCards, so selection, keys and impressions skip them.
-    const groupByFeed = getActiveView()?.kind === 'folder' && getArticleQuery().sort === 'feed';
-    let groupStreamId = null;
-    for (const entry of entries) {
+    const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    // One row per story shown; a story in two folder sections gets two rows,
+    // both with its id and its first position.
+    const appendArticleRow = (entry, row) => {
       const article = loadedItemsById[entry.id];
-      if (groupByFeed && article && (article.origin?.streamId || '') !== groupStreamId) {
-        groupStreamId = article.origin?.streamId || '';
-        articlesList.appendChild(createFeedGroupHeader(groupStreamId, entry.feedTitle));
-      }
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
       const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
       // Only a loaded row counts as shown: a placeholder has no read state yet.
       if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
-      const listItem = createNode('li');
+      const listItem = createNode('li', row.sectionKey ? { attributes: { 'data-row-key': row.sectionKey + ':' + entry.id } } : undefined);
       const button = createNode('button', {
         classNames: [
           'article-card',
@@ -2934,7 +2938,7 @@ export function renderBrowserAppRuntimeScript(): string {
           'data-starred': isStarred ? 'true' : 'false',
         },
       });
-      renderedArticleCards.push({ id: entry.id, node: button });
+      renderedArticleCards.push({ id: entry.id, node: button, position: row.position, ...(row.section ? { section: row.section } : {}) });
       button.addEventListener('click', () => {
         setMobilePane('reader', true);
         void selectArticle(entry.id);
@@ -2944,7 +2948,7 @@ export function renderBrowserAppRuntimeScript(): string {
         appendSavedCard(button, article, entry);
         listItem.appendChild(button);
         articlesList.appendChild(listItem);
-        continue;
+        return;
       }
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
@@ -2968,7 +2972,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const readingLength = showReadingTime ? entry.readingLength : null;
         if (entry.feedTitle || listTime || readingLength) {
           const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
-          if (entry.feedTitle && !groupByFeed) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
+          if (entry.feedTitle && row.showSource) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
           if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
           if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
           copy.appendChild(meta);
@@ -2991,6 +2995,25 @@ export function renderBrowserAppRuntimeScript(): string {
       button.appendChild(cardGrid);
       listItem.appendChild(button);
       articlesList.appendChild(listItem);
+    };
+    // A folder shows sections (Today, Last 7 Days, one per feed). Headers and
+    // "N more" rows are not articles: they are not in renderedArticleCards, so
+    // selection, keys and impressions skip them.
+    const folderLayout = getFolderSectionLayout(visibleItemIds);
+    if (folderLayout) {
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      const positions = new Map(folderLayout.order.map((id, index) => [id, windowStart + index]));
+      for (const section of folderLayout.sections) {
+        articlesList.appendChild(createFolderSectionHeader(section));
+        for (const id of section.itemIds) {
+          appendArticleRow(entryById.get(id), { showSource: section.kind !== 'feed', position: positions.get(id),
+            section: folderLayout.firstSections.get(id), sectionKey: section.key });
+        }
+        if (section.hiddenCount > 0) articlesList.appendChild(createFolderSectionMoreRow(section));
+      }
+      for (const id of folderLayout.unloadedIds) appendArticleRow(entryById.get(id), { showSource: true, position: positions.get(id), sectionKey: 'loading' });
+    } else {
+      entries.forEach((entry, index) => appendArticleRow(entry, { showSource: true, position: windowStart + index }));
     }
 
     loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
@@ -2999,16 +3022,118 @@ export function renderBrowserAppRuntimeScript(): string {
       !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
+    restoreFolderListAnchor(folderAnchor);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
   }
 
-  function createFeedGroupHeader(streamId, title) {
-    const header = createNode('li', { classNames: ['article-feed-header'], attributes: { 'data-feed-stream': streamId } });
-    const iconUrl = views.find((view) => view.kind === 'feed' && view.streamId === streamId)?.iconUrl;
-    if (iconUrl) header.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: iconUrl, alt: '', width: '14', height: '14' } }));
-    header.appendChild(createNode('span', { classNames: ['article-feed-header-title'], text: title || 'Unknown feed' }));
+  // The feed view a folder section opens: the copy under the open folder when
+  // the feed sits in several folders.
+  function findFolderSectionFeedView(streamId) {
+    const folderId = getActiveView()?.id;
+    const feedViews = views.filter((view) => view.kind === 'feed' && view.streamId === streamId);
+    return feedViews.find((view) => view.parentId === folderId) || feedViews[0] || null;
+  }
+
+  // Sections of the open folder's loaded window, or null outside a folder.
+  // The order is each story once, at its first appearance: what keys walk and
+  // where impressions are counted. Stories without a body yet follow the sections.
+  function getFolderSectionLayout(visibleItemIds = getVisibleItemIds()) {
+    const view = getActiveView();
+    if (view?.kind !== 'folder') return null;
+    const feedTitles = new Map(views.filter((candidate) => candidate.kind === 'feed').map((candidate) => [candidate.streamId, candidate.title]));
+    const items = [];
+    const unloadedIds = [];
+    for (const id of visibleItemIds) {
+      const item = loadedItemsById[id];
+      if (!item || typeof item.published !== 'number' || !Number.isFinite(item.published)) {
+        unloadedIds.push(id);
+        continue;
+      }
+      // A feed the library does not list keeps the title the story came with.
+      const streamId = item.origin?.streamId || '';
+      items.push({ id, published: item.published, streamId, feedTitle: feedTitles.get(streamId) || item.origin?.title || 'Unknown feed' });
+    }
+    const sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+    const order = [];
+    const firstSections = new Map();
+    for (const section of sections) {
+      for (const id of section.itemIds) {
+        if (firstSections.has(id)) continue;
+        firstSections.set(id, section.kind);
+        order.push(id);
+      }
+    }
+    order.push(...unloadedIds);
+    return { sections, order, firstSections, unloadedIds };
+  }
+
+  // Today, Last 7 Days and Older are plain labels; a feed's label carries its
+  // icon and opens that feed.
+  function createFolderSectionHeader(section) {
+    const header = createNode('li', {
+      classNames: ['article-feed-header', section.kind === 'feed' ? '' : 'is-' + section.kind],
+      attributes: { 'data-section-key': section.key, 'data-row-key': section.key },
+    });
+    const feedView = section.kind === 'feed' && section.streamId ? findFolderSectionFeedView(section.streamId) : null;
+    const target = feedView
+      ? createNode('button', { classNames: ['article-feed-header-button'], attributes: { type: 'button', 'data-feed-stream': section.streamId, 'aria-label': 'Open ' + section.title } })
+      : header;
+    if (feedView?.iconUrl) target.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: feedView.iconUrl, alt: '', width: '14', height: '14' } }));
+    target.appendChild(createNode('span', { classNames: ['article-feed-header-title'], text: section.title }));
+    if (feedView) {
+      target.addEventListener('click', () => {
+        setMobilePane('stream', true);
+        void selectView(feedView.id);
+      });
+      header.appendChild(target);
+    }
     return header;
+  }
+
+  // The first folder row on screen and how far below the list's top it sits.
+  function captureFolderListAnchor() {
+    const container = getArticleScrollContainer();
+    if (!container || typeof container.getBoundingClientRect !== 'function') return null;
+    const top = container.getBoundingClientRect().top;
+    for (const row of articlesList.children) {
+      const key = row.getAttribute('data-row-key');
+      if (!key || typeof row.getBoundingClientRect !== 'function') continue;
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom > top) return { key, offset: rect.top - top };
+    }
+    return null;
+  }
+
+  // Scrolls so the anchored row sits where it was before the list was rebuilt.
+  function restoreFolderListAnchor(anchor) {
+    const container = getArticleScrollContainer();
+    if (!anchor || !container || typeof container.getBoundingClientRect !== 'function') return;
+    for (const row of articlesList.children) {
+      if (row.getAttribute('data-row-key') !== anchor.key || typeof row.getBoundingClientRect !== 'function') continue;
+      const delta = row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+      if (delta) container.scrollTop += delta;
+      return;
+    }
+  }
+
+  // "N more" shows the rest of the section's loaded stories in place.
+  function createFolderSectionMoreRow(section) {
+    const row = createNode('li', { classNames: ['article-section-more'], attributes: { 'data-row-key': 'more:' + section.key } });
+    const button = createNode('button', {
+      classNames: ['article-more-button'],
+      text: section.hiddenCount + ' more',
+      attributes: { type: 'button', 'data-section-key': section.key, 'aria-label': 'Show ' + section.hiddenCount + ' more in ' + section.title },
+    });
+    button.addEventListener('click', () => {
+      const folderId = getActiveView()?.id;
+      if (!folderId) return;
+      if (!expandedFolderSections.has(folderId)) expandedFolderSections.set(folderId, new Set());
+      expandedFolderSections.get(folderId).add(section.key);
+      renderArticles();
+    });
+    row.appendChild(button);
+    return row;
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
