@@ -6,6 +6,7 @@ import {
 	applyUnauthorizedState,
 	buildArticleListEntries,
 	buildFeedViews,
+	buildFolderSections,
 	createArticleFrameDocument,
 	createContentLoadPlan,
 	createFeedOrderComparator,
@@ -15,6 +16,7 @@ import {
 	filterItemIdsForLocalDay,
 	formatArticleListTime,
 	getLocalDayBounds,
+	getLocalDayRangeBounds,
 	limitInitialItemIds,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
@@ -704,4 +706,103 @@ test('createFeedOrderComparator survives serialization into the browser script',
 	new Function('window', script)(window);
 	const compare = window.__PIGEON_BROWSER_CLIENT__.createFeedOrderComparator((id: string) => ({ published: Number(id), origin: { title: id === '1' ? 'b' : 'A', streamId: 'feed/' + id } }));
 	assert.deepEqual(['1', '2', '3'].sort(compare), ['2', '3', '1']);
+});
+
+function withTimeZone<T>(timeZone: string, run: () => T): T {
+	const previous = process.env.TZ;
+	process.env.TZ = timeZone;
+	try {
+		return run();
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+}
+
+test('getLocalDayRangeBounds covers six days back to next midnight across DST', () => {
+	withTimeZone('America/New_York', () => {
+		// Daylight saving ends on Nov 1, 2026, so this week is 7 days and one hour long.
+		const now = new Date(2026, 10, 3, 12, 0, 0).getTime();
+		const week = getLocalDayRangeBounds(now, 7);
+		assert.equal(week.start.toISOString(), '2026-10-28T04:00:00.000Z');
+		assert.equal(week.end.toISOString(), '2026-11-04T05:00:00.000Z');
+		assert.equal(week.startSeconds, Date.parse('2026-10-28T04:00:00Z') / 1000);
+		assert.equal(week.endSeconds, Date.parse('2026-11-04T05:00:00Z') / 1000);
+		assert.equal(week.endSeconds - week.startSeconds, 7 * 86_400 + 3_600);
+		const day = getLocalDayRangeBounds(now, 1);
+		assert.equal(day.start.toISOString(), '2026-11-03T05:00:00.000Z');
+		assert.equal(day.endSeconds, week.endSeconds);
+		assert.deepEqual(getLocalDayBounds(new Date(now)), { startSeconds: day.startSeconds, endSeconds: day.endSeconds });
+	});
+});
+
+test('buildFolderSections orders Today, Last 7 Days, feeds by newest, then Older', () => {
+	withTimeZone('America/New_York', () => {
+		const now = new Date(2026, 10, 3, 12, 0, 0).getTime();
+		const today = getLocalDayRangeBounds(now, 1).startSeconds;
+		const weekStart = getLocalDayRangeBounds(now, 7).startSeconds;
+		const story = (id: string, streamId: string, feedTitle: string, published: number) => ({ id, streamId, feedTitle, published });
+		const items = [
+			story('o2', 'feed/6', 'Foxtrot', weekStart - 1),
+			story('t6', 'feed/1', 'Alpha', today),
+			story('r2', 'feed/5', 'Echo', weekStart),
+			story('t1', 'feed/1', 'Alpha', today + 600),
+			story('t2', 'feed/2', 'Bravo', today + 500),
+			story('o1', 'feed/4', 'Delta', weekStart - 1),
+			story('t3', 'feed/1', 'Alpha', today + 400),
+			story('m1', '', 'Mystery', today - 100),
+			story('t4', 'feed/1', 'Alpha', today + 300),
+			story('r1', 'feed/3', 'Charlie', today - 1),
+			story('t5', 'feed/2', 'Bravo', today + 200),
+		];
+		const summary = (sections: ReturnType<typeof buildFolderSections>) =>
+			sections.map((section) => [section.key, section.kind, section.title, section.itemIds.join(' '), section.hiddenCount]);
+
+		assert.deepEqual(summary(buildFolderSections(items, now)), [
+			// Midnight exactly is today; 23:59:59 yesterday and the first second of the week are the Last 7 Days.
+			['today', 'today', 'Today', 't1 t2 t3 t4 t5', 1],
+			['last-7-days', 'last-7-days', 'Last 7 Days', 'r1 m1 r2', 0],
+			// Today's stories appear again in their feed; feeds follow their newest story.
+			['feed:feed/1', 'feed', 'Alpha', 't1 t3 t4', 1],
+			['feed:feed/2', 'feed', 'Bravo', 't2 t5', 0],
+			['feed:feed/3', 'feed', 'Charlie', 'r1', 0],
+			// A story without a known feed keeps its own source title.
+			['feed:Mystery', 'feed', 'Mystery', 'm1', 0],
+			['feed:feed/5', 'feed', 'Echo', 'r2', 0],
+			// One second before the week starts is Older; equal newest stories fall back to the feed title.
+			['older', 'older-header', 'Older', '', 0],
+			['feed:feed/4', 'feed', 'Delta', 'o1', 0],
+			['feed:feed/6', 'feed', 'Foxtrot', 'o2', 0],
+		]);
+		const sections = buildFolderSections(items, now);
+		assert.equal(sections.find((section) => section.key === 'feed:feed/1')?.streamId, 'feed/1');
+		assert.equal(sections.find((section) => section.key === 'feed:Mystery')?.streamId, undefined);
+		assert.equal(sections.find((section) => section.key === 'today')?.streamId, undefined);
+
+		const expanded = summary(buildFolderSections(items, now, { expanded: new Set(['today', 'feed:feed/1']) }));
+		assert.deepEqual(expanded[0], ['today', 'today', 'Today', 't1 t2 t3 t4 t5 t6', 0]);
+		assert.deepEqual(expanded[2], ['feed:feed/1', 'feed', 'Alpha', 't1 t3 t4 t6', 0]);
+
+		const limited = summary(buildFolderSections(items, now, { todayLimit: 2, recentLimit: 1, feedLimit: 1 }));
+		assert.deepEqual(limited.slice(0, 3), [
+			['today', 'today', 'Today', 't1 t2', 4],
+			['last-7-days', 'last-7-days', 'Last 7 Days', 'r1', 2],
+			['feed:feed/1', 'feed', 'Alpha', 't1', 3],
+		]);
+
+		// No story today or this week: no Today or Last 7 Days section, and Older still heads the old feeds.
+		assert.deepEqual(summary(buildFolderSections([items[0], items[5]], now)).map((row) => row[0]), ['older', 'feed:feed/4', 'feed:feed/6']);
+		assert.deepEqual(buildFolderSections([], now), []);
+	});
+});
+
+test('buildFolderSections survives serialization into the browser script', () => {
+	const script = renderBrowserAppClientScript();
+	const window: Record<string, any> = {};
+	new Function('window', script)(window);
+	const now = new Date(2026, 10, 3, 12).getTime();
+	const sections = window.__PIGEON_BROWSER_CLIENT__.buildFolderSections(
+		[{ id: '1', streamId: 'feed/1', feedTitle: 'Alpha', published: Math.floor(now / 1000) }], now,
+	);
+	assert.deepEqual(sections.map((section: { key: string }) => section.key), ['today', 'feed:feed/1']);
 });
