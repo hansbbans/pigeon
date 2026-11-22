@@ -94,14 +94,17 @@
 		421BA217FA9DE63A0E563FF0 /* ReaderViewLoadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E8AC8F18052D2B49B7C5CE0 /* ReaderViewLoadState.swift */; };
 		422C180C2A3B473823D3AFDC /* ReaderHomeTilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7BFE6566D2F01E26F362790 /* ReaderHomeTilesTests.swift */; };
 		4359DA494BCA696F09CBD8FD /* StructuredHTMLSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5084F12E112D485EEFFDA553 /* StructuredHTMLSanitizer.swift */; };
+		448AC565CF51483F3E66E773 /* FolderCardsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95CDD922585E568A5B1A43A0 /* FolderCardsTests.swift */; };
 		45DBC3F4013C04EE48BB2862 /* ReaderAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50C27465FDECAFCA4DC5316E /* ReaderAppModelTests.swift */; };
 		45FA11DA3ADD0931078F81ED /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 7DB918F88B6BC2422BB2C6BC /* PrivacyInfo.xcprivacy */; };
+		4679BCC2129C73B5EF13358C /* PigeonCardsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CCABC6738ED7A4C75BDB07F /* PigeonCardsUITests.swift */; };
 		47C77AEF392A7B19A01A4C34 /* PigeonWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61105CB74C63F659448A80F4 /* PigeonWidgets.swift */; };
 		48598C835B50B75CCB29C093 /* ReadingLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D29F4A74F947F8CFC2E85ADE /* ReadingLogTests.swift */; };
 		49257C680A78DCFD9877305F /* ArticleReaderContentIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9F4737478BD29E32A34D335 /* ArticleReaderContentIdentity.swift */; };
 		4A243D9A07B36B6DEBB40589 /* PreviewMotionStreamFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC475503FA7186C21736B5C /* PreviewMotionStreamFixtureTests.swift */; };
 		4BDECEB471C1E4BA893F6BA4 /* ReaderHTMLLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBAB1CCD4849F65C4BC7D4E1 /* ReaderHTMLLayoutTests.swift */; };
 		4D8C2D9D6FC698ED7B774AD5 /* ArticleReaderControlsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F47D6309C6377F2B4A8DD1F6 /* ArticleReaderControlsBar.swift */; };
+		4E62E192E266C889A1B42F84 /* ReaderTiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3267FD0ED666DFB56E1F96D /* ReaderTiles.swift */; };
 		4F1C5990BFBF22559F4015D5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A426EB127F04B664BEF59C8 /* SettingsView.swift */; };
 		4F4B933095D0D2F8336B04F6 /* YouTubeTranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80AADD70BFBD94CF97794C2 /* YouTubeTranscriptTests.swift */; };
 		50026D4731EAD13CF0B617F5 /* ReaderNavigationCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C9F5D4D9D0CFCFBD490DD97 /* ReaderNavigationCatalog.swift */; };
@@ -296,12 +299,14 @@
 		E1F11BDA126E65898C345B8C /* ZoomableImageUIScrollView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24F5F01222C21445D5114E56 /* ZoomableImageUIScrollView.swift */; };
 		E26DE31B0F9561C7872B94BB /* ReaderCollectionPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98008F7409D891118C21CF0B /* ReaderCollectionPane.swift */; };
 		E317AAF582DBC3A061829EF8 /* OfflineLibraryBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = C696204FA88BC69AC7A409A3 /* OfflineLibraryBootstrap.swift */; };
+		E322A68AF9436DD116149F2B /* PreviewCardsFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76A25A1FEEFA8FD765232044 /* PreviewCardsFixture.swift */; };
 		E387110A83CF49FC7361F1E5 /* TestSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F34C1B63B65057D559755C /* TestSessionStore.swift */; };
 		E3CBCFD3545A245B3BF3BC60 /* ArticleListToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E22DB84D98FCB38E17FE706 /* ArticleListToolbar.swift */; };
 		E675FB6691F714637141227B /* ReaderBoundaryPullTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F6619B454B22972CCC7687 /* ReaderBoundaryPullTests.swift */; };
 		E78523B0A4EEF04AD7E549B1 /* PigeonAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66043B1FA33C07955ACDBDB8 /* PigeonAPIClient.swift */; };
 		E79BFA8674623C4FCC7DC9F3 /* ReaderArticleFilterStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2425C7BEC32F12BCD632E6C3 /* ReaderArticleFilterStoreTests.swift */; };
 		E7CCD4640C6A8CA2A57DD2B2 /* ArticleThumbnailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55EB9AD43472869EA73FBBCB /* ArticleThumbnailView.swift */; };
+		E8D92C45E212195CFA9D1ED2 /* FolderCardsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4D9222EC9824988AA308089 /* FolderCardsView.swift */; };
 		EAC54C0A3B9E862733DEBC54 /* ReaderSidebarPresentationProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55EBB58395D3415FD5AF5413 /* ReaderSidebarPresentationProjection.swift */; };
 		EACA26E790D667C6099FE22C /* Bookerly-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C09092CB3E7A5B6809CAA8D8 /* Bookerly-Regular.ttf */; };
 		EB9187FBF2C6400B38323FCA /* ReaderBoundarySwipeRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0A9632625EC7F0AA28E1099 /* ReaderBoundarySwipeRecognizer.swift */; };
@@ -525,6 +530,7 @@
 		74B610A84BAC0C10C8A7F730 /* ArticleReaderControlsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleReaderControlsTests.swift; sourceTree = "<group>"; };
 		75756437552365B47A47A5F5 /* ReadingLength.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingLength.swift; sourceTree = "<group>"; };
 		75D6650809E8CFC2F38CC1AB /* YouTubeChannelSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouTubeChannelSearch.swift; sourceTree = "<group>"; };
+		76A25A1FEEFA8FD765232044 /* PreviewCardsFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewCardsFixture.swift; sourceTree = "<group>"; };
 		7773F26BB408608FB7D86330 /* FeedNotificationIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedNotificationIdentity.swift; sourceTree = "<group>"; };
 		783AE858B23D53C9F8ED0E28 /* Defuddle.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Defuddle.js; sourceTree = "<group>"; };
 		7984D43A93051E4429F5833E /* ReaderModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderModeTests.swift; sourceTree = "<group>"; };
@@ -557,6 +563,7 @@
 		8A65B4952C49BA123D5C6F14 /* ZoomableImageScrollViewCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomableImageScrollViewCoordinator.swift; sourceTree = "<group>"; };
 		8B43488C197B8C4B5DBB60A5 /* YouTubeTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouTubeTranscriptView.swift; sourceTree = "<group>"; };
 		8C7793149ABF287D1320EE02 /* TodayNavigationCountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodayNavigationCountTests.swift; sourceTree = "<group>"; };
+		8CCABC6738ED7A4C75BDB07F /* PigeonCardsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonCardsUITests.swift; sourceTree = "<group>"; };
 		8DFAD0F22CB532982035C79C /* ReaderArticleFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderArticleFilter.swift; sourceTree = "<group>"; };
 		8E8AC8F18052D2B49B7C5CE0 /* ReaderViewLoadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderViewLoadState.swift; sourceTree = "<group>"; };
 		90487EABD2EE1F9C845FB655 /* ReaderStickyReadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderStickyReadTests.swift; sourceTree = "<group>"; };
@@ -569,6 +576,7 @@
 		93F8DAAB89F16B17840F0901 /* ReadingLogEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingLogEvent.swift; sourceTree = "<group>"; };
 		9433A80804B63A1E66BEE05A /* GeistSerif-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "GeistSerif-Regular.ttf"; sourceTree = "<group>"; };
 		95B54D4FD92903C5B451584C /* PigeonSharedSaving.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PigeonSharedSaving.swift; sourceTree = "<group>"; };
+		95CDD922585E568A5B1A43A0 /* FolderCardsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderCardsTests.swift; sourceTree = "<group>"; };
 		9636E5729F971E488DE596CE /* ArticleListThumbnailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleListThumbnailView.swift; sourceTree = "<group>"; };
 		9657486D4B84EF270C1D2E48 /* LibraryManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryManagementView.swift; sourceTree = "<group>"; };
 		967F74B09FCC2A40E2530A06 /* PigeonReader.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PigeonReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -612,6 +620,7 @@
 		B45B3EFE3E23930ECB94F04B /* ReaderTextShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderTextShareSheet.swift; sourceTree = "<group>"; };
 		B4B39853EEFB615DFCB1693E /* ReaderHomeTilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderHomeTilesView.swift; sourceTree = "<group>"; };
 		B4CA71DD184488F1A41FFED2 /* ReaderArticleIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderArticleIdentityTests.swift; sourceTree = "<group>"; };
+		B4D9222EC9824988AA308089 /* FolderCardsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderCardsView.swift; sourceTree = "<group>"; };
 		B523BDC6C904684E233707C6 /* ArticleReadingProgressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArticleReadingProgressTests.swift; sourceTree = "<group>"; };
 		B64F4345946CEC51D925D81F /* Allo-SemiBold.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-SemiBold.otf"; sourceTree = "<group>"; };
 		B6B75918D3BF5B9624172A74 /* ReaderSidebarScrollViewAnchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderSidebarScrollViewAnchor.swift; sourceTree = "<group>"; };
@@ -656,6 +665,7 @@
 		D07D1FB6DEABECFF28FC8162 /* BackgroundRefreshManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefreshManager.swift; sourceTree = "<group>"; };
 		D2904C0E2853654E545B77B5 /* PigeonWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PigeonWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		D29F4A74F947F8CFC2E85ADE /* ReadingLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingLogTests.swift; sourceTree = "<group>"; };
+		D3267FD0ED666DFB56E1F96D /* ReaderTiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderTiles.swift; sourceTree = "<group>"; };
 		D34F229DA412D378E136E5F4 /* ReaderSidebarPresentationProjectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderSidebarPresentationProjectionTests.swift; sourceTree = "<group>"; };
 		D4032C6A1DBF83393798AD9C /* PreviewHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewHTTPClient.swift; sourceTree = "<group>"; };
 		D479625A1A650B8AB9DD4BA3 /* Allo-Oblique.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Allo-Oblique.otf"; sourceTree = "<group>"; };
@@ -724,6 +734,7 @@
 			children = (
 				5150E4CF8E5CFE5B83592C20 /* ArticleRowThumbnailRequestTests.swift */,
 				C1869F43C497863C34EB8B10 /* ArticleRowViewTests.swift */,
+				95CDD922585E568A5B1A43A0 /* FolderCardsTests.swift */,
 				7B031179E2C758062F926F2C /* FrontPageLayoutTests.swift */,
 				C7BFE6566D2F01E26F362790 /* ReaderHomeTilesTests.swift */,
 				97575C31478A317EC6D623CF /* ReaderListViewportControllerResizeTests.swift */,
@@ -764,6 +775,7 @@
 				20A41278D46A9E7E605DFD54 /* ArticleRowView.swift */,
 				55EB9AD43472869EA73FBBCB /* ArticleThumbnailView.swift */,
 				ADBCEB5165814FFB622A80C3 /* ArticleWebsiteView.swift */,
+				B4D9222EC9824988AA308089 /* FolderCardsView.swift */,
 				CA27269208691A759B33BED7 /* FrontPageLayout.swift */,
 				84E4E9096DE38C913722FF44 /* FrontPageView.swift */,
 				5B8791BCEF93EA48C557C2CC /* PaywallLabel.swift */,
@@ -806,6 +818,7 @@
 				E3489D0DCD972965490D36A4 /* ReaderSidebarViewportCoordinator.swift */,
 				4E12235F772F56268375D6A2 /* ReaderStatusOverlay.swift */,
 				B45B3EFE3E23930ECB94F04B /* ReaderTextShareSheet.swift */,
+				D3267FD0ED666DFB56E1F96D /* ReaderTiles.swift */,
 				3C0996CDA82354E92282957B /* ReadingLengthLabel.swift */,
 				65A49E29E5597D20149E0858 /* ReadingMonitorID.swift */,
 				C6B307BACA7C3B968482FCA8 /* RemoteArticleImageView.swift */,
@@ -891,6 +904,7 @@
 		544B96A92ED3D0B229438119 /* PigeonReaderUITests */ = {
 			isa = PBXGroup;
 			children = (
+				8CCABC6738ED7A4C75BDB07F /* PigeonCardsUITests.swift */,
 				2CC90DD2D1F47AF7514369F2 /* PigeonDeviceLayoutUITests.swift */,
 				ED4066B4B9E1B87C7B4A5FAF /* PigeonHomeTilesUITests.swift */,
 				245E6BE17C1BBA7F6E950473 /* PigeonMotionPerformanceUITests.swift */,
@@ -1182,6 +1196,7 @@
 		C0961D63C23DA925F1E00431 /* Development */ = {
 			isa = PBXGroup;
 			children = (
+				76A25A1FEEFA8FD765232044 /* PreviewCardsFixture.swift */,
 				6E899879012FBD92B7D16184 /* PreviewData.swift */,
 				D4032C6A1DBF83393798AD9C /* PreviewHTTPClient.swift */,
 				2B5B45E0BFED4AF7C8980F96 /* PreviewMotionStreamFixture.swift */,
@@ -1482,6 +1497,7 @@
 				14B0C34C5314497A26FF0BFD /* FeedNotificationIdentity.swift in Sources */,
 				1E37A2C8587C4C305156AAF0 /* FeedNotificationSettingsView.swift in Sources */,
 				C277B98E3A1033AD02CC4276 /* FeedSubscription.swift in Sources */,
+				E8D92C45E212195CFA9D1ED2 /* FolderCardsView.swift in Sources */,
 				2FE10F7174D72C0A470D3F2D /* FolderSections.swift in Sources */,
 				C92EC21C8BA7F06AB2E67D32 /* FrontPageLayout.swift in Sources */,
 				D533EF17FC2F7A6121F8E414 /* FrontPageView.swift in Sources */,
@@ -1511,6 +1527,7 @@
 				06B62BD860A9C3630A8E425F /* PigeonSession.swift in Sources */,
 				59FE066E105A38D7A700A0BA /* PigeonSharedData.swift in Sources */,
 				5C5F12E429BE70AC852A4095 /* PigeonSharedSaving.swift in Sources */,
+				E322A68AF9436DD116149F2B /* PreviewCardsFixture.swift in Sources */,
 				2D75967FD9E8A073D53746D3 /* PreviewData.swift in Sources */,
 				91319E07A20EF9334D2D8191 /* PreviewHTTPClient.swift in Sources */,
 				A8C2198B04AA55C4844F3527 /* PreviewMotionStreamFixture.swift in Sources */,
@@ -1605,6 +1622,7 @@
 				C2E26B22013B3FE69E6AE5F6 /* ReaderSmartViewStore.swift in Sources */,
 				7F58863FDA0F04A1BE4ED65E /* ReaderStatusOverlay.swift in Sources */,
 				D727CE12FD30D777AAA35417 /* ReaderTextShareSheet.swift in Sources */,
+				4E62E192E266C889A1B42F84 /* ReaderTiles.swift in Sources */,
 				501C3E0BBBD127D7DC08B646 /* ReaderTypography.swift in Sources */,
 				73AF5609290FC91C8279CCE1 /* ReaderTypographySettings.swift in Sources */,
 				A0B082EE3DD80985EDA58423 /* ReaderViewDocument.swift in Sources */,
@@ -1671,6 +1689,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4679BCC2129C73B5EF13358C /* PigeonCardsUITests.swift in Sources */,
 				F5C3D2E71B93B938E6585537 /* PigeonDeviceLayoutUITests.swift in Sources */,
 				1F98DA2E2C3DB829AE155EFF /* PigeonHomeTilesUITests.swift in Sources */,
 				3FC79B852EFBEE59A89FB058 /* PigeonMotionPerformanceUITests.swift in Sources */,
@@ -1698,6 +1717,7 @@
 				BAE8E5A8CD4682C0CD1F580D /* ArticleWebsiteIdentityTests.swift in Sources */,
 				DFD547C5CD0413F4F0221EC8 /* ControlledHTTPClient.swift in Sources */,
 				97565F46CF5070ACE6706D1E /* EngagementAggregatorTests.swift in Sources */,
+				448AC565CF51483F3E66E773 /* FolderCardsTests.swift in Sources */,
 				011715FF52B836C5CDA2E2DD /* FolderSectionsTests.swift in Sources */,
 				31A931B382464DCE561C2A2E /* FrontPageLayoutTests.swift in Sources */,
 				8702C7830DE571532DAAF912 /* ImpressionTrackerTests.swift in Sources */,

@@ -229,6 +229,9 @@ enum PreviewData {
 			if ProcessInfo.processInfo.arguments.contains("-reader-navigation-fixture") {
 				PreviewNavigationFixture.install(in: model)
 			}
+			if PreviewCardsFixture.isEnabled {
+				installCardsFixture(in: model)
+			}
 			if ProcessInfo.processInfo.arguments.contains("-reader-paging-fixture") {
 				if let feed = model.navigation.items.first(where: { $0.kind == .feed && $0.streamID == "feed/1" }) {
 					model.select(item: feed)
@@ -236,6 +239,43 @@ enum PreviewData {
 				model.setArticleFilter(.all, for: model.selectedCollection)
 			}
 			return model
+	}
+
+	/// The library of `PreviewCardsFixture`; its stories load through the
+	/// preview client like a server's.
+	private static func installCardsFixture(in model: ReaderAppModel) {
+		let stories = PreviewCardsFixture.stories()
+		let unread = stories.filter { $0.isRead == false }
+		model.setNavigation(
+			ReaderNavigationCatalog.make(
+				subscriptions: PreviewCardsFixture.feeds.map { feed in
+					ReaderSubscription(
+						id: feed.streamID,
+						title: feed.title,
+						categories: feed.inFolder
+							? [ReaderSubscriptionCategory(id: PreviewCardsFixture.folderID, label: PreviewCardsFixture.folderLabel)]
+							: [],
+						url: "https://pigeon.preview/feed/\(feed.key)",
+					)
+				},
+				unreadCounts: PreviewCardsFixture.feeds.map { feed in
+					ReaderUnreadCount(id: feed.streamID, count: unread.count(where: { $0.feed.key == feed.key }))
+				} + [ReaderUnreadCount(id: PreviewCardsFixture.folderID, count: unread.count(where: \.feed.inFolder))],
+				smartCounts: ReaderNavigationSmartCounts(forYou: 2, today: 6, unread: unread.count, starred: 1, saved: 0),
+			),
+			markAsLoaded: true,
+		)
+		for folder in model.navigation.folderItems where model.isFolderExpanded(folder) == false {
+			model.toggleFolder(folder)
+		}
+		// `-reader-cards-open <collection id>` opens a list at launch, for screenshots.
+		let arguments = ProcessInfo.processInfo.arguments
+		if let index = arguments.firstIndex(of: "-reader-cards-open"), index + 1 < arguments.count,
+			let item = model.navigation.item(withID: arguments[index + 1]) {
+			model.select(item: item)
+			model.setArticleFilter(.all, for: item)
+			model.preferredCompactColumn = .content
+		}
 	}
 
 	/// Read It Later fixtures: finished text of several lengths, a video, an

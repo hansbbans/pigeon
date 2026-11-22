@@ -4314,6 +4314,25 @@ final class ReaderAppModel {
 		return ArticleFeedSection.sections(for: articles, feeds: articleFeedDirectory)
 	}
 
+	/// The kicker colour of a collection's cards, the same one its Home tile
+	/// has: a folder's own, a feed's folder's, or for a feed in no folder its
+	/// own kicker colour. Nil for smart views.
+	func cardColorIndex(for collection: ReaderNavigationItem) -> Int? {
+		let item = navigation.item(withID: collection.id) ?? collection
+		switch item.kind {
+		case .smart:
+			return nil
+		case .folder:
+			return ReaderHomeTiles.folderColorIndices(in: navigation)[item.id]
+				?? FrontPageKickerPalette.colorIndex(for: item.id)
+		case .feed:
+			if let parentID = item.parentID, let index = ReaderHomeTiles.folderColorIndices(in: navigation)[parentID] {
+				return index
+			}
+			return FrontPageKickerPalette.colorIndex(for: item.streamID)
+		}
+	}
+
 	private func sortOrder(for collectionID: String) -> ArticleSortOrder {
 		ArticleSortOrder.resolved(sortOrders[collectionID], forCollectionID: collectionID)
 	}
@@ -5222,9 +5241,12 @@ final class ReaderAppModel {
 	/// Buffers impressions for the reading log. They go out in batches: at
 	/// `readingLogFlushThreshold`, about every `flushInterval` while any are
 	/// waiting, when a list session ends, and when the scene is backgrounded.
+	/// `rows` names the kind of row that showed each story, where the list has
+	/// more than one (see `ReadingLogMetadata.row`).
 	func recordImpressions(
 		_ impressions: [ImpressionTracker.Impression],
 		in list: ReadingLogList,
+		rows: [String: String] = [:],
 		flushInterval: Duration = ReaderAppModel.readingLogFlushInterval,
 	) {
 		guard impressions.isEmpty == false, apiClient != nil else { return }
@@ -5235,6 +5257,7 @@ final class ReaderAppModel {
 			let metadata = ReadingLogMetadata(
 				score: forYouArticles.first { $0.id == impression.itemId }?.score,
 				stream: list.stream,
+				row: rows[impression.itemId],
 			)
 			readingLogBuffer.append(ReadingLogEvent(
 				itemId: impression.itemId,
@@ -5415,12 +5438,14 @@ final class ReaderAppModel {
 		)
 	}
 
-	func markStoriesAboveAsRead(_ article: Recommendation, in collection: ReaderNavigationItem) async {
-		await markStoriesAsRead(.above, around: article, in: collection)
+	/// `order` is the order the reader sees when it is not the collection's
+	/// own (the Cards look shows stories newest first, whatever the sort).
+	func markStoriesAboveAsRead(_ article: Recommendation, in collection: ReaderNavigationItem, order: [Recommendation]? = nil) async {
+		await markStoriesAsRead(.above, around: article, in: collection, order: order)
 	}
 
-	func markStoriesBelowAsRead(_ article: Recommendation, in collection: ReaderNavigationItem) async {
-		await markStoriesAsRead(.below, around: article, in: collection)
+	func markStoriesBelowAsRead(_ article: Recommendation, in collection: ReaderNavigationItem, order: [Recommendation]? = nil) async {
+		await markStoriesAsRead(.below, around: article, in: collection, order: order)
 	}
 
 	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
@@ -8571,8 +8596,13 @@ final class ReaderAppModel {
 		return displayedArticles.filter { $0.isRead == false && $0.receivedAt < date }
 	}
 
-	private func markStoriesAsRead(_ boundary: ReadBoundary, around article: Recommendation, in collection: ReaderNavigationItem) async {
-		let displayedArticles = markReadOrderArticles(in: collection)
+	private func markStoriesAsRead(
+		_ boundary: ReadBoundary,
+		around article: Recommendation,
+		in collection: ReaderNavigationItem,
+		order: [Recommendation]? = nil,
+	) async {
+		let displayedArticles = order ?? markReadOrderArticles(in: collection)
 		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
 			return

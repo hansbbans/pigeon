@@ -1,0 +1,350 @@
+import SwiftUI
+
+nonisolated enum FolderCardsLayout {
+	static let topAnchorID = "folder-cards-top"
+	/// Feed cards carry several headlines each, so they stop at three across,
+	/// where Home's single-headline tiles go to four.
+	static let maximumFeedColumns = 3
+
+	/// One column of cards on a phone and at accessibility sizes; a wide
+	/// window lays feed cards out like Home's folder tiles.
+	static func feedColumnCount(usesAccessibilitySize: Bool, availableWidth: Double?) -> Int {
+		guard usesAccessibilitySize == false,
+			let availableWidth, availableWidth >= ReaderHomeTiles.wideLayoutMinimumWidth else { return 1 }
+		return min(
+			ReaderHomeTiles.folderColumnCount(usesAccessibilitySize: false, availableWidth: availableWidth),
+			maximumFeedColumns,
+		)
+	}
+}
+
+extension FolderSections {
+	/// The reading log's `row` for each story: the card it first appears in.
+	nonisolated var readingLogRows: [String: String] {
+		var rows: [String: String] = [:]
+		for section in sections {
+			let row = switch section.kind {
+			case .today: "card-today"
+			case .lastSevenDays: "card-last-7-days"
+			case .feed, .older: "card-feed"
+			case .yesterday, .earlier: "card-day"
+			}
+			for article in section.articles where rows[article.id] == nil {
+				rows[article.id] = row
+			}
+		}
+		return rows
+	}
+}
+
+/// A folder or a feed in the Cards look: a column of cards in the Home tile
+/// style, each with the folder's colour bar. It reuses the list's data,
+/// selection and actions, like `FrontPageView`.
+struct FolderCardsView<StoryMenu: View, Footer: View>: View {
+	let sections: FolderSections
+	let feeds: ArticleFeedDirectory
+	/// Today and Last 7 Days mix feeds, so their stories name their feed. A
+	/// single feed's day cards do not.
+	let showsFeedNames: Bool
+	let colorIndex: Int?
+	let selectedArticleID: String?
+	let remoteImagePolicy: ReaderRemoteImagePolicy
+	let select: (Recommendation) -> Void
+	let onExpand: (String) -> Void
+	/// Whether a feed card's header opens that feed; a story from a feed the
+	/// library does not list has nowhere to go.
+	let canOpenFeed: (ArticleFeedDirectory.Feed) -> Bool
+	let onOpenFeed: (ArticleFeedDirectory.Feed) -> Void
+	let onNearEndChange: (Bool) -> Void
+	let onUserScroll: () -> Void
+	let onScrollingChange: (Bool) -> Void
+	/// One copy (story id, card id) of a story became, or stopped being, at
+	/// least half visible (reading log).
+	let onStoryVisibilityChange: (String, Bool, String) -> Void
+	@ViewBuilder let storyMenu: (Recommendation) -> StoryMenu
+	@ViewBuilder let footer: () -> Footer
+
+	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
+	@State private var availableWidth: Double?
+
+	private let nearEndDistance = 900.0
+
+	var body: some View {
+		ScrollView {
+			LazyVStack(alignment: .leading, spacing: 10) {
+				Color.clear
+					.frame(height: 0)
+					.id(FolderCardsLayout.topAnchorID)
+				ForEach(blocks) { block in
+					switch block.content {
+					case let .card(section):
+						card(section)
+					case .olderHeader:
+						Text("Older")
+							.font(.footnote.weight(.semibold))
+							.foregroundStyle(.pigeonSecondary)
+							.padding(.top, 14)
+							.accessibilityAddTraits(.isHeader)
+							.accessibilityIdentifier("folder-cards-older")
+					case let .feedGrid(feedSections):
+						LazyVGrid(columns: feedColumns, alignment: .leading, spacing: 10) {
+							ForEach(feedSections) { section in
+								card(section)
+							}
+						}
+					}
+				}
+				VStack(spacing: 12) {
+					footer()
+				}
+				.frame(maxWidth: .infinity)
+				.padding(.top, 18)
+			}
+			.padding(.horizontal, 16)
+			.padding(.top, 8)
+			.padding(.bottom, 24)
+			.frame(maxWidth: ReaderHomeTiles.maximumContentWidth)
+			.frame(maxWidth: .infinity)
+		}
+		.onGeometryChange(for: Double.self) { geometry in
+			Double(geometry.size.width)
+		} action: { _, width in
+			availableWidth = width
+		}
+		.onScrollGeometryChange(for: Bool.self) { geometry in
+			geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - nearEndDistance
+		} action: { _, isNearEnd in
+			onNearEndChange(isNearEnd)
+		}
+		.onScrollPhaseChange { _, phase in
+			onScrollingChange(phase != .idle)
+			if phase == .interacting { onUserScroll() }
+		}
+		.scrollEdgeEffectStyle(.soft, for: .top)
+		.background(Color(.systemGroupedBackground))
+	}
+
+	private var barColor: Color? {
+		colorIndex.map(FrontPageKickerPalette.color(at:))
+	}
+
+	private var feedColumns: [GridItem] {
+		let count = FolderCardsLayout.feedColumnCount(
+			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
+			availableWidth: availableWidth,
+		)
+		return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: count)
+	}
+
+	/// Today, Last 7 Days and day cards span the width; runs of feed cards
+	/// share a grid, split by the Older header.
+	private var blocks: [Block] {
+		var blocks: [Block] = []
+		var run: [FolderSections.Section] = []
+		func closeRun() {
+			guard let first = run.first else { return }
+			blocks.append(Block(id: "grid:\(first.id)", content: .feedGrid(run)))
+			run = []
+		}
+		for section in sections.sections {
+			switch section.kind {
+			case .feed:
+				run.append(section)
+			case .older:
+				closeRun()
+				blocks.append(Block(id: section.id, content: .olderHeader))
+			case .today, .lastSevenDays, .yesterday, .earlier:
+				closeRun()
+				blocks.append(Block(id: section.id, content: .card(section)))
+			}
+		}
+		closeRun()
+		return blocks
+	}
+
+	private func card(_ section: FolderSections.Section) -> some View {
+		VStack(alignment: .leading, spacing: 12) {
+			header(section)
+			ForEach(section.articles) { article in
+				story(article, in: section)
+			}
+			if section.hiddenCount > 0 {
+				Button {
+					onExpand(section.id)
+				} label: {
+					Text("\(section.hiddenCount) more")
+						.font(.footnote.weight(.semibold))
+						.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+						.contentShape(.rect)
+				}
+				.buttonStyle(.plain)
+				.foregroundStyle(.tint)
+				.padding(.top, -10)
+				.accessibilityHint("Shows every loaded story in \(section.title)")
+				.accessibilityIdentifier("folder-card-more-\(section.id)")
+			}
+		}
+		.padding(.horizontal, 12)
+		.padding(.top, 10)
+		.padding(.bottom, section.hiddenCount > 0 ? 0 : 14)
+		.frame(maxWidth: .infinity, alignment: .topLeading)
+		.readerTileBackground(barColor: barColor)
+		.accessibilityElement(children: .contain)
+		.accessibilityIdentifier("folder-card-\(section.id)")
+	}
+
+	@ViewBuilder
+	private func header(_ section: FolderSections.Section) -> some View {
+		if let feed = section.feed, canOpenFeed(feed) {
+			Button {
+				onOpenFeed(feed)
+			} label: {
+				FolderCardHeader(title: section.title, color: barColor, iconURL: iconURL(for: feed))
+					.contentShape(.rect.inset(by: -6))
+			}
+			.buttonStyle(ReaderRowButtonStyle())
+			.accessibilityLabel(section.title)
+			.accessibilityHint("Opens \(section.title)")
+			.accessibilityIdentifier("folder-card-open-\(section.id)")
+		} else {
+			FolderCardHeader(title: section.title, color: barColor, iconURL: section.feed.flatMap(iconURL(for:)))
+				.accessibilityElement(children: .combine)
+				.accessibilityAddTraits(.isHeader)
+		}
+	}
+
+	/// Favicons are publisher-hosted, so they follow the image policy.
+	private func iconURL(for feed: ArticleFeedDirectory.Feed) -> URL? {
+		remoteImagePolicy == .normal ? feed.iconURL : nil
+	}
+
+	private func story(_ article: Recommendation, in section: FolderSections.Section) -> some View {
+		let showsFeed = showsFeedNames && (section.kind == .today || section.kind == .lastSevenDays)
+		return FolderCardStoryView(
+			article: article,
+			feed: showsFeed ? feeds.feed(for: article) : nil,
+			isSelected: selectedArticleID == article.id,
+			select: { select(article) },
+		)
+		.contextMenu { storyMenu(article) }
+		.onScrollVisibilityChange(threshold: 0.5) { isVisible in
+			onStoryVisibilityChange(article.id, isVisible, section.id)
+		}
+		// A card can leave the hierarchy (a reload, an expansion) without
+		// being told its stories are no longer visible.
+		.onDisappear { onStoryVisibilityChange(article.id, false, section.id) }
+	}
+
+	private struct Block: Identifiable {
+		enum Content {
+			case card(FolderSections.Section)
+			case olderHeader
+			case feedGrid([FolderSections.Section])
+		}
+
+		let id: String
+		let content: Content
+	}
+}
+
+/// A card's name in kicker type and the folder's colour, after the feed's
+/// favicon on a feed card.
+private struct FolderCardHeader: View {
+	let title: String
+	let color: Color?
+	let iconURL: URL?
+
+	var body: some View {
+		HStack(spacing: 8) {
+			if let iconURL {
+				ReaderHomeFeedIcon(url: iconURL)
+					.accessibilityHidden(true)
+			}
+			// A step above the stories' feed kickers, so the card's name leads.
+			Text(title)
+				.font(.footnote.weight(.bold))
+				.textCase(.uppercase)
+				.tracking(0.8)
+				.foregroundStyle(color ?? .pigeonSecondary)
+				.lineLimit(1)
+			Spacer(minLength: 0)
+		}
+		.frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+	}
+}
+
+/// A story on a card: optional feed kicker, the headline in the reading
+/// typeface and one caption line. Read stories change weight and colour.
+struct FolderCardStoryView: View {
+	@Environment(\.accessibilityReduceMotion) private var reduceMotion
+	@Environment(\.showsReadingTime) private var showsReadingTime
+	@Environment(\.readerTypeface) private var readerTypeface
+	let article: Recommendation
+	/// Set on cards that mix feeds.
+	let feed: ArticleFeedDirectory.Feed?
+	let isSelected: Bool
+	let select: () -> Void
+
+	var body: some View {
+		Button(action: select) {
+			VStack(alignment: .leading, spacing: 4) {
+				if let feed {
+					Text(feed.title)
+						.font(.caption2.weight(.bold))
+						.textCase(.uppercase)
+						.tracking(0.8)
+						.foregroundStyle(FrontPageKickerPalette.color(for: feed.id))
+						.lineLimit(1)
+				}
+				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
+					.font(article.isRead
+						? ReaderTypography.body(readerTypeface, size: 17, relativeTo: .body)
+						: ReaderTypography.storyTitle(readerTypeface))
+					.foregroundStyle(article.isRead ? Color.pigeonSecondary : Color.primary)
+					.lineLimit(3)
+					.multilineTextAlignment(.leading)
+					.fixedSize(horizontal: false, vertical: true)
+				HStack(spacing: 6) {
+					Text(article.receivedAt, format: .relative(presentation: .named))
+					if let readingLength {
+						Text("· \(readingLength)")
+					}
+					if article.isStarred {
+						Image(systemName: "star.fill")
+							.foregroundStyle(.pigeonKeep)
+					}
+				}
+				.font(.caption)
+				.foregroundStyle(.pigeonSecondary)
+				.lineLimit(1)
+			}
+			.frame(maxWidth: .infinity, alignment: .leading)
+			.padding(6)
+			.background {
+				RoundedRectangle(cornerRadius: 8, style: .continuous)
+					.fill(Color.accentColor.opacity(isSelected ? 0.1 : 0))
+			}
+			.padding(-6)
+		}
+		.buttonStyle(ReaderRowButtonStyle())
+		.animation(ReaderMotion.animation(reduceMotion: reduceMotion), value: article.isRead)
+		.accessibilityElement(children: .ignore)
+		.accessibilityLabel(feed.map { "\($0.title), \(article.title)" } ?? article.title)
+		.accessibilityValue(accessibilityValue)
+		.accessibilityAddTraits(.isButton)
+		.accessibilityAction { select() }
+		.accessibilityIdentifier("folder-card-story-\(article.id)")
+	}
+
+	private var readingLength: String? {
+		article.readingLengthLabel(showsReadingTime: showsReadingTime)
+	}
+
+	private var accessibilityValue: String {
+		var parts = [article.isRead ? "Read" : "Unread"]
+		if article.isStarred { parts.append("Starred") }
+		if article.isPaywalled == true { parts.append(PaywallLabel.accessibilityValue) }
+		if let readingLength { parts.append(readingLength) }
+		return parts.joined(separator: ", ")
+	}
+}

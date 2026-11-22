@@ -37,6 +37,8 @@ struct ArticleListView: View {
 	@State private var isExplicitListTransitioning = false
 	@State private var isLayoutReflowing = false
 	@State private var layoutReflowToken: UUID?
+	/// Cards shown in full ("N more") for this visit to the collection.
+	@State private var expandedCardSections: Set<String> = []
 
 	var body: some View {
 		let allArticles = model.allArticles(for: collection)
@@ -132,6 +134,13 @@ struct ArticleListView: View {
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
+			} else if usesFolderCards {
+				let cardSections = folderCardSections(for: articles)
+				folderCards(cardSections, articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
+					.onChange(of: CardImpressionRows(sections: cardSections), initial: true) { _, rows in
+						impressions.updateRows(rows.ids, readingLogRows: rows.rows)
+					}
+					.transition(.opacity)
 			} else if usesFrontPage {
 				// Front Page keeps its own pages; By Feed only orders them, and every
 				// story's kicker already names its feed.
@@ -402,9 +411,14 @@ struct ArticleListView: View {
 		model.readerTypography.look == .cards
 	}
 
+	/// Folders and feeds in Cards are cards.
+	private var usesFolderCards: Bool {
+		usesCardsLook && (collection.kind == .folder || collection.kind == .feed)
+	}
+
 	/// Smart views in Cards are the Front Page.
 	private var usesFrontPage: Bool {
-		usesCardsLook
+		usesCardsLook && usesFolderCards == false
 	}
 
 	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {
@@ -494,6 +508,93 @@ struct ArticleListView: View {
 		}
 	}
 
+	private var presentationName: String {
+		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : "classic"
+	}
+
+	private func folderCardSections(for articles: [Recommendation]) -> FolderSections {
+		collection.kind == .folder
+			? FolderSections.make(articles: articles, feeds: model.articleFeedDirectory, now: .now, expanded: expandedCardSections)
+			: FeedDaySections.make(articles: articles, now: .now, expanded: expandedCardSections)
+	}
+
+	/// The feed's own list, preferring its row in this folder.
+	private func navigationItem(for feed: ArticleFeedDirectory.Feed) -> ReaderNavigationItem? {
+		let rows = model.navigation.items.filter { $0.kind == .feed && $0.streamID == feed.id }
+		return rows.first { $0.parentID == collection.id } ?? rows.first
+	}
+
+	private func folderCards(
+		_ sections: FolderSections,
+		articles: [Recommendation],
+		isSearchActive: Bool,
+		holdsUpdates: Bool,
+	) -> some View {
+		ScrollViewReader { proxy in
+			FolderCardsView(
+				sections: sections,
+				feeds: model.articleFeedDirectory,
+				showsFeedNames: collection.kind == .folder,
+				colorIndex: model.cardColorIndex(for: collection),
+				selectedArticleID: model.selectedArticleID,
+				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+				select: { article in
+					impressions.rowChosen(article.id)
+					model.retainPresentedArticles(articles, in: collection)
+					model.select(article: article)
+				},
+				onExpand: { sectionID in
+					withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
+						_ = expandedCardSections.insert(sectionID)
+					}
+				},
+				canOpenFeed: { navigationItem(for: $0) != nil },
+				onOpenFeed: { feed in
+					guard let item = navigationItem(for: feed) else { return }
+					model.select(item: item)
+				},
+				onNearEndChange: { if isNearEnd != $0 { isNearEnd = $0 } },
+				onUserScroll: {
+					if paginationGate.userDidScroll() { paginationMovement &+= 1 }
+				},
+				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
+				onStoryVisibilityChange: { impressions.setRowVisible($0, $1, copy: $2) },
+			) { article in
+				// Cards read newest first whatever the collection's sort, so
+				// "above" means newer.
+				readButton(for: article)
+				starButton(for: article)
+				Divider()
+				markAboveButton(for: article, newestFirst: true)
+				markBelowButton(for: article, newestFirst: true)
+			} footer: {
+				Text(model.collectionStatusText(for: collection))
+					.font(.footnote)
+					.foregroundStyle(.pigeonSecondary)
+					.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
+				loadMoreControls(for: collection, isSearchActive: isSearchActive)
+			}
+			.task(id: acceptedScrollRequest) {
+				guard let request = acceptedScrollRequest else { return }
+				await Task.yield()
+				guard Task.isCancelled == false, acceptedScrollRequest == request else { return }
+				withAnimation(reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false)) {
+					proxy.scrollTo(FolderCardsLayout.topAnchorID, anchor: .top)
+				}
+				acceptedScrollRequest = nil
+			}
+			.overlay(alignment: .top) {
+				if updateBuffer.needsAcceptance, holdsUpdates == false {
+					ReaderNewStoriesButton(count: updateBuffer.newStoryCount, action: showUpdatedStories)
+				}
+			}
+			.onDisappear {
+				isScrolling = false
+				isNearEnd = false
+			}
+		}
+	}
+
 	/// One impression session per continuous showing of one list context. The
 	/// list is off screen while another collection or Home is selected, and
 	/// paused while the scene is inactive or the reader covers it on iPhone.
@@ -501,7 +602,7 @@ struct ArticleListView: View {
 		let isOnScreen = model.selectedNavigationID == collection.id && model.preferredCompactColumn != .sidebar
 		return ReaderImpressionRecorder.ListState(
 			sessionKey: isOnScreen
-				? "\(listContext)|\(usesFrontPage ? "front-page" : "classic")|\(model.readingLogSessionEpoch)"
+				? "\(listContext)|\(presentationName)|\(model.readingLogSessionEpoch)"
 				: nil,
 			list: ReadingLogList.list(for: collection, search: isSearchActive ? searchScope : nil),
 			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
@@ -792,18 +893,22 @@ struct ArticleListView: View {
 		isShowingSaveErrorMessage = false
 	}
 
-	private func markAboveButton(for article: Recommendation) -> some View {
+	/// `newestFirst`: the reader sees the stories newest first (Cards), not
+	/// in the collection's sort order.
+	private func markAboveButton(for article: Recommendation, newestFirst: Bool = false) -> some View {
 		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesAboveAsRead(article, in: collection) }
+			let order = newestFirst ? FolderSections.newestFirst(updateBuffer.articles) : nil
+			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
-	private func markBelowButton(for article: Recommendation) -> some View {
+	private func markBelowButton(for article: Recommendation, newestFirst: Bool = false) -> some View {
 		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesBelowAsRead(article, in: collection) }
+			let order = newestFirst ? FolderSections.newestFirst(updateBuffer.articles) : nil
+			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
@@ -816,6 +921,18 @@ private struct ReaderListSourceSnapshot: Equatable {
 	let allArticles: [Recommendation]
 	let mutationRevision: UInt64
 	let mutationArticleID: String?
+}
+
+/// What the reading log needs from the cards: each story once, in order of
+/// first appearance, and the card that shows it first.
+private struct CardImpressionRows: Equatable {
+	let ids: [String]
+	let rows: [String: String]
+
+	init(sections: FolderSections) {
+		ids = sections.uniqueArticleIDs
+		rows = sections.readingLogRows
+	}
 }
 
 private struct AutomaticPageRequest: Equatable {

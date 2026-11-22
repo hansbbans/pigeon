@@ -36,13 +36,7 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 			guard let section = item.smartSection else { return false }
 			return hiddenSections.contains(section) == false
 		}
-		// Colours are assigned across every folder, not only the visible ones,
-		// so the Unread filter never recolours a tile.
-		let allFolderIDs = navigation.items.filter(\.isFolder).map(\.id)
-		let colorIndices = Dictionary(
-			zip(allFolderIDs, colorIndices(for: allFolderIDs)),
-			uniquingKeysWith: { first, _ in first },
-		)
+		let colorIndices = folderColorIndices(in: navigation)
 		let folders = snapshot.folderItems.map { folder in
 			let feeds = snapshot.feeds(in: folder.id)
 			var seenIcons = Set<URL>()
@@ -57,6 +51,14 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 		}
 		let today = navigation.items.first { $0.smartSection == .today }
 		return Self(viewItems: viewItems, folders: folders, newTodayCount: max(today?.unreadCount ?? 0, 0))
+	}
+
+	/// Every folder's colour. Colours are assigned across every folder, not
+	/// only the visible ones, so the Unread filter never recolours a tile, and
+	/// a folder's cards use the colour its tile has.
+	static func folderColorIndices(in navigation: ReaderNavigationState) -> [String: Int] {
+		let allFolderIDs = navigation.items.filter(\.isFolder).map(\.id)
+		return Dictionary(zip(allFolderIDs, colorIndices(for: allFolderIDs)), uniquingKeysWith: { first, _ in first })
 	}
 
 	/// Cached lists follow the reader's sort order, which may be oldest first,

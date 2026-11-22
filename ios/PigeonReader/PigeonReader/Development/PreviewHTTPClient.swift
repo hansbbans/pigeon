@@ -91,6 +91,10 @@ struct PreviewHTTPClient: HTTPClient {
 			throw PigeonError.invalidServerURL
 		}
 		let url = request.url ?? fallbackURL
+		if let fixture = try PreviewCardsFixture.data(for: request),
+			let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) {
+			return (fixture, response)
+		}
 		if ProcessInfo.processInfo.arguments.contains("-reader-motion-stress-fixture"),
 			let fixture = try PreviewMotionStreamFixture.data(for: request),
 			let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) {

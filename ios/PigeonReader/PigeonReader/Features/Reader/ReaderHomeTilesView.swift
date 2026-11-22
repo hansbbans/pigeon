@@ -176,11 +176,6 @@ private struct ReaderHomeDateline: View {
 	}
 }
 
-private enum ReaderHomeTileStyle {
-	static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-	static let background = Color(.secondarySystemGroupedBackground)
-}
-
 private struct ReaderHomeViewTile: View {
 	let item: ReaderNavigationItem
 
@@ -250,52 +245,7 @@ private struct ReaderHomeFolderTile: View {
 		.padding(.top, 14)
 		.padding(.bottom, 12)
 		.frame(maxWidth: .infinity, minHeight: 136, alignment: .topLeading)
-		.background(ReaderHomeTileStyle.background)
-		.overlay(alignment: .top) {
-			Rectangle()
-				.fill(color)
-				.frame(height: 3)
-				.accessibilityHidden(true)
-		}
-		.clipShape(ReaderHomeTileStyle.shape)
+		.readerTileBackground(barColor: color)
 		.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: folder.headline)
-	}
-}
-
-/// A feed favicon that fades in once loaded, so tiles never pop.
-private struct ReaderHomeFeedIcon: View {
-	@Environment(\.accessibilityReduceMotion) private var reduceMotion
-	let url: URL
-
-	var body: some View {
-		AsyncImage(url: url) { phase in
-			ZStack {
-				RoundedRectangle(cornerRadius: 4, style: .continuous)
-					.fill(.quaternary)
-					.opacity(phase.image == nil ? 1 : 0)
-				if let image = phase.image {
-					image
-						.resizable()
-						.scaledToFit()
-						.clipShape(.rect(cornerRadius: 4, style: .continuous))
-						.transition(.opacity)
-				}
-			}
-			.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: phase.image != nil)
-		}
-		.frame(width: 18, height: 18)
-	}
-}
-
-/// Tiles acknowledge touch-down with a slight press before navigation begins.
-private struct ReaderHomeTileButtonStyle: ButtonStyle {
-	@Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-	func makeBody(configuration: Configuration) -> some View {
-		configuration.label
-			.contentShape(ReaderHomeTileStyle.shape)
-			.opacity(configuration.isPressed ? 0.7 : 1)
-			.scaleEffect(configuration.isPressed && reduceMotion == false ? 0.97 : 1)
-			.animation(.easeOut(duration: 0.12), value: configuration.isPressed)
 	}
 }

@@ -410,6 +410,37 @@ struct ReadingLogTests {
 		#expect(batches.last?.allSatisfy { $0["sessionId"] as? String == secondSession } == true)
 	}
 
+	@Test func aCardStoryShownTwiceIsOneImpressionAtItsFirstCard() async throws {
+		let transport = ReadingLogTransport()
+		let model = try makeModel(transport)
+		let clock = ManualClock(start)
+		let recorder = ReaderImpressionRecorder(now: { clock.now })
+		let folder = navigationItem(id: "user/-/label/Work", kind: .folder)
+
+		// "a" sits in the Today card and again in its feed's card.
+		recorder.updateRows(["a", "b"], readingLogRows: ["a": "card-today", "b": "card-feed"])
+		recorder.apply(.init(sessionKey: "work|cards", list: .list(for: folder), isPaused: false), model: model)
+		recorder.setRowVisible("a", true, copy: "today")
+		recorder.setRowVisible("a", true, copy: "feed:feed/1")
+		recorder.setRowVisible("b", true, copy: "feed:feed/2")
+		// The Today copy scrolls away; the feed copy keeps "a" on screen.
+		recorder.setRowVisible("a", false, copy: "today")
+		clock.advance(0.5)
+		recorder.evaluate()
+		clock.advance(1)
+		recorder.evaluate()
+		recorder.endSession()
+		await model.waitForReadingAnalytics()
+
+		let events = try await readingLogBatches(transport).flatMap { $0 }
+		#expect(events.map { $0["itemId"] as? String } == ["a", "b"])
+		#expect(events.map { $0["position"] as? Int } == [0, 1])
+		#expect(events.map { $0["metadata"] as? [String: String] } == [
+			["stream": "user/-/label/Work", "row": "card-today"],
+			["stream": "user/-/label/Work", "row": "card-feed"],
+		])
+	}
+
 	@Test func aRowTappedInItsFirstSecondIsLoggedAsShown() async throws {
 		let transport = ReadingLogTransport()
 		let model = try makeModel(transport)
