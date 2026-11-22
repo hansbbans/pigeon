@@ -26,6 +26,8 @@ import { mediaKindForFeedItem } from './youtube';
 export interface FeedToFetch {
 	feed_key: string;
 	source_url: string;
+	/** Stored site link; callers that do not load it leave it undefined. */
+	site_url?: string | null;
 	etag: string | null;
 	last_modified: string | null;
 	fetch_interval_minutes?: number | null;
@@ -649,12 +651,17 @@ async function persistRefresh(
 	if (content) {
 		const pollMessageIds = JSON.stringify(content.messageIds);
 		const insertedSince = new Date(Date.parse(result.attemptedAt) - NEW_ITEM_CLOCK_MARGIN_MS).toISOString();
+		// The feed sync trigger fires for every statement that names site_url or source_url,
+		// whatever the values. Naming them only when they change keeps a routine poll from
+		// telling every client that the feed changed.
+		const siteUrlChanged = content.siteUrl != null && content.siteUrl !== feed.site_url;
+		const sourceUrlChanged = content.sourceUrl != null && content.sourceUrl !== feed.source_url;
 		feedUpdate = env.DB.prepare(
 			`UPDATE feeds
 			 SET last_fetched_at = ?,
 			     etag = COALESCE(?, etag),
 			     last_modified = COALESCE(?, last_modified),
-			     site_url = COALESCE(?, site_url),
+			     ${siteUrlChanged ? 'site_url = ?,' : ''}
 			     last_attempt_at = ?,
 			     last_success_at = ?,
 			     fetch_error = NULL,
@@ -665,7 +672,7 @@ async function persistRefresh(
 			     conditional_checked_at = COALESCE(?, conditional_checked_at),
 			     next_fetch_at = ?,
 			     feed_format = COALESCE(?, feed_format),
-			     source_url = COALESCE(?, source_url),
+			     ${sourceUrlChanged ? 'source_url = ?,' : ''}
 			     canonical_url = COALESCE(canonical_url, ?),
 			     last_refresh_outcome = ?,
 			     last_fetch_duration_ms = ?,
@@ -681,7 +688,7 @@ async function persistRefresh(
 			result.attemptedAt,
 			content.etag,
 			content.lastModified,
-			content.siteUrl,
+			...(siteUrlChanged ? [content.siteUrl] : []),
 			result.attemptedAt,
 			result.completedAt,
 			result.httpStatus,
@@ -689,7 +696,7 @@ async function persistRefresh(
 			content.performedFullFetch ? result.completedAt : null,
 			nextFetchAt,
 			content.format,
-			content.sourceUrl,
+			...(sourceUrlChanged ? [content.sourceUrl] : []),
 			content.sourceUrl,
 			result.outcome,
 			result.durationMs,

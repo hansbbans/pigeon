@@ -133,7 +133,7 @@ test('conditional validators are sent only within the periodic full-fetch window
 	assert.deepEqual(observedEtags, ['"old-etag"', null]);
 });
 
-test('Cache-Control max-age defers the next successful refresh within a one-day cap', async () => {
+test('Cache-Control max-age defers the next successful refresh within a five-hour cap', async () => {
 	globalThis.fetch = (async () =>
 		new Response('<rss><channel><title>Cached</title></channel></rss>', {
 			status: 200,
@@ -147,8 +147,13 @@ test('Cache-Control max-age defers the next successful refresh within a one-day 
 	assert.ok(result.cacheUntilAt);
 	const update = state.db.batches.at(-1)?.find((statement) => statement.sql.includes('UPDATE feeds'));
 	assert.ok(update);
-	const scheduledAt = update.values[9] as string;
-	assert.ok(new Date(scheduledAt).getTime() - new Date(result.completedAt).getTime() >= 7_199_000);
+	// The statement names site_url only when it changed, so the schedule has no fixed position.
+	const completedAt = new Date(result.completedAt).getTime();
+	const scheduled = update.values
+		.filter((value): value is string => typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value))
+		.map((value) => new Date(value).getTime() - completedAt);
+	assert.ok(Math.max(...scheduled) >= 7_199_000);
+	assert.ok(Math.max(...scheduled) <= 5 * 3_600_000);
 });
 
 test('rate limits honor Retry-After and persist a redacted typed outcome', async () => {
