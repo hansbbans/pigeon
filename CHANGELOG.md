@@ -11,6 +11,7 @@ All notable changes to Pigeon are documented in this file.
 ### Fixed
 
 - A routine feed poll no longer records a feed change for every client to sync. The Worker rewrote the feed's site and source URL on each successful poll, which logged a change even when nothing differed; it now writes them only when they change.
+- Web: opening the reader no longer waits for the status page's counts. The sign-in check ran the full status query, which reads every article, before the first list could load; it now only checks the token.
 - iOS: in a story list's More menu, Sort, Display and Read actions stay open when you expand them. A background sync or refresh rebuilt the menu and collapsed the submenu before you could pick anything. Refresh in that menu is no longer greyed out during a sync; tapping it joins the sync already running.
 
 ## [0.1.15.0] - 2026-11-21
