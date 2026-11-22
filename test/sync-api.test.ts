@@ -901,7 +901,7 @@ for (const oldOutcome of ['success', 'not_modified', 'http_error']) {
 			assert.deepEqual({ ...state.database.prepare("SELECT from_name, html_content FROM items WHERE subject = 'Shared'").get() }, { from_name: 'Fresh byline', html_content: 'Fresh byline body' });
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM items').get() as { count: number }).count, 2);
 			assert.deepEqual({ ...state.database.prepare("SELECT item_count, etag, source_url, last_refresh_outcome, consecutive_failures FROM feeds WHERE feed_key = 'design-weekly'").get() }, {
-				item_count: 2, etag: 'fresh-tag', source_url: 'https://feeds.example.com/fresh.xml', last_refresh_outcome: 'success', consecutive_failures: 0,
+				item_count: 2, etag: 'fresh-tag', source_url: 'https://feeds.example.com/design.xml', last_refresh_outcome: 'success', consecutive_failures: 0,
 			});
 			assert.equal((state.database.prepare('SELECT COUNT(*) AS count FROM feed_url_aliases').get() as { count: number }).count, 0);
 			assert.equal((state.database.prepare("SELECT COUNT(*) AS count FROM sync_changes WHERE entity_type = 'article'").get() as { count: number }).count, 2);

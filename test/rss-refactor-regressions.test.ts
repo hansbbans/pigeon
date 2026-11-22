@@ -688,7 +688,10 @@ test('fetchAndStoreRssFeed refreshes parent feed metadata after successful impor
 	);
 
 	assert.ok(metadataUpdate, 'expected feed metadata update for last_item_at and item_count');
-	assert.equal(metadataUpdate.values[3], 'https://example.com/');
+	// The statement names site_url only when the fetched link differs from the stored one.
+	const siteUrlAt = metadataUpdate.sql.indexOf('site_url = ?');
+	assert.notEqual(siteUrlAt, -1);
+	assert.equal(metadataUpdate.values[metadataUpdate.sql.slice(0, siteUrlAt).split('?').length - 1], 'https://example.com/');
 });
 
 test('RSS excerpts decode HTML entities once and preserve literal entity examples', () => {
