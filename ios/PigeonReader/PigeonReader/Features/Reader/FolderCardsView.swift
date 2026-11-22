@@ -78,7 +78,9 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 	/// One copy (story id, card id) of a story became, or stopped being, at
 	/// least half visible (reading log).
 	let onStoryVisibilityChange: (String, Bool, String) -> Void
-	@ViewBuilder let storyMenu: (Recommendation) -> StoryMenu
+	/// A story's menu, with the story's place in `sections.renderedCopies`
+	/// (a story shown twice has two).
+	@ViewBuilder let storyMenu: (Recommendation, Int?) -> StoryMenu
 	@ViewBuilder let footer: () -> Footer
 
 	@Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -199,8 +201,8 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 	private func card(_ section: FolderSections.Section) -> some View {
 		VStack(alignment: .leading, spacing: 12) {
 			header(section)
-			ForEach(section.articles) { article in
-				story(article, in: section)
+			ForEach(Array(section.articles.enumerated()), id: \.element.id) { index, article in
+				story(article, in: section, copyIndex: sections.copyIndex(of: index, inSection: section.id))
 			}
 			if section.hiddenCount > 0 {
 				Button {
@@ -252,7 +254,7 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 		remoteImagePolicy == .normal ? feed.iconURL : nil
 	}
 
-	private func story(_ article: Recommendation, in section: FolderSections.Section) -> some View {
+	private func story(_ article: Recommendation, in section: FolderSections.Section, copyIndex: Int?) -> some View {
 		let showsFeed = showsFeedNames && (section.kind == .today || section.kind == .lastSevenDays)
 		return FolderCardStoryView(
 			article: article,
@@ -260,7 +262,7 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 			isSelected: selectedArticleID == article.id,
 			select: { select(article) },
 		)
-		.contextMenu { storyMenu(article) }
+		.contextMenu { storyMenu(article, copyIndex) }
 		.onScrollVisibilityChange(threshold: 0.5) { isVisible in
 			onStoryVisibilityChange(article.id, isVisible, section.id)
 		}

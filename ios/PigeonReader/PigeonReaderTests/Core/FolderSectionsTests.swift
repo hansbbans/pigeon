@@ -215,6 +215,25 @@ struct FolderSectionsTests {
 		#expect(ids(sections, FolderSections.lastSevenDaysID).isEmpty)
 	}
 
+	/// Each drawn copy of a story has its own place, so above and below can be
+	/// taken from the copy the menu was opened on.
+	@Test func everyDrawnCopyHasAnIndexInDrawingOrder() {
+		let articles = [
+			story("a", feed: "feed/1", source: "One", at: todayStart.addingTimeInterval(120)),
+			story("b", feed: "feed/2", source: "Two", at: todayStart.addingTimeInterval(60)),
+			story("c", feed: "feed/1", source: "One", at: local(2026, 10, 1)),
+		]
+
+		let sections = FolderSections.make(articles: articles, feeds: .empty, now: now, calendar: calendar)
+
+		// Today a b, then One a c, then Two b.
+		#expect(sections.renderedCopies.map(\.id) == ["a", "b", "a", "c", "b"])
+		#expect(sections.copyIndex(of: 0, inSection: FolderSections.todayID) == 0)
+		#expect(sections.copyIndex(of: 1, inSection: "feed:feed/1") == 3)
+		#expect(sections.copyIndex(of: 0, inSection: "feed:feed/2") == 4)
+		#expect(sections.copyIndex(of: 0, inSection: "missing") == nil)
+	}
+
 	/// The Cards page is rebuilt from the loaded stories, so a big folder must
 	/// still build in a fraction of a frame budget's worth of seconds.
 	@Test func aHundredFeedsAndAThousandStoriesBuildQuickly() {

@@ -5479,13 +5479,24 @@ final class ReaderAppModel {
 	}
 
 	/// `order` is the order the reader sees when it is not the collection's
-	/// own (the Cards look shows stories newest first, whatever the sort).
-	func markStoriesAboveAsRead(_ article: Recommendation, in collection: ReaderNavigationItem, order: [Recommendation]? = nil) async {
-		await markStoriesAsRead(.above, around: article, in: collection, order: order)
+	/// own (the Cards look draws cards, whatever the sort). When it shows a
+	/// story more than once, `position` is the copy the menu was opened on.
+	func markStoriesAboveAsRead(
+		_ article: Recommendation,
+		in collection: ReaderNavigationItem,
+		order: [Recommendation]? = nil,
+		at position: Int? = nil,
+	) async {
+		await markStoriesAsRead(.above, around: article, in: collection, order: order, at: position)
 	}
 
-	func markStoriesBelowAsRead(_ article: Recommendation, in collection: ReaderNavigationItem, order: [Recommendation]? = nil) async {
-		await markStoriesAsRead(.below, around: article, in: collection, order: order)
+	func markStoriesBelowAsRead(
+		_ article: Recommendation,
+		in collection: ReaderNavigationItem,
+		order: [Recommendation]? = nil,
+		at position: Int? = nil,
+	) async {
+		await markStoriesAsRead(.below, around: article, in: collection, order: order, at: position)
 	}
 
 	func canMarkAllStoriesAsRead(in collection: ReaderNavigationItem) -> Bool {
@@ -8681,9 +8692,15 @@ final class ReaderAppModel {
 		around article: Recommendation,
 		in collection: ReaderNavigationItem,
 		order: [Recommendation]? = nil,
+		at position: Int? = nil,
 	) async {
 		let displayedArticles = order ?? markReadOrderArticles(in: collection)
-		guard let boundaryIndex = displayedArticles.firstIndex(where: { $0.id == article.id })
+		let copyIndex = position.flatMap { position in
+			displayedArticles.indices.contains(position) && articlesMatch(displayedArticles[position], article)
+				? position : nil
+		}
+		guard let boundaryIndex = copyIndex
+			?? displayedArticles.firstIndex(where: { $0.id == article.id })
 			?? displayedArticles.firstIndex(where: { articlesMatch($0, article) }) else {
 			return
 		}
@@ -8698,7 +8715,8 @@ final class ReaderAppModel {
 
 		var seenIdentifiers = Set<String>()
 		let targets = candidates.filter { candidate in
-			guard candidate.isRead == false else {
+			// The story's other copies are neither above nor below it.
+			guard candidate.isRead == false, articlesMatch(candidate, article) == false else {
 				return false
 			}
 			let identifiers = Set([candidate.id, candidate.readerId])

@@ -62,6 +62,11 @@ nonisolated struct FolderSections: Equatable, Sendable {
 	let uniqueArticleIDs: [String]
 	/// The reading log's `row` for each story: the card it first appears in.
 	let readingLogRows: [String: String]
+	/// Every story as drawn, a story shown twice included twice. Above and
+	/// below are taken from the copy a menu was opened on.
+	let renderedCopies: [Recommendation]
+	/// Each section's stories' places in `renderedCopies`.
+	private let copyRanges: [String: Range<Int>]
 
 	/// Everything derived is worked out here, once per build, so a page that
 	/// reads it on every body pass does not repeat the work.
@@ -70,7 +75,11 @@ nonisolated struct FolderSections: Equatable, Sendable {
 		var seen = Set<String>()
 		var rows: [String: String] = [:]
 		var rendered: [Recommendation] = []
+		var copies: [Recommendation] = []
+		var ranges: [String: Range<Int>] = [:]
 		for section in sections {
+			ranges[section.id] = copies.count..<(copies.count + section.articles.count)
+			copies.append(contentsOf: section.articles)
 			for article in section.articles where seen.insert(article.id).inserted {
 				rendered.append(article)
 				rows[article.id] = section.kind.readingLogRow
@@ -79,6 +88,14 @@ nonisolated struct FolderSections: Equatable, Sendable {
 		renderedArticles = rendered
 		uniqueArticleIDs = rendered.map(\.id)
 		readingLogRows = rows
+		renderedCopies = copies
+		copyRanges = ranges
+	}
+
+	/// The place in `renderedCopies` of the story at `index` in a section.
+	func copyIndex(of index: Int, inSection id: String) -> Int? {
+		guard let range = copyRanges[id], index >= 0, index < range.count else { return nil }
+		return range.lowerBound + index
 	}
 
 	/// `expanded` holds the ids of sections shown in full.

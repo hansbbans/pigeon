@@ -102,6 +102,28 @@ struct FolderCardsTests {
 		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["a1", "b1", "a2", "b2", "a3"])
 	}
 
+	/// Mark Above and Below slice the cards at the copy the menu was opened
+	/// on: a story shown in Today and again in its feed's card has different
+	/// neighbours in each place.
+	@Test func markAboveAndBelowStartFromTheCopyTheMenuWasOpenedOn() async throws {
+		let (model, folder, sections) = try cardsFixture()
+		// Copies: Today a1 b1 | Last 7 Days a2 b2 | Alpha a1 a2 a3 | Beta b1 b2 b3.
+		#expect(sections.renderedCopies.map(\.id) == ["a1", "b1", "a2", "b2", "a1", "a2", "a3", "b1", "b2", "b3"])
+		let betaB1 = try #require(sections.copyIndex(of: 0, inSection: "feed:feed/8"))
+		#expect(betaB1 == 7)
+		let b1 = try #require(model.allArticles(for: folder).first { $0.id == "b1" })
+
+		await model.markStoriesBelowAsRead(b1, in: folder, order: sections.renderedCopies, at: betaB1)
+		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["b2", "b3"])
+		await model.undoLastBulkRead()
+
+		// Above Alpha's copy of a1: Today's b1 and Last 7 Days, not a1 itself.
+		let alphaA1 = try #require(sections.copyIndex(of: 0, inSection: "feed:feed/7"))
+		let a1 = try #require(model.allArticles(for: folder).first { $0.id == "a1" })
+		await model.markStoriesAboveAsRead(a1, in: folder, order: sections.renderedCopies, at: alphaA1)
+		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["b1", "a2", "b2"])
+	}
+
 	/// The Cards page re-renders at local midnight: the model's day moves on
 	/// when the day changes, and the page's sections are keyed by it.
 	@Test func theLocalDayMovesOnAtMidnight() async throws {

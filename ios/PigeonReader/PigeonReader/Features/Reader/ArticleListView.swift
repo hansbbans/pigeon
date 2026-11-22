@@ -596,13 +596,14 @@ struct ArticleListView: View {
 				},
 				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
 				onStoryVisibilityChange: { impressions.setRowVisible($0, $1, copy: $2) },
-			) { article in
-				// Above and below mean the cards as drawn, not the collection's sort.
+			) { article, copyIndex in
+				// Above and below mean the cards as drawn from the copy the menu
+				// was opened on, not the collection's sort.
 				readButton(for: article)
 				starButton(for: article)
 				Divider()
-				markAboveButton(for: article, order: sections.renderedArticles)
-				markBelowButton(for: article, order: sections.renderedArticles)
+				markAboveButton(for: article, order: sections.renderedCopies, at: copyIndex)
+				markBelowButton(for: article, order: sections.renderedCopies, at: copyIndex)
 			} footer: {
 				Text(model.collectionStatusText(for: collection))
 					.font(.footnote)
@@ -932,19 +933,20 @@ struct ArticleListView: View {
 		isShowingSaveErrorMessage = false
 	}
 
-	/// `order` is the on-screen order when it differs from the collection's.
-	private func markAboveButton(for article: Recommendation, order: [Recommendation]? = nil) -> some View {
+	/// `order` is the on-screen order when it differs from the collection's,
+	/// and `position` the copy of the story the menu was opened on.
+	private func markAboveButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order) }
+			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
-	private func markBelowButton(for article: Recommendation, order: [Recommendation]? = nil) -> some View {
+	private func markBelowButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order) }
+			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
