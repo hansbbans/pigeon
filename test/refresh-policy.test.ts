@@ -111,7 +111,18 @@ test('successful schedules respect bounded Cache-Control freshness', () => {
 		'2026-08-15T14:00:00.000Z',
 	);
 	assert.equal(parseCacheControlMaxAge('no-cache', NOW), null);
-	assert.equal(parseCacheControlMaxAge('max-age=999999', NOW), '2026-08-16T12:00:00.000Z');
+	// A feed may ask for a day; five hours is as long as new posts are allowed to wait.
+	assert.equal(parseCacheControlMaxAge('max-age=999999', NOW), '2026-08-15T17:00:00.000Z');
+	assert.equal(
+		computeNextFetchAt(NOW, {
+			feedKey: 'feed',
+			fetchIntervalMinutes: 15,
+			consecutiveFailures: 0,
+			outcome: 'success',
+			cacheUntilAt: '2026-08-16T12:00:00.000Z',
+		}),
+		'2026-08-15T17:00:00.000Z',
+	);
 });
 
 test('conditional validators are periodically bypassed for a full response', () => {
