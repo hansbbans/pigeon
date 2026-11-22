@@ -2460,6 +2460,8 @@ struct ReaderAppModelTests {
 				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
 			case "/reader/api/0/unread-count":
 				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/api/v1/browser/articles/count":
+				await controlled.resolve(request, data: Data(#"{"count":0}"#.utf8))
 			case "/reader/api/0/stream/items/ids":
 				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
 			default:
@@ -2525,6 +2527,8 @@ struct ReaderAppModelTests {
 				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
 			case "/reader/api/0/unread-count":
 				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/api/v1/browser/articles/count":
+				await controlled.resolve(request, data: Data(#"{"count":0}"#.utf8))
 			case "/reader/api/0/stream/items/ids":
 				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
 			default:
@@ -3638,6 +3642,8 @@ struct ReaderAppModelTests {
 				await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
 			case "/reader/api/0/unread-count":
 				await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+			case "/api/v1/browser/articles/count":
+				await controlled.resolve(request, data: Data(#"{"count":0}"#.utf8))
 			case "/reader/api/0/stream/items/ids":
 				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
 			default:
@@ -4062,6 +4068,8 @@ struct ReaderAppModelTests {
 					request,
 					data: Data(#"{"unreadcounts":[{"id":"user/-/state/com.google/reading-list","count":100}]}"#.utf8),
 				)
+			case "/api/v1/browser/articles/count":
+				await controlled.resolve(request, data: Data(#"{"count":0}"#.utf8))
 			case "/reader/api/0/stream/items/ids":
 				await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
 			default:
@@ -4239,6 +4247,8 @@ struct ReaderAppModelTests {
 					await controlled.resolve(request, data: Data(#"{"subscriptions":[]}"#.utf8))
 				case "/reader/api/0/unread-count":
 					await controlled.resolve(request, data: Data(#"{"unreadcounts":[]}"#.utf8))
+				case "/api/v1/browser/articles/count":
+					await controlled.resolve(request, data: Data(#"{"count":0}"#.utf8))
 				case "/reader/api/0/stream/items/ids":
 					await controlled.resolve(request, data: Data(#"{"itemRefs":[]}"#.utf8))
 				default:
