@@ -88,6 +88,15 @@ nonisolated enum ReaderLook: String, CaseIterable, Identifiable, Sendable {
 	static func migrated(fromLegacyHomeLayout legacy: String?) -> Self {
 		legacy == "classic" ? .reeder : .cards
 	}
+
+	/// The `ReaderHomeLayout` an older build reads for this look, so a
+	/// TestFlight build installed over this one keeps the reader's choice.
+	var legacyHomeLayout: String {
+		switch self {
+		case .cards: "front-page"
+		case .reeder: "classic"
+		}
+	}
 }
 
 nonisolated enum ReaderMarkReadBehavior: String, CaseIterable, Identifiable, Sendable {
@@ -128,7 +137,8 @@ final class ReaderTypographySettings {
 	private let densityKey = "pigeon.reader.timeline-density"
 	private let markReadBehaviorKey = "pigeon.reader.mark-read-behavior"
 	static let lookKey = "pigeon.reader.look.v1"
-	/// `ReaderHomeLayout` (classic / front-page), read once to migrate to the look.
+	/// `ReaderHomeLayout` (classic / front-page): migrated to the look once,
+	/// then kept in step with it for older builds (see `legacyHomeLayout`).
 	static let legacyHomeLayoutKey = "pigeon.reader.home-layout.v1"
 	static let showsReadingTimeKey = "pigeon.reader.shows-reading-time"
 	private var storedTextScale: Double
@@ -168,11 +178,15 @@ final class ReaderTypographySettings {
 		storedMarkReadBehavior = defaults.string(forKey: markReadBehaviorKey).flatMap(ReaderMarkReadBehavior.init(rawValue:)) ?? .onOpen
 		if let look = defaults.string(forKey: Self.lookKey).flatMap(ReaderLook.init(rawValue:)) {
 			storedLook = look
+			// A build that deleted the old key after migrating left it unset.
+			if defaults.string(forKey: Self.legacyHomeLayoutKey) != look.legacyHomeLayout {
+				defaults.set(look.legacyHomeLayout, forKey: Self.legacyHomeLayoutKey)
+			}
 		} else if let legacy = defaults.string(forKey: Self.legacyHomeLayoutKey) {
 			let look = ReaderLook.migrated(fromLegacyHomeLayout: legacy)
 			storedLook = look
 			defaults.set(look.rawValue, forKey: Self.lookKey)
-			defaults.removeObject(forKey: Self.legacyHomeLayoutKey)
+			defaults.set(look.legacyHomeLayout, forKey: Self.legacyHomeLayoutKey)
 		} else {
 			storedLook = .cards
 		}
@@ -256,6 +270,7 @@ final class ReaderTypographySettings {
 		set {
 			storedLook = newValue
 			defaults.set(newValue.rawValue, forKey: Self.lookKey)
+			defaults.set(newValue.legacyHomeLayout, forKey: Self.legacyHomeLayoutKey)
 		}
 	}
 

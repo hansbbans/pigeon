@@ -75,10 +75,30 @@ struct ReaderTypographySettingsTests {
 		defaults.set(legacy, forKey: ReaderTypographySettings.legacyHomeLayoutKey)
 
 		#expect(ReaderTypographySettings(defaults: defaults).look == expected)
-		// Migrated once: the old key is gone and the look is stored under its own.
-		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == nil)
+		// The look is stored under its own key. The old key stays, in step with
+		// the look, so an older build installed over this one keeps the layout.
 		#expect(defaults.string(forKey: ReaderTypographySettings.lookKey) == expected.rawValue)
+		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == expected.legacyHomeLayout)
 		#expect(ReaderTypographySettings(defaults: defaults).look == expected)
+	}
+
+	@Test
+	func choosingALookKeepsTheLegacyLayoutInStep() throws {
+		let suiteName = "pigeon-reader-look-legacy-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		let settings = ReaderTypographySettings(defaults: defaults)
+
+		settings.look = .reeder
+		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == "classic")
+		settings.look = .cards
+		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == "front-page")
+
+		// A look stored by a build that deleted the old key writes it back.
+		defaults.removeObject(forKey: ReaderTypographySettings.legacyHomeLayoutKey)
+		defaults.set("reeder", forKey: ReaderTypographySettings.lookKey)
+		#expect(ReaderTypographySettings(defaults: defaults).look == .reeder)
+		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == "classic")
 	}
 
 	@Test
