@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Web: opening the reader no longer waits for the status page's counts. The sign-in check ran the full status query, which reads every article, before the first list could load; it now only checks the token.
+
 ## [0.1.15.0] - 2026-11-21
 
 ### Added

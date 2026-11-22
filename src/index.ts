@@ -7,6 +7,7 @@ import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
 import { renderBrowserAppShell } from './browser-app';
+import { requireApiAuth } from './api-auth';
 import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
@@ -91,6 +92,13 @@ export default {
 				return new Response(null, { status: 304, headers });
 			}
 			return new Response(shell.html, { headers });
+		}
+
+		// The web app's sign-in check. It runs before the first screen on every load, so it only
+		// compares the token: no database, unlike the status page.
+		if (path === '/app/session') {
+			return (await requireApiAuth(request, env.API_PASSWORD))
+				?? new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
 		}
 
 		if (path === '/app/status') {

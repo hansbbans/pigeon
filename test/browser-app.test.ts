@@ -445,6 +445,26 @@ test('renderBrowserAppShell memoizes the rendered HTML per base URL', () => {
 	assert.match(renderBrowserAppShell('https://other.example').html, /<strong>other\.example<\/strong>/);
 });
 
+test('GET /app/session answers a sign-in check without touching the database', async () => {
+	const env = { ...createEnv(), DB: new Proxy({}, { get() { throw new Error('the session check must not query D1'); } }) };
+	const anonymous = await app.fetch(new Request('https://pigeon.example/app/session'), env as never);
+	assert.equal(anonymous.status, 401);
+
+	const wrong = await app.fetch(
+		new Request('https://pigeon.example/app/session', { headers: { Authorization: 'GoogleLogin auth=pigeon/wrong' } }),
+		env as never,
+	);
+	assert.equal(wrong.status, 401);
+
+	const token = await generateApiToken('secret-password');
+	const signedIn = await app.fetch(
+		new Request('https://pigeon.example/app/session', { headers: { Authorization: `GoogleLogin auth=pigeon/${token}` } }),
+		env as never,
+	);
+	assert.equal(signedIn.status, 204);
+	assert.equal(signedIn.headers.get('Cache-Control'), 'no-store');
+});
+
 test('GET /app/status requires auth', async () => {
 	const response = await app.fetch(
 		new Request('https://pigeon.example/app/status'),

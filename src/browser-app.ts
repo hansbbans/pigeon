@@ -2609,13 +2609,13 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   async function validateToken(token) {
-    const response = await fetch('/app/status', {
+    const response = await fetch('/app/session', {
       headers: {
         Authorization: 'GoogleLogin auth=pigeon/' + token,
       },
     });
 
-    if (response.status === 200) return true;
+    if (response.ok) return true;
     // A server error says nothing about the token: fail like an unreachable server and keep it.
     // Any other answer (401, or a 403/404 from something in front of the Worker) rejects it.
     if (response.status >= 500) throw new Error('Session check failed: ' + response.status);

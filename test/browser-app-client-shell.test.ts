@@ -44,7 +44,7 @@ test('runtime script validates a stored token before restoring the logged-in she
 		},
 	});
 
-	assert.deepEqual(fetchCalls, ['GET /app/status']);
+	assert.deepEqual(fetchCalls, ['GET /app/session']);
 	assert.equal(storage.has(AUTH_STORAGE_KEY), false);
 	assert.equal(elements.get('login-screen')?.classList.contains('hidden'), false);
 	assert.equal(elements.get('reader-shell')?.classList.contains('hidden'), true);
@@ -54,7 +54,7 @@ test('a server error while restoring the session keeps the saved token', async (
 	const { elements, storage } = await createBrowserHarness({
 		storedToken: 'valid-token',
 		fetchImpl: async (input) => {
-			if (input === '/app/status') return new Response('Database migration failed', { status: 503 });
+			if (input === '/app/session') return new Response('Database migration failed', { status: 503 });
 			throw new Error(`Unexpected fetch: ${input}`);
 		},
 	});
@@ -83,7 +83,7 @@ test('clear saved session cancels a pending startup validation and returns focus
 	const { elements, storage, getActiveElement } = await createBrowserHarness({
 		storedToken: 'stale-token',
 		fetchImpl: async (input) => {
-			if (input === '/app/status') {
+			if (input === '/app/session') {
 				return startupValidation.promise;
 			}
 
@@ -145,7 +145,7 @@ test('startup token validation cannot overwrite a newer successful manual login'
 	const { elements, storage } = await createBrowserHarness({
 		storedToken: 'stale-token',
 		fetchImpl: async (input, init) => {
-			if (input === '/app/status') {
+			if (input === '/app/session') {
 				return startupValidation.promise;
 			}
 
@@ -179,7 +179,7 @@ test('startup validation request failure cannot overwrite a newer successful man
 	const { elements, storage } = await createBrowserHarness({
 		storedToken: 'stale-token',
 		fetchImpl: async (input, init) => {
-			if (input === '/app/status') {
+			if (input === '/app/session') {
 				return startupValidation.promise;
 			}
 
@@ -933,7 +933,7 @@ test('runtime script lets column resizer drags persist reader column widths', as
 	const { elements, localStorageState, dispatchDocumentPointer } = await createBrowserHarness({
 		storedToken: 'live-token',
 		fetchImpl: async (input, init) => {
-			if (input === '/app/status') {
+			if (input === '/app/session') {
 				return new Response(null, { status: 200 });
 			}
 
@@ -1077,7 +1077,7 @@ test('runtime script lets keyboard users resize columns and exposes separator va
 	const { elements, localStorageState } = await createBrowserHarness({
 		storedToken: 'live-token',
 		fetchImpl: async (input, init) => {
-			if (input === '/app/status') {
+			if (input === '/app/session') {
 				return new Response(null, { status: 200 });
 			}
 
