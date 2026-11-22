@@ -61,6 +61,14 @@ final class PigeonCardsUITests: XCTestCase {
 		XCTAssertTrue(story(containing: "The Aggregator").exists)
 		XCTAssertFalse(story(containing: "Stratechery, The Aggregator").exists)
 		attachScreenshot(named: "cards-feed")
+
+		// Back returns to the folder the card was in, not to Home.
+		let back = app.buttons["folder-card-feed-back"]
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+		XCTAssertTrue(app.navigationBars["Newsletters"].waitForExistence(timeout: 10))
+		XCTAssertTrue(element("folder-card-last-7-days").waitForExistence(timeout: 10))
+		XCTAssertFalse(element("reader-home-tiles").exists)
 	}
 
 	func testCardsHaveNoSortMenuAndAStoryOpensAndReturns() throws {

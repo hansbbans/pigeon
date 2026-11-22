@@ -109,6 +109,47 @@ struct FolderCardsTests {
 		#expect(model.allArticles(for: folder).filter(\.isRead).map(\.id) == ["beta-new"])
 	}
 
+	@Test func backFromAFeedOpenedFromAFolderCardReturnsToTheFolder() throws {
+		let navigation = Self.navigation()
+		let model = try makeModel()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
+		model.select(item: folder)
+
+		model.openFeed(feed, fromFolder: folder)
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.folderToReturnTo?.id == folder.id)
+
+		model.returnToFolder()
+		#expect(model.selectedNavigationID == folder.id)
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.folderToReturnTo == nil)
+	}
+
+	@Test func choosingAnotherListOrGoingHomeForgetsTheFolder() throws {
+		let navigation = Self.navigation()
+		let model = try makeModel()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
+		let other = try #require(navigation.item(withID: "feed/9"))
+		model.select(item: folder)
+
+		model.openFeed(feed, fromFolder: folder)
+		model.select(item: other)
+		#expect(model.folderToReturnTo == nil)
+
+		model.select(item: folder)
+		model.openFeed(feed, fromFolder: folder)
+		model.showHome()
+		#expect(model.folderToReturnTo == nil)
+
+		// A feed opened from Home or the library has no folder to return to.
+		model.select(item: feed)
+		#expect(model.folderToReturnTo == nil)
+	}
+
 	// MARK: Helpers
 
 	private static func navigation() -> ReaderNavigationState {

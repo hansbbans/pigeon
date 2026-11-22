@@ -151,8 +151,13 @@ final class ReaderAppModel {
 	var preferredCompactColumn: NavigationSplitViewColumn = .sidebar {
 		didSet {
 			if preferredCompactColumn != oldValue { scheduleRestorationSave() }
+			// Home is the top of the stack; nothing below it to return to.
+			if preferredCompactColumn == .sidebar { feedOpenedFromFolderID = nil }
 		}
 	}
+	/// The folder whose card opened the selected feed, so back returns there
+	/// rather than to Home. Cleared by choosing any other list.
+	private var feedOpenedFromFolderID: String?
 	var isConnecting = false
 	var errorMessage: String?
 	var settingsErrorMessage: String?
@@ -2809,6 +2814,23 @@ final class ReaderAppModel {
 		select(collectionID: item.id)
 	}
 
+	/// Opens a feed from its card in a folder; back returns to the folder.
+	func openFeed(_ feed: ReaderNavigationItem, fromFolder folder: ReaderNavigationItem) {
+		select(item: feed)
+		feedOpenedFromFolderID = folder.id
+	}
+
+	/// The folder the selected feed was opened from, while it still exists.
+	var folderToReturnTo: ReaderNavigationItem? {
+		guard let feedOpenedFromFolderID, feedOpenedFromFolderID != selectedNavigationID else { return nil }
+		return navigation.item(withID: feedOpenedFromFolderID)
+	}
+
+	func returnToFolder() {
+		guard let folder = folderToReturnTo else { return }
+		select(item: folder)
+	}
+
 	func toggleFolder(_ folder: ReaderNavigationItem) {
 		invalidateSpeculativeFeedWork()
 		navigation.toggleFolder(folder.id)
@@ -2845,6 +2867,7 @@ final class ReaderAppModel {
 	}
 
 	private func select(collectionID: String) {
+		feedOpenedFromFolderID = nil
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
 			invalidateSpeculativeFeedWork()
