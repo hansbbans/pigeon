@@ -10,8 +10,8 @@ actor NavigationHTTPClient: HTTPClient {
 	private let todaySecondPage: Data
 	private let weekFirstPage: Data
 	private let weekSecondPage: Data
-	/// Reading-list requests bounded by today's start; any other `ot` is the
-	/// Last 7 Days count.
+	/// Reading-list requests bounded by today's start; any other `ot` would be
+	/// a week counted by paging IDs, which the client must not do.
 	private let todayOlderThan: String
 	private let failingSmartStreamID: String?
 	private var requestURLs: [URL] = []
@@ -81,6 +81,12 @@ actor NavigationHTTPClient: HTTPClient {
 			responseData = subscriptionResponse
 		case "/reader/api/0/unread-count":
 			responseData = unreadResponse
+		case "/api/v1/browser/articles/count":
+			// The day counts read the reading list, so they fail with it.
+			if failingSmartStreamID == "user/-/state/com.google/reading-list" {
+				return (Data("{\"error\":\"Could not count articles\"}".utf8), try Self.response(for: url, statusCode: 503))
+			}
+			responseData = Data("{\"count\":3}".utf8)
 		case "/reader/api/0/stream/items/ids":
 			if streamID == failingSmartStreamID {
 				let payload = Data("{\"error_code\":1102,\"error_name\":\"worker_exceeded_resources\",\"ray_id\":\"test-ray\"}".utf8)

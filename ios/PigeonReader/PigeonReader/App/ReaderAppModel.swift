@@ -2981,7 +2981,11 @@ final class ReaderAppModel {
 		}
 
 		do {
-			let snapshot = try await apiClient.navigationSnapshot(now: now, dayBounds: dayBounds)
+			let snapshot = try await apiClient.navigationSnapshot(
+				now: now,
+				dayBounds: dayBounds,
+				countsLastSevenDays: enabledSmartViewSections.contains(.lastSevenDays),
+			)
 			try Task.checkCancellation()
 			guard isCurrentOperation(context), activeNavigationLoadID == loadID else {
 				return false

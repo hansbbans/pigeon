@@ -251,17 +251,45 @@ struct ReaderNavigationTests {
 		#expect(todayQueryItems.first(where: { $0.name == "xt" })?.value == "user/-/state/com.google/read")
 		#expect(todayQueryItems.first(where: { $0.name == "ot" })?.value == String(bounds.startSeconds - 1))
 		#expect(todayQueryItems.first(where: { $0.name == "n" })?.value == "1000")
-		// Last 7 Days counts the same stream from six local days before today.
+		// Last 7 Days is one COUNT on the server over the same local days the
+		// web app counts, not a week of IDs paged 1,000 at a time.
 		let week = ReaderLocalDayBounds.localDays(7, endingWith: bounds.start)
-		let weekRequest = try #require(requests.first(where: { url in
+		let countRequests = requests.filter { $0.path == "/api/v1/browser/articles/count" }
+		#expect(countRequests.count == 1)
+		let countQuery = Dictionary(
+			uniqueKeysWithValues: (URLComponents(url: try #require(countRequests.first), resolvingAgainstBaseURL: false)?
+				.queryItems ?? []).map { ($0.name, $0.value ?? "") },
+		)
+		#expect(countQuery == [
+			"stream": "all",
+			"filter": "unread",
+			"since": week.start.formatted(.iso8601),
+			"before": week.end.formatted(.iso8601),
+		])
+		#expect(requests.contains(where: { url in
 			let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
 			return url.path == "/reader/api/0/stream/items/ids"
-				&& queryItems.first(where: { $0.name == "s" })?.value == "user/-/state/com.google/reading-list"
 				&& queryItems.first(where: { $0.name == "ot" })?.value == String(week.startSeconds - 1)
-		}))
-		let weekQueryItems = URLComponents(url: weekRequest, resolvingAgainstBaseURL: false)?.queryItems ?? []
-		#expect(weekQueryItems.first(where: { $0.name == "xt" })?.value == "user/-/state/com.google/read")
-		#expect(requests.contains(where: { $0.query?.contains("c=week-2") == true }))
+		}) == false)
+	}
+
+	@MainActor
+	@Test func aHiddenLastSevenDaysViewIsNotCounted() async throws {
+		var calendar = Calendar(identifier: .gregorian)
+		calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 8, day: 13, hour: 7, minute: 48)))
+		let bounds = ReaderLocalDayBounds.localDay(containing: now, calendar: calendar)
+		let client = NavigationHTTPClient(now: now, dayBounds: bounds)
+		let defaults = try #require(UserDefaults(suiteName: "pigeon-smart-views-\(UUID().uuidString)"))
+		let smartViews = ReaderSmartViewStore(defaults: defaults)
+		smartViews.setEnabled(false, for: .lastSevenDays)
+		let model = try makeModel(httpClient: client, smartViewStore: smartViews)
+		#expect(model.isLastSevenDaysSmartViewEnabled == false)
+
+		_ = await model.loadNavigation(force: true, now: now, dayBounds: bounds)
+
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .today })?.unreadCount == 1)
+		#expect(await client.requests().contains(where: { $0.path == "/api/v1/browser/articles/count" }) == false)
 	}
 
 	@MainActor
@@ -389,7 +417,10 @@ struct ReaderNavigationTests {
 		#expect(model.allArticles(for: .unread).first?.isRead == false)
 	}
 
-	private func makeModel(httpClient: any HTTPClient) throws -> ReaderAppModel {
+	private func makeModel(
+		httpClient: any HTTPClient,
+		smartViewStore: ReaderSmartViewStore = ReaderSmartViewStore(),
+	) throws -> ReaderAppModel {
 		let baseURL = try #require(URL(string: "https://pigeon.test"))
 		let session = PigeonSession(baseURL: baseURL, token: "server-token")
 		let isolatedDefaults = try #require(UserDefaults(suiteName: "pigeon-article-filter-\(UUID().uuidString)"))
@@ -397,6 +428,7 @@ struct ReaderNavigationTests {
 			sessionStore: TestSessionStore(session: session),
 			httpClient: httpClient,
 			articleFilterStore: ReaderArticleFilterStore(defaults: isolatedDefaults),
+			smartViewStore: smartViewStore,
 			offlineStore: OfflineLibraryStore.inMemory(),
 		)
 	}

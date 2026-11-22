@@ -14,6 +14,10 @@ nonisolated struct RecommendationsResponse: Codable, Sendable {
 	}
 }
 
+nonisolated struct ArticleCountResponse: Decodable, Sendable {
+	let count: Int
+}
+
 struct ReaderRecommendationsPage: Sendable {
 	let items: [Recommendation]
 	let continuation: String?
@@ -221,9 +225,12 @@ struct PigeonAPIClient: Sendable {
 		return decoded
 	}
 
+	/// `countsLastSevenDays` is off while that view is hidden: nothing shows
+	/// its count, so the request is not made.
 	func navigationSnapshot(
 		now: Date = .now,
 		dayBounds: ReaderLocalDayBounds? = nil,
+		countsLastSevenDays: Bool = true,
 	) async throws -> ReaderNavigationSnapshot {
 		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: now)
 		// The week ends with the same local day, so both counts share a boundary.
@@ -232,7 +239,7 @@ struct PigeonAPIClient: Sendable {
 		async let unreadCounts = readerUnreadCounts()
 		async let starredUnreadCount = unreadCountIfAvailable(in: "user/-/state/com.google/starred")
 		async let todayUnreadCount = unreadCountIfAvailable(on: bounds)
-		async let lastSevenDaysUnreadCount = unreadCountIfAvailable(on: weekBounds)
+		async let lastSevenDaysUnreadCount = countsLastSevenDays ? unreadArticleCountIfAvailable(in: weekBounds) : nil
 		return try await ReaderNavigationSnapshot(
 			subscriptions: subscriptions,
 			unreadCounts: unreadCounts,
@@ -542,6 +549,31 @@ struct PigeonAPIClient: Sendable {
 	private func unreadCountIfAvailable(in streamID: String) async throws -> Int? {
 		do {
 			return try await unreadCount(in: streamID)
+		} catch is CancellationError {
+			throw CancellationError()
+		} catch {
+			return nil
+		}
+	}
+
+	/// Unread stories received within `bounds`, counted by the server in one
+	/// query (`/api/v1/browser/articles/count`, as the web app counts its
+	/// days). Paging a week of IDs 1,000 at a time costs the Worker far more.
+	func unreadArticleCount(in bounds: ReaderLocalDayBounds) async throws -> Int {
+		var components = try endpointComponents(path: "api/v1/browser/articles/count")
+		components.queryItems = [
+			URLQueryItem(name: "stream", value: "all"),
+			URLQueryItem(name: "filter", value: "unread"),
+			URLQueryItem(name: "since", value: bounds.start.formatted(.iso8601)),
+			URLQueryItem(name: "before", value: bounds.end.formatted(.iso8601)),
+		]
+		let (data, _) = try await requestJSON(components: components)
+		return try decoder.decode(ArticleCountResponse.self, from: data).count
+	}
+
+	private func unreadArticleCountIfAvailable(in bounds: ReaderLocalDayBounds) async throws -> Int? {
+		do {
+			return try await unreadArticleCount(in: bounds)
 		} catch is CancellationError {
 			throw CancellationError()
 		} catch {
