@@ -16,6 +16,14 @@ nonisolated enum FolderCardsLayout {
 			maximumFeedColumns,
 		)
 	}
+
+	/// Cards in rows of `columns`, left to right; the last row may be short.
+	static func rows<Item>(of items: [Item], columns: Int) -> [[Item]] {
+		let columns = max(columns, 1)
+		return stride(from: 0, to: items.count, by: columns).map { start in
+			Array(items[start..<min(start + columns, items.count)])
+		}
+	}
 }
 
 extension FolderSections {
@@ -71,7 +79,10 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 
 	var body: some View {
 		ScrollView {
-			LazyVStack(alignment: .leading, spacing: 10) {
+			// Eager on purpose. Every card is capped, so the page stays small, and
+			// a lazy stack of cards this uneven re-estimated the page's height on
+			// every pass: the near-end flag flipped with it and the app hung.
+			VStack(alignment: .leading, spacing: 10) {
 				Color.clear
 					.frame(height: 0)
 					.id(FolderCardsLayout.topAnchorID)
@@ -87,11 +98,7 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 							.accessibilityAddTraits(.isHeader)
 							.accessibilityIdentifier("folder-cards-older")
 					case let .feedGrid(feedSections):
-						LazyVGrid(columns: feedColumns, alignment: .leading, spacing: 10) {
-							ForEach(feedSections) { section in
-								card(section)
-							}
-						}
+						feedGrid(feedSections)
 					}
 				}
 				VStack(spacing: 12) {
@@ -128,12 +135,30 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 		colorIndex.map(FrontPageKickerPalette.color(at:))
 	}
 
-	private var feedColumns: [GridItem] {
-		let count = FolderCardsLayout.feedColumnCount(
+	private var feedColumnCount: Int {
+		FolderCardsLayout.feedColumnCount(
 			usesAccessibilitySize: dynamicTypeSize.isAccessibilitySize,
 			availableWidth: availableWidth,
 		)
-		return Array(repeating: GridItem(.flexible(), spacing: 10, alignment: .top), count: count)
+	}
+
+	/// Equal columns, each card as tall as its own stories, like Home's tiles.
+	private func feedGrid(_ sections: [FolderSections.Section]) -> some View {
+		let columns = feedColumnCount
+		return VStack(alignment: .leading, spacing: 10) {
+			ForEach(FolderCardsLayout.rows(of: sections, columns: columns), id: \.first?.id) { row in
+				HStack(alignment: .top, spacing: 10) {
+					ForEach(row) { section in
+						card(section)
+					}
+					ForEach(row.count..<columns, id: \.self) { _ in
+						Color.clear
+							.frame(maxWidth: .infinity, maxHeight: 0)
+							.accessibilityHidden(true)
+					}
+				}
+			}
+		}
 	}
 
 	/// Today, Last 7 Days and day cards span the width; runs of feed cards

@@ -45,6 +45,19 @@ struct FolderCardsTests {
 		#expect(FolderCardsLayout.feedColumnCount(usesAccessibilitySize: true, availableWidth: 1_210) == 1)
 	}
 
+	/// Feed cards are laid out eagerly in rows: a lazy grid inside the lazy
+	/// page kept re-estimating the page's height, which flipped the near-end
+	/// flag on every layout pass and hung the app on an iPad.
+	@Test func feedCardRowsFillLeftToRightAndKeepTheLastRowShort() {
+		let ids = ["a", "b", "c", "d", "e"]
+
+		#expect(FolderCardsLayout.rows(of: ids, columns: 3) == [["a", "b", "c"], ["d", "e"]])
+		#expect(FolderCardsLayout.rows(of: ids, columns: 1) == ids.map { [$0] })
+		#expect(FolderCardsLayout.rows(of: [String](), columns: 3).isEmpty)
+		// A zero column count from a bad width still lays every card out.
+		#expect(FolderCardsLayout.rows(of: ids, columns: 0) == ids.map { [$0] })
+	}
+
 	@Test func readingLogRowsNameTheCardThatShowsAStoryFirst() {
 		let todayStart = ReaderLocalDayBounds.localDay(containing: Date()).start
 		let now = todayStart.addingTimeInterval(43_200)

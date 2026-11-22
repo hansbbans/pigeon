@@ -19,6 +19,10 @@ final class PigeonCardsUITests: XCTestCase {
 		app.launchWithoutAnimations()
 	}
 
+	override func tearDown() async throws {
+		XCUIDevice.shared.orientation = .portrait
+	}
+
 	func testFolderOpensAsTodayLastSevenDaysAndFeedCards() throws {
 		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 15))
 		XCTAssertTrue(element("folder-card-last-7-days").exists)
@@ -66,14 +70,43 @@ final class PigeonCardsUITests: XCTestCase {
 		// The cards' sections are the order, so there is nothing to sort.
 		XCTAssertFalse(app.buttons["article-list-sort"].exists)
 		app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95)).tap()
+		XCTAssertTrue(app.buttons["Display"].waitForNonExistence(timeout: 5))
 
-		let first = story(containing: "The Aggregator")
-		XCTAssertTrue(first.waitForExistence(timeout: 5))
-		first.tap()
+		let today = story(containing: "Quiet tools, loud cities", in: element("folder-card-today"))
+		XCTAssertTrue(today.waitForExistence(timeout: 5))
+		// A coordinate tap: on an iPad, XCTest's hit-point check after an
+		// element tap fails once the opened story covers the card.
+		today.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 		let back = element("article-back-to-feed")
 		XCTAssertTrue(back.waitForExistence(timeout: 10))
 		back.tap()
 		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 10))
+	}
+
+	func testFeedCardsGoSeveralAcrossOnALandscapeIPad() throws {
+		try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "Needs a regular-width window")
+		XCUIDevice.shared.orientation = .landscapeLeft
+		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 15))
+		attachScreenshot(named: "cards-ipad-folder-top")
+
+		// The two feeds with the newest stories share the first row.
+		let stratechery = element("folder-card-feed:feed/cards-strat")
+		let dense = element("folder-card-feed:feed/cards-dense")
+		scroll(to: app.buttons["folder-card-open-feed:feed/cards-dense"])
+		XCTAssertTrue(stratechery.exists && dense.exists)
+		XCTAssertEqual(stratechery.frame.minY, dense.frame.minY, accuracy: 1)
+		XCTAssertNotEqual(stratechery.frame.minX, dense.frame.minX)
+		attachScreenshot(named: "cards-ipad-folder-feeds")
+
+		// All Feeds is tiles across the window too.
+		let back = app.buttons["BackButton"].firstMatch
+		XCTAssertTrue(back.waitForExistence(timeout: 5))
+		back.tap()
+		let allFeeds = app.buttons["reader-home-all-feeds"]
+		scroll(to: allFeeds)
+		allFeeds.tap()
+		XCTAssertTrue(element("reader-library-tiles").waitForExistence(timeout: 10))
+		attachScreenshot(named: "library-ipad-tiles")
 	}
 
 	private func element(_ identifier: String) -> XCUIElement {
