@@ -6064,6 +6064,70 @@ struct ReaderAppModelTests {
 	}
 
 	@Test(.timeLimit(.minutes(1)))
+	func markingReadShowsOnScreenBeforeTheStoreHasTakenIt() async throws {
+		let session = try makeSession(token: "optimistic-read")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "optimistic-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		await store.pauseNextEnqueue()
+		let toggle = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+
+		// The store is still busy, as it is during a sync, and the row has changed.
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		await store.resumeEnqueue()
+		await toggle.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		let pending = try await store.pendingMutations(accountID: session.storageIdentity, limit: 10)
+		#expect(pending.map(\.mutation.kind) == [.setRead])
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func aReadOrStarTheStoreRefusesIsPutBack() async throws {
+		let session = try makeSession(token: "optimistic-rollback")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "rollback-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1), .smart(.starred)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		let unreadBefore = model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount
+
+		await store.failNextEnqueue()
+		await model.setRead(story, read: true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == unreadBefore)
+		#expect(model.errorMessage != nil)
+
+		await store.failNextEnqueue()
+		await model.setStarred(story, starred: true)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		// The store works again: the same story can still be changed and it sticks.
+		await model.setRead(story, read: true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
 	func mutationDuringCachedPreparationKeepsVisibleEditsAndAllowsFreshHydration() async throws {
 		let session = try makeSession(token: "cached-mutation-race")
 		let store = OfflineLibraryStore.inMemory()
@@ -12079,7 +12143,37 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		try await base.saveRestoration(restoration, accountID: accountID)
 	}
 
+	private var shouldFailNextEnqueue = false
+	private var shouldPauseNextEnqueue = false
+	private var enqueueIsPaused = false
+	private var enqueueResume: CheckedContinuation<Void, Never>?
+
+	func failNextEnqueue() { shouldFailNextEnqueue = true }
+	func pauseNextEnqueue() { shouldPauseNextEnqueue = true }
+
+	func waitUntilEnqueueIsPaused() async {
+		while enqueueIsPaused == false {
+			guard Task.isCancelled == false else { return }
+			await Task.yield()
+		}
+	}
+
+	func resumeEnqueue() {
+		enqueueResume?.resume()
+		enqueueResume = nil
+	}
+
 	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws {
+		if shouldFailNextEnqueue {
+			shouldFailNextEnqueue = false
+			throw LaunchStoreError.snapshotUnavailable
+		}
+		if shouldPauseNextEnqueue {
+			shouldPauseNextEnqueue = false
+			enqueueIsPaused = true
+			await withCheckedContinuation { enqueueResume = $0 }
+			enqueueIsPaused = false
+		}
 		try await base.enqueue(mutation, accountID: accountID)
 	}
 

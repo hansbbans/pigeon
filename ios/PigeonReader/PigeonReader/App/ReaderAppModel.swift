@@ -7816,9 +7816,21 @@ final class ReaderAppModel {
 		}
 	}
 
+	private enum OfflineEnqueueOutcome {
+		case enqueued
+		/// The store refused the change; the library it was made in is still current.
+		case failed
+		/// The account or library changed while the store was working.
+		case superseded
+	}
+
 	@discardableResult
 	private func enqueueOfflineMutation(_ mutation: OfflineMutation) async -> Bool {
-		guard let session else { return false }
+		await enqueueOfflineMutationOutcome(mutation) == .enqueued
+	}
+
+	private func enqueueOfflineMutationOutcome(_ mutation: OfflineMutation) async -> OfflineEnqueueOutcome {
+		guard let session else { return .superseded }
 		let context = OperationContext(
 			accountID: session.storageIdentity,
 			generation: libraryGeneration,
@@ -7826,14 +7838,14 @@ final class ReaderAppModel {
 		)
 		do {
 			try await offlineStore.enqueue(mutation, accountID: context.accountID)
-			guard isCurrentOperation(context) else { return false }
+			guard isCurrentOperation(context) else { return .superseded }
 			await refreshOfflineStorageStats()
-			guard isCurrentOperation(context) else { return false }
-			return true
+			guard isCurrentOperation(context) else { return .superseded }
+			return .enqueued
 		} catch {
-			guard isCurrentOperation(context) else { return false }
+			guard isCurrentOperation(context) else { return .superseded }
 			errorMessage = error.localizedDescription
-			return false
+			return .failed
 		}
 	}
 
@@ -8867,9 +8879,56 @@ final class ReaderAppModel {
 			value: value,
 			scope: .single,
 		)
-		guard await enqueueOfflineMutation(mutation) else { return }
+		// The screen changes before the store is asked. A tap during a sync used
+		// to wait until the store had finished the page it was writing. The
+		// pending-state ledger goes first, so a page or snapshot that lands in
+		// the meantime cannot put the old state back.
+		let ledgerKeys = mutation.itemIds.map(ReaderArticleIdentity.normalized).filter { $0.isEmpty == false }
+		let pendingBefore = ledgerKeys.map { (key: $0, state: pendingArticleStates[$0], revisions: pendingArticleStateRevisions[$0]) }
 		rememberPendingArticleStates(mutation)
+		let changedCollections = applyArticleStateInMemory(
+			current: current, value: value, previousValue: previousValue, field: field, keyPath: keyPath,
+			animation: animation, offersUndo: offersUndo, expectedValue: expectedValue, accountID: accountID,
+		)
+		switch await enqueueOfflineMutationOutcome(mutation) {
+		case .enqueued:
+			break
+		case .superseded:
+			return
+		case .failed:
+			// Nothing was stored, so nothing will be sent: put the story back.
+			// The local ledger takes the restored value at a newer revision, so a
+			// load in flight keeps it; the pending ledger returns to what the
+			// store really holds.
+			rememberPendingArticleStates(OfflineMutation(kind: kind, itemIds: mutation.itemIds, value: previousValue, scope: .single))
+			for entry in pendingBefore {
+				pendingArticleStates[entry.key] = entry.state
+				pendingArticleStateRevisions[entry.key] = entry.revisions
+			}
+			let shown = self.article(withId: current.id) ?? current
+			_ = applyArticleStateInMemory(
+				current: shown, value: previousValue, previousValue: value, field: field, keyPath: keyPath,
+				animation: nil, offersUndo: false, expectedValue: nil, accountID: accountID,
+			)
+			return
+		}
+		await persistCollections(changedCollections)
+	}
 
+	/// The in-memory half of a read or star change: every cached copy of the
+	/// story, the membership of Unread or Starred, the counts and the undo
+	/// banner. Returns the collections whose rows changed.
+	private func applyArticleStateInMemory(
+		current: Recommendation,
+		value: Bool,
+		previousValue: Bool,
+		field: ReaderArticleUndo.Field,
+		keyPath: WritableKeyPath<Recommendation, Bool>,
+		animation: Animation?,
+		offersUndo: Bool,
+		expectedValue: Bool?,
+		accountID: String,
+	) -> Set<String> {
 		if field == .read {
 			keepArticleLeavingDisplayedList(current, read: value)
 		}
@@ -8917,7 +8976,7 @@ final class ReaderAppModel {
 				articleListMutationRevision &+= 1
 			}
 		}
-		await persistCollections(changedCollections)
+		return changedCollections
 	}
 
 	private func syncStarredMembership(for article: Recommendation, starred: Bool) {
