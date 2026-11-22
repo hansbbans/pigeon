@@ -63,7 +63,10 @@ nonisolated struct OfflineLibraryBootstrapSnapshot: Codable, Equatable, Sendable
 	}
 
 	/// Zero only the stale Today total after a local-day rollover. Other saved
-	/// counts remain useful metadata and are copied unchanged.
+	/// counts remain useful metadata and are copied unchanged. That includes
+	/// Last 7 Days: yesterday's stories are still in its window. The stamp
+	/// follows Today's count alone, so it cannot say when the week's total was
+	/// taken; the next navigation load replaces it.
 	func normalizedForCurrentLocalDay(now: Date = .now) -> Self? {
 		guard isStructurallyValid, let navigation else { return nil }
 		let currentDayStart = ReaderLocalDayBounds.localDay(containing: now).start

@@ -3,7 +3,8 @@ import Foundation
 struct ReaderSmartViewStore {
 	static let key = "pigeon.reader.smart-views.v1"
 	private static let unreadMigrationKey = "pigeon.reader.smart-views.unread-migrated.v1"
-	static let configurableSections: [ReaderSection] = [.forYou, .unread, .starred, .today]
+	private static let lastSevenDaysMigrationKey = "pigeon.reader.smart-views.last-7-days-migrated.v1"
+	static let configurableSections: [ReaderSection] = [.forYou, .unread, .starred, .today, .lastSevenDays]
 	static let defaultEnabledSections = Set(configurableSections)
 
 	private let defaults: UserDefaults
@@ -45,19 +46,27 @@ struct ReaderSmartViewStore {
 		let value = normalized.isEmpty ? Self.defaultEnabledSections : normalized
 		defaults.set(value.map(\.rawValue).sorted(), forKey: Self.key)
 		defaults.set(true, forKey: Self.unreadMigrationKey)
+		defaults.set(true, forKey: Self.lastSevenDaysMigrationKey)
 	}
 
 	private func migrateLegacyPreferencesIfNeeded() {
+		addSectionOnce(.unread, migrationKey: Self.unreadMigrationKey)
+		addSectionOnce(.lastSevenDays, migrationKey: Self.lastSevenDaysMigrationKey)
+	}
+
+	/// Settings saved before `section` existed gain it once. A later choice to
+	/// turn it off marks the migration done, so it is not added back.
+	private func addSectionOnce(_ section: ReaderSection, migrationKey: String) {
 		guard defaults.object(forKey: Self.key) != nil,
-			defaults.bool(forKey: Self.unreadMigrationKey) == false else {
+			defaults.bool(forKey: migrationKey) == false else {
 			return
 		}
 
 		let storedSections = Set((defaults.array(forKey: Self.key) as? [String] ?? []).compactMap(ReaderSection.init(rawValue:)))
 		let migratedSections = storedSections.isEmpty
 			? Self.defaultEnabledSections
-			: storedSections.union([.unread]).intersection(Self.defaultEnabledSections)
+			: storedSections.union([section]).intersection(Self.defaultEnabledSections)
 		defaults.set(migratedSections.map(\.rawValue).sorted(), forKey: Self.key)
-		defaults.set(true, forKey: Self.unreadMigrationKey)
+		defaults.set(true, forKey: migrationKey)
 	}
 }

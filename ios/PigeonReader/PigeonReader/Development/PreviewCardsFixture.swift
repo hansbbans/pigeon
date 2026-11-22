@@ -63,12 +63,18 @@ nonisolated enum PreviewCardsFixture {
 		]
 	}
 
-	static func streamIDs(_ stream: String?) -> [String] {
+	/// `newerThan` is the stream's `ot`: Today and Last 7 Days ask for the
+	/// reading list from their window's start, so their counts stay in it.
+	static func streamIDs(_ stream: String?, newerThan: Date? = nil, now: Date = .now) -> [String] {
 		guard let stream else { return [] }
 		return stories().filter { story in
 			stream == story.feed.streamID
 				|| (stream == folderID && story.feed.inFolder)
 				|| stream == "user/-/state/com.google/reading-list"
+		}
+		.filter { story in
+			guard let newerThan else { return true }
+			return now.addingTimeInterval(-story.hoursAgo * 3_600) > newerThan
 		}
 		.map(\.id)
 	}
@@ -99,7 +105,8 @@ nonisolated enum PreviewCardsFixture {
 			let stream = query.first { $0.name == "s" }?.value
 			let excludesRead = query.contains { $0.name == "xt" && $0.value == "user/-/state/com.google/read" }
 			let readIDs = Set(stories().filter(\.isRead).map(\.id))
-			let ids = streamIDs(stream).filter { excludesRead == false || readIDs.contains($0) == false }
+			let newerThan = query.first { $0.name == "ot" }?.value.flatMap(TimeInterval.init).map(Date.init(timeIntervalSince1970:))
+			let ids = streamIDs(stream, newerThan: newerThan).filter { excludesRead == false || readIDs.contains($0) == false }
 			return try JSONSerialization.data(withJSONObject: ["itemRefs": ids.map { ["id": $0] }])
 		case "/reader/api/0/stream/items/contents":
 			let form = String(decoding: request.httpBody ?? Data(), as: UTF8.self)

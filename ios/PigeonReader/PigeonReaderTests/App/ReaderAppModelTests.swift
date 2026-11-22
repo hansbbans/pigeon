@@ -747,7 +747,7 @@ struct ReaderAppModelTests {
 			return data
 		}
 		await controlled.resolve(firstPostSyncRequest, data: try postSyncData(for: firstPostSyncRequest))
-		for _ in 0..<5 {
+		for _ in 0..<6 {
 			let request = await controlled.nextRequest()
 			await controlled.resolve(request, data: try postSyncData(for: request))
 		}
@@ -2453,7 +2453,7 @@ struct ReaderAppModelTests {
 
 		// A full rebuild must be allowed to refresh the navigation and subscription
 		// data without replacing the just-published page with an empty snapshot.
-		for _ in 0..<4 {
+		for _ in 0..<5 {
 			let request = await controlled.nextRequest()
 			switch request.request.url?.path {
 			case "/reader/api/0/subscription/list":
@@ -2518,7 +2518,7 @@ struct ReaderAppModelTests {
 		#expect(model.allArticles(for: collection).first?.isStarred == true)
 
 		await controlled.resolve(sync, data: emptySyncPage(cursor: "latest-state-full-sync"))
-		for _ in 0..<4 {
+		for _ in 0..<5 {
 			let request = await controlled.nextRequest()
 			switch request.request.url?.path {
 			case "/reader/api/0/subscription/list":
@@ -3631,7 +3631,7 @@ struct ReaderAppModelTests {
 		let navigation = Task {
 			await model.loadNavigation(force: true, reportError: false)
 		}
-		for _ in 0..<4 {
+		for _ in 0..<5 {
 			let request = await controlled.nextRequest()
 			switch request.request.url?.path {
 			case "/reader/api/0/subscription/list":
@@ -4052,7 +4052,7 @@ struct ReaderAppModelTests {
 		await store.pauseNextSnapshot()
 		await store.resumeSnapshot()
 
-		for _ in 0..<4 {
+		for _ in 0..<5 {
 			let request = await controlled.nextRequest()
 			switch request.request.url?.path {
 			case "/reader/api/0/subscription/list":
@@ -4232,7 +4232,7 @@ struct ReaderAppModelTests {
 			#expect(model.articles(for: collection).map(\.id) == [firstPageID])
 			#expect(model.isLoading(collection: collection) == false)
 			await controlled.resolve(sync, data: Data(#"{"cursor":"cold-cursor","hasMore":false,"changes":[]}"#.utf8))
-			for _ in 0..<4 {
+			for _ in 0..<5 {
 				let request = await controlled.nextRequest()
 				switch request.request.url?.path {
 				case "/reader/api/0/subscription/list":
@@ -5508,7 +5508,7 @@ struct ReaderAppModelTests {
 		// Let every concurrent request start before failing one. Otherwise the
 		// failed request can cancel a sibling before it reaches the HTTP client.
 		var navigationRefreshes: [ControlledHTTPClient.PendingRequest] = []
-		for _ in 0..<4 {
+		for _ in 0..<5 {
 			navigationRefreshes.append(await controlled.nextRequest())
 		}
 		for navigationRefresh in navigationRefreshes {
@@ -6911,6 +6911,41 @@ struct ReaderAppModelTests {
 		let snapshot = try await store.loadSnapshot(accountID: accountID)
 		#expect(snapshot.articlesByCollection[ReaderSection.today.rawValue]?.map(\.id) == [today.id])
 		#expect(snapshot.articlesByCollection[ReaderSection.unread.rawValue]?.map(\.id).contains(yesterday.id) == true)
+	}
+
+	@Test func lastSevenDaysDropsStoriesOlderThanTheWindowAfterMidnight() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		let model = try makeModel(httpClient: MockHTTPClient(), offlineStore: store)
+		let weekItem = ReaderNavigationItem.smart(.lastSevenDays, unreadCount: 3)
+		let unreadItem = ReaderNavigationItem.smart(.unread, unreadCount: 3)
+		model.setNavigation(ReaderNavigationState(items: [weekItem, unreadItem]))
+
+		let today = ReaderLocalDayBounds.localDay(containing: .now)
+		let week = try #require(ReaderSection.lastSevenDays.dayWindow(at: .now))
+		let tooOld = makeArticle(id: "a-week-ago", receivedDate: week.start.addingTimeInterval(-60))
+		let firstDay = makeArticle(id: "six-days-ago", receivedDate: week.start.addingTimeInterval(60))
+		let yesterday = makeArticle(id: "yesterday", receivedDate: today.start.addingTimeInterval(-60))
+		model.setArticles([tooOld, firstDay, yesterday], for: .lastSevenDays)
+		model.setArticles([tooOld, firstDay, yesterday], for: .unread)
+
+		// Yesterday is outside Today but inside the week; the week's first day counts.
+		#expect(model.allArticles(for: .lastSevenDays).map(\.id) == [yesterday.id, firstDay.id])
+		#expect(model.articles(for: .lastSevenDays).map(\.id) == [yesterday.id, firstDay.id])
+
+		let accountID = try #require(model.session).storageIdentity
+		try await store.saveArticles([tooOld, firstDay, yesterday], collectionID: weekItem.id, accountID: accountID)
+		try await store.saveArticles([tooOld, firstDay, yesterday], collectionID: unreadItem.id, accountID: accountID)
+
+		#expect(await model.handleLocalDayChange())
+
+		#expect(model.allArticles(for: .lastSevenDays).map(\.id) == [yesterday.id, firstDay.id])
+		// The dropped unread story leaves the count; the rest of the week stays.
+		#expect(model.smartNavigationItems.first(where: { $0.smartSection == .lastSevenDays })?.unreadCount == 2)
+		#expect(model.allArticles(for: .unread).map(\.id) == [yesterday.id, firstDay.id, tooOld.id])
+
+		let snapshot = try await store.loadSnapshot(accountID: accountID)
+		#expect(snapshot.articlesByCollection[weekItem.id]?.map(\.id) == [yesterday.id, firstDay.id])
+		#expect(snapshot.articlesByCollection[unreadItem.id]?.map(\.id).contains(tooOld.id) == true)
 	}
 
 	@Test func todayKeepsSameDayStoriesWhenTheLocalDayHasNotChanged() async throws {
@@ -10978,6 +11013,7 @@ struct ReaderAppModelTests {
 				today: unreadCount,
 				unread: unreadCount,
 				starred: unreadCount,
+				lastSevenDays: unreadCount,
 			),
 		)
 	}

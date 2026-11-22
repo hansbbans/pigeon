@@ -16,7 +16,9 @@ nonisolated struct ReaderNavigationState: Codable, Equatable, Sendable {
 
 	init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: CodingKeys.self)
-		items = Self.addingMissingSavedSection(try container.decode([ReaderNavigationItem].self, forKey: .items))
+		items = Self.addingMissingLastSevenDaysSection(
+			Self.addingMissingSavedSection(try container.decode([ReaderNavigationItem].self, forKey: .items)),
+		)
 		expandedFolderIDs = try container.decode(Set<String>.self, forKey: .expandedFolderIDs)
 	}
 
@@ -33,6 +35,20 @@ nonisolated struct ReaderNavigationState: Codable, Equatable, Sendable {
 		}
 		var result = items
 		result.insert(.smart(.saved), at: starredIndex + 1)
+		return result
+	}
+
+	/// Navigation cached by builds before Last 7 Days has no row for it. Add
+	/// it right after Today, with no count until the next navigation load.
+	static func addingMissingLastSevenDaysSection(_ items: [ReaderNavigationItem]) -> [ReaderNavigationItem] {
+		let sections = Set(items.compactMap(\.smartSection))
+		guard sections.isSuperset(of: [.forYou, .unread, .starred, .today]),
+			sections.contains(.lastSevenDays) == false,
+			let todayIndex = items.lastIndex(where: { $0.smartSection == .today }) else {
+			return items
+		}
+		var result = items
+		result.insert(.smart(.lastSevenDays), at: todayIndex + 1)
 		return result
 	}
 

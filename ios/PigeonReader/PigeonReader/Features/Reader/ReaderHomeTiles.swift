@@ -104,12 +104,12 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 	private static let wideFolderTileWidth = 220.0
 	private static let maximumFolderColumns = 4
 
-	/// Three equal tiles in a row; four read better as two rows of two. A wide
-	/// window keeps every view on one row.
+	/// Three equal tiles in a row, so five views go three then two; four read
+	/// better as two rows of two. A wide window keeps every view on one row.
 	static func viewColumnCount(itemCount: Int, usesAccessibilitySize: Bool, availableWidth: Double? = nil) -> Int {
 		let isWide = (availableWidth ?? 0) >= wideLayoutMinimumWidth
 		if usesAccessibilitySize { return isWide ? min(max(itemCount, 1), 2) : 1 }
-		if isWide { return min(max(itemCount, 1), 4) }
+		if isWide { return max(itemCount, 1) }
 		if itemCount == 4 { return 2 }
 		return min(max(itemCount, 1), 3)
 	}

@@ -590,6 +590,11 @@ final class ReaderAppModel {
 		set { setSmartViewEnabled(newValue, for: .today) }
 	}
 
+	var isLastSevenDaysSmartViewEnabled: Bool {
+		get { enabledSmartViewSections.contains(.lastSevenDays) }
+		set { setSmartViewEnabled(newValue, for: .lastSevenDays) }
+	}
+
 	func canDisableSmartView(_ section: ReaderSection) -> Bool {
 		!enabledSmartViewSections.contains(section) || enabledSmartViewSections.count > 1
 	}
@@ -2146,7 +2151,7 @@ final class ReaderAppModel {
 		var requiresFullRebuild = offlineCacheIntegrity.requiresFullRebuild
 		var fullRebuildStartedAt: Date?
 		var snapshotLoadFailureMessage: String?
-		var shouldPersistTodayAfterRestore = false
+		var dayWindowIDsToPersistAfterRestore = Set<String>()
 		if preparedOfflineAccountID != accountID {
 			let preservedBootstrapInteraction = isShowingBootstrapSnapshot
 				&& bootstrapAccountID == accountID
@@ -2177,11 +2182,9 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				guard let needsTodaySave = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation),
+				guard let dayWindowIDsToSave = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation),
 					isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
-				if needsTodaySave {
-					shouldPersistTodayAfterRestore = true
-				}
+				dayWindowIDsToPersistAfterRestore.formUnion(dayWindowIDsToSave)
 				if snapshot.isEmpty == false {
 					// A persisted navigation payload, subscription list, or article
 					// cache is enough to render the known local state. Network repair
@@ -2235,10 +2238,10 @@ final class ReaderAppModel {
 					generation: preparationGeneration,
 				) else { return }
 			}
-			if shouldPersistTodayAfterRestore {
+			if dayWindowIDsToPersistAfterRestore.isEmpty == false {
 				// Snapshot cleanup is allowed to wait behind the first page, but it
 				// must never prevent that page request from starting.
-				await persistCollections([ReaderSection.today.rawValue])
+				await persistCollections(dayWindowIDsToPersistAfterRestore)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -2665,9 +2668,9 @@ final class ReaderAppModel {
 			guard isCurrentAccountOperation(context) else { return count }
 			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return count }
-			guard let needsTodaySave = await applyCachedSnapshot(snapshot) else { return count }
-			if needsTodaySave {
-				await persistCollections([ReaderSection.today.rawValue])
+			guard let dayWindowIDsToSave = await applyCachedSnapshot(snapshot) else { return count }
+			if dayWindowIDsToSave.isEmpty == false {
+				await persistCollections(dayWindowIDsToSave)
 			}
 			guard isCurrentAccountOperation(context) else { return count }
 			await refreshOfflineStorageStats()
@@ -2985,6 +2988,7 @@ final class ReaderAppModel {
 			}
 			isOffline = false
 			let previousTodayCount = navigation.item(withID: ReaderSection.today.rawValue)?.unreadCount ?? 0
+			let previousLastSevenDaysCount = navigation.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount ?? 0
 			let previousStarredCount = navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0
 			// For You is the complete bounded recommendation collection returned by the existing
 			// endpoint. Its trailing count covers every currently displayed unread recommendation,
@@ -3002,6 +3006,7 @@ final class ReaderAppModel {
 					saved: snapshot.savedSubscription == nil
 						? articleCache[ReaderSection.saved.rawValue]?.count(where: { $0.isRead == false }) ?? 0
 						: snapshot.savedUnreadCount,
+					lastSevenDays: snapshot.lastSevenDaysUnreadCount ?? previousLastSevenDaysCount,
 				),
 			)
 			setNavigation(state, markAsLoaded: true)
@@ -3239,7 +3244,7 @@ final class ReaderAppModel {
 			}
 			await prepareOfflineLibrary()
 			guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
-			let didPruneToday = pruneTodayIfNeeded(collection, now: now)
+			let didPruneToday = pruneDayWindowIfNeeded(collection, now: now)
 			if didPruneToday {
 				await persistCollections([collection.id])
 			}
@@ -3269,7 +3274,7 @@ final class ReaderAppModel {
 			return
 		}
 		if force == false, articleCache[collection.id] != nil {
-			if pruneTodayIfNeeded(collection, now: now) {
+			if pruneDayWindowIfNeeded(collection, now: now) {
 				await persistCollections([collection.id])
 				guard isCurrentAccountOperation(accountContext), Task.isCancelled == false else { return }
 				await performCollectionLoad(collection: collection, force: true, now: now, retryAttempt: 0)
@@ -3315,19 +3320,18 @@ final class ReaderAppModel {
 					continuation: nil,
 				)
 				dayBounds = nil
-			} else if collection.smartSection == .today {
-				let todayBounds = ReaderLocalDayBounds.localDay(containing: now)
-				guard let todayPage = try await loadTodayPage(
+			} else if let windowBounds = collection.smartSection?.dayWindow(at: now) {
+				guard let windowPage = try await loadDayWindowPage(
 					collectionID: collection.id,
-					dayBounds: todayBounds,
+					dayBounds: windowBounds,
 					apiClient: apiClient,
 					context: context,
 					operationID: loadID,
 				) else {
 					return
 				}
-				page = todayPage
-				dayBounds = todayBounds
+				page = windowPage
+				dayBounds = windowBounds
 			} else {
 				page = try await apiClient.recommendationsPage(
 					from: collection.streamID,
@@ -3401,7 +3405,7 @@ final class ReaderAppModel {
 				livePagesDuringOfflineSynchronization[collection.id] = loadedArticles
 			}
 			collectionFreshness[collection.id] = CollectionFreshness(updatedAt: .now, isCached: false)
-			if collection.smartSection == .forYou || collection.smartSection == .today {
+			if collection.smartSection == .forYou || collection.smartSection?.usesDayWindow == true {
 				updateNavigationCount(
 					for: collection.id,
 					to: unreadCountAfterLoading(collection: collection, articles: loadedArticles, hasMore: page.continuation != nil),
@@ -3476,11 +3480,12 @@ final class ReaderAppModel {
 		}
 	}
 
-	/// Today is fetched from the full reading-list stream so All/Read filters keep
-	/// their meaning. The default Unread filter can therefore receive a page made
-	/// entirely of read stories. Resolve those pages until the active filter has a
-	/// row to show or the server reaches the end of its bounded stream.
-	private func loadTodayPage(
+	/// Today and Last 7 Days are fetched from the full reading-list stream so
+	/// All/Read filters keep their meaning. The default Unread filter can
+	/// therefore receive a page made entirely of read stories. Resolve those
+	/// pages until the active filter has a row to show or the server reaches the
+	/// end of its bounded stream.
+	private func loadDayWindowPage(
 		collectionID: String,
 		dayBounds: ReaderLocalDayBounds,
 		apiClient: PigeonAPIClient,
@@ -3605,8 +3610,9 @@ final class ReaderAppModel {
 
 		do {
 			let page: ReaderRecommendationsPage
-			if collection.smartSection == .today {
-				let dayBounds = streamDayBounds[collection.id] ?? ReaderLocalDayBounds.localDay(containing: .now)
+			if let windowBounds = collection.smartSection?.dayWindow(at: .now) {
+				// Keep paging the window the first page was fetched with.
+				let dayBounds = streamDayBounds[collection.id] ?? windowBounds
 				page = try await apiClient.recommendationsPage(
 					from: "user/-/state/com.google/reading-list",
 					dayBounds: dayBounds,
@@ -3677,7 +3683,7 @@ final class ReaderAppModel {
 			}
 			seenStreamContinuations[collection.id] = nextSeenContinuations
 			streamContinuations[collection.id] = nextStreamContinuation
-			if collection.smartSection == .today {
+			if collection.smartSection?.usesDayWindow == true {
 				updateNavigationCount(
 					for: collection.id,
 					to: unreadCountAfterLoading(collection: collection, articles: combinedArticles, hasMore: page.continuation != nil),
@@ -3781,6 +3787,7 @@ final class ReaderAppModel {
 			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
 			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
 			saved: navigation.item(withID: ReaderSection.saved.rawValue)?.unreadCount ?? 0,
+			lastSevenDays: navigation.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount ?? 0,
 		)
 		setNavigation(
 			ReaderNavigationCatalog.make(
@@ -4693,7 +4700,7 @@ final class ReaderAppModel {
 		guard keptArticles.applies(to: collectionID, filter: filter) else {
 			return filter.filtering(allArticles(for: collectionID))
 		}
-		guard collectionID == ReaderSection.today.rawValue else {
+		guard let bounds = Self.dayWindow(forCollectionID: collectionID, at: .now) else {
 			return keptArticles.displayed(
 				allArticles(for: collectionID),
 				filter: filter,
@@ -4701,7 +4708,6 @@ final class ReaderAppModel {
 				feeds: articleFeedDirectory,
 			)
 		}
-		let bounds = ReaderLocalDayBounds.localDay(containing: .now)
 		return keptArticles.displayed(
 			allArticles(for: collectionID),
 			filter: filter,
@@ -4817,8 +4823,8 @@ final class ReaderAppModel {
 		if isReadingOpenArticle,
 			selectedNavigationID == collectionID,
 			let found = article(withId: rememberedID) {
-			if collectionID == ReaderSection.today.rawValue,
-				ReaderLocalDayBounds.localDay(containing: .now).contains(found.receivedAt) == false {
+			if let window = Self.dayWindow(forCollectionID: collectionID, at: .now),
+				window.contains(found.receivedAt) == false {
 				selectedArticleID = found.id
 				selectedArticleIDs[collectionID] = found.id
 				return
@@ -4860,7 +4866,9 @@ final class ReaderAppModel {
 			return [:]
 		}
 		let delta = toRead ? -1 : 1
-		let todayBounds = ReaderLocalDayBounds.localDay(containing: .now)
+		let now = Date.now
+		let todayBounds = ReaderLocalDayBounds.localDay(containing: now)
+		let lastSevenDaysBounds = ReaderLocalDayBounds.localDays(7, endingWith: now)
 		var deltas: [String: Int] = [:]
 		func cachedContains(_ collectionID: String) -> Bool {
 			if let cachedLookups {
@@ -4881,6 +4889,8 @@ final class ReaderAppModel {
 					shouldAdjust = cachedContains(item.id)
 				case .today:
 					shouldAdjust = article.isSaved == false && todayBounds.contains(article.receivedAt)
+				case .lastSevenDays:
+					shouldAdjust = article.isSaved == false && lastSevenDaysBounds.contains(article.receivedAt)
 				case .unread:
 					shouldAdjust = article.isSaved == false
 				case .starred:
@@ -4942,7 +4952,7 @@ final class ReaderAppModel {
 			return feed
 		}
 
-		let smartOrder: [ReaderSection] = [.today, .forYou, .unread, .starred]
+		let smartOrder: [ReaderSection] = [.today, .lastSevenDays, .forYou, .unread, .starred]
 		for section in smartOrder {
 			if articleCache[section.rawValue]?.contains(where: { articlesMatch($0, article) }) == true,
 				let item = navigation.item(withID: section.rawValue) {
@@ -6144,18 +6154,20 @@ final class ReaderAppModel {
 		)
 	}
 
-	/// Drops yesterday's Today rows after local midnight and refreshes if Today is open.
+	/// Drops rows that left Today or Last 7 Days at local midnight and
+	/// refreshes the open one of them.
 	@discardableResult
 	func handleLocalDayChange(now: Date = .now) async -> Bool {
 		guard let context = accountContext(), Task.isCancelled == false else { return false }
-		if pruneStaleTodayStories(now: now) {
-			if selectedCollection.smartSection == .today {
+		let prunedDayWindowIDs = pruneStaleDayWindowStories(now: now)
+		if prunedDayWindowIDs.isEmpty == false {
+			if prunedDayWindowIDs.contains(selectedCollection.id), selectedCollection.smartSection?.usesDayWindow == true {
 				await load(collection: selectedCollection, force: true, now: now)
 			}
 			guard isCurrentAccountOperation(context), Task.isCancelled == false else { return true }
-			// Persist the pruned cache after the selected Today page has had a
+			// Persist the pruned cache after the selected page has had a
 			// chance to render and refresh.
-			await persistCollections([ReaderSection.today.rawValue])
+			await persistCollections(prunedDayWindowIDs)
 			return true
 		}
 		await retryFailedInitialCollectionIfNeeded(now: now)
@@ -6421,15 +6433,15 @@ final class ReaderAppModel {
 			}
 			switch reloadScope {
 			case .full:
-				guard let needsTodaySave = await applyCachedSnapshot(
+				guard let dayWindowIDsToSave = await applyCachedSnapshot(
 					snapshot,
 					preservingPagination: true,
 					preservingCurrentSelection: preservingCurrentSelection,
 				), isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 					return OfflineSyncResult(canUseIncrementalReload: false, receivedChanges: receivedChanges)
 				}
-				if needsTodaySave {
-					await persistCollections([ReaderSection.today.rawValue])
+				if dayWindowIDsToSave.isEmpty == false {
+					await persistCollections(dayWindowIDsToSave)
 				}
 			case .collections(let collectionIDs):
 				mergeCachedSnapshot(snapshot, collectionIDs: collectionIDs)
@@ -6670,11 +6682,13 @@ final class ReaderAppModel {
 	@discardableResult
 	/// Nil means ownership or a concurrent mutation invalidated the snapshot;
 	/// callers must leave hydration retryable instead of treating it as applied.
+	/// Otherwise the Today and Last 7 Days collections this pruned or reset,
+	/// which the caller saves.
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
 		preservingPagination: Bool = false,
 		preservingCurrentSelection: Bool = false,
-	) async -> Bool? {
+	) async -> Set<String>? {
 		guard let context = currentOperationContext(), let accountContext = accountContext() else { return nil }
 		let initialSortOrders = sortOrders
 		let initialCanonicalOrder = canonicalArticleOrder
@@ -6743,8 +6757,8 @@ final class ReaderAppModel {
 		ordering: CachedLibrarySnapshotPreparation.Ordering,
 		preservingPagination: Bool,
 		preservingCurrentSelection: Bool,
-	) -> Bool {
-		guard let session else { return false }
+	) -> Set<String> {
+		guard let session else { return [] }
 		cancelPrewarmPersistence()
 		offlineCacheIntegrity = snapshot.integrity
 		offlineSyncCursor = snapshot.cursor
@@ -6766,9 +6780,8 @@ final class ReaderAppModel {
 			?? (temporarilyUnavailableSelectedCollection?.id == preservedNavigationID
 				? temporarilyUnavailableSelectedCollection
 				: nil)
-		let todayID = ReaderSection.today.rawValue
-		let currentTodayBounds = ReaderLocalDayBounds.localDay(containing: .now)
-		let hadTrustedTodayBounds = streamDayBounds[todayID] == currentTodayBounds
+		let dayWindowIDs = Set(ReaderSection.dayWindowSections.map(\.rawValue))
+		let trustedDayWindowIDs = trustedDayWindowCollectionIDs(at: .now)
 
 		invalidateCollectionLoads()
 		libraryGeneration = UUID()
@@ -6776,16 +6789,16 @@ final class ReaderAppModel {
 			resetStreamPagination()
 			resolvedPaginationCollections.removeAll()
 		}
-		// A persisted Today continuation has no day-bound metadata. Only reuse it
-		// while this live model has already established that the token belongs to
-		// the current local day; otherwise a cold restore could send an old-day
-		// token with today's request.
-		let canRestoreTodayPagination = preservingPagination && hadTrustedTodayBounds
-		if canRestoreTodayPagination == false {
-			resetStreamPagination(for: todayID)
-			resolvedPaginationCollections.remove(todayID)
+		// A persisted Today or Last 7 Days continuation has no day-bound
+		// metadata. Only reuse it while this live model has already established
+		// that the token belongs to the current local day; otherwise a cold
+		// restore could send an old-day token with today's request.
+		let restorableDayWindowIDs = preservingPagination ? trustedDayWindowIDs : []
+		for collectionID in dayWindowIDs.subtracting(restorableDayWindowIDs) {
+			resetStreamPagination(for: collectionID)
+			resolvedPaginationCollections.remove(collectionID)
 		}
-		var discardedUntrustedTodayPagination = false
+		var discardedUntrustedDayWindowIDs = Set<String>()
 		isApplyingRestoration = true
 		defer { isApplyingRestoration = false }
 		if let restoration = snapshot.restoration {
@@ -6882,8 +6895,8 @@ final class ReaderAppModel {
 			}
 		}
 		for (collectionID, continuation) in snapshot.continuationsByCollection {
-			if collectionID == todayID, canRestoreTodayPagination == false {
-				discardedUntrustedTodayPagination = true
+			if dayWindowIDs.contains(collectionID), restorableDayWindowIDs.contains(collectionID) == false {
+				discardedUntrustedDayWindowIDs.insert(collectionID)
 				continue
 			}
 			guard preservingPagination == false || streamContinuations[collectionID] == nil else { continue }
@@ -6891,10 +6904,10 @@ final class ReaderAppModel {
 			seenStreamContinuations[collectionID] = [continuation]
 			resolvedPaginationCollections.insert(collectionID)
 		}
-		if discardedUntrustedTodayPagination {
-			// Mark Today as intentionally reconciled so the caller persists the
-			// cleared token even when the snapshot had no Today article rows.
-			articleCache[todayID] = snapshot.articlesByCollection[todayID] ?? []
+		for collectionID in discardedUntrustedDayWindowIDs {
+			// Mark the view as intentionally reconciled so the caller persists the
+			// cleared token even when the snapshot had no article rows for it.
+			articleCache[collectionID] = snapshot.articlesByCollection[collectionID] ?? []
 		}
 		if let updatedAt = snapshot.lastSyncAt {
 			collectionFreshness = snapshot.articlesByCollection.keys.reduce(into: [:]) { result, collectionID in
@@ -6912,13 +6925,9 @@ final class ReaderAppModel {
 			selectedArticleIDs[preservedNavigationID] = kept.id
 			selectedArticleID = kept.id
 			preferredCompactColumn = .detail
-			let didPruneToday = pruneStaleTodayStories()
-			if didPruneToday {
-				resetStreamPagination(for: ReaderSection.today.rawValue)
-				resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
-			}
+			let prunedDayWindowIDs = pruneStaleDayWindowStoriesAfterRestore()
 			reapplyLocallySavedArticles()
-			return didPruneToday || discardedUntrustedTodayPagination
+			return prunedDayWindowIDs.union(discardedUntrustedDayWindowIDs)
 		}
 
 		if preservingCurrentSelection || preserveBootstrapHomeState {
@@ -6939,13 +6948,28 @@ final class ReaderAppModel {
 			selectedArticleID = selectedArticleIDs[selectedNavigationID]
 		}
 		reconcileCurrentArticleSelection()
-		let didPruneToday = pruneStaleTodayStories()
-		if didPruneToday {
-			resetStreamPagination(for: ReaderSection.today.rawValue)
-			resolvedPaginationCollections.remove(ReaderSection.today.rawValue)
-		}
+		let prunedDayWindowIDs = pruneStaleDayWindowStoriesAfterRestore()
 		reapplyLocallySavedArticles()
-		return didPruneToday || discardedUntrustedTodayPagination
+		return prunedDayWindowIDs.union(discardedUntrustedDayWindowIDs)
+	}
+
+	/// Restored rows can predate the current local day. Prune them and leave
+	/// those views unresolved so their next load establishes fresh bounds.
+	private func pruneStaleDayWindowStoriesAfterRestore() -> Set<String> {
+		let prunedDayWindowIDs = pruneStaleDayWindowStories()
+		for collectionID in prunedDayWindowIDs {
+			resetStreamPagination(for: collectionID)
+			resolvedPaginationCollections.remove(collectionID)
+		}
+		return prunedDayWindowIDs
+	}
+
+	/// Today and Last 7 Days collections whose live pagination was established
+	/// for the window they cover at `now`.
+	private func trustedDayWindowCollectionIDs(at now: Date) -> Set<String> {
+		Set(ReaderSection.dayWindowSections.compactMap { section in
+			streamDayBounds[section.rawValue] == section.dayWindow(at: now) ? section.rawValue : nil
+		})
 	}
 
 	private func mergeCachedSnapshot(
@@ -6971,8 +6995,8 @@ final class ReaderAppModel {
 		for collectionID in collectionIDs {
 			incomingByCollection[collectionID] = snapshot.articlesByCollection[collectionID] ?? []
 		}
-		let todayID = ReaderSection.today.rawValue
-		let canRestoreTodayPagination = streamDayBounds[todayID] == ReaderLocalDayBounds.localDay(containing: .now)
+		let dayWindowIDs = Set(ReaderSection.dayWindowSections.map(\.rawValue))
+		let trustedDayWindowIDs = trustedDayWindowCollectionIDs(at: .now)
 		var canonicalizedByCollection: [String: [Recommendation]] = [:]
 		for (collectionID, articles) in incomingByCollection {
 			let canonicalized = canonicalizedArticles(
@@ -6987,10 +7011,10 @@ final class ReaderAppModel {
 			if ReaderSection(rawValue: collectionID) == .forYou {
 				canonicalArticleOrder[collectionID] = canonicalized.map(ReaderArticleIdentity.key(for:))
 			}
-			if collectionID == todayID, canRestoreTodayPagination == false {
+			if dayWindowIDs.contains(collectionID), trustedDayWindowIDs.contains(collectionID) == false {
 				// A scoped status merge can observe a persisted token from an older
-				// local day. Leave Today unresolved so its next load establishes fresh
-				// day bounds and a valid continuation before load-more runs.
+				// local day. Leave the view unresolved so its next load establishes
+				// fresh day bounds and a valid continuation before load-more runs.
 				streamContinuations[collectionID] = nil
 				seenStreamContinuations[collectionID] = []
 				resolvedPaginationCollections.remove(collectionID)
@@ -7199,57 +7223,80 @@ final class ReaderAppModel {
 		invalidateLoadMore(for: collectionID)
 	}
 
+	/// The local-day window of the Today or Last 7 Days collection at `now`;
+	/// nil for every other collection.
+	private static func dayWindow(forCollectionID collectionID: String, at now: Date) -> ReaderLocalDayBounds? {
+		ReaderSection(rawValue: collectionID)?.dayWindow(at: now)
+	}
+
 	private func articlesInCurrentLocalDay(
 		_ articles: [Recommendation],
 		for collectionID: String,
 		now: Date = .now,
 	) -> [Recommendation] {
-		guard collectionID == ReaderSection.today.rawValue else {
+		guard let bounds = Self.dayWindow(forCollectionID: collectionID, at: now) else {
 			return articles
 		}
-		let bounds = ReaderLocalDayBounds.localDay(containing: now)
 		return articles.filter { bounds.contains($0.receivedAt) }
 	}
 
 	@discardableResult
-	private func pruneTodayIfNeeded(_ collection: ReaderNavigationItem, now: Date) -> Bool {
-		guard collection.smartSection == .today else {
+	private func pruneDayWindowIfNeeded(_ collection: ReaderNavigationItem, now: Date) -> Bool {
+		guard let section = collection.smartSection, section.usesDayWindow else {
 			return false
 		}
-		return pruneStaleTodayStories(now: now)
+		return pruneStaleStories(in: section, now: now)
+	}
+
+	/// The Today and Last 7 Days collections that dropped rows or moved to a
+	/// new local day.
+	@discardableResult
+	private func pruneStaleDayWindowStories(now: Date = .now) -> Set<String> {
+		Set(ReaderSection.dayWindowSections.compactMap { section in
+			pruneStaleStories(in: section, now: now) ? section.rawValue : nil
+		})
 	}
 
 	@discardableResult
-	private func pruneStaleTodayStories(now: Date = .now) -> Bool {
-		let todayID = ReaderSection.today.rawValue
-		let bounds = ReaderLocalDayBounds.localDay(containing: now)
-		let previousBounds = streamDayBounds[todayID]
+	private func pruneStaleStories(in section: ReaderSection, now: Date) -> Bool {
+		guard let bounds = section.dayWindow(at: now) else { return false }
+		let collectionID = section.rawValue
+		let previousBounds = streamDayBounds[collectionID]
 		let boundsChanged = previousBounds.map { $0 != bounds } ?? false
-		let cached = articleCache[todayID]
+		let cached = articleCache[collectionID]
 		let kept = cached?.filter { bounds.contains($0.receivedAt) }
 		let droppedStale = cached.map { $0.count != (kept?.count ?? 0) } ?? false
 		guard droppedStale || boundsChanged else {
 			return false
 		}
 
-		// A local-day transition starts a new Today page generation. The previous
+		// A local-day transition starts a new page generation. The previous
 		// completion marker must not suppress the foreground retry if this refresh
 		// is canceled or fails before it publishes a page.
-		failedInitialLoadCollectionIDs.remove(todayID)
-		completedInitialLoadCollectionIDs.remove(todayID)
+		failedInitialLoadCollectionIDs.remove(collectionID)
+		completedInitialLoadCollectionIDs.remove(collectionID)
 		if boundsChanged {
-			resetStreamPagination(for: todayID)
+			resetStreamPagination(for: collectionID)
 		}
-		streamDayBounds[todayID] = bounds
-		if keptArticles.collectionID == todayID {
+		streamDayBounds[collectionID] = bounds
+		if keptArticles.collectionID == collectionID {
 			keptArticles.removeAll { bounds.contains($0.receivedAt) == false }
 		}
-		if droppedStale, let kept {
-			setArticles(kept, for: todayID, preserveOpenSelection: false)
-			updateNavigationCount(
-				for: todayID,
-				to: kept.count(where: { $0.isRead == false }),
-			)
+		if droppedStale, let cached, let kept {
+			setArticles(kept, for: collectionID, preserveOpenSelection: false)
+			let keptUnreadCount = kept.count(where: { $0.isRead == false })
+			let count: Int
+			if section == .today {
+				count = keptUnreadCount
+			} else {
+				// The week loses only its oldest day. Its total can cover stories
+				// beyond the loaded pages, so subtract the dropped unread rows
+				// rather than recounting what is loaded.
+				let droppedUnreadCount = cached.count(where: { $0.isRead == false }) - keptUnreadCount
+				let currentCount = navigation.item(withID: collectionID)?.unreadCount ?? 0
+				count = max(currentCount - droppedUnreadCount, keptUnreadCount)
+			}
+			updateNavigationCount(for: collectionID, to: count)
 		}
 		return true
 	}
@@ -7615,7 +7662,7 @@ final class ReaderAppModel {
 		articles: [Recommendation],
 		hasMore: Bool,
 	) -> ReaderNavigationState {
-		guard collection.smartSection == .forYou || collection.smartSection == .today else {
+		guard collection.smartSection == .forYou || collection.smartSection?.usesDayWindow == true else {
 			return navigation
 		}
 		return navigation.replacingCount(
@@ -7630,8 +7677,8 @@ final class ReaderAppModel {
 		hasMore: Bool,
 	) -> Int {
 		let loadedUnreadCount = articles.count(where: { $0.isRead == false })
-		guard collection.smartSection == .today, hasMore else { return loadedUnreadCount }
-		// A partial page cannot replace a known total for the whole day.
+		guard collection.smartSection?.usesDayWindow == true, hasMore else { return loadedUnreadCount }
+		// A partial page cannot replace a known total for the whole window.
 		return max(navigation.item(withID: collection.id)?.unreadCount ?? 0, loadedUnreadCount)
 	}
 
@@ -8477,6 +8524,7 @@ final class ReaderAppModel {
 			unread: navigation.item(withID: ReaderSection.unread.rawValue)?.unreadCount ?? 0,
 			starred: navigation.item(withID: ReaderSection.starred.rawValue)?.unreadCount ?? 0,
 			saved: navigation.item(withID: ReaderSection.saved.rawValue)?.unreadCount ?? 0,
+			lastSevenDays: navigation.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount ?? 0,
 		)
 		setNavigation(
 			ReaderNavigationCatalog.make(

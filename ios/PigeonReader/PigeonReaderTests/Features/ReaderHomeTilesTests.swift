@@ -140,6 +140,23 @@ struct ReaderHomeTilesTests {
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 3, usesAccessibilitySize: true) == 1)
 	}
 
+	@Test func fiveViewTilesGoThreeAcrossOnAPhoneAndOneRowWhenWide() {
+		let navigation = ReaderNavigationState(items: ReaderSection.allCases.map { ReaderNavigationItem.smart($0) })
+		let tiles = ReaderHomeTiles.make(
+			snapshot: makeSnapshot(navigation, enabled: Set(ReaderSmartViewStore.configurableSections)),
+			navigation: navigation,
+		) { _ in nil }
+
+		#expect(tiles.viewItems.map(\.smartSection) == [.forYou, .starred, .saved, .today, .lastSevenDays])
+		// A phone: three across, then two.
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false) == 3)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 402) == 3)
+		// A wide window keeps all five on one row.
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 600) == 5)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 1_024) == 5)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: true, availableWidth: 1_024) == 2)
+	}
+
 	@Test func wideWindowsKeepEveryViewTileOnOneRow() {
 		// iPad mini portrait is 744pt wide; an iPhone is about 400pt.
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 4, usesAccessibilitySize: false, availableWidth: 744) == 4)

@@ -45,7 +45,7 @@ struct ReaderCollectionPane: View {
 
 	private var navigationTitle: String {
 		let collection = model.selectedCollection
-		guard collection.smartSection == .today else { return collection.title }
+		guard collection.smartSection?.usesDayWindow == true else { return collection.title }
 		let unreadCount = model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
 		return "\(collection.title) (\(unreadCount.formatted()))"
 	}

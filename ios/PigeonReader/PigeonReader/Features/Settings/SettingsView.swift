@@ -69,6 +69,8 @@ struct SettingsView: View {
 						.disabled(model.canDisableSmartView(.starred) == false)
 					Toggle("Today", isOn: $model.isTodaySmartViewEnabled)
 						.disabled(model.canDisableSmartView(.today) == false)
+					Toggle("Last 7 Days", isOn: $model.isLastSevenDaysSmartViewEnabled)
+						.disabled(model.canDisableSmartView(.lastSevenDays) == false)
 					Text("At least one smart view must stay enabled so Reader always has a home.")
 						.font(.footnote)
 						.foregroundStyle(.pigeonSecondary)

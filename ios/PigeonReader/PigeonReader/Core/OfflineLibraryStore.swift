@@ -2143,6 +2143,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let managedCollectionIDs = [
 			ReaderSection.unread.rawValue,
 			ReaderSection.today.rawValue,
+			ReaderSection.lastSevenDays.rawValue,
 			ReaderSection.starred.rawValue,
 		]
 		for collectionID in managedCollectionIDs {
@@ -2161,10 +2162,20 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				database: database,
 			)
 		}
-		if ReaderLocalDayBounds.localDay(containing: .now).contains(article.receivedAt) {
+		let today = ReaderLocalDayBounds.localDay(containing: .now)
+		if today.contains(article.receivedAt) {
 			try insertCollectionMembership(
 				accountID: accountID,
 				collectionID: ReaderSection.today.rawValue,
+				articleID: article.id,
+				position: 0,
+				database: database,
+			)
+		}
+		if Self.lastSevenDaysBounds(endingWith: today).contains(article.receivedAt) {
+			try insertCollectionMembership(
+				accountID: accountID,
+				collectionID: ReaderSection.lastSevenDays.rawValue,
 				articleID: article.id,
 				position: 0,
 				database: database,
@@ -2719,9 +2730,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		if protectedCollectionIDs.contains(ReaderSection.unread.rawValue) == false, article.isRead == false {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.unread.rawValue, articleID: article.id, position: 0, database: database)
 		}
+		let today = dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)
 		if protectedCollectionIDs.contains(ReaderSection.today.rawValue) == false,
-			(dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)).contains(article.receivedAt) {
+			today.contains(article.receivedAt) {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.today.rawValue, articleID: article.id, position: 0, database: database)
+		}
+		if protectedCollectionIDs.contains(ReaderSection.lastSevenDays.rawValue) == false,
+			Self.lastSevenDaysBounds(endingWith: today).contains(article.receivedAt) {
+			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.lastSevenDays.rawValue, articleID: article.id, position: 0, database: database)
 		}
 		if protectedCollectionIDs.contains(ReaderSection.starred.rawValue) == false, article.isStarred {
 			try insertCollectionMembership(accountID: accountID, collectionID: ReaderSection.starred.rawValue, articleID: article.id, position: 0, database: database)
@@ -2860,6 +2876,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 
 		let protectedCollectionIDs = try cachedExplicitCollectionIDs(accountID: accountID, database: database)
 		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: .now)
+		let weekBounds = Self.lastSevenDaysBounds(endingWith: bounds)
 		for article in articles {
 			var expected = Set<String>()
 			let memberships = membershipsByArticleID[article.id, default: []]
@@ -2867,7 +2884,8 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				// Builds before Read It Later projected saved items into Unread and
 				// Today. Those rows must be rebuilt away, not just supplemented.
 				if memberships.contains(ReaderSection.unread.rawValue) && protectedCollectionIDs.contains(ReaderSection.unread.rawValue) == false
-					|| memberships.contains(ReaderSection.today.rawValue) && protectedCollectionIDs.contains(ReaderSection.today.rawValue) == false {
+					|| memberships.contains(ReaderSection.today.rawValue) && protectedCollectionIDs.contains(ReaderSection.today.rawValue) == false
+					|| memberships.contains(ReaderSection.lastSevenDays.rawValue) && protectedCollectionIDs.contains(ReaderSection.lastSevenDays.rawValue) == false {
 					return false
 				}
 				expected.insert(ReaderSection.saved.rawValue)
@@ -2885,6 +2903,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			}
 			if bounds.contains(article.receivedAt) {
 				expected.insert(ReaderSection.today.rawValue)
+			}
+			if weekBounds.contains(article.receivedAt) {
+				expected.insert(ReaderSection.lastSevenDays.rawValue)
 			}
 			if article.isStarred {
 				expected.insert(ReaderSection.starred.rawValue)
@@ -3018,9 +3039,15 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	private static let managedCollectionIDs = [
 		ReaderSection.unread.rawValue,
 		ReaderSection.today.rawValue,
+		ReaderSection.lastSevenDays.rawValue,
 		ReaderSection.starred.rawValue,
 		ReaderSection.saved.rawValue,
 	]
+
+	/// Last 7 Days ends with the local day Today's membership uses.
+	private static func lastSevenDaysBounds(endingWith today: ReaderLocalDayBounds) -> ReaderLocalDayBounds {
+		ReaderLocalDayBounds.localDays(7, endingWith: today.start)
+	}
 
 	private func insertCollectionMembership(
 		accountID: String,
@@ -3084,13 +3111,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 			map: { Int(sqlite3_column_int64($0, 0)) },
 		) ?? 0
 		let today = try membershipUnreadCount(collectionID: ReaderSection.today.rawValue, accountID: accountID, database: database)
+		let lastSevenDays = try membershipUnreadCount(collectionID: ReaderSection.lastSevenDays.rawValue, accountID: accountID, database: database)
 		let starred = try membershipUnreadCount(collectionID: ReaderSection.starred.rawValue, accountID: accountID, database: database)
 		let forYou = try membershipUnreadCount(collectionID: ReaderSection.forYou.rawValue, accountID: accountID, database: database)
 		let saved = try membershipUnreadCount(collectionID: ReaderSection.saved.rawValue, accountID: accountID, database: database)
 		let navigation = ReaderNavigationCatalog.make(
 			subscriptions: subscriptions,
 			unreadCounts: unreadCounts + [ReaderUnreadCount(id: "user/-/state/com.google/reading-list", count: allArticles)],
-			smartCounts: ReaderNavigationSmartCounts(forYou: forYou, today: today, unread: allArticles, starred: starred, saved: saved),
+			smartCounts: ReaderNavigationSmartCounts(forYou: forYou, today: today, unread: allArticles, starred: starred, saved: saved, lastSevenDays: lastSevenDays),
 		)
 		try writeNavigation(navigation, accountID: accountID, database: database)
 		return navigation

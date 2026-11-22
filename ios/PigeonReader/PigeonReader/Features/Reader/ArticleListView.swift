@@ -638,7 +638,7 @@ struct ArticleListView: View {
 	}
 
 	private var navigationTitle: String {
-		guard collection.smartSection == .today else { return collection.title }
+		guard collection.smartSection?.usesDayWindow == true else { return collection.title }
 		let unreadCount = model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
 		return "\(collection.title) (\(unreadCount.formatted()))"
 	}
@@ -797,6 +797,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "No starred stories"
 		case .today: "Nothing from today"
+		case .lastSevenDays: "Nothing from the last 7 days"
 		case .forYou: "No recommendations yet"
 		case .unread: "You are all caught up"
 		case .saved: "Nothing saved yet"
@@ -808,6 +809,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "star"
 		case .today: "calendar"
+		case .lastSevenDays: "calendar.badge.clock"
 		case .forYou: "sparkles"
 		default: "checkmark.circle"
 		}
@@ -817,6 +819,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "Star a story to keep it here."
 		case .today: "Stories received today will appear here."
+		case .lastSevenDays: "Stories received in the last 7 days will appear here."
 		case .forYou: "Pigeon will surface unread stories as it learns what you like."
 		case .unread: "New stories will appear here as Pigeon receives them."
 		case .saved: "Saved links appear here."

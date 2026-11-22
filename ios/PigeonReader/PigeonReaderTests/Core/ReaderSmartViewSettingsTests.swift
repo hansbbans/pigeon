@@ -11,7 +11,31 @@ struct ReaderSmartViewSettingsTests {
 
 		#expect(store.enabledSections == ReaderSmartViewStore.defaultEnabledSections)
 		#expect(store.enabledSections.contains(.unread))
-		#expect(ReaderSmartViewStore.configurableSections == [.forYou, .unread, .starred, .today])
+		#expect(store.enabledSections.contains(.lastSevenDays))
+		#expect(ReaderSmartViewStore.configurableSections == [.forYou, .unread, .starred, .today, .lastSevenDays])
+	}
+
+	@MainActor
+	@Test func existingPreferencesGainLastSevenDaysOnceAndADeliberateDisableSticks() throws {
+		let (defaults, suiteName) = try makeDefaults()
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+
+		// Settings saved by a build that already ran the Unread migration.
+		defaults.set([ReaderSection.forYou.rawValue, ReaderSection.today.rawValue], forKey: ReaderSmartViewStore.key)
+		defaults.set(true, forKey: "pigeon.reader.smart-views.unread-migrated.v1")
+
+		let migrated = ReaderSmartViewStore(defaults: defaults)
+		#expect(migrated.enabledSections == [.forYou, .today, .lastSevenDays])
+		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.forYou, .today, .lastSevenDays])
+
+		let model = try makeModel(defaults: defaults, smartViewStore: migrated)
+		#expect(model.isLastSevenDaysSmartViewEnabled)
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .saved, .today, .lastSevenDays])
+		model.isLastSevenDaysSmartViewEnabled = false
+
+		#expect(model.isLastSevenDaysSmartViewEnabled == false)
+		// A relaunch runs the migration check again; it must not re-add the view.
+		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.forYou, .today])
 	}
 
 	@MainActor
@@ -22,10 +46,10 @@ struct ReaderSmartViewSettingsTests {
 		defaults.set([ReaderSection.starred.rawValue, ReaderSection.today.rawValue], forKey: ReaderSmartViewStore.key)
 
 		let migrated = ReaderSmartViewStore(defaults: defaults)
-		#expect(migrated.enabledSections == [.unread, .starred, .today])
-		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.unread, .starred, .today])
+		#expect(migrated.enabledSections == [.unread, .starred, .today, .lastSevenDays])
+		#expect(ReaderSmartViewStore(defaults: defaults).enabledSections == [.unread, .starred, .today, .lastSevenDays])
 		let model = try makeModel(defaults: defaults, smartViewStore: migrated)
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today, .lastSevenDays])
 	}
 
 	@MainActor
@@ -49,11 +73,11 @@ struct ReaderSmartViewSettingsTests {
 
 		model.isForYouSmartViewEnabled = false
 		// Read It Later is not a Smart View setting; it is always listed.
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.unread, .starred, .saved, .today, .lastSevenDays])
 		#expect(model.smartNavigationItems.count == ReaderSection.allCases.count)
 
 		model.isForYouSmartViewEnabled = true
-		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .starred, .saved, .today])
+		#expect(model.visibleSmartNavigationItems.compactMap(\.smartSection) == [.forYou, .unread, .starred, .saved, .today, .lastSevenDays])
 	}
 
 	@MainActor

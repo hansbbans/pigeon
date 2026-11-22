@@ -8,6 +8,8 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 	/// Read It Later. Listed below Starred and always visible.
 	case saved
 	case today
+	/// Today and the six local days before it, across all feeds.
+	case lastSevenDays
 
 	var id: Self { self }
 
@@ -15,6 +17,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		switch self {
 		case .forYou: "For You"
 		case .today: "Today"
+		case .lastSevenDays: "Last 7 Days"
 		case .unread: "Unread"
 		case .starred: "Starred"
 		case .saved: SavedItems.title
@@ -25,6 +28,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		switch self {
 		case .forYou: "sparkles"
 		case .today: "calendar"
+		case .lastSevenDays: "calendar.badge.clock"
 		case .unread: "circle"
 		case .starred: "star"
 		case .saved: "bookmark"
@@ -35,6 +39,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		switch self {
 		case .forYou: "for-you"
 		case .today: "today"
+		case .lastSevenDays: "last-7-days"
 		case .unread: "unread"
 		case .starred: "starred"
 		case .saved: "saved"
@@ -48,7 +53,27 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 		case .starred: "3"
 		case .today: "4"
 		case .saved: "5"
+		case .lastSevenDays: "6"
 		}
+	}
+
+	/// The local days a time-window view covers at `now`: Today is the day
+	/// holding `now`, Last 7 Days that day and the six before it, counted in
+	/// calendar days so a week across a DST change stays seven days. Nil for
+	/// views that are not bounded by time.
+	func dayWindow(at now: Date, calendar: Calendar = .autoupdatingCurrent) -> ReaderLocalDayBounds? {
+		switch self {
+		case .today: ReaderLocalDayBounds.localDay(containing: now, calendar: calendar)
+		case .lastSevenDays: ReaderLocalDayBounds.localDays(7, endingWith: now, calendar: calendar)
+		case .forYou, .unread, .starred, .saved: nil
+		}
+	}
+
+	/// Views whose membership is a local-day window over the reading list.
+	static let dayWindowSections: [ReaderSection] = [.today, .lastSevenDays]
+
+	var usesDayWindow: Bool {
+		Self.dayWindowSections.contains(self)
 	}
 
 	var usesRecommendationEndpoint: Bool {
