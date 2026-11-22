@@ -29,6 +29,9 @@ const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 24 * 60;
 const MAX_BACKOFF_MINUTES = 24 * 60;
 const HOUR_MS = 3_600_000;
+// Servers declare longer freshness than their posting rate justifies, so a feed's own max-age
+// may hold the next poll back by this much at most.
+const MAX_CACHE_CONTROL_MS = 5 * HOUR_MS;
 // Polling follows how recently a feed published. The refresh queue serves the most overdue feed
 // first, so quiet feeds stepping back is what leaves room to poll active ones more often.
 const CADENCE_TIERS: ReadonlyArray<{ newestItemWithinHours: number; intervalMultiplier: number }> = [
@@ -67,7 +70,7 @@ export function computeNextFetchAt(now: Date, input: RefreshScheduleInput): stri
 	if (isSuccess && input.cacheUntilAt) {
 		const cacheUntil = new Date(input.cacheUntilAt).getTime();
 		if (Number.isFinite(cacheUntil)) {
-			nextTime = Math.max(nextTime, Math.min(cacheUntil, now.getTime() + 86_400_000));
+			nextTime = Math.max(nextTime, Math.min(cacheUntil, now.getTime() + MAX_CACHE_CONTROL_MS));
 		}
 	}
 	return new Date(nextTime).toISOString();
@@ -100,7 +103,7 @@ export function parseCacheControlMaxAge(value: string | null, now: Date): string
 	if (!directive) return null;
 	const seconds = Number(directive[1]);
 	if (!Number.isFinite(seconds) || seconds < 0) return null;
-	return new Date(now.getTime() + Math.min(seconds, 86_400) * 1_000).toISOString();
+	return new Date(now.getTime() + Math.min(seconds * 1_000, MAX_CACHE_CONTROL_MS)).toISOString();
 }
 
 export function shouldUseConditionalRequest(
