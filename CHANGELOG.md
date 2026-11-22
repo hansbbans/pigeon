@@ -2,6 +2,12 @@
 
 All notable changes to Pigeon are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- iOS: in a story list's More menu, Sort, Display and Read actions stay open when you expand them. A background sync or refresh rebuilt the menu and collapsed the submenu before you could pick anything. Refresh in that menu is no longer greyed out during a sync; tapping it joins the sync already running.
+
 ## [0.1.15.0] - 2026-11-21
 
 ### Added
