@@ -601,6 +601,10 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSortOrder = 'newest';
   // Folder sections a reader opened with "N more", per folder for the page session.
   const expandedFolderSections = new Map();
+  // Last 7 Days' window, fixed when a load of the view starts so a response
+  // landing after midnight still matches its list; a revalidation after midnight
+  // reloads it. (Today's search keeps a live window: its key rolls at midnight.)
+  const viewDayBounds = new Map();
   // Read rows render compact, except rows a list has already shown in full this
   // page session: those stay full, only dimmed. So a loaded row never changes
   // height in a list, and a list's saved scrollTop stays valid when the reader
@@ -1093,7 +1097,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
     // The window is part of the query, so a new local day starts a new list.
     if (view?.kind === 'last-7-days' || (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest'))) {
-      query.dayBounds = client.getViewDayBounds(view);
+      query.dayBounds = viewDayBounds.get(view.id) || client.getViewDayBounds(view);
     }
     return query;
   }
@@ -1451,6 +1455,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
     expandedFolderSections.clear();
+    viewDayBounds.clear();
     fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
@@ -4519,6 +4524,13 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     if (options?.refreshUnread !== false) void refreshUnreadCounts();
+    // A new local day: reload the view for its new window (loadActiveView fixes it).
+    const fixedBounds = viewDayBounds.get(activeView.id);
+    if (fixedBounds && activeView.kind === 'last-7-days' &&
+        fixedBounds.startSeconds !== client.getViewDayBounds(activeView).startSeconds) {
+      await loadActiveView({ ...options, refreshUnread: false });
+      return;
+    }
     let expectedRootRequestId = null;
     try {
       const activeState = getViewState(activeView.id, false);
@@ -4779,6 +4791,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const requestId = activeViewRequestId + 1;
     activeViewRequestId = requestId;
     cancelContentLoads();
+    if (activeView.kind === 'last-7-days') viewDayBounds.set(activeView.id, client.getViewDayBounds(activeView));
     const state = getViewState(activeView.id);
     activeLoadedQueryKey = state.queryKey;
     itemIds = [...state.itemIds];
@@ -5214,7 +5227,7 @@ export function renderBrowserAppRuntimeScript(): string {
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
-      dayBounds: client.getViewDayBounds(view), before: mode.startsWith('age-')
+      dayBounds: getArticleQuery().dayBounds || client.getViewDayBounds(view), before: mode.startsWith('age-')
         ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null,
       // Folder rows in drawn order, each story once (sections can show it twice).
       drawnItemIds: view?.kind === 'folder' ? [...getNavigableItemIds()] : null };

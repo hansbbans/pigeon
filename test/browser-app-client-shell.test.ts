@@ -758,6 +758,57 @@ test('Last 7 Days view requests since/before for seven local days and lists newe
 	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
 });
 
+test('a Last 7 Days load in flight across local midnight still lands, and a refresh moves the window', async () => {
+	let now = new Date(2026, 10, 3, 23, 59, 30).getTime();
+	const before = getLocalDayRangeBounds(now, 7);
+	const after = getLocalDayRangeBounds(new Date(2026, 10, 4, 0, 0, 30).getTime(), 7);
+	const contentFor = (id: string) => ({
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title: `Story ${id}`, published: before.endSeconds - Number(id) * 3_600, categories: [],
+		origin: { title: 'Alpha', streamId: 'feed/1' }, summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
+	});
+	const articleRequests: URL[] = [];
+	const firstResponse = createDeferred<Response>();
+	const { elements } = await createBrowserHarness({
+		now: () => now,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 3 });
+			if (url.pathname === '/api/v1/browser/articles') {
+				articleRequests.push(url);
+				const body = { itemIds: ['1', '2', '3'], continuation: null, hasMore: false, sort: 'newest' };
+				return articleRequests.length === 1 ? firstResponse.promise.then(() => Response.json(body)) : Response.json(body);
+			}
+			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).map(contentFor) });
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('views-list'), 'last-7-days')));
+	await findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.dispatch('click');
+	await waitForBrowserCondition(() => articleRequests.length === 1);
+	assert.equal(articleRequests[0].searchParams.get('since'), before.start.toISOString());
+
+	// Local midnight passes while the first page is on its way.
+	now = new Date(2026, 10, 4, 0, 0, 30).getTime();
+	firstResponse.resolve(new Response());
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3']);
+
+	// The next refresh reloads the list for the new window.
+	elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => articleRequests.length === 2);
+	assert.equal(articleRequests[1].searchParams.get('since'), after.start.toISOString());
+	assert.equal(articleRequests[1].searchParams.get('before'), after.end.toISOString());
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+});
+
 test('runtime script hides all-read feeds when the unread filter is active', async () => {
 	const { elements } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
