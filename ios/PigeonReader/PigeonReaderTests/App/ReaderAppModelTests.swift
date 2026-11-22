@@ -6095,6 +6095,73 @@ struct ReaderAppModelTests {
 	}
 
 	@Test(.timeLimit(.minutes(1)))
+	func aLibraryReadWhileAReadIsUnsettledDoesNotPutTheOldStateBack() async throws {
+		let session = try makeSession(token: "optimistic-snapshot")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "unsettled-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await store.pauseNextEnqueue()
+		let toggle = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+
+		// The store does not hold the change yet, so the library it returns here
+		// still says unread. Applying it would undo what the reader just did.
+		await model.cleanupOfflineBodies()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		await store.resumeEnqueue()
+		await toggle.value
+		await model.cleanupOfflineBodies()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func aNewerChoiceSurvivesAnOlderOneTheStoreRefuses() async throws {
+		let session = try makeSession(token: "optimistic-newer-choice")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "twice-toggled-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await store.pauseNextEnqueue()
+		let first = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		// Read, then unread again before the store has answered for the first.
+		// The second change shows at once; only its store write waits its turn.
+		let second = Task { await model.setRead(story, read: false) }
+		while model.allArticles(for: .forYou).first?.isRead != false {
+			await Task.yield()
+		}
+
+		await store.resumeEnqueue(failing: true)
+		await first.value
+		await second.value
+		// Undoing the refused "read" must not flip the newer "unread".
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		let pending = try await store.pendingMutations(accountID: session.storageIdentity, limit: 10)
+		#expect(pending.map(\.mutation.value) == [false])
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
 	func aReadOrStarTheStoreRefusesIsPutBack() async throws {
 		let session = try makeSession(token: "optimistic-rollback")
 		let store = PausingOfflineLibraryStore()
@@ -12146,6 +12213,7 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 	private var shouldFailNextEnqueue = false
 	private var shouldPauseNextEnqueue = false
 	private var enqueueIsPaused = false
+	private var shouldFailResumedEnqueue = false
 	private var enqueueResume: CheckedContinuation<Void, Never>?
 
 	func failNextEnqueue() { shouldFailNextEnqueue = true }
@@ -12158,7 +12226,8 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		}
 	}
 
-	func resumeEnqueue() {
+	func resumeEnqueue(failing: Bool = false) {
+		shouldFailResumedEnqueue = failing
 		enqueueResume?.resume()
 		enqueueResume = nil
 	}
@@ -12173,6 +12242,10 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 			enqueueIsPaused = true
 			await withCheckedContinuation { enqueueResume = $0 }
 			enqueueIsPaused = false
+			if shouldFailResumedEnqueue {
+				shouldFailResumedEnqueue = false
+				throw LaunchStoreError.snapshotUnavailable
+			}
 		}
 		try await base.enqueue(mutation, accountID: accountID)
 	}

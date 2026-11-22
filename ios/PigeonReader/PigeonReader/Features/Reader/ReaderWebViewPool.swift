@@ -76,6 +76,11 @@ final class ReaderWebViewPool {
 
 	private func scheduleRefill(session: PigeonSession?) {
 		refill?.cancel()
+		// Signed out: nothing to read, and no reason to keep a web process alive.
+		guard session != nil else {
+			refill = nil
+			return
+		}
 		refill = Task { [weak self] in
 			try? await Task.sleep(for: Self.refillDelay)
 			guard Task.isCancelled == false else { return }

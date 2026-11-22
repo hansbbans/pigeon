@@ -48,6 +48,19 @@ struct FeedIconStoreTests {
 		#expect(await log.count == 1)
 	}
 
+	@Test func anIconThatFailedIsNotFetchedAgainStraightAway() async {
+		let log = FetchLog()
+		let store = FeedIconStore(fetch: { _ in
+			await log.record()
+			throw URLError(.badServerResponse)
+		})
+		let url = URL(string: "https://example.com/broken.png")!
+		for _ in 0..<5 {
+			#expect(await store.image(for: url) == nil)
+		}
+		#expect(await log.count == 1)
+	}
+
 	@Test func failedOrUndecodableIconIsNotCached() async {
 		let url = URL(string: "https://example.com/favicon.png")!
 		let failing = FeedIconStore(fetch: { _ in throw URLError(.notConnectedToInternet) })

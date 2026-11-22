@@ -18,6 +18,11 @@ final class FeedIconStore {
 
 	private let cache = NSCache<NSURL, UIImage>()
 	private var loads: [URL: Task<UIImage?, Never>] = [:]
+	/// When an icon last failed to load. A row asks again every time it
+	/// appears, so a broken icon would otherwise be fetched on every scroll.
+	/// The wait is short because the usual failure is being offline.
+	private var failures: [URL: ContinuousClock.Instant] = [:]
+	nonisolated static let failureRetryInterval: Duration = .seconds(60)
 	private let fetch: @Sendable (URL) async throws -> Data
 
 	init(fetch: (@Sendable (URL) async throws -> Data)? = nil) {
@@ -32,6 +37,10 @@ final class FeedIconStore {
 	func image(for url: URL) async -> UIImage? {
 		if let cached = cachedImage(for: url) { return cached }
 		if let load = loads[url] { return await load.value }
+		if let failedAt = failures[url] {
+			guard ContinuousClock.now - failedAt >= Self.failureRetryInterval else { return nil }
+			failures[url] = nil
+		}
 		let fetch = fetch
 		let load = Task.detached(priority: .utility) { () -> UIImage? in
 			guard let data = try? await fetch(url) else { return nil }
@@ -40,7 +49,11 @@ final class FeedIconStore {
 		loads[url] = load
 		let image = await load.value
 		loads[url] = nil
-		if let image { cache.setObject(image, forKey: url as NSURL) }
+		if let image {
+			cache.setObject(image, forKey: url as NSURL)
+		} else {
+			failures[url] = .now
+		}
 		return image
 	}
 
@@ -58,8 +71,8 @@ final class FeedIconStore {
 
 	private nonisolated static func fetchLive(from url: URL) async throws -> Data {
 		var request = URLRequest(url: url)
-		// A favicon rarely changes; the stored copy is good until the cache evicts it.
-		request.cachePolicy = .returnCacheDataElseLoad
+		// The default policy: the disk cache answers while the publisher's own
+		// caching headers say the copy is fresh, and a changed icon is picked up after.
 		request.timeoutInterval = 15
 		request.setValue("image/*", forHTTPHeaderField: "Accept")
 		let (data, response) = try await URLSession.shared.data(for: request)

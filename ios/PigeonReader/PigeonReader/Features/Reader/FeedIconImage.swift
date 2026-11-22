@@ -15,7 +15,9 @@ struct FeedIconImage<Content: View>: View {
 		let image = (loaded?.url == url ? loaded?.image : nil) ?? store.cachedImage(for: url)
 		content(image.map { Image(uiImage: $0) })
 			.task(id: url) {
-				guard let image = await store.image(for: url), Task.isCancelled == false else { return }
+				// Already drawn from the store's cache: nothing to wait for or redraw.
+				guard store.cachedImage(for: url) == nil,
+					let image = await store.image(for: url), Task.isCancelled == false else { return }
 				loaded = LoadedIcon(url: url, image: image)
 			}
 	}

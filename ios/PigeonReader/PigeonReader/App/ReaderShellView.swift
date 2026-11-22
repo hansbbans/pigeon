@@ -115,7 +115,11 @@ struct ReaderShellView: View {
 		.task(id: model.session) {
 			// Have a reader web view ready for the first story, made once the
 			// launch work has had a moment to settle.
-			guard let session = model.session else { return }
+			guard let session = model.session else {
+				// The spare and any refill on its way belong to the account that just left.
+				ReaderWebViewPool.shared.drain()
+				return
+			}
 			try? await Task.sleep(for: .seconds(2))
 			guard Task.isCancelled == false else { return }
 			ReaderWebViewPool.shared.prewarm(session: session)
