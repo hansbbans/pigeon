@@ -134,9 +134,9 @@ struct SettingsView: View {
 						}
 					}
 					.accessibilityIdentifier("reader-typeface-picker")
-					Picker("Layout", selection: $typography.homeLayout) {
-						ForEach(ReaderHomeLayout.allCases) { layout in
-							Text(layout.title).tag(layout)
+					Picker("Look", selection: $typography.look) {
+						ForEach(ReaderLook.allCases) { look in
+							Text(look.title).tag(look)
 						}
 					}
 					.accessibilityIdentifier("home-layout-picker")

@@ -68,16 +68,25 @@ nonisolated enum ReaderTimelineDensity: String, CaseIterable, Identifiable, Send
 	}
 }
 
-nonisolated enum ReaderHomeLayout: String, CaseIterable, Identifiable, Sendable {
-	case classic
-	case frontPage = "front-page"
+/// The app's two looks, chosen per device. Cards: Home tiles, folders and
+/// feeds as cards, smart views as the Front Page, and a regular window that
+/// navigates page by page. Reeder: the story list in a split view.
+nonisolated enum ReaderLook: String, CaseIterable, Identifiable, Sendable {
+	case cards
+	case reeder
 
 	var id: Self { self }
 	var title: String {
 		switch self {
-		case .classic: "Classic"
-		case .frontPage: "Front Page"
+		case .cards: "Cards"
+		case .reeder: "Reeder"
 		}
+	}
+
+	/// The look a device had before the setting existed: Front Page became
+	/// Cards and Classic became Reeder. Nothing stored means Cards.
+	static func migrated(fromLegacyHomeLayout legacy: String?) -> Self {
+		legacy == "classic" ? .reeder : .cards
 	}
 }
 
@@ -118,7 +127,9 @@ final class ReaderTypographySettings {
 	private let imagePolicyKey = "pigeon.reader.remote-images"
 	private let densityKey = "pigeon.reader.timeline-density"
 	private let markReadBehaviorKey = "pigeon.reader.mark-read-behavior"
-	static let homeLayoutKey = "pigeon.reader.home-layout.v1"
+	static let lookKey = "pigeon.reader.look.v1"
+	/// `ReaderHomeLayout` (classic / front-page), read once to migrate to the look.
+	static let legacyHomeLayoutKey = "pigeon.reader.home-layout.v1"
 	static let showsReadingTimeKey = "pigeon.reader.shows-reading-time"
 	private var storedTextScale: Double
 	private var storedLineHeight: Double
@@ -129,7 +140,7 @@ final class ReaderTypographySettings {
 	private var storedImagePolicy: ReaderRemoteImagePolicy
 	private var storedDensity: ReaderTimelineDensity
 	private var storedMarkReadBehavior: ReaderMarkReadBehavior
-	private var storedHomeLayout: ReaderHomeLayout
+	private var storedLook: ReaderLook
 	private var storedShowsReadingTime: Bool
 
 	init(defaults: UserDefaults = .standard) {
@@ -155,7 +166,16 @@ final class ReaderTypographySettings {
 		storedImagePolicy = defaults.string(forKey: imagePolicyKey).flatMap(ReaderRemoteImagePolicy.init(rawValue:)) ?? .normal
 		storedDensity = defaults.string(forKey: densityKey).flatMap(ReaderTimelineDensity.init(rawValue:)) ?? .comfortable
 		storedMarkReadBehavior = defaults.string(forKey: markReadBehaviorKey).flatMap(ReaderMarkReadBehavior.init(rawValue:)) ?? .onOpen
-		storedHomeLayout = defaults.string(forKey: Self.homeLayoutKey).flatMap(ReaderHomeLayout.init(rawValue:)) ?? .classic
+		if let look = defaults.string(forKey: Self.lookKey).flatMap(ReaderLook.init(rawValue:)) {
+			storedLook = look
+		} else if let legacy = defaults.string(forKey: Self.legacyHomeLayoutKey) {
+			let look = ReaderLook.migrated(fromLegacyHomeLayout: legacy)
+			storedLook = look
+			defaults.set(look.rawValue, forKey: Self.lookKey)
+			defaults.removeObject(forKey: Self.legacyHomeLayoutKey)
+		} else {
+			storedLook = .cards
+		}
 		storedShowsReadingTime = defaults.object(forKey: Self.showsReadingTimeKey) as? Bool ?? true
 	}
 
@@ -231,11 +251,11 @@ final class ReaderTypographySettings {
 		}
 	}
 
-	var homeLayout: ReaderHomeLayout {
-		get { storedHomeLayout }
+	var look: ReaderLook {
+		get { storedLook }
 		set {
-			storedHomeLayout = newValue
-			defaults.set(newValue.rawValue, forKey: Self.homeLayoutKey)
+			storedLook = newValue
+			defaults.set(newValue.rawValue, forKey: Self.lookKey)
 		}
 	}
 

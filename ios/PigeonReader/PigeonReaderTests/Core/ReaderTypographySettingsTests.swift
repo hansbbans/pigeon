@@ -47,24 +47,49 @@ struct ReaderTypographySettingsTests {
 	}
 
 	@Test
-	func homeLayoutDefaultsToClassicPersistsAndIgnoresUnknownValues() throws {
-		let suiteName = "pigeon-reader-home-layout-\(UUID().uuidString)"
+	func lookDefaultsToCardsWithoutAStoredLayout() throws {
+		let suiteName = "pigeon-reader-look-\(UUID().uuidString)"
 		let defaults = try #require(UserDefaults(suiteName: suiteName))
 		defer { defaults.removePersistentDomain(forName: suiteName) }
 
-		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
-		#expect(ReaderHomeLayout.allCases.map(\.title) == ["Classic", "Front Page"])
+		#expect(ReaderTypographySettings(defaults: defaults).look == .cards)
+		#expect(ReaderLook.allCases.map(\.title) == ["Cards", "Reeder"])
 
 		let settings = ReaderTypographySettings(defaults: defaults)
-		settings.homeLayout = .frontPage
-		#expect(defaults.string(forKey: ReaderTypographySettings.homeLayoutKey) == "front-page")
-		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .frontPage)
+		settings.look = .reeder
+		#expect(defaults.string(forKey: ReaderTypographySettings.lookKey) == "reeder")
+		#expect(ReaderTypographySettings(defaults: defaults).look == .reeder)
 
-		settings.homeLayout = .classic
-		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
+		settings.look = .cards
+		#expect(ReaderTypographySettings(defaults: defaults).look == .cards)
 
-		defaults.set("magazine", forKey: ReaderTypographySettings.homeLayoutKey)
-		#expect(ReaderTypographySettings(defaults: defaults).homeLayout == .classic)
+		defaults.set("magazine", forKey: ReaderTypographySettings.lookKey)
+		#expect(ReaderTypographySettings(defaults: defaults).look == .cards)
+	}
+
+	@Test(arguments: [("front-page", ReaderLook.cards), ("classic", .reeder), ("magazine", .cards)])
+	func lookMigratesFrontPageToCardsAndClassicToReeder(legacy: String, expected: ReaderLook) throws {
+		let suiteName = "pigeon-reader-look-migration-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		defaults.set(legacy, forKey: ReaderTypographySettings.legacyHomeLayoutKey)
+
+		#expect(ReaderTypographySettings(defaults: defaults).look == expected)
+		// Migrated once: the old key is gone and the look is stored under its own.
+		#expect(defaults.string(forKey: ReaderTypographySettings.legacyHomeLayoutKey) == nil)
+		#expect(defaults.string(forKey: ReaderTypographySettings.lookKey) == expected.rawValue)
+		#expect(ReaderTypographySettings(defaults: defaults).look == expected)
+	}
+
+	@Test
+	func aStoredLookWinsOverTheLegacyLayout() throws {
+		let suiteName = "pigeon-reader-look-stored-\(UUID().uuidString)"
+		let defaults = try #require(UserDefaults(suiteName: suiteName))
+		defer { defaults.removePersistentDomain(forName: suiteName) }
+		defaults.set("reeder", forKey: ReaderTypographySettings.lookKey)
+		defaults.set("front-page", forKey: ReaderTypographySettings.legacyHomeLayoutKey)
+
+		#expect(ReaderTypographySettings(defaults: defaults).look == .reeder)
 	}
 
 	@Test

@@ -69,15 +69,15 @@ struct ReaderShellView: View {
 			}
 		}
 		// Everything below the shell navigates with this size class, so a
-		// regular window on Front Page collapses the split view and gets the
+		// regular window in Cards collapses the split view and gets the
 		// phone's back navigation and full-window reader. The shell's own
 		// sheets keep the window's size class; sheets presented from inside
 		// the library or reader see the navigation one.
 		.environment(\.horizontalSizeClass, horizontalSizeClass)
-		.onChange(of: model.readerTypography.homeLayout) { _, layout in
-			model.preferredCompactColumn = ReaderCompactArticlePresentation.columnAfterLayoutChange(
+		.onChange(of: model.readerTypography.look) { _, look in
+			model.preferredCompactColumn = ReaderCompactArticlePresentation.columnAfterLookChange(
 				window: windowHorizontalSizeClass,
-				homeLayout: layout,
+				look: look,
 				preferredColumn: model.preferredCompactColumn,
 			)
 		}
@@ -136,7 +136,7 @@ struct ReaderShellView: View {
 	private var horizontalSizeClass: UserInterfaceSizeClass? {
 		ReaderCompactArticlePresentation.navigationSizeClass(
 			window: windowHorizontalSizeClass,
-			homeLayout: model.readerTypography.homeLayout,
+			look: model.readerTypography.look,
 		)
 	}
 

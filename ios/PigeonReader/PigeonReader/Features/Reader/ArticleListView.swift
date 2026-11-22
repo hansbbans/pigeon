@@ -48,8 +48,8 @@ struct ArticleListView: View {
 			: model.articles(for: collection)
 		let articles = updateBuffer.displayedArticles(in: listContext, fallback: sourceArticles)
 		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: articles.map(\.id)) != nil
-		// Front Page has no saved-position restore, so it is ready as soon as it appears.
-		let isPositionReady = (usesFrontPage || hasSavedPosition == false || readyContext == listContext)
+		// Cards have no saved-position restore, so they are ready as soon as they appear.
+		let isPositionReady = (usesCardsLook || hasSavedPosition == false || readyContext == listContext)
 			&& isExplicitListTransitioning == false
 		let holdsUpdates = isScrolling || isNativeTransitioning || isCollectionTransitioning
 			|| isExplicitListTransitioning || isLayoutReflowing || isPositionReady == false
@@ -292,7 +292,7 @@ struct ArticleListView: View {
 		}
 		.onChange(of: listContext) { _, context in
 			viewport.commitContextChange(to: context, scope: listScope)
-			if isExplicitListTransitioning && (articles.isEmpty || usesFrontPage) {
+			if isExplicitListTransitioning && (articles.isEmpty || usesCardsLook) {
 				readyContext = context
 				isExplicitListTransitioning = false
 			}
@@ -302,10 +302,10 @@ struct ArticleListView: View {
 		}
 		// Reading log: which stories this list showed. No view state changes here.
 		.onChange(of: impressionState, initial: true) { _, state in
-			impressions.apply(state, viewport: usesFrontPage ? nil : viewport, model: model)
+			impressions.apply(state, viewport: usesCardsLook ? nil : viewport, model: model)
 		}
 		.onAppear {
-			impressions.apply(impressionState, viewport: usesFrontPage ? nil : viewport, model: model)
+			impressions.apply(impressionState, viewport: usesCardsLook ? nil : viewport, model: model)
 		}
 		.onDisappear {
 			impressions.endSession()
@@ -315,7 +315,7 @@ struct ArticleListView: View {
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("collection-pane-\(collection.id)")
 		.navigationTitle(navigationTitle)
-		.toolbarTitleDisplayMode(usesFrontPage ? .inline : .automatic)
+		.toolbarTitleDisplayMode(usesCardsLook ? .inline : .automatic)
 		.searchable(text: $searchText, prompt: "Titles, authors, feeds, and text")
 		.searchScopes($searchScope) {
 			ForEach(ReaderSearchScope.allCases) { scope in
@@ -396,10 +396,15 @@ struct ArticleListView: View {
 		(windowHorizontalSizeClass ?? horizontalSizeClass) == .compact && model.preferredCompactColumn == .detail
 	}
 
-	/// Front Page is a reader setting on iPhone and iPad. On iPad it fills the
-	/// window (see `ReaderCompactArticlePresentation.navigationSizeClass`).
+	/// Cards is a look on iPhone and iPad. On iPad it fills the window (see
+	/// `ReaderCompactArticlePresentation.navigationSizeClass`).
+	private var usesCardsLook: Bool {
+		model.readerTypography.look == .cards
+	}
+
+	/// Smart views in Cards are the Front Page.
 	private var usesFrontPage: Bool {
-		model.readerTypography.homeLayout == .frontPage
+		usesCardsLook
 	}
 
 	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {

@@ -30,7 +30,13 @@ struct PigeonReaderApp: App {
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.remote-images")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.timeline-density")
 			UserDefaults.standard.removeObject(forKey: "pigeon.reader.mark-read-behavior")
-			UserDefaults.standard.removeObject(forKey: ReaderTypographySettings.homeLayoutKey)
+			UserDefaults.standard.removeObject(forKey: ReaderTypographySettings.legacyHomeLayoutKey)
+			// UI tests were written against the story list, so a reset starts in
+			// Reeder; tests of the Cards look ask for it.
+			UserDefaults.standard.set(
+				ProcessInfo.processInfo.environment["PIGEON_UI_TEST_LOOK"] ?? ReaderLook.reeder.rawValue,
+				forKey: ReaderTypographySettings.lookKey,
+			)
 			UserDefaults.standard.removeObject(forKey: ReaderTypographySettings.showsReadingTimeKey)
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.nextKey)
 			UserDefaults.standard.removeObject(forKey: ReaderKeyboardShortcutSettings.previousKey)

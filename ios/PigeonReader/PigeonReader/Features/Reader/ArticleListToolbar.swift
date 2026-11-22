@@ -44,28 +44,31 @@ struct ArticleListToolbar: ToolbarContent {
 			.accessibilityHint(ReaderAccessibilityText.filterStoriesHint)
 			.accessibilityIdentifier("article-list-filter")
 			Menu("More", systemImage: "ellipsis") {
-				Menu("Sort", systemImage: "arrow.up.arrow.down") {
-					Picker("Sort stories", selection: sortBinding) {
-						ForEach(model.availableSortOrders(for: collection)) { sortOrder in
-							Label(sortOrder.title, systemImage: sortOrder.systemImage)
-								.tag(sortOrder)
+				// In Cards a folder's or feed's sections are its order.
+				if hidesSort == false {
+					Menu("Sort", systemImage: "arrow.up.arrow.down") {
+						Picker("Sort stories", selection: sortBinding) {
+							ForEach(model.availableSortOrders(for: collection)) { sortOrder in
+								Label(sortOrder.title, systemImage: sortOrder.systemImage)
+									.tag(sortOrder)
+							}
 						}
+						.accessibilityIdentifier("article-list-sort-options")
 					}
-					.accessibilityIdentifier("article-list-sort-options")
+					.accessibilityLabel(ReaderAccessibilityText.sortStories(for: collection.title))
+					.accessibilityValue(model.sortOrder(for: collection).title)
+					.accessibilityIdentifier("article-list-sort")
 				}
-				.accessibilityLabel(ReaderAccessibilityText.sortStories(for: collection.title))
-				.accessibilityValue(model.sortOrder(for: collection).title)
-				.accessibilityIdentifier("article-list-sort")
 
 				Menu("Display", systemImage: "rectangle.grid.1x2") {
-					Picker("Layout", selection: layoutBinding) {
-						ForEach(ReaderHomeLayout.allCases) { layout in
-							Text(layout.title).tag(layout)
+					Picker("Look", selection: lookBinding) {
+						ForEach(ReaderLook.allCases) { look in
+							Text(look.title).tag(look)
 						}
 					}
 					.accessibilityIdentifier("article-list-layout-options")
-					// Density only shapes Classic rows.
-					if usesFrontPage == false {
+					// Density only shapes Reeder's rows.
+					if usesCards == false {
 						Picker("Timeline density", selection: densityBinding) {
 							ForEach(ReaderTimelineDensity.allCases) { density in
 								Text(density.title).tag(density)
@@ -74,8 +77,8 @@ struct ArticleListToolbar: ToolbarContent {
 						.accessibilityIdentifier("article-list-density-options")
 					}
 				}
-				.accessibilityValue(usesFrontPage
-					? ReaderHomeLayout.frontPage.title
+				.accessibilityValue(usesCards
+					? ReaderLook.cards.title
 					: model.readerTypography.timelineDensity.title)
 				.accessibilityIdentifier("article-list-density")
 
@@ -135,14 +138,18 @@ struct ArticleListToolbar: ToolbarContent {
 		)
 	}
 
-	private var usesFrontPage: Bool {
-		model.readerTypography.homeLayout == .frontPage
+	private var usesCards: Bool {
+		model.readerTypography.look == .cards
 	}
 
-	private var layoutBinding: Binding<ReaderHomeLayout> {
+	private var hidesSort: Bool {
+		usesCards && (collection.kind == .folder || collection.kind == .feed)
+	}
+
+	private var lookBinding: Binding<ReaderLook> {
 		Binding(
-			get: { model.readerTypography.homeLayout },
-			set: { model.readerTypography.homeLayout = $0 },
+			get: { model.readerTypography.look },
+			set: { model.readerTypography.look = $0 },
 		)
 	}
 
