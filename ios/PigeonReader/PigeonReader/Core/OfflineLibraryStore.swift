@@ -79,6 +79,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	private var statusOverlayArticleDecodeCount = 0
 	private var sanitizedBodyCount = 0
 	private var articleWriteCount = 0
+	private var pendingOverlayLoadCount = 0
 	#endif
 	/// Bodies the sanitizer is known to return unchanged; see `sanitized(_:)`.
 	private var sanitizedFixedPoints = Set<SanitizedBodyFingerprint>()
@@ -727,6 +728,14 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 	func articleWriteCountForTesting() -> Int {
 		articleWriteCount
 	}
+
+	func resetPendingOverlayLoadCount() {
+		pendingOverlayLoadCount = 0
+	}
+
+	func pendingOverlayLoadCountForTesting() -> Int {
+		pendingOverlayLoadCount
+	}
 	#endif
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) throws {
@@ -1164,6 +1173,11 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		// Article/feed upserts must land before status changes because a page can
 		// contain both records for a newly-created article.
 		var skippedChangeCount = 0
+		// Nothing in a page writes the outbox, so one read serves every article
+		// in it. Reading it per article decoded the whole outbox each time.
+		let pendingOverlays = page.changes.contains(where: { $0.entityType == .article && $0.operation == .upsert })
+			? try loadPendingStatusOverlays(accountID: storageAccountID, database: database)
+			: [:]
 		for change in page.changes.filter({ $0.entityType != .status }) + page.changes.filter({ $0.entityType == .status }) {
 			do {
 				try apply(
@@ -1171,6 +1185,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 					accountID: storageAccountID,
 					dayBounds: dayBounds,
 					deletedArticleIDs: deletedArticleIDs,
+					pendingOverlays: pendingOverlays,
 					database: database,
 				)
 			} catch OfflineLibraryError.invalidSyncChange {
@@ -1286,6 +1301,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		let database = try openDatabase()
 		var stored: [Recommendation] = []
 		try transaction(database) {
+			var pendingOverlays: [String: PendingStatusOverlay]?
 			for payload in articles {
 				guard let id = payload.id, id.isEmpty == false else { continue }
 				try execute(
@@ -1321,6 +1337,12 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 						accountID: accountID,
 						dayBounds: dayBounds,
 						deletedArticleIDs: [],
+						pendingOverlays: try {
+							if let pendingOverlays { return pendingOverlays }
+							let loaded = try loadPendingStatusOverlays(accountID: accountID, database: database)
+							pendingOverlays = loaded
+							return loaded
+						}(),
 						database: database,
 					)
 					if let inserted = try loadArticle(identifier: id, accountID: accountID, database: database)?.article {
@@ -1503,6 +1525,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		accountID: String,
 		dayBounds: ReaderLocalDayBounds?,
 		deletedArticleIDs: Set<String>,
+		pendingOverlays: [String: PendingStatusOverlay],
 		database: OpaquePointer,
 	) throws {
 		guard change.entityId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
@@ -1691,7 +1714,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 				// The server only ever sends `true`; a transcript, once stored, stays.
 				hasTranscript: payload.hasTranscript ?? existing?.article.hasTranscript,
 				)),
-				overlays: try loadPendingStatusOverlays(accountID: accountID, database: database),
+				overlays: pendingOverlays,
 			)
 			let storedArticle = try upsertArticle(
 				article,
@@ -1960,6 +1983,9 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 		database: OpaquePointer,
 	) throws -> [String: PendingStatusOverlay] {
 		var overlays: [String: PendingStatusOverlay] = [:]
+		#if DEBUG
+		pendingOverlayLoadCount += 1
+		#endif
 		try query(
 			"SELECT sequence, payload FROM pending_actions WHERE account_id = ? ORDER BY sequence",
 			bindings: [.text(accountID)],

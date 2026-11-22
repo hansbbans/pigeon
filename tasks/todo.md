@@ -1,3 +1,25 @@
+# Feed loading: fixes from the NetNewsWire comparison (started 2026-11-22)
+
+Three branches, one outcome each. Nothing is pushed yet.
+
+- [x] Worker (`claude/perf-worker-sync-hygiene`, `~/code/pigeon-perf-worker`): a poll writes a feed sync row only when the site or source URL changes; `max-age` capped at 5 hours. Suite green.
+- [x] Web (`claude/perf-web-first-load`, `~/code/pigeon-perf-web`): sign-in check uses `GET /app/session` (no database) instead of `/app/status`. Suite green.
+- [ ] iOS (`claude/perf-ios-store`, `~/code/pigeon-perf-ios`): a sync page reads the outbox once, not once per article. Written with a test; not yet run (the `Pigeon Claude` simulator was in use by another session).
+- [ ] iOS: run `STATUS_TOGGLE_BENCH` and `BOOTSTRAP_BENCH` before changing the toggle and launch paths
+- [ ] iOS: update the screen before the store on a read/star toggle (roll back if the enqueue fails)
+- [ ] iOS: show the selected list from a scoped snapshot at launch, then hydrate the rest (a tap during hydration must not strand it)
+- [ ] iOS: one warm `WKWebView`, fonts installed once
+- [ ] iOS: disk image cache, downsampled favicons
+- [ ] iOS: bodies out of list rows (cache migration; needs its own plan)
+
+Decided against, with reasons:
+- `cleanupReadBodies` filter on `body_pruned = 0`: a row can be flagged pruned and still hold a body, so the filter would stop pruning those.
+- Web list rows from server metadata: default views already get rows and bodies in one request; only folder, search and filter views would gain, and hero images are not stored for RSS items, so rows would shift when bodies arrive.
+- Web cached list on load: the sign-in token is per tab, so only an in-tab reload would benefit.
+
+
+---
+
 # iOS folders sort By Feed by default (started 2026-11-17)
 
 Branch `claude/folder-by-feed-ios`, worktree `~/code/pigeon-folder-by-feed-ios`. The web half is built separately with the same rules.

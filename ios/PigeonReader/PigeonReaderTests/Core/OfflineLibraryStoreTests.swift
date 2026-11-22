@@ -604,6 +604,45 @@ struct OfflineLibraryStoreTests {
 		#expect(snapshot.articlesByCollection["folder/one"]?.map(\.id) == [target.id, first.id])
 	}
 
+	@Test func syncPageReadsTheOutboxOnceHoweverManyArticlesItCarries() async throws {
+		let store = OfflineLibraryStore.inMemory()
+		try await store.enqueue(
+			OfflineMutation(id: "star-second", kind: .setStarred, itemIds: ["reader-2"], value: true, scope: .single),
+			accountID: "account-a",
+		)
+		let changes = (1...3).map { index in
+			IncrementalSyncChange(
+				sequence: index,
+				entityType: .article,
+				entityId: "article-\(index)",
+				operation: .upsert,
+				changedAt: Date(timeIntervalSince1970: 200),
+				payload: IncrementalSyncPayload(
+					feedKey: "feed-a", streamId: "feed/7", title: "Story \(index)",
+					feedURL: nil, siteURL: nil, iconURL: nil, isActive: nil, folders: nil,
+					id: "article-\(index)", readerId: "reader-\(index)", source: "Feed A",
+					author: nil, html: "<p>Body \(index)</p>", text: nil, originalURL: nil,
+					receivedAt: Date(timeIntervalSince1970: TimeInterval(200 + index)), isRead: false, isStarred: false,
+					isBodyPruned: false, itemId: nil, updatedAt: nil, version: nil, mutationId: nil,
+				),
+			)
+		}
+		await store.resetPendingOverlayLoadCount()
+
+		try await store.apply(
+			IncrementalSyncPage(cursor: "v1:3", hasMore: false, changes: changes),
+			accountID: "account-a",
+		)
+
+		#expect(await store.pendingOverlayLoadCountForTesting() == 1)
+		let snapshot = try await store.loadSnapshot(accountID: "account-a")
+		var stored: [String: Recommendation] = [:]
+		for article in snapshot.articlesByCollection.values.joined() { stored[article.id] = article }
+		#expect(stored.keys.sorted() == ["article-1", "article-2", "article-3"])
+		// The pending star still wins over the server's unstarred copy.
+		#expect(stored.values.filter(\.isStarred).map(\.id) == ["article-2"])
+	}
+
 	@Test func canonicalSyncAliasCollapsesInitialReaderRowAndPreservesMembershipBodyAndPendingStatus() async throws {
 		let store = OfflineLibraryStore.inMemory()
 		let readerID = "tag:google.com,2005:reader/item/0000000000000001"
