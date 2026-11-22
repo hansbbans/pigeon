@@ -178,6 +178,8 @@ private struct ReaderLibraryFeedTile: View {
 	let feed: ReaderLibraryTiles.FeedTile
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 
+	private var isCompact: Bool { feed.headline == nil }
+
 	var body: some View {
 		VStack(alignment: .leading, spacing: 6) {
 			HStack(spacing: 6) {
@@ -201,12 +203,13 @@ private struct ReaderLibraryFeedTile: View {
 					.contentTransition(reduceMotion ? .identity : .opacity)
 					.transition(.opacity)
 			}
-			Spacer(minLength: 0)
 		}
 		.padding(.horizontal, 12)
-		.padding(.top, 12)
-		.padding(.bottom, 10)
-		.frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+		.padding(.top, isCompact ? 11 : 12)
+		.padding(.bottom, isCompact ? 8 : 10)
+		// Without a cached headline the tile is one row of favicon and name,
+		// as Home's folder tile shrinks to its names, not an empty box.
+		.frame(maxWidth: .infinity, minHeight: isCompact ? 44 : 60, alignment: isCompact ? .leading : .topLeading)
 		.readerTileBackground(barColor: FrontPageKickerPalette.color(at: feed.colorIndex))
 		.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: feed.headline)
 	}

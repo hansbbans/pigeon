@@ -55,7 +55,10 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		XCTAssertTrue((unread.value as? String)?.hasSuffix("unread") == true)
 		// Each folder, then its feeds.
 		XCTAssertTrue(tile("user/-/label/Design").exists)
-		XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-feed/1")).firstMatch.exists)
+		let denseDiscovery = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-feed/1")).firstMatch
+		XCTAssertTrue(denseDiscovery.exists)
+		// No headline is cached for it, so its tile is one compact row, not an empty box.
+		XCTAssertLessThan(denseDiscovery.frame.height, 52)
 		attachScreenshot(named: "library-tiles")
 
 		app.buttons["reader-home-show-tiles"].tap()
