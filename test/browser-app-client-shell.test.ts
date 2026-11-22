@@ -99,7 +99,7 @@ test('clear saved session cancels a pending startup validation and returns focus
 	assert.equal(elements.get('login-error')?.textContent, 'Saved session cleared. Sign in again.');
 	assert.equal(getActiveElement(), elements.get('password-input'));
 
-	startupValidation.resolve(new Response('OK', { status: 200 }));
+	startupValidation.resolve(new Response(null, { status: 204 }));
 	await flushBrowserTasks();
 
 	assert.equal(storage.has(AUTH_STORAGE_KEY), false);
@@ -934,7 +934,7 @@ test('runtime script lets column resizer drags persist reader column widths', as
 		storedToken: 'live-token',
 		fetchImpl: async (input, init) => {
 			if (input === '/app/session') {
-				return new Response(null, { status: 200 });
+				return new Response(null, { status: 204 });
 			}
 
 			if (input === '/reader/api/0/subscription/list') {
@@ -1078,7 +1078,7 @@ test('runtime script lets keyboard users resize columns and exposes separator va
 		storedToken: 'live-token',
 		fetchImpl: async (input, init) => {
 			if (input === '/app/session') {
-				return new Response(null, { status: 200 });
+				return new Response(null, { status: 204 });
 			}
 
 			if (input === '/reader/api/0/subscription/list') {

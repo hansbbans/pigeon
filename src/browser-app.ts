@@ -2615,7 +2615,7 @@ export function renderBrowserAppRuntimeScript(): string {
       },
     });
 
-    if (response.ok) return true;
+    if (response.status === 204) return true;
     // A server error says nothing about the token: fail like an unreachable server and keep it.
     // Any other answer (401, or a 403/404 from something in front of the Worker) rejects it.
     if (response.status >= 500) throw new Error('Session check failed: ' + response.status);

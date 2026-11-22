@@ -94,10 +94,15 @@ export default {
 			return new Response(shell.html, { headers });
 		}
 
-		// The web app's sign-in check. It runs before the first screen on every load, so it only
-		// compares the token: no database, unlike the status page.
+		// The web app's sign-in check. It runs before the first screen on every load, so it compares
+		// the token and nothing more: none of the status page's counts. A failed migration still
+		// answers 503, which is what sends the app to its offline library.
 		if (path === '/app/session') {
+			if (request.method !== 'GET' && request.method !== 'HEAD') {
+				return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+			}
 			return (await requireApiAuth(request, env.API_PASSWORD))
+				?? (await ensureSchemaReady(env))
 				?? new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
 		}
 
