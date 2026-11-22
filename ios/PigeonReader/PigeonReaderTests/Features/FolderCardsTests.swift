@@ -102,6 +102,17 @@ struct FolderCardsTests {
 		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["a1", "b1", "a2", "b2", "a3"])
 	}
 
+	/// The Cards page re-renders at local midnight: the model's day moves on
+	/// when the day changes, and the page's sections are keyed by it.
+	@Test func theLocalDayMovesOnAtMidnight() async throws {
+		let model = try makeModel()
+		let today = ReaderLocalDayBounds.localDay(containing: .now)
+		#expect(model.localDayStart == today.start)
+
+		await model.handleLocalDayChange(now: today.end.addingTimeInterval(60))
+		#expect(model.localDayStart == today.end)
+	}
+
 	/// The page's sections are built once per change of what they show, not on
 	/// every body pass.
 	@Test func cardSectionsAreBuiltOncePerChange() throws {
@@ -229,12 +240,15 @@ struct FolderCardsTests {
 	private func makeModel() throws -> ReaderAppModel {
 		let session = PigeonSession(baseURL: try #require(URL(string: "https://pigeon.test")), token: "cards")
 		let defaults = try #require(UserDefaults(suiteName: "pigeon-folder-cards-\(UUID().uuidString)"))
+		let typography = ReaderTypographySettings(defaults: defaults)
+		typography.look = .cards
 		return ReaderAppModel(
 			sessionStore: TestSessionStore(session: session),
 			httpClient: MockHTTPClient(shouldFail: true),
 			articleFilterStore: ReaderArticleFilterStore(defaults: defaults),
 			offlineStore: OfflineLibraryStore.inMemory(),
 			offlineSynchronizationEnabled: false,
+			readerTypography: typography,
 		)
 	}
 }

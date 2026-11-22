@@ -203,6 +203,18 @@ struct FolderSectionsTests {
 		#expect(ids(expanded, "earlier").count == 9)
 	}
 
+	/// A story dated after today (a skewed clock) is Today in a folder too,
+	/// as it is in a single feed, rather than only in its feed's card.
+	@Test func aFutureStoryIsTodayInAFolder() {
+		let future = story("future", feed: "feed/1", source: "One", at: local(2026, 11, 5))
+		let today = story("today", feed: "feed/2", source: "Two", at: todayStart.addingTimeInterval(60))
+
+		let sections = FolderSections.make(articles: [today, future], feeds: .empty, now: now, calendar: calendar)
+
+		#expect(ids(sections, FolderSections.todayID) == ["future", "today"])
+		#expect(ids(sections, FolderSections.lastSevenDaysID).isEmpty)
+	}
+
 	/// The Cards page is rebuilt from the loaded stories, so a big folder must
 	/// still build in a fraction of a frame budget's worth of seconds.
 	@Test func aHundredFeedsAndAThousandStoriesBuildQuickly() {

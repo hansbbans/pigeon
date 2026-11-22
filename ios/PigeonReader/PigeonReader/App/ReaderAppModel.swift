@@ -158,6 +158,9 @@ final class ReaderAppModel {
 	/// The folder whose card opened the selected feed, so back returns there
 	/// rather than to Home. Cleared by choosing any other list.
 	private var feedOpenedFromFolderID: String?
+	/// The start of the local day the app last saw. Moves on at midnight (see
+	/// `handleLocalDayChange`), so pages built around today re-render.
+	private(set) var localDayStart = ReaderLocalDayBounds.localDay(containing: .now).start
 	var isConnecting = false
 	var errorMessage: String?
 	var settingsErrorMessage: String?
@@ -6162,6 +6165,8 @@ final class ReaderAppModel {
 	/// refreshes the open one of them.
 	@discardableResult
 	func handleLocalDayChange(now: Date = .now) async -> Bool {
+		let dayStart = ReaderLocalDayBounds.localDay(containing: now).start
+		if localDayStart != dayStart { localDayStart = dayStart }
 		guard let context = accountContext(), Task.isCancelled == false else { return false }
 		let prunedDayWindowIDs = pruneStaleDayWindowStories(now: now)
 		if prunedDayWindowIDs.isEmpty == false {

@@ -540,7 +540,9 @@ struct ArticleListView: View {
 			expanded: expandedCardSections,
 			feeds: isFolder ? model.articleFeedDirectory : .empty,
 			isFolder: isFolder,
-			day: ReaderLocalDayBounds.localDay(containing: now).start,
+			// The model's day moves on at midnight and on returning to the app,
+			// which re-renders this page with that day's Today.
+			day: model.localDayStart,
 		)
 		return cardSectionsCache.sections(for: key) {
 			isFolder

@@ -102,7 +102,9 @@ nonisolated struct FolderSections: Equatable, Sendable {
 				hiddenCount: articles.count - shown.count))
 		}
 
-		append(todayID, .today, "Today", articles: stories.filter { today.contains($0.receivedAt) }, limit: todayLimit)
+		// A story dated after today (a skewed clock) is Today, as in a single
+		// feed's cards, rather than only in its feed's card.
+		append(todayID, .today, "Today", articles: stories.filter { $0.receivedAt >= today.start }, limit: todayLimit)
 		append(lastSevenDaysID, .lastSevenDays, "Last 7 Days",
 			articles: stories.filter { $0.receivedAt >= week.start && $0.receivedAt < today.start },
 			limit: lastSevenDaysLimit)
