@@ -581,13 +581,12 @@ struct ArticleListView: View {
 				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
 				onStoryVisibilityChange: { impressions.setRowVisible($0, $1, copy: $2) },
 			) { article in
-				// Cards read newest first whatever the collection's sort, so
-				// "above" means newer.
+				// Above and below mean the cards as drawn, not the collection's sort.
 				readButton(for: article)
 				starButton(for: article)
 				Divider()
-				markAboveButton(for: article, newestFirst: true)
-				markBelowButton(for: article, newestFirst: true)
+				markAboveButton(for: article, order: sections.renderedArticles)
+				markBelowButton(for: article, order: sections.renderedArticles)
 			} footer: {
 				Text(model.collectionStatusText(for: collection))
 					.font(.footnote)
@@ -914,21 +913,18 @@ struct ArticleListView: View {
 		isShowingSaveErrorMessage = false
 	}
 
-	/// `newestFirst`: the reader sees the stories newest first (Cards), not
-	/// in the collection's sort order.
-	private func markAboveButton(for article: Recommendation, newestFirst: Bool = false) -> some View {
+	/// `order` is the on-screen order when it differs from the collection's.
+	private func markAboveButton(for article: Recommendation, order: [Recommendation]? = nil) -> some View {
 		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			let order = newestFirst ? FolderSections.newestFirst(updateBuffer.articles) : nil
 			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
-	private func markBelowButton(for article: Recommendation, newestFirst: Bool = false) -> some View {
+	private func markBelowButton(for article: Recommendation, order: [Recommendation]? = nil) -> some View {
 		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
 			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			let order = newestFirst ? FolderSections.newestFirst(updateBuffer.articles) : nil
 			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)

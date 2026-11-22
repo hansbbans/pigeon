@@ -54,6 +54,13 @@ nonisolated struct FolderSections: Equatable, Sendable {
 		uniqueArticleIDs = sections.flatMap(\.articles).map(\.id).filter { seen.insert($0).inserted }
 	}
 
+	/// Each shown story once, in the order the cards draw them (at its first
+	/// appearance, nothing behind "N more"): what above and below mean.
+	var renderedArticles: [Recommendation] {
+		var seen = Set<String>()
+		return sections.flatMap(\.articles).filter { seen.insert($0.id).inserted }
+	}
+
 	/// `expanded` holds the ids of sections shown in full.
 	static func make(
 		articles: [Recommendation],

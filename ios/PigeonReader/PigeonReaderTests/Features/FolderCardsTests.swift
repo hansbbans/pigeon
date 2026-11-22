@@ -87,26 +87,38 @@ struct FolderCardsTests {
 		#expect(copies.set("b", copy: "today", visible: true) == true)
 	}
 
-	@Test func markAboveInCardsFollowsNewestFirstNotTheFolderSort() async throws {
+	/// Above and below follow the cards as drawn: each story at its first
+	/// appearance, and nothing hidden behind "N more".
+	@Test func markAboveAndBelowFollowTheCardOrder() async throws {
 		let model = try makeModel()
 		let navigation = Self.navigation()
 		model.setNavigation(navigation)
 		let folder = try #require(navigation.item(withID: Self.tech))
 		model.select(item: folder)
-		let base = Date(timeIntervalSince1970: 1_800_000_000)
+		var calendar = Calendar(identifier: .gregorian)
+		calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12)))
+		func ago(_ days: Double) -> Date { now.addingTimeInterval(-days * 86_400) }
 		let stories = [
-			story("alpha-new", feed: "feed/7", at: base.addingTimeInterval(4)),
-			story("alpha-old", feed: "feed/7", at: base.addingTimeInterval(1)),
-			story("beta-new", feed: "feed/8", at: base.addingTimeInterval(9)),
-			story("beta-old", feed: "feed/8", at: base.addingTimeInterval(5)),
+			story("a1", feed: "feed/7", at: ago(0.05)), story("b1", feed: "feed/8", at: ago(0.1)),
+			story("a2", feed: "feed/7", at: ago(2)), story("b2", feed: "feed/8", at: ago(3)),
+			story("b3", feed: "feed/8", at: ago(9)),
+			story("a3", feed: "feed/7", at: ago(10)), story("a4", feed: "feed/7", at: ago(11)),
+			story("a5", feed: "feed/7", at: ago(12)),
 		]
 		model.setArticles(stories, for: folder)
-		#expect(model.sortOrder(for: folder) == .byFeed)
-		let betaOld = try #require(model.allArticles(for: folder).first { $0.id == "beta-old" })
+		let sections = FolderSections.make(
+			articles: model.articles(for: folder), feeds: model.articleFeedDirectory, now: now, calendar: calendar, expanded: [],
+		)
+		// Today a1 b1, Last 7 Days a2 b2, Alpha a1 a2 a3 (a4 a5 behind "2 more"), Beta b1 b2 b3.
+		#expect(sections.renderedArticles.map(\.id) == ["a1", "b1", "a2", "b2", "a3", "b3"])
+		let b3 = try #require(model.allArticles(for: folder).first { $0.id == "b3" })
 
-		await model.markStoriesAboveAsRead(betaOld, in: folder, order: FolderSections.newestFirst(model.articles(for: folder)))
+		await model.markStoriesBelowAsRead(b3, in: folder, order: sections.renderedArticles)
+		#expect(model.allArticles(for: folder).filter(\.isRead).isEmpty)
 
-		#expect(model.allArticles(for: folder).filter(\.isRead).map(\.id) == ["beta-new"])
+		await model.markStoriesAboveAsRead(b3, in: folder, order: sections.renderedArticles)
+		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["a1", "b1", "a2", "b2", "a3"])
 	}
 
 	@Test func backFromAFeedOpenedFromAFolderCardReturnsToTheFolder() throws {
