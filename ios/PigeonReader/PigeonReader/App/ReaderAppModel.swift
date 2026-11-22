@@ -2099,6 +2099,37 @@ final class ReaderAppModel {
 		return task
 	}
 
+	/// Shows the selected list from its own cached rows while the whole library
+	/// is still being read. Reading every cached story, bodies included, is most
+	/// of the time between a cold launch and the first list; one collection is a
+	/// small part of it. The full snapshot replaces these rows when it lands.
+	private func publishSelectedCollectionPreview(
+		accountID: String,
+		preparationID: UUID,
+		generation: UUID,
+	) async {
+		let collectionID = selectedNavigationID
+		func canPublish() -> Bool {
+			isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID, generation: generation)
+				&& isShowingBootstrapSnapshot
+				&& bootstrapAccountID == accountID
+				&& selectedNavigationID == collectionID
+				&& articleCache[collectionID]?.isEmpty != false
+		}
+		guard canPublish(),
+			let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID, collectionIDs: [collectionID]),
+			canPublish(),
+			let rows = snapshot.articlesByCollection[collectionID], rows.isEmpty == false else { return }
+		let ordering = cachedSnapshotOrdering(
+			snapshot,
+			initialSortOrders: sortOrders,
+			initialCanonicalOrder: canonicalArticleOrder,
+		)
+		let prepared = await prepareCachedSnapshot([collectionID: rows], ordering)
+		guard canPublish(), let articles = prepared[collectionID], articles.isEmpty == false else { return }
+		articleCache[collectionID] = articles
+	}
+
 	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
 		BootstrapInteractionState(
 			selectedNavigationID: selectedNavigationID,
@@ -2163,8 +2194,18 @@ final class ReaderAppModel {
 			// call's ownership after the reset before awaiting the snapshot.
 			activeOfflinePreparationID = preparationID
 			preparationGeneration = libraryGeneration
+			await publishSelectedCollectionPreview(
+				accountID: accountID,
+				preparationID: preparationID,
+				generation: preparationGeneration,
+			)
+			guard isCurrentOfflinePreparation(
+				accountID: accountID,
+				preparationID: preparationID,
+				generation: preparationGeneration,
+			) else { return }
 			do {
-				let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+				var snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -2172,7 +2213,30 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				guard let needsTodaySave = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation),
+				var appliedSnapshot = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation)
+				// The preview makes stories tappable while the library is still being
+				// read, and a read or star change in that window invalidates the snapshot
+				// being applied. The change is already in the store, so read it again
+				// rather than leave the shell on its bootstrap until the next launch.
+				var snapshotRetries = 0
+				while appliedSnapshot == nil, snapshotRetries < 3,
+					isCurrentOfflinePreparation(
+						accountID: accountID,
+						preparationID: preparationID,
+						generation: preparationGeneration,
+					) {
+					snapshotRetries += 1
+					snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+					guard isCurrentOfflinePreparation(
+						accountID: accountID,
+						preparationID: preparationID,
+						generation: preparationGeneration,
+					) else { return }
+					offlineCacheIntegrity = snapshot.integrity
+					requiresFullRebuild = snapshot.integrity.requiresFullRebuild
+					appliedSnapshot = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation)
+				}
+				guard let needsTodaySave = appliedSnapshot,
 					isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
 				if needsTodaySave {
 					shouldPersistTodayAfterRestore = true

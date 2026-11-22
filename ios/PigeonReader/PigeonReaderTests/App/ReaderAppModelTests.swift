@@ -2666,9 +2666,12 @@ struct ReaderAppModelTests {
 		defer { Task { await store.resumeSnapshot() } }
 		await store.waitUntilSnapshotIsPaused()
 
+		// The whole library is still being read, but the selected list already
+		// shows its own cached rows instead of a loading state.
+		#expect(model.isShowingBootstrapSnapshot)
 		#expect(model.selectedNavigationID == feed.id)
-		#expect(model.isInitialLoadPending(for: feed))
-		#expect(model.allArticles(for: feed).isEmpty)
+		#expect(model.isInitialLoadPending(for: feed) == false)
+		#expect(model.allArticles(for: feed).map(\.id) == [article.id])
 
 		await store.resumeSnapshot()
 		await preparation.value
@@ -6082,14 +6085,15 @@ struct ReaderAppModelTests {
 		model.setArticles([story], for: .forYou)
 		await model.setRead(story, read: true)
 		await model.setStarred(story, starred: true)
+		let edited = try #require(model.allArticles(for: .forYou).first)
+		#expect(edited.isRead && edited.isStarred)
+		// The edits invalidate the snapshot being prepared. The same preparation
+		// reads the store again instead of waiting for a later one, so it also
+		// sees what was stored in the meantime.
+		let fresh = makeArticle(id: "fresh-hydration-story", receivedAt: 2)
+		try await store.saveArticles([edited, fresh], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
 		await gate.release()
 		await preparation.value
-		let visible = try #require(model.allArticles(for: .forYou).first)
-		#expect(visible.isRead && visible.isStarred)
-		// An invalidated first hydration must remain retryable.
-		let fresh = makeArticle(id: "fresh-hydration-story", receivedAt: 2)
-		try await store.saveArticles([visible, fresh], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
-		await model.prepareOfflineLibrary()
 		#expect(model.allArticles(for: .forYou).contains { $0.id == fresh.id })
 		let restored = try #require(model.allArticles(for: .forYou).first { $0.id == story.id })
 		#expect(restored.isRead && restored.isStarred)
@@ -12018,6 +12022,12 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 			snapshotIsPaused = false
 		}
 		return try await base.loadSnapshot(accountID: accountID)
+	}
+
+	/// Only the whole-library read is paused: the launch preview reads one
+	/// collection and must be able to finish while that read is held.
+	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot {
+		try await base.loadSnapshot(accountID: accountID, collectionIDs: collectionIDs)
 	}
 
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {

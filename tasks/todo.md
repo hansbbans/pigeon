@@ -1,22 +1,26 @@
 # Feed loading: fixes from the NetNewsWire comparison (started 2026-11-22)
 
-Three branches, one outcome each. Nothing is pushed yet.
+Three branches, one outcome each. Committed locally; nothing is pushed.
 
-- [x] Worker (`claude/perf-worker-sync-hygiene`, `~/code/pigeon-perf-worker`): a poll writes a feed sync row only when the site or source URL changes; `max-age` capped at 5 hours. Suite green.
-- [x] Web (`claude/perf-web-first-load`, `~/code/pigeon-perf-web`): sign-in check uses `GET /app/session` (no database) instead of `/app/status`. Suite green.
-- [ ] iOS (`claude/perf-ios-store`, `~/code/pigeon-perf-ios`): a sync page reads the outbox once, not once per article. Written with a test; not yet run (the `Pigeon Claude` simulator was in use by another session).
-- [ ] iOS: run `STATUS_TOGGLE_BENCH` and `BOOTSTRAP_BENCH` before changing the toggle and launch paths
-- [ ] iOS: update the screen before the store on a read/star toggle (roll back if the enqueue fails)
-- [ ] iOS: show the selected list from a scoped snapshot at launch, then hydrate the rest (a tap during hydration must not strand it)
-- [ ] iOS: one warm `WKWebView`, fonts installed once
-- [ ] iOS: disk image cache, downsampled favicons
-- [ ] iOS: bodies out of list rows (cache migration; needs its own plan)
+- [x] Worker (`claude/perf-worker-sync-hygiene`, `~/code/pigeon-perf-worker`): a poll writes a feed sync row only when the site or source URL changes; `max-age` capped at 5 hours.
+- [x] Web (`claude/perf-web-first-load`, `~/code/pigeon-perf-web`): sign-in check uses `GET /app/session` (no database) instead of `/app/status`.
+- [x] iOS (`claude/perf-ios-store`, `~/code/pigeon-perf-ios`): a sync page reads the outbox once, not once per article.
+- [x] iOS: the selected list shows from a scoped snapshot at launch while the whole library is read; a read or star change in that window makes the preparation read the store again instead of leaving hydration for a later one.
+- [x] iOS: feed icons decoded once at 96 px and kept in memory (`FeedIconStore`); `URLCache.shared` raised to 150 MB on disk so thumbnails and icons survive a relaunch.
+- [x] iOS: the next reader web view is made ahead of time (`ReaderWebViewPool`). Each story still gets its own view and data store.
 
-Decided against, with reasons:
+## Review
+- Worker suite and typecheck green on both Worker branches. iOS: 1,107 unit tests, the 9 smoke UI tests and 6 UI tests that tap links and images inside the article web view, all green on `Pigeon Claude`.
+- Baseline from the existing benchmarks (simulator, loaded Mac): reading a 5,344-article, 61 MB cache takes about 550 ms; a toggle's enqueue about 2 ms. No after-numbers on a device yet.
+- Not measured: the launch preview and the web view prewarm on a real phone.
+
+Not done, with reasons:
+- Screen-before-store on a read/star toggle: the enqueue measured about 2 ms, so the wait only shows while a sync holds the store. Reordering it means rolling back the pending-state ledger on failure; that needs its own change and device testing.
+- Bodies out of list rows: a cache migration; needs its own plan.
+- Fonts installed once per web view: the shell is reloaded per story so images are requested with the story's own address as referrer; a reload drops installed fonts.
 - `cleanupReadBodies` filter on `body_pruned = 0`: a row can be flagged pruned and still hold a body, so the filter would stop pruning those.
 - Web list rows from server metadata: default views already get rows and bodies in one request; only folder, search and filter views would gain, and hero images are not stored for RSS items, so rows would shift when bodies arrive.
 - Web cached list on load: the sign-in token is per tab, so only an in-tab reload would benefit.
-
 
 ---
 
