@@ -124,6 +124,31 @@ struct FolderCardsTests {
 		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["b1", "a2", "b2"])
 	}
 
+	/// Next and previous in the reader follow the cards as drawn (each story at
+	/// its first appearance), not the folder's saved sort.
+	@Test func nextAndPreviousFollowTheCardOrder() throws {
+		let (model, folder, sections) = try cardsFixture()
+		model.setSortOrder(.oldest, for: folder)
+		#expect(model.articles(for: folder).first?.id == "a5")
+		let order = sections.uniqueArticleIDs
+		#expect(order == ["a1", "b1", "a2", "b2", "a3", "b3"])
+
+		model.retainPresentedArticles(model.articles(for: folder), in: folder, order: order)
+		let b1 = try #require(model.allArticles(for: folder).first { $0.id == "b1" })
+		model.select(article: b1)
+		#expect(model.articleTarget(for: .next, from: b1)?.id == "a2")
+		#expect(model.articleTarget(for: .previous, from: b1)?.id == "a1")
+		let b3 = try #require(model.allArticles(for: folder).first { $0.id == "b3" })
+		// Stories no card draws come after the drawn ones, in the list's order.
+		#expect(model.articleTarget(for: .next, from: b3)?.id == "a5")
+
+		// A list without a drawn order (Reeder) goes back to the saved sort,
+		// oldest first.
+		model.retainPresentedArticles(model.articles(for: folder), in: folder, order: nil)
+		#expect(model.articleTarget(for: .next, from: b1)?.id == "a1")
+		#expect(model.articleTarget(for: .previous, from: b1)?.id == "a2")
+	}
+
 	/// The Cards page re-renders at local midnight: the model's day moves on
 	/// when the day changes, and the page's sections are keyed by it.
 	@Test func theLocalDayMovesOnAtMidnight() async throws {

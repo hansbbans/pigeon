@@ -45,6 +45,9 @@ final class FolderCardsSectionsCache {
 	private var key: Key?
 	private var cached: FolderSections?
 
+	/// The sections last built, for actions taken on the page.
+	var current: FolderSections? { cached }
+
 	func sections(for key: Key, make: () -> FolderSections) -> FolderSections {
 		if let cached, self.key == key { return cached }
 		let sections = make()

@@ -526,6 +526,12 @@ struct ArticleListView: View {
 		return model.folderToReturnTo
 	}
 
+	/// The order the page draws stories in when it is not the sort: the
+	/// cards', each story at its first appearance.
+	private var presentedOrder: [String]? {
+		usesFolderCards ? cardSectionsCache.current?.uniqueArticleIDs : nil
+	}
+
 	private var presentationName: String {
 		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : "classic"
 	}
@@ -573,7 +579,8 @@ struct ArticleListView: View {
 				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 				select: { article in
 					impressions.rowChosen(article.id)
-					model.retainPresentedArticles(articles, in: collection)
+					// Next and previous follow the cards, not the saved sort.
+					model.retainPresentedArticles(articles, in: collection, order: sections.uniqueArticleIDs)
 					model.select(article: article)
 				},
 				onExpand: { sectionID in
@@ -870,7 +877,7 @@ struct ArticleListView: View {
 
 	private func readButton(for article: Recommendation) -> some View {
 		Button(article.isRead ? "Mark Unread" : "Mark Read", systemImage: article.isRead ? "envelope.badge" : "checkmark.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			actionFeedbackCount += 1
 			Task {
 				await model.setRead(article, read: !article.isRead, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
@@ -881,7 +888,7 @@ struct ArticleListView: View {
 
 	private func starButton(for article: Recommendation) -> some View {
 		Button(article.isStarred ? "Unstar" : "Star", systemImage: article.isStarred ? "star.slash" : "star") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			actionFeedbackCount += 1
 			Task {
 				await model.setStarred(article, starred: !article.isStarred, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
@@ -937,7 +944,7 @@ struct ArticleListView: View {
 	/// and `position` the copy of the story the menu was opened on.
 	private func markAboveButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
@@ -945,7 +952,7 @@ struct ArticleListView: View {
 
 	private func markBelowButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)

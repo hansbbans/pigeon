@@ -158,6 +158,9 @@ final class ReaderAppModel {
 	/// The folder whose card opened the selected feed, so back returns there
 	/// rather than to Home. Cleared by choosing any other list.
 	private var feedOpenedFromFolderID: String?
+	/// How the selected list's page orders its stories, when that is not
+	/// the sort (see `retainPresentedArticles`).
+	private var presentedArticleOrder: ReaderPresentedArticleOrder?
 	/// The start of the local day the app last saw. Moves on at midnight (see
 	/// `handleLocalDayChange`), so pages built around today re-render.
 	private(set) var localDayStart = ReaderLocalDayBounds.localDay(containing: .now).start
@@ -2877,6 +2880,7 @@ final class ReaderAppModel {
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
 			invalidateSpeculativeFeedWork()
+			presentedArticleOrder = nil
 			automaticDisplaySuppressionCollectionID = nil
 			clearDetachedSelectedArticle()
 			resetKeptArticles(handingOffOpenStory: false)
@@ -5035,7 +5039,20 @@ final class ReaderAppModel {
 	}
 
 	private var articleNavigationArticles: [Recommendation] {
-		activeSearchScope == nil ? articles : displayedSearchResults
+		activeSearchScope == nil ? inPresentedOrder(articles) : displayedSearchResults
+	}
+
+	/// The selected list's stories in the order its page draws them.
+	private func inPresentedOrder(_ articles: [Recommendation]) -> [Recommendation] {
+		guard let presentedArticleOrder, presentedArticleOrder.collectionID == selectedNavigationID else {
+			return articles
+		}
+		return presentedArticleOrder.ordering(articles)
+	}
+
+	func setPresentedArticleOrder(_ order: ReaderPresentedArticleOrder?) {
+		guard presentedArticleOrder != order else { return }
+		presentedArticleOrder = order
 	}
 
 	/// Unread/Read filters drop the open story from the visible list as soon as
@@ -5058,7 +5075,7 @@ final class ReaderAppModel {
 			// the source of truth before applying the active read/unread filter.
 			ordering = searchResults
 		} else {
-			ordering = articleCache[selectedNavigationID] ?? []
+			ordering = inPresentedOrder(articleCache[selectedNavigationID] ?? [])
 		}
 		guard let orderingIndex = ordering.firstIndex(where: { articlesMatch($0, current) }) else {
 			return visible + [current]
