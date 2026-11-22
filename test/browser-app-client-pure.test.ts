@@ -17,6 +17,8 @@ import {
 	formatArticleListTime,
 	getLocalDayBounds,
 	getLocalDayRangeBounds,
+	getViewDayBounds,
+	isTimeWindowView,
 	limitInitialItemIds,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
@@ -101,6 +103,33 @@ test('buildFeedViews shows the local-day unread count on Today and defaults it t
 	assert.equal(buildFeedViews([], unread, 4).find((view) => view.kind === 'all')!.unreadCount, 9);
 });
 
+test('buildFeedViews lists Last 7 Days after Today with its unread count', () => {
+	const unread = [{ id: 'user/-/state/com.google/reading-list', count: 9 }];
+	const views = buildFeedViews([], unread, 4, 7);
+	assert.deepEqual(views.map((view) => view.id).slice(0, 5), ['all', 'unread', 'today', 'last-7-days', 'recent']);
+	assert.deepEqual(views.find((view) => view.id === 'last-7-days'), {
+		id: 'last-7-days',
+		title: 'Last 7 Days',
+		streamId: 'user/-/state/com.google/reading-list',
+		unreadCount: 7,
+		kind: 'last-7-days',
+		section: 'views',
+	});
+	assert.equal(buildFeedViews([], unread, 4).find((view) => view.kind === 'last-7-days')!.unreadCount, 0);
+});
+
+test('Today and Last 7 Days are time-window views over one and seven local days', () => {
+	const now = new Date(2026, 10, 3, 12).getTime();
+	assert.equal(isTimeWindowView({ kind: 'today' }), true);
+	assert.equal(isTimeWindowView({ kind: 'last-7-days' }), true);
+	for (const kind of ['all', 'unread', 'folder', 'feed', 'recommended']) assert.equal(isTimeWindowView({ kind }), false);
+	assert.equal(isTimeWindowView(null), false);
+	const day = getLocalDayRangeBounds(now, 1);
+	const week = getLocalDayRangeBounds(now, 7);
+	assert.deepEqual(getViewDayBounds({ kind: 'today' }, now), { startSeconds: day.startSeconds, endSeconds: day.endSeconds });
+	assert.deepEqual(getViewDayBounds({ kind: 'last-7-days' }, now), { startSeconds: week.startSeconds, endSeconds: week.endSeconds });
+});
+
 test('buildFeedViews returns built-in views plus sorted uncategorized feeds', () => {
 	assert.deepEqual(
 		buildFeedViews(
@@ -136,6 +165,14 @@ test('buildFeedViews returns built-in views plus sorted uncategorized feeds', ()
 				streamId: 'user/-/state/com.google/reading-list',
 				unreadCount: 0,
 				kind: 'today',
+				section: 'views',
+			},
+			{
+				id: 'last-7-days',
+				title: 'Last 7 Days',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 0,
+				kind: 'last-7-days',
 				section: 'views',
 			},
 			{
@@ -217,6 +254,14 @@ test('buildFeedViews groups categorized feeds into folder views and keeps uncate
 				streamId: 'user/-/state/com.google/reading-list',
 				unreadCount: 0,
 				kind: 'today',
+				section: 'views',
+			},
+			{
+				id: 'last-7-days',
+				title: 'Last 7 Days',
+				streamId: 'user/-/state/com.google/reading-list',
+				unreadCount: 0,
+				kind: 'last-7-days',
 				section: 'views',
 			},
 			{

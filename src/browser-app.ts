@@ -504,9 +504,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let views = [];
   let subscriptions = [];
   let unreadCountRequestId = 0;
-  let todayUnreadCount = null;
-  let inFlightTodayCount = null;
-  let todayCountStale = false;
+  // Today's and Last 7 Days' unread counts, each from its own request (see refreshWindowUnreadCount).
+  const windowUnreadCounts = { today: { stored: null, inFlight: null, stale: false }, 'last-7-days': { stored: null, inFlight: null, stale: false } };
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
@@ -1091,8 +1090,9 @@ export function renderBrowserAppRuntimeScript(): string {
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
       view?.kind === 'recent' ? 'read' : articleReadFilter, sort: getListSortOrder(view) };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
-    if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
-      query.dayBounds = client.getLocalDayBounds();
+    // The window is part of the query, so a new local day starts a new list.
+    if (view?.kind === 'last-7-days' || (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest'))) {
+      query.dayBounds = client.getViewDayBounds(view);
     }
     return query;
   }
@@ -1178,7 +1178,7 @@ export function renderBrowserAppRuntimeScript(): string {
       refreshedAt: 0,
       contentLoadedIds: new Set(),
       publicationDates: new Map(),
-      todayDay: '',
+      windowDay: '',
       windowStart: 0,
       windowNavigation: false,
       windowAnchorId: null,
@@ -1369,13 +1369,13 @@ export function renderBrowserAppRuntimeScript(): string {
   // response so membership is scanned per chunk, not per article.
   function markContentLoaded(loadedIds) {
     if (loadedIds.length === 0) return;
-    const todayState = getViewState('today', false);
+    const windowStates = new Set(['today', 'last-7-days'].map((viewId) => getViewState(viewId, false)).filter(Boolean));
     for (const state of viewStates.values()) {
       const memberIds = new Set(state.itemIds);
       for (const itemId of loadedIds) {
         if (!memberIds.has(itemId)) continue;
         state.contentLoadedIds.add(itemId);
-        if (state === todayState) {
+        if (windowStates.has(state)) {
           const published = articleCache.get(itemId)?.published;
           if (typeof published === 'number' && Number.isFinite(published)) state.publicationDates.set(itemId, published);
         }
@@ -2123,6 +2123,11 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'today';
   }
 
+  // Today or Last 7 Days: lists bounded by local days.
+  function isTimeWindowView() {
+    return client.isTimeWindowView(getActiveView());
+  }
+
   function isSavedView() {
     return getActiveView()?.kind === 'saved';
   }
@@ -2140,17 +2145,17 @@ export function renderBrowserAppRuntimeScript(): string {
     return item?.mediaKind === 'video' || Boolean(client.extractYouTubeVideoId(item?.alternate?.[0]?.href));
   }
 
-  function getTodayCandidateIds() {
+  function getTimeWindowCandidateIds() {
     const state = getViewState(activeViewId);
-    const bounds = client.getLocalDayBounds();
+    const bounds = client.getViewDayBounds(getActiveView());
     const day = bounds.startSeconds + ':' + bounds.endSeconds;
-    if (state.todayDay !== day) {
-      state.todayDay = day;
+    if (state.windowDay !== day) {
+      state.windowDay = day;
       state.windowStart = 0;
       state.windowAnchorId = null;
     }
     // Only a number is retained per membership ID. Evictable titles and bodies
-    // must not decide whether a previously verified story still belongs today.
+    // must not decide whether a previously verified story still belongs to the window.
     return itemIds.filter((id) => {
       const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
       if (typeof published !== 'number' || !Number.isFinite(published)) return true;
@@ -2161,7 +2166,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getWindowCandidateIds() {
     reconcileArticleQueryBoundary();
-    return isTodayView() ? getTodayCandidateIds() : itemIds;
+    return isTimeWindowView() ? getTimeWindowCandidateIds() : itemIds;
   }
 
   function reconcileArticleQueryBoundary() {
@@ -2188,12 +2193,12 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
 
-  function reconcileTodayMembershipBoundary() {
-    if (!isTodayView() || isLoadingItemIdsPage || !hasReachedTodayBoundary()) return;
+  function reconcileWindowMembershipBoundary() {
+    if (!isTimeWindowView() || isLoadingItemIdsPage || !hasReachedWindowBoundary()) return;
     const state = getViewState(activeViewId);
     const kept = getKeptItemIds(state);
     if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id) || kept?.has(id))) return;
-    // The ordered current root has reached yesterday, so all of today's IDs
+    // The ordered current root has reached the day before the window, so all of its IDs
     // are confirmed even when the server still has older pages. Cached tails
     // must no longer retain removed stories or their previous ordering.
     itemIds = withKeptItemIds(state, [...state.confirmedItemIds], '');
@@ -2209,7 +2214,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function getVisibleItemIds() {
-    reconcileTodayMembershipBoundary();
+    reconcileWindowMembershipBoundary();
     const state = getViewState(activeViewId);
     const candidates = getWindowCandidateIds();
     const anchoredIndex = state.windowAnchorId ? candidates.indexOf(state.windowAnchorId) : -1;
@@ -2223,10 +2228,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return visible;
   }
 
-  function hasReachedTodayBoundary() {
-    if (!isTodayView()) return false;
+  function hasReachedWindowBoundary() {
+    if (!isTimeWindowView()) return false;
     const state = getViewState(activeViewId);
-    const bounds = client.getLocalDayBounds();
+    const bounds = client.getViewDayBounds(getActiveView());
     return itemIds.some((id) => {
       const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
       return state.confirmedItemIds.has(id) && typeof published === 'number' && published < bounds.startSeconds;
@@ -2239,7 +2244,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const candidates = active ? getWindowCandidateIds() : [];
     const busy = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
     const more = active && (state.windowStart + ARTICLE_WINDOW_SIZE < candidates.length ||
-      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation)));
+      (!hasReachedWindowBoundary() && Boolean(nextItemIdsContinuation)));
     articleWindowControls.classList.toggle('hidden', !active || (state.windowStart === 0 && !more));
     articleNewerButton.disabled = busy || !active || state.windowStart === 0;
     articleOlderButton.disabled = busy || !more;
@@ -2252,7 +2257,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const candidates = getWindowCandidateIds();
     const start = Math.max(0, state.windowStart + direction * ARTICLE_WINDOW_SIZE);
     if (start === state.windowStart ||
-        (direction > 0 && start >= candidates.length && (hasReachedTodayBoundary() || !nextItemIdsContinuation))) return false;
+        (direction > 0 && start >= candidates.length && (hasReachedWindowBoundary() || !nextItemIdsContinuation))) return false;
     state.windowNavigation = true;
     state.windowStart = start;
     state.windowAnchorId = candidates[start] || null;
@@ -2315,7 +2320,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const hasUnreadItems = ['today', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
+    const hasUnreadItems = ['today', 'last-7-days', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
     const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems || isOfflineReading();
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
@@ -2401,7 +2406,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
-    if (isTodayView()) {
+    if (isTimeWindowView()) {
       renderArticles();
       renderReader();
     }
@@ -2418,7 +2423,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const nextIndex = selectedIndex + direction;
     const visibleItemIds = getVisibleItemIds();
     if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedTodayBoundary()) {
+      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedWindowBoundary()) {
         if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || (window.navigator?.onLine === false && !offlineLibrary)) return false;
         void loadAdjacentKeyboardArticle();
         return true;
@@ -2532,13 +2537,13 @@ export function renderBrowserAppRuntimeScript(): string {
       plannedIds.push(itemId);
     };
 
-    // A selected article cache miss remains loadable after finding yesterday.
+    // A selected article cache miss remains loadable after finding the day before the window.
     addId(targetItemId, true);
-    const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
+    const windowStartSeconds = isTimeWindowView() ? client.getViewDayBounds(getActiveView()).startSeconds : null;
     for (const itemId of getVisibleItemIds()) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
-      if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
+      if (windowStartSeconds !== null && typeof published === 'number' && published < windowStartSeconds) {
         break;
       }
       addId(itemId, !loadedItemsById[itemId]);
@@ -2752,6 +2757,8 @@ export function renderBrowserAppRuntimeScript(): string {
       summaryParts.push('Unread only');
     } else if (activeView.kind === 'today') {
       summaryParts.push('Received today');
+    } else if (activeView.kind === 'last-7-days') {
+      summaryParts.push('Received in the last 7 days');
     } else if (activeView.kind === 'recent') {
       summaryParts.push('Read items');
     } else if (activeView.kind === 'starred') {
@@ -2878,7 +2885,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (entries.length === 0) {
       const activeView = getActiveView();
       articlesStatus.textContent =
-        isTodayView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
+        isTimeWindowView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
           ? 'Loading articles…'
           : activeView?.kind === 'saved'
             ? savedEmptyMessage()
@@ -4066,6 +4073,8 @@ export function renderBrowserAppRuntimeScript(): string {
   function usesBrowserArticlesQuery(view) {
     // Read It Later exists only as the browser/articles saved stream.
     if (view?.kind === 'saved') return true;
+    // Last 7 Days is the server's since/before query; only Today pages the reading list itself.
+    if (view?.kind === 'last-7-days') return true;
     return Boolean(articleSearchQuery || articleReadFilter !== 'all' || getListSortOrder(view) !== 'newest');
   }
 
@@ -4119,8 +4128,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if (query.kind && query.kind !== 'all') params.set('kind', query.kind);
       if (query.length && query.length !== 'any') params.set('length', query.length);
     }
-    if (view.kind === 'today') {
-      const bounds = options?.dayBounds || query.dayBounds || client.getLocalDayBounds();
+    if (client.isTimeWindowView(view)) {
+      const bounds = options?.dayBounds || query.dayBounds || client.getViewDayBounds(view);
       params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
       params.set('before', new Date(bounds.endSeconds * 1000).toISOString());
     }
@@ -4192,7 +4201,7 @@ export function renderBrowserAppRuntimeScript(): string {
     state.refreshedAt = Date.now();
     if (!state.selectedItemId || !memberIds.has(state.selectedItemId)) {
       const view = views.find((candidate) => candidate.id === viewId);
-      state.selectedItemId = view?.kind === 'today' ? null : state.itemIds[0] || null;
+      state.selectedItemId = client.isTimeWindowView(view) ? null : state.itemIds[0] || null;
     }
 
     if (viewId === activeViewId) {
@@ -4453,7 +4462,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const kept = getKeptItemIds(state);
     return createPendingContentPlan(null).length > 0 ||
       ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id) && !kept?.has(id))) &&
-        !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
+        !hasReachedWindowBoundary() && Boolean(nextItemIdsContinuation));
   }
 
   function shouldAutoLoadWindow() {
@@ -4543,7 +4552,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const activeView = getActiveView();
     const activeState = activeView ? getViewState(activeView.id) : null;
     const continuation = activeState?.continuation || nextItemIdsContinuation;
-    if (!activeView || !continuation || isLoadingItemIdsPage || (isTodayView() && hasReachedTodayBoundary())) {
+    if (!activeView || !continuation || isLoadingItemIdsPage || hasReachedWindowBoundary()) {
       return;
     }
 
@@ -4641,7 +4650,7 @@ export function renderBrowserAppRuntimeScript(): string {
     syncLoadedItemsFromCache();
     selectedItemId = state.selectedItemId && itemIds.includes(state.selectedItemId)
       ? state.selectedItemId
-      : isTodayView()
+      : isTimeWindowView()
         ? null
         : itemIds[0] || null;
     state.selectedItemId = selectedItemId;
@@ -4672,7 +4681,7 @@ export function renderBrowserAppRuntimeScript(): string {
         selectedItemId = currentState.selectedItemId;
         // applyMembershipPayload already rendered this view; only start body
         // loading when something is still missing or the window auto-extends.
-        const preferredItemId = isTodayView() ? null : selectedItemId;
+        const preferredItemId = isTimeWindowView() ? null : selectedItemId;
         if (itemIds.length > 0 && (shouldAutoLoadWindow() || createPendingContentPlan(preferredItemId).length > 0)) {
           await loadContentChunk(preferredItemId, requestId);
         } else {
@@ -4956,7 +4965,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (['above','below'].includes(request.mode) && index < 0) throw new Error('Selected article is no longer in these results.');
       return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
     }
-    if (request.view.kind === 'today' && request.before &&
+    if (client.isTimeWindowView(request.view) && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
     do {
       if (!isCurrentBulkRequest(request)) return [];
@@ -5061,7 +5070,7 @@ export function renderBrowserAppRuntimeScript(): string {
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
-      dayBounds: client.getLocalDayBounds(), before: mode.startsWith('age-')
+      dayBounds: client.getViewDayBounds(view), before: mode.startsWith('age-')
         ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null };
   }
 
@@ -5188,7 +5197,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const token = session.token;
     if (!force && inFlightUnreadCountRequest) return inFlightUnreadCountRequest;
     const requestId = ++unreadCountRequestId;
-    void refreshTodayUnreadCount();
+    void refreshWindowUnreadCount('today');
+    void refreshWindowUnreadCount('last-7-days');
     const requestPromise = authenticatedJson('/reader/api/0/unread-count')
       .then((payload) => ({ payload, generation, token, requestId }))
       .finally(() => {
@@ -5198,45 +5208,47 @@ export function renderBrowserAppRuntimeScript(): string {
     return requestPromise;
   }
 
-  // Today's count comes from its own request (unread-count cannot know the local
-  // day), runs beside unread-count without delaying it, and patches only Today.
-  // A stored count counts only for the session and local day it was fetched for.
-  function refreshTodayUnreadCount() {
-    if (inFlightTodayCount) {
-      todayCountStale = true;
-      return inFlightTodayCount;
+  // Today's and Last 7 Days' counts come from their own requests (unread-count
+  // cannot know the local day), run beside unread-count without delaying it, and
+  // patch only their own view. A stored count counts only for the session and
+  // local window it was fetched for.
+  function refreshWindowUnreadCount(kind) {
+    const entry = windowUnreadCounts[kind];
+    if (entry.inFlight) {
+      entry.stale = true;
+      return entry.inFlight;
     }
     const generation = accountGeneration, token = session.token;
-    const bounds = client.getLocalDayBounds();
+    const bounds = client.getViewDayBounds({ kind });
     const params = new URLSearchParams({ stream: 'all', filter: 'unread',
       since: new Date(bounds.startSeconds * 1000).toISOString(), before: new Date(bounds.endSeconds * 1000).toISOString() });
-    todayCountStale = false;
-    inFlightTodayCount = authenticatedJson('/api/v1/browser/articles/count?' + params.toString())
+    entry.stale = false;
+    entry.inFlight = authenticatedJson('/api/v1/browser/articles/count?' + params.toString())
       .then((payload) => {
         if (!requestBelongsToCurrentSession(generation, token) || !Number.isSafeInteger(payload?.count) || payload.count < 0) return;
-        todayUnreadCount = { count: payload.count, day: bounds.startSeconds, generation, token };
-        const todayView = views.find((view) => view.kind === 'today');
-        if (todayView && todayView.unreadCount !== payload.count) {
-          todayView.unreadCount = payload.count;
+        entry.stored = { count: payload.count, start: bounds.startSeconds, generation, token };
+        const windowView = views.find((view) => view.kind === kind);
+        if (windowView && windowView.unreadCount !== payload.count) {
+          windowView.unreadCount = payload.count;
           renderFeeds();
         }
       })
       .catch(() => {})
       .finally(() => {
-        inFlightTodayCount = null;
-        if (todayCountStale && requestBelongsToCurrentSession(generation, token)) void refreshTodayUnreadCount();
+        entry.inFlight = null;
+        if (entry.stale && requestBelongsToCurrentSession(generation, token)) void refreshWindowUnreadCount(kind);
       });
-    return inFlightTodayCount;
+    return entry.inFlight;
   }
 
-  function currentTodayUnreadCount() {
-    const stored = todayUnreadCount;
-    return stored && stored.day === client.getLocalDayBounds().startSeconds &&
+  function currentWindowUnreadCount(kind) {
+    const stored = windowUnreadCounts[kind].stored;
+    return stored && stored.start === client.getViewDayBounds({ kind }).startSeconds &&
       requestBelongsToCurrentSession(stored.generation, stored.token) ? stored.count : 0;
   }
 
   function buildViews(unreadcounts) {
-    return client.buildFeedViews(subscriptions, unreadcounts, currentTodayUnreadCount());
+    return client.buildFeedViews(subscriptions, unreadcounts, currentWindowUnreadCount('today'), currentWindowUnreadCount('last-7-days'));
   }
 
   function isCurrentUnreadCountResult(result) {
@@ -5714,7 +5726,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
     const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
-    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedTodayBoundary();
+    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
     contextMarkAboveButton.disabled = unavailable || index === 0;
     contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !moreBelow);
   }

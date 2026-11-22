@@ -41,7 +41,7 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'saved' | 'recommended' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'last-7-days' | 'recent' | 'starred' | 'saved' | 'recommended' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
@@ -542,6 +542,8 @@ export function buildFeedViews(
 	// Unread items received in the local day; the server cannot derive it from
 	// unread-count because it does not know the browser's time zone.
 	todayUnreadCount = 0,
+	// Unread items received in the last 7 local days, today included; same reason.
+	lastSevenDaysUnreadCount = 0,
 ): BrowserFeedView[] {
 	function createCategoryLabel(category: { id: string; label?: string }): string {
 		if (category.label && category.label.trim()) {
@@ -681,6 +683,14 @@ export function buildFeedViews(
 			section: 'views',
 		},
 		{
+			id: 'last-7-days',
+			title: 'Last 7 Days',
+			streamId: 'user/-/state/com.google/reading-list',
+			unreadCount: lastSevenDaysUnreadCount,
+			kind: 'last-7-days',
+			section: 'views',
+		},
+		{
 			id: 'recent',
 			title: 'Recently read',
 			streamId: 'user/-/state/com.google/read',
@@ -731,6 +741,20 @@ export function getLocalDayRangeBounds(now: number, days: number): BrowserLocalD
 
 export function getLocalDayBounds(now: Date = new Date()): BrowserLocalDayBounds {
 	const bounds = getLocalDayRangeBounds(now.getTime(), 1);
+	return { startSeconds: bounds.startSeconds, endSeconds: bounds.endSeconds };
+}
+
+/** Today and Last 7 Days: views defined by a window of local days. Self-contained. */
+export function isTimeWindowView(view: { kind: string } | null | undefined): boolean {
+	return view?.kind === 'today' || view?.kind === 'last-7-days';
+}
+
+/**
+ * The window of a time-window view: Today is the local day, Last 7 Days the
+ * local day and the six before it. Emitted via toString().
+ */
+export function getViewDayBounds(view: { kind: string } | null | undefined, now: number = Date.now()): BrowserLocalDayBounds {
+	const bounds = getLocalDayRangeBounds(now, view?.kind === 'last-7-days' ? 7 : 1);
 	return { startSeconds: bounds.startSeconds, endSeconds: bounds.endSeconds };
 }
 
@@ -1213,7 +1237,7 @@ export function readingLogView(
 	if (isSearching) return { view: 'search', stream };
 	if (view.kind === 'recommended') return { view: 'for-you', stream: null };
 	if (stream !== null) return { view: view.kind, stream };
-	return ['all', 'unread', 'today', 'recent', 'starred', 'saved'].includes(view.kind) ? { view: view.kind, stream: null } : null;
+	return ['all', 'unread', 'today', 'last-7-days', 'recent', 'starred', 'saved'].includes(view.kind) ? { view: view.kind, stream: null } : null;
 }
 
 export function outboundLinkHost(href: unknown): string | null {
@@ -1301,6 +1325,8 @@ ${createFeedOrderComparator.toString()}
 ${buildFeedViews.toString()}
 ${getLocalDayRangeBounds.toString()}
 ${getLocalDayBounds.toString()}
+${isTimeWindowView.toString()}
+${getViewDayBounds.toString()}
 ${buildFolderSections.toString()}
 ${filterItemIdsForLocalDay.toString()}
 ${limitInitialItemIds.toString()}
@@ -1358,6 +1384,8 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   buildFeedViews,
   getLocalDayRangeBounds,
   getLocalDayBounds,
+  isTimeWindowView,
+  getViewDayBounds,
   buildFolderSections,
   filterItemIdsForLocalDay,
   limitInitialItemIds,

@@ -5,6 +5,7 @@ import {
 	THEME_STORAGE_KEY,
 	createArticleFrameDocument,
 	getLocalDayBounds,
+	getLocalDayRangeBounds,
 } from '../src/browser-app-client';
 import {
 	createBrowserHarness,
@@ -690,6 +691,69 @@ test('runtime Today view filters received timestamps in the local day and stops 
 
 	await findListButtonByItemId(elements.get('articles-list'), '2')?.dispatch('click');
 	assert.equal(elements.get('reader-title')?.textContent, 'At-midnight article');
+});
+
+test('Last 7 Days view requests since/before for seven local days and lists newest first', async () => {
+	const now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
+	const week = getLocalDayRangeBounds(now, 7);
+	const contentFor = (id: string, published: number) => ({
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title: `Story ${id}`, published, origin: { title: 'Alpha', streamId: 'feed/1' },
+		summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
+	});
+	const contentById: Record<string, ReturnType<typeof contentFor>> = {
+		'1': contentFor('1', week.startSeconds),
+		'2': contentFor('2', week.startSeconds + 3 * 86_400),
+		'3': contentFor('3', week.endSeconds - 1),
+	};
+	const articleRequests: URL[] = [];
+	const countRequests: URL[] = [];
+	const { elements } = await createBrowserHarness({
+		now,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [{ id: 'feed/1', count: 3 }] });
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') {
+				countRequests.push(url);
+				return Response.json({ count: url.searchParams.get('since') === week.start.toISOString() ? 7 : 2 });
+			}
+			if (url.pathname === '/api/v1/browser/articles') {
+				articleRequests.push(url);
+				return Response.json({ itemIds: ['3', '2', '1'], continuation: null, hasMore: false, sort: 'newest' });
+			}
+			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).map((id) => contentById[id]).filter(Boolean) });
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => (findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.textContent ?? '').includes('7'));
+	const viewIds = elements.get('views-list')!.children.map((row) => row.children[0]?.dataset.viewId);
+	assert.equal(viewIds[viewIds.indexOf('today') + 1], 'last-7-days');
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.textContent ?? '', /Last 7 Days/);
+	const weekCount = countRequests.find((url) => url.searchParams.get('since') === week.start.toISOString());
+	assert.ok(weekCount, 'the Last 7 Days count asks for its own window');
+	assert.equal(weekCount.searchParams.get('before'), week.end.toISOString());
+	assert.equal(weekCount.searchParams.get('stream'), 'all');
+	assert.equal(weekCount.searchParams.get('filter'), 'unread');
+
+	await findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	const request = articleRequests.at(-1)!;
+	assert.equal(request.searchParams.get('stream'), 'user/-/state/com.google/reading-list');
+	assert.equal(request.searchParams.get('since'), week.start.toISOString());
+	assert.equal(request.searchParams.get('before'), week.end.toISOString());
+	assert.equal(request.searchParams.get('sort'), 'newest');
+	assert.equal(request.searchParams.get('filter'), 'all');
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['3', '2', '1']);
+	assert.equal(elements.get('articles-heading')?.textContent, 'Last 7 Days');
+	assert.equal(elements.get('sidebar-current-meta')?.textContent, 'Received in the last 7 days');
+	await waitForBrowserCondition(() => elements.get('reader-title')?.textContent === 'Story 3');
 });
 
 test('runtime script hides all-read feeds when the unread filter is active', async () => {
