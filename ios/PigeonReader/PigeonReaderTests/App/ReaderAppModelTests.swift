@@ -9749,6 +9749,52 @@ struct ReaderAppModelTests {
 		#expect(model.isOffline == false)
 	}
 
+	/// A feed pushed above its folder (Cards) follows a rename: the folder
+	/// under it and the feed's row in it both get the new folder's ids.
+	@Test func folderRenameKeepsAFeedPushedAboveTheFolder() async throws {
+		let controlled = ControlledHTTPClient()
+		let model = try makeModel(httpClient: controlled)
+		#expect(model.readerTypography.look == .cards)
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		model.select(item: folder)
+		model.openFeed(feed, fromFolder: folder)
+
+		let rename = Task { await model.renameFolder("Design", to: "Studio") }
+		let request = await controlled.nextRequest()
+		let renamed = try #require(model.folderNavigationItems.first)
+		let renamedFeed = try #require(model.feedNavigationItems(in: renamed).first)
+		#expect(model.contentRootCollection.id == renamed.id)
+		#expect(model.cardFeedPath == [ReaderCardFeedDestination(feedID: renamedFeed.id)])
+		#expect(model.selectedNavigationID == renamedFeed.id)
+
+		await controlled.resolve(request)
+		#expect(await rename.value)
+		model.cardFeedPath = []
+		#expect(model.selectedNavigationID == renamed.id)
+	}
+
+	/// Only Cards gives the list column a stack. Leaving it keeps the pushed
+	/// feed open as the column's only list rather than showing the folder.
+	@Test func leavingCardsKeepsAFeedPushedAboveItsFolderOpen() throws {
+		let model = try makeModel(httpClient: MockHTTPClient())
+		let subscription = makeSubscription(id: "feed/1", key: "daily", title: "Daily", folder: "Design")
+		installSubscriptions([subscription], on: model)
+		let folder = try #require(model.folderNavigationItems.first)
+		let feed = try #require(model.feedNavigationItems(in: folder).first)
+		model.select(item: folder)
+		model.openFeed(feed, fromFolder: folder)
+
+		model.readerTypography.look = .reeder
+		#expect(model.contentRootCollection.id == feed.id)
+		// The stack going away writes an empty path; that is not a pop.
+		model.cardFeedPath = []
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.contentRootCollection.id == feed.id)
+	}
+
 	@Test func folderRenameDiscardsAnInFlightLoadWithoutLeavingTheRenamedFolderLoading() async throws {
 		let controlled = ControlledHTTPClient()
 		let model = try makeModel(httpClient: controlled)

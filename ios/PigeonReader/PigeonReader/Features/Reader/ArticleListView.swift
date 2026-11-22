@@ -377,19 +377,7 @@ struct ArticleListView: View {
 			await loadOlderStories()
 			if Task.isCancelled, paginationContext == requestContext { paginationGate.cancelClaim(token) }
 		}
-		// A feed opened from a folder card goes back to the folder; the system
-		// back item would pop to Home.
-		.navigationBarBackButtonHidden(folderToReturnTo != nil)
 		.toolbar {
-			if let folder = folderToReturnTo {
-				ToolbarItem(placement: .topBarLeading) {
-					Button(folder.title, systemImage: "chevron.backward") {
-						model.returnToFolder()
-					}
-					.accessibilityHint("Returns to \(folder.title)")
-					.accessibilityIdentifier("folder-card-feed-back")
-				}
-			}
 			if model.selectedNavigationID == collection.id {
 				ArticleListToolbar(
 					collection: collection,
@@ -521,11 +509,6 @@ struct ArticleListView: View {
 		}
 	}
 
-	private var folderToReturnTo: ReaderNavigationItem? {
-		guard usesCardsLook, model.selectedNavigationID == collection.id else { return nil }
-		return model.folderToReturnTo
-	}
-
 	/// The order the page draws stories in when it is not the sort: the
 	/// cards', each story at its first appearance.
 	private var presentedOrder: [String]? {
@@ -591,6 +574,7 @@ struct ArticleListView: View {
 				canOpenFeed: { navigationItem(for: $0) != nil },
 				onOpenFeed: { feed in
 					guard let item = navigationItem(for: feed) else { return }
+					// Pushed above the folder, which stays as it was left.
 					if collection.kind == .folder {
 						model.openFeed(item, fromFolder: collection)
 					} else {

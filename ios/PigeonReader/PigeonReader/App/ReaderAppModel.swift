@@ -151,13 +151,16 @@ final class ReaderAppModel {
 	var preferredCompactColumn: NavigationSplitViewColumn = .sidebar {
 		didSet {
 			if preferredCompactColumn != oldValue { scheduleRestorationSave() }
-			// Home is the top of the stack; nothing below it to return to.
-			if preferredCompactColumn == .sidebar { feedOpenedFromFolderID = nil }
+			// The stack above a folder is kept at Home and cleared by choosing
+			// a list, so a swipe back from Home's edge never loses it midway.
 		}
 	}
-	/// The folder whose card opened the selected feed, so back returns there
-	/// rather than to Home. Cleared by choosing any other list.
-	private var feedOpenedFromFolderID: String?
+	/// A feed opened from a folder's card, pushed above the folder in the
+	/// Cards stack (`cardsPath`), so the system back button and the edge
+	/// swipe return to the folder as it was left. `cardStackRootID` is that
+	/// folder; both are cleared by choosing any other list.
+	private var storedCardFeedPath: [ReaderCardFeedDestination] = []
+	private var cardStackRootID: String?
 	/// How the selected list's page orders its stories, when that is not
 	/// the sort (see `retainPresentedArticles`).
 	private var presentedArticleOrder: ReaderPresentedArticleOrder?
@@ -2823,21 +2826,67 @@ final class ReaderAppModel {
 		select(collectionID: item.id)
 	}
 
-	/// Opens a feed from its card in a folder; back returns to the folder.
+	/// Opens a feed from its card in a folder, pushed above the folder.
 	func openFeed(_ feed: ReaderNavigationItem, fromFolder folder: ReaderNavigationItem) {
 		select(item: feed)
-		feedOpenedFromFolderID = folder.id
+		cardStackRootID = folder.id
+		storedCardFeedPath = [ReaderCardFeedDestination(feedID: feed.id)]
 	}
 
-	/// The folder the selected feed was opened from, while it still exists.
-	var folderToReturnTo: ReaderNavigationItem? {
-		guard let feedOpenedFromFolderID, feedOpenedFromFolderID != selectedNavigationID else { return nil }
-		return navigation.item(withID: feedOpenedFromFolderID)
+	/// The feeds above the open folder. Only popping is driven from outside
+	/// (the back button, the edge swipe): it selects the folder again, which
+	/// is still on screen underneath.
+	var cardFeedPath: [ReaderCardFeedDestination] {
+		get { storedCardFeedPath }
+		set {
+			guard newValue != storedCardFeedPath else { return }
+			guard newValue.isEmpty, let rootID = cardStackRootID else {
+				storedCardFeedPath = newValue
+				return
+			}
+			if readerTypography.look == .cards, navigation.item(withID: rootID) != nil {
+				select(collectionID: rootID)
+			} else {
+				clearCardStack()
+			}
+		}
 	}
 
-	func returnToFolder() {
-		guard let folder = folderToReturnTo else { return }
-		select(item: folder)
+	/// The Cards stack above Home: the list (`contentRootCollection`) while
+	/// one is open, then a feed pushed above its folder. Read from the column
+	/// state; the system back button and the edge swipe write it.
+	var cardsPath: [ReaderCardsRoute] {
+		get {
+			guard preferredCompactColumn != .sidebar else { return [] }
+			return [.list] + storedCardFeedPath.map { .feed($0.feedID) }
+		}
+		set {
+			guard newValue != cardsPath else { return }
+			guard newValue.isEmpty == false else {
+				preferredCompactColumn = .sidebar
+				return
+			}
+			cardFeedPath = newValue.dropFirst().compactMap { route in
+				if case let .feed(id) = route { ReaderCardFeedDestination(feedID: id) } else { nil }
+			}
+			if preferredCompactColumn == .sidebar { preferredCompactColumn = .content }
+		}
+	}
+
+	/// The open list under any pushed feed: the folder under a feed opened
+	/// from its card, otherwise the selected list.
+	var contentRootCollection: ReaderNavigationItem {
+		guard readerTypography.look == .cards, let cardStackRootID,
+			let root = navigation.item(withID: cardStackRootID) else { return selectedCollection }
+		return root
+	}
+
+	/// Leaves the selected feed as the only open list, as when the look
+	/// changes to one without the Cards stack.
+	func clearCardStack() {
+		guard cardStackRootID != nil || storedCardFeedPath.isEmpty == false else { return }
+		cardStackRootID = nil
+		storedCardFeedPath = []
 	}
 
 	func toggleFolder(_ folder: ReaderNavigationItem) {
@@ -2859,6 +2908,11 @@ final class ReaderAppModel {
 		if markAsLoaded {
 			hasLoadedNavigation = true
 		}
+		// A folder that went away (deleted, or moved by another device) takes
+		// its stack with it; the pushed feed becomes the only open list.
+		if let cardStackRootID, navigation.item(withID: cardStackRootID) == nil {
+			clearCardStack()
+		}
 		if navigation.item(withID: previousSelection) == nil {
 			if let previousCollection {
 				temporarilyUnavailableSelectedCollection = previousCollection
@@ -2876,7 +2930,7 @@ final class ReaderAppModel {
 	}
 
 	private func select(collectionID: String) {
-		feedOpenedFromFolderID = nil
+		clearCardStack()
 		let isReselectingOpenCollection = selectedNavigationID == collectionID && isReadingOpenArticle
 		if selectedNavigationID != collectionID {
 			invalidateSpeculativeFeedWork()
@@ -8622,6 +8676,12 @@ final class ReaderAppModel {
 		}
 		if selectedNavigationID == oldID {
 			selectedNavigationID = newID
+		}
+		if cardStackRootID == oldID {
+			cardStackRootID = newID
+		}
+		if storedCardFeedPath.contains(where: { $0.feedID == oldID }) {
+			storedCardFeedPath = storedCardFeedPath.map { $0.feedID == oldID ? ReaderCardFeedDestination(feedID: newID) : $0 }
 		}
 		if activeSearchCollectionID == oldID {
 			activeSearchCollectionID = newID

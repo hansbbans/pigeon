@@ -21,6 +21,19 @@ extension ReaderAppModel {
 	}
 }
 
+/// A feed opened from a folder's card, pushed above the folder (Cards).
+struct ReaderCardFeedDestination: Hashable {
+	let feedID: String
+}
+
+/// A level of the Cards navigation stack above Home.
+enum ReaderCardsRoute: Hashable {
+	/// The open list (`ReaderAppModel.contentRootCollection`).
+	case list
+	/// A feed pushed above its folder, by navigation item id.
+	case feed(String)
+}
+
 /// The order a page draws a collection's stories in when it is not the
 /// collection's sort (the Cards look draws cards).
 nonisolated struct ReaderPresentedArticleOrder: Equatable, Sendable {

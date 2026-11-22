@@ -149,6 +149,85 @@ struct FolderCardsTests {
 		#expect(model.articleTarget(for: .previous, from: b1)?.id == "a2")
 	}
 
+	@Test func aFeedOpenedFromAFolderCardIsPushedAboveTheFolder() throws {
+		let navigation = Self.navigation()
+		let model = try makeModel()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
+		model.select(item: folder)
+
+		model.openFeed(feed, fromFolder: folder)
+		#expect(model.selectedNavigationID == feed.id)
+		#expect(model.cardFeedPath == [ReaderCardFeedDestination(feedID: feed.id)])
+		// The folder stays the column's root, under the pushed feed.
+		#expect(model.contentRootCollection.id == folder.id)
+
+		// The system back button or the edge swipe pops the path.
+		model.cardFeedPath = []
+		#expect(model.selectedNavigationID == folder.id)
+		#expect(model.preferredCompactColumn == .content)
+		#expect(model.contentRootCollection.id == folder.id)
+	}
+
+	/// Cards is one stack above Home: the list, then a feed above its folder.
+	@Test func theCardsStackFollowsHomeTheListAndAPushedFeed() throws {
+		let navigation = Self.navigation()
+		let model = try makeModel()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
+		model.preferredCompactColumn = .sidebar
+		#expect(model.cardsPath.isEmpty)
+
+		model.select(item: folder)
+		#expect(model.cardsPath == [.list])
+		model.openFeed(feed, fromFolder: folder)
+		#expect(model.cardsPath == [.list, .feed(feed.id)])
+
+		// A story open over the feed keeps the stack under it.
+		model.preferredCompactColumn = .detail
+		#expect(model.cardsPath == [.list, .feed(feed.id)])
+		model.preferredCompactColumn = .content
+
+		// Back from the feed is the folder; back from the folder is Home.
+		model.cardsPath = [.list]
+		#expect(model.selectedNavigationID == folder.id)
+		#expect(model.contentRootCollection.id == folder.id)
+		model.cardsPath = []
+		#expect(model.preferredCompactColumn == .sidebar)
+		#expect(model.selectedNavigationID == folder.id)
+	}
+
+	@Test func choosingAnotherListOrGoingHomeClearsThePushedFeed() throws {
+		let navigation = Self.navigation()
+		let model = try makeModel()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
+		let other = try #require(navigation.item(withID: "feed/9"))
+		model.select(item: folder)
+
+		model.openFeed(feed, fromFolder: folder)
+		model.select(item: other)
+		#expect(model.cardFeedPath.isEmpty)
+		#expect(model.contentRootCollection.id == other.id)
+
+		// Going Home leaves the stack for the swipe that may come back to it;
+		// choosing a list from Home starts a new one.
+		model.select(item: folder)
+		model.openFeed(feed, fromFolder: folder)
+		model.showHome()
+		model.select(item: folder)
+		#expect(model.cardFeedPath.isEmpty)
+		#expect(model.contentRootCollection.id == folder.id)
+
+		// A feed opened from Home or the library is the root itself.
+		model.select(item: feed)
+		#expect(model.cardFeedPath.isEmpty)
+		#expect(model.contentRootCollection.id == feed.id)
+	}
+
 	/// The Cards page re-renders at local midnight: the model's day moves on
 	/// when the day changes, and the page's sections are keyed by it.
 	@Test func theLocalDayMovesOnAtMidnight() async throws {
@@ -183,47 +262,6 @@ struct FolderCardsTests {
 		_ = sections(read, expanded: ["today"])
 		_ = sections(read, expanded: ["today"], day: todayStart.addingTimeInterval(86_400))
 		#expect(builds == 4)
-	}
-
-	@Test func backFromAFeedOpenedFromAFolderCardReturnsToTheFolder() throws {
-		let navigation = Self.navigation()
-		let model = try makeModel()
-		model.setNavigation(navigation)
-		let folder = try #require(navigation.item(withID: Self.tech))
-		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
-		model.select(item: folder)
-
-		model.openFeed(feed, fromFolder: folder)
-		#expect(model.selectedNavigationID == feed.id)
-		#expect(model.folderToReturnTo?.id == folder.id)
-
-		model.returnToFolder()
-		#expect(model.selectedNavigationID == folder.id)
-		#expect(model.preferredCompactColumn == .content)
-		#expect(model.folderToReturnTo == nil)
-	}
-
-	@Test func choosingAnotherListOrGoingHomeForgetsTheFolder() throws {
-		let navigation = Self.navigation()
-		let model = try makeModel()
-		model.setNavigation(navigation)
-		let folder = try #require(navigation.item(withID: Self.tech))
-		let feed = try #require(navigation.item(withID: "feed/7::\(Self.tech)"))
-		let other = try #require(navigation.item(withID: "feed/9"))
-		model.select(item: folder)
-
-		model.openFeed(feed, fromFolder: folder)
-		model.select(item: other)
-		#expect(model.folderToReturnTo == nil)
-
-		model.select(item: folder)
-		model.openFeed(feed, fromFolder: folder)
-		model.showHome()
-		#expect(model.folderToReturnTo == nil)
-
-		// A feed opened from Home or the library has no folder to return to.
-		model.select(item: feed)
-		#expect(model.folderToReturnTo == nil)
 	}
 
 	// MARK: Helpers

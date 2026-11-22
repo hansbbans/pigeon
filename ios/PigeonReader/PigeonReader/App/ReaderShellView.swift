@@ -22,6 +22,28 @@ struct ReaderShellView: View {
 						.navigationTitle("Pigeon")
 						.accessibilityIdentifier("library-startup-loading")
 				}
+			} else if model.readerTypography.look == .cards {
+				// Cards navigates like a phone in every window: Home, then the
+				// list, then a feed opened from a folder's card above the folder.
+				// One stack, so the system back button and the edge swipe pop each
+				// level and the folder underneath keeps its scroll and expanded
+				// cards. (A stack nested in a collapsed split view's column rebuilt
+				// the column on every push and pop.) The story is the overlay below
+				// the branches.
+				NavigationStack(path: $model.cardsPath) {
+					ReaderHomeView(placement: .compactRoot)
+						.navigationDestination(for: ReaderCardsRoute.self) { route in
+							switch route {
+							case .list:
+								ReaderCollectionPane()
+							case let .feed(id):
+								ArticleListView(collection: model.navigation.item(withID: id) ?? model.selectedCollection)
+							}
+						}
+				}
+				.environment(\.readerWindowHorizontalSizeClass, horizontalSizeClass)
+				.allowsHitTesting(showsCompactArticle == false)
+				.accessibilityHidden(showsCompactArticle)
 			} else {
 				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
 					ReaderHomeView(placement: horizontalSizeClass == .compact ? .compactRoot : .splitSidebar)
@@ -56,25 +78,30 @@ struct ReaderShellView: View {
 					.background(.background)
 				}
 
-				if showsCompactArticle, let article = model.selectedArticle {
-					// NavigationSplitView that launches on `.detail` has no stack to pop, so
-					// the system back item and interactive pop do nothing. Own the article
-					// on compact without replacing the library list underneath.
-					NavigationStack {
-						ArticleReaderView(article: article)
-					}
-					.frame(maxWidth: .infinity, maxHeight: .infinity)
-					.background(.background)
+			}
+
+			if model.isInitialLibraryLoading == false, showsCompactArticle, let article = model.selectedArticle {
+				// NavigationSplitView that launches on `.detail` has no stack to pop, so
+				// the system back item and interactive pop do nothing. Own the article
+				// on compact without replacing the library list underneath (in Cards,
+				// above the whole stack).
+				NavigationStack {
+					ArticleReaderView(article: article)
 				}
+				.frame(maxWidth: .infinity, maxHeight: .infinity)
+				.background(.background)
 			}
 		}
 		// Everything below the shell navigates with this size class, so a
-		// regular window in Cards collapses the split view and gets the
-		// phone's back navigation and full-window reader. The shell's own
+		// regular window in Cards gets the phone's stack navigation and
+		// full-window reader. The shell's own
 		// sheets keep the window's size class; sheets presented from inside
 		// the library or reader see the navigation one.
 		.environment(\.horizontalSizeClass, horizontalSizeClass)
 		.onChange(of: model.readerTypography.look) { _, look in
+			// Only Cards stacks a feed above its folder; elsewhere the feed
+			// stays open as the only list.
+			if look != .cards { model.clearCardStack() }
 			model.preferredCompactColumn = ReaderCompactArticlePresentation.columnAfterLookChange(
 				window: windowHorizontalSizeClass,
 				look: look,

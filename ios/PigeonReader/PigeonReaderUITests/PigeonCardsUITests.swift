@@ -49,9 +49,14 @@ final class PigeonCardsUITests: XCTestCase {
 	}
 
 	func testAFeedCardHeaderOpensTheFeedAsDayCards() throws {
-		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 15))
+		let today = element("folder-card-today")
+		XCTAssertTrue(today.waitForExistence(timeout: 15))
+		// Expand Today first: the folder must come back as it was left.
+		app.buttons["folder-card-more-today"].tap()
+		XCTAssertTrue(story(containing: "Why bundles come back", in: today).waitForExistence(timeout: 5))
 		let stratechery = app.buttons["folder-card-open-feed:feed/cards-strat"]
 		scroll(to: stratechery)
+		let headerY = stratechery.frame.minY
 		stratechery.tap()
 
 		let bar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "Stratechery")).firstMatch
@@ -60,15 +65,26 @@ final class PigeonCardsUITests: XCTestCase {
 		// One feed: no feed names over its stories.
 		XCTAssertTrue(story(containing: "The Aggregator").exists)
 		XCTAssertFalse(story(containing: "Stratechery, The Aggregator").exists)
+		// The system back button leads to the folder, not Home.
+		XCTAssertTrue(bar.buttons["Newsletters"].exists, "back button: \(bar.buttons.allElementsBoundByIndex.map(\.label))")
 		attachScreenshot(named: "cards-feed")
 
-		// Back returns to the folder the card was in, not to Home.
-		let back = app.buttons["folder-card-feed-back"]
-		XCTAssertTrue(back.waitForExistence(timeout: 5))
-		back.tap()
-		XCTAssertTrue(app.navigationBars["Newsletters"].waitForExistence(timeout: 10))
-		XCTAssertTrue(element("folder-card-last-7-days").waitForExistence(timeout: 10))
+		// The edge swipe goes back to the folder, still scrolled to the
+		// Stratechery card and with Today expanded.
+		swipeBackFromTheLeadingEdge()
+		let folderBar = app.navigationBars["Newsletters"]
+		XCTAssertTrue(folderBar.waitForExistence(timeout: 10))
+		XCTAssertTrue(bar.waitForNonExistence(timeout: 5))
 		XCTAssertFalse(element("reader-home-tiles").exists)
+		XCTAssertTrue(stratechery.waitForExistence(timeout: 5))
+		XCTAssertTrue(stratechery.isHittable)
+		XCTAssertEqual(stratechery.frame.minY, headerY, accuracy: 2)
+		XCTAssertFalse(app.buttons["folder-card-more-today"].exists)
+		attachScreenshot(named: "cards-folder-after-back")
+
+		// Back once more is Home.
+		swipeBackFromTheLeadingEdge()
+		XCTAssertTrue(element("reader-home-tiles").waitForExistence(timeout: 10))
 	}
 
 	func testCardsHaveNoSortMenuAndAStoryOpensAndReturns() throws {
@@ -115,6 +131,12 @@ final class PigeonCardsUITests: XCTestCase {
 		allFeeds.tap()
 		XCTAssertTrue(element("reader-library-tiles").waitForExistence(timeout: 10))
 		attachScreenshot(named: "library-ipad-tiles")
+	}
+
+	/// The interactive pop: a drag in from the window's leading edge.
+	private func swipeBackFromTheLeadingEdge() {
+		let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
+		start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)))
 	}
 
 	private func element(_ identifier: String) -> XCUIElement {
