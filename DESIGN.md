@@ -99,7 +99,8 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 - `articleTitle` is the title face at 25 and `articleBody` the regular face at 18, both multiplied by `textScale`.
 - Front Page masthead is the italic face at 38, lead headline the title face at 27, deck the regular face at 16 (52, 34 and 18 in the wide spread).
 - In the HTML, the body uses `"Geist Serif", "Iowan Old Style", Georgia, serif`, Bookerly when `body[data-typeface="bookerly"]`, or Allo when `body[data-typeface="allo"]`. Headings inherit it with line-height 1.16, and are weight 400 in Geist Serif and 600 in Allo to match the SwiftUI title. WebKit synthesizes bold and italic for `strong` and `em` in Geist Serif; Bookerly and Allo use their own bold and italic faces. WebKit's content process cannot see `UIAppFonts` fonts, and it blocks fonts fetched from a custom scheme on the article's https page as mixed content. So `ReaderWebFonts` passes the chosen typeface's bytes to `__pigeonInstallFonts`, which adds them with the `FontFace` API before the first render (about 7 ms for Bookerly's four faces in the simulator). Captions and UI chrome use the system font. Code uses `ui-monospace, SFMono-Regular, Menlo`.
-- Classic list rows (`ArticleRowView.swift`) use `storyTitle` for titles and `.caption` for metadata.
+- Reeder list rows (`ArticleRowView.swift`) use `storyTitle` for titles and `.caption` for metadata.
+- Folder cards set an unread headline in `storyTitle`, `.primary`; a read one in the regular face at 17, `label-secondary`. The meta line is `.caption`.
 
 **Reading preferences.** `ReaderTypographySettings`:
 - textScale 0.85–1.35 (default 1.0)
@@ -107,7 +108,7 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 - horizontalMargin 8–56 (default 20)
 - columnWidth 480–920 (default 640; a saved width is kept)
 - `ReaderTimelineDensity`: title-only / compact / comfortable / image-rich
-- `ReaderHomeLayout`: classic / front-page
+- `ReaderLook`: cards (default) / reeder, under `pigeon.reader.look.v1`. A stored `pigeon.reader.home-layout.v1` is migrated once (classic → reeder, front-page → cards) and removed
 - `ReaderMarkReadBehavior`
 
 They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them through `--pigeon-text-scale` and `--pigeon-line-height`.
@@ -115,24 +116,32 @@ They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them throu
 **Spacing and radii.** There are no spacing constants; values are inline. The Front Page uses horizontal padding 16, grid spacing 22 and a column gap of 18; a spread uses padding 28 and a column gap of 28. Common corner radii are 8, 16, 10 and 12; Front Page thumbnails use 12 with continuous corners.
 
 **Layout and components.**
-- `FrontPageView` / `FrontPageLayout` (a reader setting on iPhone and iPad; see `usesFrontPage` in `ArticleListView.swift`):
+- The look (Settings → Look, or the list's Display menu) is Cards or Reeder. Reeder is the list: three-column split view on iPad, rows with density options, every sort. Cards is the editorial look: For You, Today and the other views are the Front Page, a folder or feed is folder cards, and All Feeds is tiles (`usesCardsLook`, `usesFolderCards`, `usesFrontPage` in `ArticleListView.swift`). Cards has no density options and, for folders and feeds, no sort menu: the cards are the order.
+- `FrontPageView` / `FrontPageLayout` (For You and the other views in Cards):
   - newspaper masthead with `FrontPageRule` hairlines (2pt / 0.5pt) and an uppercase dateline (`.caption2`, tracking 0.8)
   - pages of 13 stories: 1 lead plus a 2-column `LazyVGrid`, which drops to 1 column at accessibility sizes and in a column narrower than 330pt (`FrontPageLayout.gridColumnCount`)
   - the page is capped at 640pt and centred, so an iPhone in landscape does not stretch the lead image
   - from 760pt wide (an iPad Pro 11-inch in portrait; not an iPad mini in portrait, 744) the page is a spread (`FrontPageLayout.usesSpread`): the lead image takes 58% of the page beside its headline (title face 34) and deck (18, six lines), the grid goes three across with a 28pt gap, the masthead is 52, padding is 28, and the page is capped at 1080pt. Spread images load at 1200×800 (lead) and 640×480 (columns). Accessibility sizes and short windows (a phone in landscape, however wide) keep the stacked page, and a lead without an image keeps stacked typography
-  - Front Page is a page, not a column: a regular-width window reading it navigates the way a phone does, Home then the page then the article, each across the whole window (`ReaderCompactArticlePresentation.navigationSizeClass`, applied in `ReaderShellView`). Classic keeps the three-column split view
+  - Cards are pages, not a column: a regular-width window in Cards navigates the way a phone does, Home then the page then the article, each across the whole window (`ReaderCompactArticlePresentation.navigationSizeClass`, applied in `ReaderShellView`). Reeder keeps the three-column split view
   - colored feed kicker, a 240-char deck, and an `isEditorialImage` aspect filter of 0.6–2.4
+- `FolderCardsView` / `FolderSections` (a folder or feed in Cards):
+  - a folder is a full-width Today card (stories since local midnight, five until "N more"), a full-width Last 7 Days card (the six local days before today, five until "N more"), then one card per feed with stories this week (three until "N more"), newest feed first; feeds with nothing this week follow under an "Older" header. A story can sit in Today and in its feed's card; the reading log counts it once, at the card that showed it first (`row` metadata: `card-today`, `card-last-7-days`, `card-feed`, `card-day`)
+  - a single feed is day cards: Today and Yesterday (five until "N more") and Earlier
+  - each card is a Home tile (`ReaderTiles.swift`: `readerTileBackground(barColor:)`, the same shape, background and 3pt top bar), in the folder's `kicker` colour; a feed out of any folder uses its own kicker colour, a view none. The header is `.footnote` bold, uppercase, tracking 0.8, in that colour, with the feed's favicon under Load Normally; a feed card's header opens the feed. Today and Last 7 Days stories name their feed in the colored kicker
+  - read stories are told apart by weight and colour, not dots. Selection is the 0.1 accent wash
+  - feed cards go one column on a phone and at accessibility sizes, and up to three across from 600pt (`FolderCardsLayout.feedColumnCount`), in a page capped at 960pt and centred
+- `ReaderLibraryTilesView` / `ReaderLibraryTiles` (All Feeds in Cards): every view as a tile (Unread too), then each folder's tile with its feeds as smaller tiles under it (favicon, name and newest headline in the reading face at 15, the folder's colour bar), then a "Feeds" group for feeds in no folder. The Unread filter hides read folders and feeds; colours never move with it. Context menus and the editor match the library list (`ReaderLibraryItemMenus.swift`). In Reeder, All Feeds is the library list
 - `ReaderHomeView` / `ReaderHomeTilesView` / `ReaderHomeTiles` (Home on iPhone and iPad; decided in the Nov 2026 home redesign, not yet in the Claude Design artifact):
   - no large title; the toolbar's leading item is a dateline in kicker type ("Wed, Nov 11 · 8 new"), the only number on the screen
   - one row of equal view tiles (For You, Today, Read It Later, plus Starred when enabled; four tiles become two rows of two). Unread never gets a tile
   - a 2-column grid of folder tiles: 3pt bar and name in the folder's `kicker` colour (`FrontPageKickerPalette`, starting from the folder id hash and moved to the next free colour so folders do not share one), the newest cached story title in `story-title` (four lines at most; the first feed names until a story is cached), up to four feed favicons. No featured story and no unread counts; a list shows its count in its title once opened
-  - "All Feeds" swaps the column to the library list (`ReaderSidebarView`), whose leading Home button swaps back
+  - "All Feeds" swaps the column to the library tiles in Cards or the library list (`ReaderSidebarView`) in Reeder; its leading Home button swaps back
   - iPad and other regular-width windows show the same tiles over the split view until a view is chosen (`ReaderHomeView.Placement.regularHome` in `ReaderShellView`). From 600pt wide the views sit on one row and folders go three or four across (`ReaderHomeTiles.folderColumnCount`), in a grid capped at 960pt and centred. The split view's own sidebar is always the library list, and the list column's toolbar has a Home button (`ReaderHomeToolbarItem`), because a split view has no stack to pop. The split view's columns are 240-320pt (ideal 280) for the sidebar and 300-400pt (ideal 340) for the list, set in `ReaderShellView`, so the reading column on an iPad mini in portrait is at least as wide as an iPhone's
   - tiles are `secondarySystemGroupedBackground` on `systemGroupedBackground`, radius 12 continuous, one column at accessibility sizes
   - motion: favicons and headlines fade in and crossfade, the dateline count rolls (`numericText`), tiles press to 0.97, content fades under the toolbar (`scrollEdgeEffectStyle(.soft)`); all of it is off or reduced with Reduce Motion
 - Other: `ArticleReaderHeaderView`, `ArticleBodyView`, `StructuredHTMLView`, `ReaderReadingSettingsView`, `ScoreBadge`, `PaywallLabel`, `ReadingLengthLabel`, `ReaderMotion`. All are under `Features/Reader/`.
-- Folders sort By Feed by default (`ArticleSortOrder.byFeed`; Newest, Oldest and Score stay in the sort menu). Each feed's run of stories sits under `ArticleFeedSectionLabel`: the feed's sidebar title in `.footnote` semibold, uppercase, tracking 0.8, `label-secondary`, with its favicon at 16pt under the Load Normally image policy. In the Classic list it is a plain row above the feed's first story. The Front Page has no labels: it keeps its normal pages in By Feed order, and each story's kicker already names its feed.
-- Classic list swipe actions (`ArticleListView.swift`) use `PigeonPalette.SwipeFill`: tint (read), keep (star) and teal `kicker-2` (Read It Later).
+- In Reeder, folders sort By Feed by default (`ArticleSortOrder.byFeed`; Newest, Oldest and Score stay in the sort menu). Each feed's run of stories sits under `ArticleFeedSectionLabel`: the feed's sidebar title in `.footnote` semibold, uppercase, tracking 0.8, `label-secondary`, with its favicon at 16pt under the Load Normally image policy. It is a plain row above the feed's first story.
+- Reeder list swipe actions (`ArticleListView.swift`) use `PigeonPalette.SwipeFill`: tint (read), keep (star) and teal `kicker-2` (Read It Later).
 
 ## Web (Worker `/`)
 
