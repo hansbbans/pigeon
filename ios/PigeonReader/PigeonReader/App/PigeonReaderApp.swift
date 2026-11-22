@@ -78,6 +78,17 @@ struct PigeonReaderApp: App {
 					previewModel.pendingFeedRequest = PendingFeedRequest(url: debugURL)
 				}
 			}
+			if ProcessInfo.processInfo.arguments.contains("-reader-background-refresh-fixture") {
+				// A live library refreshes in the background while the reader
+				// uses the list; sample data never would on its own.
+				// The app's model lives for the whole process, and so does this loop.
+				Task { @MainActor in
+					while true {
+						await previewModel.refresh(collection: previewModel.selectedCollection)
+						try? await Task.sleep(for: .milliseconds(300))
+					}
+				}
+			}
 			_model = State(initialValue: previewModel)
 			return
 		}

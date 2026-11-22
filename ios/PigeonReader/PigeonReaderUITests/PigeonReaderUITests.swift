@@ -897,6 +897,45 @@ final class PigeonReaderUITests: XCTestCase {
 		XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
 	}
 
+	/// Expanding Sort inside More must stay open long enough to pick an order,
+	/// even while the library refreshes underneath it.
+	func testMoreMenuSortSubmenuStaysOpenDuringBackgroundRefresh() throws {
+		try launchFeedList(additionalArguments: ["-reader-background-refresh-fixture"])
+		try assertSortSubmenuStaysOpenAndPicksNewest()
+	}
+
+	func testFrontPageMoreMenuSortSubmenuStaysOpenDuringBackgroundRefresh() throws {
+		try launchFeedList(additionalArguments: [
+			"-reader-background-refresh-fixture",
+			"-pigeon.reader.home-layout.v1", "front-page",
+		])
+		try assertSortSubmenuStaysOpenAndPicksNewest()
+	}
+
+	private func assertSortSubmenuStaysOpenAndPicksNewest() throws {
+		let more = app.buttons["article-list-more"]
+		XCTAssertTrue(more.waitForExistence(timeout: 5))
+		more.tap()
+		let sort = app.buttons["article-list-sort"]
+		XCTAssertTrue(sort.waitForExistence(timeout: 5))
+		sort.tap()
+
+		let newest = app.buttons["Newest to Oldest"]
+		XCTAssertTrue(newest.waitForExistence(timeout: 5), "Sort must expand to its orders.")
+		for _ in 0..<6 {
+			Thread.sleep(forTimeInterval: 0.5)
+			XCTAssertTrue(newest.exists, "Sort collapsed before an order could be chosen.")
+		}
+		newest.tap()
+		XCTAssertTrue(newest.waitForNonExistence(timeout: 5), "Choosing an order closes the menu.")
+
+		more.tap()
+		XCTAssertTrue(sort.waitForExistence(timeout: 5))
+		sort.tap()
+		XCTAssertTrue(newest.waitForExistence(timeout: 5))
+		XCTAssertTrue(newest.isSelected, "The chosen order must be the selected one.")
+	}
+
 	func testImageRichThumbnailPermissionStaysOnTheListAndResetsAfterDisplayChanges() throws {
 		try launchFeedList(additionalArguments: [
 			"-pigeon.reader.timeline-density", "image-rich",
