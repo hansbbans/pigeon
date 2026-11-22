@@ -75,8 +75,8 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 	let onNearEndChange: (Bool) -> Void
 	let onUserScroll: () -> Void
 	let onScrollingChange: (Bool) -> Void
-	/// One copy (story id, card id) of a story became, or stopped being, at
-	/// least half visible (reading log).
+	/// One drawn copy (story id, copy key) of a story became, or stopped
+	/// being, at least half visible (reading log).
 	let onStoryVisibilityChange: (String, Bool, String) -> Void
 	/// A story's menu, with the story's place in `sections.renderedCopies`
 	/// (a story shown twice has two).
@@ -263,12 +263,7 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 			select: { select(article) },
 		)
 		.contextMenu { storyMenu(article, copyIndex) }
-		.onScrollVisibilityChange(threshold: 0.5) { isVisible in
-			onStoryVisibilityChange(article.id, isVisible, section.id)
-		}
-		// A card can leave the hierarchy (a reload, an expansion) without
-		// being told its stories are no longer visible.
-		.onDisappear { onStoryVisibilityChange(article.id, false, section.id) }
+		.modifier(StoryCopyVisibility(articleID: article.id, cardID: section.id, onChange: onStoryVisibilityChange))
 	}
 
 	private struct Block: Identifiable {
@@ -280,6 +275,28 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 
 		let id: String
 		let content: Content
+	}
+}
+
+/// Reports one drawn copy of a story crossing half visibility. Each copy
+/// reports under a key of its own view's lifetime, not just its card's id:
+/// when a card is rebuilt, the old copy's late `onDisappear` must not hide
+/// the copy that replaced it.
+private struct StoryCopyVisibility: ViewModifier {
+	let articleID: String
+	let cardID: String
+	let onChange: (String, Bool, String) -> Void
+	@State private var instance = UUID()
+
+	func body(content: Content) -> some View {
+		let copy = "\(cardID)#\(instance.uuidString)"
+		content
+			.onScrollVisibilityChange(threshold: 0.5) { isVisible in
+				onChange(articleID, isVisible, copy)
+			}
+			// A card can leave the hierarchy (a reload, an expansion) without
+			// being told its stories are no longer visible.
+			.onDisappear { onChange(articleID, false, copy) }
 	}
 }
 
