@@ -7,6 +7,11 @@ All notable changes to Pigeon are documented in this file.
 ### Changed
 
 - A feed's own `Cache-Control: max-age` now holds its next poll back by five hours at most, instead of a day, so a feed that overstates its freshness still shows new stories the same day.
+- iOS: after a cold launch the list you were on shows its saved stories straight away, while the rest of the offline library loads behind it. Marking a story read or starring it in that moment no longer leaves the library half loaded until the next refresh.
+- iOS: feed icons in the sidebar, on Home and above By Feed sections are decoded once at icon size and reused, and story pictures and icons are kept on disk between launches (up to 150 MB).
+- iOS: the reader prepares the web view for the next story ahead of time, so opening a story does less work at the moment of the tap. Each story still reads in its own private web view.
+- iOS: syncing a page of new stories reads the list of unsent changes once, not once per story.
+- iOS: marking a story read or starring it changes the screen at once, also while a sync is writing to the offline library. If the change cannot be saved, the story goes back to how it was.
 
 ### Fixed
 

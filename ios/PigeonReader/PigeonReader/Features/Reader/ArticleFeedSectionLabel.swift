@@ -12,13 +12,15 @@ struct ArticleFeedSectionLabel: View {
 		HStack(spacing: 8) {
 			// The favicon is publisher-hosted, so it follows the list's image policy.
 			if remoteImagePolicy == .normal, let iconURL = feed.iconURL {
-				AsyncImage(url: iconURL) { image in
-					image
-						.resizable()
-						.scaledToFit()
-						.clipShape(.rect(cornerRadius: 3))
-				} placeholder: {
-					Color.clear
+				FeedIconImage(url: iconURL) { image in
+					if let image {
+						image
+							.resizable()
+							.scaledToFit()
+							.clipShape(.rect(cornerRadius: 3))
+					} else {
+						Color.clear
+					}
 				}
 				.frame(width: iconSize, height: iconSize)
 				.accessibilityHidden(true)

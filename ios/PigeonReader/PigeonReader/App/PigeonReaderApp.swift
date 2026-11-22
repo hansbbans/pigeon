@@ -11,6 +11,9 @@ struct PigeonReaderApp: App {
 	#endif
 
 	init() {
+		// Story thumbnails and feed icons load through the shared session. Its
+		// default cache is too small to keep them from one launch to the next.
+		URLCache.shared = URLCache(memoryCapacity: 8 * 1024 * 1024, diskCapacity: 150 * 1024 * 1024)
 		BackgroundRefreshManager.shared.register()
 		_ = ReaderNotificationManager.shared
 		LegacyReadwiseCleanup.run()

@@ -1,3 +1,29 @@
+# Feed loading: fixes from the NetNewsWire comparison (started 2026-11-22)
+
+Three branches, one outcome each. Committed locally; nothing is pushed.
+
+- [x] Worker (`claude/perf-worker-sync-hygiene`, `~/code/pigeon-perf-worker`): a poll writes a feed sync row only when the site or source URL changes; `max-age` capped at 5 hours.
+- [x] Web (`claude/perf-web-first-load`, `~/code/pigeon-perf-web`): sign-in check uses `GET /app/session` (no database) instead of `/app/status`.
+- [x] iOS (`claude/perf-ios-store`, `~/code/pigeon-perf-ios`): a sync page reads the outbox once, not once per article.
+- [x] iOS: the selected list shows from a scoped snapshot at launch while the whole library is read; a read or star change in that window makes the preparation read the store again instead of leaving hydration for a later one.
+- [x] iOS: feed icons decoded once at 96 px and kept in memory (`FeedIconStore`); `URLCache.shared` raised to 150 MB on disk so thumbnails and icons survive a relaunch.
+- [x] iOS: the next reader web view is made ahead of time (`ReaderWebViewPool`). Each story still gets its own view and data store.
+
+## Review
+- Worker suite and typecheck green on both Worker branches. iOS: 1,107 unit tests, the 9 smoke UI tests and 6 UI tests that tap links and images inside the article web view, all green on `Pigeon Claude`.
+- Baseline from the existing benchmarks (simulator, loaded Mac): reading a 5,344-article, 61 MB cache takes about 550 ms; a toggle's enqueue about 2 ms. No after-numbers on a device yet.
+- Not measured: the launch preview and the web view prewarm on a real phone.
+- Added 2026-11-22: a read or star toggle now changes the screen and the pending ledger first and asks the store second; a store that refuses puts the story back. Two tests hold the store mid-write and make it fail. Unit suite 1109/1109.
+
+Not done, with reasons:
+- Bodies out of list rows: built and measured, then dropped. With each body in its own column, the 5,344-article benchmark load took 464, 463 and 505 ms against 455, 450 and 485 ms without it. Not reading bodies at all saves about 90 ms of that; the rest is decoding 5,344 rows of fields and building the lists. A cache migration is not worth that. The patch is not kept.
+- Fonts installed once per web view: the shell is reloaded per story so images are requested with the story's own address as referrer; a reload drops installed fonts.
+- `cleanupReadBodies` filter on `body_pruned = 0`: a row can be flagged pruned and still hold a body, so the filter would stop pruning those.
+- Web list rows from server metadata: default views already get rows and bodies in one request; only folder, search and filter views would gain, and hero images are not stored for RSS items, so rows would shift when bodies arrive.
+- Web cached list on load: the sign-in token is per tab, so only an in-tab reload would benefit.
+
+---
+
 # iOS folders sort By Feed by default (started 2026-11-17)
 
 Branch `claude/folder-by-feed-ios`, worktree `~/code/pigeon-folder-by-feed-ios`. The web half is built separately with the same rules.

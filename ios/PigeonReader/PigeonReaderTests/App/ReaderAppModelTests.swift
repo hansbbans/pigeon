@@ -2666,9 +2666,12 @@ struct ReaderAppModelTests {
 		defer { Task { await store.resumeSnapshot() } }
 		await store.waitUntilSnapshotIsPaused()
 
+		// The whole library is still being read, but the selected list already
+		// shows its own cached rows instead of a loading state.
+		#expect(model.isShowingBootstrapSnapshot)
 		#expect(model.selectedNavigationID == feed.id)
-		#expect(model.isInitialLoadPending(for: feed))
-		#expect(model.allArticles(for: feed).isEmpty)
+		#expect(model.isInitialLoadPending(for: feed) == false)
+		#expect(model.allArticles(for: feed).map(\.id) == [article.id])
 
 		await store.resumeSnapshot()
 		await preparation.value
@@ -6061,6 +6064,180 @@ struct ReaderAppModelTests {
 	}
 
 	@Test(.timeLimit(.minutes(1)))
+	func markingReadShowsOnScreenBeforeTheStoreHasTakenIt() async throws {
+		let session = try makeSession(token: "optimistic-read")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "optimistic-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+
+		await store.pauseNextEnqueue()
+		let toggle = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+
+		// The store is still busy, as it is during a sync, and the row has changed.
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		await store.resumeEnqueue()
+		await toggle.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		let pending = try await store.pendingMutations(accountID: session.storageIdentity, limit: 10)
+		#expect(pending.map(\.mutation.kind) == [.setRead])
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func aLibraryReadWhileAReadIsUnsettledDoesNotPutTheOldStateBack() async throws {
+		let session = try makeSession(token: "optimistic-snapshot")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "unsettled-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await store.pauseNextEnqueue()
+		let toggle = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+
+		// The store does not hold the change yet, so a library read now would
+		// still say unread, and applying it would undo what the reader just did.
+		// The reload waits for the store to take the change first.
+		let reload = Task { await model.cleanupOfflineBodies() }
+		for _ in 0..<200 { await Task.yield() }
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+
+		await store.resumeEnqueue()
+		await toggle.value
+		_ = await reload.value
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		await model.cleanupOfflineBodies()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func aNewerChoiceSurvivesAnOlderOneTheStoreRefuses() async throws {
+		let session = try makeSession(token: "optimistic-newer-choice")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "twice-toggled-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+
+		await store.pauseNextEnqueue()
+		let first = Task { await model.setRead(story, read: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		// Read, then unread again before the store has answered for the first.
+		// The second change shows at once; only its store write waits its turn.
+		let second = Task { await model.setRead(story, read: false) }
+		while model.allArticles(for: .forYou).first?.isRead != false {
+			await Task.yield()
+		}
+
+		await store.resumeEnqueue(failing: true)
+		await first.value
+		await second.value
+		// Undoing the refused "read" must not flip the newer "unread".
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		let pending = try await store.pendingMutations(accountID: session.storageIdentity, limit: 10)
+		#expect(pending.map(\.mutation.value) == [false])
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func twoRefusedChangesInARowReturnToWhatTheStoreHolds() async throws {
+		let session = try makeSession(token: "optimistic-two-refusals")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "twice-refused-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1), .smart(.starred)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+
+		await store.pauseNextEnqueue()
+		let first = Task { await model.setStarred(story, starred: true) }
+		defer { Task { await store.resumeEnqueue() } }
+		await store.waitUntilEnqueueIsPaused()
+		let second = Task { await model.setStarred(story, starred: false) }
+		while model.allArticles(for: .forYou).first?.isStarred != false {
+			await Task.yield()
+		}
+
+		// The store refuses both: the star, then the removal of a star it never held.
+		await store.failNextEnqueue()
+		await store.resumeEnqueue(failing: true)
+		await first.value
+		await second.value
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		// Nothing is left pending in memory: a fresh read of the library agrees.
+		await model.cleanupOfflineBodies()
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		await model.setStarred(story, starred: true)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
+	func aReadOrStarTheStoreRefusesIsPutBack() async throws {
+		let session = try makeSession(token: "optimistic-rollback")
+		let store = PausingOfflineLibraryStore()
+		let story = makeArticle(id: "rollback-story", receivedAt: 1)
+		let navigation = ReaderNavigationState(items: [.smart(.forYou, unreadCount: 1), .smart(.unread, unreadCount: 1), .smart(.starred)])
+		try await store.seed(
+			navigation: navigation, subscriptions: [],
+			articlesByCollection: [ReaderSection.forYou.rawValue: [story]],
+			restoration: ReaderRestorationState.initial, accountID: session.storageIdentity,
+		)
+		let model = try makeModel(httpClient: MockHTTPClient(shouldFail: true), session: session, offlineStore: store)
+		await model.prepareOfflineLibrary()
+		let unreadBefore = model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount
+
+		await store.failNextEnqueue()
+		await model.setRead(story, read: true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == false)
+		#expect(model.navigation.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == unreadBefore)
+		#expect(model.errorMessage != nil)
+
+		await store.failNextEnqueue()
+		await model.setStarred(story, starred: true)
+		#expect(model.allArticles(for: .forYou).first?.isStarred == false)
+		#expect(try await store.pendingMutations(accountID: session.storageIdentity, limit: 10).isEmpty)
+
+		// The store works again: the same story can still be changed and it sticks.
+		await model.setRead(story, read: true)
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+		await model.prepareOfflineLibrary()
+		#expect(model.allArticles(for: .forYou).first?.isRead == true)
+	}
+
+	@Test(.timeLimit(.minutes(1)))
 	func mutationDuringCachedPreparationKeepsVisibleEditsAndAllowsFreshHydration() async throws {
 		let session = try makeSession(token: "cached-mutation-race")
 		let store = OfflineLibraryStore.inMemory()
@@ -6082,14 +6259,15 @@ struct ReaderAppModelTests {
 		model.setArticles([story], for: .forYou)
 		await model.setRead(story, read: true)
 		await model.setStarred(story, starred: true)
+		let edited = try #require(model.allArticles(for: .forYou).first)
+		#expect(edited.isRead && edited.isStarred)
+		// The edits invalidate the snapshot being prepared. The same preparation
+		// reads the store again instead of waiting for a later one, so it also
+		// sees what was stored in the meantime.
+		let fresh = makeArticle(id: "fresh-hydration-story", receivedAt: 2)
+		try await store.saveArticles([edited, fresh], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
 		await gate.release()
 		await preparation.value
-		let visible = try #require(model.allArticles(for: .forYou).first)
-		#expect(visible.isRead && visible.isStarred)
-		// An invalidated first hydration must remain retryable.
-		let fresh = makeArticle(id: "fresh-hydration-story", receivedAt: 2)
-		try await store.saveArticles([visible, fresh], collectionID: ReaderSection.forYou.rawValue, accountID: session.storageIdentity)
-		await model.prepareOfflineLibrary()
 		#expect(model.allArticles(for: .forYou).contains { $0.id == fresh.id })
 		let restored = try #require(model.allArticles(for: .forYou).first { $0.id == story.id })
 		#expect(restored.isRead && restored.isStarred)
@@ -12020,6 +12198,12 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		return try await base.loadSnapshot(accountID: accountID)
 	}
 
+	/// Only the whole-library read is paused: the launch preview reads one
+	/// collection and must be able to finish while that read is held.
+	func loadSnapshot(accountID: String, collectionIDs: Set<String>) async throws -> CachedLibrarySnapshot {
+		try await base.loadSnapshot(accountID: accountID, collectionIDs: collectionIDs)
+	}
+
 	func saveNavigation(_ navigation: ReaderNavigationState, accountID: String) async throws {
 		try await base.saveNavigation(navigation, accountID: accountID)
 	}
@@ -12069,7 +12253,43 @@ private actor PausingOfflineLibraryStore: OfflineLibraryStoring {
 		try await base.saveRestoration(restoration, accountID: accountID)
 	}
 
+	private var shouldFailNextEnqueue = false
+	private var shouldPauseNextEnqueue = false
+	private var enqueueIsPaused = false
+	private var shouldFailResumedEnqueue = false
+	private var enqueueResume: CheckedContinuation<Void, Never>?
+
+	func failNextEnqueue() { shouldFailNextEnqueue = true }
+	func pauseNextEnqueue() { shouldPauseNextEnqueue = true }
+
+	func waitUntilEnqueueIsPaused() async {
+		while enqueueIsPaused == false {
+			guard Task.isCancelled == false else { return }
+			await Task.yield()
+		}
+	}
+
+	func resumeEnqueue(failing: Bool = false) {
+		shouldFailResumedEnqueue = failing
+		enqueueResume?.resume()
+		enqueueResume = nil
+	}
+
 	func enqueue(_ mutation: OfflineMutation, accountID: String) async throws {
+		if shouldFailNextEnqueue {
+			shouldFailNextEnqueue = false
+			throw LaunchStoreError.snapshotUnavailable
+		}
+		if shouldPauseNextEnqueue {
+			shouldPauseNextEnqueue = false
+			enqueueIsPaused = true
+			await withCheckedContinuation { enqueueResume = $0 }
+			enqueueIsPaused = false
+			if shouldFailResumedEnqueue {
+				shouldFailResumedEnqueue = false
+				throw LaunchStoreError.snapshotUnavailable
+			}
+		}
 		try await base.enqueue(mutation, accountID: accountID)
 	}
 
