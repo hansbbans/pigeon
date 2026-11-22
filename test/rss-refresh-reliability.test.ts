@@ -133,28 +133,35 @@ test('conditional validators are sent only within the periodic full-fetch window
 	assert.deepEqual(observedEtags, ['"old-etag"', null]);
 });
 
-test('Cache-Control max-age defers the next successful refresh within a five-hour cap', async () => {
-	globalThis.fetch = (async () =>
-		new Response('<rss><channel><title>Cached</title></channel></rss>', {
-			status: 200,
-			headers: {
-				'Content-Type': 'application/rss+xml',
-				'Cache-Control': 'public, max-age=7200',
-			},
-		})) as typeof fetch;
-	const state = env();
-	const result = await fetchAndStoreRssFeed(state.env as never, feed({ fetch_interval_minutes: 15 }));
-	assert.ok(result.cacheUntilAt);
-	const update = state.db.batches.at(-1)?.find((statement) => statement.sql.includes('UPDATE feeds'));
-	assert.ok(update);
-	// The statement names site_url only when it changed, so the schedule has no fixed position.
-	const completedAt = new Date(result.completedAt).getTime();
-	const scheduled = update.values
-		.filter((value): value is string => typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test(value))
-		.map((value) => new Date(value).getTime() - completedAt);
-	assert.ok(Math.max(...scheduled) >= 7_199_000);
-	assert.ok(Math.max(...scheduled) <= 5 * 3_600_000);
-});
+/** The value bound to `column = ?` in a statement whose placeholders have no fixed positions. */
+function boundValue(statement: { sql: string; values: unknown[] }, column: string): unknown {
+	const at = statement.sql.indexOf(`${column} = ?`);
+	assert.notEqual(at, -1, `${column} is bound directly`);
+	return statement.values[statement.sql.slice(0, at).split('?').length - 1];
+}
+
+for (const { maxAge, expectedMs, label } of [
+	{ maxAge: 7_200, expectedMs: 7_200_000, label: 'a two-hour max-age is honored' },
+	{ maxAge: 604_800, expectedMs: 5 * 3_600_000, label: 'a week-long max-age is cut to five hours' },
+]) {
+	test(`Cache-Control max-age defers the next successful refresh: ${label}`, async () => {
+		globalThis.fetch = (async () =>
+			new Response('<rss><channel><title>Cached</title></channel></rss>', {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/rss+xml',
+					'Cache-Control': `public, max-age=${maxAge}`,
+				},
+			})) as typeof fetch;
+		const state = env();
+		const result = await fetchAndStoreRssFeed(state.env as never, feed({ fetch_interval_minutes: 15 }));
+		assert.ok(result.cacheUntilAt);
+		const update = state.db.batches.at(-1)?.find((statement) => statement.sql.includes('UPDATE feeds'));
+		assert.ok(update);
+		const deferral = new Date(String(boundValue(update, 'next_fetch_at'))).getTime() - new Date(result.completedAt).getTime();
+		assert.ok(Math.abs(deferral - expectedMs) <= 2_000, `deferred ${deferral} ms, expected about ${expectedMs}`);
+	});
+}
 
 test('rate limits honor Retry-After and persist a redacted typed outcome', async () => {
 	globalThis.fetch = (async () =>
