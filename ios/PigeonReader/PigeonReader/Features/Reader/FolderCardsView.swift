@@ -26,22 +26,31 @@ nonisolated enum FolderCardsLayout {
 	}
 }
 
-extension FolderSections {
-	/// The reading log's `row` for each story: the card it first appears in.
-	nonisolated var readingLogRows: [String: String] {
-		var rows: [String: String] = [:]
-		for section in sections {
-			let row = switch section.kind {
-			case .today: "card-today"
-			case .lastSevenDays: "card-last-7-days"
-			case .feed, .older: "card-feed"
-			case .yesterday, .earlier: "card-day"
-			}
-			for article in section.articles where rows[article.id] == nil {
-				rows[article.id] = row
-			}
-		}
-		return rows
+/// The Cards page's sections, built once per change of what they show.
+/// SwiftUI evaluates the list's body on every model change (a scroll, a
+/// count, a read elsewhere); rebuilding a big folder's cards each time is
+/// wasted work. Not observable: reading it never invalidates a view.
+final class FolderCardsSectionsCache {
+	/// Everything the sections depend on. `articles` is the list as shown, so
+	/// it carries the filter and every story's read and starred state; `day`
+	/// is the local day, so the page moves on at midnight.
+	struct Key: Equatable {
+		let articles: [Recommendation]
+		let expanded: Set<String>
+		let feeds: ArticleFeedDirectory
+		let isFolder: Bool
+		let day: Date
+	}
+
+	private var key: Key?
+	private var cached: FolderSections?
+
+	func sections(for key: Key, make: () -> FolderSections) -> FolderSections {
+		if let cached, self.key == key { return cached }
+		let sections = make()
+		self.key = key
+		cached = sections
+		return sections
 	}
 }
 

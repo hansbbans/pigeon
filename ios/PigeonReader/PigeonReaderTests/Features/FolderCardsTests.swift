@@ -90,26 +90,7 @@ struct FolderCardsTests {
 	/// Above and below follow the cards as drawn: each story at its first
 	/// appearance, and nothing hidden behind "N more".
 	@Test func markAboveAndBelowFollowTheCardOrder() async throws {
-		let model = try makeModel()
-		let navigation = Self.navigation()
-		model.setNavigation(navigation)
-		let folder = try #require(navigation.item(withID: Self.tech))
-		model.select(item: folder)
-		var calendar = Calendar(identifier: .gregorian)
-		calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
-		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12)))
-		func ago(_ days: Double) -> Date { now.addingTimeInterval(-days * 86_400) }
-		let stories = [
-			story("a1", feed: "feed/7", at: ago(0.05)), story("b1", feed: "feed/8", at: ago(0.1)),
-			story("a2", feed: "feed/7", at: ago(2)), story("b2", feed: "feed/8", at: ago(3)),
-			story("b3", feed: "feed/8", at: ago(9)),
-			story("a3", feed: "feed/7", at: ago(10)), story("a4", feed: "feed/7", at: ago(11)),
-			story("a5", feed: "feed/7", at: ago(12)),
-		]
-		model.setArticles(stories, for: folder)
-		let sections = FolderSections.make(
-			articles: model.articles(for: folder), feeds: model.articleFeedDirectory, now: now, calendar: calendar, expanded: [],
-		)
+		let (model, folder, sections) = try cardsFixture()
 		// Today a1 b1, Last 7 Days a2 b2, Alpha a1 a2 a3 (a4 a5 behind "2 more"), Beta b1 b2 b3.
 		#expect(sections.renderedArticles.map(\.id) == ["a1", "b1", "a2", "b2", "a3", "b3"])
 		let b3 = try #require(model.allArticles(for: folder).first { $0.id == "b3" })
@@ -119,6 +100,31 @@ struct FolderCardsTests {
 
 		await model.markStoriesAboveAsRead(b3, in: folder, order: sections.renderedArticles)
 		#expect(Set(model.allArticles(for: folder).filter(\.isRead).map(\.id)) == ["a1", "b1", "a2", "b2", "a3"])
+	}
+
+	/// The page's sections are built once per change of what they show, not on
+	/// every body pass.
+	@Test func cardSectionsAreBuiltOncePerChange() throws {
+		let cache = FolderCardsSectionsCache()
+		let todayStart = ReaderLocalDayBounds.localDay(containing: Date()).start
+		let articles = [story("a", feed: "feed/1", at: todayStart.addingTimeInterval(60))]
+		var builds = 0
+		func sections(_ articles: [Recommendation], expanded: Set<String> = [], day: Date = todayStart) -> FolderSections {
+			cache.sections(for: .init(articles: articles, expanded: expanded, feeds: .empty, isFolder: true, day: day)) {
+				builds += 1
+				return FolderSections.make(articles: articles, feeds: .empty, now: day.addingTimeInterval(60))
+			}
+		}
+
+		_ = sections(articles)
+		_ = sections(articles)
+		#expect(builds == 1)
+		var read = articles
+		read[0].isRead = true
+		#expect(sections(read).sections.first?.articles.first?.isRead == true)
+		_ = sections(read, expanded: ["today"])
+		_ = sections(read, expanded: ["today"], day: todayStart.addingTimeInterval(86_400))
+		#expect(builds == 4)
 	}
 
 	@Test func backFromAFeedOpenedFromAFolderCardReturnsToTheFolder() throws {
@@ -163,6 +169,30 @@ struct FolderCardsTests {
 	}
 
 	// MARK: Helpers
+
+	/// Tech holds Alpha (a1 to a5) and Beta (b1 to b3), drawn at noon UTC.
+	private func cardsFixture() throws -> (ReaderAppModel, ReaderNavigationItem, FolderSections) {
+		let model = try makeModel()
+		let navigation = Self.navigation()
+		model.setNavigation(navigation)
+		let folder = try #require(navigation.item(withID: Self.tech))
+		model.select(item: folder)
+		var calendar = Calendar(identifier: .gregorian)
+		calendar.timeZone = try #require(TimeZone(identifier: "UTC"))
+		let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12)))
+		func ago(_ days: Double) -> Date { now.addingTimeInterval(-days * 86_400) }
+		model.setArticles([
+			story("a1", feed: "feed/7", at: ago(0.05)), story("b1", feed: "feed/8", at: ago(0.1)),
+			story("a2", feed: "feed/7", at: ago(2)), story("b2", feed: "feed/8", at: ago(3)),
+			story("b3", feed: "feed/8", at: ago(9)),
+			story("a3", feed: "feed/7", at: ago(10)), story("a4", feed: "feed/7", at: ago(11)),
+			story("a5", feed: "feed/7", at: ago(12)),
+		], for: folder)
+		let sections = FolderSections.make(
+			articles: model.articles(for: folder), feeds: model.articleFeedDirectory, now: now, calendar: calendar, expanded: [],
+		)
+		return (model, folder, sections)
+	}
 
 	private static func navigation() -> ReaderNavigationState {
 		ReaderNavigationState(items: [

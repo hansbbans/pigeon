@@ -39,6 +39,7 @@ struct ArticleListView: View {
 	@State private var layoutReflowToken: UUID?
 	/// Cards shown in full ("N more") for this visit to the collection.
 	@State private var expandedCardSections: Set<String> = []
+	@State private var cardSectionsCache = FolderCardsSectionsCache()
 
 	var body: some View {
 		let allArticles = model.allArticles(for: collection)
@@ -529,10 +530,23 @@ struct ArticleListView: View {
 		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : "classic"
 	}
 
+	/// Built once per change of the stories, expansions or day (see
+	/// `FolderCardsSectionsCache`), not on every body pass.
 	private func folderCardSections(for articles: [Recommendation]) -> FolderSections {
-		collection.kind == .folder
-			? FolderSections.make(articles: articles, feeds: model.articleFeedDirectory, now: .now, expanded: expandedCardSections)
-			: FeedDaySections.make(articles: articles, now: .now, expanded: expandedCardSections)
+		let isFolder = collection.kind == .folder
+		let now = Date.now
+		let key = FolderCardsSectionsCache.Key(
+			articles: articles,
+			expanded: expandedCardSections,
+			feeds: isFolder ? model.articleFeedDirectory : .empty,
+			isFolder: isFolder,
+			day: ReaderLocalDayBounds.localDay(containing: now).start,
+		)
+		return cardSectionsCache.sections(for: key) {
+			isFolder
+				? FolderSections.make(articles: articles, feeds: key.feeds, now: now, expanded: key.expanded)
+				: FeedDaySections.make(articles: articles, now: now, expanded: key.expanded)
+		}
 	}
 
 	/// The feed's own list, preferring its row in this folder.

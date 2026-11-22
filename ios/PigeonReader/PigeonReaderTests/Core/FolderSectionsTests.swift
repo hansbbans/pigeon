@@ -182,7 +182,7 @@ struct FolderSectionsTests {
 		#expect(sections.uniqueArticleIDs == ["today", "yesterday", "yesterday-start", "day-before", "earlier"])
 	}
 
-	@Test func aFeedLimitsItsDaysButNotItsPaginatedTail() {
+	@Test func aFeedLimitsEveryDayIncludingItsEarlierTail() {
 		let today = (0..<7).map { story("t\($0)", feed: "feed/1", source: "One", at: todayStart.addingTimeInterval(Double($0) * 60)) }
 		let earlier = (0..<9).map { story("e\($0)", feed: "feed/1", source: "One", at: local(2026, 10, 1).addingTimeInterval(Double($0) * 60)) }
 		// A story dated after today's end (a skewed clock) still shows, in Today.
@@ -192,11 +192,44 @@ struct FolderSectionsTests {
 
 		#expect(ids(collapsed, "today").first == "future")
 		#expect(collapsed.sections.first { $0.id == "today" }?.hiddenCount == 3)
-		#expect(ids(collapsed, "earlier").count == 9)
-		#expect(collapsed.sections.first { $0.id == "earlier" }?.hiddenCount == 0)
+		// Earlier is capped like the other days, so a long feed stays a short page.
+		#expect(ids(collapsed, "earlier").count == FeedDaySections.dayLimit)
+		#expect(collapsed.sections.first { $0.id == "earlier" }?.hiddenCount == 4)
 
-		let expanded = FeedDaySections.make(articles: today + earlier + [future], now: now, calendar: calendar, expanded: ["today"])
+		let expanded = FeedDaySections.make(
+			articles: today + earlier + [future], now: now, calendar: calendar, expanded: ["today", "earlier"],
+		)
 		#expect(ids(expanded, "today").count == 8)
+		#expect(ids(expanded, "earlier").count == 9)
+	}
+
+	/// The Cards page is rebuilt from the loaded stories, so a big folder must
+	/// still build in a fraction of a frame budget's worth of seconds.
+	@Test func aHundredFeedsAndAThousandStoriesBuildQuickly() {
+		let directory = ArticleFeedDirectory(navigationItems: (0..<100).map { index in
+			ReaderNavigationItem(
+				id: "feed/\(index)", title: "Feed \(index)", streamID: "feed/\(index)", kind: .feed, unreadCount: 10,
+				parentID: nil, feedKey: "feed-\(index)", iconURL: nil, smartSection: nil,
+			)
+		})
+		let articles = (0..<1_000).map { index in
+			story("s\(index)", feed: "feed-\(index % 100)", source: "Feed \(index % 100)",
+				at: now.addingTimeInterval(-Double(index) * 1_800))
+		}
+		let clock = ContinuousClock()
+
+		var sections: FolderSections?
+		let elapsed = clock.measure {
+			for _ in 0..<10 {
+				sections = FolderSections.make(articles: articles, feeds: directory, now: now, calendar: calendar)
+			}
+		}
+
+		#expect(sections?.sections.filter { $0.kind == .feed }.count == 100)
+		// Every story Today and Last 7 Days show is also among its feed's newest three.
+		#expect(sections?.uniqueArticleIDs.count == 300)
+		// Ten builds; one is well under 50 ms.
+		#expect(elapsed < .milliseconds(500), "10 builds took \(elapsed)")
 	}
 
 	// MARK: Helpers

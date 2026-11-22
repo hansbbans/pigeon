@@ -20,6 +20,16 @@ nonisolated struct FolderSections: Equatable, Sendable {
 			/// Single-feed day sections.
 			case yesterday
 			case earlier
+
+			/// The reading log's `row` for a story this card shows first.
+			var readingLogRow: String {
+				switch self {
+				case .today: "card-today"
+				case .lastSevenDays: "card-last-7-days"
+				case .feed, .older: "card-feed"
+				case .yesterday, .earlier: "card-day"
+				}
+			}
 		}
 
 		let id: String
@@ -46,19 +56,29 @@ nonisolated struct FolderSections: Equatable, Sendable {
 	}
 
 	let sections: [Section]
+	/// Each shown story once, in the order the cards draw them (at its first
+	/// appearance, nothing behind "N more"): what above and below mean.
+	let renderedArticles: [Recommendation]
 	let uniqueArticleIDs: [String]
+	/// The reading log's `row` for each story: the card it first appears in.
+	let readingLogRows: [String: String]
 
+	/// Everything derived is worked out here, once per build, so a page that
+	/// reads it on every body pass does not repeat the work.
 	init(sections: [Section]) {
 		self.sections = sections
 		var seen = Set<String>()
-		uniqueArticleIDs = sections.flatMap(\.articles).map(\.id).filter { seen.insert($0).inserted }
-	}
-
-	/// Each shown story once, in the order the cards draw them (at its first
-	/// appearance, nothing behind "N more"): what above and below mean.
-	var renderedArticles: [Recommendation] {
-		var seen = Set<String>()
-		return sections.flatMap(\.articles).filter { seen.insert($0.id).inserted }
+		var rows: [String: String] = [:]
+		var rendered: [Recommendation] = []
+		for section in sections {
+			for article in section.articles where seen.insert(article.id).inserted {
+				rendered.append(article)
+				rows[article.id] = section.kind.readingLogRow
+			}
+		}
+		renderedArticles = rendered
+		uniqueArticleIDs = rendered.map(\.id)
+		readingLogRows = rows
 	}
 
 	/// `expanded` holds the ids of sections shown in full.
@@ -131,9 +151,9 @@ nonisolated struct FolderSections: Equatable, Sendable {
 nonisolated enum FeedDaySections {
 	static let dayLimit = 5
 
-	/// Today and Yesterday show `dayLimit` before "N more". Earlier is the
-	/// feed's paginated tail, so it shows everything loaded. A story dated
-	/// after today (a skewed clock) counts as Today rather than vanishing.
+	/// Every day shows `dayLimit` before "N more", Earlier included, so a
+	/// long feed is a short page. A story dated after today (a skewed clock)
+	/// counts as Today rather than vanishing.
 	static func make(
 		articles: [Recommendation],
 		now: Date,
@@ -147,7 +167,7 @@ nonisolated enum FeedDaySections {
 			("today", .today, "Today", stories.filter { $0.receivedAt >= todayStart }, dayLimit),
 			("yesterday", .yesterday, "Yesterday",
 				stories.filter { $0.receivedAt >= yesterdayStart && $0.receivedAt < todayStart }, dayLimit),
-			("earlier", .earlier, "Earlier", stories.filter { $0.receivedAt < yesterdayStart }, nil),
+			("earlier", .earlier, "Earlier", stories.filter { $0.receivedAt < yesterdayStart }, dayLimit),
 		]
 		return FolderSections(sections: groups.compactMap { group in
 			guard group.articles.isEmpty == false else { return nil }
