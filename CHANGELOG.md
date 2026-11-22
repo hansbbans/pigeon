@@ -10,6 +10,7 @@ All notable changes to Pigeon are documented in this file.
 - iOS: feed icons in the sidebar, on Home and above By Feed sections are decoded once at icon size and reused, and story pictures and icons are kept on disk between launches (up to 150 MB).
 - iOS: the reader prepares the web view for the next story ahead of time, so opening a story does less work at the moment of the tap. Each story still reads in its own private web view.
 - iOS: syncing a page of new stories reads the list of unsent changes once, not once per story.
+- iOS: marking a story read or starring it changes the screen at once, also while a sync is writing to the offline library. If the change cannot be saved, the story goes back to how it was.
 
 ## [0.1.15.0] - 2026-11-21
 
