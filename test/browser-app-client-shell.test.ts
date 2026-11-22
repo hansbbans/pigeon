@@ -1328,6 +1328,7 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 	const firstPage = ['110', '109', '108', '107', '106', '105', '104', '103', '102'];
 	const requests: URL[] = [];
 	const readingLog: Array<Record<string, any>> = [];
+	const markedRead: string[][] = [];
 	const harness = await createBrowserHarness({
 		now: options.now ?? now,
 		fetchImpl: async (input, init) => {
@@ -1348,6 +1349,11 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 				return Response.json({});
 			}
 			if (input === '/api/v1/engagement') return Response.json({});
+			if (input === '/api/v1/mutations') {
+				const mutations = JSON.parse(String(init?.body)).mutations;
+				markedRead.push(...mutations.map((mutation: { itemIds: string[] }) => mutation.itemIds));
+				return Response.json({ results: mutations.map((mutation: { id: string }) => ({ mutationId: mutation.id, status: 'applied' })) });
+			}
 			const url = new URL(`https://pigeon.example${input}`);
 			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 0 });
 			if (url.pathname === '/reader/api/0/stream/items/ids') {
@@ -1364,7 +1370,7 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
 				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => stories[id]).map((id) => ({
 					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
-					title: `Story ${id}`, published: stories[id].published,
+					title: `Story ${id}`, published: stories[id].published, categories: [],
 					origin: { title: stories[id].title, streamId: stories[id].feed },
 					summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
 				})) });
@@ -1404,7 +1410,7 @@ async function openFolderSections(options: { now?: () => number; rowHeight?: num
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)));
 	await findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)!.dispatch('click');
 	await waitForBrowserCondition(() => outline().includes('102'));
-	return { ...harness, requests, readingLog, rows, outline, copies };
+	return { ...harness, requests, readingLog, markedRead, rows, outline, copies };
 }
 
 test('folders open as Today, Last 7 Days and feed sections with N more', async () => {
@@ -1483,6 +1489,36 @@ test('a page landing in a folder keeps the first row on screen in place', async 
 	await waitForBrowserCondition(() => outline().includes('100'));
 	assert.equal(charlie(), before + 1);
 	assert.equal(shell.scrollTop, charlie() * 50);
+});
+
+test('in a folder, Mark above and below follow the rows as drawn, not the newest-first stream', async () => {
+	const { elements, outline, copies, markedRead } = await openFolderSections();
+	const contextMenu = (id: string) => copies(id)[0].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	const above = elements.get('context-mark-above-button')!;
+	const below = elements.get('context-mark-below-button')!;
+	// Only drawn rows count: the last drawn story has nothing below it, even with another page to load.
+	contextMenu('102');
+	assert.equal(below.disabled, true);
+	assert.equal(above.disabled, false);
+	elements.get('article-context-menu')!.classList.add('hidden');
+	contextMenu('110');
+	assert.equal(above.disabled, true);
+
+	// After the next page, 101 (Oct 22) is drawn in Bravo, above Charlie's 103 (Oct 24).
+	elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('100'));
+	contextMenu('103');
+	above.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	// 105 sits behind "1 more", so it is not marked.
+	assert.deepEqual(markedRead.flat(), ['110', '109', '108', '107', '106', '104', '101']);
+	await waitForBrowserCondition(() => !elements.get('article-bulk-button')!.disabled, 100);
+
+	markedRead.length = 0;
+	contextMenu('103');
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	assert.deepEqual(markedRead.flat(), ['102', '100']);
 });
 
 test('folders ignore the list sort and keep it for the other views', async () => {

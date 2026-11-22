@@ -5090,6 +5090,12 @@ export function renderBrowserAppRuntimeScript(): string {
       if (['above','below'].includes(request.mode) && index < 0) throw new Error('Selected article is no longer in these results.');
       return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
     }
+    // A folder marks what is drawn above or below the story, not the newest-first stream.
+    if (request.drawnItemIds && ['above', 'below'].includes(request.mode)) {
+      const index = request.drawnItemIds.indexOf(request.selectedItemId);
+      if (index < 0) throw new Error('Selected article is no longer shown');
+      return request.mode === 'above' ? request.drawnItemIds.slice(0, index) : request.drawnItemIds.slice(index + 1);
+    }
     if (client.isTimeWindowView(request.view) && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
     do {
@@ -5196,7 +5202,9 @@ export function renderBrowserAppRuntimeScript(): string {
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
       dayBounds: client.getViewDayBounds(view), before: mode.startsWith('age-')
-        ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null };
+        ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null,
+      // Folder rows in drawn order, each story once (sections can show it twice).
+      drawnItemIds: view?.kind === 'folder' ? [...getNavigableItemIds()] : null };
   }
 
   async function finishBulkRequest(request) {
@@ -5844,14 +5852,16 @@ export function renderBrowserAppRuntimeScript(): string {
   // Runs on open and on every list or action render, so the items follow pending writes and new rows.
   function refreshArticleContextMenu() {
     if (!articleContextTarget) return;
-    const candidates = getWindowCandidateIds();
+    // In a folder only drawn rows count, in the order they are drawn.
+    const isFolder = getActiveView()?.kind === 'folder';
+    const candidates = isFolder ? getNavigableItemIds() : getWindowCandidateIds();
     const index = candidates.indexOf(articleContextTarget.itemId);
     if (index < 0 || articleContextTarget.viewId !== activeViewId || articleContextTarget.generation !== accountGeneration) {
       closeArticleContextMenu(false);
       return;
     }
     const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
-    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
+    const moreBelow = !isFolder && Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
     contextMarkAboveButton.disabled = unavailable || index === 0;
     contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !moreBelow);
   }
