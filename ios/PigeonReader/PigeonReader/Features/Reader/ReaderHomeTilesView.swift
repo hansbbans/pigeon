@@ -76,7 +76,7 @@ struct ReaderHomeTilesView: View {
 					.background(ReaderHomeTileStyle.background, in: ReaderHomeTileStyle.shape)
 				}
 				.buttonStyle(ReaderHomeTileButtonStyle())
-				.accessibilityHint("Shows every folder and feed with unread counts")
+				.accessibilityHint("Shows every folder and feed")
 				.accessibilityIdentifier(ReaderHomeAccessibility.allFeeds)
 			}
 			.padding(.horizontal, 16)
@@ -176,7 +176,7 @@ private struct ReaderHomeDateline: View {
 	}
 }
 
-private struct ReaderHomeViewTile: View {
+struct ReaderHomeViewTile: View {
 	let item: ReaderNavigationItem
 
 	var body: some View {
@@ -200,10 +200,12 @@ private struct ReaderHomeViewTile: View {
 	}
 }
 
-private struct ReaderHomeFolderTile: View {
+struct ReaderHomeFolderTile: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.readerTypeface) private var readerTypeface
 	let folder: ReaderHomeTiles.FolderTile
+	/// Home's grid keeps tiles even; a full-width tile fits its content.
+	var minHeight: Double = 136
 
 	var body: some View {
 		let color = FrontPageKickerPalette.color(at: folder.colorIndex)
@@ -244,7 +246,7 @@ private struct ReaderHomeFolderTile: View {
 		.padding(.horizontal, 12)
 		.padding(.top, 14)
 		.padding(.bottom, 12)
-		.frame(maxWidth: .infinity, minHeight: 136, alignment: .topLeading)
+		.frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
 		.readerTileBackground(barColor: color)
 		.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: folder.headline)
 	}

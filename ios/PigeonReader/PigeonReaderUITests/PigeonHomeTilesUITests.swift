@@ -1,6 +1,7 @@
 import XCTest
 
-/// The tile home, on iPhone and iPad. Every other UI test starts on the library list.
+/// The tile home and All Feeds in the Cards look, on iPhone and iPad. Every
+/// other UI test starts on the library list.
 @MainActor
 final class PigeonHomeTilesUITests: XCTestCase {
 	private var app: XCUIApplication!
@@ -8,6 +9,7 @@ final class PigeonHomeTilesUITests: XCTestCase {
 	override func setUp() async throws {
 		continueAfterFailure = false
 		app = XCUIApplication()
+		app.launchEnvironment["PIGEON_UI_TEST_LOOK"] = "cards"
 		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state", "-reader-folder-read-data"]
 		app.launchWithoutAnimations()
 	}
@@ -40,17 +42,46 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		XCTAssertTrue(forYouBar.waitForExistence(timeout: 10))
 	}
 
-	func testAllFeedsShowsTheLibraryListAndHomeReturnsToTheTiles() throws {
+	func testAllFeedsShowsTheLibraryAsTilesAndHomeReturns() throws {
 		try skipUnlessTileHome()
-		let allFeeds = app.buttons["reader-home-all-feeds"]
-		for _ in 0..<4 where allFeeds.isHittable == false {
-			app.swipeUp()
-		}
-		allFeeds.tap()
+		showAllFeeds()
+
+		let library = app.descendants(matching: .any)["reader-library-tiles"].firstMatch
+		XCTAssertTrue(library.waitForExistence(timeout: 10))
+		XCTAssertFalse(app.descendants(matching: .any)["reader-sidebar"].firstMatch.exists)
+		// Every view, Unread included; counts are spoken, not shown.
+		let unread = tile("unread")
+		XCTAssertTrue(unread.waitForExistence(timeout: 5))
+		XCTAssertTrue((unread.value as? String)?.hasSuffix("unread") == true)
+		// Each folder, then its feeds.
+		XCTAssertTrue(tile("user/-/label/Design").exists)
+		XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-feed/1")).firstMatch.exists)
+		attachScreenshot(named: "library-tiles")
+
+		app.buttons["reader-home-show-tiles"].tap()
+		XCTAssertTrue(app.descendants(matching: .any)["reader-home-tiles"].firstMatch.waitForExistence(timeout: 10))
+		XCTAssertFalse(library.exists)
+	}
+
+	func testAFeedTileOpensTheFeed() throws {
+		try skipUnlessTileHome()
+		showAllFeeds()
+		let feed = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-feed/1")).firstMatch
+		XCTAssertTrue(feed.waitForExistence(timeout: 10))
+		feed.tap()
+		let bar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "Dense Discovery")).firstMatch
+		XCTAssertTrue(bar.waitForExistence(timeout: 10))
+	}
+
+	func testAllFeedsInReederIsTheLibraryList() throws {
+		app.terminate()
+		app.launchEnvironment["PIGEON_UI_TEST_LOOK"] = "reeder"
+		app.launchWithoutAnimations()
+		try skipUnlessTileHome()
+		showAllFeeds()
 
 		let sidebar = app.descendants(matching: .any)["reader-sidebar"].firstMatch
 		XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
-		// Unread counts live here, not on the tiles.
 		let unread = app.descendants(matching: .any)["reader-sidebar-item-unread"].firstMatch
 		XCTAssertTrue(unread.waitForExistence(timeout: 5))
 		XCTAssertTrue((unread.value as? String)?.hasSuffix("unread") == true)
@@ -81,6 +112,14 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		} else {
 			bar.buttons.firstMatch.tap()
 		}
+	}
+
+	private func showAllFeeds() {
+		let allFeeds = app.buttons["reader-home-all-feeds"]
+		for _ in 0..<4 where allFeeds.isHittable == false {
+			app.swipeUp()
+		}
+		allFeeds.tap()
 	}
 
 	private func tile(_ id: String) -> XCUIElement {

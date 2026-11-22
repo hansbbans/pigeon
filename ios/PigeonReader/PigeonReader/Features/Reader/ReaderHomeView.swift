@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Home is the tile grid, with the full library list one tap away. A compact
-/// window, and a regular one in Cards (which navigates like a phone),
-/// shows it as the split view's first column. A regular window in Reeder
+/// Home is the tile grid, with the full library one tap away: tiles in
+/// Cards, the list in Reeder. A compact window, and a regular one in Cards
+/// (which navigates like a phone), shows it as the split view's first column. A regular window in Reeder
 /// shows it over the split view until a view is chosen, and that split view's
 /// own sidebar is always the list.
 struct ReaderHomeView: View {
@@ -17,6 +17,7 @@ struct ReaderHomeView: View {
 		case regularHome
 	}
 
+	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	let placement: Placement
 	@State private var showsLibraryList = ReaderHomeView.startsOnLibraryList
@@ -25,10 +26,19 @@ struct ReaderHomeView: View {
 		if allowsTiles, showsLibraryList == false {
 			ReaderHomeTilesView(onShowLibrary: { setShowsLibraryList(true) })
 				.transition(.opacity)
+		} else if showsLibraryTiles {
+			ReaderLibraryTilesView(onShowHome: { setShowsLibraryList(false) })
+				.transition(.opacity)
 		} else {
 			ReaderSidebarView(onShowHome: allowsTiles ? { setShowsLibraryList(false) } : nil)
 				.transition(.opacity)
 		}
+	}
+
+	/// All Feeds in Cards is tiles too. Reeder, the split view's own sidebar
+	/// and UI tests written against the list keep the library list.
+	private var showsLibraryTiles: Bool {
+		allowsTiles && model.readerTypography.look == .cards && Self.startsOnLibraryList == false
 	}
 
 	private var allowsTiles: Bool {
