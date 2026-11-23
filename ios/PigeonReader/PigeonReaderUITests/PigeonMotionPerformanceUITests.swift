@@ -11,8 +11,12 @@ final class PigeonMotionPerformanceUITests: XCTestCase {
 		app = XCUIApplication()
 		// These tests exercise the library list; PigeonHomeTilesUITests covers the tile home.
 		app.launchEnvironment["PIGEON_UI_TEST_HOME"] = "list"
+		// Five views, as in PigeonNavigationMotionUITests: with Last 7 Days,
+		// Folder 01 sits where opening it scrolls to reveal its feeds.
 		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state",
-			"-reader-navigation-fixture", "-reader-motion-stress-fixture"]
+			"-reader-navigation-fixture", "-reader-motion-stress-fixture",
+			"-pigeon.reader.smart-views.v1", "(forYou, unread, starred, today)",
+			"-pigeon.reader.smart-views.last-7-days-migrated.v1", "YES"]
 		app.launch()
 		if folder.waitForExistence(timeout: 2) == false {
 			// Startup may restore the fixture's For You feed as a compact detail
