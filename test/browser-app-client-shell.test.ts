@@ -5,6 +5,7 @@ import {
 	THEME_STORAGE_KEY,
 	createArticleFrameDocument,
 	getLocalDayBounds,
+	getLocalDayRangeBounds,
 } from '../src/browser-app-client';
 import {
 	createBrowserHarness,
@@ -692,6 +693,125 @@ test('runtime Today view filters received timestamps in the local day and stops 
 	assert.equal(elements.get('reader-title')?.textContent, 'At-midnight article');
 });
 
+test('Last 7 Days view requests since/before for seven local days and lists newest first', async () => {
+	const now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
+	const week = getLocalDayRangeBounds(now, 7);
+	const contentFor = (id: string, published: number) => ({
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title: `Story ${id}`, published, origin: { title: 'Alpha', streamId: 'feed/1' },
+		summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
+	});
+	const contentById: Record<string, ReturnType<typeof contentFor>> = {
+		'1': contentFor('1', week.startSeconds),
+		'2': contentFor('2', week.startSeconds + 3 * 86_400),
+		'3': contentFor('3', week.endSeconds - 1),
+	};
+	const articleRequests: URL[] = [];
+	const countRequests: URL[] = [];
+	const { elements } = await createBrowserHarness({
+		now,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [{ id: 'feed/1', count: 3 }] });
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') {
+				countRequests.push(url);
+				return Response.json({ count: url.searchParams.get('since') === week.start.toISOString() ? 7 : 2 });
+			}
+			if (url.pathname === '/api/v1/browser/articles') {
+				articleRequests.push(url);
+				return Response.json({ itemIds: ['3', '2', '1'], continuation: null, hasMore: false, sort: 'newest' });
+			}
+			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).map((id) => contentById[id]).filter(Boolean) });
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => (findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.textContent ?? '').includes('7'));
+	const viewIds = elements.get('views-list')!.children.map((row) => row.children[0]?.dataset.viewId);
+	assert.equal(viewIds[viewIds.indexOf('today') + 1], 'last-7-days');
+	assert.match(findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.textContent ?? '', /Last 7 Days/);
+	const weekCount = countRequests.find((url) => url.searchParams.get('since') === week.start.toISOString());
+	assert.ok(weekCount, 'the Last 7 Days count asks for its own window');
+	assert.equal(weekCount.searchParams.get('before'), week.end.toISOString());
+	assert.equal(weekCount.searchParams.get('stream'), 'all');
+	assert.equal(weekCount.searchParams.get('filter'), 'unread');
+
+	await findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	const request = articleRequests.at(-1)!;
+	assert.equal(request.searchParams.get('stream'), 'user/-/state/com.google/reading-list');
+	assert.equal(request.searchParams.get('since'), week.start.toISOString());
+	assert.equal(request.searchParams.get('before'), week.end.toISOString());
+	assert.equal(request.searchParams.get('sort'), 'newest');
+	assert.equal(request.searchParams.get('filter'), 'all');
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['3', '2', '1']);
+	assert.equal(elements.get('articles-heading')?.textContent, 'Last 7 Days');
+	assert.equal(elements.get('sidebar-current-meta')?.textContent, 'Received in the last 7 days');
+	await waitForBrowserCondition(() => elements.get('reader-title')?.textContent === 'Story 3');
+	// Mark all follows the loaded list, as in Today.
+	assert.equal(elements.get('mark-all-as-read-button')?.disabled, false);
+});
+
+test('a Last 7 Days load in flight across local midnight still lands, and a refresh moves the window', async () => {
+	let now = new Date(2026, 10, 3, 23, 59, 30).getTime();
+	const before = getLocalDayRangeBounds(now, 7);
+	const after = getLocalDayRangeBounds(new Date(2026, 10, 4, 0, 0, 30).getTime(), 7);
+	// Story 4 is from the window's first day, which midnight moves out of the window.
+	const contentFor = (id: string) => ({
+		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
+		title: `Story ${id}`, published: id === '4' ? before.startSeconds + 3_600 : before.endSeconds - Number(id) * 3_600, categories: [],
+		origin: { title: 'Alpha', streamId: 'feed/1' }, summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
+	});
+	const articleRequests: URL[] = [];
+	const firstResponse = createDeferred<Response>();
+	const { elements } = await createBrowserHarness({
+		now: () => now,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Alpha' }] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 3 });
+			if (url.pathname === '/api/v1/browser/articles') {
+				articleRequests.push(url);
+				const body = { itemIds: ['1', '2', '3', '4'], continuation: null, hasMore: false, sort: 'newest' };
+				return articleRequests.length === 1 ? firstResponse.promise.then(() => Response.json(body)) : Response.json(body);
+			}
+			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
+			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).map(contentFor) });
+			}
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('views-list'), 'last-7-days')));
+	await findListButtonByViewId(elements.get('views-list'), 'last-7-days')?.dispatch('click');
+	await waitForBrowserCondition(() => articleRequests.length === 1);
+	assert.equal(articleRequests[0].searchParams.get('since'), before.start.toISOString());
+
+	// Local midnight passes while the first page is on its way. The list keeps
+	// the window it asked for, first day included, until it reloads.
+	now = new Date(2026, 10, 4, 0, 0, 30).getTime();
+	firstResponse.resolve(new Response());
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 4);
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3', '4']);
+
+	// The next refresh reloads the list for the new window.
+	elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => articleRequests.length === 2);
+	assert.equal(articleRequests[1].searchParams.get('since'), after.start.toISOString());
+	assert.equal(articleRequests[1].searchParams.get('before'), after.end.toISOString());
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3']);
+});
+
 test('runtime script hides all-read feeds when the unread filter is active', async () => {
 	const { elements } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
@@ -1190,12 +1310,6 @@ test('runtime script expands folder feeds and requests the folder label stream w
 				});
 			}
 
-			// Folders open "By feed", a browser articles query.
-			if (String(input).startsWith('/api/v1/browser/articles?')) {
-				streamRequests.push(String(input));
-				return Response.json({ itemIds: ['101'], continuation: null, hasMore: false, sort: 'feed' });
-			}
-
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
 				return Response.json({
 					items: [
@@ -1225,11 +1339,10 @@ test('runtime script expands folder feeds and requests the folder label stream w
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/3')?.textContent ?? '', /4/);
 
 	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
+	// Folders load newest first like every other stream; the sections are built in the browser.
 	const folderRequestUrl = new URL(`https://pigeon.example${streamRequests.at(-1) ?? ''}`);
-	assert.equal(folderRequestUrl.pathname, '/api/v1/browser/articles');
-	assert.equal(folderRequestUrl.searchParams.get('stream'), 'user/-/label/Daily Reads');
-	assert.equal(folderRequestUrl.searchParams.get('sort'), 'feed');
-	assert.equal(folderRequestUrl.searchParams.get('filter'), 'all');
+	assert.equal(folderRequestUrl.pathname, '/reader/api/0/stream/items/ids');
+	assert.equal(folderRequestUrl.searchParams.get('s'), 'user/-/label/Daily Reads');
 
 	const requestCountBeforeToggle = streamRequests.length;
 	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Daily Reads')?.dispatch('click');
@@ -1244,107 +1357,342 @@ test('runtime script expands folder feeds and requests the folder label stream w
 	await waitForBrowserCondition(() => !findListButtonByViewId(elements.get('folders-list'), 'feed/1'));
 });
 
-test('folders open By feed with a label per feed; their sort stays apart from other views', async () => {
-	const requests: URL[] = [];
-	const items: Record<string, { feed: string; title: string; published: number }> = {
-		'101': { feed: 'feed/1', title: 'Alpha', published: 1_742_460_100 },
-		'102': { feed: 'feed/2', title: 'Bravo', published: 1_742_460_300 },
-		'103': { feed: 'feed/1', title: 'Alpha', published: 1_742_460_200 },
+const FOLDER_ID = 'user/-/label/Daily Reads';
+
+// A folder of three feeds seen on Nov 3, 2026 at noon: six stories today, one
+// three days ago, and two older than the week, one from a feed the library
+// does not list. A second page adds two older stories.
+async function openFolderSections(options: { now?: () => number; rowHeight?: number } = {}) {
+	const now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
+	const today = getLocalDayRangeBounds(now, 1).startSeconds;
+	const at = (date: Date) => Math.floor(date.getTime() / 1000);
+	const stories: Record<string, { feed: string; title: string; published: number }> = {
+		// Not in the first page: a refresh can bring them in.
+		'112': { feed: 'feed/1', title: 'Alpha', published: today + 7_000 },
+		'111': { feed: 'feed/1', title: 'Alpha', published: today + 6_000 },
+		'110': { feed: 'feed/1', title: 'Alpha', published: today + 5_000 },
+		'109': { feed: 'feed/2', title: 'Bravo', published: today + 4_000 },
+		'108': { feed: 'feed/1', title: 'Alpha', published: today + 3_000 },
+		'107': { feed: 'feed/1', title: 'Alpha', published: today + 2_000 },
+		'106': { feed: 'feed/3', title: 'Charlie', published: today + 1_000 },
+		'105': { feed: 'feed/1', title: 'Alpha', published: today + 500 },
+		'104': { feed: 'feed/2', title: 'Bravo', published: at(new Date(2026, 9, 31, 12)) },
+		'103': { feed: 'feed/3', title: 'Charlie', published: at(new Date(2026, 9, 24, 12)) },
+		'102': { feed: 'feed/9', title: 'Ghost', published: at(new Date(2026, 9, 23, 12)) },
+		'101': { feed: 'feed/2', title: 'Bravo', published: at(new Date(2026, 9, 22, 12)) },
+		'100': { feed: 'feed/4', title: 'Delta', published: at(new Date(2026, 9, 21, 12)) },
 	};
-	const order: Record<string, string[]> = { feed: ['103', '101', '102'], newest: ['102', '103', '101'], oldest: ['101', '103', '102'] };
-	const { elements, dispatchKeydown } = await createBrowserHarness({
+	const firstPage = ['110', '109', '108', '107', '106', '105', '104', '103', '102'];
+	const requests: URL[] = [];
+	const readingLog: Array<Record<string, any>> = [];
+	const markedRead: string[][] = [];
+	const harness = await createBrowserHarness({
+		now: options.now ?? now,
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
 			if (input === '/reader/api/0/subscription/list') {
-				const folder = [{ id: 'user/-/label/Daily Reads', label: 'Daily Reads' }];
+				const folder = [{ id: FOLDER_ID, label: 'Daily Reads' }];
 				return Response.json({ subscriptions: [
 					{ id: 'feed/1', title: 'Alpha', iconUrl: 'https://icons.example/alpha.png', categories: folder },
 					{ id: 'feed/2', title: 'Bravo', categories: folder },
-					{ id: 'feed/3', title: 'Charlie' },
+					{ id: 'feed/3', title: 'Charlie', categories: folder },
+					{ id: 'feed/4', title: 'Delta', categories: folder },
+					{ id: 'feed/5', title: 'Echo' },
 				] });
 			}
 			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			if (input === '/api/v1/reading-log') {
+				readingLog.push(...JSON.parse(String(init?.body)).events);
+				return Response.json({});
+			}
+			if (input === '/api/v1/engagement') return Response.json({});
+			if (input === '/api/v1/mutations') {
+				const mutations = JSON.parse(String(init?.body)).mutations;
+				markedRead.push(...mutations.map((mutation: { itemIds: string[] }) => mutation.itemIds));
+				return Response.json({ results: mutations.map((mutation: { id: string }) => ({ mutationId: mutation.id, status: 'applied' })) });
+			}
 			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 0 });
 			if (url.pathname === '/reader/api/0/stream/items/ids') {
 				requests.push(url);
-				const ids = url.searchParams.get('s') === 'user/-/label/Daily Reads' ? order.newest : [];
-				return Response.json({ itemRefs: ids.map((id) => ({ id })) });
+				if (url.searchParams.get('s') !== FOLDER_ID) return Response.json({ itemRefs: [] });
+				return url.searchParams.get('c') === 'page-2'
+					? Response.json({ itemRefs: [{ id: '101' }, { id: '100' }] })
+					: Response.json({ itemRefs: firstPage.map((id) => ({ id })), continuation: 'page-2' });
 			}
 			if (url.pathname === '/api/v1/browser/articles') {
 				requests.push(url);
-				const ids = url.searchParams.get('stream') === 'user/-/label/Daily Reads' ? order[url.searchParams.get('sort')!] : [];
-				return Response.json({ itemIds: ids, continuation: null, hasMore: false, sort: url.searchParams.get('sort') });
+				return Response.json({ itemIds: url.searchParams.get('stream') === FOLDER_ID ? firstPage : [], continuation: null, hasMore: false });
 			}
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => items[id]).map((id) => ({
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => stories[id]).map((id) => ({
 					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
-					title: `Story ${id}`, published: items[id].published,
-					origin: { title: items[id].title, streamId: items[id].feed },
+					title: `Story ${id}`, published: stories[id].published, categories: [],
+					origin: { title: stories[id].title, streamId: stories[id].feed },
 					summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
 				})) });
 			}
 			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
 		},
 	});
-	const list = () => elements.get('articles-list')!.children;
-	const headers = () => list().filter((row) => row.classList.contains('article-feed-header'));
-	const sortSelect = elements.get('article-sort-select')!;
-	async function chooseSort(value: string) {
-		sortSelect.value = value;
-		sortSelect.dispatch('change');
-		await flushBrowserTasks();
+	const { elements } = harness;
+	if (options.rowHeight) {
+		// Lay list rows out one under another so the page can measure them.
+		const rowHeight = options.rowHeight;
+		const shell = elements.get('articles-list-shell')!;
+		const document = harness.window.document;
+		const createElement = document.createElement.bind(document);
+		document.createElement = (tagName: string) => {
+			const element = createElement(tagName);
+			if (tagName === 'li') {
+				element.getBoundingClientRect = () => {
+					const index = element.parentElement?.children.indexOf(element) ?? 0;
+					const top = index * rowHeight - shell.scrollTop;
+					return { width: 340, height: rowHeight, left: 0, right: 340, top, bottom: top + rowHeight };
+				};
+			}
+			return element;
+		};
 	}
-	async function openView(listId: string, viewId: string) {
-		await findListButtonByViewId(elements.get(listId), viewId)!.dispatch('click');
-		await flushBrowserTasks();
-	}
-
+	const rows = () => elements.get('articles-list')!.children;
+	// Each list row as a short label: headers by their title, stories by id, "N more" by its text.
+	const outline = () => rows().map((row) => {
+		if (row.classList.contains('article-feed-header')) return '# ' + findDescendantByClass(row, 'article-feed-header-title')?.textContent;
+		const more = findDescendantByClass(row, 'article-more-button');
+		if (more) return '+ ' + more.textContent;
+		return row.children.find((child) => child.dataset.itemId)?.dataset.itemId ?? '?';
+	});
+	const copies = (id: string) => rows().map((row) => row.children[0]).filter((button) => button?.dataset.itemId === id);
 	await elements.get('login-form')!.dispatch('submit');
-	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Daily Reads')));
-	await openView('folders-list', 'user/-/label/Daily Reads');
-	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)));
+	await findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('102'));
+	return { ...harness, requests, readingLog, markedRead, firstPage, rows, outline, copies };
+}
 
-	assert.equal(requests.at(-1)!.searchParams.get('sort'), 'feed');
-	assert.equal(sortSelect.value, 'feed');
-	assert.deepEqual(renderedArticleIds({ elements } as any), order.feed);
-	// Label, 103, 101, label, 102: labels are list rows without an article button.
-	assert.deepEqual(list().map((row) => row.classList.contains('article-feed-header') ? 'header' : 'article'), ['header', 'article', 'article', 'header', 'article']);
-	assert.deepEqual(headers().map((row) => findDescendantByClass(row, 'article-feed-header-title')?.textContent), ['Alpha', 'Bravo']);
-	assert.deepEqual(headers().map((row) => row.getAttribute('data-feed-stream')), ['feed/1', 'feed/2']);
-	assert.equal(findDescendantByClass(headers()[0], 'feed-icon')?.getAttribute('src'), 'https://icons.example/alpha.png');
-	assert.equal(findDescendantByClass(headers()[1], 'feed-icon'), undefined);
-	assert.ok(headers().every((row) => !findDescendantByAttribute(row, 'data-item-id')));
-	// Under a label the row leaves out the repeated feed name.
-	assert.equal(findDescendantByClass(findListButtonByItemId(elements.get('articles-list'), '103'), 'article-source'), undefined);
-	// The first article, not a label, is selected; j moves across a feed boundary to the next article.
-	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 103');
+test('folders open as Today, Last 7 Days and feed sections with N more', async () => {
+	const { elements, requests, rows, outline, copies } = await openFolderSections();
+
+	assert.deepEqual(outline(), [
+		'# Today', '110', '109', '108', '107', '106', '+ 1 more',
+		'# Last 7 Days', '104',
+		'# Alpha', '110', '108', '107', '+ 1 more',
+		'# Bravo', '109', '104',
+		'# Charlie', '106', '103',
+		'# Older',
+		'# Ghost', '102',
+	]);
+	// Folders load newest first; the browser builds the sections.
+	assert.ok(requests.every((url) => url.searchParams.get('sort') !== 'feed'));
+	assert.equal(requests.at(-1)!.pathname, '/reader/api/0/stream/items/ids');
+	assert.equal(requests.at(-1)!.searchParams.get('s'), FOLDER_ID);
+	// Feed headers carry the favicon and open their feed; the others are plain text.
+	const headers = rows().filter((row) => row.classList.contains('article-feed-header'));
+	assert.deepEqual(headers.map((row) => row.getAttribute('data-section-key')),
+		['today', 'last-7-days', 'feed:feed/1', 'feed:feed/2', 'feed:feed/3', 'older', 'feed:feed/9']);
+	assert.equal(findDescendantByClass(headers[2], 'feed-icon')?.getAttribute('src'), 'https://icons.example/alpha.png');
+	assert.equal(findDescendantByClass(headers[3], 'feed-icon'), undefined);
+	for (const header of [headers[0], headers[1], headers[5], headers[6]]) {
+		assert.equal(findDescendantByClass(header, 'article-feed-header-button'), undefined);
+	}
+	assert.ok(headers.every((row) => !findDescendantByAttribute(row, 'data-item-id')));
+	// A story from today shows in Today with its feed name and again in its feed section without it.
+	const [todayCopy, feedCopy] = copies('110');
+	assert.equal(findDescendantByClass(todayCopy, 'article-source')?.textContent, 'Alpha');
+	assert.equal(findDescendantByClass(feedCopy, 'article-source'), undefined);
+	assert.equal(findDescendantByClass(copies('104')[0], 'article-source')?.textContent, 'Bravo');
+	// The read filter stays; the sort control is gone for folders.
+	assert.equal(elements.get('article-sort-field')!.classList.contains('hidden'), true);
+
+	// "N more" expands its own section in place without asking the server again.
+	const requestCount = requests.length;
+	findDescendantByClass(rows()[6], 'article-more-button')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.deepEqual(outline().slice(0, 9), ['# Today', '110', '109', '108', '107', '106', '105', '# Last 7 Days', '104']);
+	assert.deepEqual(outline().slice(9, 14), ['# Alpha', '110', '108', '107', '+ 1 more']);
+	assert.equal(requests.length, requestCount);
+
+	// The next page adds stories below the ones already shown and new feeds at the end.
+	elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('100'));
+	assert.deepEqual(outline().slice(14), [
+		'# Bravo', '109', '104', '101',
+		'# Charlie', '106', '103',
+		'# Older',
+		'# Ghost', '102',
+		'# Delta', '100',
+	]);
+
+	// Expanded sections stay expanded when the folder is opened again in this page session.
+	await findListButtonByViewId(elements.get('feeds-list'), 'feed/5')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(elements.get('article-sort-field')!.classList.contains('hidden'), false);
+	await findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('105'));
+
+	// A feed header opens that feed.
+	findDescendantByClass(rows().find((row) => row.getAttribute('data-section-key') === 'feed:feed/2'), 'article-feed-header-button')!.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-heading')!.textContent === 'Bravo');
+});
+
+test('a page landing in a folder keeps the first row on screen in place', async () => {
+	const { elements, outline } = await openFolderSections({ rowHeight: 50 });
+	const shell = elements.get('articles-list-shell')!;
+	const charlie = () => outline().indexOf('# Charlie');
+	shell.scrollTop = charlie() * 50;
+	const before = charlie();
+	// The next page adds 101 to Bravo, above Charlie.
+	elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('100'));
+	assert.equal(charlie(), before + 1);
+	assert.equal(shell.scrollTop, charlie() * 50);
+});
+
+test('in a folder, Mark above and below follow the rows as drawn, not the newest-first stream', async () => {
+	const { elements, outline, copies, markedRead } = await openFolderSections();
+	const contextMenu = (id: string) => copies(id)[0].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	const above = elements.get('context-mark-above-button')!;
+	const below = elements.get('context-mark-below-button')!;
+	// Only drawn rows count: the last drawn story has nothing below it, even with another page to load.
+	contextMenu('102');
+	assert.equal(below.disabled, true);
+	assert.equal(above.disabled, false);
+	elements.get('article-context-menu')!.classList.add('hidden');
+	contextMenu('110');
+	assert.equal(above.disabled, true);
+
+	// After the next page, 101 (Oct 22) is drawn in Bravo, above Charlie's 103 (Oct 24).
+	elements.get('load-more-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('100'));
+	contextMenu('103');
+	above.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	// 105 sits behind "1 more", so it is not marked.
+	assert.deepEqual(markedRead.flat(), ['110', '109', '108', '107', '106', '104', '101']);
+	await waitForBrowserCondition(() => !elements.get('article-bulk-button')!.disabled, 100);
+
+	markedRead.length = 0;
+	contextMenu('103');
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	assert.deepEqual(markedRead.flat(), ['102', '100']);
+});
+
+test('in a folder, the second copy of a story anchors its own actions and highlight', async () => {
+	const { elements, copies, markedRead } = await openFolderSections();
+	const above = elements.get('context-mark-above-button')!;
+	const below = elements.get('context-mark-below-button')!;
+	// 104 is drawn in Last 7 Days and again in Bravo, under 109.
+	copies('104')[1].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	assert.equal(above.disabled, false);
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	assert.deepEqual(markedRead.flat(), ['106', '103', '102']);
+	await waitForBrowserCondition(() => !elements.get('article-bulk-button')!.disabled, 100);
+
+	markedRead.length = 0;
+	copies('104')[0].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	// From the Last 7 Days copy, every feed section is below; 104 itself is not.
+	assert.deepEqual(markedRead.flat(), ['110', '108', '107', '109', '106', '103', '102']);
+
+	// Opening the feed copy highlights that row only.
+	copies('110')[1].dispatch('click');
+	await waitForBrowserCondition(() => copies('110')[1].classList.contains('is-active'));
+	assert.equal(copies('110')[0].classList.contains('is-active'), false);
+});
+
+test('folders ignore the list sort and keep it for the other views', async () => {
+	const { elements, requests } = await openFolderSections();
+	async function choose(id: string, value: string) {
+		elements.get(id)!.value = value;
+		elements.get(id)!.dispatch('change');
+		await flushBrowserTasks();
+	}
+	await findListButtonByViewId(elements.get('views-list'), 'all')!.dispatch('click');
+	await flushBrowserTasks();
+	await choose('article-sort-select', 'oldest');
+	await findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)!.dispatch('click');
+	await flushBrowserTasks();
+	// Unread in a folder is a browser articles query, newest first whatever All is sorted by.
+	await choose('article-read-filter', 'unread');
+	const folderQuery = requests.filter((url) => url.searchParams.get('stream') === FOLDER_ID).at(-1)!;
+	assert.equal(folderQuery.pathname, '/api/v1/browser/articles');
+	assert.equal(folderQuery.searchParams.get('filter'), 'unread');
+	assert.equal(folderQuery.searchParams.get('sort'), 'newest');
+	await findListButtonByViewId(elements.get('views-list'), 'all')!.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(elements.get('article-sort-select')!.value, 'oldest', 'changing the filter in a folder keeps the sort of other views');
+});
+
+test('j/k walks each story once in display order of first appearance in a folder', async () => {
+	const { elements, dispatchKeydown, copies } = await openFolderSections();
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 110');
+	// Both copies of the selected story are marked active.
+	assert.deepEqual(copies('110').map((button) => button.classList.contains('is-active')), [true, true]);
+	const walked = ['110'];
+	for (let step = 0; step < 7; step += 1) {
+		dispatchKeydown('j');
+		await flushBrowserTasks();
+		walked.push(elements.get('reader-title')!.textContent.replace('Story ', ''));
+	}
+	// 105 is behind "1 more" in both of its sections, so the keys skip it.
+	assert.deepEqual(walked, ['110', '109', '108', '107', '106', '104', '103', '102']);
+	assert.deepEqual(copies('109').map((button) => button.classList.contains('is-active')), [false, false]);
+	dispatchKeydown('k');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 103');
+	assert.deepEqual(copies('103').map((button) => button.classList.contains('is-active')), [true]);
+	dispatchKeydown('k');
+	await flushBrowserTasks();
+	dispatchKeydown('k');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 106');
+	assert.deepEqual(copies('106').map((button) => button.classList.contains('is-active')), [true, true]);
+});
+
+test('the selected story stays drawn when newer stories push it behind N more', async () => {
+	const { elements, dispatchKeydown, firstPage, outline, copies } = await openFolderSections();
+	copies('107')[0].dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 107');
+	// Two newer Alpha stories arrive: 107 would drop below Today's five and Alpha's three.
+	firstPage.unshift('112', '111');
+	elements.get('refresh-view-button')!.dispatch('click');
+	await waitForBrowserCondition(() => outline().includes('112'));
+	await flushBrowserTasks();
+	// Its first section, Today, opens so the open story keeps its row and its place in j/k.
+	assert.deepEqual(outline().slice(0, 9), ['# Today', '112', '111', '110', '109', '108', '107', '106', '105']);
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 107');
+	assert.ok(copies('107').every((button) => button.classList.contains('is-active')));
 	dispatchKeydown('j');
-	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 101');
-	dispatchKeydown('j');
-	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 102');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 106');
+	dispatchKeydown('k');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 107');
+});
 
-	// Newest first in a folder mixes feeds and drops the labels.
-	await chooseSort('newest');
-	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).join() === order.newest.join());
-	assert.equal(headers().length, 0);
-	assert.ok(findDescendantByClass(findListButtonByItemId(elements.get('articles-list'), '103'), 'article-source'));
-
-	// Other views keep their own sort and never send sort=feed.
-	await openView('views-list', 'all');
-	assert.equal(sortSelect.value, 'newest');
-	await openView('folders-list', 'user/-/label/Daily Reads');
-	assert.equal(sortSelect.value, 'newest', 'the folder sort sticks for folders');
-	await chooseSort('feed');
-	await waitForBrowserCondition(() => headers().length === 2);
-	const requestsBeforeAll = requests.length;
-	await openView('views-list', 'all');
-	assert.equal(sortSelect.value, 'newest');
-	await chooseSort('oldest');
-	await openView('folders-list', 'user/-/label/Daily Reads');
-	assert.equal(sortSelect.value, 'feed', 'Oldest first in All does not change the folder sort');
-	await openView('feeds-list', 'feed/3');
-	assert.equal(sortSelect.value, 'oldest');
-	assert.ok(requests.slice(requestsBeforeAll).every((url) => url.searchParams.get('sort') !== 'feed' || url.searchParams.get('stream') === 'user/-/label/Daily Reads'));
+test('impressions count a story shown twice once, at its first position, with metadata.section', async () => {
+	let now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
+	const harness = await openFolderSections({ now: () => now });
+	for (let tick = 0; tick < 12; tick += 1) {
+		now += 500;
+		harness.intervals[0].handler();
+	}
+	await waitForBrowserCondition(() => harness.readingLog.length > 0);
+	const logged = harness.readingLog.map((event) => [event.itemId, event.position, event.metadata?.section, event.metadata?.stream]);
+	assert.deepEqual(logged, [
+		['110', 0, 'today', FOLDER_ID],
+		['109', 1, 'today', FOLDER_ID],
+		['108', 2, 'today', FOLDER_ID],
+		['107', 3, 'today', FOLDER_ID],
+		['106', 4, 'today', FOLDER_ID],
+		['104', 5, 'last-7-days', FOLDER_ID],
+		['103', 6, 'feed', FOLDER_ID],
+		['102', 7, 'feed', FOLDER_ID],
+	]);
+	assert.ok(harness.readingLog.every((event) => event.view === 'folder'));
 });
 
 for (const scope of ['feed', 'folder']) {

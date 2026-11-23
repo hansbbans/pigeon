@@ -58,7 +58,7 @@ test('reading log view names follow the API values and carry the stream for feed
 	const view = (id: string, kind: string, streamId: string) => ({ id, kind, streamId });
 	assert.deepEqual(readingLogView(view('for-you', 'recommended', 'for-you'), false), { view: 'for-you', stream: null });
 	assert.deepEqual(readingLogView(view('unread', 'unread', 'user/-/state/com.google/reading-list'), false), { view: 'unread', stream: null });
-	for (const kind of ['all', 'today', 'recent', 'starred', 'saved']) {
+	for (const kind of ['all', 'today', 'last-7-days', 'recent', 'starred', 'saved']) {
 		assert.deepEqual(readingLogView(view(kind, kind, 'x'), false), { view: kind, stream: null });
 	}
 	assert.deepEqual(readingLogView(view('feed/7', 'feed', 'feed/7'), false), { view: 'feed', stream: 'feed/7' });

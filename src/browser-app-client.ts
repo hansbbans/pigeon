@@ -41,7 +41,7 @@ export interface BrowserFeedView {
 	title: string;
 	streamId: string;
 	unreadCount: number;
-	kind: 'all' | 'unread' | 'today' | 'recent' | 'starred' | 'saved' | 'recommended' | 'folder' | 'feed';
+	kind: 'all' | 'unread' | 'today' | 'last-7-days' | 'recent' | 'starred' | 'saved' | 'recommended' | 'folder' | 'feed';
 	section: 'views' | 'folders' | 'feeds';
 	iconUrl?: string;
 	parentId?: string;
@@ -52,6 +52,29 @@ export interface BrowserFeedView {
 export interface BrowserLocalDayBounds {
 	startSeconds: number;
 	endSeconds: number;
+}
+
+export interface BrowserLocalDayRange extends BrowserLocalDayBounds {
+	start: Date;
+	end: Date;
+}
+
+export interface FolderSectionItem {
+	id: string;
+	// Seconds.
+	published: number;
+	streamId: string;
+	feedTitle: string;
+}
+
+export interface FolderSection {
+	// 'today', 'last-7-days', 'feed:<streamId>' or 'older'.
+	key: string;
+	kind: 'today' | 'last-7-days' | 'feed' | 'older-header';
+	title: string;
+	streamId?: string;
+	itemIds: string[];
+	hiddenCount: number;
 }
 
 export interface BrowserLoadedItem {
@@ -316,7 +339,7 @@ export function sortSubscriptionsByTitle(subscriptions: BrowserSubscription[]): 
 }
 
 /**
- * The folder "By feed" order, identical to GET /api/v1/browser/articles?sort=feed:
+ * The folder "By feed" order of the offline store (src/browser-offline.ts), identical to GET /api/v1/browser/articles?sort=feed:
  * feed title with only ASCII letters case-folded, compared by code point (SQLite
  * COLLATE NOCASE over UTF-8), then feed ID, then newest first, then item ID.
  * Items lookup cannot find (not loaded yet) sort last, newest ID first.
@@ -519,6 +542,8 @@ export function buildFeedViews(
 	// Unread items received in the local day; the server cannot derive it from
 	// unread-count because it does not know the browser's time zone.
 	todayUnreadCount = 0,
+	// Unread items received in the last 7 local days, today included; same reason.
+	lastSevenDaysUnreadCount = 0,
 ): BrowserFeedView[] {
 	function createCategoryLabel(category: { id: string; label?: string }): string {
 		if (category.label && category.label.trim()) {
@@ -658,6 +683,14 @@ export function buildFeedViews(
 			section: 'views',
 		},
 		{
+			id: 'last-7-days',
+			title: 'Last 7 Days',
+			streamId: 'user/-/state/com.google/reading-list',
+			unreadCount: lastSevenDaysUnreadCount,
+			kind: 'last-7-days',
+			section: 'views',
+		},
+		{
 			id: 'recent',
 			title: 'Recently read',
 			streamId: 'user/-/state/com.google/read',
@@ -688,14 +721,96 @@ export function buildFeedViews(
 	];
 }
 
-export function getLocalDayBounds(now: Date = new Date()): BrowserLocalDayBounds {
-	const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-	const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-
+/**
+ * `days` local calendar days ending with the day of `now`: from local midnight
+ * `days - 1` days before it to the next local midnight. Calendar arithmetic, so
+ * a week across a daylight-saving change is 7 local days, not 7 × 86,400 seconds.
+ * Self-contained: emitted via toString().
+ */
+export function getLocalDayRangeBounds(now: number, days: number): BrowserLocalDayRange {
+	const day = new Date(now);
+	const start = new Date(day.getFullYear(), day.getMonth(), day.getDate() - (days - 1));
+	const end = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);
 	return {
+		start,
+		end,
 		startSeconds: Math.floor(start.getTime() / 1000),
 		endSeconds: Math.floor(end.getTime() / 1000),
 	};
+}
+
+export function getLocalDayBounds(now: Date = new Date()): BrowserLocalDayBounds {
+	const bounds = getLocalDayRangeBounds(now.getTime(), 1);
+	return { startSeconds: bounds.startSeconds, endSeconds: bounds.endSeconds };
+}
+
+/** Today and Last 7 Days: views defined by a window of local days. Self-contained. */
+export function isTimeWindowView(view: { kind: string } | null | undefined): boolean {
+	return view?.kind === 'today' || view?.kind === 'last-7-days';
+}
+
+/**
+ * The window of a time-window view: Today is the local day, Last 7 Days the
+ * local day and the six before it. Emitted via toString().
+ */
+export function getViewDayBounds(view: { kind: string } | null | undefined, now: number = Date.now()): BrowserLocalDayBounds {
+	const bounds = getLocalDayRangeBounds(now, view?.kind === 'last-7-days' ? 7 : 1);
+	return { startSeconds: bounds.startSeconds, endSeconds: bounds.endSeconds };
+}
+
+/**
+ * A folder's loaded stories as sections: Today (since local midnight), Last 7
+ * Days (the six local days before today), then one section per feed ordered by
+ * its newest story, with feeds whose newest story is older than that week after
+ * an "Older" header. Stories in Today and Last 7 Days appear in their feed's
+ * section too. Each section shows its newest `limit` stories unless its key is
+ * in `expanded`; `hiddenCount` is the rest. Self-contained: emitted via toString().
+ */
+export function buildFolderSections(
+	items: FolderSectionItem[],
+	now: number,
+	options?: { todayLimit?: number; recentLimit?: number; feedLimit?: number; expanded?: ReadonlySet<string> },
+): FolderSection[] {
+	const todayStart = getLocalDayRangeBounds(now, 1);
+	const weekStart = getLocalDayRangeBounds(now, 7).startSeconds;
+	const expanded = options?.expanded;
+	const newestFirst = [...items].sort((left, right) =>
+		right.published - left.published || Number(right.id) - Number(left.id) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0));
+	const makeSection = (key: string, kind: FolderSection['kind'], title: string, ids: string[], limit: number, streamId?: string): FolderSection => {
+		const shown = expanded?.has(key) ? ids : ids.slice(0, Math.max(0, limit));
+		return { key, kind, title, ...(streamId ? { streamId } : {}), itemIds: shown, hiddenCount: ids.length - shown.length };
+	};
+
+	const sections: FolderSection[] = [];
+	const todayIds = newestFirst.filter((item) => item.published >= todayStart.startSeconds && item.published < todayStart.endSeconds).map((item) => item.id);
+	const recentIds = newestFirst.filter((item) => item.published >= weekStart && item.published < todayStart.startSeconds).map((item) => item.id);
+	if (todayIds.length > 0) sections.push(makeSection('today', 'today', 'Today', todayIds, options?.todayLimit ?? 5));
+	if (recentIds.length > 0) sections.push(makeSection('last-7-days', 'last-7-days', 'Last 7 Days', recentIds, options?.recentLimit ?? 5));
+
+	// A story whose feed is unknown keeps its own source title as its group.
+	const feeds = new Map<string, { key: string; streamId: string; title: string; newest: number; ids: string[] }>();
+	for (const item of newestFirst) {
+		const group = item.streamId || item.feedTitle;
+		let feed = feeds.get(group);
+		if (!feed) {
+			feed = { key: 'feed:' + group, streamId: item.streamId, title: item.feedTitle, newest: item.published, ids: [] };
+			feeds.set(group, feed);
+		}
+		feed.ids.push(item.id);
+	}
+	const orderedFeeds = [...feeds.values()].sort((left, right) =>
+		right.newest - left.newest ||
+		left.title.localeCompare(right.title, undefined, { sensitivity: 'base', numeric: true }) ||
+		(left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+	let olderStarted = false;
+	for (const feed of orderedFeeds) {
+		if (!olderStarted && feed.newest < weekStart) {
+			olderStarted = true;
+			sections.push({ key: 'older', kind: 'older-header', title: 'Older', itemIds: [], hiddenCount: 0 });
+		}
+		sections.push(makeSection(feed.key, 'feed', feed.title, feed.ids, options?.feedLimit ?? 3, feed.streamId || undefined));
+	}
+	return sections;
 }
 
 export function filterItemIdsForLocalDay(
@@ -1122,7 +1237,7 @@ export function readingLogView(
 	if (isSearching) return { view: 'search', stream };
 	if (view.kind === 'recommended') return { view: 'for-you', stream: null };
 	if (stream !== null) return { view: view.kind, stream };
-	return ['all', 'unread', 'today', 'recent', 'starred', 'saved'].includes(view.kind) ? { view: view.kind, stream: null } : null;
+	return ['all', 'unread', 'today', 'last-7-days', 'recent', 'starred', 'saved'].includes(view.kind) ? { view: view.kind, stream: null } : null;
 }
 
 export function outboundLinkHost(href: unknown): string | null {
@@ -1206,9 +1321,11 @@ ${createSessionFromToken.toString()}
 ${normalizeBrowserTheme.toString()}
 ${applyUnauthorizedState.toString()}
 ${sortSubscriptionsByTitle.toString()}
-${createFeedOrderComparator.toString()}
 ${buildFeedViews.toString()}
-${getLocalDayBounds.toString()}
+${getLocalDayRangeBounds.toString()}
+${isTimeWindowView.toString()}
+${getViewDayBounds.toString()}
+${buildFolderSections.toString()}
 ${filterItemIdsForLocalDay.toString()}
 ${limitInitialItemIds.toString()}
 ${createContentLoadPlan.toString()}
@@ -1261,9 +1378,11 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   formatArticleListTime,
   applyUnauthorizedState,
   sortSubscriptionsByTitle,
-  createFeedOrderComparator,
   buildFeedViews,
-  getLocalDayBounds,
+  getLocalDayRangeBounds,
+  isTimeWindowView,
+  getViewDayBounds,
+  buildFolderSections,
   filterItemIdsForLocalDay,
   limitInitialItemIds,
   createContentLoadPlan,
