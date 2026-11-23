@@ -32,12 +32,12 @@ struct ReaderHomeFeedIcon: View {
 	let url: URL
 
 	var body: some View {
-		AsyncImage(url: url) { phase in
+		FeedIconImage(url: url) { loadedImage in
 			ZStack {
 				RoundedRectangle(cornerRadius: 4, style: .continuous)
 					.fill(.quaternary)
-					.opacity(phase.image == nil ? 1 : 0)
-				if let image = phase.image {
+					.opacity(loadedImage == nil ? 1 : 0)
+				if let image = loadedImage {
 					image
 						.resizable()
 						.scaledToFit()
@@ -45,7 +45,7 @@ struct ReaderHomeFeedIcon: View {
 						.transition(.opacity)
 				}
 			}
-			.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: phase.image != nil)
+			.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: loadedImage != nil)
 		}
 		.frame(width: 18, height: 18)
 	}

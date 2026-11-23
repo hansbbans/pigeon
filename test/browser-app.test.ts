@@ -445,6 +445,44 @@ test('renderBrowserAppShell memoizes the rendered HTML per base URL', () => {
 	assert.match(renderBrowserAppShell('https://other.example').html, /<strong>other\.example<\/strong>/);
 });
 
+test('GET /app/session answers a sign-in check with none of the status queries', async () => {
+	// A refused sign-in is decided before the database is opened.
+	const env = createEnv();
+	const anonymous = await app.fetch(new Request('https://pigeon.example/app/session'), env as never);
+	assert.equal(anonymous.status, 401);
+
+	const wrong = await app.fetch(
+		new Request('https://pigeon.example/app/session', { headers: { Authorization: 'GoogleLogin auth=pigeon/wrong' } }),
+		env as never,
+	);
+	assert.equal(wrong.status, 401);
+
+	const token = await generateApiToken('secret-password');
+	const authorized = { Authorization: `GoogleLogin auth=pigeon/${token}` };
+	const queries: string[] = [];
+	const statusDb = createStatusDb();
+	const ready = createEnv({ DB: { ...statusDb, prepare(sql: string) { queries.push(sql); return statusDb.prepare(sql); } } });
+	const signedIn = await app.fetch(new Request('https://pigeon.example/app/session', { headers: authorized }), ready as never);
+	assert.equal(signedIn.status, 204);
+	assert.equal(signedIn.headers.get('Cache-Control'), 'no-store');
+	assert.deepEqual(queries.filter((sql) => /\b(items|feeds)\b/.test(sql) && /\bCOUNT\(/i.test(sql)), []);
+
+	const posted = await app.fetch(
+		new Request('https://pigeon.example/app/session', { method: 'POST', headers: authorized }),
+		ready as never,
+	);
+	assert.equal(posted.status, 405);
+});
+
+test('GET /app/session reports a failed migration, so the app opens its offline library', async () => {
+	const token = await generateApiToken('secret-password');
+	const response = await app.fetch(
+		new Request('https://pigeon.example/app/session', { headers: { Authorization: `GoogleLogin auth=pigeon/${token}` } }),
+		createEnv() as never,
+	);
+	assert.equal(response.status, 503);
+});
+
 test('GET /app/status requires auth', async () => {
 	const response = await app.fetch(
 		new Request('https://pigeon.example/app/status'),

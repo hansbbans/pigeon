@@ -93,31 +93,12 @@ struct StructuredHTMLView: UIViewRepresentable {
 	}
 
 	func makeUIView(context: Context) -> WKWebView {
-		let configuration = WKWebViewConfiguration()
-		configuration.websiteDataStore = .nonPersistent()
-		configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-		configuration.userContentController.add(context.coordinator, name: "pigeonEvent")
-		configuration.setURLSchemeHandler(
-			PrivacyImageSchemeHandler(session: imageProxySession),
-			forURLScheme: "pigeon-image",
-		)
-
-		let webView = WKWebView(frame: .zero, configuration: configuration)
+		let entry = ReaderWebViewPool.shared.take(session: imageProxySession)
+		let webView = entry.webView
+		entry.relay.target = context.coordinator
+		context.coordinator.messageRelay = entry.relay
 		webView.navigationDelegate = context.coordinator
 		webView.uiDelegate = context.coordinator
-		// WebKit asks the UI delegate for a link's context menu only while link
-		// previews are allowed. The delegate returns Pigeon's own menu with no
-		// preview, so a long press never loads the page.
-		webView.allowsLinkPreview = true
-		webView.isOpaque = false
-		webView.backgroundColor = .clear
-		webView.scrollView.isScrollEnabled = false
-		webView.scrollView.alwaysBounceVertical = false
-		webView.scrollView.alwaysBounceHorizontal = false
-		webView.scrollView.showsHorizontalScrollIndicator = false
-		webView.scrollView.contentInsetAdjustmentBehavior = .never
-		webView.setContentHuggingPriority(.required, for: .horizontal)
-		webView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 		context.coordinator.webView = webView
 		context.coordinator.loadShell(baseURL: baseURL)
 		return webView
@@ -153,6 +134,13 @@ struct StructuredHTMLView: UIViewRepresentable {
 		var onLayout: (ReaderHTMLLayout) -> Void
 		var onLinkMenuAction: (ArticleLinkMenuAction, URL) -> Void
 		var onHeight: (CGFloat) -> Void
+		/// The web view's script messages arrive through this relay; the
+		/// configuration holds it, and it holds the coordinator weakly.
+		var messageRelay: ReaderScriptMessageRelay?
+		/// The shell load this coordinator started. A web view from the pool may
+		/// still be finishing the load that warmed it up, and that one must not
+		/// be mistaken for the shell being ready.
+		private var shellNavigation: WKNavigation?
 		private var isShellLoaded = false
 		private var installedTypefaces: Set<ReaderTypeface> = []
 		private var pendingPayload: Payload?
@@ -183,7 +171,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 			pendingPayload = nil
 			renderedSignature = nil
 			renderingGeneration &+= 1
-			webView?.loadHTMLString(StructuredHTMLJavaScript.renderingShell, baseURL: baseURL)
+			shellNavigation = webView?.loadHTMLString(StructuredHTMLJavaScript.renderingShell, baseURL: baseURL)
 		}
 
 		func render(
@@ -313,6 +301,7 @@ struct StructuredHTMLView: UIViewRepresentable {
 		}
 
 		func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+			if let shellNavigation, navigation !== shellNavigation { return }
 			isShellLoaded = true
 			if let pendingPayload {
 				evaluate(pendingPayload)

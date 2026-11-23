@@ -245,6 +245,18 @@ final class ReaderAppModel {
 	private var localRecommendationRejectionRevisions: [String: Int] = [:]
 	private var localArticleStateRevisions: [String: PendingArticleStateRevision] = [:]
 	private var nextPendingArticleStateRevision = 0
+	/// Stories with a read or star change on screen that the store has not
+	/// answered for yet, by ledger key. The outbox does not hold these, so
+	/// nothing read from the store while one is listed may replace what is
+	/// shown or correct the pending ledger for that story.
+	private var unsettledArticleStateKeys: [String: Int] = [:]
+	/// What a story's flag was before a change the store refused, kept while a
+	/// newer change for the same flag is still unsettled. If that one is
+	/// refused too, this is the state to return to, not the refused one.
+	private var refusedArticleStateBaselines: [String: ArticleStateBaseline] = [:]
+	/// Bumped whenever the ledgers are emptied, so a store answer from before
+	/// then cannot touch what was built since.
+	private var articleStateEpoch = 0
 	private var sortOrders: [String: ArticleSortOrder] = [:]
 	private var canonicalArticleOrder: [String: [String]] = [:]
 	private var articleFilters: [ArticleFilterKey: ReaderArticleFilter] = [:]
@@ -875,6 +887,9 @@ final class ReaderAppModel {
 			canonicalArticleRecords = [:]
 			pendingArticleStates = [:]
 			pendingArticleStateRevisions = [:]
+			unsettledArticleStateKeys = [:]
+			refusedArticleStateBaselines = [:]
+			articleStateEpoch += 1
 			localArticleStates = [:]
 			localRecommendationRejectionRevisions = [:]
 			localArticleStateRevisions = [:]
@@ -2118,6 +2133,40 @@ final class ReaderAppModel {
 		return task
 	}
 
+	/// Shows the selected list from its own cached rows while the whole library
+	/// is still being read. Reading every cached story, bodies included, is most
+	/// of the time between a cold launch and the first list; one collection is a
+	/// small part of it. The full snapshot replaces these rows when it lands.
+	private func publishSelectedCollectionPreview(
+		accountID: String,
+		preparationID: UUID,
+		generation: UUID,
+	) async {
+		let collectionID = selectedNavigationID
+		// A day window's saved rows may be from an earlier day; only the full load
+		// prunes them.
+		guard ReaderSection(rawValue: collectionID)?.usesDayWindow != true else { return }
+		func canPublish() -> Bool {
+			isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID, generation: generation)
+				&& isShowingBootstrapSnapshot
+				&& bootstrapAccountID == accountID
+				&& selectedNavigationID == collectionID
+				&& articleCache[collectionID]?.isEmpty != false
+		}
+		guard canPublish(),
+			let snapshot = try? await offlineStore.loadSnapshot(accountID: accountID, collectionIDs: [collectionID]),
+			canPublish(),
+			let rows = snapshot.articlesByCollection[collectionID], rows.isEmpty == false else { return }
+		let ordering = cachedSnapshotOrdering(
+			snapshot,
+			initialSortOrders: sortOrders,
+			initialCanonicalOrder: canonicalArticleOrder,
+		)
+		let prepared = await prepareCachedSnapshot([collectionID: rows], ordering)
+		guard canPublish(), let articles = prepared[collectionID], articles.isEmpty == false else { return }
+		articleCache[collectionID] = applyPendingArticleStates(articles)
+	}
+
 	private func captureBootstrapInteractionState() -> BootstrapInteractionState {
 		BootstrapInteractionState(
 			selectedNavigationID: selectedNavigationID,
@@ -2182,8 +2231,19 @@ final class ReaderAppModel {
 			// call's ownership after the reset before awaiting the snapshot.
 			activeOfflinePreparationID = preparationID
 			preparationGeneration = libraryGeneration
+			await publishSelectedCollectionPreview(
+				accountID: accountID,
+				preparationID: preparationID,
+				generation: preparationGeneration,
+			)
+			guard isCurrentOfflinePreparation(
+				accountID: accountID,
+				preparationID: preparationID,
+				generation: preparationGeneration,
+			) else { return }
 			do {
-				let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+				var readAtRevision = await settledArticleStateRevision()
+				var snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 				guard isCurrentOfflinePreparation(
 					accountID: accountID,
 					preparationID: preparationID,
@@ -2191,7 +2251,35 @@ final class ReaderAppModel {
 				) else { return }
 				offlineCacheIntegrity = snapshot.integrity
 				requiresFullRebuild = snapshot.integrity.requiresFullRebuild
-				guard let dayWindowIDsToSave = await applyCachedSnapshot(snapshot, preservingCurrentSelection: isInitialPreparation),
+				var appliedSnapshot = await applyCachedSnapshot(
+					snapshot, readAtRevision: readAtRevision, preservingCurrentSelection: isInitialPreparation,
+				)
+				// The preview makes stories tappable while the library is still being
+				// read, and a read or star change in that window invalidates the snapshot
+				// being applied. The change is already in the store, so read it again
+				// rather than leave the shell on its bootstrap until the next launch.
+				var snapshotRetries = 0
+				while appliedSnapshot == nil, snapshotRetries < 3, Task.isCancelled == false,
+					isCurrentOfflinePreparation(
+						accountID: accountID,
+						preparationID: preparationID,
+						generation: preparationGeneration,
+					) {
+					snapshotRetries += 1
+					readAtRevision = await settledArticleStateRevision()
+					snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
+					guard isCurrentOfflinePreparation(
+						accountID: accountID,
+						preparationID: preparationID,
+						generation: preparationGeneration,
+					) else { return }
+					offlineCacheIntegrity = snapshot.integrity
+					requiresFullRebuild = snapshot.integrity.requiresFullRebuild
+					appliedSnapshot = await applyCachedSnapshot(
+						snapshot, readAtRevision: readAtRevision, preservingCurrentSelection: isInitialPreparation,
+					)
+				}
+				guard let dayWindowIDsToSave = appliedSnapshot,
 					isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else { return }
 				dayWindowIDsToPersistAfterRestore.formUnion(dayWindowIDsToSave)
 				if snapshot.isEmpty == false {
@@ -2675,9 +2763,10 @@ final class ReaderAppModel {
 		do {
 			let count = try await offlineStore.cleanupReadBodies(accountID: context.accountID, keepingNewest: 200)
 			guard isCurrentAccountOperation(context) else { return count }
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot = try await offlineStore.loadSnapshot(accountID: context.accountID)
 			guard isCurrentAccountOperation(context) else { return count }
-			guard let dayWindowIDsToSave = await applyCachedSnapshot(snapshot) else { return count }
+			guard let dayWindowIDsToSave = await applyCachedSnapshot(snapshot, readAtRevision: readAtRevision) else { return count }
 			if dayWindowIDsToSave.isEmpty == false {
 				await persistCollections(dayWindowIDsToSave)
 			}
@@ -6404,12 +6493,14 @@ final class ReaderAppModel {
 			return nil
 		}
 		do {
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot = try await offlineStore.loadSnapshot(accountID: accountID)
 			guard isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
 				return nil
 			}
 			guard await applyCachedSnapshot(
 				snapshot,
+				readAtRevision: readAtRevision,
 				preservingPagination: true,
 				preservingCurrentSelection: preservingCurrentSelection,
 			) != nil,
@@ -6509,6 +6600,7 @@ final class ReaderAppModel {
 			let reloadScope = fullRebuild
 				? IncrementalReloadScope.full
 				: incrementalReloadScope(for: receivedChangesList)
+			let readAtRevision = await settledArticleStateRevision()
 			let snapshot: CachedLibrarySnapshot
 			switch reloadScope {
 			case .full:
@@ -6526,6 +6618,7 @@ final class ReaderAppModel {
 			case .full:
 				guard let dayWindowIDsToSave = await applyCachedSnapshot(
 					snapshot,
+					readAtRevision: readAtRevision,
 					preservingPagination: true,
 					preservingCurrentSelection: preservingCurrentSelection,
 				), isCurrentOfflinePreparation(accountID: accountID, preparationID: preparationID) else {
@@ -6770,6 +6863,14 @@ final class ReaderAppModel {
 		return true
 	}
 
+	/// Waits until the store holds every read or star shown on screen, then
+	/// returns the ledger revision a library read may start from. Pass it to
+	/// `applyCachedSnapshot` with the snapshot read next.
+	private func settledArticleStateRevision() async -> Int {
+		await articleMutationTask?.value
+		return nextPendingArticleStateRevision
+	}
+
 	@discardableResult
 	/// Nil means ownership or a concurrent mutation invalidated the snapshot;
 	/// callers must leave hydration retryable instead of treating it as applied.
@@ -6777,13 +6878,19 @@ final class ReaderAppModel {
 	/// which the caller saves.
 	private func applyCachedSnapshot(
 		_ snapshot: CachedLibrarySnapshot,
+		readAtRevision: Int,
 		preservingPagination: Bool = false,
 		preservingCurrentSelection: Bool = false,
 	) async -> Set<String>? {
 		guard let context = currentOperationContext(), let accountContext = accountContext() else { return nil }
+		// A read or star shows on screen before the store has it. A snapshot read
+		// while one is unsettled may predate it and would put the old state back.
+		guard unsettledArticleStateKeys.isEmpty else { return nil }
 		let initialSortOrders = sortOrders
 		let initialCanonicalOrder = canonicalArticleOrder
-		let mutationRevision = nextPendingArticleStateRevision
+		// Counted from before the store was read: a change made while the read
+		// was under way may be missing from it.
+		let mutationRevision = readAtRevision
 		while Task.isCancelled == false {
 			let capturedSortOrders = sortOrders
 			let capturedCanonicalOrder = canonicalArticleOrder
@@ -7239,6 +7346,9 @@ final class ReaderAppModel {
 		canonicalArticleRecords = [:]
 		pendingArticleStates = [:]
 		pendingArticleStateRevisions = [:]
+		unsettledArticleStateKeys = [:]
+		refusedArticleStateBaselines = [:]
+		articleStateEpoch += 1
 		localArticleStates = [:]
 		localRecommendationRejectionRevisions = [:]
 		localArticleStateRevisions = [:]
@@ -7938,9 +8048,21 @@ final class ReaderAppModel {
 		}
 	}
 
+	private enum OfflineEnqueueOutcome {
+		case enqueued
+		/// The store refused the change; the library it was made in is still current.
+		case failed
+		/// The account or library changed while the store was working.
+		case superseded
+	}
+
 	@discardableResult
 	private func enqueueOfflineMutation(_ mutation: OfflineMutation) async -> Bool {
-		guard let session else { return false }
+		await enqueueOfflineMutationOutcome(mutation) == .enqueued
+	}
+
+	private func enqueueOfflineMutationOutcome(_ mutation: OfflineMutation) async -> OfflineEnqueueOutcome {
+		guard let session else { return .superseded }
 		let context = OperationContext(
 			accountID: session.storageIdentity,
 			generation: libraryGeneration,
@@ -7948,14 +8070,16 @@ final class ReaderAppModel {
 		)
 		do {
 			try await offlineStore.enqueue(mutation, accountID: context.accountID)
-			guard isCurrentOperation(context) else { return false }
+			guard isCurrentOperation(context) else { return .superseded }
 			await refreshOfflineStorageStats()
-			guard isCurrentOperation(context) else { return false }
-			return true
+			guard isCurrentOperation(context) else { return .superseded }
+			return .enqueued
 		} catch {
-			guard isCurrentOperation(context) else { return false }
-			errorMessage = error.localizedDescription
-			return false
+			// The store took nothing, whether or not the library moved on meanwhile.
+			if isCurrentOperation(context) {
+				errorMessage = error.localizedDescription
+			}
+			return .failed
 		}
 	}
 
@@ -8220,7 +8344,8 @@ final class ReaderAppModel {
 			.map(ReaderArticleIdentity.normalized))
 		let durableStates = pendingArticleStates(from: pendingMutations)
 		let keys = Set(pendingArticleStates.keys).union(durableStates.keys)
-		for key in keys {
+		// The outbox read above may predate a change still on its way to the store.
+		for key in keys where unsettledArticleStateKeys[key] == nil {
 			let durable = durableStates[key]
 			var current = pendingArticleStates[key, default: PendingArticleState()]
 			let currentRevisions = pendingArticleStateRevisions[key] ?? PendingArticleStateRevision()
@@ -8261,7 +8386,8 @@ final class ReaderAppModel {
 		guard isCurrentAccountOperation(context) else { return false }
 		for collectionID in unloadedIDs {
 			if let articles = snapshot.articlesByCollection[collectionID] {
-				articleCache[collectionID] = articles
+				// The snapshot may predate a read or star still on its way to the store.
+				articleCache[collectionID] = applyPendingArticleStates(articles)
 			}
 		}
 		for collectionID in unloadedPaginationIDs {
@@ -8963,22 +9089,23 @@ final class ReaderAppModel {
 		guard let accountID = session?.storageIdentity else { return }
 		articleStateGeneration = UUID()
 		let generation = libraryGeneration
+		// The screen changes now. Only the store writes wait their turn, so a
+		// second tap is as immediate as the first while the store is busy.
+		let change = beginArticleStateChange(
+			article: article,
+			value: value,
+			mutationName: mutationName,
+			keyPath: keyPath,
+			animation: animation,
+			offersUndo: offersUndo,
+			expectedValue: expectedValue,
+			accountID: accountID,
+		)
 		let previousTask = articleMutationTask
 		let task = Task { @MainActor [weak self] in
 			await previousTask?.value
-			guard let self,
-				self.session?.storageIdentity == accountID,
-				self.libraryGeneration == generation else { return }
-			await self.applyArticleState(
-				article: article,
-				value: value,
-				mutationName: mutationName,
-				keyPath: keyPath,
-				animation: animation,
-				offersUndo: offersUndo,
-				expectedValue: expectedValue,
-				accountID: accountID,
-			)
+			guard let self, let change else { return }
+			await self.settleArticleStateChange(change)
 		}
 		articleMutationTask = task
 		await task.value
@@ -8986,7 +9113,35 @@ final class ReaderAppModel {
 		await replayPendingMutations()
 	}
 
-	private func applyArticleState(
+	/// A story's flag and its pending-ledger entries as they were before a change.
+	private struct ArticleStateBaseline {
+		let value: Bool
+		let pending: [(key: String, state: PendingArticleState?, revisions: PendingArticleStateRevision?)]
+	}
+
+	/// A read or star change that is on screen and not yet in the store.
+	private struct ArticleStateChange {
+		let articleID: String
+		let mutation: OfflineMutation
+		let field: ReaderArticleUndo.Field
+		let keyPath: WritableKeyPath<Recommendation, Bool>
+		let value: Bool
+		let previousValue: Bool
+		let ledgerKeys: [String]
+		let baseline: ArticleStateBaseline
+		let writtenRevision: Int
+		let epoch: Int
+		let changedCollections: Set<String>
+		let accountID: String
+	}
+
+	/// Changes the screen and the pending ledger, and lists the story as
+	/// unsettled. A tap during a sync used to wait until the store had finished
+	/// the page it was writing. The ledger keeps a server page that lands in
+	/// the meantime from putting the old state back; the unsettled list does
+	/// the same for anything read from the store, which does not hold the
+	/// change until `settleArticleStateChange` has run.
+	private func beginArticleStateChange(
 		article: Recommendation,
 		value: Bool,
 		mutationName: String,
@@ -8995,22 +9150,111 @@ final class ReaderAppModel {
 		offersUndo: Bool,
 		expectedValue: Bool?,
 		accountID: String,
-	) async {
+	) -> ArticleStateChange? {
 		let current = self.article(withId: article.id) ?? article
 		let previousValue = current[keyPath: keyPath]
-		guard expectedValue == nil || previousValue == expectedValue else { return }
-		guard previousValue != value else { return }
+		guard expectedValue == nil || previousValue == expectedValue else { return nil }
+		guard previousValue != value else { return nil }
 		let field: ReaderArticleUndo.Field = mutationName == "read" ? .read : .starred
-		let kind: OfflineMutationKind = mutationName == "read" ? .setRead : .setStarred
 		let mutation = OfflineMutation(
-			kind: kind,
+			kind: mutationName == "read" ? .setRead : .setStarred,
 			itemIds: [current.readerId],
 			value: value,
 			scope: .single,
 		)
-		guard await enqueueOfflineMutation(mutation) else { return }
+		let ledgerKeys = mutation.itemIds.map(ReaderArticleIdentity.normalized).filter { $0.isEmpty == false }
+		let pendingBefore = ledgerKeys.map { (key: $0, state: pendingArticleStates[$0], revisions: pendingArticleStateRevisions[$0]) }
 		rememberPendingArticleStates(mutation)
+		let writtenRevision = nextPendingArticleStateRevision
+		let changedCollections = applyArticleStateInMemory(
+			current: current, value: value, previousValue: previousValue, field: field, keyPath: keyPath,
+			animation: animation, offersUndo: offersUndo, expectedValue: expectedValue, accountID: accountID,
+		)
+		for key in ledgerKeys { unsettledArticleStateKeys[key, default: 0] += 1 }
+		return ArticleStateChange(
+			articleID: current.id, mutation: mutation, field: field, keyPath: keyPath, value: value,
+			previousValue: previousValue, ledgerKeys: ledgerKeys,
+			baseline: ArticleStateBaseline(value: previousValue, pending: pendingBefore),
+			writtenRevision: writtenRevision, epoch: articleStateEpoch,
+			changedCollections: changedCollections, accountID: accountID,
+		)
+	}
 
+	/// Hands the change to the store, and puts the story back if it refuses.
+	private func settleArticleStateChange(_ change: ArticleStateChange) async {
+		// A sign-out or account change has already emptied the ledgers and the unsettled list.
+		guard session?.storageIdentity == change.accountID, articleStateEpoch == change.epoch else { return }
+		let outcome = await enqueueOfflineMutationOutcome(change.mutation)
+		guard session?.storageIdentity == change.accountID, articleStateEpoch == change.epoch else { return }
+		for key in change.ledgerKeys {
+			let remaining = (unsettledArticleStateKeys[key] ?? 1) - 1
+			unsettledArticleStateKeys[key] = remaining > 0 ? remaining : nil
+		}
+		let isRead = change.mutation.kind == .setRead
+		let baselineKey = "\(isRead ? "read" : "starred")|\(change.articleID)"
+		switch outcome {
+		case .enqueued:
+			refusedArticleStateBaselines[baselineKey] = nil
+			await persistCollections(change.changedCollections)
+		case .superseded:
+			// Stored, and the library was reloaded meanwhile from a store that holds it.
+			refusedArticleStateBaselines[baselineKey] = nil
+		case .failed:
+			// Nothing was stored, so nothing will be sent. The state to return to
+			// is the one before the oldest refused change, not before this one.
+			let baseline = refusedArticleStateBaselines.removeValue(forKey: baselineKey) ?? change.baseline
+			func revision(_ revisions: PendingArticleStateRevision?) -> Int? {
+				isRead ? revisions?.read : revisions?.starred
+			}
+			guard change.ledgerKeys.allSatisfy({ revision(pendingArticleStateRevisions[$0]) == change.writtenRevision }) else {
+				// A newer choice for this story is on screen; leave it, and keep
+				// the baseline in case the store refuses that one as well.
+				refusedArticleStateBaselines[baselineKey] = baseline
+				return
+			}
+			// The local ledger takes the restored value at a newer revision, so a
+			// load in flight keeps it. The pending ledger returns, for this field
+			// only, to what it held before: that is what the store still holds.
+			rememberPendingArticleStates(OfflineMutation(
+				kind: change.mutation.kind, itemIds: change.mutation.itemIds, value: baseline.value, scope: .single,
+			))
+			for entry in baseline.pending {
+				var state = pendingArticleStates[entry.key, default: PendingArticleState()]
+				var revisions = pendingArticleStateRevisions[entry.key, default: PendingArticleStateRevision()]
+				if isRead {
+					state.isRead = entry.state?.isRead
+					revisions.read = entry.revisions?.read
+				} else {
+					state.isStarred = entry.state?.isStarred
+					revisions.starred = entry.revisions?.starred
+				}
+				let isEmpty = state.isRead == nil && state.isStarred == nil
+				pendingArticleStates[entry.key] = isEmpty ? nil : state
+				pendingArticleStateRevisions[entry.key] = isEmpty ? nil : revisions
+			}
+			guard let shown = self.article(withId: change.articleID),
+				shown[keyPath: change.keyPath] == change.value, baseline.value != change.value else { return }
+			_ = applyArticleStateInMemory(
+				current: shown, value: baseline.value, previousValue: change.value, field: change.field,
+				keyPath: change.keyPath, animation: nil, offersUndo: false, expectedValue: nil, accountID: change.accountID,
+			)
+		}
+	}
+
+	/// The in-memory half of a read or star change: every cached copy of the
+	/// story, the membership of Unread or Starred, the counts and the undo
+	/// banner. Returns the collections whose rows changed.
+	private func applyArticleStateInMemory(
+		current: Recommendation,
+		value: Bool,
+		previousValue: Bool,
+		field: ReaderArticleUndo.Field,
+		keyPath: WritableKeyPath<Recommendation, Bool>,
+		animation: Animation?,
+		offersUndo: Bool,
+		expectedValue: Bool?,
+		accountID: String,
+	) -> Set<String> {
 		if field == .read {
 			keepArticleLeavingDisplayedList(current, read: value)
 		}
@@ -9058,7 +9302,7 @@ final class ReaderAppModel {
 				articleListMutationRevision &+= 1
 			}
 		}
-		await persistCollections(changedCollections)
+		return changedCollections
 	}
 
 	private func syncStarredMembership(for article: Recommendation, starred: Bool) {

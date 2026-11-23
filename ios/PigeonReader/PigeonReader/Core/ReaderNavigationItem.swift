@@ -51,4 +51,19 @@ nonisolated struct ReaderNavigationItem: Codable, Hashable, Identifiable, Sendab
 			smartSection: section,
 		)
 	}
+
+	/// The same row with another unread count.
+	func replacingUnreadCount(_ count: Int) -> Self {
+		Self(
+			id: id,
+			title: title,
+			streamID: streamID,
+			kind: kind,
+			unreadCount: count,
+			parentID: parentID,
+			feedKey: feedKey,
+			iconURL: iconURL,
+			smartSection: smartSection,
+		)
+	}
 }

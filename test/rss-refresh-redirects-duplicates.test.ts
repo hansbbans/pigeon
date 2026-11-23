@@ -29,7 +29,7 @@ function setup() {
 	const env = { DB: state.db, BASE_URL: 'https://pigeon.example', ITEMS_PER_FEED: '50', API_PASSWORD: 'x' } as never;
 	// The same columns the cron handler selects for a due feed.
 	const feedRow = () => ({ ...(state.database.prepare(
-		`SELECT feed_key, source_url, etag, last_modified, fetch_interval_minutes,
+		`SELECT feed_key, source_url, site_url, etag, last_modified, fetch_interval_minutes,
 		        consecutive_failures, content_hash, conditional_checked_at
 		   FROM feeds WHERE feed_key = 'blog'`,
 	).get() as object) }) as never;
@@ -109,5 +109,46 @@ test('duplicate guids in one document do not rewrite the article on every change
 	}
 	assert.equal(version() - versionBefore, 0, 'content_version of the unchanged duplicate moved');
 	assert.equal(articleChanges() - changesBefore, 3, 'one article sync row per new item');
+	s.database.close();
+});
+
+test('a poll that changes nothing about the feed itself writes no feed sync event', async () => {
+	const s = setup();
+	const feedChanges = () => s.count("SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'feed'");
+	let items = item('a', 'A', 'alpha');
+	serve(() => rss(items));
+	const before = feedChanges();
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	items += item('b', 'B', 'beta');
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	assert.equal(s.count('SELECT COUNT(*) AS n FROM items'), 2);
+	assert.equal(feedChanges() - before, 0, 'expected 0 feed events for 2 polls with the same site and source URL');
+	s.database.close();
+});
+
+test('a poll that finds a new site link still writes one feed sync event', async () => {
+	const s = setup();
+	const feedChanges = () => s.count("SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'feed'");
+	globalThis.fetch = (async () => new Response(
+		rss(item('a', 'A', 'alpha')).replace('https://example.com/</link>', 'https://blog.example.com/</link>'),
+		{ status: 200, headers: { 'Content-Type': 'application/rss+xml' } },
+	)) as typeof fetch;
+	const before = feedChanges();
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	assert.equal(feedChanges() - before, 1);
+	assert.equal(
+		(s.database.prepare("SELECT site_url FROM feeds WHERE feed_key = 'blog'").get() as { site_url: string }).site_url,
+		'https://blog.example.com/',
+	);
+	s.database.close();
+});
+
+test('a permanent redirect writes one feed sync event for the moved source URL', async () => {
+	const s = setup();
+	const feedChanges = () => s.count("SELECT COUNT(*) AS n FROM sync_changes WHERE entity_type = 'feed'");
+	serveWithRedirect(301, 'https://new.example.com/feed.xml', rss(item('a', 'A', 'alpha')));
+	const before = feedChanges();
+	assert.equal((await fetchAndStoreRssFeed(s.env, s.feedRow())).outcome, 'success');
+	assert.equal(feedChanges() - before, 1);
 	s.database.close();
 });

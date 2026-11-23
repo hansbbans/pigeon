@@ -33,11 +33,11 @@ struct ReaderNavigationLabelView: View {
 	private var icon: some View {
 		Group {
 			if item.kind == .feed, let iconURL = item.iconURL {
-				AsyncImage(url: iconURL) { phase in
+				FeedIconImage(url: iconURL) { loadedImage in
 					ZStack {
 						fallbackIcon
-							.opacity(phase.image == nil ? 1 : 0)
-						if let image = phase.image {
+							.opacity(loadedImage == nil ? 1 : 0)
+						if let image = loadedImage {
 							image
 								.resizable()
 								.scaledToFit()
@@ -47,7 +47,7 @@ struct ReaderNavigationLabelView: View {
 					}
 					.animation(
 						reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false),
-						value: phase.image != nil,
+						value: loadedImage != nil,
 					)
 				}
 			} else {
