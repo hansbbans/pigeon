@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>iOS Reeder look: three directions</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; }
+  .options { display: flex; flex-direction: column; gap: 34px; }
+  .option > h2 { font-size: 16px; font-weight: 700; margin-bottom: 4px; color: var(--foreground, #1c1c1e); }
+  .option > h2 span { color: var(--primary, #0063d1); font-weight: 600; }
+  .option > p { font-size: 13px; color: var(--muted-foreground, #48484a); line-height: 1.45; max-width: 640px; margin-bottom: 12px; }
+  .pair { display: flex; gap: 14px; }
+  .phone { width: 312px; height: 650px; border-radius: 38px; background: #000; padding: 9px; box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+  .screen { width: 100%; height: 100%; border-radius: 30px; overflow: hidden; position: relative; background: #fff; color: #1c1c1e; display: flex; flex-direction: column; }
+  .status { height: 34px; display: flex; justify-content: space-between; align-items: center; padding: 0 24px; font-size: 12px; font-weight: 600; flex: none; }
+  .caption { font-size: 11px; color: var(--muted-foreground, #6e6e73); text-align: center; margin-top: 6px; }
+  .scroll { flex: 1; overflow: hidden; }
+  .fav { width: 14px; height: 14px; border-radius: 3px; display: inline-block; vertical-align: -2px; flex: none; }
+  .f1 { background: #e0a94a; } .f2 { background: #e5484d; } .f3 { background: #6b5bd6; } .f4 { background: #444; } .f5 { background: #2f8f83; } .f6 { background: #3a5ba0; }
+
+  /* ---------- A: Hairline (the web app's Reeder look) ---------- */
+  .a .screen { background: #fff; }
+  .a .nav { display: flex; align-items: center; justify-content: space-between; padding: 4px 14px 8px; border-bottom: 0.5px solid #e4e4e7; flex: none; }
+  .a .nav .back { color: #0063d1; font-size: 15px; }
+  .a .nav .title { font-size: 15px; font-weight: 600; }
+  .a .nav .tools { display: flex; gap: 16px; color: #6e6e73; }
+  .a .sec { font-size: 10.5px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: #6e6e73; padding: 16px 16px 5px; display: flex; align-items: center; gap: 6px; }
+  .a .sec .go { margin-left: auto; font-size: 13px; color: #aeaeb2; letter-spacing: 0; }
+  .a .row { padding: 8px 16px 9px; border-bottom: 0.5px solid #efeff1; margin-left: 0; }
+  .a .row .t { font-size: 14px; font-weight: 600; line-height: 1.3; }
+  .a .row .m { font-size: 11.5px; color: #6e6e73; margin-top: 2px; }
+  .a .row .m b { font-weight: 500; color: #48484a; }
+  .a .row.read .t { font-weight: 400; color: #6e6e73; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .a .row.sel { background: rgba(0,99,209,.08); }
+  .a .more { font-size: 12px; color: #0063d1; padding: 7px 16px 2px; }
+  .a .side { background: #f5f5f6; }
+  .a .side .nav { background: #f5f5f6; border-bottom: none; }
+  .a .side .nav .title { font-size: 22px; font-weight: 700; }
+  .a .sl { font-size: 10.5px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: #8e8e93; padding: 14px 18px 4px; }
+  .a .sr { display: flex; align-items: center; gap: 10px; padding: 7px 12px; margin: 0 6px; border-radius: 7px; font-size: 14px; }
+  .a .sr .n { margin-left: auto; font-size: 12px; color: #8e8e93; font-variant-numeric: tabular-nums; }
+  .a .sr .tri { width: 10px; color: #8e8e93; font-size: 11px; text-align: center; }
+  .a .sr.in { padding-left: 38px; font-size: 13.5px; }
+  .a .sr.on { background: #e3e3e7; }
+  .a .sr .ic { width: 17px; text-align: center; color: #6e6e73; font-size: 13px; }
+
+  /* ---------- B: Ruled (editorial list, borrowed from the Front Page) ---------- */
+  .b .screen { background: #fff; }
+  .b .nav { padding: 2px 16px 0; flex: none; }
+  .b .navbar { display: flex; justify-content: space-between; align-items: center; color: #6e6e73; font-size: 15px; }
+  .b .navbar .back { color: #0063d1; }
+  .b .navbar .tools { display: flex; gap: 16px; }
+  .b .mast { font-family: 'New York', 'Iowan Old Style', Georgia, serif; font-style: italic; font-size: 30px; margin-top: 4px; }
+  .b .date { font-size: 9.5px; letter-spacing: .8px; text-transform: uppercase; color: #6e6e73; padding: 3px 0 7px; border-bottom: 2px solid #1c1c1e; }
+  .b .sec { margin: 14px 16px 0; padding-top: 5px; border-top: 0.5px solid #1c1c1e; display: flex; align-items: baseline; gap: 6px; }
+  .b .sec .h { font-family: 'New York', 'Iowan Old Style', Georgia, serif; font-style: italic; font-size: 17px; }
+  .b .sec .k { font-size: 10px; font-weight: 700; letter-spacing: .9px; text-transform: uppercase; }
+  .b .sec .go { margin-left: auto; font-size: 13px; color: #aeaeb2; }
+  .b .row { margin: 0 16px; padding: 9px 0; border-bottom: 0.5px solid #e4e4e7; }
+  .b .row:last-of-type { border-bottom: none; }
+  .b .row .kick { font-size: 9.5px; font-weight: 700; letter-spacing: .9px; text-transform: uppercase; margin-bottom: 2px; }
+  .b .row .t { font-family: 'New York', 'Iowan Old Style', Georgia, serif; font-size: 16px; line-height: 1.25; }
+  .b .row .m { font-size: 11px; color: #6e6e73; margin-top: 3px; }
+  .b .row.read .t { color: #8e8e93; }
+  .b .more { font-size: 12px; color: #6e6e73; margin: 6px 16px 0; font-style: italic; font-family: 'New York', Georgia, serif; }
+  .b .side .mast { font-size: 30px; }
+  .b .sl { font-size: 9.5px; font-weight: 700; letter-spacing: .9px; text-transform: uppercase; color: #6e6e73; margin: 14px 16px 2px; padding-top: 5px; border-top: 0.5px solid #1c1c1e; }
+  .b .sr { display: flex; align-items: baseline; gap: 10px; margin: 0 16px; padding: 8px 0; border-bottom: 0.5px solid #efeff1; font-family: 'New York', 'Iowan Old Style', Georgia, serif; font-size: 17px; }
+  .b .sr .n { margin-left: auto; font-family: -apple-system, sans-serif; font-size: 11.5px; color: #8e8e93; }
+  .b .sr.fold { border-left: 3px solid var(--k); padding-left: 9px; margin-left: 16px; }
+  .b .sr.in { font-family: -apple-system, sans-serif; font-size: 13.5px; padding-left: 12px; align-items: center; }
+  .b .sr.on { color: #0063d1; }
+
+  /* ---------- C: Columns (dense, favicon-led) ---------- */
+  .c .screen { background: #fbfbfc; }
+  .c .nav { display: flex; align-items: center; justify-content: space-between; padding: 4px 14px 8px; flex: none; background: rgba(251,251,252,.92); }
+  .c .nav .back { color: #0063d1; font-size: 15px; }
+  .c .nav .title { font-size: 15px; font-weight: 600; }
+  .c .nav .tools { display: flex; gap: 16px; color: #6e6e73; }
+  .c .sec { position: relative; background: #efeff2; font-size: 11.5px; font-weight: 600; color: #48484a; padding: 5px 14px; display: flex; gap: 6px; align-items: center; border-top: 0.5px solid #e4e4e7; border-bottom: 0.5px solid #e4e4e7; }
+  .c .sec .n { margin-left: auto; font-weight: 400; color: #8e8e93; }
+  .c .row { display: grid; grid-template-columns: 16px 1fr auto; gap: 4px 10px; padding: 8px 14px; border-bottom: 0.5px solid #efeff1; align-items: start; }
+  .c .row .fav { margin-top: 2px; }
+  .c .row .t { font-size: 13.5px; font-weight: 600; line-height: 1.28; }
+  .c .row .when { font-size: 11px; color: #8e8e93; padding-top: 2px; }
+  .c .row .src { grid-column: 2 / 4; font-size: 11px; color: #6e6e73; margin-top: -2px; }
+  .c .row.read .t { font-weight: 400; color: #8e8e93; }
+  .c .row.sel { background: rgba(0,99,209,.08); }
+  .c .more { font-size: 11.5px; color: #0063d1; padding: 6px 14px 8px 40px; border-bottom: 0.5px solid #efeff1; }
+  .c .side { background: #26262a; color: #e8e8ea; }
+  .c .side .status { color: #e8e8ea; }
+  .c .side .nav { background: transparent; }
+  .c .side .nav .title { font-size: 22px; font-weight: 700; color: #f2f2f4; }
+  .c .side .nav .tools { color: #8e8e94; }
+  .c .sl { font-size: 10.5px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: #8e8e94; padding: 14px 18px 4px; }
+  .c .sr { display: flex; align-items: center; gap: 10px; padding: 7px 12px; margin: 0 6px; border-radius: 7px; font-size: 14px; }
+  .c .sr .n { margin-left: auto; font-size: 12px; color: #8e8e94; }
+  .c .sr .ic { width: 17px; text-align: center; color: #b4b4b9; font-size: 13px; }
+  .c .sr .dot { width: 9px; height: 9px; border-radius: 3px; background: var(--k); }
+  .c .sr.in { padding-left: 37px; font-size: 13.5px; color: #c8c8cc; }
+  .c .sr.on { background: #3a3a3f; }
+</style>
+</head>
+<body>
+
+<div class="options">
+
+<!-- ================= A ================= -->
+<section class="option a">
+  <h2>A · Hairline <span>(recommended)</span></h2>
+  <p>The web app on a phone. White list, hairlines between rows, small grey uppercase section labels, sans-serif titles, and read stories shrink to one muted line. The sidebar is a quiet grey column with counts in grey. This gives the closest parity with the web Reeder look, and the clearest difference from Cards, which keeps the serif and the colours.</p>
+  <div class="pair">
+    <div>
+      <div class="phone"><div class="screen">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav"><span class="back">‹ All</span><span class="title">Tech</span><span class="tools"><span>☰</span><span>⋯</span></span></div>
+        <div class="scroll">
+          <div class="sec">Today</div>
+          <div class="row sel"><div class="t">The AI platform shift has a distribution problem</div><div class="m"><b>Stratechery</b> · 2h · 9 min</div></div>
+          <div class="row"><div class="t">Apple's next iPad mini gets an OLED panel</div><div class="m"><b>The Verge</b> · 3h · 4 min</div></div>
+          <div class="row read"><div class="t">Inside the fight over the open social web</div><div class="m"><b>Platformer</b> · 5h</div></div>
+          <div class="more">4 more</div>
+          <div class="sec">Last 7 Days</div>
+          <div class="row"><div class="t">What's left to build in the smartphone</div><div class="m"><b>Benedict Evans</b> · Sat · 6 min</div></div>
+          <div class="row read"><div class="t">Hands-on with the new Kindle Scribe</div><div class="m"><b>The Verge</b> · Fri</div></div>
+          <div class="more">7 more</div>
+          <div class="sec"><span class="fav f1"></span>Stratechery<span class="go">›</span></div>
+          <div class="row sel"><div class="t">The AI platform shift has a distribution problem</div><div class="m">2h · 9 min</div></div>
+          <div class="row"><div class="t">An interview with the CEO of Arm</div><div class="m">Thu · 12 min</div></div>
+        </div>
+      </div></div>
+      <div class="caption">Folder</div>
+    </div>
+    <div>
+      <div class="phone"><div class="screen side">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav"><span class="title">Pigeon</span><span class="tools"><span>＋</span><span>⋯</span></span></div>
+        <div class="scroll">
+          <div class="sl">Views</div>
+          <div class="sr"><span class="ic">✦</span>For You<span class="n">24</span></div>
+          <div class="sr"><span class="ic">◉</span>Unread<span class="n">132</span></div>
+          <div class="sr"><span class="ic">☆</span>Starred</div>
+          <div class="sr"><span class="ic">▤</span>Read It Later<span class="n">5</span></div>
+          <div class="sr"><span class="ic">◐</span>Today<span class="n">18</span></div>
+          <div class="sr"><span class="ic">◷</span>Last 7 Days<span class="n">96</span></div>
+          <div class="sl">Folders</div>
+          <div class="sr on"><span class="tri">▾</span>Tech<span class="n">19</span></div>
+          <div class="sr in"><span class="fav f1"></span>Stratechery<span class="n">2</span></div>
+          <div class="sr in"><span class="fav f2"></span>The Verge<span class="n">14</span></div>
+          <div class="sr in"><span class="fav f3"></span>Platformer</div>
+          <div class="sr in"><span class="fav f4"></span>Daring Fireball<span class="n">3</span></div>
+          <div class="sr"><span class="tri">▸</span>News<span class="n">41</span></div>
+          <div class="sr"><span class="tri">▸</span>Newsletters<span class="n">12</span></div>
+        </div>
+      </div></div>
+      <div class="caption">Library</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= B ================= -->
+<section class="option b">
+  <h2>B · Ruled</h2>
+  <p>A list that borrows the Front Page's voice: an italic masthead and dateline, ruled section heads, serif headlines, and each feed's kicker colour on its name. Folders in the sidebar carry the same colour bar as their Home tile. It is the most editorial of the three, but it sits close to Cards, so the two looks differ less.</p>
+  <div class="pair">
+    <div>
+      <div class="phone"><div class="screen">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav">
+          <div class="navbar"><span class="back">‹ All</span><span class="tools"><span>☰</span><span>⋯</span></span></div>
+          <div class="mast">Tech</div>
+          <div class="date">Monday, November 23 · 19 unread</div>
+        </div>
+        <div class="scroll">
+          <div class="sec"><span class="h">Today</span></div>
+          <div class="row"><div class="kick" style="color:#8a5a00">Stratechery</div><div class="t">The AI platform shift has a distribution problem</div><div class="m">2h · 9 min</div></div>
+          <div class="row read"><div class="kick" style="color:#6a57c9">Platformer</div><div class="t">Inside the fight over the open social web</div><div class="m">5h</div></div>
+          <div class="more">4 more</div>
+          <div class="sec"><span class="h">Last 7 Days</span></div>
+          <div class="row"><div class="kick" style="color:#1f6f6a">Benedict Evans</div><div class="t">What's left to build in the smartphone</div><div class="m">Sat · 6 min</div></div>
+          <div class="more">8 more</div>
+          <div class="sec"><span class="fav f1"></span><span class="k" style="color:#8a5a00">Stratechery</span><span class="go">›</span></div>
+          <div class="row"><div class="t">The AI platform shift has a distribution problem</div><div class="m">2h · 9 min</div></div>
+        </div>
+      </div></div>
+      <div class="caption">Folder</div>
+    </div>
+    <div>
+      <div class="phone"><div class="screen side">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav">
+          <div class="navbar"><span></span><span class="tools"><span>＋</span><span>⋯</span></span></div>
+          <div class="mast">Pigeon</div>
+          <div class="date">Monday, November 23</div>
+        </div>
+        <div class="scroll">
+          <div class="sr">For You<span class="n">24</span></div>
+          <div class="sr">Unread<span class="n">132</span></div>
+          <div class="sr">Starred</div>
+          <div class="sr">Read It Later<span class="n">5</span></div>
+          <div class="sr">Today<span class="n">18</span></div>
+          <div class="sr">Last 7 Days<span class="n">96</span></div>
+          <div class="sl">Folders</div>
+          <div class="sr fold on" style="--k:#3a5ba0">Tech<span class="n">19</span></div>
+          <div class="sr in"><span class="fav f1"></span>Stratechery<span class="n">2</span></div>
+          <div class="sr in"><span class="fav f2"></span>The Verge<span class="n">14</span></div>
+          <div class="sr in"><span class="fav f3"></span>Platformer</div>
+          <div class="sr fold" style="--k:#b3261e">News<span class="n">41</span></div>
+          <div class="sr fold" style="--k:#2e7d32">Newsletters<span class="n">12</span></div>
+        </div>
+      </div></div>
+      <div class="caption">Library</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= C ================= -->
+<section class="option c">
+  <h2>C · Columns</h2>
+  <p>The densest of the three, closest to Reeder itself. A favicon column down the left, the time aligned right, and the source under the title only where feeds mix. Section heads are grey bands that stick while you scroll. The sidebar is graphite in both light and dark, with each folder's colour as a small square. It shows the most stories per screen, but it is the most list-like, and the nearest of the three to the inbox feel you dislike.</p>
+  <div class="pair">
+    <div>
+      <div class="phone"><div class="screen">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav"><span class="back">‹ All</span><span class="title">Tech</span><span class="tools"><span>☰</span><span>⋯</span></span></div>
+        <div class="scroll">
+          <div class="sec">Today<span class="n">7</span></div>
+          <div class="row sel"><span class="fav f1"></span><div class="t">The AI platform shift has a distribution problem</div><div class="when">2h</div><div class="src">Stratechery · 9 min</div></div>
+          <div class="row"><span class="fav f2"></span><div class="t">Apple's next iPad mini gets an OLED panel</div><div class="when">3h</div><div class="src">The Verge · 4 min</div></div>
+          <div class="row read"><span class="fav f3"></span><div class="t">Inside the fight over the open social web</div><div class="when">5h</div><div class="src">Platformer</div></div>
+          <div class="more">4 more</div>
+          <div class="sec">Last 7 Days<span class="n">9</span></div>
+          <div class="row"><span class="fav f5"></span><div class="t">What's left to build in the smartphone</div><div class="when">Sat</div><div class="src">Benedict Evans · 6 min</div></div>
+          <div class="row read"><span class="fav f2"></span><div class="t">Hands-on with the new Kindle Scribe</div><div class="when">Fri</div><div class="src">The Verge</div></div>
+          <div class="more">7 more</div>
+          <div class="sec"><span class="fav f1"></span>Stratechery<span class="n">›</span></div>
+          <div class="row"><span class="fav f1"></span><div class="t">An interview with the CEO of Arm</div><div class="when">Thu</div></div>
+        </div>
+      </div></div>
+      <div class="caption">Folder</div>
+    </div>
+    <div>
+      <div class="phone"><div class="screen side">
+        <div class="status"><span>9:41</span><span>▂▄▆ ▭</span></div>
+        <div class="nav"><span class="title">Pigeon</span><span class="tools"><span>＋</span><span>⋯</span></span></div>
+        <div class="scroll">
+          <div class="sl">Views</div>
+          <div class="sr"><span class="ic">✦</span>For You<span class="n">24</span></div>
+          <div class="sr"><span class="ic">◉</span>Unread<span class="n">132</span></div>
+          <div class="sr"><span class="ic">☆</span>Starred</div>
+          <div class="sr"><span class="ic">▤</span>Read It Later<span class="n">5</span></div>
+          <div class="sr"><span class="ic">◐</span>Today<span class="n">18</span></div>
+          <div class="sr"><span class="ic">◷</span>Last 7 Days<span class="n">96</span></div>
+          <div class="sl">Folders</div>
+          <div class="sr on"><span class="dot" style="--k:#9db6ff"></span>Tech<span class="n">19</span></div>
+          <div class="sr in">Stratechery<span class="n">2</span></div>
+          <div class="sr in">The Verge<span class="n">14</span></div>
+          <div class="sr in">Platformer</div>
+          <div class="sr"><span class="dot" style="--k:#ff8a80"></span>News<span class="n">41</span></div>
+          <div class="sr"><span class="dot" style="--k:#8bd48f"></span>Newsletters<span class="n">12</span></div>
+        </div>
+      </div></div>
+      <div class="caption">Library</div>
+    </div>
+  </div>
+</section>
+
+</div>
+</body>
+</html>

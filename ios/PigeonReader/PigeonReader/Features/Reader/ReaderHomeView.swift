@@ -1,48 +1,30 @@
 import SwiftUI
 
-/// Home is the tile grid, with the full library one tap away: tiles in
-/// Cards, the list in Reeder. A compact window, and a regular one in Cards
-/// (which navigates like a phone), shows it as the split view's first column. A regular window in Reeder
-/// shows it over the split view until a view is chosen, and that split view's
-/// own sidebar is always the list.
+/// The library's root. Cards: Home is the tile grid, with All Feeds (more
+/// tiles) one tap away. Reeder has no Home: the root is the library list, the
+/// first column of the split view on iPhone and iPad alike.
 struct ReaderHomeView: View {
-	/// The sidebar column reports a compact size class even on iPad, so the
-	/// shell decides from the window's size class.
-	enum Placement {
-		/// The first column of a compact window.
-		case compactRoot
-		/// The sidebar column of a regular window, beside the open list.
-		case splitSidebar
-		/// Home covering a regular window.
-		case regularHome
-	}
-
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
-	let placement: Placement
 	@State private var showsLibraryList = ReaderHomeView.startsOnLibraryList
 
 	var body: some View {
-		if allowsTiles, showsLibraryList == false {
+		if usesTiles, showsLibraryList == false {
 			ReaderHomeTilesView(onShowLibrary: { setShowsLibraryList(true) })
 				.transition(.opacity)
-		} else if showsLibraryTiles {
+		} else if usesTiles, Self.startsOnLibraryList == false {
 			ReaderLibraryTilesView(onShowHome: { setShowsLibraryList(false) })
 				.transition(.opacity)
 		} else {
-			ReaderSidebarView(onShowHome: allowsTiles ? { setShowsLibraryList(false) } : nil)
+			// UI tests written against the library list reach it in Cards too,
+			// with the way back to the tiles.
+			ReaderSidebarView(onShowHome: usesTiles ? { setShowsLibraryList(false) } : nil)
 				.transition(.opacity)
 		}
 	}
 
-	/// All Feeds in Cards is tiles too. Reeder, the split view's own sidebar
-	/// and UI tests written against the list keep the library list.
-	private var showsLibraryTiles: Bool {
-		allowsTiles && model.readerTypography.look == .cards && Self.startsOnLibraryList == false
-	}
-
-	private var allowsTiles: Bool {
-		placement != .splitSidebar
+	private var usesTiles: Bool {
+		model.readerTypography.look == .cards
 	}
 
 	private func setShowsLibraryList(_ shows: Bool) {

@@ -38,6 +38,15 @@ enum ReaderTypography {
 	static let articleTitlePointSize = 25.0
 	static let articleBodyPointSize = 18.0
 
+	/// The Reeder list is the system sans whatever the reading typeface:
+	/// the reading face belongs to the article and to Cards.
+	static let listTitle = Font.body.weight(.semibold)
+	static let listReadTitle = Font.body
+	static let listMeta = Font.footnote
+	/// Small grey uppercase labels over list sections and library groups.
+	static let sectionLabel = Font.caption.weight(.semibold)
+	static let sectionLabelTracking = 0.8
+
 	static func storyTitle(_ typeface: ReaderTypeface) -> Font {
 		title(typeface, size: 17, relativeTo: .body)
 	}

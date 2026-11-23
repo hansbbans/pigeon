@@ -4,6 +4,7 @@ struct ReaderShellView: View {
 	@Environment(ReaderAppModel.self) private var model
 	@Environment(\.horizontalSizeClass) private var windowHorizontalSizeClass
 	@Environment(\.scenePhase) private var scenePhase
+	@State private var columnVisibility = NavigationSplitViewVisibility.all
 
 	var body: some View {
 		@Bindable var model = model
@@ -12,7 +13,6 @@ struct ReaderShellView: View {
 			preferredColumn: model.preferredCompactColumn,
 			hasSelectedArticle: model.selectedArticle != nil,
 		)
-		let showsRegularHome = horizontalSizeClass == .regular && model.preferredCompactColumn == .sidebar
 
 		ZStack {
 			if model.isInitialLibraryLoading {
@@ -31,7 +31,7 @@ struct ReaderShellView: View {
 				// the column on every push and pop.) The story is the overlay below
 				// the branches.
 				NavigationStack(path: $model.cardsPath) {
-					ReaderHomeView(placement: .compactRoot)
+					ReaderHomeView()
 						.navigationDestination(for: ReaderCardsRoute.self) { route in
 							switch route {
 							case .list:
@@ -45,8 +45,8 @@ struct ReaderShellView: View {
 				.allowsHitTesting(showsCompactArticle == false)
 				.accessibilityHidden(showsCompactArticle)
 			} else {
-				NavigationSplitView(preferredCompactColumn: splitViewColumn) {
-					ReaderHomeView(placement: horizontalSizeClass == .compact ? .compactRoot : .splitSidebar)
+				NavigationSplitView(columnVisibility: $columnVisibility, preferredCompactColumn: splitViewColumn) {
+					ReaderHomeView()
 						// The system's widths (320 and 375) leave an iPad mini in
 						// portrait a narrower reading column than an iPhone has.
 						.navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 320)
@@ -64,20 +64,8 @@ struct ReaderShellView: View {
 				}
 				.navigationSplitViewStyle(.balanced)
 				.environment(\.readerWindowHorizontalSizeClass, horizontalSizeClass)
-				.allowsHitTesting(showsCompactArticle == false && showsRegularHome == false)
-				.accessibilityHidden(showsCompactArticle || showsRegularHome)
-
-				if showsRegularHome {
-					// An iPad in portrait can hide the sidebar even when all split
-					// columns are requested. Present Home explicitly until a view is
-					// chosen, while keeping the library and reader mounted underneath.
-					NavigationStack {
-						ReaderHomeView(placement: .regularHome)
-					}
-					.frame(maxWidth: .infinity, maxHeight: .infinity)
-					.background(.background)
-				}
-
+				.allowsHitTesting(showsCompactArticle == false)
+				.accessibilityHidden(showsCompactArticle)
 			}
 
 			if model.isInitialLibraryLoading == false, showsCompactArticle, let article = model.selectedArticle {
@@ -98,6 +86,15 @@ struct ReaderShellView: View {
 		// sheets keep the window's size class; sheets presented from inside
 		// the library or reader see the navigation one.
 		.environment(\.horizontalSizeClass, horizontalSizeClass)
+		.onChange(of: ReaderRegularColumnKey(sizeClass: horizontalSizeClass, column: model.preferredCompactColumn), initial: true) { _, key in
+			// Reeder has no Home: a regular window always has a list open beside
+			// the library (see `columnWithoutHome`).
+			let column = ReaderCompactArticlePresentation.columnWithoutHome(
+				horizontalSizeClass: key.sizeClass,
+				preferredColumn: key.column,
+			)
+			if column != key.column { model.preferredCompactColumn = column }
+		}
 		.onChange(of: model.readerTypography.look) { _, look in
 			// Only Cards stacks a feed above its folder; elsewhere the feed
 			// stays open as the only list.
@@ -153,9 +150,11 @@ struct ReaderShellView: View {
 			ReaderWebViewPool.shared.prewarm(session: session)
 		}
 		.task(id: model.isSynchronizingOfflineLibrary) {
-			guard model.isSynchronizingOfflineLibrary, model.preferredCompactColumn == .sidebar else { return }
-			// Home needs server totals as soon as its cache is restored, even if
-			// downloading the complete offline library takes much longer.
+			guard model.isSynchronizingOfflineLibrary,
+				model.preferredCompactColumn == .sidebar || horizontalSizeClass == .regular else { return }
+			// Home and the library need server totals as soon as the cache is
+			// restored, even if downloading the complete offline library takes
+			// much longer. A regular window always shows the library.
 			_ = await model.loadNavigation(force: true, reportError: false)
 		}
 		.onChange(of: scenePhase, initial: true) { _, phase in
@@ -199,3 +198,8 @@ struct ReaderShellView: View {
 		.environment(PreviewData.makeModel())
 }
 #endif
+
+private struct ReaderRegularColumnKey: Equatable {
+	let sizeClass: UserInterfaceSizeClass?
+	let column: NavigationSplitViewColumn
+}

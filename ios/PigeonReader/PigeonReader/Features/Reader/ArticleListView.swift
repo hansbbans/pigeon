@@ -40,6 +40,9 @@ struct ArticleListView: View {
 	/// Cards shown in full ("N more") for this visit to the collection.
 	@State private var expandedCardSections: Set<String> = []
 	@State private var cardSectionsCache = FolderCardsSectionsCache()
+	/// The section of the copy last tapped, for a story a folder shows twice:
+	/// only that copy is highlighted, as on the web.
+	@State private var selectedCopySectionID: String?
 
 	var body: some View {
 		let allArticles = model.allArticles(for: collection)
@@ -50,7 +53,12 @@ struct ArticleListView: View {
 			? (searchPresentation.canDisplayResults(for: searchRequest) ? model.searchResults : [])
 			: model.articles(for: collection)
 		let articles = updateBuffer.displayedArticles(in: listContext, fallback: sourceArticles)
-		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: articles.map(\.id)) != nil
+		// Folders and feeds draw sections (cards in Cards, a sectioned list in
+		// Reeder). The stories drawn, each at its first copy and nothing behind
+		// "N more", are what the viewport, scroll positions and paging see.
+		let sections = usesSections ? folderCardSections(for: articles) : nil
+		let drawnIDs = sections?.uniqueArticleIDs ?? articles.map(\.id)
+		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: drawnIDs) != nil
 		// Cards have no saved-position restore, so they are ready as soon as they appear.
 		let isPositionReady = (usesCardsLook || hasSavedPosition == false || readyContext == listContext)
 			&& isExplicitListTransitioning == false
@@ -80,7 +88,6 @@ struct ArticleListView: View {
 			articles: preparesThumbnails ? Array(articles.prefix(ReaderFeedThumbnailPolicy.firstScreenLimit)) : [],
 		)
 		let impressionState = impressionState(isSearchActive: isSearchActive)
-		let feedSections = model.feedSections(for: collection, articles: articles)
 
 		ZStack {
 			if presentation == .loading {
@@ -135,8 +142,7 @@ struct ArticleListView: View {
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
-			} else if usesFolderCards {
-				let cardSections = folderCardSections(for: articles)
+			} else if usesFolderCards, let cardSections = sections {
 				folderCards(cardSections, articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
 					.onChange(of: CardImpressionRows(sections: cardSections), initial: true) { _, rows in
 						impressions.updateRows(rows.ids, readingLogRows: rows.rows)
@@ -155,20 +161,11 @@ struct ArticleListView: View {
 			} else {
 				ScrollViewReader { proxy in
 					List {
-						if let feedSections {
-							// Labels are plain rows without an anchor or id: the viewport,
-							// impressions and selection only ever see the story rows.
-							ForEach(feedSections) { section in
-								ArticleFeedSectionLabel(
-									feed: section.feed,
-									remoteImagePolicy: model.readerTypography.remoteImagePolicy,
-								)
-								.padding(.top, 12)
-								.listRowSeparator(.hidden)
-								.listRowBackground(Color.clear)
-								ForEach(section.articles) { article in
-									articleRow(article, presentedArticles: articles)
-								}
+						if let sections {
+							// Labels and "N more" are plain rows without an anchor: the
+							// viewport, impressions and selection only see story rows.
+							ForEach(sections.sections) { section in
+								sectionRows(section, in: sections, presentedArticles: articles)
 							}
 						} else {
 							ForEach(articles) { article in
@@ -184,6 +181,15 @@ struct ArticleListView: View {
 						loadMoreControls(for: collection, isSearchActive: isSearchActive)
 					}
 					.listStyle(.plain)
+					// Section labels and "N more" are short rows.
+					.environment(\.defaultMinListRowHeight, 1)
+					.onChange(of: drawnUnreadIDs(sections: sections, articles: articles), initial: true) {
+						model.fullRowMemory.noteDrawn(sections?.renderedArticles ?? articles, in: listContext)
+					}
+					.onChange(of: ReaderListReadingLogTags(sections: sections, articles: articles,
+						isCompact: { model.fullRowMemory.isCompact($0, in: listContext) }), initial: true) { _, tags in
+						impressions.setReadingLogTags(rows: tags.rows, sections: tags.sections)
+					}
 					.task(id: thumbnailRequest) {
 						guard let scope = thumbnailRequest.scope, thumbnailRequest.articles.isEmpty == false else { return }
 						await ReaderFeedThumbnailStore.shared.prefetch(articles: thumbnailRequest.articles, scope: scope)
@@ -204,7 +210,7 @@ struct ArticleListView: View {
 						// window before activation can read the target position.
 						viewport.commitContextChange(to: context, scope: listScope)
 						let target = viewport.activate(
-							context: listContext, articleIDs: articles.map(\.id), store: model.listPositions,
+							context: listContext, articleIDs: drawnIDs, store: model.listPositions,
 							scope: listScope,
 							onNearEnd: { if isNearEnd != $0 { isNearEnd = $0 } },
 							onUserScroll: {
@@ -225,7 +231,7 @@ struct ArticleListView: View {
 						}
 					}
 					.task(id: acceptedScrollRequest) {
-						guard let request = acceptedScrollRequest, let firstID = articles.first?.id else { return }
+						guard let request = acceptedScrollRequest, let firstID = drawnIDs.first else { return }
 						let context = listContext
 						await Task.yield()
 						guard Task.isCancelled == false, acceptedScrollRequest == request,
@@ -240,7 +246,7 @@ struct ArticleListView: View {
 							ReaderNewStoriesButton(count: updateBuffer.newStoryCount, action: showUpdatedStories)
 						}
 					}
-					.onChange(of: articles.map(\.id)) { _, ids in viewport.updateArticleIDs(ids) }
+					.onChange(of: drawnIDs) { _, ids in viewport.updateArticleIDs(ids) }
 					.onDisappear {
 						viewport.deactivate()
 						readyContext = nil
@@ -375,7 +381,7 @@ struct ArticleListView: View {
 			guard paginationGate.claim(
 				token,
 				hasError: model.loadMoreError(for: collection) != nil,
-				budget: usesFolderCards ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
+				budget: usesSections ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
 			) else { return }
 			let requestContext = listContext
 			await loadOlderStories()
@@ -426,23 +432,87 @@ struct ArticleListView: View {
 		usesCardsLook && usesFolderCards == false
 	}
 
-	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {
-		ArticleRowView(
+	/// Folders and feeds in Reeder: the cards' sections as a hairline list.
+	private var usesListSections: Bool {
+		usesCardsLook == false && (collection.kind == .folder || collection.kind == .feed)
+	}
+
+	private var usesSections: Bool {
+		usesFolderCards || usesListSections
+	}
+
+	/// A section's label, its stories and its "N more". A story the folder
+	/// shows twice gets its plain id and scroll anchor at its first copy only.
+	@ViewBuilder
+	private func sectionRows(_ section: FolderSections.Section, in sections: FolderSections,
+		presentedArticles articles: [Recommendation]) -> some View {
+		ArticleSectionLabel(
+			section: section,
+			remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+			openFeed: openFeedAction(for: section),
+		)
+		.listRowInsets(EdgeInsets(top: section.id == sections.sections.first?.id ? 8 : 22, leading: 16, bottom: 4, trailing: 16))
+		.listRowSeparator(.hidden)
+		.listRowBackground(Color.clear)
+		ForEach(Array(section.articles.enumerated()), id: \.element.id) { index, article in
+			articleRow(
+				article,
+				presentedArticles: articles,
+				in: sections,
+				section: section,
+				copyIndex: sections.copyIndex(of: index, inSection: section.id),
+			)
+		}
+		if section.hiddenCount > 0 {
+			ArticleSectionMoreButton(section: section) {
+				withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
+					_ = expandedCardSections.insert(section.id)
+				}
+			}
+			.listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 6, trailing: 16))
+			.listRowSeparator(.hidden, edges: .bottom)
+			.listRowBackground(Color.clear)
+		}
+	}
+
+	/// `sections` and `section` are set in a sectioned list; `copyIndex` is the
+	/// story's place among every drawn copy, for above and below.
+	private func articleRow(
+		_ article: Recommendation,
+		presentedArticles articles: [Recommendation],
+		in sections: FolderSections? = nil,
+		section: FolderSections.Section? = nil,
+		copyIndex: Int? = nil,
+	) -> some View {
+		let isFirstCopy = section.map { sections?.firstSectionIDs[article.id] == $0.id } ?? true
+		let isHighlighted = model.selectedArticleID == article.id
+			&& highlightedSectionID(for: article.id, in: sections) == section?.id
+		return ArticleRowView(
 			article: article,
 			density: model.readerTypography.timelineDensity,
 			remoteImagePolicy: model.readerTypography.remoteImagePolicy,
 			thumbnailStore: ReaderFeedThumbnailStore.shared,
 			thumbnailScope: model.session?.storageIdentity,
 			imageProxySession: model.session,
+			// A feed's own sections and a feed section are all one feed.
+			showsFeedName: collection.kind != .feed && section?.kind != .feed,
+			isCompact: model.fullRowMemory.isCompact(article, in: listContext),
 			select: {
+				selectedCopySectionID = section?.id
 				impressions.rowChosen(article.id)
-				model.retainPresentedArticles(articles, in: collection)
+				// Next and previous follow the sections, not the saved sort.
+				model.retainPresentedArticles(articles, in: collection, order: sections?.uniqueArticleIDs)
 				model.select(article: article)
 			},
 		)
-		.id(article.id)
-		.background { ReaderListRowAnchor(articleID: article.id, controller: viewport) }
-		.listRowBackground(model.selectedArticleID == article.id ? Color.accentColor.opacity(0.1) : .clear)
+		.alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+		.id(isFirstCopy ? article.id : "\(section?.id ?? "")|\(article.id)")
+		.background {
+			if isFirstCopy {
+				ReaderListRowAnchor(articleID: article.id, controller: viewport)
+			}
+		}
+		.listRowBackground(isHighlighted ? Color.accentColor.opacity(0.1) : .clear)
 		.swipeActions(edge: .leading, allowsFullSwipe: true) {
 			readButton(for: article)
 		}
@@ -454,9 +524,32 @@ struct ArticleListView: View {
 			readButton(for: article)
 			starButton(for: article)
 			Divider()
-			markAboveButton(for: article)
-			markBelowButton(for: article)
+			// Above and below mean the list as drawn, from this copy.
+			markAboveButton(for: article, order: sections?.renderedCopies, at: copyIndex)
+			markBelowButton(for: article, order: sections?.renderedCopies, at: copyIndex)
 		}
+	}
+
+	/// A feed section's label opens that feed as the list beside the library.
+	private func openFeedAction(for section: FolderSections.Section) -> (() -> Void)? {
+		guard let feed = section.feed, let item = navigationItem(for: feed) else { return nil }
+		return { model.select(item: item) }
+	}
+
+	/// The section whose copy of the story is highlighted: the one tapped, or
+	/// the first copy when the story was chosen another way (next, previous).
+	private func highlightedSectionID(for articleID: String, in sections: FolderSections?) -> String? {
+		guard let sections else { return nil }
+		if let selectedCopySectionID,
+			sections.sections.contains(where: { $0.id == selectedCopySectionID && $0.articles.contains { $0.id == articleID } }) {
+			return selectedCopySectionID
+		}
+		return sections.firstSectionIDs[articleID]
+	}
+
+	/// The unread stories drawn: when it changes, the full-row memory learns them.
+	private func drawnUnreadIDs(sections: FolderSections?, articles: [Recommendation]) -> [String] {
+		(sections?.renderedArticles ?? articles).compactMap { $0.isRead ? nil : $0.id }
 	}
 
 	private func frontPage(articles: [Recommendation], isSearchActive: Bool, holdsUpdates: Bool) -> some View {
@@ -516,11 +609,11 @@ struct ArticleListView: View {
 	/// The order the page draws stories in when it is not the sort: the
 	/// cards', each story at its first appearance.
 	private var presentedOrder: [String]? {
-		usesFolderCards ? cardSectionsCache.current?.uniqueArticleIDs : nil
+		usesSections ? cardSectionsCache.current?.uniqueArticleIDs : nil
 	}
 
 	private var presentationName: String {
-		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : "classic"
+		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : usesListSections ? "reeder" : "classic"
 	}
 
 	/// Built once per change of the stories, expansions or day (see
@@ -533,6 +626,7 @@ struct ArticleListView: View {
 			expanded: expandedCardSections,
 			feeds: isFolder ? model.articleFeedDirectory : .empty,
 			isFolder: isFolder,
+			collapsesDays: usesFolderCards,
 			// The model's day moves on at midnight and on returning to the app,
 			// which re-renders this page with that day's Today.
 			day: model.localDayStart,
@@ -540,7 +634,8 @@ struct ArticleListView: View {
 		return cardSectionsCache.sections(for: key) {
 			isFolder
 				? FolderSections.make(articles: articles, feeds: key.feeds, now: now, expanded: key.expanded)
-				: FeedDaySections.make(articles: articles, now: now, expanded: key.expanded)
+				: FeedDaySections.make(articles: articles, now: now, expanded: key.expanded,
+					limit: key.collapsesDays ? FeedDaySections.dayLimit : .max)
 		}
 	}
 

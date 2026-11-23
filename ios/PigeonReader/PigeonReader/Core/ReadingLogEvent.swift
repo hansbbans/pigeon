@@ -47,10 +47,15 @@ nonisolated struct ReadingLogMetadata: Codable, Equatable, Sendable {
 	/// The stream id of a feed or folder list.
 	var stream: String? = nil
 	/// The kind of row that showed the story where a list has more than one
-	/// (the Cards look: `card-today`, `card-last-7-days`, `card-feed`, `card-day`).
+	/// (the Cards look: `card-today`, `card-last-7-days`, `card-feed`, `card-day`;
+	/// the Reeder list: `compact` for a read story drawn on one line).
 	var row: String? = nil
+	/// In a Reeder folder or feed, the section that showed the story first
+	/// (`today`, `last-7-days`, `feed`, `day`), as the web app logs it. Compact
+	/// read rows set `row` to `compact`, also as on the web.
+	var section: String? = nil
 
-	var isEmpty: Bool { score == nil && stream == nil && row == nil }
+	var isEmpty: Bool { score == nil && stream == nil && row == nil && section == nil }
 }
 
 /// Which list an impression came from, in the reading log's terms.
