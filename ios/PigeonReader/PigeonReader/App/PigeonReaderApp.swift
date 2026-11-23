@@ -11,6 +11,9 @@ struct PigeonReaderApp: App {
 	#endif
 
 	init() {
+		// Story thumbnails and feed icons load through the shared session. Its
+		// default cache is too small to keep them from one launch to the next.
+		URLCache.shared = URLCache(memoryCapacity: 8 * 1024 * 1024, diskCapacity: 150 * 1024 * 1024)
 		BackgroundRefreshManager.shared.register()
 		_ = ReaderNotificationManager.shared
 		LegacyReadwiseCleanup.run()
@@ -73,6 +76,17 @@ struct PigeonReaderApp: App {
 			} else if ProcessInfo.processInfo.arguments.contains("-reader-show-add-feed") {
 				if let debugURL = URL(string: "https://pigeon.preview/debug-add-feed") {
 					previewModel.pendingFeedRequest = PendingFeedRequest(url: debugURL)
+				}
+			}
+			if ProcessInfo.processInfo.arguments.contains("-reader-background-refresh-fixture") {
+				// A live library refreshes in the background while the reader
+				// uses the list; sample data never would on its own.
+				// The app's model lives for the whole process, and so does this loop.
+				Task { @MainActor in
+					while true {
+						await previewModel.refresh(collection: previewModel.selectedCollection)
+						try? await Task.sleep(for: .milliseconds(300))
+					}
 				}
 			}
 			_model = State(initialValue: previewModel)

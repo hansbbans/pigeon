@@ -365,7 +365,7 @@ class LegacySchemaStatement {
 
 		if (
 			this.mode === 'scheduled' &&
-			this.sql.includes('SELECT feed_key, source_url, etag, last_modified, fetch_interval_minutes')
+			this.sql.includes('SELECT feed_key, source_url, site_url, etag, last_modified, fetch_interval_minutes')
 		) {
 			this.state.operations.push('cron-select');
 			return {

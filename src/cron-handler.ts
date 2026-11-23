@@ -117,7 +117,7 @@ export async function handleCronTrigger(env: Env): Promise<void> {
 	try {
 		if (!budget.reserve(1)) return;
 		const { results } = await env.DB.prepare(
-			`SELECT feed_key, source_url, etag, last_modified, fetch_interval_minutes,
+			`SELECT feed_key, source_url, site_url, etag, last_modified, fetch_interval_minutes,
 			        consecutive_failures, content_hash, conditional_checked_at, next_fetch_at, last_item_at
 			 FROM feeds
 			 WHERE source_type = 'rss'

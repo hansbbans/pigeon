@@ -7,6 +7,7 @@ import { handleGreaderRequest } from './greader';
 import { handleCronTrigger } from './cron-handler';
 import { handleSubscribe } from './subscribe';
 import { renderBrowserAppShell } from './browser-app';
+import { requireApiAuth } from './api-auth';
 import { handleStatusRequest, handleStatusRetryRequest } from './status';
 import { ensureDatabaseSchema } from './migrations';
 import { handleNativeApiRequest } from './native-api';
@@ -91,6 +92,18 @@ export default {
 				return new Response(null, { status: 304, headers });
 			}
 			return new Response(shell.html, { headers });
+		}
+
+		// The web app's sign-in check. It runs before the first screen on every load, so it compares
+		// the token and nothing more: none of the status page's counts. A failed migration still
+		// answers 503, which is what sends the app to its offline library.
+		if (path === '/app/session') {
+			if (request.method !== 'GET' && request.method !== 'HEAD') {
+				return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
+			}
+			return (await requireApiAuth(request, env.API_PASSWORD))
+				?? (await ensureSchemaReady(env))
+				?? new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
 		}
 
 		if (path === '/app/status') {
