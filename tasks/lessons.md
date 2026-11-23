@@ -8,3 +8,4 @@ _Updated as we go. Check this at session start._
 - Re-read current navigation totals after asynchronous cache lookups before deciding whether the saved articles cover the complete folder.
 - Before proposing a redesign, ask what specifically the user dislikes. The iOS app's core complaint is that it "looks like the Mail app": sender + subject + excerpt rows in a list read as an inbox. Redesigns must break that row pattern, not just restyle it.
 - When the user corrects tooling choice (e.g. "use claude, not codex"), stop the delegated run immediately, discard its partial output, and record the preference in memory.
+- Once Hans approves a design spec, build it. Do not write a separate implementation plan or ask for another approval round.

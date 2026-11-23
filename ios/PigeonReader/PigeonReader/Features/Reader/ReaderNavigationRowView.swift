@@ -8,9 +8,9 @@ struct ReaderNavigationRowView: View {
 
 	var body: some View {
 		NavigationLink(value: item.id) {
-			ReaderNavigationLabelView(item: item, indentation: indentation)
+			ReaderNavigationLabelView(item: item, indentation: indentation, isSelected: isSelected)
 		}
-		.listRowBackground(isSelected ? Color.accentColor.opacity(0.16) : .clear)
+		.readerLibrarySelection(isSelected)
 		.accessibilityLabel(item.title)
 		.accessibilityValue("\(item.unreadCount) unread")
 		.accessibilityIdentifier(ReaderSidebarAccessibility.item(item.id))

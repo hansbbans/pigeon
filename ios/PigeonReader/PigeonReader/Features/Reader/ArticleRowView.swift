@@ -3,13 +3,18 @@ import SwiftUI
 struct ArticleRowView: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.showsReadingTime) private var showsReadingTime
-	@Environment(\.readerTypeface) private var readerTypeface
 	let article: Recommendation
 	let density: ReaderTimelineDensity
 	let remoteImagePolicy: ReaderRemoteImagePolicy
 	let thumbnailStore: ReaderFeedThumbnailStore?
 	let thumbnailScope: String?
 	let imageProxySession: PigeonSession?
+	/// Off in a feed's own sections, where every story is from that feed.
+	let showsFeedName: Bool
+	/// A story already read when the list first showed it: one muted line.
+	/// A story read while the list is open keeps its height (see
+	/// `ReaderFullRowMemory`).
+	let isCompact: Bool
 	let select: (() -> Void)?
 	@State private var thumbnailState = ArticleRowThumbnailState()
 
@@ -20,6 +25,8 @@ struct ArticleRowView: View {
 		thumbnailStore: ReaderFeedThumbnailStore? = nil,
 		thumbnailScope: String? = nil,
 		imageProxySession: PigeonSession? = nil,
+		showsFeedName: Bool = true,
+		isCompact: Bool = false,
 		select: (() -> Void)? = nil,
 	) {
 		self.article = article
@@ -28,6 +35,8 @@ struct ArticleRowView: View {
 		self.thumbnailStore = thumbnailStore
 		self.thumbnailScope = thumbnailScope
 		self.imageProxySession = imageProxySession
+		self.showsFeedName = showsFeedName
+		self.isCompact = isCompact
 		self.select = select
 	}
 
@@ -41,13 +50,12 @@ struct ArticleRowView: View {
 			} else {
 				selectableContent
 			}
-			if density == .imageRich, thumbnailPresentation == .askToLoad {
+			if showsThumbnail, thumbnailPresentation == .askToLoad {
 				thumbnail
 			}
 		}
-		.padding(.vertical, density == .titleOnly ? 1 : 3)
+		.padding(.vertical, density == .titleOnly || isCompact ? 1 : 3)
 		.frame(maxWidth: .infinity, alignment: .leading)
-		.opacity(article.isRead ? 0.55 : 1)
 		.animation(ReaderMotion.animation(reduceMotion: reduceMotion), value: article.isRead)
 		.task(id: thumbnailRequest) {
 			let request = thumbnailRequest
@@ -67,7 +75,7 @@ struct ArticleRowView: View {
 			baseURL: article.safeOriginalURL,
 			scope: imageProxySession?.storageIdentity ?? thumbnailScope,
 			policy: remoteImagePolicy,
-			isImageRich: density == .imageRich,
+			isImageRich: showsThumbnail,
 		)
 	}
 
@@ -86,7 +94,7 @@ struct ArticleRowView: View {
 	private var selectableContent: some View {
 		HStack(alignment: .top, spacing: 10) {
 			storyText
-			if density == .imageRich, thumbnailPresentation != .askToLoad {
+			if showsThumbnail, thumbnailPresentation != .askToLoad {
 				thumbnail
 			}
 		}
@@ -95,12 +103,23 @@ struct ArticleRowView: View {
 		.accessibilityValue(accessibilityValue)
 	}
 
+	private var showsThumbnail: Bool {
+		density == .imageRich && isCompact == false
+	}
+
+	private var titleLineLimit: Int {
+		density == .titleOnly || isCompact ? 1 : 2
+	}
+
 	private var storyText: some View {
-		VStack(alignment: .leading, spacing: density == .compact ? 2 : 4) {
+		VStack(alignment: .leading, spacing: density == .compact || isCompact ? 1 : 3) {
 			HStack(alignment: .firstTextBaseline, spacing: 7) {
+				// Read is a change of weight and colour, never a fade: faded text
+				// fell under 4.5:1.
 				PaywallLabel.title(article.title, isPaywalled: article.isPaywalled)
-					.font(ReaderTypography.storyTitle(readerTypeface))
-					.lineLimit(density == .titleOnly ? 1 : 2)
+					.font(article.isRead ? ReaderTypography.listReadTitle : ReaderTypography.listTitle)
+					.foregroundStyle(article.isRead ? Color.pigeonSecondary : Color.primary)
+					.lineLimit(titleLineLimit)
 				Spacer(minLength: 4)
 				if article.sampleCount > 0 || article.score > 0 {
 					ScoreBadge(score: article.score)
@@ -108,27 +127,27 @@ struct ArticleRowView: View {
 			}
 
 			if density != .titleOnly {
-				HStack(spacing: 6) {
-					// Names give way first; a narrow iPad column must not wrap the
-					// date under them.
-					Text(article.displayAuthor ?? article.source)
-						.font(.caption.weight(.semibold))
-						.foregroundStyle(.primary)
-						.lineLimit(1)
-					if article.displayAuthor != nil {
+				HStack(spacing: 5) {
+					// The feed name gives way first; a narrow iPad column must not
+					// wrap the date under it.
+					if showsFeedName {
 						Text(article.source)
-							.font(.caption)
-							.foregroundStyle(.pigeonSecondary)
+							.font(ReaderTypography.listMeta.weight(.medium))
+							.foregroundStyle(article.isRead ? Color.pigeonSecondary : Color.primary)
 							.lineLimit(1)
+						Text("·")
+							.font(ReaderTypography.listMeta)
+							.foregroundStyle(.pigeonSecondary)
+							.accessibilityHidden(true)
 					}
 					Text(article.receivedAt, format: .relative(presentation: .named))
-						.font(.caption)
+						.font(ReaderTypography.listMeta)
 						.foregroundStyle(.pigeonSecondary)
 						.lineLimit(1)
 						.layoutPriority(1)
 					if let readingLength {
 						Text("· \(readingLength)")
-							.font(.caption)
+							.font(ReaderTypography.listMeta)
 							.foregroundStyle(.pigeonSecondary)
 							.lineLimit(1)
 							.layoutPriority(1)
@@ -144,9 +163,9 @@ struct ArticleRowView: View {
 				}
 			}
 
-			if (density == .comfortable || density == .imageRich) && shouldShowExplanation {
+			if (density == .comfortable || density == .imageRich), isCompact == false, shouldShowExplanation {
 				Text(article.explanation)
-					.font(.caption)
+					.font(ReaderTypography.listMeta)
 					.foregroundStyle(.pigeonSecondary)
 					.lineLimit(1)
 					.accessibilityLabel("Why this is here: \(article.explanation)")

@@ -221,7 +221,7 @@ struct FolderCardsTests {
 		// choosing a list from Home starts a new one.
 		model.select(item: folder)
 		model.openFeed(feed, fromFolder: folder)
-		model.showHome()
+		model.cardsPath = []
 		model.select(item: folder)
 		#expect(model.cardFeedPath.isEmpty)
 		#expect(model.contentRootCollection.id == folder.id)
@@ -251,7 +251,7 @@ struct FolderCardsTests {
 		let articles = [story("a", feed: "feed/1", at: todayStart.addingTimeInterval(60))]
 		var builds = 0
 		func sections(_ articles: [Recommendation], expanded: Set<String> = [], day: Date = todayStart) -> FolderSections {
-			cache.sections(for: .init(articles: articles, expanded: expanded, feeds: .empty, isFolder: true, day: day)) {
+			cache.sections(for: .init(articles: articles, expanded: expanded, feeds: .empty, isFolder: true, collapsesDays: true, day: day)) {
 				builds += 1
 				return FolderSections.make(articles: articles, feeds: .empty, now: day.addingTimeInterval(60))
 			}

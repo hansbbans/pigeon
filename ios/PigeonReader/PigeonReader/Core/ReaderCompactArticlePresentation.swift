@@ -37,6 +37,17 @@ nonisolated enum ReaderCompactArticlePresentation {
 		window == .regular && look == .cards && preferredColumn == .detail ? .content : preferredColumn
 	}
 
+	/// In a regular window the split view shows the library beside the list,
+	/// so `.sidebar` (where a launch, an account change or a compact window
+	/// leaves the column) has nothing of its own to show: open the list. A
+	/// Cards window navigates as compact and keeps its Home.
+	static func columnWithoutHome(
+		horizontalSizeClass: UserInterfaceSizeClass?,
+		preferredColumn: NavigationSplitViewColumn,
+	) -> NavigationSplitViewColumn {
+		horizontalSizeClass == .regular && preferredColumn == .sidebar ? .content : preferredColumn
+	}
+
 	static func splitViewColumn(
 		horizontalSizeClass: UserInterfaceSizeClass?,
 		preferredColumn: NavigationSplitViewColumn,

@@ -50,52 +50,35 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		let recorder = PigeonLayoutRecorder(app: app, orientation: name, testCase: self)
 		let isPad = UIDevice.current.userInterfaceIdiom == .pad
 
-		// Home: the tile grid at every width.
-		let tiles = element("reader-home-tiles")
-		recorder.expect(tiles.waitForExistence(timeout: 20), "Home shows the tile grid")
-		// The sample library has two folders, so the column count shows in the
-		// width of a tile: about 260pt at three across on an iPad in portrait,
-		// about 400pt if the grid stayed at a phone's two.
-		let folderTiles = app.buttons.matching(
-			NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-user/"),
-		)
-		let folderTileWidth = folderTiles.allElementsBoundByIndex
-			.first { $0.exists && $0.isHittable }?.frame.width ?? 0
-		recorder.note("folder-tile-columns", "\(columnCount(of: folderTiles))")
-		recorder.note("folder-tile-width", "\(Int(folderTileWidth.rounded()))")
-		if isPad {
-			recorder.expect(folderTileWidth > 0 && folderTileWidth <= 300, "An iPad lays folder tiles out at least three across")
+		// Reeder (the UI-test reset's look) has no Home: it opens on the
+		// library list. An iPad in landscape shows it beside the open list; in
+		// portrait the list and the story fill the window and the library is
+		// behind the sidebar button.
+		let isLandscape = orientation.isLandscape
+		let showSidebar = app.buttons["Show Sidebar"]
+		if isPad, isLandscape == false, showSidebar.waitForExistence(timeout: 10), showSidebar.isHittable {
+			showSidebar.tap()
 		}
-		recorder.capture("home")
+		let sidebar = element("reader-sidebar")
+		recorder.expect(sidebar.waitForExistence(timeout: 20), "Reeder opens on the library list")
+		recorder.expect(element("reader-home-tiles").exists == false, "Reeder has no tile Home")
+		recorder.capture("library")
 
-		// The full library list, one tap from Home.
-		let allFeeds = app.buttons["reader-home-all-feeds"]
-		for _ in 0..<4 where allFeeds.exists && allFeeds.isHittable == false {
-			app.swipeUp()
-		}
-		if allFeeds.exists, allFeeds.isHittable {
-			allFeeds.tap()
-			recorder.expect(element("reader-sidebar").waitForExistence(timeout: 10), "All Feeds shows the library list")
-			recorder.capture("library")
-			let showTiles = app.buttons["reader-home-show-tiles"]
-			if showTiles.waitForExistence(timeout: 5) {
-				showTiles.tap()
-			}
-			recorder.expect(tiles.waitForExistence(timeout: 10), "Home returns from the library list")
-		} else {
-			recorder.expect(false, "All Feeds is reachable on Home")
-		}
-
-		// A story list in Reeder rows (the UI-test reset starts in Reeder).
+		// A story list in Reeder rows.
 		let forYou = hittableButton("reader-sidebar-item-forYou")
-		recorder.expect(forYou.exists && forYou.isHittable, "Home offers For You")
-		forYou.tap()
+		recorder.expect(forYou.exists && forYou.isHittable, "The library offers For You")
+		if isPad, isLandscape == false {
+			// For You is already open under the library's overlay; tapping the
+			// open list leaves the overlay up, as with the stock sidebar. A tap
+			// on the story column closes it.
+			app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)).tap()
+		} else {
+			forYou.tap()
+		}
 		let firstStory = app.staticTexts["Designing calmer tools for people who read every day"]
 		recorder.expect(firstStory.waitForExistence(timeout: 15), "For You lists its stories")
-		let showHome = app.buttons["reader-show-home"]
-		recorder.note("home-button", showHome.exists ? (showHome.isHittable ? "hittable" : "hidden") : "absent")
-		if isPad {
-			recorder.expect(showHome.exists && showHome.isHittable, "An iPad list offers a way back to Home")
+		if isPad, isLandscape {
+			recorder.expect(forYou.exists && forYou.isHittable, "An iPad in landscape keeps the library beside the list")
 		}
 		recorder.capture("list-classic")
 
@@ -156,6 +139,19 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 				recorder.expect(homeBack.waitForExistence(timeout: 5) && homeBack.isHittable, "The Front Page leads back to Home")
 				if homeBack.exists, homeBack.isHittable {
 					homeBack.tap()
+					// Home: the tile grid. The sample library has two folders, so
+					// the column count shows in the width of a tile: about 260pt
+					// at three across on an iPad in portrait, about 400pt if the
+					// grid stayed at a phone's two.
+					recorder.expect(element("reader-home-tiles").waitForExistence(timeout: 10), "Cards returns to the tile Home")
+					let folderTiles = app.buttons.matching(
+						NSPredicate(format: "identifier BEGINSWITH %@", "reader-sidebar-item-user/"),
+					)
+					let folderTileWidth = folderTiles.allElementsBoundByIndex
+						.first { $0.exists && $0.isHittable }?.frame.width ?? 0
+					recorder.note("folder-tile-columns", "\(columnCount(of: folderTiles))")
+					recorder.note("folder-tile-width", "\(Int(folderTileWidth.rounded()))")
+					recorder.expect(folderTileWidth > 0 && folderTileWidth <= 300, "An iPad lays folder tiles out at least three across")
 					let forYouAgain = hittableButton("reader-sidebar-item-forYou")
 					recorder.expect(forYouAgain.exists && forYouAgain.isHittable, "Home is usable after returning to it")
 					recorder.capture("home-returned")

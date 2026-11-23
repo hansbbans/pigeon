@@ -6,6 +6,7 @@ All notable changes to Pigeon are documented in this file.
 
 ### Changed
 
+- iOS: the Reeder look no longer looks like stock iOS. The library is a quiet grey column with small labels, grey counts and no chevrons, and it is where Reeder opens: there are no Home tiles in Reeder (they stay in Cards), and an iPad opens with a list beside the library. A folder is one list in sections, Today, Last 7 Days and then one per feed, as on the web; a feed is Today, Yesterday and Earlier. Story titles are sans serif with one grey line under them, and a story already read when its list opens takes a single line.
 - A feed's own `Cache-Control: max-age` now holds its next poll back by five hours at most, instead of a day, so a feed that overstates its freshness still shows new stories the same day.
 - iOS: after a cold launch the list you were on shows its saved stories straight away, while the rest of the offline library loads behind it. Marking a story read or starring it in that moment no longer leaves the library half loaded until the next refresh.
 - iOS: feed icons in the sidebar, on Home and above By Feed sections are decoded once at icon size and reused, and story pictures and icons are kept on disk between launches (up to 150 MB).

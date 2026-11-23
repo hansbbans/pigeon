@@ -36,12 +36,9 @@ struct ReaderFolderSortTests {
 		model.setArticles(Self.folderStories, for: folder)
 
 		#expect(model.allArticles(for: folder).map(\.id) == ["alpha-new", "alpha-old", "beta-new", "beta-old"])
-		#expect(model.feedSections(for: folder, articles: model.allArticles(for: folder)).map { $0.map(\.feed.title) }
-			== ["alpha", "Beta"])
 
 		model.setSortOrder(.newest, for: folder)
 		#expect(model.allArticles(for: folder).map(\.id) == ["beta-new", "alpha-new", "beta-old", "alpha-old"])
-		#expect(model.feedSections(for: folder, articles: model.allArticles(for: folder)) == nil)
 
 		model.setSortOrder(.byFeed, for: folder)
 		#expect(model.sortOrder(for: folder) == .byFeed)
@@ -62,8 +59,6 @@ struct ReaderFolderSortTests {
 		model.setNavigation(Self.navigation(alphaTitle: "Zulu"))
 
 		#expect(model.allArticles(for: folder).map(\.id) == ["beta-new", "beta-old", "alpha-new", "alpha-old"])
-		#expect(model.feedSections(for: folder, articles: model.allArticles(for: folder)).map { $0.map(\.feed.title) }
-			== ["Beta", "Zulu"])
 	}
 
 	@Test func restoredFoldersUseTheirSavedChoiceOrByFeed() async throws {

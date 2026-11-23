@@ -41,11 +41,11 @@ struct ArticleSortOrderByFeedTests {
 		]
 
 		let sorted = ArticleSortOrder.byFeed.sorted(articles)
-		let sections = ArticleFeedSection.sections(for: sorted, feeds: .empty)
+		let feeds = sorted.map { ArticleFeedDirectory.empty.feed(for: $0) }
 
 		#expect(sorted.map(\.id) == ["a", "b"])
-		#expect(sections.map(\.feed.id) == ["feed/1", "feed/2"])
-		#expect(sections.map(\.feed.title) == ["Weekly", "Weekly"])
+		#expect(feeds.map(\.id) == ["feed/1", "feed/2"])
+		#expect(feeds.map(\.title) == ["Weekly", "Weekly"])
 	}
 
 	@Test func titlesCompareNumbersByValue() {
@@ -97,12 +97,12 @@ struct ArticleSortOrderByFeedTests {
 		]
 
 		let sorted = ArticleSortOrder.byFeed.sorted(articles, feeds: directory)
-		let sections = ArticleFeedSection.sections(for: sorted, feeds: directory)
+		let feeds = sorted.map { directory.feed(for: $0) }
 
 		#expect(sorted.map(\.id) == ["other", "sync", "stream"])
-		#expect(sections.map(\.feed.id) == ["feed/8", "feed/7"])
-		#expect(sections.map(\.feed.title) == ["Axios", "Stratechery"])
-		#expect(sections.last?.feed.iconURL == URL(string: "https://stratechery.com/favicon.ico"))
+		#expect(feeds.map(\.id) == ["feed/8", "feed/7", "feed/7"])
+		#expect(feeds.map(\.title) == ["Axios", "Stratechery", "Stratechery"])
+		#expect(feeds.last?.iconURL == URL(string: "https://stratechery.com/favicon.ico"))
 	}
 
 	@Test func byFeedIsOfferedOnlyInFolders() {
@@ -142,23 +142,6 @@ struct ArticleSortOrderByFeedTests {
 		#expect(ArticleSortOrder(rawValue: "byFeed") == .byFeed)
 		#expect(ArticleSortOrder(rawValue: "byAuthor") == nil)
 		#expect(ArticleSortOrder.byFeed.title == "By Feed")
-	}
-
-	@Test func sectionsAreConsecutiveRunsThatKeepEveryArticleOnce() {
-		let articles = [
-			story("a", feed: "feed/1", source: "One", at: 3),
-			story("b", feed: "feed/1", source: "One", at: 2),
-			story("c", feed: "feed/2", source: "Two", at: 9),
-			// A held list can briefly show a feed twice; ids stay unique.
-			story("d", feed: "feed/1", source: "One", at: 1),
-		]
-
-		let sections = ArticleFeedSection.sections(for: articles, feeds: .empty)
-
-		#expect(sections.flatMap(\.articles) == articles)
-		#expect(sections.map(\.articles.count) == [2, 1, 1])
-		#expect(sections.map(\.id) == ["feed/1", "feed/2", "feed/1#2"])
-		#expect(ArticleFeedSection.sections(for: [], feeds: .empty).isEmpty)
 	}
 
 	@Test func cachedSnapshotPreparationDefaultsFoldersToByFeed() {
