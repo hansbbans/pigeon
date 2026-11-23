@@ -90,6 +90,20 @@ final class PigeonReederUITests: XCTestCase {
 		XCTAssertFalse(app.buttons["article-list-sort"].exists)
 	}
 
+	func testSearchInAFolderIsOneFlatListNamingEachFeed() throws {
+		launchFolder()
+		XCTAssertTrue(element("article-section-today").waitForExistence(timeout: 15))
+		let search = app.searchFields.firstMatch
+		XCTAssertTrue(search.waitForExistence(timeout: 5))
+		search.tap()
+		search.typeText("Aggregator")
+		XCTAssertTrue(app.staticTexts["The Aggregator's dilemma, revisited for an age of agents"].waitForExistence(timeout: 10))
+		// Results are not the folder's sections, and every row names its feed.
+		XCTAssertFalse(element("article-section-today").exists)
+		XCTAssertFalse(element("article-feed-section-feed/cards-strat").exists)
+		XCTAssertTrue(app.staticTexts["Stratechery"].exists)
+	}
+
 	private func launchFolder() {
 		app.launchArguments = [
 			"-reader-sample-data", "-reader-reset-reader-state", "-reader-cards-fixture",

@@ -945,6 +945,7 @@ final class ReaderAppModel {
 			articleUndo = nil
 			readerPreparation.reset()
 			listPositions.reset()
+			fullRowMemory.removeAll()
 			scrollReadTriggered = []
 			engagement = EngagementAggregator()
 			sentScrollThresholds = [:]
@@ -7386,6 +7387,7 @@ final class ReaderAppModel {
 		articleUndo = nil
 		readerPreparation.reset()
 		listPositions.reset()
+		fullRowMemory.removeAll()
 		scrollReadTriggered = []
 		engagement = EngagementAggregator()
 		sentScrollThresholds = [:]

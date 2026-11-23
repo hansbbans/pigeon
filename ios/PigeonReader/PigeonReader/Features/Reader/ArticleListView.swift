@@ -43,6 +43,7 @@ struct ArticleListView: View {
 	/// The section of the copy last tapped, for a story a folder shows twice:
 	/// only that copy is highlighted, as on the web.
 	@State private var selectedCopySectionID: String?
+	@State private var selectedCopyArticleID: String?
 
 	var body: some View {
 		let allArticles = model.allArticles(for: collection)
@@ -58,6 +59,8 @@ struct ArticleListView: View {
 		// "N more", are what the viewport, scroll positions and paging see.
 		let sections = usesSections ? folderCardSections(for: articles) : nil
 		let drawnIDs = sections?.uniqueArticleIDs ?? articles.map(\.id)
+		let rowMemoryContext = listContext
+		let compactIDs = compactArticleIDs(articles, in: rowMemoryContext, isSearchActive: isSearchActive)
 		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: drawnIDs) != nil
 		// Cards have no saved-position restore, so they are ready as soon as they appear.
 		let isPositionReady = (usesCardsLook || hasSavedPosition == false || readyContext == listContext)
@@ -165,11 +168,12 @@ struct ArticleListView: View {
 							// Labels and "N more" are plain rows without an anchor: the
 							// viewport, impressions and selection only see story rows.
 							ForEach(sections.sections) { section in
-								sectionRows(section, in: sections, presentedArticles: articles)
+								sectionRows(section, in: sections, presentedArticles: articles, compactIDs: compactIDs)
 							}
 						} else {
 							ForEach(articles) { article in
-								articleRow(article, presentedArticles: articles)
+								articleRow(article, presentedArticles: articles, compactIDs: compactIDs,
+									showsFeedName: collection.kind != .feed || isSearchActive)
 							}
 						}
 						Text(model.collectionStatusText(for: collection))
@@ -184,10 +188,12 @@ struct ArticleListView: View {
 					// Section labels and "N more" are short rows.
 					.environment(\.defaultMinListRowHeight, 1)
 					.onChange(of: drawnUnreadIDs(sections: sections, articles: articles), initial: true) {
-						model.fullRowMemory.noteDrawn(sections?.renderedArticles ?? articles, in: listContext)
+						// Search results are not a list to come back to.
+						guard isSearchActive == false else { return }
+						model.fullRowMemory.noteDrawn(sections?.renderedArticles ?? articles, in: rowMemoryContext)
 					}
 					.onChange(of: ReaderListReadingLogTags(sections: sections, articles: articles,
-						isCompact: { model.fullRowMemory.isCompact($0, in: listContext) }), initial: true) { _, tags in
+						isCompact: { compactIDs.contains($0.id) }), initial: true) { _, tags in
 						impressions.setReadingLogTags(rows: tags.rows, sections: tags.sections)
 					}
 					.task(id: thumbnailRequest) {
@@ -287,6 +293,10 @@ struct ArticleListView: View {
 				}
 			}
 		}
+		.onChange(of: model.selectedArticleID) { _, id in
+			// Next, previous or a deep link: highlight the story's first copy.
+			if id != selectedCopyArticleID { selectedCopySectionID = nil }
+		}
 		.onChange(of: model.markingAllReadCollectionID) { _, collectionID in
 			if collectionID == collection.id {
 				AccessibilityNotification.Announcement("Marking all as read").post()
@@ -303,6 +313,11 @@ struct ArticleListView: View {
 				manuallyChangedArticleID: isManualMutation ? source.mutationArticleID : nil)
 		}
 		.onChange(of: holdsUpdates) { _, holding in
+			if holding == false, usesListSections, updateBuffer.hasPendingUpdate,
+				updateBuffer.needsAcceptance == false {
+				// A page that waited for the gesture lands now (see `loadOlderStories`).
+				viewport.prepareForLayoutReflow()
+			}
 			updateBuffer.receive(source.articles, context: source.context, holding: holding,
 				explicit: isUserRefreshing || isSearchActive, knownArticles: source.allArticles)
 		}
@@ -381,7 +396,7 @@ struct ArticleListView: View {
 			guard paginationGate.claim(
 				token,
 				hasError: model.loadMoreError(for: collection) != nil,
-				budget: usesSections ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
+				budget: sectionsHideStories ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
 			) else { return }
 			let requestContext = listContext
 			await loadOlderStories()
@@ -434,18 +449,28 @@ struct ArticleListView: View {
 
 	/// Folders and feeds in Reeder: the cards' sections as a hairline list.
 	private var usesListSections: Bool {
+		// Search results (possibly library-wide) are one flat list that names
+		// each story's feed.
 		usesCardsLook == false && (collection.kind == .folder || collection.kind == .feed)
+			&& currentSearchRequest.isActive == false
 	}
 
 	private var usesSections: Bool {
 		usesFolderCards || usesListSections
 	}
 
+	/// Folders (and feeds in Cards) keep stories behind "N more", so a page
+	/// loaded automatically may add nothing visible: fetch one per scroll. A
+	/// Reeder feed's day sections hide nothing.
+	private var sectionsHideStories: Bool {
+		usesFolderCards || (usesListSections && collection.kind == .folder)
+	}
+
 	/// A section's label, its stories and its "N more". A story the folder
 	/// shows twice gets its plain id and scroll anchor at its first copy only.
 	@ViewBuilder
 	private func sectionRows(_ section: FolderSections.Section, in sections: FolderSections,
-		presentedArticles articles: [Recommendation]) -> some View {
+		presentedArticles articles: [Recommendation], compactIDs: Set<String>) -> some View {
 		ArticleSectionLabel(
 			section: section,
 			remoteImagePolicy: model.readerTypography.remoteImagePolicy,
@@ -458,6 +483,9 @@ struct ArticleListView: View {
 			articleRow(
 				article,
 				presentedArticles: articles,
+				compactIDs: compactIDs,
+				// A feed's own sections and a feed section are all one feed.
+				showsFeedName: collection.kind != .feed && section.kind != .feed,
 				in: sections,
 				section: section,
 				copyIndex: sections.copyIndex(of: index, inSection: section.id),
@@ -480,6 +508,8 @@ struct ArticleListView: View {
 	private func articleRow(
 		_ article: Recommendation,
 		presentedArticles articles: [Recommendation],
+		compactIDs: Set<String>,
+		showsFeedName: Bool,
 		in sections: FolderSections? = nil,
 		section: FolderSections.Section? = nil,
 		copyIndex: Int? = nil,
@@ -494,11 +524,11 @@ struct ArticleListView: View {
 			thumbnailStore: ReaderFeedThumbnailStore.shared,
 			thumbnailScope: model.session?.storageIdentity,
 			imageProxySession: model.session,
-			// A feed's own sections and a feed section are all one feed.
-			showsFeedName: collection.kind != .feed && section?.kind != .feed,
-			isCompact: model.fullRowMemory.isCompact(article, in: listContext),
+			showsFeedName: showsFeedName,
+			isCompact: compactIDs.contains(article.id),
 			select: {
 				selectedCopySectionID = section?.id
+				selectedCopyArticleID = article.id
 				impressions.rowChosen(article.id)
 				// Next and previous follow the sections, not the saved sort.
 				model.retainPresentedArticles(articles, in: collection, order: sections?.uniqueArticleIDs)
@@ -545,6 +575,17 @@ struct ArticleListView: View {
 			return selectedCopySectionID
 		}
 		return sections.firstSectionIDs[articleID]
+	}
+
+	/// Stories drawn as one compact line: read before this list showed them in
+	/// full. Never the open story, nor in search results (web parity).
+	private func compactArticleIDs(_ articles: [Recommendation], in context: String,
+		isSearchActive: Bool) -> Set<String> {
+		guard usesCardsLook == false, isSearchActive == false else { return [] }
+		let selectedID = model.selectedArticleID
+		return Set(articles.lazy
+			.filter { $0.id != selectedID && model.fullRowMemory.isCompact($0, in: context) }
+			.map(\.id))
 	}
 
 	/// The unread stories drawn: when it changes, the full-row memory learns them.
@@ -861,6 +902,9 @@ struct ArticleListView: View {
 		// waits for a gesture to end without offering them as "new stories".
 		let holding = isScrolling || isNativeTransitioning || isCollectionTransitioning
 			|| isCoveredByReader
+		// In Reeder's sections an older page also adds rows to sections above
+		// the viewport; keep the story being read where it is.
+		if holding == false, usesListSections { viewport.prepareForLayoutReflow() }
 		updateBuffer.receive(model.articles(for: collection), context: context, holding: holding,
 			acceptsReordering: true)
 	}
