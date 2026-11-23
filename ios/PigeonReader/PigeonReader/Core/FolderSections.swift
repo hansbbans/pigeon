@@ -17,7 +17,10 @@ nonisolated struct FolderSections: Equatable, Sendable {
 			/// A header with no stories; the feed sections after it are older
 			/// than the last 7 days.
 			case older
-			/// Single-feed day sections.
+			/// Single-feed day sections. A feed's Today is not the folder's
+			/// Today card: it shows one source, and the reading log counts it
+			/// with the feed's other days.
+			case feedToday
 			case yesterday
 			case earlier
 
@@ -27,7 +30,7 @@ nonisolated struct FolderSections: Equatable, Sendable {
 				case .today: "card-today"
 				case .lastSevenDays: "card-last-7-days"
 				case .feed, .older: "card-feed"
-				case .yesterday, .earlier: "card-day"
+				case .feedToday, .yesterday, .earlier: "card-day"
 				}
 			}
 		}
@@ -41,6 +44,16 @@ nonisolated struct FolderSections: Equatable, Sendable {
 		let articles: [Recommendation]
 		/// Loaded stories left out until the section is expanded ("N more").
 		let hiddenCount: Int
+
+		/// A section showing its first `limit` stories until it is expanded;
+		/// nil when it has none.
+		static func collapsed(id: String, kind: Kind, title: String, feed: ArticleFeedDirectory.Feed? = nil,
+			articles: [Recommendation], limit: Int, expanded: Set<String>) -> Self? {
+			guard articles.isEmpty == false else { return nil }
+			let shown = expanded.contains(id) ? articles : Array(articles.prefix(limit))
+			return Self(id: id, kind: kind, title: title, feed: feed, articles: shown,
+				hiddenCount: articles.count - shown.count)
+		}
 	}
 
 	static let todayLimit = 5
@@ -108,15 +121,15 @@ nonisolated struct FolderSections: Equatable, Sendable {
 	) -> Self {
 		let stories = newestFirst(articles)
 		let today = ReaderLocalDayBounds.localDay(containing: now, calendar: calendar)
-		let week = ReaderLocalDayBounds.localDays(7, endingWith: now, calendar: calendar)
+		let week = ReaderLocalDayBounds.lastSevenDays(endingWith: now, calendar: calendar)
 		var sections: [Section] = []
 
 		func append(_ id: String, _ kind: Section.Kind, _ title: String, feed: ArticleFeedDirectory.Feed? = nil,
-			articles: [Recommendation], limit: Int?) {
-			guard articles.isEmpty == false else { return }
-			let shown = expanded.contains(id) || limit == nil ? articles : Array(articles.prefix(limit ?? 0))
-			sections.append(Section(id: id, kind: kind, title: title, feed: feed, articles: shown,
-				hiddenCount: articles.count - shown.count))
+			articles: [Recommendation], limit: Int) {
+			if let section = Section.collapsed(id: id, kind: kind, title: title, feed: feed,
+				articles: articles, limit: limit, expanded: expanded) {
+				sections.append(section)
+			}
 		}
 
 		// A story dated after today (a skewed clock) is Today, as in a single
@@ -182,19 +195,15 @@ nonisolated enum FeedDaySections {
 		let stories = FolderSections.newestFirst(articles)
 		let todayStart = ReaderLocalDayBounds.localDay(containing: now, calendar: calendar).start
 		let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) ?? todayStart.addingTimeInterval(-86_400)
-		let groups: [(id: String, kind: FolderSections.Section.Kind, title: String, articles: [Recommendation], limit: Int?)] = [
-			("today", .today, "Today", stories.filter { $0.receivedAt >= todayStart }, dayLimit),
+		let groups: [(id: String, kind: FolderSections.Section.Kind, title: String, articles: [Recommendation])] = [
+			("today", .feedToday, "Today", stories.filter { $0.receivedAt >= todayStart }),
 			("yesterday", .yesterday, "Yesterday",
-				stories.filter { $0.receivedAt >= yesterdayStart && $0.receivedAt < todayStart }, dayLimit),
-			("earlier", .earlier, "Earlier", stories.filter { $0.receivedAt < yesterdayStart }, dayLimit),
+				stories.filter { $0.receivedAt >= yesterdayStart && $0.receivedAt < todayStart }),
+			("earlier", .earlier, "Earlier", stories.filter { $0.receivedAt < yesterdayStart }),
 		]
 		return FolderSections(sections: groups.compactMap { group in
-			guard group.articles.isEmpty == false else { return nil }
-			let shown = expanded.contains(group.id) || group.limit == nil
-				? group.articles
-				: Array(group.articles.prefix(group.limit ?? 0))
-			return FolderSections.Section(id: group.id, kind: group.kind, title: group.title, feed: nil,
-				articles: shown, hiddenCount: group.articles.count - shown.count)
+			FolderSections.Section.collapsed(id: group.id, kind: group.kind, title: group.title,
+				articles: group.articles, limit: dayLimit, expanded: expanded)
 		})
 	}
 }

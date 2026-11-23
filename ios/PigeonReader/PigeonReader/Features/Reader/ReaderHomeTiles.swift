@@ -103,15 +103,24 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 	static let wideLayoutMinimumWidth = 600.0
 	private static let wideFolderTileWidth = 220.0
 	private static let maximumFolderColumns = 4
+	/// Narrower than this, a view tile's title and count start to crowd.
+	private static let minimumWideViewTileWidth = 160.0
 
 	/// Three equal tiles in a row, so five views go three then two; four read
-	/// better as two rows of two. A wide window keeps every view on one row.
+	/// better as two rows of two. A wide window puts as many on a row as fit,
+	/// in rows as even as they can be (six go three and three, not four and two).
 	static func viewColumnCount(itemCount: Int, usesAccessibilitySize: Bool, availableWidth: Double? = nil) -> Int {
-		let isWide = (availableWidth ?? 0) >= wideLayoutMinimumWidth
-		if usesAccessibilitySize { return isWide ? min(max(itemCount, 1), 2) : 1 }
-		if isWide { return max(itemCount, 1) }
-		if itemCount == 4 { return 2 }
-		return min(max(itemCount, 1), 3)
+		let count = max(itemCount, 1)
+		let width = min(availableWidth ?? 0, maximumContentWidth)
+		let isWide = width >= wideLayoutMinimumWidth
+		if usesAccessibilitySize { return isWide ? min(count, 2) : 1 }
+		if isWide {
+			let fitting = min(count, max(Int(width / minimumWideViewTileWidth), 3))
+			let rows = (count + fitting - 1) / fitting
+			return (count + rows - 1) / rows
+		}
+		if count == 4 { return 2 }
+		return min(count, 3)
 	}
 
 	/// Two folder tiles across on a phone, more as the window widens.

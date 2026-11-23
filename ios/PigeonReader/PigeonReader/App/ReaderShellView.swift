@@ -101,7 +101,8 @@ struct ReaderShellView: View {
 		.onChange(of: model.readerTypography.look) { _, look in
 			// Only Cards stacks a feed above its folder; elsewhere the feed
 			// stays open as the only list.
-			if look != .cards { model.clearCardStack() }
+			// Next and previous follow the cards only in Cards.
+			if look != .cards { model.leaveCardsNavigation() }
 			model.preferredCompactColumn = ReaderCompactArticlePresentation.columnAfterLookChange(
 				window: windowHorizontalSizeClass,
 				look: look,

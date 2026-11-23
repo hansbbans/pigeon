@@ -372,7 +372,11 @@ struct ArticleListView: View {
 				paginationContext = listContext
 				paginationGate = ReaderAutomaticPaginationGate()
 			}
-			guard paginationGate.claim(token, hasError: model.loadMoreError(for: collection) != nil) else { return }
+			guard paginationGate.claim(
+				token,
+				hasError: model.loadMoreError(for: collection) != nil,
+				budget: usesFolderCards ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
+			) else { return }
 			let requestContext = listContext
 			await loadOlderStories()
 			if Task.isCancelled, paginationContext == requestContext { paginationGate.cancelClaim(token) }

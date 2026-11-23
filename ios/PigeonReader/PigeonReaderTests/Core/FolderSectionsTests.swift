@@ -174,7 +174,7 @@ struct FolderSectionsTests {
 		let sections = FeedDaySections.make(articles: articles, now: now, calendar: calendar)
 
 		#expect(sections.sections.map(\.id) == ["today", "yesterday", "earlier"])
-		#expect(sections.sections.map(\.kind) == [.today, .yesterday, .earlier])
+		#expect(sections.sections.map(\.kind) == [.feedToday, .yesterday, .earlier])
 		#expect(sections.sections.map(\.title) == ["Today", "Yesterday", "Earlier"])
 		#expect(ids(sections, "today") == ["today"])
 		#expect(ids(sections, "yesterday") == ["yesterday", "yesterday-start"])

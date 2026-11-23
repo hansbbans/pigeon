@@ -39,15 +39,36 @@ enum ReaderCardsRoute: Hashable {
 nonisolated struct ReaderPresentedArticleOrder: Equatable, Sendable {
 	let collectionID: String
 	let ids: [String]
+	/// Each id's first place in `ids`, built once: next and previous read the
+	/// order on every reader toolbar pass.
+	private let ranks: [String: Int]
 
-	/// `articles` in the drawn order; stories the page does not draw (behind
-	/// "N more") follow, in their own order.
-	func ordering(_ articles: [Recommendation]) -> [Recommendation] {
+	init(collectionID: String, ids: [String]) {
+		self.collectionID = collectionID
+		self.ids = ids
 		var ranks: [String: Int] = [:]
 		for (rank, id) in ids.enumerated() where ranks[id] == nil {
 			ranks[id] = rank
 		}
-		let drawn = articles.filter { ranks[$0.id] != nil }.sorted { ranks[$0.id, default: 0] < ranks[$1.id, default: 0] }
-		return drawn + articles.filter { ranks[$0.id] == nil }
+		self.ranks = ranks
+	}
+
+	static func == (lhs: Self, rhs: Self) -> Bool {
+		lhs.collectionID == rhs.collectionID && lhs.ids == rhs.ids
+	}
+
+	/// `articles` in the drawn order; stories the page does not draw (behind
+	/// "N more") follow, in their own order.
+	func ordering(_ articles: [Recommendation]) -> [Recommendation] {
+		var drawn: [(rank: Int, article: Recommendation)] = []
+		var rest: [Recommendation] = []
+		for article in articles {
+			if let rank = ranks[article.id] {
+				drawn.append((rank, article))
+			} else {
+				rest.append(article)
+			}
+		}
+		return drawn.sorted { $0.rank < $1.rank }.map(\.article) + rest
 	}
 }

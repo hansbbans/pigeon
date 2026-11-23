@@ -19,6 +19,14 @@ struct ReaderListContinuityTests {
 		#expect(gate.claim("5", hasError: false) == true)
 	}
 
+	@Test func cardsLoadOnePageForEachTouch() {
+		var gate = ReaderAutomaticPaginationGate()
+		#expect(gate.claim("2", hasError: false, budget: 1) == true)
+		#expect(gate.claim("3", hasError: false, budget: 1) == false)
+		#expect(gate.userDidScroll() == true)
+		#expect(gate.claim("3", hasError: false, budget: 1) == true)
+	}
+
 	@Test func failuresRequireExplicitRetryButCancellationCanResume() {
 		var gate = ReaderAutomaticPaginationGate()
 		#expect(gate.claim("2", hasError: true) == false)

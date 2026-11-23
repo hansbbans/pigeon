@@ -30,4 +30,11 @@ nonisolated struct ReaderLocalDayBounds: Equatable, Sendable {
 		let start = calendar.date(byAdding: .day, value: -(max(count, 1) - 1), to: day.start) ?? day.start
 		return Self(start: start, end: day.end)
 	}
+
+	/// The Last 7 Days window: the day that holds `date` and the six before it.
+	/// The one definition the view, its count, its offline membership and the
+	/// folder cards all use.
+	nonisolated static func lastSevenDays(endingWith date: Date, calendar: Calendar = .autoupdatingCurrent) -> Self {
+		localDays(7, endingWith: date, calendar: calendar)
+	}
 }

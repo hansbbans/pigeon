@@ -234,7 +234,7 @@ struct PigeonAPIClient: Sendable {
 	) async throws -> ReaderNavigationSnapshot {
 		let bounds = dayBounds ?? ReaderLocalDayBounds.localDay(containing: now)
 		// The week ends with the same local day, so both counts share a boundary.
-		let weekBounds = ReaderLocalDayBounds.localDays(7, endingWith: bounds.start)
+		let weekBounds = ReaderLocalDayBounds.lastSevenDays(endingWith: bounds.start)
 		async let subscriptions = readerSubscriptions()
 		async let unreadCounts = readerUnreadCounts()
 		async let starredUnreadCount = unreadCountIfAvailable(in: "user/-/state/com.google/starred")

@@ -64,7 +64,7 @@ nonisolated enum ReaderSection: String, Codable, CaseIterable, Hashable, Identif
 	func dayWindow(at now: Date, calendar: Calendar = .autoupdatingCurrent) -> ReaderLocalDayBounds? {
 		switch self {
 		case .today: ReaderLocalDayBounds.localDay(containing: now, calendar: calendar)
-		case .lastSevenDays: ReaderLocalDayBounds.localDays(7, endingWith: now, calendar: calendar)
+		case .lastSevenDays: ReaderLocalDayBounds.lastSevenDays(endingWith: now, calendar: calendar)
 		case .forYou, .unread, .starred, .saved: nil
 		}
 	}

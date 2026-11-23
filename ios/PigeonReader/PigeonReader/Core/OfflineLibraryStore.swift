@@ -3072,7 +3072,7 @@ actor OfflineLibraryStore: OfflineLibraryStoring, OfflineLibraryBootstrapProvidi
 
 	/// Last 7 Days ends with the local day Today's membership uses.
 	private static func lastSevenDaysBounds(endingWith today: ReaderLocalDayBounds) -> ReaderLocalDayBounds {
-		ReaderLocalDayBounds.localDays(7, endingWith: today.start)
+		ReaderLocalDayBounds.lastSevenDays(endingWith: today.start)
 	}
 
 	private func insertCollectionMembership(

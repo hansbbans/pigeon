@@ -108,7 +108,7 @@ The editorial direction is clearest in the iOS Front Page layout and the Bookerl
 - horizontalMargin 8–56 (default 20)
 - columnWidth 480–920 (default 640; a saved width is kept)
 - `ReaderTimelineDensity`: title-only / compact / comfortable / image-rich
-- `ReaderLook`: cards (default) / reeder, under `pigeon.reader.look.v1`. A stored `pigeon.reader.home-layout.v1` is migrated once (classic → reeder, front-page → cards) and removed
+- `ReaderLook`: cards (default) / reeder, under `pigeon.reader.look.v1`. A stored `pigeon.reader.home-layout.v1` is migrated once (classic → reeder, front-page → cards) and kept, written in step with the look, so an older build keeps its layout
 - `ReaderMarkReadBehavior`
 
 They persist under `pigeon.reader.*` UserDefaults keys. The HTML gets them through `--pigeon-text-scale` and `--pigeon-line-height`.

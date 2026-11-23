@@ -909,6 +909,7 @@ final class ReaderAppModel {
 			subscriptions = []
 			selectedArticleID = nil
 			sidebarFilter = .all
+			leaveCardsNavigation()
 			selectedNavigationID = firstEnabledSmartSection.rawValue
 			navigation = .initial
 			temporarilyUnavailableSelectedCollection = nil
@@ -2978,6 +2979,13 @@ final class ReaderAppModel {
 		storedCardFeedPath = []
 	}
 
+	/// Drops everything Cards keeps about the open page: the stack and the
+	/// card order next and previous follow. For a change of look or account.
+	func leaveCardsNavigation() {
+		clearCardStack()
+		presentedArticleOrder = nil
+	}
+
 	func toggleFolder(_ folder: ReaderNavigationItem) {
 		invalidateSpeculativeFeedWork()
 		navigation.toggleFolder(folder.id)
@@ -5022,7 +5030,7 @@ final class ReaderAppModel {
 		let delta = toRead ? -1 : 1
 		let now = Date.now
 		let todayBounds = ReaderLocalDayBounds.localDay(containing: now)
-		let lastSevenDaysBounds = ReaderLocalDayBounds.localDays(7, endingWith: now)
+		let lastSevenDaysBounds = ReaderLocalDayBounds.lastSevenDays(endingWith: now)
 		var deltas: [String: Int] = [:]
 		func cachedContains(_ collectionID: String) -> Bool {
 			if let cachedLookups {
@@ -7391,6 +7399,7 @@ final class ReaderAppModel {
 		settingsErrorMessage = nil
 		subscriptions = []
 		selectedArticleID = nil
+		leaveCardsNavigation()
 		selectedNavigationID = firstEnabledSmartSection.rawValue
 		navigation = .initial
 		temporarilyUnavailableSelectedCollection = nil

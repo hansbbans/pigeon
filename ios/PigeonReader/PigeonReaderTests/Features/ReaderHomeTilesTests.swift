@@ -151,9 +151,12 @@ struct ReaderHomeTilesTests {
 		// A phone: three across, then two.
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false) == 3)
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 402) == 3)
-		// A wide window keeps all five on one row.
-		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 600) == 5)
+		// A wide window fits as many as stay readable, in even rows.
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 600) == 3)
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: false, availableWidth: 1_024) == 5)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 6, usesAccessibilitySize: false, availableWidth: 600) == 3)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 6, usesAccessibilitySize: false, availableWidth: 1_024) == 6)
+		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 4, usesAccessibilitySize: false, availableWidth: 768) == 4)
 		#expect(ReaderHomeTiles.viewColumnCount(itemCount: 5, usesAccessibilitySize: true, availableWidth: 1_024) == 2)
 	}
 

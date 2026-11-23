@@ -192,7 +192,7 @@ struct FolderCardsView<StoryMenu: View, Footer: View>: View {
 			case .older:
 				closeRun()
 				blocks.append(Block(id: section.id, content: .olderHeader))
-			case .today, .lastSevenDays, .yesterday, .earlier:
+			case .today, .lastSevenDays, .feedToday, .yesterday, .earlier:
 				closeRun()
 				blocks.append(Block(id: section.id, content: .card(section)))
 			}

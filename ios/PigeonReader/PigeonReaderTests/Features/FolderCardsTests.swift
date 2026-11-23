@@ -71,9 +71,13 @@ struct FolderCardsTests {
 		)
 
 		#expect(sections.readingLogRows == ["today": "card-today", "week": "card-last-7-days", "old": "card-feed"])
+		// A single feed's days, Today included, are all day cards.
 		#expect(FeedDaySections.make(
-			articles: [story("day", feed: "feed/1", at: todayStart.addingTimeInterval(-3_600))], now: now,
-		).readingLogRows == ["day": "card-day"])
+			articles: [
+				story("feed-today", feed: "feed/1", at: todayStart.addingTimeInterval(60)),
+				story("day", feed: "feed/1", at: todayStart.addingTimeInterval(-3_600)),
+			], now: now,
+		).readingLogRows == ["feed-today": "card-day", "day": "card-day"])
 	}
 
 	@Test func aStoryShownTwiceIsVisibleWhileEitherCopyIs() {
