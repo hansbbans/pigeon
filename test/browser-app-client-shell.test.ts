@@ -762,9 +762,10 @@ test('a Last 7 Days load in flight across local midnight still lands, and a refr
 	let now = new Date(2026, 10, 3, 23, 59, 30).getTime();
 	const before = getLocalDayRangeBounds(now, 7);
 	const after = getLocalDayRangeBounds(new Date(2026, 10, 4, 0, 0, 30).getTime(), 7);
+	// Story 4 is from the window's first day, which midnight moves out of the window.
 	const contentFor = (id: string) => ({
 		id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
-		title: `Story ${id}`, published: before.endSeconds - Number(id) * 3_600, categories: [],
+		title: `Story ${id}`, published: id === '4' ? before.startSeconds + 3_600 : before.endSeconds - Number(id) * 3_600, categories: [],
 		origin: { title: 'Alpha', streamId: 'feed/1' }, summary: { content: `Preview ${id}` }, content: { content: `<p>Body ${id}</p>` },
 	});
 	const articleRequests: URL[] = [];
@@ -779,7 +780,7 @@ test('a Last 7 Days load in flight across local midnight still lands, and a refr
 			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 3 });
 			if (url.pathname === '/api/v1/browser/articles') {
 				articleRequests.push(url);
-				const body = { itemIds: ['1', '2', '3'], continuation: null, hasMore: false, sort: 'newest' };
+				const body = { itemIds: ['1', '2', '3', '4'], continuation: null, hasMore: false, sort: 'newest' };
 				return articleRequests.length === 1 ? firstResponse.promise.then(() => Response.json(body)) : Response.json(body);
 			}
 			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
@@ -795,11 +796,12 @@ test('a Last 7 Days load in flight across local midnight still lands, and a refr
 	await waitForBrowserCondition(() => articleRequests.length === 1);
 	assert.equal(articleRequests[0].searchParams.get('since'), before.start.toISOString());
 
-	// Local midnight passes while the first page is on its way.
+	// Local midnight passes while the first page is on its way. The list keeps
+	// the window it asked for, first day included, until it reloads.
 	now = new Date(2026, 10, 4, 0, 0, 30).getTime();
 	firstResponse.resolve(new Response());
-	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
-	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3']);
+	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 4);
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3', '4']);
 
 	// The next refresh reloads the list for the new window.
 	elements.get('refresh-view-button')!.dispatch('click');
@@ -807,6 +809,7 @@ test('a Last 7 Days load in flight across local midnight still lands, and a refr
 	assert.equal(articleRequests[1].searchParams.get('since'), after.start.toISOString());
 	assert.equal(articleRequests[1].searchParams.get('before'), after.end.toISOString());
 	await waitForBrowserCondition(() => renderedArticleIds({ elements } as any).length === 3);
+	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3']);
 });
 
 test('runtime script hides all-read feeds when the unread filter is active', async () => {
@@ -1573,6 +1576,31 @@ test('in a folder, Mark above and below follow the rows as drawn, not the newest
 	below.dispatch('click');
 	await waitForBrowserCondition(() => markedRead.length > 0);
 	assert.deepEqual(markedRead.flat(), ['102', '100']);
+});
+
+test('in a folder, the second copy of a story anchors its own actions and highlight', async () => {
+	const { elements, copies, markedRead } = await openFolderSections();
+	const above = elements.get('context-mark-above-button')!;
+	const below = elements.get('context-mark-below-button')!;
+	// 104 is drawn in Last 7 Days and again in Bravo, under 109.
+	copies('104')[1].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	assert.equal(above.disabled, false);
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	assert.deepEqual(markedRead.flat(), ['106', '103', '102']);
+	await waitForBrowserCondition(() => !elements.get('article-bulk-button')!.disabled, 100);
+
+	markedRead.length = 0;
+	copies('104')[0].dispatch('contextmenu', { clientX: 10, clientY: 10 });
+	below.dispatch('click');
+	await waitForBrowserCondition(() => markedRead.length > 0);
+	// From the Last 7 Days copy, every feed section is below; 104 itself is not.
+	assert.deepEqual(markedRead.flat(), ['110', '108', '107', '109', '106', '103', '102']);
+
+	// Opening the feed copy highlights that row only.
+	copies('110')[1].dispatch('click');
+	await waitForBrowserCondition(() => copies('110')[1].classList.contains('is-active'));
+	assert.equal(copies('110')[0].classList.contains('is-active'), false);
 });
 
 test('folders ignore the list sort and keep it for the other views', async () => {

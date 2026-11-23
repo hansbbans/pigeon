@@ -1323,7 +1323,6 @@ ${applyUnauthorizedState.toString()}
 ${sortSubscriptionsByTitle.toString()}
 ${buildFeedViews.toString()}
 ${getLocalDayRangeBounds.toString()}
-${getLocalDayBounds.toString()}
 ${isTimeWindowView.toString()}
 ${getViewDayBounds.toString()}
 ${buildFolderSections.toString()}
@@ -1381,7 +1380,6 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   sortSubscriptionsByTitle,
   buildFeedViews,
   getLocalDayRangeBounds,
-  getLocalDayBounds,
   isTimeWindowView,
   getViewDayBounds,
   buildFolderSections,

@@ -577,6 +577,13 @@ export function renderBrowserAppRuntimeScript(): string {
   let loadedItemsById = {};
   let inFlightContentIds = [];
   let selectedItemId = null;
+  // In a folder a story can be drawn twice; this is the copy the reader chose
+  // ({ itemId, key }, key a folder section key). It applies only while that
+  // story is selected; otherwise the story's first copy is the selected one.
+  let selectedCopy = null;
+  // Which list and window the article rows on screen were drawn for, so a
+  // folder's scroll anchor only carries over a redraw of the same rows.
+  let renderedArticleListIdentity = null;
   let articleContextTarget = null;
   let pendingArticleMutation = null;
   let readerActionTarget = '';
@@ -2155,9 +2162,16 @@ export function renderBrowserAppRuntimeScript(): string {
     return item?.mediaKind === 'video' || Boolean(client.extractYouTubeVideoId(item?.alternate?.[0]?.href));
   }
 
+  // Last 7 Days keeps the window it was loaded with until it reloads, so the
+  // list keeps matching its own query across local midnight.
+  function getActiveWindowBounds() {
+    const view = getActiveView();
+    return (view?.kind === 'last-7-days' && viewDayBounds.get(view.id)) || client.getViewDayBounds(view);
+  }
+
   function getTimeWindowCandidateIds() {
     const state = getViewState(activeViewId);
-    const bounds = client.getViewDayBounds(getActiveView());
+    const bounds = getActiveWindowBounds();
     const day = bounds.startSeconds + ':' + bounds.endSeconds;
     if (state.windowDay !== day) {
       state.windowDay = day;
@@ -2241,7 +2255,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function hasReachedWindowBoundary() {
     if (!isTimeWindowView()) return false;
     const state = getViewState(activeViewId);
-    const bounds = client.getViewDayBounds(getActiveView());
+    const bounds = getActiveWindowBounds();
     return itemIds.some((id) => {
       const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
       return state.confirmedItemIds.has(id) && typeof published === 'number' && published < bounds.startSeconds;
@@ -2549,7 +2563,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     // A selected article cache miss remains loadable after finding the day before the window.
     addId(targetItemId, true);
-    const windowStartSeconds = isTimeWindowView() ? client.getViewDayBounds(getActiveView()).startSeconds : null;
+    const windowStartSeconds = isTimeWindowView() ? getActiveWindowBounds().startSeconds : null;
     for (const itemId of getVisibleItemIds()) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
@@ -2892,7 +2906,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
     // Folder sections grow in place (a page lands, a section opens), so their
     // list keeps its first visible row where it was rather than its offset.
-    const folderAnchor = captureFolderListAnchor();
+    const listIdentity = getViewQueryKey(activeViewId) + '@' + (getViewState(activeViewId, false)?.windowStart || 0);
+    const folderAnchor = renderedArticleListIdentity === listIdentity ? captureFolderListAnchor() : null;
+    renderedArticleListIdentity = listIdentity;
     clearElement(articlesList);
     renderedArticleCards = [];
 
@@ -2918,6 +2934,11 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
     const fullRowIds = fullRowIdsByList.get(listKey);
     const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    const folderLayout = getFolderSectionLayout(visibleItemIds);
+    // A folder highlights the copy the reader clicked, or every copy of a story
+    // chosen from the keyboard.
+    const chosenKey = folderLayout ? getSelectedCopyKey() : null;
+    const selectedRowKey = chosenKey && folderLayout.rows.some((row) => row.id === selectedItemId && row.key === chosenKey) ? chosenKey : null;
     // One row per story shown; a story in two folder sections gets two rows,
     // both with its id and its first position.
     const appendArticleRow = (entry, row) => {
@@ -2932,7 +2953,7 @@ export function renderBrowserAppRuntimeScript(): string {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
-          entry.id === selectedItemId ? 'is-active' : '',
+          entry.id === selectedItemId && (!selectedRowKey || row.sectionKey === selectedRowKey) ? 'is-active' : '',
           isCompact ? 'is-compact' : '',
           savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
@@ -2946,9 +2967,9 @@ export function renderBrowserAppRuntimeScript(): string {
       renderedArticleCards.push({ id: entry.id, node: button, position: row.position, ...(row.section ? { section: row.section } : {}) });
       button.addEventListener('click', () => {
         setMobilePane('reader', true);
-        void selectArticle(entry.id);
+        void selectArticle(entry.id, row.sectionKey ? { sectionKey: row.sectionKey } : undefined);
       });
-      button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event); });
+      button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event, row.sectionKey); });
       if (savedView && article) {
         appendSavedCard(button, article, entry);
         listItem.appendChild(button);
@@ -3004,7 +3025,6 @@ export function renderBrowserAppRuntimeScript(): string {
     // A folder shows sections (Today, Last 7 Days, one per feed). Headers and
     // "N more" rows are not articles: they are not in renderedArticleCards, so
     // selection, keys and impressions skip them.
-    const folderLayout = getFolderSectionLayout(visibleItemIds);
     if (folderLayout) {
       const entryById = new Map(entries.map((entry) => [entry.id, entry]));
       const positions = new Map(folderLayout.order.map((id, index) => [id, windowStart + index]));
@@ -3075,15 +3095,38 @@ export function renderBrowserAppRuntimeScript(): string {
     }
     const order = [];
     const firstSections = new Map();
+    // Every drawn row in order, a story once per section that shows it.
+    const rows = [];
     for (const section of sections) {
       for (const id of section.itemIds) {
+        rows.push({ id, key: section.key });
         if (firstSections.has(id)) continue;
         firstSections.set(id, section.kind);
         order.push(id);
       }
     }
+    for (const id of unloadedIds) rows.push({ id, key: 'loading' });
     order.push(...unloadedIds);
-    return { sections, order, firstSections, unloadedIds };
+    return { sections, order, firstSections, unloadedIds, rows };
+  }
+
+  function getSelectedCopyKey() {
+    return selectedCopy && selectedCopy.itemId === selectedItemId ? selectedCopy.key : null;
+  }
+
+  // The drawn row of a story: the copy under key when it is drawn, else the first.
+  function findFolderRowIndex(layout, itemId, key) {
+    const index = key ? layout.rows.findIndex((row) => row.id === itemId && row.key === key) : -1;
+    return index >= 0 ? index : layout.rows.findIndex((row) => row.id === itemId);
+  }
+
+  // The stories drawn above and below one copy of a story, each once, without
+  // the story itself (its other copy may sit on either side).
+  function splitFolderRowsAt(layout, itemId, key) {
+    const index = findFolderRowIndex(layout, itemId, key);
+    if (index < 0) return null;
+    const ids = (rows) => [...new Set(rows.map((row) => row.id))].filter((id) => id !== itemId);
+    return { above: ids(layout.rows.slice(0, index)), below: ids(layout.rows.slice(index + 1)) };
   }
 
   // Today, Last 7 Days and Older are plain labels; a feed's label carries its
@@ -5117,10 +5160,9 @@ export function renderBrowserAppRuntimeScript(): string {
       return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
     }
     // A folder marks what is drawn above or below the story, not the newest-first stream.
-    if (request.drawnItemIds && ['above', 'below'].includes(request.mode)) {
-      const index = request.drawnItemIds.indexOf(request.selectedItemId);
-      if (index < 0) throw new Error('Selected article is no longer shown');
-      return request.mode === 'above' ? request.drawnItemIds.slice(0, index) : request.drawnItemIds.slice(index + 1);
+    if (request.view.kind === 'folder' && ['above', 'below'].includes(request.mode)) {
+      if (!request.drawnSplit) throw new Error('Selected article is no longer shown');
+      return request.mode === 'above' ? request.drawnSplit.above : request.drawnSplit.below;
     }
     if (client.isTimeWindowView(request.view) && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
@@ -5221,16 +5263,17 @@ export function renderBrowserAppRuntimeScript(): string {
     return { attempted, saved, failed: false };
   }
 
-  function createBulkRequest(mode, anchorItemId = selectedItemId) {
+  function createBulkRequest(mode, anchorItemId = selectedItemId, anchorKey = anchorItemId === selectedItemId ? getSelectedCopyKey() : null) {
     const view = getActiveView();
+    const folderLayout = view?.kind === 'folder' ? getFolderSectionLayout() : null;
     return { kind: 'bulk', field: 'read', mode, scope: mode.startsWith('age-') ? 'older' :
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
       dayBounds: getArticleQuery().dayBounds || client.getViewDayBounds(view), before: mode.startsWith('age-')
         ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null,
-      // Folder rows in drawn order, each story once (sections can show it twice).
-      drawnItemIds: view?.kind === 'folder' ? [...getNavigableItemIds()] : null };
+      // A folder marks the rows drawn above or below the chosen copy of the story.
+      drawnSplit: folderLayout && anchorItemId ? splitFolderRowsAt(folderLayout, anchorItemId, anchorKey) : null };
   }
 
   async function finishBulkRequest(request) {
@@ -5248,13 +5291,13 @@ export function renderBrowserAppRuntimeScript(): string {
     maybeAutoMarkRead();
   }
 
-  async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId) {
+  async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId, anchorKey) {
     // Read It Later archives one item at a time; no bulk mark there.
     if (!getActiveView() || isSavedView() || session.status !== 'authenticated' || pendingArticleMutation) return;
     const mode = requestedMode || articleBulkSelect.value;
     if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
         (['above', 'below'].includes(mode) && !anchorItemId)) return;
-    const request = createBulkRequest(mode, anchorItemId);
+    const request = anchorKey === undefined ? createBulkRequest(mode, anchorItemId) : createBulkRequest(mode, anchorItemId, anchorKey);
     pendingArticleMutation = request;
     renderArticleActions();
     renderMarkAllAsReadAction();
@@ -5510,6 +5553,7 @@ export function renderBrowserAppRuntimeScript(): string {
     heldReaderArticle = null;
     noteCardChosen(itemId);
     selectedItemId = itemId;
+    selectedCopy = options?.sectionKey ? { itemId, key: options.sectionKey } : null;
     noteArticleOpened(itemId, Boolean(options?.keyboard));
     keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
@@ -5845,12 +5889,12 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // Right-click on a list row: bulk-mark around that row without opening it.
-  function openArticleContextMenu(itemId, row, event) {
+  function openArticleContextMenu(itemId, row, event, sectionKey = null) {
     closePopoverMenus(null);
     // Its only actions are bulk marks, which Read It Later does not offer.
     if (isSavedView() || !getWindowCandidateIds().includes(itemId)) return;
     if (typeof event?.preventDefault === 'function') event.preventDefault();
-    articleContextTarget = { itemId, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
+    articleContextTarget = { itemId, sectionKey, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
     refreshArticleContextMenu();
     // The context-menu key and Shift+F10 report no pointer position; anchor to the row instead.
     let left = Number(event?.clientX) || 0;
@@ -5878,16 +5922,22 @@ export function renderBrowserAppRuntimeScript(): string {
   // Runs on open and on every list or action render, so the items follow pending writes and new rows.
   function refreshArticleContextMenu() {
     if (!articleContextTarget) return;
-    // In a folder only drawn rows count, in the order they are drawn.
-    const isFolder = getActiveView()?.kind === 'folder';
-    const candidates = isFolder ? getNavigableItemIds() : getWindowCandidateIds();
-    const index = candidates.indexOf(articleContextTarget.itemId);
+    // In a folder only drawn rows count, above or below the copy the menu is on.
+    const folderLayout = getActiveView()?.kind === 'folder' ? getFolderSectionLayout() : null;
+    const split = folderLayout ? splitFolderRowsAt(folderLayout, articleContextTarget.itemId, articleContextTarget.sectionKey) : null;
+    const candidates = folderLayout ? null : getWindowCandidateIds();
+    const index = candidates ? candidates.indexOf(articleContextTarget.itemId) : split ? 0 : -1;
     if (index < 0 || articleContextTarget.viewId !== activeViewId || articleContextTarget.generation !== accountGeneration) {
       closeArticleContextMenu(false);
       return;
     }
     const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
-    const moreBelow = !isFolder && Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
+    if (split) {
+      contextMarkAboveButton.disabled = unavailable || split.above.length === 0;
+      contextMarkBelowButton.disabled = unavailable || split.below.length === 0;
+      return;
+    }
+    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
     contextMarkAboveButton.disabled = unavailable || index === 0;
     contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !moreBelow);
   }
@@ -5904,7 +5954,13 @@ export function renderBrowserAppRuntimeScript(): string {
     return Boolean(articleContextTarget);
   }
 
-  function findArticleRowButton(itemId) {
+  // The row of a story; in a folder, the copy under sectionKey when drawn.
+  function findArticleRowButton(itemId, sectionKey = null) {
+    if (sectionKey) {
+      for (const listItem of articlesList.children) {
+        if (listItem.getAttribute?.('data-row-key') === sectionKey + ':' + itemId) return listItem.children[0] || null;
+      }
+    }
     for (const listItem of articlesList.children) {
       const button = listItem.children[0];
       if (button?.getAttribute('data-item-id') === itemId) return button;
@@ -5914,12 +5970,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function closeArticleContextMenu(restoreFocus) {
     if (!articleContextTarget) return;
-    const { itemId } = articleContextTarget;
+    const { itemId, sectionKey } = articleContextTarget;
     articleContextTarget = null;
     articleContextMenu.classList.add('hidden');
     document.removeEventListener('wheel', holdScrollUnderArticleContextMenu, { passive: false });
     // Rows are rebuilt on every render, so look the row up again by id.
-    if (restoreFocus) findArticleRowButton(itemId)?.focus();
+    if (restoreFocus) findArticleRowButton(itemId, sectionKey)?.focus();
   }
 
   function handleArticleContextMenuKeydown(event) {
@@ -5949,7 +6005,7 @@ export function renderBrowserAppRuntimeScript(): string {
     closeArticleContextMenu(true);
     if (!target || target.generation !== accountGeneration || target.viewId !== activeViewId ||
         target.queryKey !== getViewQueryKey(activeViewId) || !getWindowCandidateIds().includes(target.itemId)) return;
-    void markArticleRangeRead(mode, target.itemId);
+    void markArticleRangeRead(mode, target.itemId, target.sectionKey ?? null);
   }
 
   function applySidebarCollapsed(isCollapsed) {
