@@ -30,6 +30,7 @@ const ICON_PATHS: Record<string, string> = {
 	inbox: "<path d='M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2l0 -12' /> <path d='M4 13h3l3 3h4l3 -3h3' />",
 	unread: "<path d='M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0' />",
 	today: "<path d='M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12' /> <path d='M16 3v4' /> <path d='M8 3v4' /> <path d='M4 11h16' /> <path d='M11 15h1' /> <path d='M12 15v3' />",
+	week: "<path d='M4 7a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12' /> <path d='M16 3v4' /> <path d='M8 3v4' /> <path d='M4 11h16' /> <path d='M7 14h.013' /> <path d='M10.01 14h.005' /> <path d='M13.01 14h.005' /> <path d='M16.015 14h.005' /> <path d='M7.01 17h.005' /> <path d='M10.01 17h.005' /> <path d='M13.015 17h.005' />",
 	recent: "<path d='M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0' /> <path d='M12 7v5l3 3' />",
 	sparkle: "<path d='M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2m-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6' />",
 	folder: "<path d='M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2' />",
@@ -460,6 +461,7 @@ ${iconVariables()}
       .list-button[data-view-kind="all"] { --icon: var(--icon-inbox); }
       .list-button[data-view-kind="unread"] { --icon: var(--icon-unread); }
       .list-button[data-view-kind="today"] { --icon: var(--icon-today); }
+      .list-button[data-view-kind="last-7-days"] { --icon: var(--icon-week); }
       .list-button[data-view-kind="recent"] { --icon: var(--icon-recent); }
       .list-button[data-view-kind="starred"] { --icon: var(--icon-star); }
       .list-button[data-view-kind="saved"] { --icon: var(--icon-bookmark); }
@@ -670,7 +672,7 @@ ${iconVariables()}
         #articles-list > li:hover + li::before { visibility: hidden; }
       }
 
-      /* Folder "By feed": a quiet section label above each feed's articles. */
+      /* Folder sections: a quiet label above Today, Last 7 Days, each feed and the older feeds. */
       #articles-list > li.article-feed-header {
         display: flex;
         align-items: center;
@@ -686,6 +688,42 @@ ${iconVariables()}
       #articles-list > li.article-feed-header + li::before { visibility: hidden; }
       .article-feed-header .feed-icon { width: 14px; height: 14px; border-radius: 3px; }
       .article-feed-header-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      /* Today and Last 7 Days lead the folder, so they read a step stronger than the feed labels. */
+      #articles-list > li.article-feed-header.is-today,
+      #articles-list > li.article-feed-header.is-last-7-days { color: var(--text-secondary); }
+      #articles-list > li.article-feed-header.is-older-header { padding-top: 1.6rem; }
+      .article-feed-header-button {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-width: 0;
+        max-width: 100%;
+        margin: -0.2rem -0.3rem;
+        padding: 0.2rem 0.3rem;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+        cursor: pointer;
+      }
+      .article-feed-header-button:hover { color: var(--text); }
+      .article-feed-header-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      /* "N more": the rest of a section's loaded stories, right under them. */
+      #articles-list > li.article-section-more::before { visibility: hidden; }
+      .article-more-button {
+        display: block;
+        padding: 0.15rem 0.7rem 0.55rem 1rem;
+        border: 0;
+        background: transparent;
+        color: var(--accent);
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .article-more-button:hover { text-decoration: underline; }
+      .article-more-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
 
       .article-card {
         position: relative;

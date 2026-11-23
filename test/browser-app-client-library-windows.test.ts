@@ -77,7 +77,7 @@ for (const view of ['unread', 'recent', 'folder']) {
 			if (view === 'recent') state.database.exec('UPDATE items SET is_read = 1');
 			if (view === 'folder') state.database.exec("UPDATE feeds SET category = 'Today folder'");
 			const token = await generateApiToken('today-test-password');
-			// Folders open "By feed" through the browser articles API; one feed keeps newest-first order.
+			// A folder shows its stories in sections (Today, Last 7 Days, then per feed), so its order differs.
 			const h = await createBrowserHarness({ now, fetchImpl: async (input, init) => input === '/accounts/ClientLogin'
 				? new Response(`Auth=pigeon/${token}`)
 				: input.startsWith('/api/v1/')
@@ -89,7 +89,8 @@ for (const view of ['unread', 'recent', 'folder']) {
 			findListButtonByViewId(h.elements.get(view === 'folder' ? 'folders-list' : 'views-list'), id)!.dispatch('click');
 			await waitForBrowserCondition(() => renderedArticleIds(h).length > 0);
 			const ids = await collectBrowserWindowIds(h);
-			assert.deepEqual(ids, [String(count + 1), ...Array.from({ length: count }, (_, index) => String(count - index)), String(count + 2)]);
+			const expected = [String(count + 1), ...Array.from({ length: count }, (_, index) => String(count - index)), String(count + 2)];
+			assert.deepEqual(view === 'folder' ? [...ids].sort() : ids, view === 'folder' ? [...expected].sort() : expected);
 			assert.ok(h.elements.get('reader-frame')!.srcdoc.includes('Body'));
 		} finally { state.database.close(); }
 	});

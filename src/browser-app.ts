@@ -205,7 +205,7 @@ ${renderBrowserAppStyles()}
                     <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
                     <div class="menu-panel">
                       <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
-                      <label>Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="feed">By feed</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+                      <label id="article-sort-field">Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
                       <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
                       <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
                       <hr />
@@ -466,6 +466,7 @@ export function renderBrowserAppRuntimeScript(): string {
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
   const articleSortSelect = document.getElementById('article-sort-select');
+  const articleSortField = document.getElementById('article-sort-field');
   document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';clearKeptItemIds();renderArticles();void revalidateActiveView({refreshUnread:true});});
   const articleBulkSelect = document.getElementById('article-bulk-select');
   const articleBulkButton = document.getElementById('article-bulk-button');
@@ -504,9 +505,8 @@ export function renderBrowserAppRuntimeScript(): string {
   let views = [];
   let subscriptions = [];
   let unreadCountRequestId = 0;
-  let todayUnreadCount = null;
-  let inFlightTodayCount = null;
-  let todayCountStale = false;
+  // Today's and Last 7 Days' unread counts, each from its own request (see refreshWindowUnreadCount).
+  const windowUnreadCounts = { today: { stored: null, inFlight: null, stale: false }, 'last-7-days': { stored: null, inFlight: null, stale: false } };
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
@@ -577,6 +577,13 @@ export function renderBrowserAppRuntimeScript(): string {
   let loadedItemsById = {};
   let inFlightContentIds = [];
   let selectedItemId = null;
+  // In a folder a story can be drawn twice; this is the copy the reader chose
+  // ({ itemId, key }, key a folder section key). It applies only while that
+  // story is selected; otherwise the story's first copy is the selected one.
+  let selectedCopy = null;
+  // Which list and window the article rows on screen were drawn for, so a
+  // folder's scroll anchor only carries over a redraw of the same rows.
+  let renderedArticleListIdentity = null;
   let articleContextTarget = null;
   let pendingArticleMutation = null;
   let readerActionTarget = '';
@@ -599,8 +606,12 @@ export function renderBrowserAppRuntimeScript(): string {
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
   let articleSortOrder = 'newest';
-  // Folders keep their own sort, "By feed" until changed, apart from every other view.
-  let folderSortOrder = 'feed';
+  // Folder sections a reader opened with "N more", per folder for the page session.
+  const expandedFolderSections = new Map();
+  // Last 7 Days' window, fixed when a load of the view starts so a response
+  // landing after midnight still matches its list; a revalidation after midnight
+  // reloads it. (Today's search keeps a live window: its key rolls at midnight.)
+  const viewDayBounds = new Map();
   // Read rows render compact, except rows a list has already shown in full this
   // page session: those stay full, only dimmed. So a loaded row never changes
   // height in a list, and a list's saved scrollTop stays valid when the reader
@@ -1091,15 +1102,17 @@ export function renderBrowserAppRuntimeScript(): string {
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
       view?.kind === 'recent' ? 'read' : articleReadFilter, sort: getListSortOrder(view) };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
-    if (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest')) {
-      query.dayBounds = client.getLocalDayBounds();
+    // The window is part of the query, so a new local day starts a new list.
+    if (view?.kind === 'last-7-days' || (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest'))) {
+      query.dayBounds = viewDayBounds.get(view.id) || client.getViewDayBounds(view);
     }
     return query;
   }
 
   function getListSortOrder(view) {
     if (view?.kind === 'recommended') return recommendationSort;
-    return view?.kind === 'folder' ? folderSortOrder : articleSortOrder;
+    // A folder's sections are its order; its stories load newest first.
+    return view?.kind === 'folder' ? 'newest' : articleSortOrder;
   }
 
   function getViewQueryKey(viewId) {
@@ -1117,8 +1130,6 @@ export function renderBrowserAppRuntimeScript(): string {
       if (sort === 'score') return (left, right) => (recommendationDetails.get(right)?.score || 0) - (recommendationDetails.get(left)?.score || 0);
       if (sort === 'recommended') return (left, right) => (recommendationDetails.get(left)?.rank || 0) - (recommendationDetails.get(right)?.rank || 0);
     }
-    // Matches the server's sort=feed exactly, so kept rows land where the server puts them.
-    if (sort === 'feed') return client.createFeedOrderComparator((id) => loadedItemsById[id]);
     if (sort === 'shortest' || sort === 'longest') {
       // Matches the server: unknown lengths last, then length, then id.
       const sign = sort === 'shortest' ? 1 : -1;
@@ -1178,7 +1189,7 @@ export function renderBrowserAppRuntimeScript(): string {
       refreshedAt: 0,
       contentLoadedIds: new Set(),
       publicationDates: new Map(),
-      todayDay: '',
+      windowDay: '',
       windowStart: 0,
       windowNavigation: false,
       windowAnchorId: null,
@@ -1369,13 +1380,13 @@ export function renderBrowserAppRuntimeScript(): string {
   // response so membership is scanned per chunk, not per article.
   function markContentLoaded(loadedIds) {
     if (loadedIds.length === 0) return;
-    const todayState = getViewState('today', false);
+    const windowStates = new Set(['today', 'last-7-days'].map((viewId) => getViewState(viewId, false)).filter(Boolean));
     for (const state of viewStates.values()) {
       const memberIds = new Set(state.itemIds);
       for (const itemId of loadedIds) {
         if (!memberIds.has(itemId)) continue;
         state.contentLoadedIds.add(itemId);
-        if (state === todayState) {
+        if (windowStates.has(state)) {
           const published = articleCache.get(itemId)?.published;
           if (typeof published === 'number' && Number.isFinite(published)) state.publicationDates.set(itemId, published);
         }
@@ -1450,7 +1461,8 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = '';
     articleReadFilter = 'all';
     articleSortOrder = 'newest';
-    folderSortOrder = 'feed';
+    expandedFolderSections.clear();
+    viewDayBounds.clear();
     fullRowIdsByList.clear();
     articleSearchInput.value = '';
     activeLoadedQueryKey = '';
@@ -1583,15 +1595,17 @@ export function renderBrowserAppRuntimeScript(): string {
       impressionSession = { key, id: crypto.randomUUID(), since: {}, logged: {} };
     }
     const viewport = container.getBoundingClientRect();
-    const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    // A story shown twice (a folder's Today and its feed section) is visible
+    // while either copy is, and keeps the position of its first appearance.
     const visible = [];
-    for (let index = 0; index < renderedArticleCards.length; index += 1) {
-      const card = renderedArticleCards[index];
+    const seen = new Set();
+    for (const card of renderedArticleCards) {
       if (!loadedItemsById[card.id] || typeof card.node.getBoundingClientRect !== 'function') continue;
       const rect = card.node.getBoundingClientRect();
       if (rect.top >= viewport.bottom) break;
-      if (client.isHalfVisible(rect.top, rect.bottom, viewport.top, viewport.bottom)) {
-        visible.push({ id: card.id, position: windowStart + index });
+      if (!seen.has(card.id) && client.isHalfVisible(rect.top, rect.bottom, viewport.top, viewport.bottom)) {
+        seen.add(card.id);
+        visible.push({ id: card.id, position: card.position });
       }
     }
     for (const card of client.advanceImpressions(impressionSession, visible, now)) queueImpression(card, logView, now);
@@ -1608,7 +1622,10 @@ export function renderBrowserAppRuntimeScript(): string {
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
     // Compact read rows are shorter, so more fit on screen: mark them so the
     // report can keep row shape apart from reading behaviour.
-    if (renderedArticleCards.find((rendered) => rendered.id === card.id)?.node.classList.contains('is-compact')) metadata.row = 'compact';
+    const rendered = renderedArticleCards.find((candidate) => candidate.id === card.id);
+    if (rendered?.node.classList.contains('is-compact')) metadata.row = 'compact';
+    // In a folder: the section that showed the story first.
+    if (rendered?.section) metadata.section = rendered.section;
     pendingImpressions.push({
       id: crypto.randomUUID(), itemId: card.id, type: 'impression', view: logView.view, position: card.position,
       sessionId: impressionSession.id, occurredAt: new Date(now).toISOString(),
@@ -1622,11 +1639,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const now = Date.now();
     sampleImpressions(now);
     const logView = client.readingLogView(getActiveView(), Boolean(articleSearchQuery));
-    const index = renderedArticleCards.findIndex((card) => card.id === itemId);
-    if (!logView || !impressionSession || impressionSession.logged[itemId] || index === -1) return;
+    const card = renderedArticleCards.find((candidate) => candidate.id === itemId);
+    if (!logView || !impressionSession || impressionSession.logged[itemId] || !card) return;
     impressionSession.logged[itemId] = true;
     delete impressionSession.since[itemId];
-    queueImpression({ id: itemId, position: (getViewState(activeViewId, false)?.windowStart || 0) + index }, logView, now);
+    queueImpression({ id: itemId, position: card.position }, logView, now);
   }
 
   function isReadingOpenedArticle() {
@@ -2123,6 +2140,11 @@ export function renderBrowserAppRuntimeScript(): string {
     return activeView && activeView.kind === 'today';
   }
 
+  // Today or Last 7 Days: lists bounded by local days.
+  function isTimeWindowView() {
+    return client.isTimeWindowView(getActiveView());
+  }
+
   function isSavedView() {
     return getActiveView()?.kind === 'saved';
   }
@@ -2140,17 +2162,24 @@ export function renderBrowserAppRuntimeScript(): string {
     return item?.mediaKind === 'video' || Boolean(client.extractYouTubeVideoId(item?.alternate?.[0]?.href));
   }
 
-  function getTodayCandidateIds() {
+  // Last 7 Days keeps the window it was loaded with until it reloads, so the
+  // list keeps matching its own query across local midnight.
+  function getActiveWindowBounds() {
+    const view = getActiveView();
+    return (view?.kind === 'last-7-days' && viewDayBounds.get(view.id)) || client.getViewDayBounds(view);
+  }
+
+  function getTimeWindowCandidateIds() {
     const state = getViewState(activeViewId);
-    const bounds = client.getLocalDayBounds();
+    const bounds = getActiveWindowBounds();
     const day = bounds.startSeconds + ':' + bounds.endSeconds;
-    if (state.todayDay !== day) {
-      state.todayDay = day;
+    if (state.windowDay !== day) {
+      state.windowDay = day;
       state.windowStart = 0;
       state.windowAnchorId = null;
     }
     // Only a number is retained per membership ID. Evictable titles and bodies
-    // must not decide whether a previously verified story still belongs today.
+    // must not decide whether a previously verified story still belongs to the window.
     return itemIds.filter((id) => {
       const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
       if (typeof published !== 'number' || !Number.isFinite(published)) return true;
@@ -2161,7 +2190,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getWindowCandidateIds() {
     reconcileArticleQueryBoundary();
-    return isTodayView() ? getTodayCandidateIds() : itemIds;
+    return isTimeWindowView() ? getTimeWindowCandidateIds() : itemIds;
   }
 
   function reconcileArticleQueryBoundary() {
@@ -2188,12 +2217,12 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
 
-  function reconcileTodayMembershipBoundary() {
-    if (!isTodayView() || isLoadingItemIdsPage || !hasReachedTodayBoundary()) return;
+  function reconcileWindowMembershipBoundary() {
+    if (!isTimeWindowView() || isLoadingItemIdsPage || !hasReachedWindowBoundary()) return;
     const state = getViewState(activeViewId);
     const kept = getKeptItemIds(state);
     if (!nextItemIdsContinuation && itemIds.every((id) => state.confirmedItemIds.has(id) || kept?.has(id))) return;
-    // The ordered current root has reached yesterday, so all of today's IDs
+    // The ordered current root has reached the day before the window, so all of its IDs
     // are confirmed even when the server still has older pages. Cached tails
     // must no longer retain removed stories or their previous ordering.
     itemIds = withKeptItemIds(state, [...state.confirmedItemIds], '');
@@ -2209,7 +2238,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function getVisibleItemIds() {
-    reconcileTodayMembershipBoundary();
+    reconcileWindowMembershipBoundary();
     const state = getViewState(activeViewId);
     const candidates = getWindowCandidateIds();
     const anchoredIndex = state.windowAnchorId ? candidates.indexOf(state.windowAnchorId) : -1;
@@ -2223,10 +2252,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return visible;
   }
 
-  function hasReachedTodayBoundary() {
-    if (!isTodayView()) return false;
+  function hasReachedWindowBoundary() {
+    if (!isTimeWindowView()) return false;
     const state = getViewState(activeViewId);
-    const bounds = client.getLocalDayBounds();
+    const bounds = getActiveWindowBounds();
     return itemIds.some((id) => {
       const published = loadedItemsById[id]?.published ?? state.publicationDates.get(id);
       return state.confirmedItemIds.has(id) && typeof published === 'number' && published < bounds.startSeconds;
@@ -2239,7 +2268,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const candidates = active ? getWindowCandidateIds() : [];
     const busy = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
     const more = active && (state.windowStart + ARTICLE_WINDOW_SIZE < candidates.length ||
-      (!hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation)));
+      (!hasReachedWindowBoundary() && Boolean(nextItemIdsContinuation)));
     articleWindowControls.classList.toggle('hidden', !active || (state.windowStart === 0 && !more));
     articleNewerButton.disabled = busy || !active || state.windowStart === 0;
     articleOlderButton.disabled = busy || !more;
@@ -2252,11 +2281,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const candidates = getWindowCandidateIds();
     const start = Math.max(0, state.windowStart + direction * ARTICLE_WINDOW_SIZE);
     if (start === state.windowStart ||
-        (direction > 0 && start >= candidates.length && (hasReachedTodayBoundary() || !nextItemIdsContinuation))) return false;
+        (direction > 0 && start >= candidates.length && (hasReachedWindowBoundary() || !nextItemIdsContinuation))) return false;
     state.windowNavigation = true;
     state.windowStart = start;
     state.windowAnchorId = candidates[start] || null;
-    const visible = getVisibleItemIds();
+    const visible = getNavigableItemIds();
     selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
     state.selectedItemId = selectedItemId;
     // Stepping past the end of a window is still the reader choosing the next
@@ -2315,7 +2344,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const hasUnreadItems = ['today', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
+    const hasUnreadItems = ['today', 'last-7-days', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
     const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems || isOfflineReading();
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
@@ -2376,9 +2405,10 @@ export function renderBrowserAppRuntimeScript(): string {
     return false;
   }
 
-  function getSelectedItemIndex() {
-    const visibleItemIds = getVisibleItemIds();
-    return selectedItemId ? visibleItemIds.indexOf(selectedItemId) : -1;
+  // The order j and k walk: the list as shown, each story once. In a folder
+  // that is the first appearance of each story across its sections.
+  function getNavigableItemIds() {
+    return getFolderSectionLayout()?.order || getVisibleItemIds();
   }
 
   async function loadAdjacentKeyboardArticle() {
@@ -2388,7 +2418,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!requestBelongsToCurrentSession(owner.generation, owner.token) || owner.requestId !== activeViewRequestId ||
         owner.viewId !== activeViewId || owner.itemId !== selectedItemId ||
         owner.epoch !== getViewState(activeViewId).membershipEpoch) return;
-    const visible = getVisibleItemIds();
+    const visible = getNavigableItemIds();
     const index = visible.indexOf(owner.itemId);
     const adjacentId = index >= 0 ? visible[index + 1] : null;
     // A failed page/body remains explicitly retryable without immediately
@@ -2401,24 +2431,23 @@ export function renderBrowserAppRuntimeScript(): string {
       return false;
     }
 
-    if (isTodayView()) {
+    if (isTimeWindowView()) {
       renderArticles();
       renderReader();
     }
-    const selectedIndex = getSelectedItemIndex();
+    const navigableIds = getNavigableItemIds();
+    const selectedIndex = selectedItemId ? navigableIds.indexOf(selectedItemId) : -1;
     if (selectedIndex === -1) {
       if (hasHeldReaderSelection()) {
-        const visible = getVisibleItemIds();
-        const itemId = direction > 0 ? visible[0] : visible[visible.length - 1];
+        const itemId = direction > 0 ? navigableIds[0] : navigableIds[navigableIds.length - 1];
         if (itemId) { void selectArticle(itemId, { keyboard: true }); return true; }
       }
       return false;
     }
 
     const nextIndex = selectedIndex + direction;
-    const visibleItemIds = getVisibleItemIds();
-    if (nextIndex < 0 || nextIndex >= visibleItemIds.length) {
-      if (direction > 0 && visibleItemIds.length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedTodayBoundary()) {
+    if (nextIndex < 0 || nextIndex >= navigableIds.length) {
+      if (direction > 0 && getVisibleItemIds().length < ARTICLE_WINDOW_SIZE && nextItemIdsContinuation && !hasReachedWindowBoundary()) {
         if (inFlightContentIds.length > 0 || isLoadingItemIdsPage || (window.navigator?.onLine === false && !offlineLibrary)) return false;
         void loadAdjacentKeyboardArticle();
         return true;
@@ -2426,7 +2455,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return moveArticleWindow(direction, true);
     }
 
-    void selectArticle(visibleItemIds[nextIndex], { keyboard: true });
+    void selectArticle(navigableIds[nextIndex], { keyboard: true });
     return true;
   }
 
@@ -2532,13 +2561,13 @@ export function renderBrowserAppRuntimeScript(): string {
       plannedIds.push(itemId);
     };
 
-    // A selected article cache miss remains loadable after finding yesterday.
+    // A selected article cache miss remains loadable after finding the day before the window.
     addId(targetItemId, true);
-    const todayStartSeconds = isTodayView() ? client.getLocalDayBounds().startSeconds : null;
+    const windowStartSeconds = isTimeWindowView() ? getActiveWindowBounds().startSeconds : null;
     for (const itemId of getVisibleItemIds()) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
-      if (todayStartSeconds !== null && typeof published === 'number' && published < todayStartSeconds) {
+      if (windowStartSeconds !== null && typeof published === 'number' && published < windowStartSeconds) {
         break;
       }
       addId(itemId, !loadedItemsById[itemId]);
@@ -2752,6 +2781,8 @@ export function renderBrowserAppRuntimeScript(): string {
       summaryParts.push('Unread only');
     } else if (activeView.kind === 'today') {
       summaryParts.push('Received today');
+    } else if (activeView.kind === 'last-7-days') {
+      summaryParts.push('Received in the last 7 days');
     } else if (activeView.kind === 'recent') {
       summaryParts.push('Read items');
     } else if (activeView.kind === 'starred') {
@@ -2810,9 +2841,9 @@ export function renderBrowserAppRuntimeScript(): string {
     articleReadFilterSelect.value = savedView ? articleReadFilter : getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || savedView || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
     for (const option of articleSortSelect.querySelectorAll('option')) {
-      option.hidden = (['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended') ||
-        (option.value === 'feed' && view?.kind !== 'folder');
+      option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     }
+    articleSortField.classList.toggle('hidden', view?.kind === 'folder');
     articleSortSelect.value = getListSortOrder(view);
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
@@ -2832,8 +2863,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
     if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(sort) ? sort : 'recommended';
-    else if (currentView?.kind === 'folder') folderSortOrder = ['feed','newest','oldest'].includes(sort) ? sort : 'feed';
-    else articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
+    else if (currentView?.kind !== 'folder') articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
     heldReaderArticle = null;
     articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
     await loadActiveView();
@@ -2866,19 +2896,26 @@ export function renderBrowserAppRuntimeScript(): string {
       }
     }
     renderArticleWindowControls();
+    // Today, Last 7 Days and Starred enable Mark all from the loaded list, so it follows each render.
+    renderMarkAllAsReadAction();
     const entries = client.buildArticleListEntries({
       itemIds: visibleItemIds,
       loadedItemsById,
     });
     visiblePreviewSources=new Set(entries.map(entry=>entry.heroImageUrl).filter(Boolean));
 
+    // Folder sections grow in place (a page lands, a section opens), so their
+    // list keeps its first visible row where it was rather than its offset.
+    const listIdentity = getViewQueryKey(activeViewId) + '@' + (getViewState(activeViewId, false)?.windowStart || 0);
+    const folderAnchor = renderedArticleListIdentity === listIdentity ? captureFolderListAnchor() : null;
+    renderedArticleListIdentity = listIdentity;
     clearElement(articlesList);
     renderedArticleCards = [];
 
     if (entries.length === 0) {
       const activeView = getActiveView();
       articlesStatus.textContent =
-        isTodayView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
+        isTimeWindowView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
           ? 'Loading articles…'
           : activeView?.kind === 'saved'
             ? savedEmptyMessage()
@@ -2896,27 +2933,27 @@ export function renderBrowserAppRuntimeScript(): string {
     const listKey = getViewQueryKey(activeViewId);
     if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
     const fullRowIds = fullRowIdsByList.get(listKey);
-    // "By feed": a quiet label before each feed's run. Labels are not articles:
-    // they are not in renderedArticleCards, so selection, keys and impressions skip them.
-    const groupByFeed = getActiveView()?.kind === 'folder' && getArticleQuery().sort === 'feed';
-    let groupStreamId = null;
-    for (const entry of entries) {
+    const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
+    const folderLayout = getFolderSectionLayout(visibleItemIds);
+    // A folder highlights the copy the reader clicked, or every copy of a story
+    // chosen from the keyboard.
+    const chosenKey = folderLayout ? getSelectedCopyKey() : null;
+    const selectedRowKey = chosenKey && folderLayout.rows.some((row) => row.id === selectedItemId && row.key === chosenKey) ? chosenKey : null;
+    // One row per story shown; a story in two folder sections gets two rows,
+    // both with its id and its first position.
+    const appendArticleRow = (entry, row) => {
       const article = loadedItemsById[entry.id];
-      if (groupByFeed && article && (article.origin?.streamId || '') !== groupStreamId) {
-        groupStreamId = article.origin?.streamId || '';
-        articlesList.appendChild(createFeedGroupHeader(groupStreamId, entry.feedTitle));
-      }
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
       const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
       // Only a loaded row counts as shown: a placeholder has no read state yet.
       if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
-      const listItem = createNode('li');
+      const listItem = createNode('li', row.sectionKey ? { attributes: { 'data-row-key': row.sectionKey + ':' + entry.id } } : undefined);
       const button = createNode('button', {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
-          entry.id === selectedItemId ? 'is-active' : '',
+          entry.id === selectedItemId && (!selectedRowKey || row.sectionKey === selectedRowKey) ? 'is-active' : '',
           isCompact ? 'is-compact' : '',
           savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
@@ -2927,17 +2964,17 @@ export function renderBrowserAppRuntimeScript(): string {
           'data-starred': isStarred ? 'true' : 'false',
         },
       });
-      renderedArticleCards.push({ id: entry.id, node: button });
+      renderedArticleCards.push({ id: entry.id, node: button, position: row.position, ...(row.section ? { section: row.section } : {}) });
       button.addEventListener('click', () => {
         setMobilePane('reader', true);
-        void selectArticle(entry.id);
+        void selectArticle(entry.id, row.sectionKey ? { sectionKey: row.sectionKey } : undefined);
       });
-      button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event); });
+      button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event, row.sectionKey); });
       if (savedView && article) {
         appendSavedCard(button, article, entry);
         listItem.appendChild(button);
         articlesList.appendChild(listItem);
-        continue;
+        return;
       }
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
@@ -2961,7 +2998,7 @@ export function renderBrowserAppRuntimeScript(): string {
         const readingLength = showReadingTime ? entry.readingLength : null;
         if (entry.feedTitle || listTime || readingLength) {
           const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
-          if (entry.feedTitle && !groupByFeed) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
+          if (entry.feedTitle && row.showSource) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
           if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
           if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
           copy.appendChild(meta);
@@ -2984,6 +3021,24 @@ export function renderBrowserAppRuntimeScript(): string {
       button.appendChild(cardGrid);
       listItem.appendChild(button);
       articlesList.appendChild(listItem);
+    };
+    // A folder shows sections (Today, Last 7 Days, one per feed). Headers and
+    // "N more" rows are not articles: they are not in renderedArticleCards, so
+    // selection, keys and impressions skip them.
+    if (folderLayout) {
+      const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+      const positions = new Map(folderLayout.order.map((id, index) => [id, windowStart + index]));
+      for (const section of folderLayout.sections) {
+        articlesList.appendChild(createFolderSectionHeader(section));
+        for (const id of section.itemIds) {
+          appendArticleRow(entryById.get(id), { showSource: section.kind !== 'feed', position: positions.get(id),
+            section: folderLayout.firstSections.get(id), sectionKey: section.key });
+        }
+        if (section.hiddenCount > 0) articlesList.appendChild(createFolderSectionMoreRow(section));
+      }
+      for (const id of folderLayout.unloadedIds) appendArticleRow(entryById.get(id), { showSource: true, position: positions.get(id), sectionKey: 'loading' });
+    } else {
+      entries.forEach((entry, index) => appendArticleRow(entry, { showSource: true, position: windowStart + index }));
     }
 
     loadMoreButton.disabled = inFlightContentIds.length > 0 || isLoadingItemIdsPage;
@@ -2992,16 +3047,154 @@ export function renderBrowserAppRuntimeScript(): string {
       !shouldContinueLoadingWindow(),
     );
     restoreArticleScrollTop(preservedScrollTop);
+    restoreFolderListAnchor(folderAnchor);
     revealKeyboardSelectedRow();
     refreshArticleContextMenu();
   }
 
-  function createFeedGroupHeader(streamId, title) {
-    const header = createNode('li', { classNames: ['article-feed-header'], attributes: { 'data-feed-stream': streamId } });
-    const iconUrl = views.find((view) => view.kind === 'feed' && view.streamId === streamId)?.iconUrl;
-    if (iconUrl) header.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: iconUrl, alt: '', width: '14', height: '14' } }));
-    header.appendChild(createNode('span', { classNames: ['article-feed-header-title'], text: title || 'Unknown feed' }));
+  // The feed view a folder section opens: the copy under the open folder when
+  // the feed sits in several folders.
+  function findFolderSectionFeedView(streamId) {
+    const folderId = getActiveView()?.id;
+    const feedViews = views.filter((view) => view.kind === 'feed' && view.streamId === streamId);
+    return feedViews.find((view) => view.parentId === folderId) || feedViews[0] || null;
+  }
+
+  // Sections of the open folder's loaded window, or null outside a folder.
+  // The order is each story once, at its first appearance: what keys walk and
+  // where impressions are counted. Stories without a body yet follow the sections.
+  function getFolderSectionLayout(visibleItemIds = getVisibleItemIds()) {
+    const view = getActiveView();
+    if (view?.kind !== 'folder') return null;
+    const feedTitles = new Map(views.filter((candidate) => candidate.kind === 'feed').map((candidate) => [candidate.streamId, candidate.title]));
+    const items = [];
+    const unloadedIds = [];
+    for (const id of visibleItemIds) {
+      const item = loadedItemsById[id];
+      if (!item || typeof item.published !== 'number' || !Number.isFinite(item.published)) {
+        unloadedIds.push(id);
+        continue;
+      }
+      // A feed the library does not list keeps the title the story came with.
+      const streamId = item.origin?.streamId || '';
+      items.push({ id, published: item.published, streamId, feedTitle: feedTitles.get(streamId) || item.origin?.title || 'Unknown feed' });
+    }
+    let sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+    // The open story must keep a row (newer stories can push it behind "N more"):
+    // its first section opens, and stays open like one the reader opened.
+    const isDrawn = (id) => sections.some((section) => section.itemIds.includes(id));
+    if (selectedItemId && items.some((item) => item.id === selectedItemId) && !isDrawn(selectedItemId)) {
+      const everyKey = new Set(sections.map((section) => section.key));
+      const holder = client.buildFolderSections(items, Date.now(), { expanded: everyKey })
+        .find((section) => section.itemIds.includes(selectedItemId));
+      if (holder) {
+        if (!expandedFolderSections.has(view.id)) expandedFolderSections.set(view.id, new Set());
+        expandedFolderSections.get(view.id).add(holder.key);
+        sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+      }
+    }
+    const order = [];
+    const firstSections = new Map();
+    // Every drawn row in order, a story once per section that shows it.
+    const rows = [];
+    for (const section of sections) {
+      for (const id of section.itemIds) {
+        rows.push({ id, key: section.key });
+        if (firstSections.has(id)) continue;
+        firstSections.set(id, section.kind);
+        order.push(id);
+      }
+    }
+    for (const id of unloadedIds) rows.push({ id, key: 'loading' });
+    order.push(...unloadedIds);
+    return { sections, order, firstSections, unloadedIds, rows };
+  }
+
+  function getSelectedCopyKey() {
+    return selectedCopy && selectedCopy.itemId === selectedItemId ? selectedCopy.key : null;
+  }
+
+  // The drawn row of a story: the copy under key when it is drawn, else the first.
+  function findFolderRowIndex(layout, itemId, key) {
+    const index = key ? layout.rows.findIndex((row) => row.id === itemId && row.key === key) : -1;
+    return index >= 0 ? index : layout.rows.findIndex((row) => row.id === itemId);
+  }
+
+  // The stories drawn above and below one copy of a story, each once, without
+  // the story itself (its other copy may sit on either side).
+  function splitFolderRowsAt(layout, itemId, key) {
+    const index = findFolderRowIndex(layout, itemId, key);
+    if (index < 0) return null;
+    const ids = (rows) => [...new Set(rows.map((row) => row.id))].filter((id) => id !== itemId);
+    return { above: ids(layout.rows.slice(0, index)), below: ids(layout.rows.slice(index + 1)) };
+  }
+
+  // Today, Last 7 Days and Older are plain labels; a feed's label carries its
+  // icon and opens that feed.
+  function createFolderSectionHeader(section) {
+    const header = createNode('li', {
+      classNames: ['article-feed-header', section.kind === 'feed' ? '' : 'is-' + section.kind],
+      attributes: { 'data-section-key': section.key, 'data-row-key': section.key },
+    });
+    const feedView = section.kind === 'feed' && section.streamId ? findFolderSectionFeedView(section.streamId) : null;
+    const target = feedView
+      ? createNode('button', { classNames: ['article-feed-header-button'], attributes: { type: 'button', 'data-feed-stream': section.streamId, 'aria-label': 'Open ' + section.title } })
+      : header;
+    if (feedView?.iconUrl) target.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: feedView.iconUrl, alt: '', width: '14', height: '14' } }));
+    target.appendChild(createNode('span', { classNames: ['article-feed-header-title'], text: section.title }));
+    if (feedView) {
+      target.addEventListener('click', () => {
+        setMobilePane('stream', true);
+        void selectView(feedView.id);
+      });
+      header.appendChild(target);
+    }
     return header;
+  }
+
+  // The first folder row on screen and how far below the list's top it sits.
+  function captureFolderListAnchor() {
+    const container = getArticleScrollContainer();
+    if (!container || typeof container.getBoundingClientRect !== 'function') return null;
+    const top = container.getBoundingClientRect().top;
+    for (const row of articlesList.children) {
+      const key = row.getAttribute('data-row-key');
+      if (!key || typeof row.getBoundingClientRect !== 'function') continue;
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom > top) return { key, offset: rect.top - top };
+    }
+    return null;
+  }
+
+  // Scrolls so the anchored row sits where it was before the list was rebuilt.
+  function restoreFolderListAnchor(anchor) {
+    const container = getArticleScrollContainer();
+    if (!anchor || !container || typeof container.getBoundingClientRect !== 'function') return;
+    for (const row of articlesList.children) {
+      if (row.getAttribute('data-row-key') !== anchor.key || typeof row.getBoundingClientRect !== 'function') continue;
+      const delta = row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
+      if (delta) container.scrollTop += delta;
+      return;
+    }
+  }
+
+  // "N more" shows the rest of the section's loaded stories in place.
+  function createFolderSectionMoreRow(section) {
+    const row = createNode('li', { classNames: ['article-section-more'], attributes: { 'data-row-key': 'more:' + section.key } });
+    const button = createNode('button', {
+      classNames: ['article-more-button'],
+      text: section.hiddenCount + ' more',
+      attributes: { type: 'button', 'data-section-key': section.key, 'aria-label': 'Show ' + section.hiddenCount + ' more in ' + section.title },
+    });
+    button.addEventListener('click', () => {
+      const folderId = getActiveView()?.id;
+      if (!folderId) return;
+      if (!expandedFolderSections.has(folderId)) expandedFolderSections.set(folderId, new Set());
+      expandedFolderSections.get(folderId).add(section.key);
+      renderArticles();
+    });
+    row.appendChild(button);
+    return row;
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
@@ -4066,6 +4259,8 @@ export function renderBrowserAppRuntimeScript(): string {
   function usesBrowserArticlesQuery(view) {
     // Read It Later exists only as the browser/articles saved stream.
     if (view?.kind === 'saved') return true;
+    // Last 7 Days is the server's since/before query; only Today pages the reading list itself.
+    if (view?.kind === 'last-7-days') return true;
     return Boolean(articleSearchQuery || articleReadFilter !== 'all' || getListSortOrder(view) !== 'newest');
   }
 
@@ -4119,8 +4314,8 @@ export function renderBrowserAppRuntimeScript(): string {
       if (query.kind && query.kind !== 'all') params.set('kind', query.kind);
       if (query.length && query.length !== 'any') params.set('length', query.length);
     }
-    if (view.kind === 'today') {
-      const bounds = options?.dayBounds || query.dayBounds || client.getLocalDayBounds();
+    if (client.isTimeWindowView(view)) {
+      const bounds = options?.dayBounds || query.dayBounds || client.getViewDayBounds(view);
       params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
       params.set('before', new Date(bounds.endSeconds * 1000).toISOString());
     }
@@ -4192,7 +4387,7 @@ export function renderBrowserAppRuntimeScript(): string {
     state.refreshedAt = Date.now();
     if (!state.selectedItemId || !memberIds.has(state.selectedItemId)) {
       const view = views.find((candidate) => candidate.id === viewId);
-      state.selectedItemId = view?.kind === 'today' ? null : state.itemIds[0] || null;
+      state.selectedItemId = client.isTimeWindowView(view) ? null : state.itemIds[0] || null;
     }
 
     if (viewId === activeViewId) {
@@ -4372,6 +4567,13 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     if (options?.refreshUnread !== false) void refreshUnreadCounts();
+    // A new local day: reload the view for its new window (loadActiveView fixes it).
+    const fixedBounds = viewDayBounds.get(activeView.id);
+    if (fixedBounds && activeView.kind === 'last-7-days' &&
+        fixedBounds.startSeconds !== client.getViewDayBounds(activeView).startSeconds) {
+      await loadActiveView({ ...options, refreshUnread: false });
+      return;
+    }
     let expectedRootRequestId = null;
     try {
       const activeState = getViewState(activeView.id, false);
@@ -4453,7 +4655,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const kept = getKeptItemIds(state);
     return createPendingContentPlan(null).length > 0 ||
       ((visible.length < ARTICLE_WINDOW_SIZE || visible.some((id) => !state.confirmedItemIds.has(id) && !kept?.has(id))) &&
-        !hasReachedTodayBoundary() && Boolean(nextItemIdsContinuation));
+        !hasReachedWindowBoundary() && Boolean(nextItemIdsContinuation));
   }
 
   function shouldAutoLoadWindow() {
@@ -4543,7 +4745,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const activeView = getActiveView();
     const activeState = activeView ? getViewState(activeView.id) : null;
     const continuation = activeState?.continuation || nextItemIdsContinuation;
-    if (!activeView || !continuation || isLoadingItemIdsPage || (isTodayView() && hasReachedTodayBoundary())) {
+    if (!activeView || !continuation || isLoadingItemIdsPage || hasReachedWindowBoundary()) {
       return;
     }
 
@@ -4632,6 +4834,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const requestId = activeViewRequestId + 1;
     activeViewRequestId = requestId;
     cancelContentLoads();
+    if (activeView.kind === 'last-7-days') viewDayBounds.set(activeView.id, client.getViewDayBounds(activeView));
     const state = getViewState(activeView.id);
     activeLoadedQueryKey = state.queryKey;
     itemIds = [...state.itemIds];
@@ -4641,7 +4844,7 @@ export function renderBrowserAppRuntimeScript(): string {
     syncLoadedItemsFromCache();
     selectedItemId = state.selectedItemId && itemIds.includes(state.selectedItemId)
       ? state.selectedItemId
-      : isTodayView()
+      : isTimeWindowView()
         ? null
         : itemIds[0] || null;
     state.selectedItemId = selectedItemId;
@@ -4672,7 +4875,7 @@ export function renderBrowserAppRuntimeScript(): string {
         selectedItemId = currentState.selectedItemId;
         // applyMembershipPayload already rendered this view; only start body
         // loading when something is still missing or the window auto-extends.
-        const preferredItemId = isTodayView() ? null : selectedItemId;
+        const preferredItemId = isTimeWindowView() ? null : selectedItemId;
         if (itemIds.length > 0 && (shouldAutoLoadWindow() || createPendingContentPlan(preferredItemId).length > 0)) {
           await loadContentChunk(preferredItemId, requestId);
         } else {
@@ -4956,7 +5159,12 @@ export function renderBrowserAppRuntimeScript(): string {
       if (['above','below'].includes(request.mode) && index < 0) throw new Error('Selected article is no longer in these results.');
       return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
     }
-    if (request.view.kind === 'today' && request.before &&
+    // A folder marks what is drawn above or below the story, not the newest-first stream.
+    if (request.view.kind === 'folder' && ['above', 'below'].includes(request.mode)) {
+      if (!request.drawnSplit) throw new Error('Selected article is no longer shown');
+      return request.mode === 'above' ? request.drawnSplit.above : request.drawnSplit.below;
+    }
+    if (client.isTimeWindowView(request.view) && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
     do {
       if (!isCurrentBulkRequest(request)) return [];
@@ -5055,14 +5263,17 @@ export function renderBrowserAppRuntimeScript(): string {
     return { attempted, saved, failed: false };
   }
 
-  function createBulkRequest(mode, anchorItemId = selectedItemId) {
+  function createBulkRequest(mode, anchorItemId = selectedItemId, anchorKey = anchorItemId === selectedItemId ? getSelectedCopyKey() : null) {
     const view = getActiveView();
+    const folderLayout = view?.kind === 'folder' ? getFolderSectionLayout() : null;
     return { kind: 'bulk', field: 'read', mode, scope: mode.startsWith('age-') ? 'older' :
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
-      dayBounds: client.getLocalDayBounds(), before: mode.startsWith('age-')
-        ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null };
+      dayBounds: getArticleQuery().dayBounds || client.getViewDayBounds(view), before: mode.startsWith('age-')
+        ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null,
+      // A folder marks the rows drawn above or below the chosen copy of the story.
+      drawnSplit: folderLayout && anchorItemId ? splitFolderRowsAt(folderLayout, anchorItemId, anchorKey) : null };
   }
 
   async function finishBulkRequest(request) {
@@ -5080,13 +5291,13 @@ export function renderBrowserAppRuntimeScript(): string {
     maybeAutoMarkRead();
   }
 
-  async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId) {
+  async function markArticleRangeRead(requestedMode, anchorItemId = selectedItemId, anchorKey) {
     // Read It Later archives one item at a time; no bulk mark there.
     if (!getActiveView() || isSavedView() || session.status !== 'authenticated' || pendingArticleMutation) return;
     const mode = requestedMode || articleBulkSelect.value;
     if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
         (['above', 'below'].includes(mode) && !anchorItemId)) return;
-    const request = createBulkRequest(mode, anchorItemId);
+    const request = anchorKey === undefined ? createBulkRequest(mode, anchorItemId) : createBulkRequest(mode, anchorItemId, anchorKey);
     pendingArticleMutation = request;
     renderArticleActions();
     renderMarkAllAsReadAction();
@@ -5188,7 +5399,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const token = session.token;
     if (!force && inFlightUnreadCountRequest) return inFlightUnreadCountRequest;
     const requestId = ++unreadCountRequestId;
-    void refreshTodayUnreadCount();
+    void refreshWindowUnreadCount('today');
+    void refreshWindowUnreadCount('last-7-days');
     const requestPromise = authenticatedJson('/reader/api/0/unread-count')
       .then((payload) => ({ payload, generation, token, requestId }))
       .finally(() => {
@@ -5198,45 +5410,47 @@ export function renderBrowserAppRuntimeScript(): string {
     return requestPromise;
   }
 
-  // Today's count comes from its own request (unread-count cannot know the local
-  // day), runs beside unread-count without delaying it, and patches only Today.
-  // A stored count counts only for the session and local day it was fetched for.
-  function refreshTodayUnreadCount() {
-    if (inFlightTodayCount) {
-      todayCountStale = true;
-      return inFlightTodayCount;
+  // Today's and Last 7 Days' counts come from their own requests (unread-count
+  // cannot know the local day), run beside unread-count without delaying it, and
+  // patch only their own view. A stored count counts only for the session and
+  // local window it was fetched for.
+  function refreshWindowUnreadCount(kind) {
+    const entry = windowUnreadCounts[kind];
+    if (entry.inFlight) {
+      entry.stale = true;
+      return entry.inFlight;
     }
     const generation = accountGeneration, token = session.token;
-    const bounds = client.getLocalDayBounds();
+    const bounds = client.getViewDayBounds({ kind });
     const params = new URLSearchParams({ stream: 'all', filter: 'unread',
       since: new Date(bounds.startSeconds * 1000).toISOString(), before: new Date(bounds.endSeconds * 1000).toISOString() });
-    todayCountStale = false;
-    inFlightTodayCount = authenticatedJson('/api/v1/browser/articles/count?' + params.toString())
+    entry.stale = false;
+    entry.inFlight = authenticatedJson('/api/v1/browser/articles/count?' + params.toString())
       .then((payload) => {
         if (!requestBelongsToCurrentSession(generation, token) || !Number.isSafeInteger(payload?.count) || payload.count < 0) return;
-        todayUnreadCount = { count: payload.count, day: bounds.startSeconds, generation, token };
-        const todayView = views.find((view) => view.kind === 'today');
-        if (todayView && todayView.unreadCount !== payload.count) {
-          todayView.unreadCount = payload.count;
+        entry.stored = { count: payload.count, start: bounds.startSeconds, generation, token };
+        const windowView = views.find((view) => view.kind === kind);
+        if (windowView && windowView.unreadCount !== payload.count) {
+          windowView.unreadCount = payload.count;
           renderFeeds();
         }
       })
       .catch(() => {})
       .finally(() => {
-        inFlightTodayCount = null;
-        if (todayCountStale && requestBelongsToCurrentSession(generation, token)) void refreshTodayUnreadCount();
+        entry.inFlight = null;
+        if (entry.stale && requestBelongsToCurrentSession(generation, token)) void refreshWindowUnreadCount(kind);
       });
-    return inFlightTodayCount;
+    return entry.inFlight;
   }
 
-  function currentTodayUnreadCount() {
-    const stored = todayUnreadCount;
-    return stored && stored.day === client.getLocalDayBounds().startSeconds &&
+  function currentWindowUnreadCount(kind) {
+    const stored = windowUnreadCounts[kind].stored;
+    return stored && stored.start === client.getViewDayBounds({ kind }).startSeconds &&
       requestBelongsToCurrentSession(stored.generation, stored.token) ? stored.count : 0;
   }
 
   function buildViews(unreadcounts) {
-    return client.buildFeedViews(subscriptions, unreadcounts, currentTodayUnreadCount());
+    return client.buildFeedViews(subscriptions, unreadcounts, currentWindowUnreadCount('today'), currentWindowUnreadCount('last-7-days'));
   }
 
   function isCurrentUnreadCountResult(result) {
@@ -5339,6 +5553,7 @@ export function renderBrowserAppRuntimeScript(): string {
     heldReaderArticle = null;
     noteCardChosen(itemId);
     selectedItemId = itemId;
+    selectedCopy = options?.sectionKey ? { itemId, key: options.sectionKey } : null;
     noteArticleOpened(itemId, Boolean(options?.keyboard));
     keyboardRevealSelection = options?.keyboard ? { itemId, viewId: activeViewId, generation: accountGeneration } : null;
     saveActiveViewState();
@@ -5674,12 +5889,12 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // Right-click on a list row: bulk-mark around that row without opening it.
-  function openArticleContextMenu(itemId, row, event) {
+  function openArticleContextMenu(itemId, row, event, sectionKey = null) {
     closePopoverMenus(null);
     // Its only actions are bulk marks, which Read It Later does not offer.
     if (isSavedView() || !getWindowCandidateIds().includes(itemId)) return;
     if (typeof event?.preventDefault === 'function') event.preventDefault();
-    articleContextTarget = { itemId, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
+    articleContextTarget = { itemId, sectionKey, viewId: activeViewId, queryKey: getViewQueryKey(activeViewId), generation: accountGeneration };
     refreshArticleContextMenu();
     // The context-menu key and Shift+F10 report no pointer position; anchor to the row instead.
     let left = Number(event?.clientX) || 0;
@@ -5707,14 +5922,22 @@ export function renderBrowserAppRuntimeScript(): string {
   // Runs on open and on every list or action render, so the items follow pending writes and new rows.
   function refreshArticleContextMenu() {
     if (!articleContextTarget) return;
-    const candidates = getWindowCandidateIds();
-    const index = candidates.indexOf(articleContextTarget.itemId);
+    // In a folder only drawn rows count, above or below the copy the menu is on.
+    const folderLayout = getActiveView()?.kind === 'folder' ? getFolderSectionLayout() : null;
+    const split = folderLayout ? splitFolderRowsAt(folderLayout, articleContextTarget.itemId, articleContextTarget.sectionKey) : null;
+    const candidates = folderLayout ? null : getWindowCandidateIds();
+    const index = candidates ? candidates.indexOf(articleContextTarget.itemId) : split ? 0 : -1;
     if (index < 0 || articleContextTarget.viewId !== activeViewId || articleContextTarget.generation !== accountGeneration) {
       closeArticleContextMenu(false);
       return;
     }
     const unavailable = isOfflineReading() || session.status !== 'authenticated' || !getActiveView() || Boolean(pendingArticleMutation);
-    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedTodayBoundary();
+    if (split) {
+      contextMarkAboveButton.disabled = unavailable || split.above.length === 0;
+      contextMarkBelowButton.disabled = unavailable || split.below.length === 0;
+      return;
+    }
+    const moreBelow = Boolean(nextItemIdsContinuation) && !hasReachedWindowBoundary();
     contextMarkAboveButton.disabled = unavailable || index === 0;
     contextMarkBelowButton.disabled = unavailable || (index === candidates.length - 1 && !moreBelow);
   }
@@ -5731,7 +5954,13 @@ export function renderBrowserAppRuntimeScript(): string {
     return Boolean(articleContextTarget);
   }
 
-  function findArticleRowButton(itemId) {
+  // The row of a story; in a folder, the copy under sectionKey when drawn.
+  function findArticleRowButton(itemId, sectionKey = null) {
+    if (sectionKey) {
+      for (const listItem of articlesList.children) {
+        if (listItem.getAttribute?.('data-row-key') === sectionKey + ':' + itemId) return listItem.children[0] || null;
+      }
+    }
     for (const listItem of articlesList.children) {
       const button = listItem.children[0];
       if (button?.getAttribute('data-item-id') === itemId) return button;
@@ -5741,12 +5970,12 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function closeArticleContextMenu(restoreFocus) {
     if (!articleContextTarget) return;
-    const { itemId } = articleContextTarget;
+    const { itemId, sectionKey } = articleContextTarget;
     articleContextTarget = null;
     articleContextMenu.classList.add('hidden');
     document.removeEventListener('wheel', holdScrollUnderArticleContextMenu, { passive: false });
     // Rows are rebuilt on every render, so look the row up again by id.
-    if (restoreFocus) findArticleRowButton(itemId)?.focus();
+    if (restoreFocus) findArticleRowButton(itemId, sectionKey)?.focus();
   }
 
   function handleArticleContextMenuKeydown(event) {
@@ -5776,7 +6005,7 @@ export function renderBrowserAppRuntimeScript(): string {
     closeArticleContextMenu(true);
     if (!target || target.generation !== accountGeneration || target.viewId !== activeViewId ||
         target.queryKey !== getViewQueryKey(activeViewId) || !getWindowCandidateIds().includes(target.itemId)) return;
-    void markArticleRangeRead(mode, target.itemId);
+    void markArticleRangeRead(mode, target.itemId, target.sectionKey ?? null);
   }
 
   function applySidebarCollapsed(isCollapsed) {

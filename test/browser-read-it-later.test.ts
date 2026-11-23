@@ -121,7 +121,7 @@ test('buildFeedViews lists Read It Later after Starred and keeps it out of feeds
 		[{ id: 'feed/1', title: 'News', sourceType: 'rss' }, { id: 'feed/9', title: 'Read It Later', sourceType: 'saved' }],
 		[{ id: 'feed/1', count: 3 }, { id: 'feed/9', count: 4 }, { id: 'user/-/state/com.google/reading-list', count: 7 }],
 	);
-	assert.deepEqual(views.map((view) => view.id), ['all', 'unread', 'today', 'recent', 'starred', 'saved', 'for-you', 'feed/1']);
+	assert.deepEqual(views.map((view) => view.id), ['all', 'unread', 'today', 'last-7-days', 'recent', 'starred', 'saved', 'for-you', 'feed/1']);
 	assert.equal(views.find((view) => view.id === 'all')!.unreadCount, 3);
 	assert.deepEqual(views.find((view) => view.id === 'saved'), {
 		id: 'saved', title: 'Read It Later', streamId: 'saved', unreadCount: 4, kind: 'saved', section: 'views', feedStreamId: 'feed/9',
