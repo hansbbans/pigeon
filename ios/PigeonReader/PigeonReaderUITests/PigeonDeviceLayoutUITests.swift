@@ -86,7 +86,7 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			recorder.expect(false, "All Feeds is reachable on Home")
 		}
 
-		// A story list in Classic rows.
+		// A story list in Reeder rows (the UI-test reset starts in Reeder).
 		let forYou = hittableButton("reader-sidebar-item-forYou")
 		recorder.expect(forYou.exists && forYou.isHittable, "Home offers For You")
 		forYou.tap()
@@ -120,8 +120,8 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			recorder.expect(false, "The list toolbar offers its menu")
 		}
 
-		// The same list as a Front Page.
-		chooseFrontPage(recorder: recorder)
+		// The same list in the Cards look, where For You is a Front Page.
+		chooseCards(recorder: recorder)
 		let stories = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-"))
 		recorder.expect(stories.firstMatch.waitForExistence(timeout: 10), "Front Page lays out its stories")
 		recorder.note("front-page-columns", "\(columnCount(of: stories))")
@@ -146,7 +146,7 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			recorder.expect(back.exists && back.isHittable, "The full-window reader leads back to the Front Page")
 			recorder.capture("reader")
 			// Back to the page, on to Home, and into the story again for the
-			// steps below. On Front Page an iPad pops back like a phone; it has
+			// steps below. In Cards an iPad pops back like a phone; it has
 			// no toolbar Home button.
 			if back.exists, back.isHittable {
 				back.tap()
@@ -191,7 +191,7 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 		recorder.finish()
 	}
 
-	private func chooseFrontPage(recorder: PigeonLayoutRecorder) {
+	private func chooseCards(recorder: PigeonLayoutRecorder) {
 		let more = app.buttons["article-list-more"]
 		guard more.waitForExistence(timeout: 5), more.isHittable else {
 			recorder.expect(false, "The list toolbar offers its menu")
@@ -204,12 +204,12 @@ final class PigeonDeviceLayoutUITests: XCTestCase {
 			return
 		}
 		display.tap()
-		let frontPage = app.buttons["Front Page"]
-		guard frontPage.waitForExistence(timeout: 5) else {
-			recorder.expect(false, "Display offers the Front Page layout")
+		let cards = app.buttons["Cards"]
+		guard cards.waitForExistence(timeout: 5) else {
+			recorder.expect(false, "Display offers the Cards look")
 			return
 		}
-		frontPage.tap()
+		cards.tap()
 	}
 
 	private func element(_ identifier: String) -> XCUIElement {

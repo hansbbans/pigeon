@@ -284,7 +284,13 @@ final class PigeonNavigationMotionUITests: XCTestCase {
 
 	private func launchFixture(additionalArguments: [String] = []) {
 		app.terminate()
-		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state", "-reader-navigation-fixture"] + additionalArguments
+		// The five views these cases were laid out with: a sixth (Last 7 Days)
+		// puts Folder 01 near a phone's bottom edge, where opening it scrolls to
+		// reveal its feeds and moves them under the next tap.
+		let views = ["-pigeon.reader.smart-views.v1", "(forYou, unread, starred, today)",
+			"-pigeon.reader.smart-views.last-7-days-migrated.v1", "YES"]
+		app.launchArguments = ["-reader-sample-data", "-reader-show-sidebar", "-reader-reset-reader-state", "-reader-navigation-fixture"]
+			+ views + additionalArguments
 		app.launch()
 		if folderToggle(1).waitForExistence(timeout: 2) {
 			return

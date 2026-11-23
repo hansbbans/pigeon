@@ -8,11 +8,17 @@ actor NavigationHTTPClient: HTTPClient {
 	private let starredSecondPage: Data
 	private let todayFirstPage: Data
 	private let todaySecondPage: Data
+	private let weekFirstPage: Data
+	private let weekSecondPage: Data
+	/// Reading-list requests bounded by today's start; any other `ot` would be
+	/// a week counted by paging IDs, which the client must not do.
+	private let todayOlderThan: String
 	private let failingSmartStreamID: String?
 	private var requestURLs: [URL] = []
 
-	init(now _: Date, dayBounds _: ReaderLocalDayBounds, failingSmartStreamID: String? = nil) {
+	init(now _: Date, dayBounds: ReaderLocalDayBounds, failingSmartStreamID: String? = nil) {
 		self.failingSmartStreamID = failingSmartStreamID
+		todayOlderThan = String(dayBounds.startSeconds - 1)
 		subscriptionResponse = Data(
 			"""
 			{"subscriptions":[
@@ -50,6 +56,14 @@ actor NavigationHTTPClient: HTTPClient {
 			ids: [],
 			continuation: nil,
 		)
+		weekFirstPage = Self.itemIDsResponse(
+			ids: ["week-1", "week-2"],
+			continuation: "week-2",
+		)
+		weekSecondPage = Self.itemIDsResponse(
+			ids: ["week-3"],
+			continuation: nil,
+		)
 	}
 
 	func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -60,12 +74,19 @@ actor NavigationHTTPClient: HTTPClient {
 		let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
 		let streamID = query.first(where: { $0.name == "s" })?.value
 		let continuation = query.first(where: { $0.name == "c" })?.value
+		let olderThan = query.first(where: { $0.name == "ot" })?.value
 		let responseData: Data
 		switch url.path {
 		case "/reader/api/0/subscription/list":
 			responseData = subscriptionResponse
 		case "/reader/api/0/unread-count":
 			responseData = unreadResponse
+		case "/api/v1/browser/articles/count":
+			// The day counts read the reading list, so they fail with it.
+			if failingSmartStreamID == "user/-/state/com.google/reading-list" {
+				return (Data("{\"error\":\"Could not count articles\"}".utf8), try Self.response(for: url, statusCode: 503))
+			}
+			responseData = Data("{\"count\":3}".utf8)
 		case "/reader/api/0/stream/items/ids":
 			if streamID == failingSmartStreamID {
 				let payload = Data("{\"error_code\":1102,\"error_name\":\"worker_exceeded_resources\",\"ray_id\":\"test-ray\"}".utf8)
@@ -74,8 +95,10 @@ actor NavigationHTTPClient: HTTPClient {
 			switch (streamID, continuation) {
 			case ("user/-/state/com.google/starred", nil): responseData = starredFirstPage
 			case ("user/-/state/com.google/starred", "starred-2"): responseData = starredSecondPage
-			case ("user/-/state/com.google/reading-list", nil): responseData = todayFirstPage
+			case ("user/-/state/com.google/reading-list", nil):
+				responseData = olderThan == todayOlderThan ? todayFirstPage : weekFirstPage
 			case ("user/-/state/com.google/reading-list", "today-2"): responseData = todaySecondPage
+			case ("user/-/state/com.google/reading-list", "week-2"): responseData = weekSecondPage
 			default: responseData = Self.itemIDsResponse(ids: [], continuation: nil)
 			}
 		default:

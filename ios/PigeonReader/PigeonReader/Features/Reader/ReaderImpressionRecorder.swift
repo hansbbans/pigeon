@@ -30,6 +30,10 @@ final class ReaderImpressionRecorder {
 	/// Row order and half-visible rows of a list that reports single rows.
 	private var rowPositions: [String: Int] = [:]
 	private var visibleRowIDs: Set<String> = []
+	/// Stories a list shows more than once (Cards) are visible while any copy is.
+	private var visibleCopies = ReaderVisibleRowCopies()
+	/// `ReadingLogMetadata.row` per story, for lists with more than one kind of row.
+	private var readingLogRows: [String: String] = [:]
 	private var lastEvaluation = Date.distantPast
 	private var wakeDate: Date?
 	private var wakeTask: Task<Void, Never>?
@@ -80,16 +84,27 @@ final class ReaderImpressionRecorder {
 		state = nil
 		attach(nil)
 		visibleRowIDs.removeAll(keepingCapacity: true)
+		visibleCopies = ReaderVisibleRowCopies()
 	}
 
-	/// The displayed order of a list that reports single rows.
-	func updateRows(_ itemIDs: [String]) {
+	/// The displayed order of a list that reports single rows. A story shown
+	/// twice is listed once, at its first appearance.
+	func updateRows(_ itemIDs: [String], readingLogRows: [String: String] = [:]) {
+		self.readingLogRows = readingLogRows
 		rowPositions.removeAll(keepingCapacity: true)
 		for (position, itemID) in itemIDs.enumerated() where rowPositions[itemID] == nil {
 			rowPositions[itemID] = position
 		}
 		visibleRowIDs = visibleRowIDs.filter { rowPositions[$0] != nil }
+		visibleCopies.removeAll { rowPositions[$0] == nil }
 		viewportDidChange()
+	}
+
+	/// One copy of a story shown more than once crossed the half-visible
+	/// threshold; the story counts as visible while any copy is.
+	func setRowVisible(_ itemID: String, _ isVisible: Bool, copy: String) {
+		guard let visible = visibleCopies.set(itemID, copy: copy, visible: isVisible) else { return }
+		setRowVisible(itemID, visible)
 	}
 
 	/// A row crossed the half-visible threshold.
@@ -158,6 +173,8 @@ final class ReaderImpressionRecorder {
 			// Single-row reports belong to the layout that just went away.
 			rowPositions.removeAll(keepingCapacity: true)
 			visibleRowIDs.removeAll(keepingCapacity: true)
+			visibleCopies = ReaderVisibleRowCopies()
+			readingLogRows.removeAll(keepingCapacity: true)
 		}
 		newViewport?.onViewportChange = { [weak self] in self?.viewportDidChange() }
 	}
@@ -171,7 +188,7 @@ final class ReaderImpressionRecorder {
 
 	private func deliver(_ impressions: [ImpressionTracker.Impression]) {
 		guard impressions.isEmpty == false, let list = state?.list else { return }
-		model?.recordImpressions(impressions, in: list)
+		model?.recordImpressions(impressions, in: list, rows: readingLogRows)
 	}
 
 	private func scheduleWake(at date: Date) {
@@ -194,5 +211,30 @@ final class ReaderImpressionRecorder {
 		wakeTask?.cancel()
 		wakeTask = nil
 		wakeDate = nil
+	}
+}
+
+/// Which copies of each story are at least half visible, for lists that show
+/// a story more than once.
+nonisolated struct ReaderVisibleRowCopies: Sendable {
+	private var copiesByItemID: [String: Set<String>] = [:]
+
+	/// Records one copy's visibility. Returns the story's visibility when it
+	/// changed (its first copy appeared or its last copy left), else nil.
+	mutating func set(_ itemID: String, copy: String, visible: Bool) -> Bool? {
+		let wasVisible = copiesByItemID[itemID] != nil
+		if visible {
+			copiesByItemID[itemID, default: []].insert(copy)
+		} else if var copies = copiesByItemID[itemID] {
+			copies.remove(copy)
+			copiesByItemID[itemID] = copies.isEmpty ? nil : copies
+		}
+		let isVisible = copiesByItemID[itemID] != nil
+		return wasVisible == isVisible ? nil : isVisible
+	}
+
+	/// Forgets stories the list no longer shows.
+	mutating func removeAll(where shouldRemove: (String) -> Bool) {
+		copiesByItemID = copiesByItemID.filter { shouldRemove($0.key) == false }
 	}
 }

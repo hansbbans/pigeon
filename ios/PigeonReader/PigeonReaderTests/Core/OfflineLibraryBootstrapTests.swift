@@ -187,6 +187,50 @@ struct OfflineLibraryBootstrapTests {
 		#expect(loaded.todayDayStart == today.start)
 	}
 
+	/// Yesterday's stories are still in the Last 7 Days window after midnight,
+	/// so its count survives a rollover while Today's is zeroed. The day stamp
+	/// follows Today's count only, so the week's count is kept as metadata
+	/// until the next navigation load rather than zeroed by the stamp's age.
+	@Test func lastSevenDaysCountSurvivesALocalDayRolloverWhileTodayIsZeroed() throws {
+		let (directory, databaseURL) = try makeDatabaseURL(named: "week.sqlite")
+		defer { try? FileManager.default.removeItem(at: directory) }
+		let today = ReaderLocalDayBounds.localDay(containing: .now)
+		let navigation = ReaderNavigationState(
+			items: [
+				.smart(.forYou, unreadCount: 12),
+				.smart(.today, unreadCount: 9),
+				.smart(.lastSevenDays, unreadCount: 30),
+			],
+		)
+		let bootstrapStore = OfflineLibraryBootstrapFileStore(databaseURL: databaseURL)
+
+		func loadedAfterRollover(fromDaysAgo days: Int, accountID: String) throws -> OfflineLibraryBootstrapSnapshot {
+			let savedDate = try #require(Calendar.current.date(byAdding: .day, value: -days, to: today.start))
+			try bootstrapStore.save(
+				OfflineLibraryBootstrapSnapshot(
+					accountID: accountID,
+					navigation: navigation,
+					todayDayStart: ReaderLocalDayBounds.localDay(containing: savedDate).start,
+				),
+			)
+			return try #require(bootstrapStore.loadBootstrapSnapshot(accountID: accountID))
+		}
+
+		let yesterday = try loadedAfterRollover(fromDaysAgo: 1, accountID: "week-account-1")
+		#expect(yesterday.navigation?.item(withID: ReaderSection.today.rawValue)?.unreadCount == 0)
+		#expect(yesterday.navigation?.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount == 30)
+		#expect(yesterday.navigation?.item(withID: ReaderSection.forYou.rawValue)?.unreadCount == 12)
+		#expect(yesterday.todayDayStart == today.start)
+
+		let sixDaysAgo = try loadedAfterRollover(fromDaysAgo: 6, accountID: "week-account-6")
+		#expect(sixDaysAgo.navigation?.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount == 30)
+
+		let aWeekAgo = try loadedAfterRollover(fromDaysAgo: 7, accountID: "week-account-7")
+		#expect(aWeekAgo.navigation?.item(withID: ReaderSection.today.rawValue)?.unreadCount == 0)
+		#expect(aWeekAgo.navigation?.item(withID: ReaderSection.lastSevenDays.rawValue)?.unreadCount == 30)
+		#expect(aWeekAgo.todayDayStart == today.start)
+	}
+
 	@Test func fullRestoreAndMetadataOnlySavesPreserveTodayDayProvenance() async throws {
 		let (directory, databaseURL) = try makeDatabaseURL(named: "today-provenance.sqlite")
 		defer { try? FileManager.default.removeItem(at: directory) }

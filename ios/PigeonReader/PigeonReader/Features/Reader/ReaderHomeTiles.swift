@@ -36,13 +36,7 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 			guard let section = item.smartSection else { return false }
 			return hiddenSections.contains(section) == false
 		}
-		// Colours are assigned across every folder, not only the visible ones,
-		// so the Unread filter never recolours a tile.
-		let allFolderIDs = navigation.items.filter(\.isFolder).map(\.id)
-		let colorIndices = Dictionary(
-			zip(allFolderIDs, colorIndices(for: allFolderIDs)),
-			uniquingKeysWith: { first, _ in first },
-		)
+		let colorIndices = folderColorIndices(in: navigation)
 		let folders = snapshot.folderItems.map { folder in
 			let feeds = snapshot.feeds(in: folder.id)
 			var seenIcons = Set<URL>()
@@ -57,6 +51,14 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 		}
 		let today = navigation.items.first { $0.smartSection == .today }
 		return Self(viewItems: viewItems, folders: folders, newTodayCount: max(today?.unreadCount ?? 0, 0))
+	}
+
+	/// Every folder's colour. Colours are assigned across every folder, not
+	/// only the visible ones, so the Unread filter never recolours a tile, and
+	/// a folder's cards use the colour its tile has.
+	static func folderColorIndices(in navigation: ReaderNavigationState) -> [String: Int] {
+		let allFolderIDs = navigation.items.filter(\.isFolder).map(\.id)
+		return Dictionary(zip(allFolderIDs, colorIndices(for: allFolderIDs)), uniquingKeysWith: { first, _ in first })
 	}
 
 	/// Cached lists follow the reader's sort order, which may be oldest first,
@@ -101,15 +103,24 @@ nonisolated struct ReaderHomeTiles: Equatable, Sendable {
 	static let wideLayoutMinimumWidth = 600.0
 	private static let wideFolderTileWidth = 220.0
 	private static let maximumFolderColumns = 4
+	/// Narrower than this, a view tile's title and count start to crowd.
+	private static let minimumWideViewTileWidth = 160.0
 
-	/// Three equal tiles in a row; four read better as two rows of two. A wide
-	/// window keeps every view on one row.
+	/// Three equal tiles in a row, so five views go three then two; four read
+	/// better as two rows of two. A wide window puts as many on a row as fit,
+	/// in rows as even as they can be (six go three and three, not four and two).
 	static func viewColumnCount(itemCount: Int, usesAccessibilitySize: Bool, availableWidth: Double? = nil) -> Int {
-		let isWide = (availableWidth ?? 0) >= wideLayoutMinimumWidth
-		if usesAccessibilitySize { return isWide ? min(max(itemCount, 1), 2) : 1 }
-		if isWide { return min(max(itemCount, 1), 4) }
-		if itemCount == 4 { return 2 }
-		return min(max(itemCount, 1), 3)
+		let count = max(itemCount, 1)
+		let width = min(availableWidth ?? 0, maximumContentWidth)
+		let isWide = width >= wideLayoutMinimumWidth
+		if usesAccessibilitySize { return isWide ? min(count, 2) : 1 }
+		if isWide {
+			let fitting = min(count, max(Int(width / minimumWideViewTileWidth), 3))
+			let rows = (count + fitting - 1) / fitting
+			return (count + rows - 1) / rows
+		}
+		if count == 4 { return 2 }
+		return min(count, 3)
 	}
 
 	/// Two folder tiles across on a phone, more as the window widens.

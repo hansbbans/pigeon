@@ -37,7 +37,7 @@ nonisolated struct ReaderNavigationItem: Codable, Hashable, Identifiable, Sendab
 		case .starred: "user/-/state/com.google/starred"
 		// The saved feed's `feed/<rowid>`; Read It Later itself is sync-backed.
 		case .saved: savedStreamID ?? SavedItems.feedKey
-		case .forYou, .unread, .today: "user/-/state/com.google/reading-list"
+		case .forYou, .unread, .today, .lastSevenDays: "user/-/state/com.google/reading-list"
 		}
 		return Self(
 			id: section.rawValue,

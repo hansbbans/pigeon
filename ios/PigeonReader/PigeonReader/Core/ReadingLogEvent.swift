@@ -46,8 +46,11 @@ nonisolated struct ReadingLogMetadata: Codable, Equatable, Sendable {
 	var score: Int? = nil
 	/// The stream id of a feed or folder list.
 	var stream: String? = nil
+	/// The kind of row that showed the story where a list has more than one
+	/// (the Cards look: `card-today`, `card-last-7-days`, `card-feed`, `card-day`).
+	var row: String? = nil
 
-	var isEmpty: Bool { score == nil && stream == nil }
+	var isEmpty: Bool { score == nil && stream == nil && row == nil }
 }
 
 /// Which list an impression came from, in the reading log's terms.

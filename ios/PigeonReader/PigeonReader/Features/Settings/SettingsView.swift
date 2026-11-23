@@ -69,6 +69,8 @@ struct SettingsView: View {
 						.disabled(model.canDisableSmartView(.starred) == false)
 					Toggle("Today", isOn: $model.isTodaySmartViewEnabled)
 						.disabled(model.canDisableSmartView(.today) == false)
+					Toggle("Last 7 Days", isOn: $model.isLastSevenDaysSmartViewEnabled)
+						.disabled(model.canDisableSmartView(.lastSevenDays) == false)
 					Text("At least one smart view must stay enabled so Reader always has a home.")
 						.font(.footnote)
 						.foregroundStyle(.pigeonSecondary)
@@ -134,9 +136,9 @@ struct SettingsView: View {
 						}
 					}
 					.accessibilityIdentifier("reader-typeface-picker")
-					Picker("Layout", selection: $typography.homeLayout) {
-						ForEach(ReaderHomeLayout.allCases) { layout in
-							Text(layout.title).tag(layout)
+					Picker("Look", selection: $typography.look) {
+						ForEach(ReaderLook.allCases) { look in
+							Text(look.title).tag(look)
 						}
 					}
 					.accessibilityIdentifier("home-layout-picker")

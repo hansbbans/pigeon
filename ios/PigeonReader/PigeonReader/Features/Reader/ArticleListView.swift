@@ -37,6 +37,9 @@ struct ArticleListView: View {
 	@State private var isExplicitListTransitioning = false
 	@State private var isLayoutReflowing = false
 	@State private var layoutReflowToken: UUID?
+	/// Cards shown in full ("N more") for this visit to the collection.
+	@State private var expandedCardSections: Set<String> = []
+	@State private var cardSectionsCache = FolderCardsSectionsCache()
 
 	var body: some View {
 		let allArticles = model.allArticles(for: collection)
@@ -48,8 +51,8 @@ struct ArticleListView: View {
 			: model.articles(for: collection)
 		let articles = updateBuffer.displayedArticles(in: listContext, fallback: sourceArticles)
 		let hasSavedPosition = model.listPositions.position(for: listContext)?.target(in: articles.map(\.id)) != nil
-		// Front Page has no saved-position restore, so it is ready as soon as it appears.
-		let isPositionReady = (usesFrontPage || hasSavedPosition == false || readyContext == listContext)
+		// Cards have no saved-position restore, so they are ready as soon as they appear.
+		let isPositionReady = (usesCardsLook || hasSavedPosition == false || readyContext == listContext)
 			&& isExplicitListTransitioning == false
 		let holdsUpdates = isScrolling || isNativeTransitioning || isCollectionTransitioning
 			|| isExplicitListTransitioning || isLayoutReflowing || isPositionReady == false
@@ -132,6 +135,13 @@ struct ArticleListView: View {
 				}
 				.frame(maxWidth: .infinity, maxHeight: .infinity)
 				.transition(.opacity)
+			} else if usesFolderCards {
+				let cardSections = folderCardSections(for: articles)
+				folderCards(cardSections, articles: articles, isSearchActive: isSearchActive, holdsUpdates: holdsUpdates)
+					.onChange(of: CardImpressionRows(sections: cardSections), initial: true) { _, rows in
+						impressions.updateRows(rows.ids, readingLogRows: rows.rows)
+					}
+					.transition(.opacity)
 			} else if usesFrontPage {
 				// Front Page keeps its own pages; By Feed only orders them, and every
 				// story's kicker already names its feed.
@@ -292,7 +302,7 @@ struct ArticleListView: View {
 		}
 		.onChange(of: listContext) { _, context in
 			viewport.commitContextChange(to: context, scope: listScope)
-			if isExplicitListTransitioning && (articles.isEmpty || usesFrontPage) {
+			if isExplicitListTransitioning && (articles.isEmpty || usesCardsLook) {
 				readyContext = context
 				isExplicitListTransitioning = false
 			}
@@ -302,10 +312,10 @@ struct ArticleListView: View {
 		}
 		// Reading log: which stories this list showed. No view state changes here.
 		.onChange(of: impressionState, initial: true) { _, state in
-			impressions.apply(state, viewport: usesFrontPage ? nil : viewport, model: model)
+			impressions.apply(state, viewport: usesCardsLook ? nil : viewport, model: model)
 		}
 		.onAppear {
-			impressions.apply(impressionState, viewport: usesFrontPage ? nil : viewport, model: model)
+			impressions.apply(impressionState, viewport: usesCardsLook ? nil : viewport, model: model)
 		}
 		.onDisappear {
 			impressions.endSession()
@@ -315,7 +325,7 @@ struct ArticleListView: View {
 		.accessibilityElement(children: .contain)
 		.accessibilityIdentifier("collection-pane-\(collection.id)")
 		.navigationTitle(navigationTitle)
-		.toolbarTitleDisplayMode(usesFrontPage ? .inline : .automatic)
+		.toolbarTitleDisplayMode(usesCardsLook ? .inline : .automatic)
 		.searchable(text: $searchText, prompt: "Titles, authors, feeds, and text")
 		.searchScopes($searchScope) {
 			ForEach(ReaderSearchScope.allCases) { scope in
@@ -362,7 +372,11 @@ struct ArticleListView: View {
 				paginationContext = listContext
 				paginationGate = ReaderAutomaticPaginationGate()
 			}
-			guard paginationGate.claim(token, hasError: model.loadMoreError(for: collection) != nil) else { return }
+			guard paginationGate.claim(
+				token,
+				hasError: model.loadMoreError(for: collection) != nil,
+				budget: usesFolderCards ? 1 : ReaderAutomaticPaginationGate.defaultBudget,
+			) else { return }
 			let requestContext = listContext
 			await loadOlderStories()
 			if Task.isCancelled, paginationContext == requestContext { paginationGate.cancelClaim(token) }
@@ -396,10 +410,20 @@ struct ArticleListView: View {
 		(windowHorizontalSizeClass ?? horizontalSizeClass) == .compact && model.preferredCompactColumn == .detail
 	}
 
-	/// Front Page is a reader setting on iPhone and iPad. On iPad it fills the
-	/// window (see `ReaderCompactArticlePresentation.navigationSizeClass`).
+	/// Cards is a look on iPhone and iPad. On iPad it fills the window (see
+	/// `ReaderCompactArticlePresentation.navigationSizeClass`).
+	private var usesCardsLook: Bool {
+		model.readerTypography.look == .cards
+	}
+
+	/// Folders and feeds in Cards are cards.
+	private var usesFolderCards: Bool {
+		usesCardsLook && (collection.kind == .folder || collection.kind == .feed)
+	}
+
+	/// Smart views in Cards are the Front Page.
 	private var usesFrontPage: Bool {
-		model.readerTypography.homeLayout == .frontPage
+		usesCardsLook && usesFolderCards == false
 	}
 
 	private func articleRow(_ article: Recommendation, presentedArticles articles: [Recommendation]) -> some View {
@@ -489,6 +513,120 @@ struct ArticleListView: View {
 		}
 	}
 
+	/// The order the page draws stories in when it is not the sort: the
+	/// cards', each story at its first appearance.
+	private var presentedOrder: [String]? {
+		usesFolderCards ? cardSectionsCache.current?.uniqueArticleIDs : nil
+	}
+
+	private var presentationName: String {
+		usesFolderCards ? "cards" : usesFrontPage ? "front-page" : "classic"
+	}
+
+	/// Built once per change of the stories, expansions or day (see
+	/// `FolderCardsSectionsCache`), not on every body pass.
+	private func folderCardSections(for articles: [Recommendation]) -> FolderSections {
+		let isFolder = collection.kind == .folder
+		let now = Date.now
+		let key = FolderCardsSectionsCache.Key(
+			articles: articles,
+			expanded: expandedCardSections,
+			feeds: isFolder ? model.articleFeedDirectory : .empty,
+			isFolder: isFolder,
+			// The model's day moves on at midnight and on returning to the app,
+			// which re-renders this page with that day's Today.
+			day: model.localDayStart,
+		)
+		return cardSectionsCache.sections(for: key) {
+			isFolder
+				? FolderSections.make(articles: articles, feeds: key.feeds, now: now, expanded: key.expanded)
+				: FeedDaySections.make(articles: articles, now: now, expanded: key.expanded)
+		}
+	}
+
+	/// The feed's own list, preferring its row in this folder.
+	private func navigationItem(for feed: ArticleFeedDirectory.Feed) -> ReaderNavigationItem? {
+		let rows = model.navigation.items.filter { $0.kind == .feed && $0.streamID == feed.id }
+		return rows.first { $0.parentID == collection.id } ?? rows.first
+	}
+
+	private func folderCards(
+		_ sections: FolderSections,
+		articles: [Recommendation],
+		isSearchActive: Bool,
+		holdsUpdates: Bool,
+	) -> some View {
+		ScrollViewReader { proxy in
+			FolderCardsView(
+				sections: sections,
+				feeds: model.articleFeedDirectory,
+				showsFeedNames: collection.kind == .folder,
+				colorIndex: model.cardColorIndex(for: collection),
+				selectedArticleID: model.selectedArticleID,
+				remoteImagePolicy: model.readerTypography.remoteImagePolicy,
+				select: { article in
+					impressions.rowChosen(article.id)
+					// Next and previous follow the cards, not the saved sort.
+					model.retainPresentedArticles(articles, in: collection, order: sections.uniqueArticleIDs)
+					model.select(article: article)
+				},
+				onExpand: { sectionID in
+					withAnimation(ReaderMotion.animation(reduceMotion: reduceMotion)) {
+						_ = expandedCardSections.insert(sectionID)
+					}
+				},
+				canOpenFeed: { navigationItem(for: $0) != nil },
+				onOpenFeed: { feed in
+					guard let item = navigationItem(for: feed) else { return }
+					// Pushed above the folder, which stays as it was left.
+					if collection.kind == .folder {
+						model.openFeed(item, fromFolder: collection)
+					} else {
+						model.select(item: item)
+					}
+				},
+				onNearEndChange: { if isNearEnd != $0 { isNearEnd = $0 } },
+				onUserScroll: {
+					if paginationGate.userDidScroll() { paginationMovement &+= 1 }
+				},
+				onScrollingChange: { if isScrolling != $0 { isScrolling = $0 } },
+				onStoryVisibilityChange: { impressions.setRowVisible($0, $1, copy: $2) },
+			) { article, copyIndex in
+				// Above and below mean the cards as drawn from the copy the menu
+				// was opened on, not the collection's sort.
+				readButton(for: article)
+				starButton(for: article)
+				Divider()
+				markAboveButton(for: article, order: sections.renderedCopies, at: copyIndex)
+				markBelowButton(for: article, order: sections.renderedCopies, at: copyIndex)
+			} footer: {
+				Text(model.collectionStatusText(for: collection))
+					.font(.footnote)
+					.foregroundStyle(.pigeonSecondary)
+					.accessibilityLabel("Collection status: \(model.collectionStatusText(for: collection))")
+				loadMoreControls(for: collection, isSearchActive: isSearchActive)
+			}
+			.task(id: acceptedScrollRequest) {
+				guard let request = acceptedScrollRequest else { return }
+				await Task.yield()
+				guard Task.isCancelled == false, acceptedScrollRequest == request else { return }
+				withAnimation(reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false)) {
+					proxy.scrollTo(FolderCardsLayout.topAnchorID, anchor: .top)
+				}
+				acceptedScrollRequest = nil
+			}
+			.overlay(alignment: .top) {
+				if updateBuffer.needsAcceptance, holdsUpdates == false {
+					ReaderNewStoriesButton(count: updateBuffer.newStoryCount, action: showUpdatedStories)
+				}
+			}
+			.onDisappear {
+				isScrolling = false
+				isNearEnd = false
+			}
+		}
+	}
+
 	/// One impression session per continuous showing of one list context. The
 	/// list is off screen while another collection or Home is selected, and
 	/// paused while the scene is inactive or the reader covers it on iPhone.
@@ -496,7 +634,7 @@ struct ArticleListView: View {
 		let isOnScreen = model.selectedNavigationID == collection.id && model.preferredCompactColumn != .sidebar
 		return ReaderImpressionRecorder.ListState(
 			sessionKey: isOnScreen
-				? "\(listContext)|\(usesFrontPage ? "front-page" : "classic")|\(model.readingLogSessionEpoch)"
+				? "\(listContext)|\(presentationName)|\(model.readingLogSessionEpoch)"
 				: nil,
 			list: ReadingLogList.list(for: collection, search: isSearchActive ? searchScope : nil),
 			isPaused: scenePhase != .active || ReaderCompactArticlePresentation.isActive(
@@ -512,7 +650,7 @@ struct ArticleListView: View {
 	}
 
 	private var navigationTitle: String {
-		guard collection.smartSection == .today else { return collection.title }
+		guard collection.smartSection?.usesDayWindow == true else { return collection.title }
 		let unreadCount = model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
 		return "\(collection.title) (\(unreadCount.formatted()))"
 	}
@@ -671,6 +809,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "No starred stories"
 		case .today: "Nothing from today"
+		case .lastSevenDays: "Nothing from the last 7 days"
 		case .forYou: "No recommendations yet"
 		case .unread: "You are all caught up"
 		case .saved: "Nothing saved yet"
@@ -682,6 +821,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "star"
 		case .today: "calendar"
+		case .lastSevenDays: "calendar.badge.clock"
 		case .forYou: "sparkles"
 		default: "checkmark.circle"
 		}
@@ -691,6 +831,7 @@ struct ArticleListView: View {
 		switch collection.smartSection {
 		case .starred: "Star a story to keep it here."
 		case .today: "Stories received today will appear here."
+		case .lastSevenDays: "Stories received in the last 7 days will appear here."
 		case .forYou: "Pigeon will surface unread stories as it learns what you like."
 		case .unread: "New stories will appear here as Pigeon receives them."
 		case .saved: "Saved links appear here."
@@ -724,7 +865,7 @@ struct ArticleListView: View {
 
 	private func readButton(for article: Recommendation) -> some View {
 		Button(article.isRead ? "Mark Unread" : "Mark Read", systemImage: article.isRead ? "envelope.badge" : "checkmark.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			actionFeedbackCount += 1
 			Task {
 				await model.setRead(article, read: !article.isRead, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
@@ -735,7 +876,7 @@ struct ArticleListView: View {
 
 	private func starButton(for article: Recommendation) -> some View {
 		Button(article.isStarred ? "Unstar" : "Star", systemImage: article.isStarred ? "star.slash" : "star") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
 			actionFeedbackCount += 1
 			Task {
 				await model.setStarred(article, starred: !article.isStarred, animation: reduceMotion ? nil : ReaderMotion.animation(reduceMotion: false), offersUndo: true)
@@ -787,18 +928,20 @@ struct ArticleListView: View {
 		isShowingSaveErrorMessage = false
 	}
 
-	private func markAboveButton(for article: Recommendation) -> some View {
+	/// `order` is the on-screen order when it differs from the collection's,
+	/// and `position` the copy of the story the menu was opened on.
+	private func markAboveButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Above as Read", systemImage: "arrow.up.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesAboveAsRead(article, in: collection) }
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
+			Task { await model.markStoriesAboveAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
 
-	private func markBelowButton(for article: Recommendation) -> some View {
+	private func markBelowButton(for article: Recommendation, order: [Recommendation]? = nil, at position: Int? = nil) -> some View {
 		Button("Mark Below as Read", systemImage: "arrow.down.circle") {
-			model.retainPresentedArticles(updateBuffer.articles, in: collection)
-			Task { await model.markStoriesBelowAsRead(article, in: collection) }
+			model.retainPresentedArticles(updateBuffer.articles, in: collection, order: presentedOrder)
+			Task { await model.markStoriesBelowAsRead(article, in: collection, order: order, at: position) }
 		}
 		.tint(PigeonPalette.SwipeFill.tint)
 	}
@@ -811,6 +954,18 @@ private struct ReaderListSourceSnapshot: Equatable {
 	let allArticles: [Recommendation]
 	let mutationRevision: UInt64
 	let mutationArticleID: String?
+}
+
+/// What the reading log needs from the cards: each story once, in order of
+/// first appearance, and the card that shows it first.
+private struct CardImpressionRows: Equatable {
+	let ids: [String]
+	let rows: [String: String]
+
+	init(sections: FolderSections) {
+		ids = sections.uniqueArticleIDs
+		rows = sections.readingLogRows
+	}
 }
 
 private struct AutomaticPageRequest: Equatable {

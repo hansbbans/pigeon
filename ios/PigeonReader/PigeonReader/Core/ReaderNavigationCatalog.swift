@@ -88,6 +88,7 @@ nonisolated enum ReaderNavigationCatalog {
 			switch section {
 			case .forYou: count = smartCounts.forYou
 			case .today: count = smartCounts.today
+			case .lastSevenDays: count = smartCounts.lastSevenDays
 			case .unread: count = smartCounts.unread
 			case .starred: count = smartCounts.starred
 			case .saved: count = smartCounts.saved ?? savedStreamID.flatMap { countsByID[$0] } ?? 0

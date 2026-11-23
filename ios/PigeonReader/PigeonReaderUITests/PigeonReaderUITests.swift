@@ -972,34 +972,36 @@ final class PigeonReaderUITests: XCTestCase {
 		attachScreenshot(named: "image-rich-thumbnail-permission-restored")
 	}
 
-	func testDisplayMenuSwitchesBetweenFrontPageAndClassic() throws {
+	func testDisplayMenuSwitchesBetweenCardsAndReeder() throws {
+		// The UI-test reset starts in Reeder, so For You opens as the list.
 		try launchFeedList()
 		XCTAssertTrue(articleList.waitForExistence(timeout: 10))
 
-		chooseLayout("Front Page")
-		// The collection pane identifier lands on its scroll container, as it does on Classic's list.
+		chooseLook("Cards")
+		// For You in Cards is the Front Page. The collection pane identifier
+		// lands on its scroll container, as it does on Reeder's list.
 		let frontPage = app.scrollViews.matching(NSPredicate(format: "identifier BEGINSWITH %@", "collection-pane-")).firstMatch
 		XCTAssertTrue(frontPage.waitForExistence(timeout: 5))
-		XCTAssertFalse(articleList.exists, "Front Page replaces the Classic rows.")
+		XCTAssertFalse(articleList.exists, "Cards replaces the Reeder rows.")
 		let story = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-")).firstMatch
 		XCTAssertTrue(story.waitForExistence(timeout: 5))
-		attachScreenshot(named: "front-page-layout")
+		attachScreenshot(named: "cards-look-for-you")
 
 		story.tap()
 		XCTAssertTrue(app.scrollViews["article-reader-scroll-view"].waitForExistence(timeout: 5))
 		let back = app.descendants(matching: .any)["article-back-to-feed"]
 		XCTAssertTrue(back.waitForExistence(timeout: 5))
 		back.tap()
-		XCTAssertTrue(frontPage.waitForExistence(timeout: 5), "Returning from a story keeps the chosen layout.")
+		XCTAssertTrue(frontPage.waitForExistence(timeout: 5), "Returning from a story keeps the chosen look.")
 
-		chooseLayout("Classic")
+		chooseLook("Reeder")
 		XCTAssertTrue(articleList.waitForExistence(timeout: 5))
 		XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "front-page-story-")).firstMatch.exists)
-		// The opened story is now read, so For You's unread filter has dropped it from Classic.
+		// The opened story is now read, so For You's unread filter has dropped it from Reeder.
 		XCTAssertTrue(app.staticTexts["A short note on cities, attention, and useful density"].waitForExistence(timeout: 5))
 	}
 
-	private func chooseLayout(_ title: String) {
+	private func chooseLook(_ title: String) {
 		app.buttons["article-list-more"].tap()
 		app.buttons["article-list-density"].tap()
 		let option = app.buttons[title]
@@ -1406,6 +1408,10 @@ final class PigeonReaderUITests: XCTestCase {
 			}
 			if backButton.waitForExistence(timeout: 1), backButton.isHittable {
 				backButton.tap()
+			} else {
+				// On the library list itself. It is lazy, so a row below the fold
+				// is not in the hierarchy until it scrolls into view.
+				app.swipeUp()
 			}
 			RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
 		}

@@ -76,7 +76,7 @@ struct ReaderHomeTilesView: View {
 					.background(ReaderHomeTileStyle.background, in: ReaderHomeTileStyle.shape)
 				}
 				.buttonStyle(ReaderHomeTileButtonStyle())
-				.accessibilityHint("Shows every folder and feed with unread counts")
+				.accessibilityHint("Shows every folder and feed")
 				.accessibilityIdentifier(ReaderHomeAccessibility.allFeeds)
 			}
 			.padding(.horizontal, 16)
@@ -176,12 +176,7 @@ private struct ReaderHomeDateline: View {
 	}
 }
 
-private enum ReaderHomeTileStyle {
-	static let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-	static let background = Color(.secondarySystemGroupedBackground)
-}
-
-private struct ReaderHomeViewTile: View {
+struct ReaderHomeViewTile: View {
 	let item: ReaderNavigationItem
 
 	var body: some View {
@@ -205,10 +200,12 @@ private struct ReaderHomeViewTile: View {
 	}
 }
 
-private struct ReaderHomeFolderTile: View {
+struct ReaderHomeFolderTile: View {
 	@Environment(\.accessibilityReduceMotion) private var reduceMotion
 	@Environment(\.readerTypeface) private var readerTypeface
 	let folder: ReaderHomeTiles.FolderTile
+	/// Home's grid keeps tiles even; a full-width tile fits its content.
+	var minHeight: Double = 136
 
 	var body: some View {
 		let color = FrontPageKickerPalette.color(at: folder.colorIndex)
@@ -249,53 +246,8 @@ private struct ReaderHomeFolderTile: View {
 		.padding(.horizontal, 12)
 		.padding(.top, 14)
 		.padding(.bottom, 12)
-		.frame(maxWidth: .infinity, minHeight: 136, alignment: .topLeading)
-		.background(ReaderHomeTileStyle.background)
-		.overlay(alignment: .top) {
-			Rectangle()
-				.fill(color)
-				.frame(height: 3)
-				.accessibilityHidden(true)
-		}
-		.clipShape(ReaderHomeTileStyle.shape)
+		.frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
+		.readerTileBackground(barColor: color)
 		.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: folder.headline)
-	}
-}
-
-/// A feed favicon that fades in once loaded, so tiles never pop.
-private struct ReaderHomeFeedIcon: View {
-	@Environment(\.accessibilityReduceMotion) private var reduceMotion
-	let url: URL
-
-	var body: some View {
-		FeedIconImage(url: url) { loadedImage in
-			ZStack {
-				RoundedRectangle(cornerRadius: 4, style: .continuous)
-					.fill(.quaternary)
-					.opacity(loadedImage == nil ? 1 : 0)
-				if let image = loadedImage {
-					image
-						.resizable()
-						.scaledToFit()
-						.clipShape(.rect(cornerRadius: 4, style: .continuous))
-						.transition(.opacity)
-				}
-			}
-			.animation(ReaderMotion.contentArrival(reduceMotion: reduceMotion), value: loadedImage != nil)
-		}
-		.frame(width: 18, height: 18)
-	}
-}
-
-/// Tiles acknowledge touch-down with a slight press before navigation begins.
-private struct ReaderHomeTileButtonStyle: ButtonStyle {
-	@Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-	func makeBody(configuration: Configuration) -> some View {
-		configuration.label
-			.contentShape(ReaderHomeTileStyle.shape)
-			.opacity(configuration.isPressed ? 0.7 : 1)
-			.scaleEffect(configuration.isPressed && reduceMotion == false ? 0.97 : 1)
-			.animation(.easeOut(duration: 0.12), value: configuration.isPressed)
 	}
 }

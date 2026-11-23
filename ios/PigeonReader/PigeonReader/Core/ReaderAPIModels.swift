@@ -205,6 +205,8 @@ nonisolated struct ReaderNavigationSmartCounts: Equatable, Sendable {
 	let starred: Int
 	/// Unread Read It Later items; nil lets the catalog read the saved feed's count.
 	var saved: Int? = nil
+	/// Unread stories in the Last 7 Days window, saved items left out as in Today.
+	var lastSevenDays: Int = 0
 }
 
 nonisolated struct ReaderNavigationSnapshot: Sendable {
@@ -213,6 +215,8 @@ nonisolated struct ReaderNavigationSnapshot: Sendable {
 	let starredUnreadCount: Int?
 	/// Requested with `xs=saved`, so Read It Later is already left out.
 	let todayUnreadCount: Int?
+	/// The Last 7 Days window's unread total, requested like Today's.
+	var lastSevenDaysUnreadCount: Int? = nil
 
 	var savedSubscription: ReaderSubscription? {
 		subscriptions.first(where: \.isSavedFeed)

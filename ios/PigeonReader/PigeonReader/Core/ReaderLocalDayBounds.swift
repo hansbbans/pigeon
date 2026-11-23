@@ -21,4 +21,20 @@ nonisolated struct ReaderLocalDayBounds: Equatable, Sendable {
 		let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
 		return Self(start: start, end: end)
 	}
+
+	/// `count` local days ending with the day that holds `date`: from midnight
+	/// `count - 1` days before it to the next midnight. Counted in calendar
+	/// days, so a week across a DST change is 7 days, not 7 × 86 400 s.
+	nonisolated static func localDays(_ count: Int, endingWith date: Date, calendar: Calendar = .autoupdatingCurrent) -> Self {
+		let day = localDay(containing: date, calendar: calendar)
+		let start = calendar.date(byAdding: .day, value: -(max(count, 1) - 1), to: day.start) ?? day.start
+		return Self(start: start, end: day.end)
+	}
+
+	/// The Last 7 Days window: the day that holds `date` and the six before it.
+	/// The one definition the view, its count, its offline membership and the
+	/// folder cards all use.
+	nonisolated static func lastSevenDays(endingWith date: Date, calendar: Calendar = .autoupdatingCurrent) -> Self {
+		localDays(7, endingWith: date, calendar: calendar)
+	}
 }

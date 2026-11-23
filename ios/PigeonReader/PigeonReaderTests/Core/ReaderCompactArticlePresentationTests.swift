@@ -67,33 +67,33 @@ struct ReaderCompactArticlePresentationTests {
 		)
 	}
 
-	@Test func frontPageNavigatesARegularWindowPageByPage() {
-		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, homeLayout: .frontPage) == .compact)
+	@Test func cardsNavigatesCompactInARegularWindow() {
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, look: .cards) == .compact)
 	}
 
-	@Test func classicKeepsTheRegularSplitViewAndCompactStaysCompact() {
-		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, homeLayout: .classic) == .regular)
-		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, homeLayout: .classic) == .compact)
-		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, homeLayout: .frontPage) == .compact)
-		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: nil, homeLayout: .frontPage) == nil)
+	@Test func reederKeepsTheRegularSplitViewAndCompactStaysCompact() {
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .regular, look: .reeder) == .regular)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, look: .reeder) == .compact)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: .compact, look: .cards) == .compact)
+		#expect(ReaderCompactArticlePresentation.navigationSizeClass(window: nil, look: .cards) == nil)
 	}
 
-	@Test func switchingAnIPadToFrontPageWithAStoryOpenShowsThePage() {
+	@Test func switchingAnIPadToCardsWithAStoryOpenShowsThePage() {
 		typealias Presentation = ReaderCompactArticlePresentation
-		// Classic on iPad shows the story beside the list. Front Page collapses
-		// the window, so keeping `.detail` would cover it with that story.
-		#expect(Presentation.columnAfterLayoutChange(window: .regular, homeLayout: .frontPage, preferredColumn: .detail) == .content)
+		// Reeder on iPad shows the story beside the list. Cards collapses the
+		// window, so keeping `.detail` would cover it with that story.
+		#expect(Presentation.columnAfterLookChange(window: .regular, look: .cards, preferredColumn: .detail) == .content)
 		#expect(Presentation.isActive(
-			horizontalSizeClass: Presentation.navigationSizeClass(window: .regular, homeLayout: .frontPage),
-			preferredColumn: Presentation.columnAfterLayoutChange(window: .regular, homeLayout: .frontPage, preferredColumn: .detail),
+			horizontalSizeClass: Presentation.navigationSizeClass(window: .regular, look: .cards),
+			preferredColumn: Presentation.columnAfterLookChange(window: .regular, look: .cards, preferredColumn: .detail),
 			hasSelectedArticle: true,
 		) == false)
 		// Home and the list stay where they are.
-		#expect(Presentation.columnAfterLayoutChange(window: .regular, homeLayout: .frontPage, preferredColumn: .sidebar) == .sidebar)
-		#expect(Presentation.columnAfterLayoutChange(window: .regular, homeLayout: .frontPage, preferredColumn: .content) == .content)
-		// Back to Classic keeps the story beside the list.
-		#expect(Presentation.columnAfterLayoutChange(window: .regular, homeLayout: .classic, preferredColumn: .detail) == .detail)
-		// A phone already reads full screen in both layouts.
-		#expect(Presentation.columnAfterLayoutChange(window: .compact, homeLayout: .frontPage, preferredColumn: .detail) == .detail)
+		#expect(Presentation.columnAfterLookChange(window: .regular, look: .cards, preferredColumn: .sidebar) == .sidebar)
+		#expect(Presentation.columnAfterLookChange(window: .regular, look: .cards, preferredColumn: .content) == .content)
+		// Back to Reeder keeps the story beside the list.
+		#expect(Presentation.columnAfterLookChange(window: .regular, look: .reeder, preferredColumn: .detail) == .detail)
+		// A phone already reads full screen in both looks.
+		#expect(Presentation.columnAfterLookChange(window: .compact, look: .cards, preferredColumn: .detail) == .detail)
 	}
 }

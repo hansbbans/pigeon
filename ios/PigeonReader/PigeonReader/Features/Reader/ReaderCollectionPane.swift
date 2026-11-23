@@ -11,8 +11,9 @@ struct ReaderCollectionPane: View {
 	@State private var isTransitioning = false
 
 	var body: some View {
+		let rootCollection = model.contentRootCollection
 		let collection = displayedAccountID == model.session?.storageIdentity
-			? displayedCollection ?? model.selectedCollection : model.selectedCollection
+			? displayedCollection ?? rootCollection : rootCollection
 		ZStack {
 			Group {
 				if collection.smartSection == .saved {
@@ -28,12 +29,12 @@ struct ReaderCollectionPane: View {
 		// Compact navigation owns its push/pop animation. The stationary iPad
 		// column changes only opacity, leaving its sidebar and row geometry alone.
 		.id(model.session?.storageIdentity)
-		.navigationTitle(navigationTitle)
-		.onChange(of: model.selectedCollection, initial: true) { _, selected in
-			show(selected)
+		.navigationTitle(navigationTitle(for: rootCollection))
+		.onChange(of: rootCollection, initial: true) { _, root in
+			show(root)
 		}
 		.onChange(of: model.session?.storageIdentity) { _, _ in
-			show(model.selectedCollection)
+			show(model.contentRootCollection)
 		}
 	}
 
@@ -43,9 +44,8 @@ struct ReaderCollectionPane: View {
 		windowHorizontalSizeClass ?? columnHorizontalSizeClass
 	}
 
-	private var navigationTitle: String {
-		let collection = model.selectedCollection
-		guard collection.smartSection == .today else { return collection.title }
+	private func navigationTitle(for collection: ReaderNavigationItem) -> String {
+		guard collection.smartSection?.usesDayWindow == true else { return collection.title }
 		let unreadCount = model.navigation.item(withID: collection.id)?.unreadCount ?? collection.unreadCount
 		return "\(collection.title) (\(unreadCount.formatted()))"
 	}

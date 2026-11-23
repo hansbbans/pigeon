@@ -172,7 +172,7 @@ struct SavedItemsTests {
 	@Test func cachedNavigationFromOlderBuildsGainsTheSection() throws {
 		let old = ReaderNavigationState(items: [.smart(.forYou), .smart(.unread), .smart(.starred), .smart(.today)])
 		let decoded = try JSONDecoder().decode(ReaderNavigationState.self, from: JSONEncoder().encode(old))
-		#expect(decoded.smartItems.map(\.id) == ["forYou", "unread", "starred", "saved", "today"])
+		#expect(decoded.smartItems.map(\.id) == ["forYou", "unread", "starred", "saved", "today", "lastSevenDays"])
 		let partial = ReaderNavigationState(items: [.smart(.forYou)])
 		#expect(try JSONDecoder().decode(ReaderNavigationState.self, from: JSONEncoder().encode(partial)) == partial)
 	}
