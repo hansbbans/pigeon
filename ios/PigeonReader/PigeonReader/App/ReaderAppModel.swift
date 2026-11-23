@@ -161,6 +161,11 @@ final class ReaderAppModel {
 	/// folder; both are cleared by choosing any other list.
 	private var storedCardFeedPath: [ReaderCardFeedDestination] = []
 	private var cardStackRootID: String?
+	/// The stories each Reeder list has drawn in full this app session, so a
+	/// story read in place keeps its height (`ReaderFullRowMemory`). Not
+	/// observed: it only decides how a read row draws, and a row is in it
+	/// before it can be read.
+	@ObservationIgnored var fullRowMemory = ReaderFullRowMemory()
 	/// How the selected list's page orders its stories, when that is not
 	/// the sort (see `retainPresentedArticles`).
 	private var presentedArticleOrder: ReaderPresentedArticleOrder?
@@ -940,6 +945,7 @@ final class ReaderAppModel {
 			articleUndo = nil
 			readerPreparation.reset()
 			listPositions.reset()
+			fullRowMemory.removeAll()
 			scrollReadTriggered = []
 			engagement = EngagementAggregator()
 			sentScrollThresholds = [:]
@@ -3106,12 +3112,6 @@ final class ReaderAppModel {
 		preferredCompactColumn = .content
 	}
 
-	/// Returns a regular-width window to Home, which covers the split view
-	/// until a view is chosen. A compact window pops to Home natively.
-	func showHome() {
-		preferredCompactColumn = .sidebar
-	}
-
 	@discardableResult
 	func loadNavigation(
 		force: Bool = false,
@@ -4499,13 +4499,6 @@ final class ReaderAppModel {
 		ArticleSortOrder.available(forCollectionID: collection.id)
 	}
 
-	/// Feed sections for `articles` (the list as displayed) when `collection`
-	/// shows By Feed; nil for every other order.
-	func feedSections(for collection: ReaderNavigationItem, articles: [Recommendation]) -> [ArticleFeedSection]? {
-		guard sortOrder(for: collection) == .byFeed else { return nil }
-		return ArticleFeedSection.sections(for: articles, feeds: articleFeedDirectory)
-	}
-
 	/// The kicker colour of a collection's cards, the same one its Home tile
 	/// has: a folder's own, a feed's folder's, or for a feed in no folder its
 	/// own kicker colour. Nil for smart views.
@@ -5455,6 +5448,7 @@ final class ReaderAppModel {
 		_ impressions: [ImpressionTracker.Impression],
 		in list: ReadingLogList,
 		rows: [String: String] = [:],
+		sections: [String: String] = [:],
 		flushInterval: Duration = ReaderAppModel.readingLogFlushInterval,
 	) {
 		guard impressions.isEmpty == false, apiClient != nil else { return }
@@ -5466,6 +5460,7 @@ final class ReaderAppModel {
 				score: forYouArticles.first { $0.id == impression.itemId }?.score,
 				stream: list.stream,
 				row: rows[impression.itemId],
+				section: sections[impression.itemId],
 			)
 			readingLogBuffer.append(ReadingLogEvent(
 				itemId: impression.itemId,
@@ -7392,6 +7387,7 @@ final class ReaderAppModel {
 		articleUndo = nil
 		readerPreparation.reset()
 		listPositions.reset()
+		fullRowMemory.removeAll()
 		scrollReadTriggered = []
 		engagement = EngagementAggregator()
 		sentScrollThresholds = [:]

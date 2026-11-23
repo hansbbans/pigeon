@@ -33,6 +33,17 @@ nonisolated struct FolderSections: Equatable, Sendable {
 				case .feedToday, .yesterday, .earlier: "card-day"
 				}
 			}
+
+			/// The reading log's `section` for a story this Reeder list section
+			/// shows first: the web app's section names.
+			var readingLogSection: String {
+				switch self {
+				case .today: "today"
+				case .lastSevenDays: "last-7-days"
+				case .feed, .older: "feed"
+				case .feedToday, .yesterday, .earlier: "day"
+				}
+			}
 		}
 
 		let id: String
@@ -75,6 +86,9 @@ nonisolated struct FolderSections: Equatable, Sendable {
 	let uniqueArticleIDs: [String]
 	/// The reading log's `row` for each story: the card it first appears in.
 	let readingLogRows: [String: String]
+	/// The section each story first appears in, by id: where the Reeder list
+	/// puts its scroll anchor, and the reading log's `section`.
+	let firstSectionIDs: [String: String]
 	/// Every story as drawn, a story shown twice included twice. Above and
 	/// below are taken from the copy a menu was opened on.
 	let renderedCopies: [Recommendation]
@@ -87,6 +101,7 @@ nonisolated struct FolderSections: Equatable, Sendable {
 		self.sections = sections
 		var seen = Set<String>()
 		var rows: [String: String] = [:]
+		var firstSections: [String: String] = [:]
 		var rendered: [Recommendation] = []
 		var copies: [Recommendation] = []
 		var ranges: [String: Range<Int>] = [:]
@@ -96,11 +111,13 @@ nonisolated struct FolderSections: Equatable, Sendable {
 			for article in section.articles where seen.insert(article.id).inserted {
 				rendered.append(article)
 				rows[article.id] = section.kind.readingLogRow
+				firstSections[article.id] = section.id
 			}
 		}
 		renderedArticles = rendered
 		uniqueArticleIDs = rendered.map(\.id)
 		readingLogRows = rows
+		firstSectionIDs = firstSections
 		renderedCopies = copies
 		copyRanges = ranges
 	}
@@ -178,19 +195,21 @@ nonisolated struct FolderSections: Equatable, Sendable {
 	}
 }
 
-/// A single feed in the Cards look: its stories by day (Today, Yesterday,
-/// Earlier), newest first.
+/// A single feed's stories by day (Today, Yesterday, Earlier), newest
+/// first: day cards in Cards, day labels in the Reeder list.
 nonisolated enum FeedDaySections {
 	static let dayLimit = 5
 
-	/// Every day shows `dayLimit` before "N more", Earlier included, so a
-	/// long feed is a short page. A story dated after today (a skewed clock)
-	/// counts as Today rather than vanishing.
+	/// Every day shows `limit` before "N more", Earlier included, so a long
+	/// feed is a short page of cards. The Reeder list passes no limit: there
+	/// the days only label a list that pages on as it scrolls. A story dated
+	/// after today (a skewed clock) counts as Today rather than vanishing.
 	static func make(
 		articles: [Recommendation],
 		now: Date,
 		calendar: Calendar = .autoupdatingCurrent,
 		expanded: Set<String> = [],
+		limit: Int = dayLimit,
 	) -> FolderSections {
 		let stories = FolderSections.newestFirst(articles)
 		let todayStart = ReaderLocalDayBounds.localDay(containing: now, calendar: calendar).start
@@ -203,7 +222,7 @@ nonisolated enum FeedDaySections {
 		]
 		return FolderSections(sections: groups.compactMap { group in
 			FolderSections.Section.collapsed(id: group.id, kind: group.kind, title: group.title,
-				articles: group.articles, limit: dayLimit, expanded: expanded)
+				articles: group.articles, limit: limit, expanded: expanded)
 		})
 	}
 }

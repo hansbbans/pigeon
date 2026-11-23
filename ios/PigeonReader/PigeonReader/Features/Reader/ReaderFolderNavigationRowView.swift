@@ -18,12 +18,15 @@ struct ReaderFolderNavigationRowView: View {
 				onToggle: onToggle,
 			)
 			.frame(width: 44, height: 44)
+			// The triangle sits where a view's symbol does, so folder and view
+			// titles line up; the target keeps its full 44pt.
+			.padding(.leading, -14)
 
 			Button(action: onSelect) {
 				ReaderNavigationLabelView(
 					item: folder,
 					indentation: 0,
-					isFolderExpanded: isExpanded,
+					isSelected: isSelected,
 				)
 			}
 			.buttonStyle(ReaderRowButtonStyle())
@@ -32,7 +35,7 @@ struct ReaderFolderNavigationRowView: View {
 			.accessibilityValue("\(folder.unreadCount) unread")
 			.accessibilityIdentifier(ReaderSidebarAccessibility.item(folder.id))
 		}
-		.listRowBackground(isSelected ? Color.accentColor.opacity(0.16) : .clear)
+		.readerLibrarySelection(isSelected)
 		.accessibilityElement(children: .contain)
 		// Folder selection is handled by the explicit title button; keep repeated
 		// disclosure taps out of List(selection:)'s cell-wide selection gesture.
@@ -59,14 +62,13 @@ private struct ReaderFolderDisclosureButton: UIViewRepresentable {
 
 	func makeUIView(context: Context) -> UIButton {
 		let button = UIButton(type: .system)
-		// A quiet disclosure mark: footnote-sized, medium weight, secondary label
-		// color, so the folder title leads while the only expand control keeps
-		// at least 3:1 contrast. The text-style configuration follows Dynamic Type.
-		button.tintColor = .secondaryLabel
+		// A quiet disclosure triangle in `label-secondary`, so the folder title
+		// leads while the only expand control keeps 4.5:1. The text-style
+		// configuration follows Dynamic Type.
+		button.tintColor = UIColor(PigeonPalette.labelSecondary)
 		button.setImage(UIImage(
-			systemName: "chevron.right",
-			withConfiguration: UIImage.SymbolConfiguration(textStyle: .footnote)
-				.applying(UIImage.SymbolConfiguration(weight: .medium))
+			systemName: "arrowtriangle.right.fill",
+			withConfiguration: UIImage.SymbolConfiguration(textStyle: .caption2)
 		), for: .normal)
 		button.addAction(UIAction { [coordinator = context.coordinator] _ in
 			coordinator.onToggle()

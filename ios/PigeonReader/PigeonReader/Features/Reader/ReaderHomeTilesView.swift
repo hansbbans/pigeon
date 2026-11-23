@@ -5,7 +5,6 @@ nonisolated enum ReaderHomeAccessibility {
 	static let dateline = "reader-home-dateline"
 	static let allFeeds = "reader-home-all-feeds"
 	static let showTiles = "reader-home-show-tiles"
-	static let showHome = "reader-show-home"
 }
 
 /// Home: a tile for each view and folder, on iPhone and iPad alike. Counts are

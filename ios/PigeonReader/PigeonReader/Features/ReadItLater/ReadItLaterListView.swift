@@ -158,7 +158,6 @@ struct ReadItLaterToolbar: ToolbarContent {
 	@Environment(ReaderAppModel.self) private var model
 
 	var body: some ToolbarContent {
-		ReaderHomeToolbarItem()
 		ToolbarItemGroup(placement: .topBarTrailing) {
 			Menu("Filter", systemImage: model.savedListFilter.isDefault
 				? "line.3.horizontal.decrease"

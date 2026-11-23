@@ -23,6 +23,14 @@ nonisolated enum PigeonPalette {
 		static let readLater = rgb(0x1F6F6A)
 	}
 
+	/// `library-ground`: the Reeder library column, a quiet grey beside the
+	/// white story list. `label-secondary` stays above 4.5:1 on it.
+	static let libraryGround = dynamic(light: 0xF5F5F6, dark: 0x1C1C1E)
+	/// `library-selection`: the selected library row, a neutral fill instead
+	/// of the system blue. Its count is drawn in the primary label colour,
+	/// which `label-secondary` would fall under 4.5:1 against.
+	static let librarySelection = dynamic(light: 0xE3E3E7, dark: 0x3A3A3C)
+
 	/// Reader theme grounds that differ from `systemBackground`.
 	static let sepiaBackground = rgb(0xF6ECD1)
 	static let darkGrayBackground = rgb(0x1C1C1E)

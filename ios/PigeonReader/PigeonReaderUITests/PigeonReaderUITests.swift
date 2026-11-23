@@ -638,8 +638,10 @@ final class PigeonReaderUITests: XCTestCase {
 		newFolder.typeText("Reading")
 		app.buttons["save-feed-folders"].tap()
 
-		XCTAssertTrue(app.staticTexts["Reading"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.staticTexts["Design"].exists)
+		// Folder rows, not their texts: a folder with nothing unread shows no
+		// count, and its title is then the row itself to accessibility.
+		XCTAssertTrue(app.buttons["reader-sidebar-item-user/-/label/Reading"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.buttons["reader-sidebar-item-user/-/label/Design"].exists)
 		XCTAssertFalse(app.navigationBars["Edit Feed"].exists)
 		attachScreenshot(named: "feed-folder-edit")
 	}
@@ -1351,8 +1353,12 @@ final class PigeonReaderUITests: XCTestCase {
 			"-reader-reset-reader-state",
 		]
 		app.launchWithoutAnimations()
-		let settings = app.descendants(matching: .any)["Settings"]
-		XCTAssertTrue(revealSidebar(containing: settings))
+		// The library keeps Settings in its More menu.
+		let more = app.buttons["library-more"]
+		XCTAssertTrue(revealSidebar(containing: more))
+		more.tap()
+		let settings = app.buttons["Settings"]
+		XCTAssertTrue(settings.waitForExistence(timeout: 5))
 		settings.tap()
 	}
 

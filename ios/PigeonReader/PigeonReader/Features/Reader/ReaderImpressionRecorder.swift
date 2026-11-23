@@ -34,6 +34,7 @@ final class ReaderImpressionRecorder {
 	private var visibleCopies = ReaderVisibleRowCopies()
 	/// `ReadingLogMetadata.row` per story, for lists with more than one kind of row.
 	private var readingLogRows: [String: String] = [:]
+	private var readingLogSections: [String: String] = [:]
 	private var lastEvaluation = Date.distantPast
 	private var wakeDate: Date?
 	private var wakeTask: Task<Void, Never>?
@@ -91,6 +92,7 @@ final class ReaderImpressionRecorder {
 	/// twice is listed once, at its first appearance.
 	func updateRows(_ itemIDs: [String], readingLogRows: [String: String] = [:]) {
 		self.readingLogRows = readingLogRows
+		readingLogSections.removeAll(keepingCapacity: true)
 		rowPositions.removeAll(keepingCapacity: true)
 		for (position, itemID) in itemIDs.enumerated() where rowPositions[itemID] == nil {
 			rowPositions[itemID] = position
@@ -98,6 +100,14 @@ final class ReaderImpressionRecorder {
 		visibleRowIDs = visibleRowIDs.filter { rowPositions[$0] != nil }
 		visibleCopies.removeAll { rowPositions[$0] == nil }
 		viewportDidChange()
+	}
+
+	/// The reading log's `row` and `section` for the stories of a list the
+	/// viewport measures (the Reeder list). Each list sets its own whenever its
+	/// rows change, so they hold across sessions of that list.
+	func setReadingLogTags(rows: [String: String], sections: [String: String]) {
+		readingLogRows = rows
+		readingLogSections = sections
 	}
 
 	/// One copy of a story shown more than once crossed the half-visible
@@ -174,7 +184,8 @@ final class ReaderImpressionRecorder {
 			rowPositions.removeAll(keepingCapacity: true)
 			visibleRowIDs.removeAll(keepingCapacity: true)
 			visibleCopies = ReaderVisibleRowCopies()
-			readingLogRows.removeAll(keepingCapacity: true)
+			// The reading-log tags stay: every list sets its own when it appears
+			// (`setReadingLogTags`, `updateRows`).
 		}
 		newViewport?.onViewportChange = { [weak self] in self?.viewportDidChange() }
 	}
@@ -188,7 +199,7 @@ final class ReaderImpressionRecorder {
 
 	private func deliver(_ impressions: [ImpressionTracker.Impression]) {
 		guard impressions.isEmpty == false, let list = state?.list else { return }
-		model?.recordImpressions(impressions, in: list, rows: readingLogRows)
+		model?.recordImpressions(impressions, in: list, rows: readingLogRows, sections: readingLogSections)
 	}
 
 	private func scheduleWake(at date: Date) {

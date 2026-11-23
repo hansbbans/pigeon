@@ -1,9 +1,13 @@
 import SwiftUI
 
-/// Add Feed and the collection filter, shared by the tile home and the library list.
+/// Add Feed and the collection filter, shared by the tile home and the library
+/// list. The Reeder library (`collectsMenus`) shows only ＋ and ⋯, with the
+/// filter, the look and Settings in ⋯: it is the app's root there, with no
+/// Home to hold the look switch.
 struct ReaderLibraryToolbarItems: ToolbarContent {
 	@Environment(ReaderAppModel.self) private var model
 	@Binding var editorRoute: LibraryEditorRoute?
+	var collectsMenus = false
 
 	var body: some ToolbarContent {
 		@Bindable var model = model
@@ -15,17 +19,51 @@ struct ReaderLibraryToolbarItems: ToolbarContent {
 			.accessibilityHint("Subscribe to a website or feed URL")
 		}
 		ToolbarItem(placement: .topBarTrailing) {
-			Menu("Filter", systemImage: "line.3.horizontal.decrease") {
-				Picker("Filter collections", selection: $model.sidebarFilter) {
-					ForEach(ReaderSidebarFilter.allCases) { filter in
-						Text(filter.title)
-							.tag(filter)
+			if collectsMenus {
+				Menu("More", systemImage: "ellipsis") {
+					filterMenu
+					Menu("Look", systemImage: "rectangle.grid.1x2") {
+						Picker("Look", selection: lookBinding) {
+							ForEach(ReaderLook.allCases) { look in
+								Text(look.title).tag(look)
+							}
+						}
+						.accessibilityIdentifier("library-look-options")
 					}
+					.accessibilityValue(model.readerTypography.look.title)
+					.accessibilityIdentifier("library-look")
+					Divider()
+					Button("Settings", systemImage: "gearshape") {
+						model.isShowingSettings = true
+					}
+					.keyboardShortcut(",", modifiers: .command)
+				}
+				.accessibilityIdentifier("library-more")
+			} else {
+				filterMenu
+			}
+		}
+	}
+
+	private var lookBinding: Binding<ReaderLook> {
+		Binding(
+			get: { model.readerTypography.look },
+			set: { model.readerTypography.look = $0 },
+		)
+	}
+
+	private var filterMenu: some View {
+		@Bindable var model = model
+		return Menu("Filter", systemImage: "line.3.horizontal.decrease") {
+			Picker("Filter collections", selection: $model.sidebarFilter) {
+				ForEach(ReaderSidebarFilter.allCases) { filter in
+					Text(filter.title)
+						.tag(filter)
 				}
 			}
-			.accessibilityLabel(ReaderAccessibilityText.filterCollections)
-			.accessibilityValue(model.sidebarFilter.title)
-			.accessibilityHint(ReaderAccessibilityText.filterCollectionsHint)
 		}
+		.accessibilityLabel(ReaderAccessibilityText.filterCollections)
+		.accessibilityValue(model.sidebarFilter.title)
+		.accessibilityHint(ReaderAccessibilityText.filterCollectionsHint)
 	}
 }

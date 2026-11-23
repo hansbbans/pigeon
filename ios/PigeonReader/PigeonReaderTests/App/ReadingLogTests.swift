@@ -441,6 +441,29 @@ struct ReadingLogTests {
 		])
 	}
 
+	/// The Reeder list logs as the web app does: the section that first
+	/// shows a story, and compact for a read story on one line.
+	@Test func aReederListLogsTheSectionAndCompactRows() async throws {
+		let transport = ReadingLogTransport()
+		let model = try makeModel(transport)
+		let folder = navigationItem(id: "user/-/label/Work", kind: .folder)
+		let impressions = [
+			ImpressionTracker.Impression(itemId: "a", position: 0, sessionId: "s", occurredAt: start),
+			ImpressionTracker.Impression(itemId: "b", position: 1, sessionId: "s", occurredAt: start),
+		]
+
+		model.recordImpressions(impressions, in: .list(for: folder), rows: ["b": "compact"],
+			sections: ["a": "today", "b": "feed"])
+		model.flushReadingLog()
+		await model.waitForReadingAnalytics()
+
+		let events = try await readingLogBatches(transport).flatMap { $0 }
+		#expect(events.map { $0["metadata"] as? [String: String] } == [
+			["stream": "user/-/label/Work", "section": "today"],
+			["stream": "user/-/label/Work", "row": "compact", "section": "feed"],
+		])
+	}
+
 	@Test func aRowTappedInItsFirstSecondIsLoggedAsShown() async throws {
 		let transport = ReadingLogTransport()
 		let model = try makeModel(transport)

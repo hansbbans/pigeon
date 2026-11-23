@@ -39,6 +39,8 @@ final class FolderCardsSectionsCache {
 		let expanded: Set<String>
 		let feeds: ArticleFeedDirectory
 		let isFolder: Bool
+		/// A feed's days show in full in the Reeder list; Cards caps each.
+		let collapsesDays: Bool
 		let day: Date
 	}
 

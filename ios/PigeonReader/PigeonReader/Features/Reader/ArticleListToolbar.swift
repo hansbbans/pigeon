@@ -17,7 +17,6 @@ struct ArticleListToolbar: ToolbarContent {
 	}
 
 	var body: some ToolbarContent {
-		ReaderHomeToolbarItem()
 		ToolbarItemGroup(placement: .topBarTrailing) {
 			if collection.kind == .feed {
 				Button("Mark Read", systemImage: "checkmark.circle") {
@@ -97,7 +96,7 @@ struct ArticleListMoreMenu: View, Equatable {
 
 	var body: some View {
 		Menu("More", systemImage: "ellipsis") {
-			// In Cards a folder's or feed's sections are its order.
+			// A folder's or feed's sections are its order, in both looks.
 			if hidesSort == false {
 				Menu("Sort", systemImage: "arrow.up.arrow.down") {
 					Picker("Sort stories", selection: sortBinding) {
@@ -185,7 +184,7 @@ struct ArticleListMoreMenu: View, Equatable {
 	}
 
 	private var hidesSort: Bool {
-		usesCards && (collection.kind == .folder || collection.kind == .feed)
+		collection.kind == .folder || collection.kind == .feed
 	}
 
 	private var lookBinding: Binding<ReaderLook> {

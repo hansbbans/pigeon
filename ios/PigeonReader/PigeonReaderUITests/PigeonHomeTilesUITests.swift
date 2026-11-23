@@ -98,24 +98,6 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		XCTAssertTrue(bar.waitForExistence(timeout: 10))
 	}
 
-	func testAllFeedsInReederIsTheLibraryList() throws {
-		app.terminate()
-		app.launchEnvironment["PIGEON_UI_TEST_LOOK"] = "reeder"
-		app.launchWithoutAnimations()
-		try skipUnlessTileHome()
-		showAllFeeds()
-
-		let sidebar = app.descendants(matching: .any)["reader-sidebar"].firstMatch
-		XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
-		let unread = app.descendants(matching: .any)["reader-sidebar-item-unread"].firstMatch
-		XCTAssertTrue(unread.waitForExistence(timeout: 5))
-		XCTAssertTrue((unread.value as? String)?.hasSuffix("unread") == true)
-
-		app.buttons["reader-home-show-tiles"].tap()
-		XCTAssertTrue(app.descendants(matching: .any)["reader-home-tiles"].firstMatch.waitForExistence(timeout: 10))
-		XCTAssertFalse(sidebar.exists)
-	}
-
 	func testAddFeedOpensTheSubscribeSheetFromTheTiles() throws {
 		try skipUnlessTileHome()
 		app.buttons["add-feed"].tap()
@@ -128,15 +110,9 @@ final class PigeonHomeTilesUITests: XCTestCase {
 		XCTAssertTrue(tiles.waitForExistence(timeout: 15), "The tile home did not appear")
 	}
 
-	/// A regular-width split view offers Home in the list's toolbar; a compact
-	/// window pops back to it.
+	/// Cards navigates as a stack in every window: back pops to Home.
 	private func returnHome(from bar: XCUIElement) {
-		let home = app.buttons["reader-show-home"]
-		if home.waitForExistence(timeout: 2) {
-			home.tap()
-		} else {
-			bar.buttons.firstMatch.tap()
-		}
+		bar.buttons.firstMatch.tap()
 	}
 
 	private func showAllFeeds() {

@@ -40,7 +40,8 @@ struct ReaderSidebarView: View {
 
 		ScrollViewReader { proxy in
 			List(selection: selection) {
-				Section("Views") {
+				Section {
+					ReaderLibraryGroupLabel("Views")
 					ForEach(presentedSnapshot.smartItems) { item in
 						let frameGeneration = sidebarViewportCoordinator.currentGeneration
 						ReaderNavigationRowView(
@@ -55,11 +56,13 @@ struct ReaderSidebarView: View {
 							ReaderSidebarScrollViewAnchor(proxy: sidebarNativeScrollView)
 						}
 						.keyboardShortcut(item.smartSection?.keyboardKey ?? "1", modifiers: .command)
+						.readerLibraryRowChrome()
 					}
 				}
 
 				if presentedSnapshot.folderItems.isEmpty == false {
-					Section("Folders") {
+					Section {
+						ReaderLibraryGroupLabel("Folders")
 						ForEach(presentedSnapshot.folderItems) { folder in
 							let frameGeneration = sidebarViewportCoordinator.currentGeneration
 							ReaderFolderNavigationRowView(
@@ -83,10 +86,12 @@ struct ReaderSidebarView: View {
 									folderPendingDeletion: $folderPendingDeletion,
 								)
 							}
+							.readerLibraryRowChrome()
 
 							if presentedSnapshot.expandedFolderIDs.contains(folder.id) {
 								ForEach(presentedSnapshot.feeds(in: folder.id)) { feed in
-									feedRow(feed, indentation: 28, proxy: proxy)
+									// Favicons line up under the folder's title.
+									feedRow(feed, indentation: 30, proxy: proxy)
 								}
 							}
 						}
@@ -94,14 +99,22 @@ struct ReaderSidebarView: View {
 				}
 
 				if presentedSnapshot.uncategorizedFeedItems.isEmpty == false {
-					Section("Feeds") {
+					Section {
+						ReaderLibraryGroupLabel("Feeds")
 						ForEach(presentedSnapshot.uncategorizedFeedItems) { feed in
 							feedRow(feed, proxy: proxy)
 						}
 					}
 				}
 			}
-			.listStyle(.sidebar)
+			// The Reeder library: a quiet grey column, not the stock sidebar.
+			// The links stay (they carry the native push and ⌘1 to ⌘6); only
+			// their chevrons go.
+			.listStyle(.plain)
+			.environment(\.defaultMinListRowHeight, 1)
+			.scrollContentBackground(.hidden)
+			.background(PigeonPalette.libraryGround)
+			.navigationLinkIndicatorVisibility(.hidden)
 			.background {
 				ReaderSidebarScrollViewAnchor(proxy: sidebarNativeScrollView)
 			}
@@ -146,8 +159,7 @@ struct ReaderSidebarView: View {
 						.accessibilityHint("Returns to the tile view")
 				}
 			}
-			ReaderLibraryToolbarItems(editorRoute: $editorRoute)
-			ReaderSettingsToolbarItem()
+			ReaderLibraryToolbarItems(editorRoute: $editorRoute, collectsMenus: true)
 		}
 		.refreshable {
 			await model.refreshLibrary()
@@ -239,6 +251,7 @@ struct ReaderSidebarView: View {
 			ReaderSidebarFeedPreview(feed: feed)
 				.environment(model)
 		}
+		.readerLibraryRowChrome()
 	}
 
 	private func toggleFolder(_ folder: ReaderNavigationItem, proxy: ScrollViewProxy) {
