@@ -4,7 +4,9 @@ import {
 	AUTH_STORAGE_KEY,
 	THEME_STORAGE_KEY,
 	applyUnauthorizedState,
+	assignFolderColorIndices,
 	buildArticleListEntries,
+	buildFeedDaySections,
 	buildFeedViews,
 	buildFolderSections,
 	createArticleFrameDocument,
@@ -19,6 +21,7 @@ import {
 	getLocalDayRangeBounds,
 	getViewDayBounds,
 	isTimeWindowView,
+	kickerColorIndex,
 	limitInitialItemIds,
 	normalizeBrowserTheme,
 	renderBrowserAppClientScript,
@@ -853,4 +856,72 @@ test('buildFolderSections survives serialization into the browser script', () =>
 		[{ id: '1', streamId: 'feed/1', feedTitle: 'Alpha', published: Math.floor(now / 1000) }], now,
 	);
 	assert.deepEqual(sections.map((section: { key: string }) => section.key), ['today', 'feed:feed/1']);
+});
+
+test('buildFeedDaySections splits a feed into Today, Yesterday and Earlier, five each until N more', () => {
+	withTimeZone('America/New_York', () => {
+		const now = new Date(2026, 10, 3, 12, 0, 0).getTime();
+		const today = getLocalDayRangeBounds(now, 1).startSeconds;
+		const yesterday = getLocalDayRangeBounds(now, 2).startSeconds;
+		const story = (id: string, published: number) => ({ id, published });
+		const items = [
+			story('e1', yesterday - 1),
+			story('y1', yesterday),
+			story('t1', today),
+			story('f1', today + 86_400 * 2),
+			story('t2', today + 60),
+			...[2, 3, 4, 5, 6, 7].map((day) => story('e' + day, yesterday - day * 86_400)),
+		];
+		const summary = (sections: ReturnType<typeof buildFeedDaySections>) =>
+			sections.map((section) => [section.key, section.kind, section.title, section.itemIds.join(' '), section.hiddenCount]);
+		assert.deepEqual(summary(buildFeedDaySections(items, now)), [
+			// A story dated after today (a skewed clock) is Today; midnight exactly is Today.
+			['today', 'today', 'Today', 'f1 t2 t1', 0],
+			['yesterday', 'yesterday', 'Yesterday', 'y1', 0],
+			// Earlier is capped at five too.
+			['earlier', 'earlier', 'Earlier', 'e1 e2 e3 e4 e5', 2],
+		]);
+		assert.deepEqual(summary(buildFeedDaySections(items, now, { expanded: new Set(['earlier']) }))[2],
+			['earlier', 'earlier', 'Earlier', 'e1 e2 e3 e4 e5 e6 e7', 0]);
+		assert.deepEqual(summary(buildFeedDaySections(items, now, { limit: 1 })).map((row) => row[4]), [2, 0, 6]);
+		// Days without a story have no section.
+		assert.deepEqual(buildFeedDaySections([story('e1', yesterday - 1)], now).map((section) => section.key), ['earlier']);
+		assert.deepEqual(buildFeedDaySections([], now), []);
+	});
+});
+
+test('kickerColorIndex matches the iOS FNV-1a palette index', () => {
+	// The fixed values iOS FrontPageLayoutTests pins.
+	assert.equal(kickerColorIndex(''), 5);
+	assert.equal(kickerColorIndex('abc'), 3);
+	assert.equal(kickerColorIndex('money-stuff'), 0);
+	const indices = Array.from({ length: 200 }, (_, index) => kickerColorIndex('feed-' + index));
+	assert.ok(indices.every((index) => index >= 0 && index < 8));
+	assert.equal(new Set(indices).size, 8);
+});
+
+test('assignFolderColorIndices gives folders distinct colours until the palette runs out', () => {
+	const ids = Array.from({ length: 8 }, (_, index) => 'user/-/label/Folder ' + (index + 1));
+	const indices = assignFolderColorIndices(ids);
+	assert.equal(new Set(indices).size, 8);
+	assert.equal(indices[0], kickerColorIndex(ids[0]));
+	// A ninth folder cannot be unique; it keeps its own hash, and the first eight do not move.
+	const nine = assignFolderColorIndices([...ids, 'user/-/label/Ninth']);
+	assert.equal(nine[8], kickerColorIndex('user/-/label/Ninth'));
+	assert.deepEqual(nine.slice(0, 8), indices);
+	// A collision moves the later folder to the next free colour.
+	const [first, second] = assignFolderColorIndices(['a', 'a']);
+	assert.equal(second, (first + 1) % 8);
+	assert.deepEqual(assignFolderColorIndices([]), []);
+});
+
+test('day sections and colours survive serialization into the browser script', () => {
+	const script = renderBrowserAppClientScript();
+	const window: Record<string, any> = {};
+	new Function('window', script)(window);
+	const client = window.__PIGEON_BROWSER_CLIENT__;
+	const now = new Date(2026, 10, 3, 12).getTime();
+	assert.deepEqual(client.buildFeedDaySections([{ id: '1', published: Math.floor(now / 1000) }], now).map((section: { key: string }) => section.key), ['today']);
+	assert.equal(client.kickerColorIndex('money-stuff'), 0);
+	assert.deepEqual(client.assignFolderColorIndices(['a', 'a']), assignFolderColorIndices(['a', 'a']));
 });

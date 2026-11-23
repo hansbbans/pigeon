@@ -5,12 +5,16 @@
 //   npm run visual:check -- --base-url <url>   # checks an already-running server
 //
 // Takes full-page screenshots at 375, 768 and 1280 px into visual-check/ and exits 1
-// on any console error, page error, failed request or non-2xx response.
+// on any console error, page error, failed request or non-2xx response. The
+// cards-* pages repeat the reader in the Cards look (pigeon.browser.look), in
+// light and dark: Home, a folder's cards, a smart view, a feed's day cards and an open story.
 //
 // Auth: when this script starts the Workers itself it gives them a throwaway
 // API_PASSWORD (and an empty env file, so .dev.vars is never read) plus a fresh,
-// empty local D1 in a temp directory. With --base-url, signed-in pages need the
-// password in PIGEON_API_PASSWORD; without it they are skipped with a message.
+// local D1 in a temp directory, seeded with a few made-up folders, feeds and
+// stories (seedSql) so the lists have something to draw. With --base-url,
+// signed-in pages need the password in PIGEON_API_PASSWORD; without it they are
+// skipped with a message.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -36,7 +40,17 @@ if (args.help) {
 	process.exit(0);
 }
 
-// Each page is a state of the single-page app at /. `auth` pages sign in first.
+// DOM clicks, once the target is there: on narrow widths the sidebar is off-screen.
+const clickFirst = (selector) => async (page) => {
+	await page.locator(selector).first().waitFor({ state: 'attached', timeout: 15000 });
+	await page.evaluate((target) => document.querySelector(target).click(), selector);
+};
+const openFolder = clickFirst('#folders-list .list-button[data-view-id="user/-/label/Newsletters"]');
+const cards = { 'pigeon.browser.look': 'cards' };
+const darkCards = { ...cards, 'pigeon.browser.theme': 'dark' };
+
+// Each page is a state of the single-page app at /. `auth` pages sign in first;
+// `storage` is put in localStorage before the app starts.
 const PAGES = [
 	{ name: 'login', auth: false, ready: '#login-screen:not(.hidden)' },
 	{ name: 'reader', auth: true, ready: '#reader-shell:not(.hidden)' },
@@ -48,6 +62,28 @@ const PAGES = [
 	{
 		name: 'library', auth: true, ready: '#library-panel:not(.hidden)',
 		open: (page) => page.evaluate(() => document.getElementById('library-button').click()),
+	},
+	{ name: 'cards-home', auth: true, storage: cards, ready: '#reader-grid[data-page="home"] .cards-home-folder' },
+	{ name: 'cards-home-dark', auth: true, storage: darkCards, ready: '#reader-grid[data-page="home"] .cards-home-folder' },
+	{ name: 'cards-folder', auth: true, storage: cards, open: openFolder, ready: '#articles-list.is-cards .cards-card.is-today .article-card' },
+	{ name: 'cards-folder-dark', auth: true, storage: darkCards, open: openFolder, ready: '#articles-list.is-cards .cards-card.is-today .article-card' },
+	{
+		name: 'cards-view', auth: true, storage: cards, ready: '#articles-list.is-cards .cards-card.is-flat .article-card',
+		open: clickFirst('#views-list .list-button[data-view-id="all"]'),
+	},
+	{
+		name: 'cards-feed', auth: true, storage: cards, ready: '#articles-list.is-cards .cards-card.is-earlier .article-card',
+		open: async (page) => {
+			await openFolder(page);
+			await clickFirst('.cards-card .article-feed-header-button')(page);
+		},
+	},
+	{
+		name: 'cards-story', auth: true, storage: cards, ready: '#reader-grid[data-mobile-pane="reader"] #reader-title:not(:empty)',
+		open: async (page) => {
+			await openFolder(page);
+			await clickFirst('.cards-card .article-card')(page);
+		},
 	},
 ];
 
@@ -105,6 +141,11 @@ async function main() {
 async function checkPage(browser, baseUrl, spec, width, password) {
 	const failures = [];
 	const context = await browser.newContext({ viewport: { width, height: HEIGHT } });
+	if (spec.storage) {
+		await context.addInitScript((entries) => {
+			for (const [key, value] of Object.entries(entries)) window.localStorage.setItem(key, value);
+		}, spec.storage);
+	}
 	const page = await context.newPage();
 	const origin = new URL(baseUrl).origin;
 	page.on('console', (msg) => {
@@ -136,7 +177,7 @@ async function checkPage(browser, baseUrl, spec, width, password) {
 			await page.locator('#reader-shell:not(.hidden)').waitFor({ timeout: 15000 });
 		}
 		if (spec.open) await spec.open(page);
-		await page.locator(spec.ready).waitFor({ timeout: 15000 });
+		await page.locator(spec.ready).first().waitFor({ timeout: 15000 });
 		await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 		file = join(OUT_DIR, `${spec.name}-${width}.png`);
 		await page.screenshot({ path: file, fullPage: true });
@@ -157,6 +198,9 @@ async function startLocalWorkers(password) {
 	const persist = join(tempDir, 'state');
 	// A brand-new D1 must be initialized from SCHEMA.sql; the Worker only migrates existing ones.
 	await run(resolve('node_modules/.bin/wrangler'), ['d1', 'execute', 'pigeon-db', '--local', '--persist-to', persist, '--config', 'wrangler.toml', '--file', '04-storage/SCHEMA.sql']);
+	const seedFile = join(tempDir, 'seed.sql');
+	writeFileSync(seedFile, seedSql(new Date()));
+	await run(resolve('node_modules/.bin/wrangler'), ['d1', 'execute', 'pigeon-db', '--local', '--persist-to', persist, '--config', 'wrangler.toml', '--file', seedFile]);
 	const [helperPort, mainPort, helperInspector, mainInspector] = await freePorts(4);
 	const common = ['--local', '--persist-to', persist, '--env-file', envFile, '--show-interactive-dev-session=false', '--ip', '127.0.0.1'];
 	startWorker('recommendations', ['dev', '--config', 'wrangler.recommendations.toml', ...common, '--port', String(helperPort), '--inspector-port', String(helperInspector)]);
@@ -165,6 +209,58 @@ async function startLocalWorkers(password) {
 	const baseUrl = `http://127.0.0.1:${mainPort}`;
 	await waitForHealth(baseUrl, 60000, true);
 	return baseUrl;
+}
+
+// Made-up newsletters in three folders and one on its own, with stories from
+// today back to last month, so folders show Today, Last 7 Days, feed cards and
+// Older, and a feed shows Today, Yesterday and Earlier. Email feeds, so the
+// local Worker never fetches anything.
+function seedSql(now) {
+	const quote = (value) => (value === null ? 'NULL' : `'${String(value).replace(/'/g, "''")}'`);
+	const feeds = [
+		['stratechery', 'Stratechery', 'Newsletters'],
+		['dense-discovery', 'Dense Discovery', 'Newsletters'],
+		['money-stuff', 'Money Stuff', 'Newsletters'],
+		['platformer', 'Platformer', 'Newsletters'],
+		['the-verge', 'The Verge', 'Technology'],
+		['six-colors', 'Six Colors', 'Technology'],
+		['sidebar-io', 'Sidebar', 'Design'],
+		['kottke', 'Kottke', null],
+	];
+	const hours = (count) => new Date(now.getTime() - count * 3_600_000).toISOString();
+	const stories = [
+		['stratechery', 'The Aggregator’s dilemma, revisited for an age of agents', 0.5],
+		['dense-discovery', 'Issue 312: Quiet tools, loud cities', 1],
+		['money-stuff', 'The bond market wants a word', 1.5],
+		['platformer', 'Inside the moderation team that runs on spreadsheets', 2],
+		['stratechery', 'An interview about chips, power and the next data centre', 3],
+		['money-stuff', 'Who owns the index?', 4],
+		['dense-discovery', 'A field guide to slower software', 26],
+		['stratechery', 'Why the platform shift is slower than it looks', 30],
+		['platformer', 'The week the feeds went quiet', 50],
+		['money-stuff', 'Private credit, public worries', 75],
+		['dense-discovery', 'Issue 311: Gardens and graphs', 120],
+		['stratechery', 'Integration and its discontents', 140],
+		['platformer', 'What the new rules mean for small forums', 260],
+		['the-verge', 'The best laptops for reading on a train', 2],
+		['six-colors', 'A week with the new tablet keyboard', 5],
+		['the-verge', 'Inside the lab testing tomorrow’s batteries', 28],
+		['six-colors', 'Mac shortcuts worth learning this year', 100],
+		['sidebar-io', 'Designing calmer tools for people who read every day', 3],
+		['sidebar-io', 'Type scales that survive dark mode', 400],
+		['kottke', 'A map of every lighthouse on the coast', 6],
+		['kottke', 'The slow art of repairing old clocks', 54],
+	];
+	const lines = [];
+	for (const [key, name, folder] of feeds) {
+		lines.push(`INSERT INTO feeds (feed_key, display_name, source_type, from_email) VALUES (${quote(key)}, ${quote(name)}, 'email', ${quote(key + '@example.com')});`);
+		if (folder) lines.push(`INSERT INTO feed_tags (feed_key, label) VALUES (${quote(key)}, ${quote(folder)});`);
+	}
+	stories.forEach(([key, subject, age], index) => {
+		const body = `<p>${subject}. A made-up story for the visual check.</p><p>${'The quick brown fox jumps over the lazy dog. '.repeat(30)}</p>`;
+		lines.push(`INSERT INTO items (id, feed_key, subject, html_content, text_content, received_at, is_read) VALUES (${quote('visual-' + index)}, ${quote(key)}, ${quote(subject)}, ${quote(body)}, ${quote(subject)}, ${quote(hours(age))}, ${index % 5 === 2 ? 1 : 0});`);
+	});
+	return lines.join('\n') + '\n';
 }
 
 function run(command, commandArgs) {

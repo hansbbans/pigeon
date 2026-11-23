@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Web: a Cards look, switched from the stream header or Settings → Look. It opens on a Home page of tiles; folders show their sections as cards, a feed shows Today, Yesterday and Earlier cards, and each story is a coloured feed name, a serif headline and one meta line. A story opens over the cards, and Back or Escape returns to them. Reeder stays the default.
+
 ### Changed
 
 - A feed's own `Cache-Control: max-age` now holds its next poll back by five hours at most, instead of a day, so a feed that overstates its freshness still shows new stories the same day.

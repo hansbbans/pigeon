@@ -40,6 +40,8 @@ const ICON_PATHS: Record<string, string> = {
 	"archive-filled": "F:<path d='M2 3m0 2a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v0a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z' /> <path d='M19 9c.513 0 .936 .386 .993 .883l.007 .117v8a3 3 0 0 1 -2.824 2.995l-.176 .005h-10a3 3 0 0 1 -2.995 -2.824l-.005 -.176v-8a1 1 0 0 1 .883 -.993l.117 -.007h14zm-5 2h-4l-.117 .007a1 1 0 0 0 0 1.986l.117 .007h4l.117 -.007a1 1 0 0 0 0 -1.986l-.117 -.007z' />",
 	trash: "<path d='M4 7l16 0' /> <path d='M10 11l0 6' /> <path d='M14 11l0 6' /> <path d='M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12' /> <path d='M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3' />",
 	transcript: "<path d='M3 7a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10' /> <path d='M10 10.5a1.5 1.5 0 0 0 -3 0v3a1.5 1.5 0 0 0 3 0' /> <path d='M17 10.5a1.5 1.5 0 0 0 -3 0v3a1.5 1.5 0 0 0 3 0' />",
+	cards: "<path d='M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' />",
+	home: "<path d='M5 12l-2 0l9 -9l9 9l-2 0' /> <path d='M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7' /> <path d='M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6' />",
 	link: "<path d='M9 15l6 -6' /> <path d='M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464' /> <path d='M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463' />",
 };
 
@@ -81,6 +83,17 @@ export function renderBrowserAppStyles(): string {
         --star: #e3a008;
         --danger: #c4382b;
         --frame: #ffffff;
+        /* Cards look: white tiles on the grouped grey, bars and kickers from the iOS palette. */
+        --grouped: #f2f2f7;
+        --tile: #ffffff;
+        --kicker-1: #b3261e;
+        --kicker-2: #1f6f6a;
+        --kicker-3: #3a5ba0;
+        --kicker-4: #8a5a00;
+        --kicker-5: #6a57c9;
+        --kicker-6: #2e7d32;
+        --kicker-7: #a2386b;
+        --kicker-8: #5d4037;
         --scrim: rgba(0, 0, 0, 0.18);
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 12px 40px rgba(0, 0, 0, 0.12);
         --radius: 8px;
@@ -110,6 +123,16 @@ ${iconVariables()}
         --star: #f0b429;
         --danger: #ff8a7a;
         --frame: #1f1f21;
+        --grouped: #141416;
+        --tile: #1f1f21;
+        --kicker-1: #ff8a80;
+        --kicker-2: #6fd6cc;
+        --kicker-3: #9db6ff;
+        --kicker-4: #f2c14e;
+        --kicker-5: #bcaeff;
+        --kicker-6: #8bd48f;
+        --kicker-7: #f59ac4;
+        --kicker-8: #d7b8a8;
         --scrim: rgba(0, 0, 0, 0.45);
         --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 48px rgba(0, 0, 0, 0.5);
       }
@@ -259,6 +282,7 @@ ${iconVariables()}
       [data-icon="trash"] { --icon: var(--icon-trash); }
       [data-icon="link"] { --icon: var(--icon-link); }
       [data-icon="transcript"] { --icon: var(--icon-transcript); }
+      [data-icon="cards"] { --icon: var(--icon-cards); }
 
       #mark-unread-button[data-read="true"] { --icon: var(--icon-check-filled); color: var(--text-secondary); }
       #mark-unread-button[data-icon="archive"][data-read="true"] { --icon: var(--icon-archive-filled); }
@@ -466,6 +490,7 @@ ${iconVariables()}
       .list-button[data-view-kind="starred"] { --icon: var(--icon-star); }
       .list-button[data-view-kind="saved"] { --icon: var(--icon-bookmark); }
       .list-button[data-view-kind="recommended"] { --icon: var(--icon-sparkle); }
+      .list-button[data-view-kind="home"] { --icon: var(--icon-home); }
 
       .feed-count {
         flex: none;
@@ -1114,6 +1139,180 @@ ${iconVariables()}
       #close-image-zoom { position: fixed; top: 0.75rem; right: 0.75rem; color: #fff; border-color: rgba(255, 255, 255, 0.3); }
       #zoom-image { display: block; max-width: 100%; max-height: 88vh; margin: auto; }
 
+      /* Cards look (data-look="cards" on .reader-grid): the sidebar, then one page
+         that shows the cards of a list or the open story over them, never both.
+         data-page says what the page holds: home (the tiles), cards, or list
+         (Read It Later keeps its own rows). */
+      #look-toggle-button[aria-pressed="true"] { background: var(--sidebar-selected); color: var(--text); }
+      #page-sidebar-toggle-button { display: none; }
+
+      .reader-grid[data-look="cards"] #articles-panel { background: var(--grouped); }
+      .reader-grid[data-look="cards"][data-page="list"] #articles-panel { background: var(--list); }
+      .reader-grid[data-look="cards"] .stream-header { width: 100%; max-width: calc(960px + 3.5rem); margin: 0 auto; padding: 0 1.1rem 0 1.75rem; }
+      .reader-grid[data-look="cards"] .stream-title-row { height: 4rem; }
+      .reader-grid[data-look="cards"] #articles-heading {
+        font-family: var(--reading-font);
+        font-size: 1.65rem;
+        font-style: italic;
+        font-weight: 400;
+        letter-spacing: 0;
+        line-height: 1.2;
+      }
+      .reader-grid[data-look="cards"] #articles-list-shell { border-top: 0; }
+      .reader-grid[data-look="cards"][data-page="list"] #articles-list { max-width: 46rem; margin: 0 auto; }
+      .reader-grid[data-look="cards"][data-page="home"] :is(#articles-list-shell, #article-page-controls, .article-query-controls, #saved-filters,
+        #mark-all-as-read-button, #search-button, #article-options-menu, #articles-status) { display: none !important; }
+
+      /* The back button names the list ("‹ Newsletters"). */
+      .reader-grid[data-look="cards"] #reader-back-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.1rem;
+        width: auto;
+        max-width: 18rem;
+        overflow: hidden;
+        padding: 0 0.6rem 0 0.15rem;
+        color: var(--accent);
+        font-size: 0.875rem;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
+      #articles-list.is-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+        gap: 14px;
+        align-items: start;
+        max-width: calc(960px + 3.5rem);
+        margin: 0 auto;
+        padding: 0.25rem 1.75rem 1.75rem;
+      }
+      #articles-list.is-cards > li::before { content: none; }
+
+      .cards-card { position: relative; min-width: 0; overflow: hidden; padding: 0.8rem 0.4rem 0.4rem; border-radius: 12px; background: var(--tile); }
+      .cards-card::after { content: ""; position: absolute; top: 0; right: 0; left: 0; height: 3px; background: var(--bar, transparent); }
+      .cards-card.is-wide { grid-column: 1 / -1; }
+      .cards-card.is-flat { padding-top: 0.4rem; }
+      /* Today flows two columns when the page has room for them. */
+      .cards-card.is-today.is-wide .cards-card-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(var(--rows, 1), auto); grid-auto-flow: column; column-gap: 1.5rem; }
+      .cards-card-list > li.is-column-start::before { display: none; }
+      .cards-card-list > li { position: relative; break-inside: avoid; }
+      .cards-card-list > li + li::before { content: ""; position: absolute; top: 0; right: 0.6rem; left: 0.6rem; border-top: 1px solid var(--hairline); }
+      .cards-card-list > li:has(> .is-active)::before,
+      .cards-card-list > li:has(> .is-active) + li::before { visibility: hidden; }
+
+      .cards-card > .article-feed-header {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-width: 0;
+        padding: 0.1rem 0.6rem 0.35rem;
+        color: var(--bar, var(--text-secondary));
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+      .cards-card .article-feed-header-button { flex: 1 1 auto; }
+      .cards-card .article-feed-header-button::after {
+        content: "";
+        width: 10px;
+        height: 10px;
+        flex: none;
+        margin-left: auto;
+        background: var(--muted);
+        -webkit-mask: var(--icon-chevron) center / contain no-repeat;
+        mask: var(--icon-chevron) center / contain no-repeat;
+      }
+      @media (hover: hover) { .cards-card .article-feed-header-button:hover { background: var(--hover); color: inherit; } }
+      #articles-list.is-cards > li.article-feed-header,
+      #articles-list.is-cards > li.article-feed-header.is-older-header { grid-column: 1 / -1; padding: 0.9rem 0.25rem 0; }
+      .cards-card .article-more-button { padding: 0.35rem 0.6rem 0.3rem; }
+
+      .is-cards .article-card { padding: 0.6rem 0.6rem 0.65rem; border-radius: 8px; }
+      .is-cards .article-card.is-active, .is-cards .article-card.is-active:hover { background: var(--accent-soft); }
+      .is-cards .article-card-copy { gap: 0; }
+      .article-kicker {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        margin-bottom: 0.3rem;
+        color: var(--kicker, var(--muted));
+        font-size: 0.64rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        line-height: 1.15;
+        text-overflow: ellipsis;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      /* Read and unread differ by weight and colour, never by shape. */
+      .is-cards .article-title { font-family: var(--reading-font); font-size: 1.04rem; font-weight: 500; line-height: 1.28; letter-spacing: 0; }
+      .is-cards .article-card.is-read .article-title { font-weight: 400; }
+      .is-cards .article-meta { order: 0; gap: 0; margin-top: 0.3rem; }
+      .is-cards .article-meta > span { margin-left: 0; }
+      .is-cards .article-meta > span + span::before { content: '·'; margin: 0 0.4rem; }
+      .is-cards .article-star { position: static; display: inline-block; margin-right: 0.35rem; vertical-align: 0.05em; }
+
+      /* Home: a tile per view, then a tile per folder. */
+      .cards-home { flex: 1 1 auto; min-height: 0; overflow: auto; }
+      .cards-home-inner { max-width: calc(960px + 3.5rem); margin: 0 auto; padding: 0.25rem 1.75rem 1.75rem; }
+      .cards-home-dateline { margin: 0 0 0.85rem; color: var(--muted); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+      .cards-home-views { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: 12px; margin-bottom: 16px; }
+      .cards-home-folders { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 12px; }
+      .cards-home-views > li, .cards-home-folders > li { display: flex; min-width: 0; }
+      .cards-home-tile, .cards-home-folder {
+        width: 100%;
+        border: 1px solid transparent;
+        border-radius: 12px;
+        background: var(--tile);
+        color: var(--text);
+        text-align: left;
+      }
+      @media (hover: hover) { .cards-home-tile:hover, .cards-home-folder:hover { background: var(--tile); border-color: var(--border); } }
+      .cards-home-tile { height: 5rem; display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; padding: 0.8rem 0.9rem; }
+      .cards-home-tile-icon {
+        width: 18px;
+        height: 18px;
+        background: var(--text-secondary);
+        -webkit-mask: var(--icon) center / contain no-repeat;
+        mask: var(--icon) center / contain no-repeat;
+      }
+      .cards-home-tile[data-view-kind="recommended"] { --icon: var(--icon-sparkle); }
+      .cards-home-tile[data-view-kind="starred"] { --icon: var(--icon-star); }
+      .cards-home-tile[data-view-kind="saved"] { --icon: var(--icon-bookmark); }
+      .cards-home-tile[data-view-kind="today"] { --icon: var(--icon-today); }
+      .cards-home-tile[data-view-kind="last-7-days"] { --icon: var(--icon-week); }
+      .cards-home-tile-title { font-size: 0.9rem; font-weight: 600; }
+      .cards-home-folder { position: relative; min-height: 9.5rem; display: flex; flex-direction: column; gap: 0.75rem; overflow: hidden; padding: 1rem 0.9rem 0.85rem; }
+      .cards-home-folder::before { content: ""; position: absolute; top: 0; right: 0; left: 0; height: 3px; background: var(--bar); }
+      .cards-home-folder-name { color: var(--bar); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+      .cards-home-folder-feeds { display: grid; gap: 0.45rem; }
+      .cards-home-folder-feed { display: flex; align-items: center; gap: 0.5rem; min-width: 0; color: var(--text-secondary); font-family: var(--reading-font); font-size: 0.95rem; }
+      .cards-home-folder-feed-title { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+      .feed-icon.is-placeholder {
+        display: inline-block;
+        background: var(--muted);
+        -webkit-mask: var(--icon-rss) center / 12px no-repeat;
+        mask: var(--icon-rss) center / 12px no-repeat;
+      }
+
+      /* Wider than a phone: the page takes the list's and the reader's columns. */
+      @media (min-width: 761px) {
+        .reader-grid[data-look="cards"] {
+          grid-template-columns: minmax(14rem, var(--sidebar-column-width)) 0 minmax(0, 1fr);
+          grid-template-areas: "sidebar sidebar-resizer page";
+        }
+        .reader-grid[data-look="cards"].is-sidebar-collapsed { grid-template-columns: 0 0 minmax(0, 1fr); }
+        .reader-grid[data-look="cards"] #articles-panel,
+        .reader-grid[data-look="cards"] #reader-panel { grid-area: page; border-right: 0; }
+        .reader-grid[data-look="cards"] #stream-column-resizer { display: none; }
+        /* Hidden, not removed, so the cards keep their scroll position under a story. */
+        .reader-grid[data-look="cards"][data-mobile-pane="reader"] #articles-panel,
+        .reader-grid[data-look="cards"]:not([data-mobile-pane="reader"]) #reader-panel { visibility: hidden; }
+        .reader-grid[data-look="cards"] #page-sidebar-toggle-button { display: inline-grid; margin: 0 0.35rem 0 -0.55rem; }
+      }
+
       /* Narrow windows: one column at a time, like the iPhone app. */
       @media (max-width: 760px) {
         .reader-grid, .reader-grid.is-sidebar-collapsed {
@@ -1138,6 +1337,16 @@ ${iconVariables()}
 
         .reader-copy { padding: 1rem 24px 0; }
         .sheet, #library-panel { width: 100vw; border-left: 0; }
+
+        .reader-grid[data-look="cards"] .stream-header { padding: 0 0.6rem 0 1.4rem; }
+        #articles-list.is-cards { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 0.25rem 0.75rem 1rem; }
+        .cards-card.is-today.is-wide .cards-card-list { display: block; }
+        .cards-card-list > li.is-column-start::before { display: block; }
+        .reader-grid[data-look="cards"] #articles-status { display: none; }
+        .cards-home-inner { padding: 0.25rem 0.75rem 1rem; }
+        .cards-home-views { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .cards-home-folder { min-height: 0; }
+        .reader-grid[data-look="cards"] #articles-heading { font-size: 1.35rem; }
       }
 `;
 }

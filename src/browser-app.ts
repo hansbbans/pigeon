@@ -132,6 +132,12 @@ ${renderBrowserAppStyles()}
               </div>
 
               <div class="sidebar-scroll">
+                <section class="sidebar-section" id="home-section" aria-label="Home">
+                  <div class="list-shell">
+                    <ul class="list-reset" id="home-list"></ul>
+                  </div>
+                </section>
+
                 <section class="sidebar-section" id="real-views-section">
                   <div class="pane-header">
                     <h2>Views</h2>
@@ -188,6 +194,7 @@ ${renderBrowserAppStyles()}
               <div class="stream-header">
                 <div class="stream-title-row article-pane-heading">
                   <button class="icon-button" id="stream-back-button" type="button" data-icon="back" title="Feeds">Feeds</button>
+                  <button class="icon-button" id="page-sidebar-toggle-button" type="button" data-icon="sidebar" title="Hide sidebar" aria-controls="feeds-panel" aria-expanded="true">Toggle sidebar</button>
                   <div class="sidebar-current">
                     <strong id="articles-heading" tabindex="-1">All items</strong>
                     <p class="status-meta" id="articles-status" role="status" aria-live="polite">Choose a feed to load article previews.</p>
@@ -201,6 +208,7 @@ ${renderBrowserAppStyles()}
                     aria-label="Mark all items in the selected feed or folder as read"
                   >Mark all as read</button>
                   <button class="icon-button" id="search-button" type="button" data-icon="search" title="Search" aria-label="Search" aria-expanded="false" aria-controls="article-query-form">Search</button>
+                  <button class="icon-button" id="look-toggle-button" type="button" data-icon="cards" title="Cards look" aria-pressed="false">Cards look</button>
                   <details class="menu" id="article-options-menu">
                     <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
                     <div class="menu-panel">
@@ -239,6 +247,7 @@ ${renderBrowserAppStyles()}
                 <button id="article-newer-button" type="button" class="secondary-button">Newer</button>
                 <button id="article-older-button" type="button" class="secondary-button">Older</button>
               </div>
+              <div class="cards-home hidden" id="cards-home" role="region" aria-label="Home"></div>
               <div class="list-shell" id="articles-list-shell">
                 <ul class="list-reset" id="articles-list"></ul>
                 <button class="secondary-button hidden" id="load-more-button" type="button">Load More</button>
@@ -337,6 +346,10 @@ ${renderBrowserAppStyles()}
           <div class="settings-row">
             <label for="app-theme-select">Appearance</label>
             <select id="app-theme-select"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          </div>
+          <div class="settings-row">
+            <label for="look-select">Look</label>
+            <select id="look-select"><option value="reeder">Reeder</option><option value="cards">Cards</option></select>
           </div>
           <div class="settings-row">
             <label for="auto-read-select">Mark articles read</label>
@@ -459,6 +472,12 @@ export function renderBrowserAppRuntimeScript(): string {
   const readerCopy = document.getElementById('reader-copy');
   const readerScroll = document.getElementById('reader-scroll');
   const popoverMenus = [document.getElementById('article-options-menu'), document.getElementById('article-actions-menu')];
+  const lookStorageKey = 'pigeon.browser.look';
+  const homeList = document.getElementById('home-list');
+  const cardsHome = document.getElementById('cards-home');
+  const lookToggleButton = document.getElementById('look-toggle-button');
+  const lookSelect = document.getElementById('look-select');
+  const pageSidebarToggleButton = document.getElementById('page-sidebar-toggle-button');
   const sidebarCollapsedStorageKey = 'pigeon.browser.sidebar-collapsed';
   const appThemeSelect = document.getElementById('app-theme-select');
   const articleQueryForm = document.getElementById('article-query-form');
@@ -510,6 +529,14 @@ export function renderBrowserAppRuntimeScript(): string {
   let inFlightUnreadCountRequest = null;
   let activeItemIdsPageRequest = null;
   let activeViewId = 'all';
+  // The look: 'reeder' (sidebar, list and reader side by side) or 'cards' (the
+  // sidebar and one page: the cards of a list, or the open story over them).
+  let look = 'reeder';
+  // Cards only: Home, the tile page, shows in place of the list. It is not a view.
+  let cardsHomeShown = false;
+  // Cards: the list and scroll position the cards had when a story opened over them.
+  let cardsScrollMemory = null;
+  let folderColorCache = { views: null, indices: new Map() };
   let pendingNotificationAction=null;
   let offlineLibrary=null; let offlineOpening=null; let offlineSession=false; let offlineBusy=false; let offlineQueuedCount=0; let notificationPanel=null;
   const offlineStatus=document.getElementById('offline-status');
@@ -1072,6 +1099,184 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReader();
   }
 
+  function normalizeLook(value) {
+    return value === 'cards' ? 'cards' : 'reeder';
+  }
+
+  function getStoredLook() {
+    try {
+      return normalizeLook(window.localStorage.getItem(lookStorageKey));
+    } catch (_error) {
+      return 'reeder';
+    }
+  }
+
+  function setStoredLook(nextLook) {
+    try {
+      window.localStorage.setItem(lookStorageKey, normalizeLook(nextLook));
+    } catch (_error) {
+      // Ignore storage failures and keep the in-memory look.
+    }
+  }
+
+  function isCardsLook() {
+    return look === 'cards';
+  }
+
+  // Cards shows the cards or the open story, never both.
+  function isCardsStoryOpen() {
+    return isCardsLook() && readerGrid.getAttribute('data-mobile-pane') === 'reader';
+  }
+
+  // Whether the reader can be seen: in Cards only while a story is open over the cards.
+  function isReaderPaneOnScreen() {
+    return !isCardsLook() || isCardsStoryOpen();
+  }
+
+  // Whether the list's rows can be seen: not under Home or an open story in Cards.
+  function isArticleListOnScreen() {
+    return !isCardsLook() || (!cardsHomeShown && !isCardsStoryOpen());
+  }
+
+  function applyLook(nextLook) {
+    look = normalizeLook(nextLook);
+    readerGrid.setAttribute('data-look', look);
+    lookToggleButton.setAttribute('aria-pressed', isCardsLook() ? 'true' : 'false');
+    lookSelect.value = look;
+    if (!isCardsLook()) cardsHomeShown = false;
+    cardsScrollMemory = null;
+    renderReaderBackButton();
+  }
+
+  // Switching keeps the open view and story: only the containers change.
+  function changeLook(nextLook) {
+    if (normalizeLook(nextLook) === look) return;
+    setStoredLook(nextLook);
+    applyLook(nextLook);
+    renderFeeds();
+    renderArticles();
+    renderReader();
+  }
+
+  // In Cards the back button names the list the story came from.
+  function renderReaderBackButton() {
+    const title = isCardsLook() ? getActiveView()?.title || 'Articles' : 'Articles';
+    readerBackButton.textContent = title;
+    readerBackButton.setAttribute('title', isCardsLook() ? 'Back to ' + title : 'Articles');
+  }
+
+  // Back from a story in Cards: the cards come back where they were scrolled.
+  function returnToCards() {
+    const memory = cardsScrollMemory;
+    cardsScrollMemory = null;
+    setMobilePane('stream', false);
+    if (memory && memory.identity === renderedArticleListIdentity) restoreArticleScrollTop(memory.scrollTop);
+    const card = findArticleRowButton(selectedItemId, getSelectedCopyKey());
+    if (card && typeof card.focus === 'function') card.focus();
+    else if (typeof articlesHeading.focus === 'function') articlesHeading.focus();
+  }
+
+  // Each folder's colour: assigned over every folder so they do not share one.
+  function getFolderColorIndex(folderId) {
+    if (folderColorCache.views !== views) {
+      const ids = getFolderViews().map((view) => view.id);
+      const indices = client.assignFolderColorIndices(ids);
+      folderColorCache = { views, indices: new Map(ids.map((id, index) => [id, indices[index]])) };
+    }
+    return folderColorCache.indices.get(folderId) ?? client.kickerColorIndex(folderId);
+  }
+
+  function kickerColor(index) {
+    return 'var(--kicker-' + (index + 1) + ')';
+  }
+
+  // A list's card bar: a folder's colour, a feed's folder's colour (its own
+  // outside any folder). Smart views have none.
+  function getCardBarColor(view) {
+    if (view?.kind === 'folder') return kickerColor(getFolderColorIndex(view.id));
+    if (view?.kind === 'feed') return kickerColor(view.parentId ? getFolderColorIndex(view.parentId) : client.kickerColorIndex(view.streamId));
+    return null;
+  }
+
+  function showCardsHome() {
+    if (!isCardsLook()) return;
+    cardsHomeShown = true;
+    cardsScrollMemory = null;
+    setMobilePane('stream', false);
+    renderFeeds();
+    renderArticles();
+  }
+
+  // Home: a tile per view (as on iOS, Unread and All items get none), then a
+  // tile per folder with its first feeds. No counts: the sidebar has them.
+  function renderCardsHome() {
+    const shown = isCardsLook() && cardsHomeShown;
+    cardsHome.classList.toggle('hidden', !shown);
+    clearElement(cardsHome);
+    if (!shown) return;
+    const inner = createNode('div', { classNames: ['cards-home-inner'] });
+    const today = views.find((view) => view.kind === 'today');
+    const dateline = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
+      (today?.unreadCount > 0 ? ' · ' + today.unreadCount + ' new' : '');
+    inner.appendChild(createNode('p', { classNames: ['cards-home-dateline'], text: dateline }));
+    const viewTiles = createNode('ul', { classNames: ['list-reset', 'cards-home-views'], attributes: { 'aria-label': 'Views' } });
+    for (const kind of ['recommended', 'starred', 'saved', 'today', 'last-7-days']) {
+      const view = views.find((candidate) => candidate.kind === kind);
+      if (!view) continue;
+      const tile = createNode('button', { classNames: ['cards-home-tile'], attributes: { type: 'button', 'data-view-id': view.id, 'data-view-kind': view.kind } });
+      tile.appendChild(createNode('span', { classNames: ['cards-home-tile-icon'], attributes: { 'aria-hidden': 'true' } }));
+      tile.appendChild(createNode('span', { classNames: ['cards-home-tile-title'], text: view.title }));
+      tile.addEventListener('click', () => { void selectView(view.id); });
+      const item = createNode('li');
+      item.appendChild(tile);
+      viewTiles.appendChild(item);
+    }
+    inner.appendChild(viewTiles);
+    const folderViews = getFolderViews();
+    if (folderViews.length > 0) {
+      const folderTiles = createNode('ul', { classNames: ['list-reset', 'cards-home-folders'], attributes: { 'aria-label': 'Folders' } });
+      for (const folderView of folderViews) {
+        const tile = createNode('button', { classNames: ['cards-home-folder'], attributes: { type: 'button', 'data-view-id': folderView.id, 'data-view-kind': 'folder' } });
+        tile.style.setProperty('--bar', kickerColor(getFolderColorIndex(folderView.id)));
+        tile.appendChild(createNode('span', { classNames: ['cards-home-folder-name'], text: folderView.title }));
+        const feeds = createNode('span', { classNames: ['cards-home-folder-feeds'] });
+        for (const feedView of getChildFeedViews(folderView.id).slice(0, 4)) {
+          const feed = createNode('span', { classNames: ['cards-home-folder-feed'] });
+          if (feedView.iconUrl) feed.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: feedView.iconUrl, alt: '', width: '16', height: '16', loading: 'lazy' } }));
+          else feed.appendChild(createNode('span', { classNames: ['feed-icon', 'is-placeholder'], attributes: { 'aria-hidden': 'true' } }));
+          feed.appendChild(createNode('span', { classNames: ['cards-home-folder-feed-title'], text: feedView.title }));
+          feeds.appendChild(feed);
+        }
+        tile.appendChild(feeds);
+        tile.addEventListener('click', () => { void selectView(folderView.id); });
+        const item = createNode('li');
+        item.appendChild(tile);
+        folderTiles.appendChild(item);
+      }
+      inner.appendChild(folderTiles);
+    }
+    cardsHome.appendChild(inner);
+  }
+
+  // The sidebar's Home row, in Cards only.
+  function renderHomeRow() {
+    clearElement(homeList);
+    if (!isCardsLook() || views.length === 0) return;
+    const button = createNode('button', {
+      classNames: ['list-button', cardsHomeShown ? 'is-active' : ''],
+      attributes: { type: 'button', 'data-view-kind': 'home', 'data-home': 'true', ...(cardsHomeShown ? { 'aria-current': 'page' } : {}) },
+    });
+    const row = createNode('span', { classNames: ['feed-row'] });
+    const titleGroup = createNode('span', { classNames: ['feed-title-line'] });
+    titleGroup.appendChild(createNode('span', { classNames: ['feed-title'], text: 'Home' }));
+    row.appendChild(titleGroup);
+    button.appendChild(row);
+    button.addEventListener('click', showCardsHome);
+    const item = createNode('li');
+    item.appendChild(button);
+    homeList.appendChild(item);
+  }
+
   function startValidation() {
     activeValidationId += 1;
     return activeValidationId;
@@ -1111,8 +1316,13 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function getListSortOrder(view) {
     if (view?.kind === 'recommended') return recommendationSort;
-    // A folder's sections are its order; its stories load newest first.
-    return view?.kind === 'folder' ? 'newest' : articleSortOrder;
+    return isSectionedList(view) ? 'newest' : articleSortOrder;
+  }
+
+  // A folder's sections, and in Cards a feed's days, are its order: it has no
+  // Sort control and its stories load newest first.
+  function isSectionedList(view) {
+    return view?.kind === 'folder' || (view?.kind === 'feed' && isCardsLook());
   }
 
   function getViewQueryKey(viewId) {
@@ -1584,7 +1794,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function sampleImpressions(now) {
     const logView = client.readingLogView(getActiveView(), Boolean(articleSearchQuery));
     const container = getArticleScrollContainer();
-    if (!logView || session.status !== 'authenticated' || document.visibilityState === 'hidden' ||
+    if (!logView || session.status !== 'authenticated' || document.visibilityState === 'hidden' || !isArticleListOnScreen() ||
         !container || typeof container.getBoundingClientRect !== 'function') {
       if (impressionSession) impressionSession.since = {};
       return;
@@ -1620,10 +1830,12 @@ export function renderBrowserAppRuntimeScript(): string {
     if (typeof recommendation?.rank === 'number') metadata.rank = recommendation.rank;
     // Position says nothing about the ranker once the reader re-sorts For You.
     if (logView.view === 'for-you' && recommendationSort !== 'recommended') metadata.sort = recommendationSort;
-    // Compact read rows are shorter, so more fit on screen: mark them so the
-    // report can keep row shape apart from reading behaviour.
+    // Compact read rows are shorter, so more fit on screen, and Cards lays
+    // stories out in cards: mark both so the report can keep row shape apart
+    // from reading behaviour.
     const rendered = renderedArticleCards.find((candidate) => candidate.id === card.id);
     if (rendered?.node.classList.contains('is-compact')) metadata.row = 'compact';
+    else if (rendered?.card) metadata.row = 'card';
     // In a folder: the section that showed the story first.
     if (rendered?.section) metadata.section = rendered.section;
     pendingImpressions.push({
@@ -1649,7 +1861,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function isReadingOpenedArticle() {
     const openedId = readingMeter.itemId();
     if (!openedId || openedId !== selectedItemId || readyReaderItemId !== openedId ||
-        document.visibilityState === 'hidden' || !isReaderVisible()) return false;
+        document.visibilityState === 'hidden' || !isReaderVisible() || !isReaderPaneOnScreen()) return false;
     // On a phone the reader pane is display:none while the list is showing.
     const rect = typeof readerScroll.getBoundingClientRect === 'function' ? readerScroll.getBoundingClientRect() : null;
     return !rect || (rect.width > 0 && rect.height > 0);
@@ -2408,7 +2620,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // The order j and k walk: the list as shown, each story once. In a folder
   // that is the first appearance of each story across its sections.
   function getNavigableItemIds() {
-    return getFolderSectionLayout()?.order || getVisibleItemIds();
+    return getSectionLayout()?.order || getVisibleItemIds();
   }
 
   async function loadAdjacentKeyboardArticle() {
@@ -2462,6 +2674,14 @@ export function renderBrowserAppRuntimeScript(): string {
   function handleArticleNavigationKeydown(event) {
     readingMeter.interact(Date.now());
     if (!libraryPanel.classList.contains('hidden') || !settingsPanel.classList.contains('hidden')) return false;
+    // Escape closes a story open over the cards.
+    if (event.key === 'Escape' && isCardsStoryOpen() && isReaderVisible() && !isEditableTarget(event.target)) {
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      returnToCards();
+      return true;
+    }
+    // Home has no stories to step through.
+    if (isCardsLook() && cardsHomeShown) return false;
     const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
     const shortcuts = readingPreferences?.shortcuts || {next:'j',previous:'k',read:'m',star:'s'};
     if ((key === shortcuts.read || key === shortcuts.star) && !event.metaKey && !event.ctrlKey && !event.altKey &&
@@ -2603,6 +2823,8 @@ export function renderBrowserAppRuntimeScript(): string {
     flushReadingLog();
     activeLoginAttemptId += 1;
     setMobilePane('stream');
+    // Cards starts on Home after the next sign-in, as on a page load.
+    cardsHomeShown = isCardsLook();
     setSearchOpen(false);
     clearAccountCache();
     session = client.applyUnauthorizedState(session);
@@ -2653,7 +2875,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function createViewButton(view, extraClassNames) {
     const button = createNode('button', {
-      classNames: ['list-button', view.id === activeViewId ? 'is-active' : ''].concat(extraClassNames || []),
+      classNames: ['list-button', view.id === activeViewId && !(isCardsLook() && cardsHomeShown) ? 'is-active' : ''].concat(extraClassNames || []),
       attributes: {
         type: 'button',
         'data-view-id': view.id,
@@ -2795,7 +3017,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
     sidebarCurrentTitle.textContent = activeView.title;
     sidebarCurrentMeta.textContent = summaryParts.join(' · ') || 'Choose a stream to load article previews.';
-    articlesHeading.textContent = activeView.title;
+    articlesHeading.textContent = isCardsLook() && cardsHomeShown ? 'Home' : activeView.title;
+    renderReaderBackButton();
     renderMarkAllAsReadAction();
   }
 
@@ -2805,6 +3028,8 @@ export function renderBrowserAppRuntimeScript(): string {
     clearElement(foldersList);
     clearElement(feedsList);
     renderSidebarSummary();
+    renderHomeRow();
+    renderCardsHome();
 
     if (views.length === 0) {
       foldersStatus.textContent = 'Tagged feeds appear here.';
@@ -2843,7 +3068,7 @@ export function renderBrowserAppRuntimeScript(): string {
     for (const option of articleSortSelect.querySelectorAll('option')) {
       option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     }
-    articleSortField.classList.toggle('hidden', view?.kind === 'folder');
+    articleSortField.classList.toggle('hidden', isSectionedList(view));
     articleSortSelect.value = getListSortOrder(view);
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
@@ -2863,7 +3088,7 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
     if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(sort) ? sort : 'recommended';
-    else if (currentView?.kind !== 'folder') articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
+    else if (!isSectionedList(currentView)) articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
     heldReaderArticle = null;
     articleQueryStatus.textContent = query ? 'Searching ' + currentView.title + ' for “' + articleSearchQuery + '”.' : '';
     await loadActiveView();
@@ -2911,6 +3136,11 @@ export function renderBrowserAppRuntimeScript(): string {
     renderedArticleListIdentity = listIdentity;
     clearElement(articlesList);
     renderedArticleCards = [];
+    // Cards draws every list but Read It Later as cards on the grouped page.
+    const savedView = isSavedView();
+    const cardsMode = isCardsLook() && !savedView;
+    articlesList.classList.toggle('is-cards', cardsMode);
+    readerGrid.setAttribute('data-page', isCardsLook() && cardsHomeShown ? 'home' : cardsMode ? 'cards' : 'list');
 
     if (entries.length === 0) {
       const activeView = getActiveView();
@@ -2928,26 +3158,26 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
-    const savedView = isSavedView();
     articlesStatus.textContent = entries.length + (savedView ? ' saved item' : ' article') + (entries.length === 1 ? '' : 's');
     const listKey = getViewQueryKey(activeViewId);
     if (!fullRowIdsByList.has(listKey)) fullRowIdsByList.set(listKey, new Set());
     const fullRowIds = fullRowIdsByList.get(listKey);
     const windowStart = getViewState(activeViewId, false)?.windowStart || 0;
-    const folderLayout = getFolderSectionLayout(visibleItemIds);
+    const folderLayout = getSectionLayout(visibleItemIds);
     // A folder highlights the copy the reader clicked, or every copy of a story
     // chosen from the keyboard.
     const chosenKey = folderLayout ? getSelectedCopyKey() : null;
     const selectedRowKey = chosenKey && folderLayout.rows.some((row) => row.id === selectedItemId && row.key === chosenKey) ? chosenKey : null;
     // One row per story shown; a story in two folder sections gets two rows,
     // both with its id and its first position.
-    const appendArticleRow = (entry, row) => {
+    // In Cards a row goes into its card's list; a card row never turns compact.
+    const appendArticleRow = (entry, row, container = articlesList) => {
       const article = loadedItemsById[entry.id];
       const isRead = getArticleState(article, 'read');
       const isStarred = getArticleState(article, 'starred');
-      const isCompact = !savedView && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
+      const isCompact = !savedView && !cardsMode && isRead && entry.id !== selectedItemId && !fullRowIds.has(entry.id);
       // Only a loaded row counts as shown: a placeholder has no read state yet.
-      if (article && !savedView && !isCompact) fullRowIds.add(entry.id);
+      if (article && !savedView && !cardsMode && !isCompact) fullRowIds.add(entry.id);
       const listItem = createNode('li', row.sectionKey ? { attributes: { 'data-row-key': row.sectionKey + ':' + entry.id } } : undefined);
       const button = createNode('button', {
         classNames: [
@@ -2964,16 +3194,26 @@ export function renderBrowserAppRuntimeScript(): string {
           'data-starred': isStarred ? 'true' : 'false',
         },
       });
-      renderedArticleCards.push({ id: entry.id, node: button, position: row.position, ...(row.section ? { section: row.section } : {}) });
+      renderedArticleCards.push({ id: entry.id, node: button, position: row.position,
+        ...(row.section ? { section: row.section } : {}), ...(cardsMode ? { card: true } : {}) });
       button.addEventListener('click', () => {
+        if (isCardsLook() && !isCardsStoryOpen()) cardsScrollMemory = { identity: renderedArticleListIdentity, scrollTop: getArticleScrollTop() };
         setMobilePane('reader', true);
         void selectArticle(entry.id, row.sectionKey ? { sectionKey: row.sectionKey } : undefined);
+        // The story may already sit in the hidden reader (Cards selects the first one).
+        if (isCardsLook()) maybeAutoMarkRead();
       });
       button.addEventListener('contextmenu', (event) => { openArticleContextMenu(entry.id, button, event, row.sectionKey); });
       if (savedView && article) {
         appendSavedCard(button, article, entry);
         listItem.appendChild(button);
-        articlesList.appendChild(listItem);
+        container.appendChild(listItem);
+        return;
+      }
+      if (cardsMode) {
+        appendCardStory(button, article, entry, row, isStarred);
+        listItem.appendChild(button);
+        container.appendChild(listItem);
         return;
       }
 
@@ -3020,12 +3260,14 @@ export function renderBrowserAppRuntimeScript(): string {
       }
       button.appendChild(cardGrid);
       listItem.appendChild(button);
-      articlesList.appendChild(listItem);
+      container.appendChild(listItem);
     };
     // A folder shows sections (Today, Last 7 Days, one per feed). Headers and
     // "N more" rows are not articles: they are not in renderedArticleCards, so
     // selection, keys and impressions skip them.
-    if (folderLayout) {
+    if (cardsMode) {
+      appendCards(entries, folderLayout, windowStart, appendArticleRow);
+    } else if (folderLayout) {
       const entryById = new Map(entries.map((entry) => [entry.id, entry]));
       const positions = new Map(folderLayout.order.map((id, index) => [id, windowStart + index]));
       for (const section of folderLayout.sections) {
@@ -3060,12 +3302,18 @@ export function renderBrowserAppRuntimeScript(): string {
     return feedViews.find((view) => view.parentId === folderId) || feedViews[0] || null;
   }
 
-  // Sections of the open folder's loaded window, or null outside a folder.
-  // The order is each story once, at its first appearance: what keys walk and
-  // where impressions are counted. Stories without a body yet follow the sections.
-  function getFolderSectionLayout(visibleItemIds = getVisibleItemIds()) {
+  // Sections of the open list's loaded window: a folder's (Today, Last 7 Days,
+  // one per feed), and in Cards a single feed's days (Today, Yesterday,
+  // Earlier). Null for any other list, and for search results in Cards, which
+  // are flat. The order is each story once, at its first appearance: what keys
+  // walk and where impressions are counted. Stories without a body yet follow the sections.
+  function getSectionLayout(visibleItemIds = getVisibleItemIds()) {
     const view = getActiveView();
-    if (view?.kind !== 'folder') return null;
+    const byDay = view?.kind === 'feed';
+    if (!isSectionedList(view) || (isCardsLook() && articleSearchQuery)) return null;
+    const build = (expanded) => byDay
+      ? client.buildFeedDaySections(items, Date.now(), { expanded })
+      : client.buildFolderSections(items, Date.now(), { expanded });
     const feedTitles = new Map(views.filter((candidate) => candidate.kind === 'feed').map((candidate) => [candidate.streamId, candidate.title]));
     const items = [];
     const unloadedIds = [];
@@ -3079,18 +3327,17 @@ export function renderBrowserAppRuntimeScript(): string {
       const streamId = item.origin?.streamId || '';
       items.push({ id, published: item.published, streamId, feedTitle: feedTitles.get(streamId) || item.origin?.title || 'Unknown feed' });
     }
-    let sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+    let sections = build(expandedFolderSections.get(view.id));
     // The open story must keep a row (newer stories can push it behind "N more"):
     // its first section opens, and stays open like one the reader opened.
     const isDrawn = (id) => sections.some((section) => section.itemIds.includes(id));
     if (selectedItemId && items.some((item) => item.id === selectedItemId) && !isDrawn(selectedItemId)) {
       const everyKey = new Set(sections.map((section) => section.key));
-      const holder = client.buildFolderSections(items, Date.now(), { expanded: everyKey })
-        .find((section) => section.itemIds.includes(selectedItemId));
+      const holder = build(everyKey).find((section) => section.itemIds.includes(selectedItemId));
       if (holder) {
         if (!expandedFolderSections.has(view.id)) expandedFolderSections.set(view.id, new Set());
         expandedFolderSections.get(view.id).add(holder.key);
-        sections = client.buildFolderSections(items, Date.now(), { expanded: expandedFolderSections.get(view.id) });
+        sections = build(expandedFolderSections.get(view.id));
       }
     }
     const order = [];
@@ -3130,9 +3377,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // Today, Last 7 Days and Older are plain labels; a feed's label carries its
-  // icon and opens that feed.
-  function createFolderSectionHeader(section) {
-    const header = createNode('li', {
+  // icon and opens that feed. In a card the label is the card's header.
+  function createFolderSectionHeader(section, tagName = 'li') {
+    const header = createNode(tagName, {
       classNames: ['article-feed-header', section.kind === 'feed' ? '' : 'is-' + section.kind],
       attributes: { 'data-section-key': section.key, 'data-row-key': section.key },
     });
@@ -3152,12 +3399,26 @@ export function renderBrowserAppRuntimeScript(): string {
     return header;
   }
 
+  // The list's rows in order: stories, section labels and "N more" rows,
+  // looking inside the cards in Cards.
+  function getArticleRowItems() {
+    const rows = [];
+    const visit = (parent) => {
+      for (const child of parent.children) {
+        if (child.classList?.contains('cards-card') || child.classList?.contains('cards-card-list')) visit(child);
+        else rows.push(child);
+      }
+    };
+    visit(articlesList);
+    return rows;
+  }
+
   // The first folder row on screen and how far below the list's top it sits.
   function captureFolderListAnchor() {
     const container = getArticleScrollContainer();
     if (!container || typeof container.getBoundingClientRect !== 'function') return null;
     const top = container.getBoundingClientRect().top;
-    for (const row of articlesList.children) {
+    for (const row of getArticleRowItems()) {
       const key = row.getAttribute('data-row-key');
       if (!key || typeof row.getBoundingClientRect !== 'function') continue;
       const rect = row.getBoundingClientRect();
@@ -3170,7 +3431,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function restoreFolderListAnchor(anchor) {
     const container = getArticleScrollContainer();
     if (!anchor || !container || typeof container.getBoundingClientRect !== 'function') return;
-    for (const row of articlesList.children) {
+    for (const row of getArticleRowItems()) {
       if (row.getAttribute('data-row-key') !== anchor.key || typeof row.getBoundingClientRect !== 'function') continue;
       const delta = row.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offset;
       if (delta) container.scrollTop += delta;
@@ -3179,8 +3440,8 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   // "N more" shows the rest of the section's loaded stories in place.
-  function createFolderSectionMoreRow(section) {
-    const row = createNode('li', { classNames: ['article-section-more'], attributes: { 'data-row-key': 'more:' + section.key } });
+  function createFolderSectionMoreRow(section, tagName = 'li') {
+    const row = createNode(tagName, { classNames: ['article-section-more'], attributes: { 'data-row-key': 'more:' + section.key } });
     const button = createNode('button', {
       classNames: ['article-more-button'],
       text: section.hiddenCount + ' more',
@@ -3195,6 +3456,83 @@ export function renderBrowserAppRuntimeScript(): string {
     });
     row.appendChild(button);
     return row;
+  }
+
+  // Cards: a folder's sections or a feed's days as cards (Today across the
+  // page, the others in a grid, Older as a label over the older feeds), or one
+  // card of every story for any other list and for search. The stories are the
+  // list's own rows, so selection, keys, menus and impressions work as in Reeder.
+  function appendCards(entries, layout, windowStart, appendArticleRow) {
+    const view = getActiveView();
+    const bar = getCardBarColor(view);
+    const createCard = (classNames) => {
+      const card = createNode('li', { classNames: ['cards-card'].concat(classNames) });
+      if (bar) card.style.setProperty('--bar', bar);
+      return card;
+    };
+    const createCardList = () => createNode('ul', { classNames: ['list-reset', 'cards-card-list'] });
+    if (!layout) {
+      const card = createCard(['is-wide', 'is-flat']);
+      const list = card.appendChild(createCardList());
+      entries.forEach((entry, index) => appendArticleRow(entry, { showSource: true, position: windowStart + index }, list));
+      articlesList.appendChild(card);
+      return;
+    }
+    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+    const positions = new Map(layout.order.map((id, index) => [id, windowStart + index]));
+    for (const section of layout.sections) {
+      if (section.kind === 'older-header') {
+        articlesList.appendChild(createFolderSectionHeader(section));
+        continue;
+      }
+      const card = createCard(['is-' + section.kind, view?.kind === 'folder' && section.kind === 'today' ? 'is-wide' : '']);
+      card.appendChild(createFolderSectionHeader(section, 'div'));
+      const list = card.appendChild(createCardList());
+      for (const id of section.itemIds) {
+        // Today and Last 7 Days name each story's feed; a feed's card and a feed's days need not.
+        appendArticleRow(entryById.get(id), { showSource: view?.kind === 'folder' && section.kind !== 'feed', position: positions.get(id),
+          section: layout.firstSections.get(id), sectionKey: section.key }, list);
+      }
+      if (card.classList.contains('is-wide') && list.children.length > 1) {
+        // Two columns, filled down then across: the second starts without a hairline.
+        const rows = Math.ceil(list.children.length / 2);
+        list.style.setProperty('--rows', String(rows));
+        list.children[rows]?.classList.add('is-column-start');
+      }
+      if (section.hiddenCount > 0) card.appendChild(createFolderSectionMoreRow(section, 'div'));
+      articlesList.appendChild(card);
+    }
+    if (layout.unloadedIds.length > 0) {
+      const card = createCard(['is-wide', 'is-loading']);
+      const list = card.appendChild(createCardList());
+      for (const id of layout.unloadedIds) appendArticleRow(entryById.get(id), { showSource: true, position: positions.get(id), sectionKey: 'loading' }, list);
+      articlesList.appendChild(card);
+    }
+  }
+
+  // A story in a card: its feed as a coloured kicker (where a card mixes
+  // feeds), a headline in the reading face and one meta line. No preview or image.
+  function appendCardStory(button, article, entry, row, isStarred) {
+    const copy = createNode('span', { classNames: ['article-card-copy'] });
+    if (row.showSource && entry.feedTitle) {
+      const kicker = createNode('span', { classNames: ['article-kicker'], text: entry.feedTitle });
+      kicker.style.setProperty('--kicker', kickerColor(client.kickerColorIndex(article?.origin?.streamId || entry.feedTitle)));
+      copy.appendChild(kicker);
+    }
+    const title = createNode('span', { classNames: ['article-title'] });
+    if (isStarred) title.appendChild(createNode('span', { classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' } }));
+    title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
+    if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
+    copy.appendChild(title);
+    const listTime = client.formatArticleListTime(entry.published);
+    const readingLength = showReadingTime ? entry.readingLength : null;
+    if (listTime || readingLength) {
+      const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
+      if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
+      if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
+      copy.appendChild(meta);
+    }
+    button.appendChild(copy);
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
@@ -5160,7 +5498,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return request.mode === 'above' ? all.slice(0,index) : request.mode === 'below' ? all.slice(index+1) : all;
     }
     // A folder marks what is drawn above or below the story, not the newest-first stream.
-    if (request.view.kind === 'folder' && ['above', 'below'].includes(request.mode)) {
+    if (request.sectioned && ['above', 'below'].includes(request.mode)) {
       if (!request.drawnSplit) throw new Error('Selected article is no longer shown');
       return request.mode === 'above' ? request.drawnSplit.above : request.drawnSplit.below;
     }
@@ -5265,14 +5603,15 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function createBulkRequest(mode, anchorItemId = selectedItemId, anchorKey = anchorItemId === selectedItemId ? getSelectedCopyKey() : null) {
     const view = getActiveView();
-    const folderLayout = view?.kind === 'folder' ? getFolderSectionLayout() : null;
+    const folderLayout = getSectionLayout();
     return { kind: 'bulk', field: 'read', mode, scope: mode.startsWith('age-') ? 'older' :
       ['above', 'below', 'all'].includes(mode) ? mode : 'all', view: { ...view }, viewId: activeViewId,
       query: { ...getArticleQuery() }, queryKey: getViewQueryKey(activeViewId), selectedItemId: anchorItemId,
       selectionId: readerActionSelectionId, generation: accountGeneration, token: session.token,
       dayBounds: getArticleQuery().dayBounds || client.getViewDayBounds(view), before: mode.startsWith('age-')
         ? new Date(Date.now() - Number(mode.slice(4)) * 86_400_000).toISOString() : null,
-      // A folder marks the rows drawn above or below the chosen copy of the story.
+      // A folder (or a feed's day cards) marks the rows drawn above or below the chosen copy of the story.
+      sectioned: Boolean(folderLayout),
       drawnSplit: folderLayout && anchorItemId ? splitFolderRowsAt(folderLayout, anchorItemId, anchorKey) : null };
   }
 
@@ -5365,7 +5704,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function maybeAutoMarkRead(fromScroll = false) {
     const policy = getAutoReadPolicy(loadedItemsById[selectedItemId], fromScroll);
     if (policy === 'manual' || pendingArticleMutation ||
-        !isReaderVisible() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
+        !isReaderVisible() || !isReaderPaneOnScreen() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
         !articleCache.has(selectedItemId) || readyReaderItemId !== selectedItemId ||
         getArticleState(loadedItemsById[selectedItemId], 'read') || manuallyUnreadItemIds.has(selectedItemId)) return;
     if (policy === 'progress' || policy === 'end') {
@@ -5530,6 +5869,13 @@ export function renderBrowserAppRuntimeScript(): string {
     heldReaderArticle = null;
     clearKeptItemIds();
     articleQueryStatus.textContent = '';
+    // Opening any list leaves Home.
+    if (cardsHomeShown) {
+      cardsHomeShown = false;
+      setMobilePane('stream', true);
+      renderFeeds();
+      renderArticles();
+    }
     if (viewId === activeViewId) {
       void revalidateActiveView();
       return;
@@ -5863,8 +6209,13 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function setMobilePane(pane, moveFocus) {
+    const previousPane = readerGrid.getAttribute('data-mobile-pane');
     readerGrid.setAttribute('data-mobile-pane', pane);
-    if (!moveFocus || typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 760px)').matches) return;
+    if (!moveFocus) return;
+    const narrow = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
+    // Cards also swaps the cards and the story in one place on a wide page.
+    const cardsSwap = isCardsLook() && (pane === 'reader') !== (previousPane === 'reader');
+    if (!narrow && !cardsSwap) return;
     // The pane that held focus is now display:none; hand focus to the pane that replaced it.
     const findActive = (root, selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
     const target = pane === 'reader'
@@ -5923,7 +6274,7 @@ export function renderBrowserAppRuntimeScript(): string {
   function refreshArticleContextMenu() {
     if (!articleContextTarget) return;
     // In a folder only drawn rows count, above or below the copy the menu is on.
-    const folderLayout = getActiveView()?.kind === 'folder' ? getFolderSectionLayout() : null;
+    const folderLayout = getSectionLayout();
     const split = folderLayout ? splitFolderRowsAt(folderLayout, articleContextTarget.itemId, articleContextTarget.sectionKey) : null;
     const candidates = folderLayout ? null : getWindowCandidateIds();
     const index = candidates ? candidates.indexOf(articleContextTarget.itemId) : split ? 0 : -1;
@@ -5956,12 +6307,13 @@ export function renderBrowserAppRuntimeScript(): string {
 
   // The row of a story; in a folder, the copy under sectionKey when drawn.
   function findArticleRowButton(itemId, sectionKey = null) {
+    const rows = getArticleRowItems();
     if (sectionKey) {
-      for (const listItem of articlesList.children) {
+      for (const listItem of rows) {
         if (listItem.getAttribute?.('data-row-key') === sectionKey + ':' + itemId) return listItem.children[0] || null;
       }
     }
-    for (const listItem of articlesList.children) {
+    for (const listItem of rows) {
       const button = listItem.children[0];
       if (button?.getAttribute('data-item-id') === itemId) return button;
     }
@@ -6011,8 +6363,10 @@ export function renderBrowserAppRuntimeScript(): string {
   function applySidebarCollapsed(isCollapsed) {
     readerGrid.classList.toggle('is-sidebar-collapsed', isCollapsed);
     if (canApplyColumnWidths()) applyStoredColumnWidths();
-    sidebarToggleButton.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-    sidebarToggleButton.setAttribute('title', isCollapsed ? 'Show sidebar' : 'Hide sidebar');
+    for (const toggle of [sidebarToggleButton, pageSidebarToggleButton]) {
+      toggle.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      toggle.setAttribute('title', isCollapsed ? 'Show sidebar' : 'Hide sidebar');
+    }
   }
 
   function getStoredSidebarCollapsed() {
@@ -6023,15 +6377,23 @@ export function renderBrowserAppRuntimeScript(): string {
     }
   }
 
-  sidebarToggleButton.addEventListener('click', () => {
+  function toggleSidebar() {
     const isCollapsed = !readerGrid.classList.contains('is-sidebar-collapsed');
     applySidebarCollapsed(isCollapsed);
     try {
       window.localStorage.setItem(sidebarCollapsedStorageKey, isCollapsed ? 'true' : 'false');
     } catch (_error) {}
-  });
+  }
+  sidebarToggleButton.addEventListener('click', toggleSidebar);
+  // Cards hides the reader's toolbar under the cards, so the page has its own toggle.
+  pageSidebarToggleButton.addEventListener('click', toggleSidebar);
   streamBackButton.addEventListener('click', () => { setMobilePane('sidebar', true); });
-  readerBackButton.addEventListener('click', () => { setMobilePane('stream', true); });
+  readerBackButton.addEventListener('click', () => {
+    if (isCardsLook()) returnToCards();
+    else setMobilePane('stream', true);
+  });
+  lookToggleButton.addEventListener('click', () => { changeLook(isCardsLook() ? 'reeder' : 'cards'); });
+  lookSelect.addEventListener('change', () => { changeLook(lookSelect.value); });
   for (const menu of popoverMenus) {
     if (!menu) continue;
     menu.addEventListener('toggle', () => { if (menu.open) closePopoverMenus(menu); });
@@ -6125,6 +6487,9 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   applyTheme(getStoredTheme());
+  applyLook(getStoredLook());
+  // Cards opens on Home.
+  cardsHomeShown = isCardsLook();
   if (typeof window.matchMedia === 'function') {
     const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
     if (systemThemeQuery && typeof systemThemeQuery.addEventListener === 'function') {
