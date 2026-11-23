@@ -426,7 +426,21 @@ export async function createBrowserHarness(options?: {
 		['reader-transcript', createElement('', ['hidden'], 'div', registerFocus)],
 		['reader-frame', createElement('', [], 'iframe', registerFocus)],
 		['settings-content', createElement('', [], 'div', registerFocus)],
+		['feeds-panel', createElement('', [], 'aside', registerFocus)],
+		['articles-panel', createElement('', [], 'section', registerFocus)],
+		['reader-panel', createElement('', [], 'article', registerFocus)],
 	]);
+	// The three panels hold the elements focus can be in, so code can tell which panel has it.
+	for (const [panel, ids] of [
+		['feeds-panel', ['home-list', 'views-list', 'folders-list', 'feeds-list']],
+		['articles-panel', ['articles-heading', 'articles-list', 'cards-home', 'stream-back-button', 'look-toggle-button', 'page-sidebar-toggle-button']],
+		['reader-panel', ['reader-title', 'reader-back-button', 'reader-copy', 'image-zoom-panel']],
+	] as const) {
+		for (const id of ids) {
+			const element = elements.get(id);
+			if (element) element.parentElement = elements.get(panel)!;
+		}
+	}
 	const frameDocumentHandlers = new Map<string, (event: Record<string, unknown>) => unknown>();
 	const frameBody = createElement('', [], 'body', registerFocus);
 	const frameDocumentElement = createElement('', [], 'html', registerFocus);

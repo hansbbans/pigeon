@@ -19,7 +19,7 @@ const LOOK_KEY = 'pigeon.browser.look';
 // A folder of three feeds seen on Nov 3, 2026 at noon, as in the Reeder folder
 // section tests: six stories today, one three days ago, two older than the week.
 // Feed 1 (Alpha) also opens on its own as day cards.
-async function openCardsBrowser(options: { look?: string; now?: () => number } = {}) {
+async function openCardsBrowser(options: { look?: string; now?: () => number; allPage?: string[]; locationHref?: string } = {}) {
 	const now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
 	const today = getLocalDayRangeBounds(now, 1).startSeconds;
 	const at = (date: Date) => Math.floor(date.getTime() / 1000);
@@ -38,10 +38,13 @@ async function openCardsBrowser(options: { look?: string; now?: () => number } =
 	const folderPage = ['110', '109', '108', '107', '106', '105', '104', '103', '102'];
 	const alphaPage = ['110', '108', '107', '105', '101'];
 	const readingLog: Array<Record<string, any>> = [];
+	const requests: string[] = [];
 	const harness = await createBrowserHarness({
 		now: options.now ?? now,
+		locationHref: options.locationHref,
 		storedEntries: options.look ? { [LOOK_KEY]: options.look } : {},
 		fetchImpl: async (input, init) => {
+			requests.push(input);
 			if (input === '/accounts/ClientLogin') return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
 			if (input === '/reader/api/0/subscription/list') {
 				const folder = [{ id: FOLDER_ID, label: 'Daily Reads' }];
@@ -62,12 +65,15 @@ async function openCardsBrowser(options: { look?: string; now?: () => number } =
 			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 0 });
 			if (url.pathname === '/reader/api/0/stream/items/ids') {
 				const stream = url.searchParams.get('s');
-				const ids = stream === FOLDER_ID ? folderPage : stream === 'feed/1' ? alphaPage : [];
+				const ids = stream === FOLDER_ID ? folderPage : stream === 'feed/1' ? alphaPage
+					: stream === 'user/-/state/com.google/reading-list' ? options.allPage ?? [] : [];
 				return Response.json({ itemRefs: ids.map((id) => ({ id })) });
 			}
 			if (url.pathname === '/api/v1/browser/articles') {
-				// Search: a few of the folder's stories.
-				const found = url.searchParams.get('stream') === FOLDER_ID && url.searchParams.get('q') ? ['110', '104', '102'] : [];
+				// Search: a few of the folder's stories. Alpha oldest first: its first window is its oldest two.
+				const stream = url.searchParams.get('stream');
+				const found = stream === FOLDER_ID && url.searchParams.get('q') ? ['110', '104', '102']
+					: stream === 'feed/1' && url.searchParams.get('sort') === 'oldest' ? ['101', '105'] : [];
 				return Response.json({ itemIds: found, continuation: null, hasMore: false });
 			}
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
@@ -109,7 +115,7 @@ async function openCardsBrowser(options: { look?: string; now?: () => number } =
 	});
 	await elements.get('login-form')!.dispatch('submit');
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), FOLDER_ID)));
-	return { ...harness, grid, list, cards, storyButtons, copies, outline, readingLog };
+	return { ...harness, grid, list, cards, storyButtons, copies, outline, readingLog, requests };
 }
 
 async function openFolder(browser: Awaited<ReturnType<typeof openCardsBrowser>>) {
@@ -358,4 +364,136 @@ test('a single feed in Cards is day cards in its folder\'s colour; search in Car
 	assert.ok(cards()[0].classList.contains('is-flat') && cards()[0].classList.contains('is-wide'));
 	assert.deepEqual(browser.storyButtons().map((button) => button.dataset.itemId), ['110', '104', '102']);
 	assert.equal(findDescendantByClass(browser.copies('104')[0], 'article-kicker')!.textContent, 'Bravo');
+});
+
+test('switching to Cards reloads a feed read oldest first, since Cards reads it newest first', async () => {
+	const browser = await openCardsBrowser();
+	const { elements, outline, requests } = browser;
+	await openFolder(browser);
+	findDescendantByClass(browser.list, 'article-feed-header-button')!.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-heading')!.textContent === 'Alpha' && browser.copies('101').length > 0);
+	const sort = elements.get('article-sort-select')!;
+	sort.value = 'oldest';
+	sort.dispatch('change');
+	await waitForBrowserCondition(() => browser.storyButtons().map((button) => button.dataset.itemId).join() === '101,105');
+	const before = requests.length;
+
+	elements.get('look-toggle-button')!.dispatch('click');
+	await waitForBrowserCondition(() => browser.copies('110').length > 0);
+	await flushBrowserTasks();
+	assert.ok(requests.slice(before).some((request) => request.startsWith('/reader/api/0/stream/items/ids?s=feed%2F1')),
+		'the feed loads again, newest first');
+	assert.deepEqual(outline(), ['Today 110 108 107 105', 'Yesterday 101']);
+});
+
+test('switching to Cards on a wide window shows the cards, with the open story still selected', async () => {
+	const browser = await openCardsBrowser();
+	const { elements, grid } = browser;
+	await openFolder(browser);
+	browser.storyButtons().find((button) => button.dataset.itemId === '108')!.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 108');
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'reader');
+	const toggle = elements.get('look-toggle-button')!;
+	toggle.focus();
+	toggle.dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'stream', 'the cards, not a full-page story');
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 108');
+	assert.ok(browser.copies('108')[0].classList.contains('is-active'));
+	assert.equal(browser.getActiveElement(), toggle, 'focus stays on the toggle');
+});
+
+test('a story opened from a notification in Cards leaves Home and shows over the page', async () => {
+	const browser = await openCardsBrowser({ look: 'cards', locationHref: 'https://pigeon.example/app?article=110' });
+	const { elements, grid } = browser;
+	await waitForBrowserCondition(() => grid.getAttribute('data-page') === 'home');
+	await waitForBrowserCondition(() => !elements.get('notification-action-panel')!.classList.contains('hidden'));
+	elements.get('notification-confirm-button')!.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 110');
+	await flushBrowserTasks();
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'reader');
+	assert.notEqual(grid.getAttribute('data-page'), 'home');
+	assert.equal(elements.get('cards-home')!.classList.contains('hidden'), true);
+	assert.equal(elements.get('home-list')!.children[0].children[0].classList.contains('is-active'), false);
+});
+
+test('Escape over a story in Cards closes the image zoom before the story', async () => {
+	const browser = await openCardsBrowser({ look: 'cards' });
+	const { elements, grid, copies, dispatchKeydown } = browser;
+	await openFolder(browser);
+	copies('104')[0].dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 104');
+	const zoom = elements.get('image-zoom-panel')!;
+	zoom.classList.remove('hidden');
+	assert.equal(dispatchKeydown('Escape'), true);
+	assert.equal(zoom.classList.contains('hidden'), true);
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'reader', 'the story stays open');
+	assert.equal(dispatchKeydown('Escape'), true);
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'stream');
+});
+
+test('a sidebar row clicked over an open story in Cards keeps focus', async () => {
+	const browser = await openCardsBrowser({ look: 'cards' });
+	const { elements, grid, copies } = browser;
+	await openFolder(browser);
+	copies('104')[0].dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 104');
+	const row = findListButtonByViewId(elements.get('views-list'), 'today')!;
+	row.focus();
+	row.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-heading')!.textContent === 'Today');
+	assert.equal(grid.getAttribute('data-mobile-pane'), 'stream');
+	assert.equal(browser.getActiveElement(), row, 'focus stays in the sidebar');
+});
+
+test('Home keeps its tiles, and the focused one, when the sidebar renders again', async () => {
+	const browser = await openCardsBrowser({ look: 'cards' });
+	const { elements } = browser;
+	const home = elements.get('cards-home')!;
+	await waitForBrowserCondition(() => findDescendantByClass(home, 'cards-home-folder') !== undefined);
+	await flushBrowserTasks();
+	const tile = findDescendantByClass(home, 'cards-home-folder')!;
+	tile.focus();
+	// The Home row renders the sidebar and Home again, as an unread refresh does.
+	elements.get('home-list')!.children[0].children[0].dispatch('click');
+	await flushBrowserTasks();
+	assert.equal(findDescendantByClass(home, 'cards-home-folder'), tile, 'the tile is not rebuilt');
+	assert.equal(browser.getActiveElement(), tile);
+});
+
+test('a Home tile opens its view without drawing the list under Home first', async () => {
+	const browser = await openCardsBrowser({ look: 'cards', allPage: ['110', '109'] });
+	const { elements, list } = browser;
+	const home = elements.get('cards-home')!;
+	await waitForBrowserCondition(() => findDescendantByClass(home, 'cards-home-folder') !== undefined && browser.copies('109').length > 0);
+	await flushBrowserTasks();
+	const appended: Element[] = [];
+	const appendChild = list.appendChild.bind(list);
+	list.appendChild = (child: Element) => { appended.push(child); return appendChild(child); };
+	findDescendantByClass(home, 'cards-home-folder')!.dispatch('click');
+	await waitForBrowserCondition(() => browser.copies('102').length > 0);
+	assert.equal(appended.some((child) => child.classList.contains('is-flat')), false, 'All items never shows on the way');
+});
+
+test('a feed\'s day cards log their impressions as section "day"', async () => {
+	let now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
+	const browser = await openCardsBrowser({ look: 'cards', now: () => now });
+	const { elements, cards } = browser;
+	await openFolder(browser);
+	findDescendantByClass(cards()[2], 'article-feed-header-button')!.dispatch('click');
+	await waitForBrowserCondition(() => elements.get('articles-heading')!.textContent === 'Alpha' && browser.copies('101').length > 0);
+	await flushBrowserTasks();
+	for (let index = 0; index < 12; index += 1) {
+		now += 500;
+		browser.intervals[0].handler();
+	}
+	await waitForBrowserCondition(() => browser.readingLog.some((event) => event.itemId === '101'));
+	assert.deepEqual(browser.readingLog.filter((event) => event.type === 'impression')
+		.map((event) => [event.itemId, event.metadata?.row, event.metadata?.section]), [
+		['110', 'card', 'day'],
+		['108', 'card', 'day'],
+		['107', 'card', 'day'],
+		['105', 'card', 'day'],
+		['101', 'card', 'day'],
+	]);
 });

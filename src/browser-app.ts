@@ -537,6 +537,10 @@ export function renderBrowserAppRuntimeScript(): string {
   // Cards: the list and scroll position the cards had when a story opened over them.
   let cardsScrollMemory = null;
   let folderColorCache = { views: null, indices: new Map() };
+  // A feed's kicker colour never changes, so each stream id is hashed once.
+  const kickerColorIndices = new Map();
+  // Home's tiles as last drawn: they are rebuilt only when this changes.
+  let cardsHomeSignature = null;
   let pendingNotificationAction=null;
   let offlineLibrary=null; let offlineOpening=null; let offlineSession=false; let offlineBusy=false; let offlineQueuedCount=0; let notificationPanel=null;
   const offlineStatus=document.getElementById('offline-status');
@@ -558,6 +562,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let frameObjectURLs=new Set();let visiblePreviewSources=new Set();
   const readerModeSelect = document.getElementById('reader-mode-select'); const readingStatus = document.getElementById('reader-reading-status');
   const loadImagesButton = document.getElementById('load-images-button'); const zoomPanel = document.getElementById('image-zoom-panel');
+  const articlesPanel = document.getElementById('articles-panel'); const readerPanel = document.getElementById('reader-panel');
   const zoomImage = document.getElementById('zoom-image');
   // Read It Later.
   const savedFiltersStorageKey = 'pigeon.browser.saved-filters';
@@ -1148,14 +1153,22 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReaderBackButton();
   }
 
-  // Switching keeps the open view and story: only the containers change.
+  // Switching keeps the open view and the selected story. On a wide window Cards
+  // starts on the cards, with the story still selected behind them. A list whose
+  // query differs between the looks (Cards loads a feed newest first) reloads
+  // through reconcileArticleQueryBoundary() on this render.
   function changeLook(nextLook) {
     if (normalizeLook(nextLook) === look) return;
     setStoredLook(nextLook);
     applyLook(nextLook);
+    if (isCardsLook() && !isNarrowWindow() && readerGrid.getAttribute('data-mobile-pane') === 'reader') setMobilePane('stream', false);
     renderFeeds();
     renderArticles();
     renderReader();
+  }
+
+  function isNarrowWindow() {
+    return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
   }
 
   // In Cards the back button names the list the story came from.
@@ -1183,7 +1196,12 @@ export function renderBrowserAppRuntimeScript(): string {
       const indices = client.assignFolderColorIndices(ids);
       folderColorCache = { views, indices: new Map(ids.map((id, index) => [id, indices[index]])) };
     }
-    return folderColorCache.indices.get(folderId) ?? client.kickerColorIndex(folderId);
+    return folderColorCache.indices.get(folderId) ?? getKickerColorIndex(folderId);
+  }
+
+  function getKickerColorIndex(key) {
+    if (!kickerColorIndices.has(key)) kickerColorIndices.set(key, client.kickerColorIndex(key));
+    return kickerColorIndices.get(key);
   }
 
   function kickerColor(index) {
@@ -1194,7 +1212,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // outside any folder). Smart views have none.
   function getCardBarColor(view) {
     if (view?.kind === 'folder') return kickerColor(getFolderColorIndex(view.id));
-    if (view?.kind === 'feed') return kickerColor(view.parentId ? getFolderColorIndex(view.parentId) : client.kickerColorIndex(view.streamId));
+    if (view?.kind === 'feed') return kickerColor(view.parentId ? getFolderColorIndex(view.parentId) : getKickerColorIndex(view.streamId));
     return null;
   }
 
@@ -1209,20 +1227,40 @@ export function renderBrowserAppRuntimeScript(): string {
 
   // Home: a tile per view (as on iOS, Unread and All items get none), then a
   // tile per folder with its first feeds. No counts: the sidebar has them.
+  function getCardsHomeContent() {
+    const today = views.find((view) => view.kind === 'today');
+    return {
+      dateline: new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
+        (today?.unreadCount > 0 ? ' · ' + today.unreadCount + ' new' : ''),
+      views: ['recommended', 'starred', 'saved', 'today', 'last-7-days']
+        .map((kind) => views.find((candidate) => candidate.kind === kind))
+        .filter(Boolean)
+        .map((view) => ({ id: view.id, kind: view.kind, title: view.title })),
+      folders: getFolderViews().map((folderView) => ({
+        id: folderView.id,
+        title: folderView.title,
+        bar: kickerColor(getFolderColorIndex(folderView.id)),
+        feeds: getChildFeedViews(folderView.id).slice(0, 4).map((feedView) => ({ title: feedView.title, iconUrl: feedView.iconUrl || '' })),
+      })),
+    };
+  }
+
+  // Each unread refresh renders the sidebar and so Home: the tiles are only
+  // rebuilt when what they show changed, so focus and loaded icons stay put.
   function renderCardsHome() {
     const shown = isCardsLook() && cardsHomeShown;
     cardsHome.classList.toggle('hidden', !shown);
-    clearElement(cardsHome);
     if (!shown) return;
+    const content = getCardsHomeContent();
+    const signature = JSON.stringify(content);
+    if (signature === cardsHomeSignature) return;
+    cardsHomeSignature = signature;
+    const focusedViewId = isFocusWithin([cardsHome]) ? document.activeElement?.dataset?.viewId : null;
+    clearElement(cardsHome);
     const inner = createNode('div', { classNames: ['cards-home-inner'] });
-    const today = views.find((view) => view.kind === 'today');
-    const dateline = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
-      (today?.unreadCount > 0 ? ' · ' + today.unreadCount + ' new' : '');
-    inner.appendChild(createNode('p', { classNames: ['cards-home-dateline'], text: dateline }));
+    inner.appendChild(createNode('p', { classNames: ['cards-home-dateline'], text: content.dateline }));
     const viewTiles = createNode('ul', { classNames: ['list-reset', 'cards-home-views'], attributes: { 'aria-label': 'Views' } });
-    for (const kind of ['recommended', 'starred', 'saved', 'today', 'last-7-days']) {
-      const view = views.find((candidate) => candidate.kind === kind);
-      if (!view) continue;
+    for (const view of content.views) {
       const tile = createNode('button', { classNames: ['cards-home-tile'], attributes: { type: 'button', 'data-view-id': view.id, 'data-view-kind': view.kind } });
       tile.appendChild(createNode('span', { classNames: ['cards-home-tile-icon'], attributes: { 'aria-hidden': 'true' } }));
       tile.appendChild(createNode('span', { classNames: ['cards-home-tile-title'], text: view.title }));
@@ -1232,15 +1270,14 @@ export function renderBrowserAppRuntimeScript(): string {
       viewTiles.appendChild(item);
     }
     inner.appendChild(viewTiles);
-    const folderViews = getFolderViews();
-    if (folderViews.length > 0) {
+    if (content.folders.length > 0) {
       const folderTiles = createNode('ul', { classNames: ['list-reset', 'cards-home-folders'], attributes: { 'aria-label': 'Folders' } });
-      for (const folderView of folderViews) {
+      for (const folderView of content.folders) {
         const tile = createNode('button', { classNames: ['cards-home-folder'], attributes: { type: 'button', 'data-view-id': folderView.id, 'data-view-kind': 'folder' } });
-        tile.style.setProperty('--bar', kickerColor(getFolderColorIndex(folderView.id)));
+        tile.style.setProperty('--bar', folderView.bar);
         tile.appendChild(createNode('span', { classNames: ['cards-home-folder-name'], text: folderView.title }));
         const feeds = createNode('span', { classNames: ['cards-home-folder-feeds'] });
-        for (const feedView of getChildFeedViews(folderView.id).slice(0, 4)) {
+        for (const feedView of folderView.feeds) {
           const feed = createNode('span', { classNames: ['cards-home-folder-feed'] });
           if (feedView.iconUrl) feed.appendChild(createNode('img', { classNames: ['feed-icon'], attributes: { src: feedView.iconUrl, alt: '', width: '16', height: '16', loading: 'lazy' } }));
           else feed.appendChild(createNode('span', { classNames: ['feed-icon', 'is-placeholder'], attributes: { 'aria-hidden': 'true' } }));
@@ -1256,6 +1293,18 @@ export function renderBrowserAppRuntimeScript(): string {
       inner.appendChild(folderTiles);
     }
     cardsHome.appendChild(inner);
+    if (focusedViewId) {
+      const tile = [...cardsHome.querySelectorAll('button')].find((button) => button.dataset.viewId === focusedViewId);
+      if (tile && typeof tile.focus === 'function') tile.focus();
+    }
+  }
+
+  // Whether focus is inside one of these elements.
+  function isFocusWithin(roots) {
+    for (let node = document.activeElement; node; node = node.parentElement) {
+      if (roots.includes(node)) return true;
+    }
+    return false;
   }
 
   // The sidebar's Home row, in Cards only.
@@ -2055,6 +2104,8 @@ export function renderBrowserAppRuntimeScript(): string {
     button.disabled=true;
     try {await ensureArticleContent([request.itemId],request);if(pendingNotificationAction!==request||!requestBelongsToCurrentSession(request.generation,request.token))return;
       selectedItemId=request.itemId;heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};
+      // In Cards the story opens over the page (and leaves Home), so it is on screen when logged.
+      if(isCardsLook()){if(cardsHomeShown){cardsHomeShown=false;renderFeeds();renderArticles();}setMobilePane('reader',true);}
       // Confirming an action shows the story too; that counts as opening it only once it is read.
       noteArticleOpened(request.itemId,Boolean(request.action));renderReader();
       if(request.action)await mutateArticleState(request.itemId,request.action==='read'?'read':'starred',true);
@@ -2674,7 +2725,12 @@ export function renderBrowserAppRuntimeScript(): string {
   function handleArticleNavigationKeydown(event) {
     readingMeter.interact(Date.now());
     if (!libraryPanel.classList.contains('hidden') || !settingsPanel.classList.contains('hidden')) return false;
-    // Escape closes a story open over the cards.
+    // Escape closes the image zoom first, then a story open over the cards.
+    if (event.key === 'Escape' && !zoomPanel.classList.contains('hidden')) {
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      closeImageZoom();
+      return true;
+    }
     if (event.key === 'Escape' && isCardsStoryOpen() && isReaderVisible() && !isEditableTarget(event.target)) {
       if (typeof event.preventDefault === 'function') event.preventDefault();
       returnToCards();
@@ -3219,13 +3275,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
       const cardGrid = createNode('span', { classNames: ['article-card-grid'] });
       const copy = createNode('span', { classNames: ['article-card-copy'] });
-      const title = createNode('span', { classNames: ['article-title'] });
-      if (isStarred) title.appendChild(createNode('span', {
-        classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' },
-      }));
-      title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
-      if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
-      copy.appendChild(title);
+      copy.appendChild(createArticleTitle(entry, isStarred));
       if (!isCompact && getActiveView()?.kind === 'recommended' && recommendationDetails.has(entry.id)) {
         const detail = recommendationDetails.get(entry.id);
         copy.appendChild(createNode('span', {classNames:['article-meta'], text: 'Score ' + Number(detail.score || 0).toFixed(1) + (detail.explanation ? ' · ' + (typeof detail.explanation === 'string' ? detail.explanation : JSON.stringify(detail.explanation)) : '')}));
@@ -3234,15 +3284,8 @@ export function renderBrowserAppRuntimeScript(): string {
         copy.appendChild(createNode('span', { classNames: ['article-preview'], text: entry.preview }));
       }
       if (articleListMode !== 'titles') {
-        const listTime = client.formatArticleListTime(entry.published);
-        const readingLength = showReadingTime ? entry.readingLength : null;
-        if (entry.feedTitle || listTime || readingLength) {
-          const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
-          if (entry.feedTitle && row.showSource) meta.appendChild(createNode('span', { classNames: ['article-source'], text: entry.feedTitle }));
-          if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
-          if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
-          copy.appendChild(meta);
-        }
+        const meta = createArticleMeta(entry, { source: row.showSource ? entry.feedTitle : null });
+        if (meta) copy.appendChild(meta);
       }
       cardGrid.appendChild(copy);
       if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
@@ -3348,7 +3391,8 @@ export function renderBrowserAppRuntimeScript(): string {
       for (const id of section.itemIds) {
         rows.push({ id, key: section.key });
         if (firstSections.has(id)) continue;
-        firstSections.set(id, section.kind);
+        // The reading log names a feed's days 'day', apart from a folder's Today.
+        firstSections.set(id, byDay ? 'day' : section.kind);
         order.push(id);
       }
     }
@@ -3516,23 +3560,38 @@ export function renderBrowserAppRuntimeScript(): string {
     const copy = createNode('span', { classNames: ['article-card-copy'] });
     if (row.showSource && entry.feedTitle) {
       const kicker = createNode('span', { classNames: ['article-kicker'], text: entry.feedTitle });
-      kicker.style.setProperty('--kicker', kickerColor(client.kickerColorIndex(article?.origin?.streamId || entry.feedTitle)));
+      kicker.style.setProperty('--kicker', kickerColor(getKickerColorIndex(article?.origin?.streamId || entry.feedTitle)));
       copy.appendChild(kicker);
     }
+    copy.appendChild(createArticleTitle(entry, isStarred));
+    // The kicker names the feed, so the meta line is the time, then the length.
+    const meta = createArticleMeta(entry, { source: null, timeFirst: true });
+    if (meta) copy.appendChild(meta);
+    button.appendChild(copy);
+  }
+
+  // A list or card row's headline: the star, the title and a Paywall label.
+  function createArticleTitle(entry, isStarred) {
     const title = createNode('span', { classNames: ['article-title'] });
     if (isStarred) title.appendChild(createNode('span', { classNames: ['article-star'], text: '★', attributes: { 'aria-label': 'Starred' } }));
     title.appendChild(createNode('span', { classNames: ['article-title-text'], text: entry.title }));
     if (entry.isPaywalled) title.appendChild(createNode('span', { classNames: ['article-paywall'], text: 'Paywall' }));
-    copy.appendChild(title);
+    return title;
+  }
+
+  // A list or card row's meta line, with the full timestamp on hover: the feed
+  // (where the row names it), the reading length and the time. Null when empty.
+  function createArticleMeta(entry, { source, timeFirst = false }) {
     const listTime = client.formatArticleListTime(entry.published);
     const readingLength = showReadingTime ? entry.readingLength : null;
-    if (listTime || readingLength) {
-      const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
-      if (listTime) meta.appendChild(createNode('span', { classNames: ['article-time'], text: listTime }));
-      if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
-      copy.appendChild(meta);
-    }
-    button.appendChild(copy);
+    if (!source && !listTime && !readingLength) return null;
+    const meta = createNode('span', { classNames: ['article-meta'], attributes: { title: formatTimestamp(entry.published) } });
+    const time = listTime ? createNode('span', { classNames: ['article-time'], text: listTime }) : null;
+    if (source) meta.appendChild(createNode('span', { classNames: ['article-source'], text: source }));
+    if (time && timeFirst) meta.appendChild(time);
+    if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
+    if (time && !timeFirst) meta.appendChild(time);
+    return meta;
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
@@ -4375,7 +4434,8 @@ export function renderBrowserAppRuntimeScript(): string {
     readingData.modes[readingFeedId(loadedItemsById[id])]=mode;persistReadingData();preparedReaderKey='';renderReader();
   });
   loadImagesButton.addEventListener('click',()=>{consentItemId=selectedItemId;preparedReaderKey='';renderReader();});
-  document.getElementById('close-image-zoom').addEventListener('click',()=>{zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');});
+  function closeImageZoom(){zoomPanel.classList.add('hidden');zoomImage.setAttribute('src','');}
+  document.getElementById('close-image-zoom').addEventListener('click',closeImageZoom);
   document.getElementById('share-article-button').addEventListener('click',async()=>{
     const item=loadedItemsById[selectedItemId],url=item?.alternate?.[0]?.href,id=selectedItemId,generation=accountGeneration;if(!url)return;
     try {if(window.navigator?.share)await window.navigator.share({title:item.title,url});else if(window.navigator?.clipboard)await window.navigator.clipboard.writeText(url);else throw new Error();
@@ -5869,12 +5929,15 @@ export function renderBrowserAppRuntimeScript(): string {
     heldReaderArticle = null;
     clearKeptItemIds();
     articleQueryStatus.textContent = '';
-    // Opening any list leaves Home.
+    // Opening any list leaves Home. Another view is drawn by loadActiveView, so
+    // the list under Home is never shown on the way.
     if (cardsHomeShown) {
       cardsHomeShown = false;
       setMobilePane('stream', true);
-      renderFeeds();
-      renderArticles();
+      if (viewId === activeViewId) {
+        renderFeeds();
+        renderArticles();
+      }
     }
     if (viewId === activeViewId) {
       void revalidateActiveView();
@@ -6212,9 +6275,11 @@ export function renderBrowserAppRuntimeScript(): string {
     const previousPane = readerGrid.getAttribute('data-mobile-pane');
     readerGrid.setAttribute('data-mobile-pane', pane);
     if (!moveFocus) return;
-    const narrow = typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
-    // Cards also swaps the cards and the story in one place on a wide page.
-    const cardsSwap = isCardsLook() && (pane === 'reader') !== (previousPane === 'reader');
+    const narrow = isNarrowWindow();
+    // Cards also swaps the cards and the story in one place on a wide page. That
+    // hides focus only when it was in the page; a sidebar row keeps it.
+    const focusInPage = !document.activeElement || document.activeElement === document.body || isFocusWithin([articlesPanel, readerPanel]);
+    const cardsSwap = isCardsLook() && (pane === 'reader') !== (previousPane === 'reader') && focusInPage;
     if (!narrow && !cardsSwap) return;
     // The pane that held focus is now display:none; hand focus to the pane that replaced it.
     const findActive = (root, selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
