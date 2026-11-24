@@ -876,6 +876,53 @@ export function assignFolderColorIndices(folderIds: string[], count: number = 8)
 	});
 }
 
+/**
+ * The Front Page's pages (iOS `FrontPageLayout`): thirteen stories each, a lead
+ * over a grid. The lead is the first story with a picture among the page's
+ * first `leadWindow`, so a page opens on a picture when it has one near the
+ * top; otherwise the first story leads. The rest keep the list's order.
+ * `order` is every story as drawn, which is the order keys walk.
+ */
+export function buildFrontPagePages(
+	stories: Array<{ id: string; hasImage: boolean }>,
+	options: { perPage?: number; leadWindow?: number } = {},
+): { pages: Array<{ lead: string; grid: string[] }>; order: string[] } {
+	const perPage = options.perPage ?? 13;
+	const leadWindow = options.leadWindow ?? 4;
+	const pages: Array<{ lead: string; grid: string[] }> = [];
+	const order: string[] = [];
+	for (let start = 0; start < stories.length; start += perPage) {
+		const page = stories.slice(start, start + perPage);
+		const pictured = page.slice(0, leadWindow).findIndex((story) => story.hasImage);
+		const leadIndex = pictured < 0 ? 0 : pictured;
+		const lead = page[leadIndex].id;
+		const grid = page.filter((_story, index) => index !== leadIndex).map((story) => story.id);
+		pages.push({ lead, grid });
+		order.push(lead, ...grid);
+	}
+	return { pages, order };
+}
+
+/** A lead's standfirst: the preview with whitespace collapsed, about `limit` characters. */
+export function frontPageDeck(text: string | null | undefined, limit: number = 240): string {
+	const collapsed = String(text ?? '').replace(/\s+/g, ' ').trim();
+	if (collapsed.length <= limit) return collapsed;
+	// Back off one code unit rather than leave a lone high surrogate at the cut.
+	const end = /[\ud800-\udbff]/.test(collapsed.charAt(limit - 1)) ? limit - 1 : limit;
+	return collapsed.slice(0, end).trimEnd() + '…';
+}
+
+/**
+ * Newsletters often open with a logo, spacer or banner: only a picture with
+ * some size and a photo-like shape earns space on the Front Page (iOS
+ * `FrontPageLayout.isEditorialImage`).
+ */
+export function isEditorialImage(width: number, height: number, minimumWidth: number): boolean {
+	if (!(width >= minimumWidth) || !(height > 0)) return false;
+	const aspect = width / height;
+	return aspect >= 0.6 && aspect <= 2.4;
+}
+
 export function filterItemIdsForLocalDay(
 	itemIds: string[],
 	loadedItemsById: Record<string, Pick<BrowserLoadedItem, 'published'>>,
@@ -1392,6 +1439,9 @@ ${buildFolderSections.toString()}
 ${buildFeedDaySections.toString()}
 ${kickerColorIndex.toString()}
 ${assignFolderColorIndices.toString()}
+${buildFrontPagePages.toString()}
+${frontPageDeck.toString()}
+${isEditorialImage.toString()}
 ${filterItemIdsForLocalDay.toString()}
 ${limitInitialItemIds.toString()}
 ${createContentLoadPlan.toString()}
@@ -1452,6 +1502,9 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   buildFeedDaySections,
   kickerColorIndex,
   assignFolderColorIndices,
+  buildFrontPagePages,
+  frontPageDeck,
+  isEditorialImage,
   filterItemIdsForLocalDay,
   limitInitialItemIds,
   createContentLoadPlan,

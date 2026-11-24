@@ -497,3 +497,19 @@ test('a feed\'s day cards log their impressions as section "day"', async () => {
 		['101', 'card', 'day'],
 	]);
 });
+
+test('a folder in Cards draws no selection wash until a story is opened in this visit', async () => {
+	const browser = await openCardsBrowser({ look: 'cards' });
+	const { elements, storyButtons, copies } = browser;
+	await openFolder(browser);
+	assert.deepEqual(storyButtons().filter((button) => button.classList.contains('is-active')).map((button) => button.dataset.itemId), [],
+		'the story picked when the list arrived is not drawn as chosen');
+	copies('106')[0].dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 106');
+	assert.deepEqual(storyButtons().filter((button) => button.classList.contains('is-active')).map((button) => button.dataset.itemId), ['106']);
+	// Another visit to the folder starts without a wash again.
+	await findListButtonByViewId(elements.get('views-list'), 'all')!.dispatch('click');
+	await flushBrowserTasks();
+	await openFolder(browser);
+	assert.equal(storyButtons().some((button) => button.classList.contains('is-active')), false);
+});

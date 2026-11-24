@@ -1230,7 +1230,7 @@ ${iconVariables()}
       .cards-card .article-more-button { padding: 0.35rem 0.6rem 0.3rem; }
 
       .is-cards .article-card { padding: 0.6rem 0.6rem 0.65rem; border-radius: 8px; }
-      .is-cards .article-card.is-active, .is-cards .article-card.is-active:hover { background: var(--accent-soft); }
+      :is(.is-cards, .is-front-page) .article-card.is-active, :is(.is-cards, .is-front-page) .article-card.is-active:hover { background: var(--accent-soft); }
       .is-cards .article-card-copy { gap: 0; }
       .article-kicker {
         display: block;
@@ -1249,10 +1249,73 @@ ${iconVariables()}
       /* Read and unread differ by weight and colour, never by shape. */
       .is-cards .article-title { font-family: var(--reading-font); font-size: 1.04rem; font-weight: 500; line-height: 1.28; letter-spacing: 0; }
       .is-cards .article-card.is-read .article-title { font-weight: 400; }
-      .is-cards .article-meta { order: 0; gap: 0; margin-top: 0.3rem; }
-      .is-cards .article-meta > span { margin-left: 0; }
-      .is-cards .article-meta > span + span::before { content: '·'; margin: 0 0.4rem; }
-      .is-cards .article-star { position: static; display: inline-block; margin-right: 0.35rem; vertical-align: 0.05em; }
+      :is(.is-cards, .is-front-page) .article-meta { order: 0; gap: 0; margin-top: 0.3rem; }
+      :is(.is-cards, .is-front-page) .article-meta > span { margin-left: 0; }
+      :is(.is-cards, .is-front-page) .article-meta > span + span::before { content: '·'; margin: 0 0.4rem; }
+      :is(.is-cards, .is-front-page) .article-star { position: static; display: inline-block; margin-right: 0.35rem; vertical-align: 0.05em; }
+
+      /* Front Page (smart views in Cards): the view's name between rules, then
+         pages of a lead over a grid, on the plain page. The masthead names the
+         list, so the stream heading is kept for assistive technology only. */
+      .reader-grid[data-look="cards"][data-page="front-page"] #articles-panel { background: var(--list); }
+      .reader-grid[data-look="cards"][data-page="front-page"] #articles-status { display: none; }
+      .reader-grid[data-look="cards"][data-page="front-page"] #articles-heading {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      #articles-list.is-front-page { container-type: inline-size; max-width: calc(960px + 3.5rem); margin: 0 auto; padding: 0 1.75rem 2rem; }
+      #articles-list.is-front-page > li::before { content: none; }
+      .front-page-masthead { margin-bottom: 1.4rem; border-top: 2px solid var(--text); border-bottom: 2px solid var(--text); text-align: center; }
+      .front-page-title {
+        margin: 0;
+        padding: 0.55rem 0 0.5rem;
+        border-bottom: 1px solid var(--border);
+        font-family: var(--reading-font);
+        font-size: 2.4rem;
+        font-style: italic;
+        font-weight: 400;
+        line-height: 1.1;
+        overflow-wrap: anywhere;
+      }
+      .front-page-dateline { margin: 0; padding: 0.5rem 0; color: var(--text-secondary); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+      .front-page + .front-page { margin-top: 1.6rem; padding-top: 1.6rem; border-top: 2px solid var(--text); }
+      .front-page-lead:not(:last-child) { margin-bottom: 1.25rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--border); }
+      .front-page-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem 1.15rem; align-items: start; }
+      .front-page-grid > li, .front-page-lead > li { min-width: 0; }
+      /* The story's selection wash reaches past its text without moving it. */
+      .is-front-page .front-page-story { display: flex; flex-direction: column; gap: 0.65rem; width: calc(100% + 1rem); margin: -0.5rem; padding: 0.5rem; border-radius: 10px; }
+      .front-page-image { display: block; width: 100%; aspect-ratio: 4 / 3; border-radius: 12px; background: var(--hover); object-fit: cover; }
+      .front-page-story.is-lead .front-page-image { aspect-ratio: 3 / 2; }
+      .front-page-copy { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
+      .front-page-story.is-lead .front-page-copy { gap: 0.5rem; }
+      .is-front-page .article-kicker { margin-bottom: 0; }
+      /* Read stories keep their weight and shape; only the colour quietens. */
+      .is-front-page .article-title { font-family: var(--reading-font); font-size: 1.15rem; font-weight: 400; line-height: 1.25; letter-spacing: 0; }
+      .front-page-story.is-lead .article-title { font-size: 1.75rem; line-height: 1.15; }
+      .front-page-deck {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        color: var(--text-secondary);
+        font-family: var(--reading-font);
+        font-size: 1rem;
+        line-height: 1.45;
+      }
+      .front-page-story.is-read:not(.is-active) .front-page-deck { color: var(--muted); }
+      .is-front-page .article-meta { margin-top: 0; }
+      /* A wide page is a spread: the lead's picture beside its headline and deck, the grid three across. */
+      @container (min-width: 760px) {
+        .front-page-title { font-size: 3.25rem; }
+        .front-page-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.75rem; }
+        .front-page-story.is-lead.has-image { display: grid; grid-template-columns: minmax(0, 58fr) minmax(0, 42fr); gap: 1.5rem; align-items: start; }
+        .front-page-story.is-lead.has-image .article-title { font-size: 2.1rem; }
+        .front-page-story.is-lead.has-image .front-page-deck { -webkit-line-clamp: 6; font-size: 1.1rem; }
+      }
 
       /* Home: a tile per view, then a tile per folder. */
       .cards-home { flex: 1 1 auto; min-height: 0; overflow: auto; }
@@ -1347,6 +1410,10 @@ ${iconVariables()}
         .cards-home-views { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .cards-home-folder { min-height: 0; }
         .reader-grid[data-look="cards"] #articles-heading { font-size: 1.35rem; }
+        #articles-list.is-front-page { padding: 0 1rem 1.25rem; }
+        .front-page-title { font-size: 2rem; }
+        .front-page-grid { grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
+        .front-page-story.is-lead .article-title { font-size: 1.55rem; }
       }
 `;
 }

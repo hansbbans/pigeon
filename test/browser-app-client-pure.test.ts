@@ -6,6 +6,7 @@ import {
 	applyUnauthorizedState,
 	assignFolderColorIndices,
 	buildArticleListEntries,
+	buildFrontPagePages,
 	buildFeedDaySections,
 	buildFeedViews,
 	buildFolderSections,
@@ -17,9 +18,11 @@ import {
 	extractAuthToken,
 	filterItemIdsForLocalDay,
 	formatArticleListTime,
+	frontPageDeck,
 	getLocalDayBounds,
 	getLocalDayRangeBounds,
 	getViewDayBounds,
+	isEditorialImage,
 	isTimeWindowView,
 	kickerColorIndex,
 	limitInitialItemIds,
@@ -924,4 +927,47 @@ test('day sections and colours survive serialization into the browser script', (
 	assert.deepEqual(client.buildFeedDaySections([{ id: '1', published: Math.floor(now / 1000) }], now).map((section: { key: string }) => section.key), ['today']);
 	assert.equal(client.kickerColorIndex('money-stuff'), 0);
 	assert.deepEqual(client.assignFolderColorIndices(['a', 'a']), assignFolderColorIndices(['a', 'a']));
+});
+
+test('buildFrontPagePages leads each page of thirteen with an early picture, else its first story', () => {
+	const stories = Array.from({ length: 30 }, (_, index) => ({ id: String(index), hasImage: [2, 9, 13 + 4, 26].includes(index) }));
+	const { pages, order } = buildFrontPagePages(stories);
+	assert.deepEqual(pages.map((page) => page.lead), ['2', '13', '26']);
+	assert.deepEqual(pages[0].grid, ['0', '1', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']);
+	// Page two's picture is its fifth story, outside the first four: its first story leads.
+	assert.deepEqual(pages[1].grid.slice(0, 4), ['14', '15', '16', '17']);
+	assert.deepEqual(pages[2], { lead: '26', grid: ['27', '28', '29'] });
+	assert.deepEqual(order, pages.flatMap((page) => [page.lead, ...page.grid]));
+	assert.equal(new Set(order).size, 30);
+	assert.deepEqual(buildFrontPagePages([]), { pages: [], order: [] });
+	assert.deepEqual(buildFrontPagePages([{ id: 'a', hasImage: false }]).pages, [{ lead: 'a', grid: [] }]);
+});
+
+test('frontPageDeck collapses whitespace and stops near 240 characters', () => {
+	assert.equal(frontPageDeck('  Short\n\n deck  '), 'Short deck');
+	assert.equal(frontPageDeck(null), '');
+	const long = frontPageDeck('word '.repeat(100));
+	assert.ok(long.endsWith('…') && long.length <= 241);
+	// A cut never leaves half of a surrogate pair.
+	const emoji = frontPageDeck('a'.repeat(239) + '😀' + 'b'.repeat(10));
+	assert.equal(emoji, 'a'.repeat(239) + '…');
+});
+
+test('isEditorialImage keeps photo-shaped pictures of some size, as on iOS', () => {
+	assert.equal(isEditorialImage(1200, 800, 320), true);
+	assert.equal(isEditorialImage(600, 1000, 320), true);
+	assert.equal(isEditorialImage(900, 100, 140), false, 'a banner');
+	assert.equal(isEditorialImage(300, 600, 140), false, 'too tall');
+	assert.equal(isEditorialImage(120, 100, 140), false, 'too small');
+	assert.equal(isEditorialImage(0, 0, 140), false);
+	assert.equal(isEditorialImage(Number.NaN, 100, 140), false);
+});
+
+test('Front Page helpers survive serialization into the browser script', () => {
+	const window: Record<string, any> = {};
+	new Function('window', renderBrowserAppClientScript())(window);
+	const client = window.__PIGEON_BROWSER_CLIENT__;
+	assert.deepEqual(client.buildFrontPagePages([{ id: 'a', hasImage: false }, { id: 'b', hasImage: true }]).order, ['b', 'a']);
+	assert.equal(client.frontPageDeck('x '.repeat(200)).length, 240);
+	assert.equal(client.isEditorialImage(1200, 800, 320), true);
 });
