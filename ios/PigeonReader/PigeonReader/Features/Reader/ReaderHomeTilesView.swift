@@ -101,6 +101,7 @@ struct ReaderHomeTilesView: View {
 				ReaderHomeDateline(newTodayCount: tiles.newTodayCount)
 			}
 			.sharedBackgroundVisibility(.hidden)
+			ReaderLookToolbarItem()
 			ReaderLibraryToolbarItems(editorRoute: $editorRoute)
 			ReaderSettingsToolbarItem()
 		}

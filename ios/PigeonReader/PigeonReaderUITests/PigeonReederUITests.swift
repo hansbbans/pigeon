@@ -45,6 +45,48 @@ final class PigeonReederUITests: XCTestCase {
 		XCTAssertTrue(element("reader-home-tiles").waitForExistence(timeout: 10), "Cards reaches Home")
 	}
 
+	func testTheTopBarSwitchesLooksInOneTap() throws {
+		app.launchArguments = ["-reader-sample-data", "-reader-reset-reader-state", "-reader-show-sidebar"]
+		app.launchWithoutAnimations()
+		revealLibrary()
+		XCTAssertTrue(element("reader-sidebar").waitForExistence(timeout: 15))
+
+		// Reeder's library bar offers Cards in one tap.
+		let toCards = app.navigationBars.buttons["Switch to Cards"].firstMatch
+		XCTAssertTrue(toCards.waitForExistence(timeout: 5))
+		capture("reeder-library-look-toggle")
+		toCards.tap()
+		if UIDevice.current.userInterfaceIdiom == .pad {
+			let back = app.buttons["BackButton"].firstMatch
+			XCTAssertTrue(back.waitForExistence(timeout: 10), "Cards keeps the open list above Home")
+			back.tap()
+		}
+		XCTAssertTrue(element("reader-home-tiles").waitForExistence(timeout: 10), "Cards reaches Home")
+
+		// Home's bar offers Reeder back, in one tap.
+		let toReeder = app.navigationBars.buttons["Switch to Reeder"].firstMatch
+		XCTAssertTrue(toReeder.waitForExistence(timeout: 5))
+		capture("cards-home-look-toggle")
+		toReeder.tap()
+		revealLibrary()
+		XCTAssertTrue(element("reader-sidebar").waitForExistence(timeout: 10), "Reeder returns to the library")
+		XCTAssertFalse(element("reader-home-tiles").exists)
+	}
+
+	func testAListBarSwitchesTheLook() throws {
+		launchFolder()
+		XCTAssertTrue(element("article-section-today").waitForExistence(timeout: 15))
+		let toCards = app.navigationBars.buttons["Switch to Cards"].firstMatch
+		XCTAssertTrue(toCards.waitForExistence(timeout: 5))
+		capture("reeder-folder-look-toggle")
+		toCards.tap()
+		// The folder stays open, now as cards.
+		XCTAssertTrue(app.navigationBars.buttons["Switch to Reeder"].firstMatch.waitForExistence(timeout: 10))
+		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 10), "the folder stays open, as cards")
+		XCTAssertFalse(element("article-section-today").exists, "Reeder's sections give way to cards")
+		capture("cards-folder-look-toggle")
+	}
+
 	func testAFolderIsSectionsWithTodayLastSevenDaysAndFeeds() throws {
 		launchFolder()
 		XCTAssertTrue(element("article-section-today").waitForExistence(timeout: 15))

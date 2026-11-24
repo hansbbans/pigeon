@@ -106,6 +106,7 @@
 		4A243D9A07B36B6DEBB40589 /* PreviewMotionStreamFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DC475503FA7186C21736B5C /* PreviewMotionStreamFixtureTests.swift */; };
 		4AED074732CFA10E1A3C4BAB /* FeedIconStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A82BAE5DF66CE94ECC8C891 /* FeedIconStoreTests.swift */; };
 		4BDECEB471C1E4BA893F6BA4 /* ReaderHTMLLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBAB1CCD4849F65C4BC7D4E1 /* ReaderHTMLLayoutTests.swift */; };
+		4C92EDB5F8B51443CDEEBE88 /* ReaderLookToggle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00E0570BCFB9519E6D3A583 /* ReaderLookToggle.swift */; };
 		4D8C2D9D6FC698ED7B774AD5 /* ArticleReaderControlsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F47D6309C6377F2B4A8DD1F6 /* ArticleReaderControlsBar.swift */; };
 		4E62E192E266C889A1B42F84 /* ReaderTiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3267FD0ED666DFB56E1F96D /* ReaderTiles.swift */; };
 		4F1C5990BFBF22559F4015D5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A426EB127F04B664BEF59C8 /* SettingsView.swift */; };
@@ -704,6 +705,7 @@
 		DE057E004417D91A5F1C69CC /* ReaderNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationState.swift; sourceTree = "<group>"; };
 		DED463BB677BEDDB9441B157 /* ReaderNavigationLabelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderNavigationLabelView.swift; sourceTree = "<group>"; };
 		DF6335A49B7A3ABFD229DE4A /* OfflineLibraryBootstrapTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryBootstrapTests.swift; sourceTree = "<group>"; };
+		E00E0570BCFB9519E6D3A583 /* ReaderLookToggle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderLookToggle.swift; sourceTree = "<group>"; };
 		E0A9632625EC7F0AA28E1099 /* ReaderBoundarySwipeRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderBoundarySwipeRecognizer.swift; sourceTree = "<group>"; };
 		E0B6356500D0C44697EABC25 /* ReaderMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderMotion.swift; sourceTree = "<group>"; };
 		E184AD8D2C937D34E5C77CFF /* ReaderBoundaryNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderBoundaryNavigation.swift; sourceTree = "<group>"; };
@@ -826,6 +828,7 @@
 				13276213BE8C961E679F669C /* ReaderLibraryTilesView.swift */,
 				C7003BEC1E87B7E105693E3B /* ReaderLibraryToolbarItems.swift */,
 				B9B11812B49988CAB483BA38 /* ReaderListViewportController.swift */,
+				E00E0570BCFB9519E6D3A583 /* ReaderLookToggle.swift */,
 				E0B6356500D0C44697EABC25 /* ReaderMotion.swift */,
 				DED463BB677BEDDB9441B157 /* ReaderNavigationLabelView.swift */,
 				5192B30C7CE7BEF7D76AEFD0 /* ReaderNavigationRowView.swift */,
@@ -1631,6 +1634,7 @@
 				70A9359FF11DC9554A7E7233 /* ReaderListUpdateBuffer.swift in Sources */,
 				B2E253ACB008227C7BA2577B /* ReaderListViewportController.swift in Sources */,
 				2A2760AB7C04F1CAE12F9E78 /* ReaderLocalDayBounds.swift in Sources */,
+				4C92EDB5F8B51443CDEEBE88 /* ReaderLookToggle.swift in Sources */,
 				569FF26755D91AFC44E31A9E /* ReaderMode.swift in Sources */,
 				9A88898A00F6354E42EC19D1 /* ReaderModeStore.swift in Sources */,
 				AA5360DF00EBACC1B978F63D /* ReaderMotion.swift in Sources */,

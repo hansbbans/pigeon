@@ -159,6 +159,7 @@ struct ReaderSidebarView: View {
 						.accessibilityHint("Returns to the tile view")
 				}
 			}
+			ReaderLookToolbarItem()
 			ReaderLibraryToolbarItems(editorRoute: $editorRoute, collectsMenus: true)
 		}
 		.refreshable {

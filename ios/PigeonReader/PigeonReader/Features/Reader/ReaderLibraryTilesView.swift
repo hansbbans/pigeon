@@ -95,6 +95,7 @@ struct ReaderLibraryTilesView: View {
 						.accessibilityHint("Returns to the tile view")
 				}
 			}
+			ReaderLookToolbarItem()
 			ReaderLibraryToolbarItems(editorRoute: $editorRoute)
 			ReaderSettingsToolbarItem()
 		}
