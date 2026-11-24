@@ -885,7 +885,7 @@ export function assignFolderColorIndices(folderIds: string[], count: number = 8)
  */
 export function buildFrontPagePages(
 	stories: Array<{ id: string; hasImage: boolean }>,
-	options: { perPage?: number; leadWindow?: number } = {},
+	options: { perPage?: number; leadWindow?: number; pinnedLeads?: Set<string> } = {},
 ): { pages: Array<{ lead: string; grid: string[] }>; order: string[] } {
 	const perPage = options.perPage ?? 13;
 	const leadWindow = options.leadWindow ?? 4;
@@ -893,8 +893,10 @@ export function buildFrontPagePages(
 	const order: string[] = [];
 	for (let start = 0; start < stories.length; start += perPage) {
 		const page = stories.slice(start, start + perPage);
+		// A lead the reader has already seen keeps its place; otherwise an early story with a picture.
+		const pinned = options.pinnedLeads ? page.findIndex((story) => options.pinnedLeads!.has(story.id)) : -1;
 		const pictured = page.slice(0, leadWindow).findIndex((story) => story.hasImage);
-		const leadIndex = pictured < 0 ? 0 : pictured;
+		const leadIndex = pinned >= 0 ? pinned : pictured < 0 ? 0 : pictured;
 		const lead = page[leadIndex].id;
 		const grid = page.filter((_story, index) => index !== leadIndex).map((story) => story.id);
 		pages.push({ lead, grid });

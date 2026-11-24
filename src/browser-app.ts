@@ -544,6 +544,15 @@ export function renderBrowserAppRuntimeScript(): string {
   // Each loaded story's first picture, found once per story object (the Front
   // Page asks on every render and every j/k step).
   const heroImageUrls = new WeakMap();
+  // Each Front Page picture's natural size once it has loaded ('failed' when it
+  // could not), by its own address, so a logo or banner is left out from then on
+  // and never chosen as a lead.
+  const previewImageSizes = new Map();
+  let frontPageRelayoutQueued = false;
+  // The leads drawn whenever a story is opened on a Front Page: while the reader
+  // stays in that list its pages keep them, so pictures arriving later never
+  // reorder the stories under j/k.
+  let frontPagePins = null;
   // A feed's kicker colour never changes, so each stream id is hashed once.
   const kickerColorIndices = new Map();
   // Home's tiles as last drawn: they are rebuilt only when this changes.
@@ -1136,7 +1145,13 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function noteCardsStoryOpened(itemId) {
-    cardsOpenedStory = { listKey: getViewQueryKey(activeViewId), itemId };
+    const listKey = getViewQueryKey(activeViewId);
+    cardsOpenedStory = { listKey, itemId };
+    const layout = getFrontPageLayout();
+    if (!layout) return;
+    if (frontPagePins?.listKey !== listKey) frontPagePins = { listKey, leads: new Set() };
+    // Pages loaded since the last open get their leads pinned too.
+    for (const page of layout.pages) frontPagePins.leads.add(page.lead);
   }
 
   function isCardsStoryOpenedHere(itemId) {
@@ -1240,13 +1255,18 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
   }
 
+  // Today's date (short on Home, long on a masthead), then the unread count when there is one.
+  function formatCardsDateline(unreadCount, length) {
+    return new Date().toLocaleDateString(undefined, { weekday: length, month: length, day: 'numeric' }) +
+      (unreadCount > 0 ? ' · ' + unreadCount + ' new' : '');
+  }
+
   // Home: a tile per view (as on iOS, Unread and All items get none), then a
   // tile per folder with its first feeds. No counts: the sidebar has them.
   function getCardsHomeContent() {
     const today = views.find((view) => view.kind === 'today');
     return {
-      dateline: new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
-        (today?.unreadCount > 0 ? ' · ' + today.unreadCount + ' new' : ''),
+      dateline: formatCardsDateline(today?.unreadCount, 'short'),
       views: ['recommended', 'starred', 'saved', 'today', 'last-7-days']
         .map((kind) => views.find((candidate) => candidate.kind === kind))
         .filter(Boolean)
@@ -2569,8 +2589,10 @@ export function renderBrowserAppRuntimeScript(): string {
     // Stepping past the end of a window is still the reader choosing the next
     // article. When that window is not loaded yet, the list picks its first
     // article once it arrives (renderArticles), and that pick is the open.
-    if (keyboard && selectedItemId) noteArticleOpened(selectedItemId, true);
-    else pendingKeyboardWindowStep = keyboard ? { viewId: activeViewId, windowStart: start } : null;
+    if (keyboard && selectedItemId) {
+      noteArticleOpened(selectedItemId, true);
+      noteCardsStoryOpened(selectedItemId);
+    } else pendingKeyboardWindowStep = keyboard ? { viewId: activeViewId, windowStart: start } : null;
     keyboardRevealSelection = keyboard && selectedItemId ? { itemId: selectedItemId, viewId: activeViewId, generation: accountGeneration } : null;
     restoreArticleScrollTop(0);
     renderArticles();
@@ -3193,6 +3215,9 @@ export function renderBrowserAppRuntimeScript(): string {
         if (pendingKeyboardWindowStep.viewId !== activeViewId || pendingKeyboardWindowStep.windowStart !== state?.windowStart) {
           pendingKeyboardWindowStep = null;
         } else if (selectedItemId) {
+          const drawn = getSectionLayout(visibleItemIds)?.order || getFrontPageLayout(visibleItemIds)?.order;
+          selectedItemId = drawn?.find((id) => loadedItemsById[id]) || selectedItemId;
+          if (state) state.selectedItemId = selectedItemId;
           noteArticleOpened(selectedItemId, true);
           noteCardsStoryOpened(selectedItemId);
         }
@@ -3618,16 +3643,40 @@ export function renderBrowserAppRuntimeScript(): string {
 
   // Whether list pictures load at all: Ask shows none until the reader asks.
   function showsPreviewImages() {
-    return !readingPreferences || readingPreferences.imagePolicy !== 'ask';
+    return articleListMode !== 'titles' && (!readingPreferences || readingPreferences.imagePolicy !== 'ask');
   }
 
   // A story's picture in a list, under the image policy: Proxy loads it through
   // the reading proxy, never from its own address.
-  function createPreviewImage(url, classNames) {
+  // onUnavailable runs when the proxy gives no picture (no load or error event follows).
+  function createPreviewImage(url, classNames, onUnavailable) {
     const proxied = readingPreferences?.imagePolicy === 'proxy';
     const image = createNode('img', { classNames, attributes: { ...(proxied ? {} : { src: url }), alt: '', loading: 'lazy', 'data-card-hero': 'true' } });
-    if (proxied) void preparePreviewImage(image, url);
+    if (proxied) void preparePreviewImage(image, url).then((shown) => { if (shown === false) onUnavailable?.(); });
     return image;
+  }
+
+  // Whether a Front Page picture is worth drawing at this width: unknown until it loads.
+  function frontPageImageFits(url, minimumWidth) {
+    const size = previewImageSizes.get(url);
+    if (!size) return true;
+    return size !== 'failed' && client.isEditorialImage(size.width, size.height, minimumWidth);
+  }
+
+  function rememberPreviewImageSize(url, size) {
+    previewImageSizes.delete(url);
+    previewImageSizes.set(url, size);
+    if (previewImageSizes.size > 1000) previewImageSizes.delete(previewImageSizes.keys().next().value);
+  }
+
+  // A lead whose picture turned out unusable gives way to a story with one.
+  function queueFrontPageRelayout() {
+    if (frontPageRelayoutQueued) return;
+    frontPageRelayoutQueued = true;
+    setTimeout(() => {
+      frontPageRelayoutQueued = false;
+      if (isFrontPageList()) renderArticles();
+    }, 0);
   }
 
   function getHeroImageUrl(item) {
@@ -3647,7 +3696,12 @@ export function renderBrowserAppRuntimeScript(): string {
   function getFrontPageLayout(visibleItemIds = getVisibleItemIds()) {
     if (!isFrontPageList()) return null;
     const pictures = showsPreviewImages();
-    return client.buildFrontPagePages(visibleItemIds.map((id) => ({ id, hasImage: pictures && Boolean(getHeroImageUrl(loadedItemsById[id])) })));
+    const hasImage = (id) => {
+      const url = pictures ? getHeroImageUrl(loadedItemsById[id]) : null;
+      return Boolean(url) && frontPageImageFits(url, 320);
+    };
+    const pinned = frontPagePins?.listKey === getViewQueryKey(activeViewId) ? frontPagePins.leads : undefined;
+    return client.buildFrontPagePages(visibleItemIds.map((id) => ({ id, hasImage: hasImage(id) })), { pinnedLeads: pinned });
   }
 
   // The Front Page: a masthead, then each page's lead and grid. Every story is
@@ -3673,9 +3727,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const masthead = createNode('li', { classNames: ['front-page-masthead'] });
     // The stream heading still names the list for assistive technology.
     masthead.appendChild(createNode('p', { classNames: ['front-page-title'], text: view?.title || '', attributes: { 'aria-hidden': 'true' } }));
-    const counted = ['all', 'unread', 'today', 'last-7-days'].includes(view?.kind) && view.unreadCount > 0;
-    const dateline = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }) +
-      (counted ? ' · ' + view.unreadCount + ' new' : '');
+    const counted = ['all', 'unread', 'today', 'last-7-days'].includes(view?.kind);
+    const dateline = formatCardsDateline(counted ? view.unreadCount : 0, 'long');
     masthead.appendChild(createNode('p', { classNames: ['front-page-dateline'], text: dateline }));
     return masthead;
   }
@@ -3685,16 +3738,22 @@ export function renderBrowserAppRuntimeScript(): string {
   // that turns out to be a logo or banner is dropped once it loads.
   function appendFrontPageStory(button, article, entry, role, isStarred) {
     button.classList.add('front-page-story', role === 'lead' ? 'is-lead' : 'is-column');
-    if (entry.heroImageUrl && showsPreviewImages()) {
-      const image = createPreviewImage(entry.heroImageUrl, ['front-page-image']);
-      const drop = () => {
+    const url = entry.heroImageUrl;
+    const minimumWidth = role === 'lead' ? 320 : 140;
+    if (url && showsPreviewImages() && frontPageImageFits(url, minimumWidth)) {
+      const drop = (size) => {
+        rememberPreviewImageSize(url, size);
         image.classList.add('hidden');
         button.classList.remove('has-image');
+        if (role === 'lead') queueFrontPageRelayout();
       };
+      const image = createPreviewImage(url, ['front-page-image'], () => drop('failed'));
       image.addEventListener('load', () => {
-        if (!client.isEditorialImage(image.naturalWidth, image.naturalHeight, role === 'lead' ? 320 : 140)) drop();
+        const size = { width: image.naturalWidth, height: image.naturalHeight };
+        if (client.isEditorialImage(size.width, size.height, minimumWidth)) rememberPreviewImageSize(url, size);
+        else drop(size);
       });
-      image.addEventListener('error', drop);
+      image.addEventListener('error', () => drop('failed'));
       button.classList.add('has-image');
       button.appendChild(image);
     }
@@ -4430,8 +4489,8 @@ export function renderBrowserAppRuntimeScript(): string {
         const result=await readingTools.applyImagePolicy('<img src="'+escaped+'">',{policy:'proxy',authenticatedFetch,registerObjectURL:value=>readingObjectURLs.add(value),isCurrent:current});
         const match=result.html.match(/\\ssrc="(blob:[^"]+)"/);return match?.[1]||'';
       })();previewImages.set(url,promise);while(previewImages.size>500){const old=[...previewImages.keys()].find(source=>!visiblePreviewSources.has(source));if(!old)break;const evicted=previewImages.get(old);previewImages.delete(old);void evicted.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});}}
-      const src=await promise;if(current()&&src)image.setAttribute('src',src);
-    }catch(_) {if(current())image.setAttribute('alt','Image unavailable through private proxy');}
+      const src=await promise;if(!current())return null;if(src)image.setAttribute('src',src);return Boolean(src);
+    }catch(_) {if(!current())return null;image.setAttribute('alt','Image unavailable through private proxy');return false;}
   }
   function zoomReadingImage(event) {
     if(event.target?.tagName?.toLowerCase()!=='img')return;
@@ -6042,6 +6101,7 @@ export function renderBrowserAppRuntimeScript(): string {
   async function selectView(viewId) {
     heldReaderArticle = null;
     cardsOpenedStory = null;
+    frontPagePins = null;
     clearKeptItemIds();
     articleQueryStatus.textContent = '';
     // Opening any list leaves Home. Another view is drawn by loadActiveView, so

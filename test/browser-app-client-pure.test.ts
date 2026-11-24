@@ -943,6 +943,14 @@ test('buildFrontPagePages leads each page of thirteen with an early picture, els
 	assert.deepEqual(buildFrontPagePages([{ id: 'a', hasImage: false }]).pages, [{ lead: 'a', grid: [] }]);
 });
 
+test('buildFrontPagePages keeps a pinned lead wherever it sits on its page', () => {
+	const stories = Array.from({ length: 15 }, (_, index) => ({ id: String(index), hasImage: index === 1 }));
+	const { pages, order } = buildFrontPagePages(stories, { pinnedLeads: new Set(['6', '14']) });
+	assert.deepEqual(pages.map((page) => page.lead), ['6', '14']);
+	assert.equal(order.length, 15);
+	assert.deepEqual(buildFrontPagePages(stories, { pinnedLeads: new Set(['99']) }).pages[0].lead, '1', 'a pin not on the page changes nothing');
+});
+
 test('frontPageDeck collapses whitespace and stops near 240 characters', () => {
 	assert.equal(frontPageDeck('  Short\n\n deck  '), 'Short deck');
 	assert.equal(frontPageDeck(null), '');

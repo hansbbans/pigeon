@@ -28,7 +28,9 @@ const feedOf = (id: string) => FEEDS[Number(id) % 3];
 const imageOf = (id: string) => `https://images.example/${id}.jpg`;
 const LONG_PREVIEW = 'A standfirst that runs on. '.repeat(20);
 
-async function openFrontPage(options: { look?: string; policy?: string; now?: () => number; paged?: boolean } = {}) {
+async function openFrontPage(options: { look?: string; policy?: string; now?: () => number; paged?: boolean;
+	ids?: string[]; proxyGivesNothing?: boolean; storedEntries?: Record<string, string> } = {}) {
+	const allIds = options.ids ?? ALL_IDS;
 	const now = new Date(2026, 10, 3, 12, 0, 0, 0).getTime();
 	const readingLog: Array<Record<string, any>> = [];
 	const preferences = { theme: 'app', font: 'geist', fontSize: 18, lineHeight: 1.6, width: 720, margins: 24, density: 'comfortable',
@@ -36,13 +38,14 @@ async function openFrontPage(options: { look?: string; policy?: string; now?: ()
 	const proxied: string[] = [];
 	const harness = await createBrowserHarness({
 		now: options.now ?? now,
-		storedEntries: { [LOOK_KEY]: options.look ?? 'cards' },
+		storedEntries: { [LOOK_KEY]: options.look ?? 'cards', ...options.storedEntries },
 		readingTools: {
 			readPreferences: () => preferences,
 			savePreferences: (next: unknown) => next,
 			frameCSS: () => 'body{font-size:18px}',
 			async applyImagePolicy(html: string) {
 				proxied.push(html);
+				if (options.proxyGivesNothing) return { html: '', images: [], blockedCount: 1 };
 				return { html: html.replace(/src="[^"]*"/, 'src="blob:proxied"'), images: [], blockedCount: 0 };
 			},
 		},
@@ -63,14 +66,14 @@ async function openFrontPage(options: { look?: string; policy?: string; now?: ()
 				if (url.searchParams.get('s') !== READING_LIST) return Response.json({ itemRefs: [] });
 				// Paged: a second page of ten older stories (100 … 91) behind a continuation.
 				if (url.searchParams.get('c') === 'page-2') return Response.json({ itemRefs: MORE_IDS.map((id) => ({ id })) });
-				return Response.json({ itemRefs: ALL_IDS.map((id) => ({ id })), ...(options.paged ? { continuation: 'page-2' } : {}) });
+				return Response.json({ itemRefs: allIds.map((id) => ({ id })), ...(options.paged ? { continuation: 'page-2' } : {}) });
 			}
 			if (url.pathname === '/api/v1/browser/articles') {
 				const found = url.searchParams.get('q') ? ['118', '110'] : [];
 				return Response.json({ itemIds: found, continuation: null, hasMore: false });
 			}
 			if (input === '/reader/api/0/stream/items/contents' && init?.method === 'POST') {
-				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => ALL_IDS.includes(id) || MORE_IDS.includes(id)).map((id) => ({
+				return Response.json({ items: (init.body?.getAll('i') ?? []).map(String).filter((id) => allIds.includes(id) || MORE_IDS.includes(id)).map((id) => ({
 					id: `tag:google.com,2005:reader/item/${Number(id).toString(16).padStart(16, '0')}`,
 					title: `Story ${id}`,
 					published: Math.floor(now / 1000) - (120 - Number(id)) * 600,
@@ -175,6 +178,83 @@ test('the Front Page drops a picture that is not editorial once it loads', async
 	lead.dispatch('load');
 	assert.equal(lead.classList.contains('hidden'), false);
 	assert.ok(story('119').classList.contains('has-image'));
+});
+
+test('a lead whose picture is a banner gives way to a story with a picture, and the banner stays out', async () => {
+	const browser = await openFrontPage();
+	const { story, outline, storyButtons } = browser;
+	await openAllItems(browser);
+	const banner = findDescendantByClass(story('119'), 'front-page-image')!;
+	Object.assign(banner, { naturalWidth: 900, naturalHeight: 100 });
+	banner.dispatch('load');
+	// 117 is the next story with a picture among the first four.
+	await waitForBrowserCondition(() => outline()[0].startsWith('117 |'));
+	assert.deepEqual(outline(), [
+		'117 | 120 119 118 116 115 114 113 112 111 110 109 108',
+		'107 | 106 105 104 103 102 101',
+	]);
+	// Redrawn, 119 does not fetch its banner again.
+	assert.equal(findDescendantByClass(story('119'), 'front-page-image'), undefined);
+	assert.equal(story('119').classList.contains('has-image'), false);
+	assert.ok(storyButtons().length === 20);
+});
+
+test('a picture the private proxy cannot give is dropped, so no empty box is drawn', async () => {
+	const browser = await openFrontPage({ policy: 'proxy', proxyGivesNothing: true });
+	const { storyButtons, outline } = browser;
+	await openAllItems(browser);
+	const shown = () => storyButtons().filter((button) => {
+		const image = findDescendantByClass(button, 'front-page-image');
+		return image && !image.classList.contains('hidden');
+	});
+	await waitForBrowserCondition(() => shown().length === 0 && storyButtons().every((button) => !button.classList.contains('has-image')), 100);
+	// With no usable picture, the first story leads.
+	await waitForBrowserCondition(() => outline()[0].startsWith('120 |'), 100);
+});
+
+test('titles only leaves the Front Page without pictures', async () => {
+	const browser = await openFrontPage({ storedEntries: { 'pigeon.browser.article-list-mode': 'titles' } });
+	await openAllItems(browser);
+	assert.equal(browser.outline()[0].split(' | ')[0], '120');
+	assert.equal(browser.storyButtons().some((button) => findDescendantByClass(button, 'front-page-image')), false);
+});
+
+test('once a story is opened, the Front Page keeps its leads while pictures arrive', async () => {
+	const browser = await openFrontPage();
+	const { elements, story, outline } = browser;
+	await openAllItems(browser);
+	const before = outline();
+	story('118').dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 118');
+	const banner = findDescendantByClass(story('119'), 'front-page-image')!;
+	Object.assign(banner, { naturalWidth: 900, naturalHeight: 100 });
+	banner.dispatch('load');
+	await flushBrowserTasks();
+	await flushBrowserTasks();
+	assert.deepEqual(outline(), before, 'j and k keep the order the reader has seen');
+	browser.dispatchKeydown('k');
+	await flushBrowserTasks();
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 120');
+});
+
+test('a keyboard step across a window counts as opening the story, so the next step continues from it', async () => {
+	// 205 stories: the first window holds 200, the second 5. None has a picture, so each page's first story leads.
+	const ids = Array.from({ length: 205 }, (_, index) => String(2000 - index));
+	const browser = await openFrontPage({ ids });
+	const { elements, story, storyButtons, dispatchKeydown } = browser;
+	await findListButtonByViewId(elements.get('views-list'), 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => storyButtons().length === 200 && findDescendantByClass(story('1801'), 'article-title-text')?.textContent === 'Story 1801', 200);
+	elements.get('article-older-button')!.dispatch('click');
+	await waitForBrowserCondition(() => storyButtons().length === 5 && findDescendantByClass(story('1796'), 'article-title-text')?.textContent === 'Story 1796', 200);
+	story('1800').dispatch('click');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 1800');
+	// k from the window's first story steps back into the last story of the window before.
+	dispatchKeydown('k');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent === 'Story 1801', 200);
+	assert.ok(story('1801').classList.contains('is-active'), 'the story stepped to is the one marked open');
+	dispatchKeydown('k');
+	await waitForBrowserCondition(() => elements.get('reader-title')!.textContent !== 'Story 1801', 50);
+	assert.equal(elements.get('reader-title')!.textContent, 'Story 1802');
 });
 
 test('the Front Page follows the image policy as list rows do', async () => {
