@@ -4,12 +4,18 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.16.0] - 2026-11-23
+
 ### Added
 
+- Two looks, Cards and Reeder, with the same structure on iOS and the web. A folder reads as its sources: Today (five stories, then "N more"), Last 7 Days, then one section per feed ordered by its newest story, and an "Older" group. A story from today also sits in its feed's section.
+- Last 7 Days, a new view beside Today on iOS and the web: every feed's stories from the last seven local days, newest first, with its own unread count. On iOS it has a Home tile, a Settings → Views toggle and ⌘6.
+- iOS: the Cards look (Settings → Look, or the list's Display menu) replaces the Front Page and Classic layouts: Front Page becomes Cards and Classic becomes Reeder. In Cards a folder is a column of cards in the folder's colour, a feed is day cards, All Feeds is tiles, and the smart views are the Front Page; iPhone and iPad navigate Home → folder → story with swipe-back.
 - Web: a Cards look, switched from the stream header or Settings → Look. It opens on a Home page of tiles; folders show their sections as cards, a feed shows Today, Yesterday and Earlier cards, and each story is a coloured feed name, a serif headline and one meta line. A story opens over the cards, and Back or Escape returns to them. Reeder stays the default.
 
 ### Changed
 
+- Web: a folder is one list in sections (Today, Last 7 Days, one per feed, Older) instead of one stream, and has no Sort menu; the Show filter stays.
 - iOS: the Reeder look no longer looks like stock iOS. The library is a quiet grey column with small labels, grey counts and no chevrons, and it is where Reeder opens: there are no Home tiles in Reeder (they stay in Cards), and an iPad opens with a list beside the library. A folder is one list in sections, Today, Last 7 Days and then one per feed, as on the web; a feed is Today, Yesterday and Earlier. Story titles are sans serif with one grey line under them, and a story already read when its list opens takes a single line.
 - A feed's own `Cache-Control: max-age` now holds its next poll back by five hours at most, instead of a day, so a feed that overstates its freshness still shows new stories the same day.
 - iOS: after a cold launch the list you were on shows its saved stories straight away, while the rest of the offline library loads behind it. Marking a story read or starring it in that moment no longer leaves the library half loaded until the next refresh.
