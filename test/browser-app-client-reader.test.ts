@@ -1472,7 +1472,8 @@ test('frame documents that are not a prepared reading view still use the reading
 	t.after(() => database.close());
 	const list = harness.elements.get('articles-list')!;
 	const frame = harness.elements.get('reader-frame')!;
-	await waitForBrowserCondition(() => frame.srcdoc.includes('</p></body>'), 200);
+	// Wait for the first story's prepared view, not the empty-state frame shown while the list loads.
+	await waitForBrowserCondition(() => /<p>Body \d+<\/p>/.test(frame.srcdoc), 200);
 	assert.ok(!frame.srcdoc.includes('READING-TYPEFACE'), 'a prepared view takes its font from frameCSS alone');
 
 	// Story 5 arrives with a later page, so opening it shows the loading placeholder first.
