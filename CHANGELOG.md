@@ -4,6 +4,8 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+## [0.1.17.0] - 2026-11-24
+
 ### Added
 
 - iOS: a look switch in the top bar of Home, All Feeds, the library and every list: one tap between Cards and Reeder (a list icon in Cards, a grid icon in Reeder).
