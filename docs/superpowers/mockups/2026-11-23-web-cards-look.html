@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pigeon web, Cards look: three layouts (part 4)</title>
+<style>
+	:root {
+		--font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', sans-serif;
+		--reading-font: 'Geist Serif', 'New York', 'Iowan Old Style', Georgia, serif;
+		--sidebar: #f5f5f6; --list: #ffffff; --hairline: #efeff1; --border: #e4e4e7;
+		--text: #1c1c1e; --text-secondary: #48484a; --muted: #6e6e73;
+		--accent: #0063d1; --accent-soft: rgba(0, 99, 209, 0.10); --sidebar-selected: #e3e3e7;
+		--grouped: #f2f2f7; --tile: #ffffff;
+		--k-teal: #1F6F6A; --k-red: #B3261E; --k-blue: #3A5BA0; --k-amber: #8A5A00;
+		--k-violet: #6A57C9; --k-green: #2E7D32; --k-pink: #A2386B; --k-brown: #5D4037;
+	}
+	* { box-sizing: border-box; }
+	body { margin: 0; padding: 40px 32px 80px; background: #e9e9ec; font: 14px/1.45 var(--font); color: var(--text); }
+	h1 { font-size: 22px; margin: 0 0 6px; }
+	.intro { max-width: 900px; color: var(--text-secondary); margin: 0 0 36px; }
+	.option { margin: 0 0 56px; }
+	.option h2 { font-size: 18px; margin: 0 0 4px; }
+	.option h2 span { color: var(--muted); font-weight: 500; }
+	.option p.why { margin: 0 0 14px; max-width: 980px; color: var(--text-secondary); }
+	.option ul.notes { margin: 12px 0 0; padding-left: 20px; max-width: 980px; color: var(--text-secondary); }
+	.option ul.notes li { margin: 3px 0; }
+
+	/* Browser window */
+	.window { width: 1200px; height: 740px; border-radius: 12px; overflow: hidden; background: var(--list);
+		box-shadow: 0 0 0 1px rgba(0,0,0,.08), 0 18px 40px rgba(0,0,0,.12); display: flex; flex-direction: column; }
+	.window.small { width: 1200px; height: 560px; }
+	.chrome { height: 38px; flex: none; background: #ececee; border-bottom: 1px solid #dcdcdf; display: flex; align-items: center; gap: 8px; padding: 0 14px; }
+	.chrome i { width: 12px; height: 12px; border-radius: 50%; background: #d0d0d4; display: block; }
+	.chrome .url { margin-left: 18px; flex: 1; max-width: 420px; height: 24px; border-radius: 6px; background: #fff; color: var(--muted); font-size: 12px; display: flex; align-items: center; padding: 0 10px; }
+	.app { flex: 1; display: flex; min-height: 0; }
+
+	/* Shared: icon buttons, toolbar */
+	.toolbar { height: 52px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 16px; }
+	.toolbar .spacer { flex: 1; }
+	.ib { width: 30px; height: 30px; border-radius: 7px; display: grid; place-items: center; color: var(--text-secondary); font-size: 15px; }
+	.ib.on { background: var(--sidebar-selected); color: var(--text); }
+	.look { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+	.look span { padding: 3px 9px; font-size: 12px; color: var(--muted); }
+	.look span.on { background: var(--text); color: #fff; }
+	.back { color: var(--accent); font-size: 14px; }
+	.dateline { font: 700 11px/1 var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--muted); }
+
+	/* Sidebar (the web's quiet library) */
+	.sidebar { width: 224px; flex: none; background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+	.sidebar .group { font: 600 10.5px/1 var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--muted); padding: 16px 16px 6px; }
+	.sidebar .item { display: flex; align-items: center; gap: 9px; margin: 0 8px; padding: 6px 8px; border-radius: 7px; color: var(--text); font-size: 13.5px; }
+	.sidebar .item .ic { width: 16px; text-align: center; color: var(--muted); font-size: 12px; }
+	.sidebar .item .n { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+	.sidebar .item.sel { background: var(--sidebar-selected); }
+	.sidebar .item.feed { padding-left: 30px; }
+	.fav { width: 14px; height: 14px; border-radius: 3px; display: inline-block; flex: none; }
+
+	/* Cards page */
+	.page { flex: 1; background: var(--grouped); overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+	.page .scroll { flex: 1; overflow: hidden; padding: 4px 28px 28px; }
+	.page .inner { max-width: 960px; margin: 0 auto; }
+	.masthead { display: flex; align-items: baseline; gap: 14px; margin: 4px 0 16px; }
+	.masthead h3 { font: italic 400 34px/1.1 var(--reading-font); margin: 0; }
+	.card { background: var(--tile); border-radius: 12px; overflow: hidden; position: relative; padding: 14px 16px 10px; }
+	.card::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--bar, var(--k-teal)); }
+	.card .head { display: flex; align-items: center; gap: 7px; font: 700 11px/1 var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--bar, var(--k-teal)); margin: 2px 0 8px; }
+	.card .head .open { margin-left: auto; color: var(--muted); font-size: 13px; letter-spacing: 0; }
+	.story { padding: 7px 0; border-top: 1px solid var(--hairline); }
+	.story:first-of-type { border-top: 0; }
+	.story .kick { font: 700 10px/1 var(--font); letter-spacing: .7px; text-transform: uppercase; margin-bottom: 4px; }
+	.story .t { font: 400 16.5px/1.25 var(--reading-font); color: var(--text); }
+	.story .m { font-size: 12px; color: var(--muted); margin-top: 3px; }
+	.story.read .t { color: var(--muted); }
+	.story.sel { background: var(--accent-soft); margin: 0 -16px; padding: 7px 16px; }
+	.more { color: var(--accent); font-size: 12.5px; padding: 6px 0 2px; }
+	.wide-cards { display: grid; gap: 14px; }
+	.split2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+	.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 14px; }
+	.older { font: 700 11px/1 var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--muted); margin: 22px 0 10px; }
+
+	/* Home tiles */
+	.views { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
+	.vtile { background: var(--tile); border-radius: 12px; padding: 14px; height: 78px; display: flex; flex-direction: column; justify-content: space-between; }
+	.vtile .ic { color: var(--muted); font-size: 16px; }
+	.vtile b { font-weight: 600; font-size: 14px; }
+	.folders { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+	.ftile { background: var(--tile); border-radius: 12px; position: relative; overflow: hidden; padding: 16px 14px 12px; height: 168px; display: flex; flex-direction: column; }
+	.ftile::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--bar); }
+	.ftile .name { font: 700 11px/1 var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--bar); }
+	.ftile .t { font: 400 16px/1.25 var(--reading-font); margin-top: 9px; flex: 1; }
+	.ftile .favs { display: flex; gap: 5px; }
+
+	/* Option C: three columns */
+	.stream { width: 360px; flex: none; background: var(--grouped); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+	.stream .scroll { flex: 1; overflow: hidden; padding: 0 12px; display: grid; gap: 12px; align-content: start; }
+	.stream .card { padding: 12px 14px 8px; }
+	.stream .story .t { font-size: 15.5px; }
+	.reader { flex: 1; background: #fff; display: flex; flex-direction: column; min-width: 0; }
+	.reader .copy { max-width: 600px; margin: 10px auto 0; padding: 0 24px; }
+	.reader .feed { color: var(--accent); font-size: 13px; font-weight: 600; }
+	.reader h4 { font: 700 30px/1.15 var(--reading-font); margin: 8px 0 8px; }
+	.reader .meta { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+	.reader p { font: 400 18px/1.65 var(--reading-font); color: #202124; margin: 0 0 16px; }
+
+	.tag { display: inline-block; font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; margin-left: 8px; vertical-align: 2px; }
+</style>
+</head>
+<body>
+<h1>Pigeon web: the Cards look (part 4)</h1>
+<p class="intro">The same cards as iOS Cards (white tiles on the grouped grey, a 3px bar in the folder's colour, serif headlines, "N more"), and the same structure as the Reeder sections the web already has. The open question is the <b>layout</b>: where the cards sit in the browser window. Each option shows a folder (Newsletters), and A and B also show Home. The Cards | Reeder switch sits in the toolbar in all three.</p>
+
+<!-- ============ OPTION A ============ -->
+<section class="option">
+	<h2>A. Pages <span>· like iPad Cards: Home, then the folder, then the story, each filling the window</span></h2>
+	<p class="why">No sidebar in Cards. Home is the tile grid, a tile opens its folder as a page of cards, and a story opens across the window with "‹ Newsletters" to go back. The library (every feed) is the All Feeds tiles, one click from Home. This matches iOS exactly and is the most editorial, but you lose the always-visible library and j/k move within one page at a time.</p>
+	<div class="window">
+		<div class="chrome"><i></i><i></i><i></i><div class="url">pigeon.hanscho.com</div></div>
+		<div class="app">
+			<div class="page">
+				<div class="toolbar"><span class="back">‹ Home</span><span class="spacer"></span><span class="ib">⌕</span><span class="ib">⛛</span><div class="look"><span class="on">Cards</span><span>Reeder</span></div><span class="ib">⚙</span></div>
+				<div class="scroll"><div class="inner">
+					<div class="masthead"><h3>Newsletters</h3><span class="dateline">Mon, Nov 23 · 14 new</span></div>
+					<div class="split2">
+						<div class="card"><div class="head">Today</div>
+							<div class="story"><div class="kick" style="color:var(--k-blue)">Stratechery</div><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago · 12 min read</div></div>
+							<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">Issue 312: Quiet tools, loud cities</div><div class="m">9 min ago</div></div>
+							<div class="story read"><div class="kick" style="color:var(--k-amber)">Money Stuff</div><div class="t">The bond market wants a word</div><div class="m">12 min ago</div></div>
+							<div class="more">4 more</div>
+						</div>
+						<div class="card"><div class="head">Last 7 Days</div>
+							<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">A field guide to slower software</div><div class="m">yesterday</div></div>
+							<div class="story"><div class="kick" style="color:var(--k-amber)">Money Stuff</div><div class="t">Who owns the index?</div><div class="m">2 days ago</div></div>
+							<div class="story"><div class="kick" style="color:var(--k-pink)">Platformer</div><div class="t">The week the feeds went quiet</div><div class="m">2 days ago</div></div>
+							<div class="more">3 more</div>
+						</div>
+					</div>
+					<div class="grid3">
+						<div class="card" style="--bar:var(--k-teal)"><div class="head"><span class="fav" style="background:var(--k-blue)"></span>Stratechery<span class="open">›</span></div>
+							<div class="story"><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago</div></div>
+							<div class="story"><div class="t">An interview about chips, power and the next data centre</div><div class="m">18 min ago</div></div>
+							<div class="more">2 more</div>
+						</div>
+						<div class="card"><div class="head"><span class="fav" style="background:var(--k-violet)"></span>Dense Discovery<span class="open">›</span></div>
+							<div class="story"><div class="t">Issue 312: Quiet tools, loud cities</div><div class="m">9 min ago</div></div>
+							<div class="story"><div class="t">A field guide to slower software</div><div class="m">yesterday</div></div>
+							<div class="more">1 more</div>
+						</div>
+						<div class="card"><div class="head"><span class="fav" style="background:var(--k-amber)"></span>Money Stuff<span class="open">›</span></div>
+							<div class="story read"><div class="t">The bond market wants a word</div><div class="m">12 min ago</div></div>
+							<div class="story"><div class="t">Who owns the index?</div><div class="m">2 days ago</div></div>
+						</div>
+					</div>
+				</div></div>
+			</div>
+		</div>
+	</div>
+	<div style="height:16px"></div>
+	<div class="window small">
+		<div class="chrome"><i></i><i></i><i></i><div class="url">pigeon.hanscho.com</div></div>
+		<div class="app"><div class="page">
+			<div class="toolbar"><span class="dateline">Mon, Nov 23 · 14 new</span><span class="spacer"></span><span class="ib">⌕</span><span class="ib">＋</span><div class="look"><span class="on">Cards</span><span>Reeder</span></div><span class="ib">⚙</span></div>
+			<div class="scroll"><div class="inner">
+				<div class="views">
+					<div class="vtile"><span class="ic">✦</span><b>For You</b></div><div class="vtile"><span class="ic">☆</span><b>Starred</b></div><div class="vtile"><span class="ic">⌑</span><b>Read It Later</b></div><div class="vtile"><span class="ic">▦</span><b>Today</b></div><div class="vtile"><span class="ic">◷</span><b>Last 7 Days</b></div>
+				</div>
+				<div class="folders">
+					<div class="ftile" style="--bar:var(--k-teal)"><div class="name">Newsletters</div><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="favs"><span class="fav" style="background:var(--k-blue)"></span><span class="fav" style="background:var(--k-violet)"></span><span class="fav" style="background:var(--k-amber)"></span><span class="fav" style="background:var(--k-pink)"></span></div></div>
+					<div class="ftile" style="--bar:var(--k-red)"><div class="name">Technology</div><div class="t">Inside the moderation team that runs on spreadsheets</div><div class="favs"><span class="fav" style="background:var(--k-pink)"></span><span class="fav" style="background:var(--k-green)"></span></div></div>
+					<div class="ftile" style="--bar:var(--k-green)"><div class="name">Design</div><div class="t">Designing calmer tools for people who read every day</div><div class="favs"><span class="fav" style="background:var(--k-violet)"></span><span class="fav" style="background:var(--k-brown)"></span></div></div>
+					<div class="ftile" style="--bar:var(--k-brown)"><div class="name">All Feeds</div><div class="t" style="color:var(--muted);font-family:var(--font);font-size:14px">Every folder and feed as tiles</div><div class="favs"></div></div>
+				</div>
+			</div></div>
+		</div></div>
+	</div>
+	<ul class="notes"><li>Home (above): five view tiles on one row and folders four across, capped at 960px and centred, as on an iPad.</li><li>Narrow windows (≤760px) are the phone layout: one column of cards.</li></ul>
+</section>
+
+<!-- ============ OPTION B ============ -->
+<section class="option">
+	<h2>B. Library + page <span>· the web's quiet sidebar stays; the rest of the window is one page of cards</span> <span class="tag">recommended</span></h2>
+	<p class="why">The library column you use now stays on the left, collapsible as today, with Home at its top. Everything to its right is the Cards page: Home tiles, a folder's cards, or the Front Page for a smart view. A story opens across that page area with "‹ Newsletters", and j/k step through the stories. You keep one-click access to every feed, and the cards get the width they need.</p>
+	<div class="window">
+		<div class="chrome"><i></i><i></i><i></i><div class="url">pigeon.hanscho.com</div></div>
+		<div class="app">
+			<div class="sidebar">
+				<div class="toolbar"><span class="ib">◧</span><span class="spacer"></span><span class="ib">＋</span><span class="ib">⋯</span></div>
+				<div class="item"><span class="ic">⌂</span>Home</div>
+				<div class="group">Views</div>
+				<div class="item"><span class="ic">✦</span>For You<span class="n">8</span></div>
+				<div class="item"><span class="ic">○</span>Unread<span class="n">23</span></div>
+				<div class="item"><span class="ic">▦</span>Today<span class="n">7</span></div>
+				<div class="item"><span class="ic">◷</span>Last 7 Days<span class="n">14</span></div>
+				<div class="item"><span class="ic">☆</span>Starred</div>
+				<div class="item"><span class="ic">⌑</span>Read It Later<span class="n">4</span></div>
+				<div class="group">Folders</div>
+				<div class="item sel"><span class="ic">▾</span>Newsletters<span class="n">14</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-blue)"></span>Stratechery<span class="n">3</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-violet)"></span>Dense Discovery<span class="n">4</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-amber)"></span>Money Stuff<span class="n">2</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-pink)"></span>Platformer<span class="n">5</span></div>
+				<div class="item"><span class="ic">▸</span>Technology<span class="n">6</span></div>
+				<div class="item"><span class="ic">▸</span>Design<span class="n">3</span></div>
+			</div>
+			<div class="page">
+				<div class="toolbar"><span class="spacer"></span><span class="ib">⌕</span><span class="ib">⛛</span><div class="look"><span class="on">Cards</span><span>Reeder</span></div><span class="ib">⚙</span></div>
+				<div class="scroll"><div class="inner">
+					<div class="masthead"><h3>Newsletters</h3><span class="dateline">Mon, Nov 23 · 14 new</span></div>
+					<div class="wide-cards">
+						<div class="card"><div class="head">Today</div>
+							<div class="split2" style="gap:0 24px">
+								<div>
+									<div class="story sel"><div class="kick" style="color:var(--k-blue)">Stratechery</div><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago · 12 min read</div></div>
+									<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">Issue 312: Quiet tools, loud cities</div><div class="m">9 min ago</div></div>
+								</div>
+								<div>
+									<div class="story read"><div class="kick" style="color:var(--k-amber)">Money Stuff</div><div class="t">The bond market wants a word</div><div class="m">12 min ago</div></div>
+									<div class="story"><div class="kick" style="color:var(--k-pink)">Platformer</div><div class="t">Inside the moderation team that runs on spreadsheets</div><div class="m">15 min ago</div></div>
+								</div>
+							</div>
+							<div class="more">3 more</div>
+						</div>
+					</div>
+					<div class="grid3">
+						<div class="card"><div class="head">Last 7 Days</div>
+							<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">A field guide to slower software</div><div class="m">yesterday</div></div>
+							<div class="story"><div class="kick" style="color:var(--k-amber)">Money Stuff</div><div class="t">Who owns the index?</div><div class="m">2 days ago</div></div>
+							<div class="more">5 more</div>
+						</div>
+						<div class="card"><div class="head"><span class="fav" style="background:var(--k-blue)"></span>Stratechery<span class="open">›</span></div>
+							<div class="story sel"><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago</div></div>
+							<div class="story"><div class="t">An interview about chips, power and the next data centre</div><div class="m">18 min ago</div></div>
+							<div class="more">2 more</div>
+						</div>
+						<div class="card"><div class="head"><span class="fav" style="background:var(--k-violet)"></span>Dense Discovery<span class="open">›</span></div>
+							<div class="story"><div class="t">Issue 312: Quiet tools, loud cities</div><div class="m">9 min ago</div></div>
+							<div class="story"><div class="t">A field guide to slower software</div><div class="m">yesterday</div></div>
+							<div class="more">1 more</div>
+						</div>
+					</div>
+				</div></div>
+			</div>
+		</div>
+	</div>
+	<ul class="notes"><li>Today spans the page and flows two columns wide when the page has room; Last 7 Days and the feed cards go three across (two at medium widths, one at ≤760px).</li><li>Home: the same tile page as A, beside the sidebar. All Feeds is the sidebar itself, so there are no library tiles on the web.</li><li>The story opens over the cards (full page width, the 640px reading measure centred); back returns to the same scroll position.</li></ul>
+</section>
+
+<!-- ============ OPTION C ============ -->
+<section class="option">
+	<h2>C. Three columns <span>· today's web layout, with the stream column drawn as cards</span></h2>
+	<p class="why">Library, a column of cards, and the open story side by side, like the Reeder look now. The smallest change and the fastest for reading many stories, but the cards are only 340px wide, one per row, so a folder is a long thin stack and the Front Page has no room to be a front page.</p>
+	<div class="window">
+		<div class="chrome"><i></i><i></i><i></i><div class="url">pigeon.hanscho.com</div></div>
+		<div class="app">
+			<div class="sidebar">
+				<div class="toolbar"><span class="ib">◧</span><span class="spacer"></span><span class="ib">＋</span><span class="ib">⋯</span></div>
+				<div class="group">Views</div>
+				<div class="item"><span class="ic">✦</span>For You<span class="n">8</span></div>
+				<div class="item"><span class="ic">○</span>Unread<span class="n">23</span></div>
+				<div class="item"><span class="ic">▦</span>Today<span class="n">7</span></div>
+				<div class="item"><span class="ic">◷</span>Last 7 Days<span class="n">14</span></div>
+				<div class="group">Folders</div>
+				<div class="item sel"><span class="ic">▾</span>Newsletters<span class="n">14</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-blue)"></span>Stratechery<span class="n">3</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-violet)"></span>Dense Discovery<span class="n">4</span></div>
+				<div class="item feed"><span class="fav" style="background:var(--k-amber)"></span>Money Stuff<span class="n">2</span></div>
+				<div class="item"><span class="ic">▸</span>Technology<span class="n">6</span></div>
+			</div>
+			<div class="stream">
+				<div class="toolbar"><b style="font-size:15px">Newsletters</b><span class="spacer"></span><span class="ib">⛛</span><div class="look"><span class="on">Cards</span><span>Reeder</span></div></div>
+				<div class="scroll">
+					<div class="card"><div class="head">Today</div>
+						<div class="story sel"><div class="kick" style="color:var(--k-blue)">Stratechery</div><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago</div></div>
+						<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">Issue 312: Quiet tools, loud cities</div><div class="m">9 min ago</div></div>
+						<div class="story read"><div class="kick" style="color:var(--k-amber)">Money Stuff</div><div class="t">The bond market wants a word</div><div class="m">12 min ago</div></div>
+						<div class="more">4 more</div>
+					</div>
+					<div class="card"><div class="head">Last 7 Days</div>
+						<div class="story"><div class="kick" style="color:var(--k-violet)">Dense Discovery</div><div class="t">A field guide to slower software</div><div class="m">yesterday</div></div>
+						<div class="more">6 more</div>
+					</div>
+					<div class="card"><div class="head"><span class="fav" style="background:var(--k-blue)"></span>Stratechery<span class="open">›</span></div>
+						<div class="story sel"><div class="t">The Aggregator's dilemma, revisited for an age of agents</div><div class="m">6 min ago</div></div>
+					</div>
+				</div>
+			</div>
+			<div class="reader">
+				<div class="toolbar"><span class="spacer"></span><span class="ib">☆</span><span class="ib">⌑</span><span class="ib">↗</span><span class="ib">Aa</span></div>
+				<div class="copy">
+					<div class="feed">Stratechery</div>
+					<h4>The Aggregator's dilemma, revisited for an age of agents</h4>
+					<div class="meta">Ben Thompson · 6 min ago · 12 min read</div>
+					<p>Aggregation Theory was always a theory about where value accrues when distribution costs fall to zero. Agents change the question: when the user no longer visits the page at all, who is the aggregator?</p>
+					<p>The answer, at least for now, is whoever owns the interface the agent reports back to, which is why every platform is racing to be the place the agent lives.</p>
+				</div>
+			</div>
+		</div>
+	</div>
+</section>
+</body>
+</html>

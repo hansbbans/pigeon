@@ -68,9 +68,10 @@ export interface FolderSectionItem {
 }
 
 export interface FolderSection {
-	// 'today', 'last-7-days', 'feed:<streamId>' or 'older'.
+	// 'today', 'last-7-days', 'feed:<streamId>' or 'older'; a single feed's
+	// day sections are 'today', 'yesterday' and 'earlier'.
 	key: string;
-	kind: 'today' | 'last-7-days' | 'feed' | 'older-header';
+	kind: 'today' | 'last-7-days' | 'feed' | 'older-header' | 'yesterday' | 'earlier';
 	title: string;
 	streamId?: string;
 	itemIds: string[];
@@ -813,6 +814,68 @@ export function buildFolderSections(
 	return sections;
 }
 
+/**
+ * A single feed in the Cards look: its loaded stories by local day, Today,
+ * Yesterday and Earlier, newest first (iOS `FeedDaySections`). Every day shows
+ * `limit` stories unless its key is in `expanded`; `hiddenCount` is the rest. A
+ * story dated after today (a skewed clock) counts as Today. Self-contained:
+ * emitted via toString().
+ */
+export function buildFeedDaySections(
+	items: Array<{ id: string; published: number }>,
+	now: number,
+	options?: { limit?: number; expanded?: ReadonlySet<string> },
+): FolderSection[] {
+	const todayStart = getLocalDayRangeBounds(now, 1).startSeconds;
+	const yesterdayStart = getLocalDayRangeBounds(now, 2).startSeconds;
+	const limit = Math.max(0, options?.limit ?? 5);
+	const newestFirst = [...items].sort((left, right) =>
+		right.published - left.published || Number(right.id) - Number(left.id) || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0));
+	const days: Array<{ key: string; kind: FolderSection['kind']; title: string; ids: string[] }> = [
+		{ key: 'today', kind: 'today', title: 'Today', ids: newestFirst.filter((item) => item.published >= todayStart).map((item) => item.id) },
+		{ key: 'yesterday', kind: 'yesterday', title: 'Yesterday',
+			ids: newestFirst.filter((item) => item.published >= yesterdayStart && item.published < todayStart).map((item) => item.id) },
+		{ key: 'earlier', kind: 'earlier', title: 'Earlier', ids: newestFirst.filter((item) => item.published < yesterdayStart).map((item) => item.id) },
+	];
+	return days.filter((day) => day.ids.length > 0).map((day) => {
+		const shown = options?.expanded?.has(day.key) ? day.ids : day.ids.slice(0, limit);
+		return { key: day.key, kind: day.kind, title: day.title, itemIds: shown, hiddenCount: day.ids.length - shown.length };
+	});
+}
+
+/**
+ * The kicker colour (0-7, `--kicker-1`...`--kicker-8`) of a feed or folder:
+ * 64-bit FNV-1a over the key's UTF-8 bytes, the hash iOS
+ * `FrontPageKickerPalette.colorIndex` uses, so it is the same on every load.
+ * Self-contained: emitted via toString().
+ */
+export function kickerColorIndex(key: string, count: number = 8): number {
+	let hash = 0xcbf29ce484222325n;
+	for (const byte of new TextEncoder().encode(key)) {
+		hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
+	}
+	return Number(hash % BigInt(Math.max(1, count)));
+}
+
+/**
+ * Each folder's kicker colour, in the order given: a folder starts from its id's
+ * hash and moves to the next free colour when another folder has it, so folders
+ * do not share a colour until there are more folders than colours; the rest keep
+ * their hash (iOS `ReaderHomeTiles.colorIndices`). Pass every folder, not only
+ * the visible ones, so a filter never recolours one. Self-contained.
+ */
+export function assignFolderColorIndices(folderIds: string[], count: number = 8): number[] {
+	const used = new Set<number>();
+	return folderIds.map((id) => {
+		let index = kickerColorIndex(id, count);
+		if (used.size < count) {
+			while (used.has(index)) index = (index + 1) % count;
+		}
+		used.add(index);
+		return index;
+	});
+}
+
 export function filterItemIdsForLocalDay(
 	itemIds: string[],
 	loadedItemsById: Record<string, Pick<BrowserLoadedItem, 'published'>>,
@@ -1326,6 +1389,9 @@ ${getLocalDayRangeBounds.toString()}
 ${isTimeWindowView.toString()}
 ${getViewDayBounds.toString()}
 ${buildFolderSections.toString()}
+${buildFeedDaySections.toString()}
+${kickerColorIndex.toString()}
+${assignFolderColorIndices.toString()}
 ${filterItemIdsForLocalDay.toString()}
 ${limitInitialItemIds.toString()}
 ${createContentLoadPlan.toString()}
@@ -1383,6 +1449,9 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   isTimeWindowView,
   getViewDayBounds,
   buildFolderSections,
+  buildFeedDaySections,
+  kickerColorIndex,
+  assignFolderColorIndices,
   filterItemIdsForLocalDay,
   limitInitialItemIds,
   createContentLoadPlan,

@@ -4,6 +4,10 @@ All notable changes to Pigeon are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Web: a Cards look, switched from the stream header or Settings → Look. It opens on a Home page of tiles; folders show their sections as cards, a feed shows Today, Yesterday and Earlier cards, and each story is a coloured feed name, a serif headline and one meta line. A story opens over the cards, and Back or Escape returns to them. Reeder stays the default.
+
 ### Changed
 
 - iOS: the Reeder look no longer looks like stock iOS. The library is a quiet grey column with small labels, grey counts and no chevrons, and it is where Reeder opens: there are no Home tiles in Reeder (they stay in Cards), and an iPad opens with a list beside the library. A folder is one list in sections, Today, Last 7 Days and then one per feed, as on the web; a feed is Today, Yesterday and Earlier. Story titles are sans serif with one grey line under them, and a story already read when its list opens takes a single line.
