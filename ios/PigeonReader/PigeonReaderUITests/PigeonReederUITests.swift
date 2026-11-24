@@ -51,9 +51,9 @@ final class PigeonReederUITests: XCTestCase {
 		revealLibrary()
 		XCTAssertTrue(element("reader-sidebar").waitForExistence(timeout: 15))
 
-		// Reeder's library bar offers Cards in one tap.
-		let toCards = app.navigationBars.buttons["Switch to Cards"].firstMatch
-		XCTAssertTrue(toCards.waitForExistence(timeout: 5))
+		// Reeder's library bar offers Cards in one tap (on an iPad the list's
+		// bar has one too, under the library while it slides over).
+		let toCards = try XCTUnwrap(hittableLookSwitch("Switch to Cards"), "a switch to Cards can be tapped")
 		capture("reeder-library-look-toggle")
 		toCards.tap()
 		if UIDevice.current.userInterfaceIdiom == .pad {
@@ -64,8 +64,7 @@ final class PigeonReederUITests: XCTestCase {
 		XCTAssertTrue(element("reader-home-tiles").waitForExistence(timeout: 10), "Cards reaches Home")
 
 		// Home's bar offers Reeder back, in one tap.
-		let toReeder = app.navigationBars.buttons["Switch to Reeder"].firstMatch
-		XCTAssertTrue(toReeder.waitForExistence(timeout: 5))
+		let toReeder = try XCTUnwrap(hittableLookSwitch("Switch to Reeder"), "a switch to Reeder can be tapped")
 		capture("cards-home-look-toggle")
 		toReeder.tap()
 		revealLibrary()
@@ -76,14 +75,17 @@ final class PigeonReederUITests: XCTestCase {
 	func testAListBarSwitchesTheLook() throws {
 		launchFolder()
 		XCTAssertTrue(element("article-section-today").waitForExistence(timeout: 15))
-		let toCards = app.navigationBars.buttons["Switch to Cards"].firstMatch
+		// The folder's own bar, not the library's beside it on an iPad.
+		let bar = app.navigationBars.matching(NSPredicate(format: "identifier BEGINSWITH %@", "Newsletters")).firstMatch
+		let toCards = bar.buttons["Switch to Cards"]
 		XCTAssertTrue(toCards.waitForExistence(timeout: 5))
 		capture("reeder-folder-look-toggle")
 		toCards.tap()
 		// The folder stays open, now as cards.
-		XCTAssertTrue(app.navigationBars.buttons["Switch to Reeder"].firstMatch.waitForExistence(timeout: 10))
 		XCTAssertTrue(element("folder-card-today").waitForExistence(timeout: 10), "the folder stays open, as cards")
-		XCTAssertFalse(element("article-section-today").exists, "Reeder's sections give way to cards")
+		let sectionsGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element("article-section-today"))
+		wait(for: [sectionsGone], timeout: 10)
+		XCTAssertTrue(app.navigationBars.buttons["Switch to Reeder"].firstMatch.waitForExistence(timeout: 10))
 		capture("cards-folder-look-toggle")
 	}
 
@@ -152,6 +154,13 @@ final class PigeonReederUITests: XCTestCase {
 			"-reader-cards-open", Self.folderID,
 		]
 		app.launchWithoutAnimations()
+	}
+
+	/// The first look switch on screen that a tap would reach.
+	private func hittableLookSwitch(_ label: String) -> XCUIElement? {
+		let switches = app.navigationBars.buttons.matching(NSPredicate(format: "label == %@", label))
+		_ = switches.firstMatch.waitForExistence(timeout: 5)
+		return switches.allElementsBoundByIndex.first { $0.isHittable }
 	}
 
 	private func element(_ identifier: String) -> XCUIElement {

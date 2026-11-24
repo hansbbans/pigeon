@@ -159,6 +159,8 @@ struct ReaderSidebarView: View {
 						.accessibilityHint("Returns to the tile view")
 				}
 			}
+			// Also in the library on an iPad, where the list beside it has one
+			// too: in portrait the library slides over and covers the list's bar.
 			ReaderLookToolbarItem()
 			ReaderLibraryToolbarItems(editorRoute: $editorRoute, collectsMenus: true)
 		}

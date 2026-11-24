@@ -159,6 +159,7 @@ struct ReadItLaterToolbar: ToolbarContent {
 
 	var body: some ToolbarContent {
 		ToolbarItemGroup(placement: .topBarTrailing) {
+			ReaderLookToggleButton()
 			Menu("Filter", systemImage: model.savedListFilter.isDefault
 				? "line.3.horizontal.decrease"
 				: "line.3.horizontal.decrease.circle.fill") {

@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Add Feed and the collection filter, shared by the tile home and the library
-/// list. The Reeder library (`collectsMenus`) shows only ＋ and ⋯, with the
-/// filter, the look and Settings in ⋯: it is the app's root there, with no
-/// Home to hold the look switch.
+/// list. The Reeder library (`collectsMenus`) shows only ＋ and ⋯ beside the
+/// top-bar look switch, with the filter, the look (named, for a reader who
+/// looks for it there) and Settings in ⋯: it is the app's root, with no Home
+/// to hold Settings.
 struct ReaderLibraryToolbarItems: ToolbarContent {
 	@Environment(ReaderAppModel.self) private var model
 	@Binding var editorRoute: LibraryEditorRoute?
