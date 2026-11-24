@@ -537,6 +537,22 @@ export function renderBrowserAppRuntimeScript(): string {
   // Cards: the list and scroll position the cards had when a story opened over them.
   let cardsScrollMemory = null;
   let folderColorCache = { views: null, indices: new Map() };
+  // Cards: the story the reader opened in this visit to the list (a click, j/k,
+  // a notification). Only it is drawn as chosen; the story picked when the list
+  // arrives is not. Reeder draws its selection as before.
+  let cardsOpenedStory = null;
+  // Each loaded story's first picture, found once per story object (the Front
+  // Page asks on every render and every j/k step).
+  const heroImageUrls = new WeakMap();
+  // Each Front Page picture's natural size once it has loaded ('failed' when it
+  // could not), by its own address, so a logo or banner is left out from then on
+  // and never chosen as a lead.
+  const previewImageSizes = new Map();
+  let frontPageRelayoutQueued = false;
+  // The leads drawn whenever a story is opened on a Front Page: while the reader
+  // stays in that list its pages keep them, so pictures arriving later never
+  // reorder the stories under j/k.
+  let frontPagePins = null;
   // A feed's kicker colour never changes, so each stream id is hashed once.
   const kickerColorIndices = new Map();
   // Home's tiles as last drawn: they are rebuilt only when this changes.
@@ -1128,6 +1144,20 @@ export function renderBrowserAppRuntimeScript(): string {
     return look === 'cards';
   }
 
+  function noteCardsStoryOpened(itemId) {
+    const listKey = getViewQueryKey(activeViewId);
+    cardsOpenedStory = { listKey, itemId };
+    const layout = getFrontPageLayout();
+    if (!layout) return;
+    if (frontPagePins?.listKey !== listKey) frontPagePins = { listKey, leads: new Set() };
+    // Pages loaded since the last open get their leads pinned too.
+    for (const page of layout.pages) frontPagePins.leads.add(page.lead);
+  }
+
+  function isCardsStoryOpenedHere(itemId) {
+    return cardsOpenedStory?.itemId === itemId && cardsOpenedStory.listKey === getViewQueryKey(activeViewId);
+  }
+
   // Cards shows the cards or the open story, never both.
   function isCardsStoryOpen() {
     return isCardsLook() && readerGrid.getAttribute('data-mobile-pane') === 'reader';
@@ -1225,13 +1255,18 @@ export function renderBrowserAppRuntimeScript(): string {
     renderArticles();
   }
 
+  // Today's date (short on Home, long on a masthead), then the unread count when there is one.
+  function formatCardsDateline(unreadCount, length) {
+    return new Date().toLocaleDateString(undefined, { weekday: length, month: length, day: 'numeric' }) +
+      (unreadCount > 0 ? ' · ' + unreadCount + ' new' : '');
+  }
+
   // Home: a tile per view (as on iOS, Unread and All items get none), then a
   // tile per folder with its first feeds. No counts: the sidebar has them.
   function getCardsHomeContent() {
     const today = views.find((view) => view.kind === 'today');
     return {
-      dateline: new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) +
-        (today?.unreadCount > 0 ? ' · ' + today.unreadCount + ' new' : ''),
+      dateline: formatCardsDateline(today?.unreadCount, 'short'),
       views: ['recommended', 'starred', 'saved', 'today', 'last-7-days']
         .map((kind) => views.find((candidate) => candidate.kind === kind))
         .filter(Boolean)
@@ -1884,7 +1919,7 @@ export function renderBrowserAppRuntimeScript(): string {
     // from reading behaviour.
     const rendered = renderedArticleCards.find((candidate) => candidate.id === card.id);
     if (rendered?.node.classList.contains('is-compact')) metadata.row = 'compact';
-    else if (rendered?.card) metadata.row = 'card';
+    else if (rendered?.row) metadata.row = rendered.row;
     // In a folder: the section that showed the story first.
     if (rendered?.section) metadata.section = rendered.section;
     pendingImpressions.push({
@@ -2103,7 +2138,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const request=pendingNotificationAction,button=document.getElementById('notification-confirm-button');if(!request||button.disabled||pendingArticleMutation)return;
     button.disabled=true;
     try {await ensureArticleContent([request.itemId],request);if(pendingNotificationAction!==request||!requestBelongsToCurrentSession(request.generation,request.token))return;
-      selectedItemId=request.itemId;heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};
+      selectedItemId=request.itemId;noteCardsStoryOpened(request.itemId);heldReaderArticle={itemId:request.itemId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};
       // In Cards the story opens over the page (and leaves Home), so it is on screen when logged.
       if(isCardsLook()){if(cardsHomeShown){cardsHomeShown=false;renderFeeds();renderArticles();}setMobilePane('reader',true);}
       // Confirming an action shows the story too; that counts as opening it only once it is read.
@@ -2554,8 +2589,10 @@ export function renderBrowserAppRuntimeScript(): string {
     // Stepping past the end of a window is still the reader choosing the next
     // article. When that window is not loaded yet, the list picks its first
     // article once it arrives (renderArticles), and that pick is the open.
-    if (keyboard && selectedItemId) noteArticleOpened(selectedItemId, true);
-    else pendingKeyboardWindowStep = keyboard ? { viewId: activeViewId, windowStart: start } : null;
+    if (keyboard && selectedItemId) {
+      noteArticleOpened(selectedItemId, true);
+      noteCardsStoryOpened(selectedItemId);
+    } else pendingKeyboardWindowStep = keyboard ? { viewId: activeViewId, windowStart: start } : null;
     keyboardRevealSelection = keyboard && selectedItemId ? { itemId: selectedItemId, viewId: activeViewId, generation: accountGeneration } : null;
     restoreArticleScrollTop(0);
     renderArticles();
@@ -2671,7 +2708,7 @@ export function renderBrowserAppRuntimeScript(): string {
   // The order j and k walk: the list as shown, each story once. In a folder
   // that is the first appearance of each story across its sections.
   function getNavigableItemIds() {
-    return getSectionLayout()?.order || getVisibleItemIds();
+    return getSectionLayout()?.order || getFrontPageLayout()?.order || getVisibleItemIds();
   }
 
   async function loadAdjacentKeyboardArticle() {
@@ -2699,6 +2736,12 @@ export function renderBrowserAppRuntimeScript(): string {
       renderReader();
     }
     const navigableIds = getNavigableItemIds();
+    // In Cards nothing is chosen until a story is opened: the first step goes to
+    // the first story drawn (a Front Page's lead), not past the one picked on arrival.
+    if (isCardsLook() && !isSavedView() && navigableIds.length > 0 && !isCardsStoryOpenedHere(selectedItemId)) {
+      void selectArticle(navigableIds[0], { keyboard: true });
+      return true;
+    }
     const selectedIndex = selectedItemId ? navigableIds.indexOf(selectedItemId) : -1;
     if (selectedIndex === -1) {
       if (hasHeldReaderSelection()) {
@@ -3172,7 +3215,11 @@ export function renderBrowserAppRuntimeScript(): string {
         if (pendingKeyboardWindowStep.viewId !== activeViewId || pendingKeyboardWindowStep.windowStart !== state?.windowStart) {
           pendingKeyboardWindowStep = null;
         } else if (selectedItemId) {
+          const drawn = getSectionLayout(visibleItemIds)?.order || getFrontPageLayout(visibleItemIds)?.order;
+          selectedItemId = drawn?.find((id) => loadedItemsById[id]) || selectedItemId;
+          if (state) state.selectedItemId = selectedItemId;
           noteArticleOpened(selectedItemId, true);
+          noteCardsStoryOpened(selectedItemId);
         }
       }
     }
@@ -3192,11 +3239,14 @@ export function renderBrowserAppRuntimeScript(): string {
     renderedArticleListIdentity = listIdentity;
     clearElement(articlesList);
     renderedArticleCards = [];
-    // Cards draws every list but Read It Later as cards on the grouped page.
+    // Cards draws every list but Read It Later as cards on the grouped page, and
+    // the smart views as the Front Page.
     const savedView = isSavedView();
     const cardsMode = isCardsLook() && !savedView;
-    articlesList.classList.toggle('is-cards', cardsMode);
-    readerGrid.setAttribute('data-page', isCardsLook() && cardsHomeShown ? 'home' : cardsMode ? 'cards' : 'list');
+    const frontPageList = cardsMode && entries.length > 0 && isFrontPageList();
+    articlesList.classList.toggle('is-cards', cardsMode && !frontPageList);
+    articlesList.classList.toggle('is-front-page', frontPageList);
+    readerGrid.setAttribute('data-page', isCardsLook() && cardsHomeShown ? 'home' : frontPageList ? 'front-page' : cardsMode ? 'cards' : 'list');
 
     if (entries.length === 0) {
       const activeView = getActiveView();
@@ -3239,7 +3289,8 @@ export function renderBrowserAppRuntimeScript(): string {
         classNames: [
           'article-card',
           isRead ? 'is-read' : '',
-          entry.id === selectedItemId && (!selectedRowKey || row.sectionKey === selectedRowKey) ? 'is-active' : '',
+          entry.id === selectedItemId && (!selectedRowKey || row.sectionKey === selectedRowKey) &&
+            (!cardsMode || isCardsStoryOpenedHere(entry.id)) ? 'is-active' : '',
           isCompact ? 'is-compact' : '',
           savedView && article ? 'saved-card' : articleListMode !== 'titles' && !isCompact && entry.heroImageUrl ? 'has-hero-image' : 'is-text-only',
         ],
@@ -3251,7 +3302,7 @@ export function renderBrowserAppRuntimeScript(): string {
         },
       });
       renderedArticleCards.push({ id: entry.id, node: button, position: row.position,
-        ...(row.section ? { section: row.section } : {}), ...(cardsMode ? { card: true } : {}) });
+        ...(row.section ? { section: row.section } : {}), ...(cardsMode ? { row: row.frontPage ? 'front-page' : 'card' } : {}) });
       button.addEventListener('click', () => {
         if (isCardsLook() && !isCardsStoryOpen()) cardsScrollMemory = { identity: renderedArticleListIdentity, scrollTop: getArticleScrollTop() };
         setMobilePane('reader', true);
@@ -3267,7 +3318,8 @@ export function renderBrowserAppRuntimeScript(): string {
         return;
       }
       if (cardsMode) {
-        appendCardStory(button, article, entry, row, isStarred);
+        if (row.frontPage) appendFrontPageStory(button, article, entry, row.frontPage, isStarred);
+        else appendCardStory(button, article, entry, row, isStarred);
         listItem.appendChild(button);
         container.appendChild(listItem);
         return;
@@ -3288,18 +3340,8 @@ export function renderBrowserAppRuntimeScript(): string {
         if (meta) copy.appendChild(meta);
       }
       cardGrid.appendChild(copy);
-      if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && (!readingPreferences || readingPreferences.imagePolicy !== 'ask')) {
-        const image = createNode('img', {
-            classNames: ['article-hero'],
-            attributes: {
-              ...(readingPreferences?.imagePolicy === 'proxy' ? {} : {src:entry.heroImageUrl}),
-              alt: '',
-              loading: 'lazy',
-              'data-card-hero': 'true',
-            },
-          });
-        cardGrid.appendChild(image);
-        if(readingPreferences?.imagePolicy === 'proxy') void preparePreviewImage(image,entry.heroImageUrl);
+      if (articleListMode !== 'titles' && !isCompact && entry.heroImageUrl && showsPreviewImages()) {
+        cardGrid.appendChild(createPreviewImage(entry.heroImageUrl, ['article-hero']));
       }
       button.appendChild(cardGrid);
       listItem.appendChild(button);
@@ -3308,7 +3350,9 @@ export function renderBrowserAppRuntimeScript(): string {
     // A folder shows sections (Today, Last 7 Days, one per feed). Headers and
     // "N more" rows are not articles: they are not in renderedArticleCards, so
     // selection, keys and impressions skip them.
-    if (cardsMode) {
+    if (frontPageList) {
+      appendFrontPage(entries, getFrontPageLayout(visibleItemIds), windowStart, appendArticleRow);
+    } else if (cardsMode) {
       appendCards(entries, folderLayout, windowStart, appendArticleRow);
     } else if (folderLayout) {
       const entryById = new Map(entries.map((entry) => [entry.id, entry]));
@@ -3449,7 +3493,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const rows = [];
     const visit = (parent) => {
       for (const child of parent.children) {
-        if (child.classList?.contains('cards-card') || child.classList?.contains('cards-card-list')) visit(child);
+        if (['cards-card', 'cards-card-list', 'front-page', 'front-page-lead', 'front-page-grid'].some((name) => child.classList?.contains(name))) visit(child);
         else rows.push(child);
       }
     };
@@ -3558,16 +3602,19 @@ export function renderBrowserAppRuntimeScript(): string {
   // feeds), a headline in the reading face and one meta line. No preview or image.
   function appendCardStory(button, article, entry, row, isStarred) {
     const copy = createNode('span', { classNames: ['article-card-copy'] });
-    if (row.showSource && entry.feedTitle) {
-      const kicker = createNode('span', { classNames: ['article-kicker'], text: entry.feedTitle });
-      kicker.style.setProperty('--kicker', kickerColor(getKickerColorIndex(article?.origin?.streamId || entry.feedTitle)));
-      copy.appendChild(kicker);
-    }
+    if (row.showSource && entry.feedTitle) copy.appendChild(createArticleKicker(article, entry));
     copy.appendChild(createArticleTitle(entry, isStarred));
     // The kicker names the feed, so the meta line is the time, then the length.
     const meta = createArticleMeta(entry, { source: null, timeFirst: true });
     if (meta) copy.appendChild(meta);
     button.appendChild(copy);
+  }
+
+  // A story's feed name over its headline, in the feed's colour.
+  function createArticleKicker(article, entry) {
+    const kicker = createNode('span', { classNames: ['article-kicker'], text: entry.feedTitle });
+    kicker.style.setProperty('--kicker', kickerColor(getKickerColorIndex(article?.origin?.streamId || entry.feedTitle)));
+    return kicker;
   }
 
   // A list or card row's headline: the star, the title and a Paywall label.
@@ -3592,6 +3639,132 @@ export function renderBrowserAppRuntimeScript(): string {
     if (readingLength) meta.appendChild(createNode('span', { classNames: ['article-length'], text: readingLength }));
     if (time && !timeFirst) meta.appendChild(time);
     return meta;
+  }
+
+  // Whether list pictures load at all: Ask shows none until the reader asks.
+  function showsPreviewImages() {
+    return articleListMode !== 'titles' && (!readingPreferences || readingPreferences.imagePolicy !== 'ask');
+  }
+
+  // A story's picture in a list, under the image policy: Proxy loads it through
+  // the reading proxy, never from its own address.
+  // onUnavailable runs when the proxy gives no picture (no load or error event follows).
+  function createPreviewImage(url, classNames, onUnavailable) {
+    const proxied = readingPreferences?.imagePolicy === 'proxy';
+    const image = createNode('img', { classNames, attributes: { ...(proxied ? {} : { src: url }), alt: '', loading: 'lazy', 'data-card-hero': 'true' } });
+    if (proxied) void preparePreviewImage(image, url).then((shown) => { if (shown === false) onUnavailable?.(); });
+    return image;
+  }
+
+  // Whether a Front Page picture is worth drawing at this width: unknown until it loads.
+  function frontPageImageFits(url, minimumWidth) {
+    const size = previewImageSizes.get(url);
+    if (!size) return true;
+    return size !== 'failed' && client.isEditorialImage(size.width, size.height, minimumWidth);
+  }
+
+  function rememberPreviewImageSize(url, size) {
+    previewImageSizes.delete(url);
+    previewImageSizes.set(url, size);
+    if (previewImageSizes.size > 1000) previewImageSizes.delete(previewImageSizes.keys().next().value);
+  }
+
+  // A lead whose picture turned out unusable gives way to a story with one.
+  function queueFrontPageRelayout() {
+    if (frontPageRelayoutQueued) return;
+    frontPageRelayoutQueued = true;
+    setTimeout(() => {
+      frontPageRelayoutQueued = false;
+      if (isFrontPageList()) renderArticles();
+    }, 0);
+  }
+
+  function getHeroImageUrl(item) {
+    if (!item) return null;
+    if (!heroImageUrls.has(item)) heroImageUrls.set(item, client.selectArticleHeroImageUrl(item.content?.content));
+    return heroImageUrls.get(item);
+  }
+
+  // In Cards the smart views are the Front Page; search results stay one flat card.
+  const frontPageViewKinds = new Set(['all', 'unread', 'today', 'last-7-days', 'recent', 'starred', 'recommended']);
+  function isFrontPageList(view = getActiveView()) {
+    return isCardsLook() && frontPageViewKinds.has(view?.kind) && !articleSearchQuery;
+  }
+
+  // The Front Page's pages for the open list: a lead (an early story with a
+  // picture) over a grid, thirteen stories a page. Null for any other list.
+  function getFrontPageLayout(visibleItemIds = getVisibleItemIds()) {
+    if (!isFrontPageList()) return null;
+    const pictures = showsPreviewImages();
+    const hasImage = (id) => {
+      const url = pictures ? getHeroImageUrl(loadedItemsById[id]) : null;
+      return Boolean(url) && frontPageImageFits(url, 320);
+    };
+    const pinned = frontPagePins?.listKey === getViewQueryKey(activeViewId) ? frontPagePins.leads : undefined;
+    return client.buildFrontPagePages(visibleItemIds.map((id) => ({ id, hasImage: hasImage(id) })), { pinnedLeads: pinned });
+  }
+
+  // The Front Page: a masthead, then each page's lead and grid. Every story is
+  // a list row, so selection, keys, menus and impressions work as elsewhere.
+  function appendFrontPage(entries, layout, windowStart, appendArticleRow) {
+    articlesList.appendChild(createFrontPageMasthead(getActiveView()));
+    const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+    let position = windowStart;
+    for (const page of layout.pages) {
+      const pageItem = createNode('li', { classNames: ['front-page'] });
+      const lead = pageItem.appendChild(createNode('ul', { classNames: ['list-reset', 'front-page-lead'] }));
+      appendArticleRow(entryById.get(page.lead), { showSource: true, position: position++, frontPage: 'lead' }, lead);
+      if (page.grid.length > 0) {
+        const grid = pageItem.appendChild(createNode('ul', { classNames: ['list-reset', 'front-page-grid'] }));
+        for (const id of page.grid) appendArticleRow(entryById.get(id), { showSource: true, position: position++, frontPage: 'column' }, grid);
+      }
+      articlesList.appendChild(pageItem);
+    }
+  }
+
+  // The view's name between rules, over the date and, where the view has one, its unread count.
+  function createFrontPageMasthead(view) {
+    const masthead = createNode('li', { classNames: ['front-page-masthead'] });
+    // The stream heading still names the list for assistive technology.
+    masthead.appendChild(createNode('p', { classNames: ['front-page-title'], text: view?.title || '', attributes: { 'aria-hidden': 'true' } }));
+    const counted = ['all', 'unread', 'today', 'last-7-days'].includes(view?.kind);
+    const dateline = formatCardsDateline(counted ? view.unreadCount : 0, 'long');
+    masthead.appendChild(createNode('p', { classNames: ['front-page-dateline'], text: dateline }));
+    return masthead;
+  }
+
+  // A Front Page story: its picture (a lead's beside the text on a wide page),
+  // the feed kicker, the headline, a lead's deck and the meta line. A picture
+  // that turns out to be a logo or banner is dropped once it loads.
+  function appendFrontPageStory(button, article, entry, role, isStarred) {
+    button.classList.add('front-page-story', role === 'lead' ? 'is-lead' : 'is-column');
+    const url = entry.heroImageUrl;
+    const minimumWidth = role === 'lead' ? 320 : 140;
+    if (url && showsPreviewImages() && frontPageImageFits(url, minimumWidth)) {
+      const drop = (size) => {
+        rememberPreviewImageSize(url, size);
+        image.classList.add('hidden');
+        button.classList.remove('has-image');
+        if (role === 'lead') queueFrontPageRelayout();
+      };
+      const image = createPreviewImage(url, ['front-page-image'], () => drop('failed'));
+      image.addEventListener('load', () => {
+        const size = { width: image.naturalWidth, height: image.naturalHeight };
+        if (client.isEditorialImage(size.width, size.height, minimumWidth)) rememberPreviewImageSize(url, size);
+        else drop(size);
+      });
+      image.addEventListener('error', () => drop('failed'));
+      button.classList.add('has-image');
+      button.appendChild(image);
+    }
+    const copy = createNode('span', { classNames: ['front-page-copy'] });
+    if (entry.feedTitle) copy.appendChild(createArticleKicker(article, entry));
+    copy.appendChild(createArticleTitle(entry, isStarred));
+    const deck = role === 'lead' ? client.frontPageDeck(entry.preview) : '';
+    if (deck) copy.appendChild(createNode('span', { classNames: ['front-page-deck'], text: deck }));
+    const meta = createArticleMeta(entry, { source: null, timeFirst: true });
+    if (meta) copy.appendChild(meta);
+    button.appendChild(copy);
   }
 
   // Read It Later row: thumbnail, serif title, then source · length · saved age. No preview text.
@@ -4316,8 +4489,8 @@ export function renderBrowserAppRuntimeScript(): string {
         const result=await readingTools.applyImagePolicy('<img src="'+escaped+'">',{policy:'proxy',authenticatedFetch,registerObjectURL:value=>readingObjectURLs.add(value),isCurrent:current});
         const match=result.html.match(/\\ssrc="(blob:[^"]+)"/);return match?.[1]||'';
       })();previewImages.set(url,promise);while(previewImages.size>500){const old=[...previewImages.keys()].find(source=>!visiblePreviewSources.has(source));if(!old)break;const evicted=previewImages.get(old);previewImages.delete(old);void evicted.then(src=>{if(src){URL.revokeObjectURL(src);readingObjectURLs.delete(src);}}).catch(()=>{});}}
-      const src=await promise;if(current()&&src)image.setAttribute('src',src);
-    }catch(_) {if(current())image.setAttribute('alt','Image unavailable through private proxy');}
+      const src=await promise;if(!current())return null;if(src)image.setAttribute('src',src);return Boolean(src);
+    }catch(_) {if(!current())return null;image.setAttribute('alt','Image unavailable through private proxy');return false;}
   }
   function zoomReadingImage(event) {
     if(event.target?.tagName?.toLowerCase()!=='img')return;
@@ -5927,6 +6100,8 @@ export function renderBrowserAppRuntimeScript(): string {
 
   async function selectView(viewId) {
     heldReaderArticle = null;
+    cardsOpenedStory = null;
+    frontPagePins = null;
     clearKeptItemIds();
     articleQueryStatus.textContent = '';
     // Opening any list leaves Home. Another view is drawn by loadActiveView, so
@@ -5961,6 +6136,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     heldReaderArticle = null;
     noteCardChosen(itemId);
+    noteCardsStoryOpened(itemId);
     selectedItemId = itemId;
     selectedCopy = options?.sectionKey ? { itemId, key: options.sectionKey } : null;
     noteArticleOpened(itemId, Boolean(options?.keyboard));

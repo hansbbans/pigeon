@@ -7,6 +7,7 @@ All notable changes to Pigeon are documented in this file.
 ### Added
 
 - Web: a Cards look, switched from the stream header or Settings → Look. It opens on a Home page of tiles; folders show their sections as cards, a feed shows Today, Yesterday and Earlier cards, and each story is a coloured feed name, a serif headline and one meta line. A story opens over the cards, and Back or Escape returns to them. Reeder stays the default.
+- Web: in the Cards look, All items, Unread, Today, Last 7 Days, Recently read, Starred and For You are a Front Page: the view's name as a masthead, a lead story with its picture and a few lines of the story, then the rest three across on a wide window. Pictures follow the image setting, and logos and banners are left out.
 
 ### Changed
 
