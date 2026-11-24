@@ -18,6 +18,7 @@ struct ArticleListToolbar: ToolbarContent {
 
 	var body: some ToolbarContent {
 		ToolbarItemGroup(placement: .topBarTrailing) {
+			ReaderLookToggleButton()
 			if collection.kind == .feed {
 				Button("Mark Read", systemImage: "checkmark.circle") {
 					Task { await model.markAllStoriesAsRead(in: collection) }
