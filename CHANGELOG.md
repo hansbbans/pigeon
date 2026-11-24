@@ -12,6 +12,7 @@ All notable changes to Pigeon are documented in this file.
 - Last 7 Days, a new view beside Today on iOS and the web: every feed's stories from the last seven local days, newest first, with its own unread count. On iOS it has a Home tile, a Settings → Views toggle and ⌘6.
 - iOS: the Cards look (Settings → Look, or the list's Display menu) replaces the Front Page and Classic layouts: Front Page becomes Cards and Classic becomes Reeder. In Cards a folder is a column of cards in the folder's colour, a feed is day cards, All Feeds is tiles, and the smart views are the Front Page; iPhone and iPad navigate Home → folder → story with swipe-back.
 - Web: a Cards look, switched from the stream header or Settings → Look. It opens on a Home page of tiles; folders show their sections as cards, a feed shows Today, Yesterday and Earlier cards, and each story is a coloured feed name, a serif headline and one meta line. A story opens over the cards, and Back or Escape returns to them. Reeder stays the default.
+- Web: in the Cards look, All items, Unread, Today, Last 7 Days, Recently read, Starred and For You are a Front Page: the view's name as a masthead, a lead story with its picture and a few lines of the story, then the rest three across on a wide window. Pictures follow the image setting, and logos and banners are left out.
 
 ### Changed
 
