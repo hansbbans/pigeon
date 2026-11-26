@@ -671,7 +671,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let queuedAutoRead = null;
   let readyReaderItemId = null;
   const manuallyUnreadItemIds = new Set();
-  const passedOverReadIds = new Set();
+  // Stories passed over and not yet marked, each with the item as it was when
+  // left: switching view clears loadedItemsById before the write can go out.
+  const passedOverStories = new Map();
   // The story whose body the reader last showed on screen: only a story shown
   // counts as opened when the reader moves past it.
   let shownReaderItemId = null;
@@ -1813,7 +1815,7 @@ export function renderBrowserAppRuntimeScript(): string {
     keptItemIds = { queryKey: '', ids: new Set() };
     readyReaderItemId = null;
     manuallyUnreadItemIds.clear();
-    passedOverReadIds.clear();
+    passedOverStories.clear();
     shownReaderItemId = null;
     autoReadAttempt = '';
     queuedAutoRead = null;
@@ -5735,17 +5737,9 @@ export function renderBrowserAppRuntimeScript(): string {
       ? 'Marking article ' + (target ? 'read…' : 'unread…') : target ? 'Starring article…' : 'Removing star…');
     renderArticleActions();
     renderMarkAllAsReadAction();
-    const form = new FormData();
-    form.set('i', itemId);
-    form.set(target ? 'a' : 'r', 'user/-/state/com.google/' + field);
     let activeCollectionChanged = false;
     try {
-      let queuedOffline=false;let response;
-      if(isOfflineReading()) {await offlineLibrary.queueMutation(itemId,field==='read'?'set_read':'set_starred',target);queuedOffline=true;response={ok:true};}
-      else {try {response=await authenticatedFetch('/reader/api/0/edit-tag',{method:'POST',body:form});}
-        catch(error){if(!offlineLibrary||!isCurrentRequest())throw error;await offlineLibrary.queueMutation(itemId,field==='read'?'set_read':'set_starred',target);offlineSession=true;queuedOffline=true;response={ok:true};}}
-      if(queuedOffline)void updateOfflineStatus();
-      if (!response.ok) throw new Error('Article state request failed');
+      const queuedOffline = await sendArticleStateWrite([itemId], field, target, isCurrentRequest);
       if (!isCurrentRequest()) return;
       activeCollectionChanged = applyArticleState(itemId, field, target, !options?.automatic);
       undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
@@ -5779,6 +5773,35 @@ export function renderBrowserAppRuntimeScript(): string {
         maybeAutoMarkRead();
       }
     }
+  }
+
+  // Sends one state change for one or more stories: edit-tag online, or the
+  // offline queue when reading offline or when the connection fails and an
+  // offline library exists. A server error throws. Resolves to whether the
+  // change was queued offline.
+  async function sendArticleStateWrite(itemIds, field, target, isCurrentRequest) {
+    const kind = field === 'read' ? 'set_read' : 'set_starred';
+    const queueOffline = async () => { for (const itemId of itemIds) await offlineLibrary.queueMutation(itemId, kind, target); };
+    let queuedOffline = false;
+    if (isOfflineReading()) {
+      await queueOffline();
+      queuedOffline = true;
+    } else {
+      const form = new FormData();
+      for (const itemId of itemIds) form.append('i', itemId);
+      form.set(target ? 'a' : 'r', 'user/-/state/com.google/' + field);
+      let response;
+      try { response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form }); }
+      catch (error) {
+        if (!offlineLibrary || !isCurrentRequest()) throw error;
+        await queueOffline();
+        offlineSession = true;
+        queuedOffline = true;
+      }
+      if (response && !response.ok) throw new Error('Article state request failed');
+    }
+    if (queuedOffline) void updateOfflineStatus();
+    return queuedOffline;
   }
 
   function isCurrentBulkRequest(request) {
@@ -6012,7 +6035,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function noteReaderShown() {
-    if (selectedItemId && articleCache.has(selectedItemId) && isReaderVisible() && isReaderPaneOnScreen() &&
+    if (selectedItemId && shownReaderItemId !== selectedItemId && articleCache.has(selectedItemId) && isReaderVisible() && isReaderPaneOnScreen() &&
         document.visibilityState !== 'hidden') shownReaderItemId = selectedItemId;
   }
 
@@ -6026,21 +6049,21 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!itemId || itemId === nextItemId || shownReaderItemId !== itemId || !item ||
         getAutoReadPolicy(item, false) !== 'opened' || getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId) ||
         (pendingArticleMutation?.itemId === itemId && pendingArticleMutation.field === 'read')) return;
-    passedOverReadIds.add(itemId);
+    passedOverStories.set(itemId, item);
   }
 
   // Marks the stories passed over so far in one write. It takes the single
   // article-write slot like any other change, shows no status on the open story
   // and leaves Undo alone; when it finishes, maybeAutoMarkRead runs again.
   function markPassedOverStories() {
-    if (pendingArticleMutation || session.status !== 'authenticated' || passedOverReadIds.size === 0 ||
+    if (pendingArticleMutation || session.status !== 'authenticated' || passedOverStories.size === 0 ||
         (window.navigator?.onLine === false && !offlineLibrary)) return false;
     const itemIds = [];
-    for (const itemId of passedOverReadIds) {
+    for (const [itemId, leftItem] of passedOverStories) {
       if (itemIds.length === client.CONTENT_CHUNK_SIZE) break;
-      passedOverReadIds.delete(itemId);
-      const item = loadedItemsById[itemId];
-      if (itemId !== selectedItemId && item && getAutoReadPolicy(item, false) === 'opened' &&
+      passedOverStories.delete(itemId);
+      const item = loadedItemsById[itemId] || leftItem;
+      if (itemId !== selectedItemId && getAutoReadPolicy(item, false) === 'opened' &&
           !getArticleState(item, 'read') && !manuallyUnreadItemIds.has(itemId)) itemIds.push(itemId);
     }
     if (itemIds.length === 0) return false;
@@ -6057,26 +6080,7 @@ export function renderBrowserAppRuntimeScript(): string {
   async function writePassedOverReads(request) {
     let activeCollectionChanged = false;
     try {
-      let queuedOffline = false;
-      const queueOffline = async () => {
-        for (const itemId of request.itemIds) await offlineLibrary.queueMutation(itemId, 'set_read', true);
-        queuedOffline = true;
-      };
-      if (isOfflineReading()) await queueOffline();
-      else {
-        const form = new FormData();
-        for (const itemId of request.itemIds) form.append('i', itemId);
-        form.set('a', 'user/-/state/com.google/read');
-        try {
-          const response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form });
-          if (!response.ok) throw new Error('Article state request failed');
-        } catch (error) {
-          if (!offlineLibrary || !isCurrentBulkRequest(request)) throw error;
-          await queueOffline();
-          offlineSession = true;
-        }
-      }
-      if (queuedOffline) void updateOfflineStatus();
+      const queuedOffline = await sendArticleStateWrite(request.itemIds, 'read', true, () => isCurrentBulkRequest(request));
       if (!isCurrentBulkRequest(request)) return;
       for (const itemId of request.itemIds) {
         if (applyArticleState(itemId, 'read', true, false)) activeCollectionChanged = true;
@@ -6287,6 +6291,7 @@ export function renderBrowserAppRuntimeScript(): string {
       return;
     }
 
+    notePassedOverStory(null);
     const nextView = views.find((view) => view.id === viewId) || null;
     if (nextView && nextView.parentId) {
       expandedFolderIds.add(nextView.parentId);
@@ -6589,7 +6594,7 @@ export function renderBrowserAppRuntimeScript(): string {
     autoReadPolicy = normalizeAutoReadPolicy(autoReadSelect.value);
     autoReadSelect.value = autoReadPolicy;
     autoReadAttempt = '';
-    passedOverReadIds.clear();
+    passedOverStories.clear();
     try {
       window.localStorage.setItem(autoReadStorageKey, autoReadPolicy);
       readingPreferenceStatus.textContent = 'Reading preference saved.';

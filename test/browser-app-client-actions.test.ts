@@ -807,6 +807,54 @@ test('changing the read setting drops stories still waiting to be marked', async
 	assert.deepEqual(readItemIds(database), ['today-4', 'today-6']);
 });
 
+test('a story left by switching view before its mark went out is still marked', async (t) => {
+	const gate = createEditTagGate();
+	const { database, harness } = await createStatefulArticleBrowser({ count: 5, policy: 'opened', fetchOverride: gate.fetchOverride });
+	t.after(() => database.close());
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	await flushBrowserTasks();
+	gate.hold();
+	harness.dispatchKeydown('s');
+	harness.dispatchKeydown('j');
+	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 5', 200);
+	await flushBrowserTasks();
+	const heading = harness.elements.get('articles-heading')!.textContent;
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent !== heading, 200);
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 6');
+	gate.release();
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-5'), 500);
+});
+
+// Only a failed connection falls back to the offline queue; a server error
+// leaves the stories unread and the app online.
+test('a server error on a passed-over mark is not queued offline', async (t) => {
+	const gate = createEditTagGate();
+	let readsFail = false;
+	const tools = offlineIntegrationTools(5);
+	const { database, harness } = await createStatefulArticleBrowser({ count: 5, policy: 'opened', offlineTools: tools,
+		fetchOverride: async (input, init, next) => input.endsWith('/edit-tag') && init?.body instanceof FormData &&
+			init.body.get('a') === 'user/-/state/com.google/read' && readsFail
+			? gate.fetchOverride(input, init, async () => new Response('Error', { status: 500 }))
+			: gate.fetchOverride(input, init, next) });
+	t.after(() => database.close());
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	await flushBrowserTasks();
+	readsFail = true;
+	gate.hold();
+	harness.dispatchKeydown('s');
+	harness.dispatchKeydown('j');
+	harness.dispatchKeydown('j');
+	await flushBrowserTasks();
+	gate.release();
+	await waitForBrowserCondition(() => harness.elements.get('star-article-button')!.disabled === false, 200);
+	for (let flush = 0; flush < 10; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(tools.queued.filter((entry: { kind: string }) => entry.kind === 'set_read'), []);
+	assert.match(harness.elements.get('offline-status')!.textContent, /\b0 pending edits/);
+	assert.deepEqual(readItemIds(database), ['today-6']);
+});
+
 // Stepping past the last story of a 200-story window moves the window: the
 // story left there counts as passed like any other.
 test('j across a window boundary marks the story it leaves', async (t) => {
@@ -1486,11 +1534,13 @@ test('opening an article with when-opened auto-read keeps its row in Unread', as
 	findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
 	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Unread' && renderedArticleIds(harness).length === 3);
 	const unreadIds = renderedArticleIds(harness);
-	const opened = mutations.length;
 	findListButtonByItemId(harness.elements.get('articles-list'), '1')!.dispatch('click');
-	// Story 2, shown on arrival and left before its own mark went out, is marked as passed over.
-	await waitForBrowserCondition(() => mutations.length === opened + 2 && harness.elements.get('mark-unread-button')!.textContent === 'Mark unread', 500);
-	assert.deepEqual(mutations.slice(opened).map((mutation) => mutation.itemId).sort(), ['1', '2']);
+	// Story 2 was shown on arrival: it is marked by its own mark or, when the click
+	// came first, as passed over. Either way each story is written once.
+	const markedIds = () => mutations.flatMap((mutation) => mutation.itemIds).filter((id) => id === '1' || id === '2').sort();
+	await waitForBrowserCondition(() => markedIds().length === 2 && harness.elements.get('mark-unread-button')!.textContent === 'Mark unread', 500);
+	for (let flush = 0; flush < 5; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(markedIds(), ['1', '2']);
 	await waitForArticleRows(harness, unreadIds);
 	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-1'").get()!.is_read, 1);
 	assert.equal(articleRowIsRead(harness, '1'), true);
