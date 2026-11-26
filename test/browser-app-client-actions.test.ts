@@ -732,6 +732,12 @@ function createEditTagGate() {
 	};
 }
 
+// The database row changes before the browser finishes the write (it still
+// refreshes unread counts); shortcuts are ignored until the write slot is free.
+async function waitForWritesSettled(harness: Awaited<ReturnType<typeof createStatefulArticleBrowser>>['harness']) {
+	await waitForBrowserCondition(() => harness.elements.get('star-article-button')!.disabled === false, 500);
+}
+
 type CardNode = { children: CardNode[]; classList: { contains(name: string): boolean }; dataset: Record<string, string>; dispatch(type: string): void };
 function findCard(harness: Awaited<ReturnType<typeof createStatefulArticleBrowser>>['harness'], id: string) {
 	const visit = (node: CardNode): CardNode | undefined => {
@@ -768,6 +774,7 @@ test('stories passed while another write is pending are marked together in one r
 	t.after(() => database.close());
 	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
 	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 7 && readItemIds(database).includes('today-6'), 200);
+	await waitForWritesSettled(harness);
 	await flushBrowserTasks();
 	gate.hold();
 	assert.equal(harness.dispatchKeydown('s'), true);
@@ -790,6 +797,7 @@ test('changing the read setting drops stories still waiting to be marked', async
 	t.after(() => database.close());
 	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
 	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 7 && readItemIds(database).includes('today-6'), 200);
+	await waitForWritesSettled(harness);
 	await flushBrowserTasks();
 	gate.hold();
 	harness.dispatchKeydown('s');
@@ -812,6 +820,7 @@ test('a story left by switching view before its mark went out is still marked', 
 	const { database, harness } = await createStatefulArticleBrowser({ count: 5, policy: 'opened', fetchOverride: gate.fetchOverride });
 	t.after(() => database.close());
 	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	await waitForWritesSettled(harness);
 	await flushBrowserTasks();
 	gate.hold();
 	harness.dispatchKeydown('s');
@@ -820,9 +829,9 @@ test('a story left by switching view before its mark went out is still marked', 
 	await flushBrowserTasks();
 	const heading = harness.elements.get('articles-heading')!.textContent;
 	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
-	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent !== heading, 200);
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent !== heading &&
+		harness.elements.get('reader-title')!.textContent === 'Story 6', 200);
 	await flushBrowserTasks();
-	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 6');
 	gate.release();
 	await waitForBrowserCondition(() => readItemIds(database).includes('today-5'), 500);
 });
@@ -840,6 +849,7 @@ test('a server error on a passed-over mark is not queued offline', async (t) => 
 			: gate.fetchOverride(input, init, next) });
 	t.after(() => database.close());
 	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	await waitForWritesSettled(harness);
 	await flushBrowserTasks();
 	readsFail = true;
 	gate.hold();
@@ -865,6 +875,7 @@ test('j across a window boundary marks the story it leaves', async (t) => {
 	await waitForBrowserCondition(() => renderedArticleIds(harness).length > 0, 200);
 	await drainBrowserMembershipPages(harness);
 	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 200 && readItemIds(database).includes('today-202'), 500);
+	await waitForWritesSettled(harness);
 	await flushBrowserTasks();
 	const last = renderedArticleIds(harness).at(-1)!;
 	gate.hold();
@@ -899,6 +910,7 @@ test('on a phone, only stories whose reader was shown are marked read', async (t
 	const { database, harness } = await createStatefulArticleBrowser({ count: 5, policy: 'opened' });
 	t.after(() => database.close());
 	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	await waitForWritesSettled(harness);
 	const grid = harness.elements.get('reader-grid')!;
 	const readerScroll = harness.elements.get('reader-scroll')!;
 	readerScroll.getBoundingClientRect = () => grid.getAttribute('data-mobile-pane') === 'reader'
