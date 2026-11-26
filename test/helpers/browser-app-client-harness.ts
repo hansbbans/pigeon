@@ -287,6 +287,7 @@ export async function createBrowserHarness(options?: {
 	frameViewportHeight?: number;
 	storedColumnWidths?: { sidebar?: number; stream?: number };
 	readerGridWidth?: number | (() => number);
+	narrowViewport?: boolean;
 	online?: boolean;
 	now?: number | (() => number);
 	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
@@ -561,6 +562,7 @@ export async function createBrowserHarness(options?: {
 	const context = {
 		window: {
 			__PIGEON_CONFIG__: { baseUrl: 'https://pigeon.example' },
+			...(options?.narrowViewport ? { matchMedia: (query: string) => ({ matches: query === '(max-width: 760px)' }) } : {}),
 			navigator: { onLine: options?.online ?? true },
 			sessionStorage: {
 				getItem(key: string) {

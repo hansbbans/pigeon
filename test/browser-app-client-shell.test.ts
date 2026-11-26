@@ -1026,7 +1026,7 @@ test('sidebar unread filter persists across view transitions and reloads, and re
 });
 
 test('sidebar unread filter renders empty state when every count is zero and lets the reader show all feeds', async () => {
-	const { elements, localStorageState } = await createBrowserHarness({
+	const { elements, localStorageState, getActiveElement } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
 				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
@@ -1072,13 +1072,66 @@ test('sidebar unread filter renders empty state when every count is zero and let
 	assert.ok(findListButtonByViewId(elements.get('views-list'), 'all'));
 	assert.ok(findListButtonByViewId(elements.get('views-list'), 'unread'));
 
-	// Clicking "Show all feeds" resets the filter and restores the library.
+	// Clicking "Show all feeds" resets the filter, restores the library, and moves focus back to the filter toggle.
+	elements.get('sidebar-show-all-button')?.focus();
 	await elements.get('sidebar-show-all-button')?.dispatch('click');
 	assert.equal(localStorageState.get('pigeon.browser.sidebar-filter'), 'all');
 	assert.equal(elements.get('sidebar-unread-filter-button')?.getAttribute('aria-pressed'), 'false');
 	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+	assert.equal(getActiveElement(), elements.get('sidebar-unread-filter-button'));
 	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
 	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+
+	// Signing out hides the empty-state notice if the unread filter was showing it.
+	await elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), false);
+	await elements.get('logout-button')?.dispatch('click');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+});
+
+test('sidebar unread filter keeps empty state hidden with no feeds and preserves narrow sidebar focus when active feed is hidden', async () => {
+	const emptyAccount = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await emptyAccount.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(emptyAccount.elements.get('views-list'), 'all')));
+	await emptyAccount.elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(emptyAccount.elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+
+	const narrow = await createBrowserHarness({
+		narrowViewport: true,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Read Inbox' }] });
+			}
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 0 }] });
+			}
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await narrow.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(() => (narrow.elements.get('articles-heading')?.textContent ?? '') === 'Read Inbox');
+	await narrow.elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1'), undefined);
+	await narrow.elements.get('stream-back-button')?.dispatch('click');
+	assert.equal(narrow.elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'sidebar');
+	assert.notEqual(narrow.getActiveElement(), narrow.elements.get('stream-back-button'));
+	assert.equal(narrow.getActiveElement(), narrow.elements.get('sidebar-unread-filter-button'));
 });
 
 test('runtime script lets column resizer drags persist reader column widths', async () => {

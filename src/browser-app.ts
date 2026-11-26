@@ -176,8 +176,8 @@ ${renderBrowserAppStyles()}
                   </div>
                 </section>
 
-                <div class="sidebar-empty hidden" id="sidebar-filter-empty" role="status" aria-live="polite">
-                  <p>No feeds with unread articles.</p>
+                <div class="sidebar-empty hidden" id="sidebar-filter-empty">
+                  <p role="status" aria-live="polite">No feeds with unread articles.</p>
                   <button class="sidebar-empty-action" id="sidebar-show-all-button" type="button">Show all feeds</button>
                 </div>
               </div>
@@ -6527,10 +6527,11 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!narrow && !cardsSwap) return;
     // The pane that held focus is now display:none; hand focus to the pane that replaced it.
     const findActive = (root, selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
+    const feedsPanel = document.getElementById('feeds-panel');
     const target = pane === 'reader'
       ? readerTitle
       : pane === 'sidebar'
-        ? findActive(document.getElementById('feeds-panel'), '.list-button.is-active') || streamBackButton
+        ? findActive(feedsPanel, '.list-button.is-active') || findActive(feedsPanel, '.list-button') || sidebarUnreadFilterButton
         : findActive(articlesList, '.article-card.is-active') || articlesHeading;
     if (target && typeof target.focus === 'function') target.focus();
   }
@@ -6711,6 +6712,9 @@ export function renderBrowserAppRuntimeScript(): string {
   if (sidebarShowAllButton) {
     sidebarShowAllButton.addEventListener('click', () => {
       changeSidebarFilter('all');
+      if (sidebarUnreadFilterButton && typeof sidebarUnreadFilterButton.focus === 'function') {
+        sidebarUnreadFilterButton.focus();
+      }
     });
   }
   for (const menu of popoverMenus) {
