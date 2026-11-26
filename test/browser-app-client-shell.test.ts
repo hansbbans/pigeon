@@ -812,8 +812,8 @@ test('a Last 7 Days load in flight across local midnight still lands, and a refr
 	assert.deepEqual(renderedArticleIds({ elements } as any), ['1', '2', '3']);
 });
 
-test('runtime script hides all-read feeds when the unread filter is active', async () => {
-	const { elements } = await createBrowserHarness({
+test('runtime script hides all-read feeds and folders when the sidebar unread filter is toggled on', async () => {
+	const { elements, localStorageState } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
 				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
@@ -883,6 +883,9 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')));
 
+	const filterToggle = elements.get('sidebar-unread-filter-button')!;
+	assert.equal(filterToggle.getAttribute('aria-pressed'), 'false');
+	assert.equal(filterToggle.getAttribute('title'), 'Hide read feeds');
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /Read Inbox/);
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')?.textContent ?? '', /0/);
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Unread Inbox/);
@@ -896,118 +899,134 @@ test('runtime script hides all-read feeds when the unread filter is active', asy
 		Boolean(findListButtonByViewId(elements.get('folders-list'), 'feed/4')),
 	);
 
-	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
-
+	// Toggling the sidebar filter on hides 0-unread feeds and folders while staying on the active view.
+	await filterToggle.dispatch('click');
+	assert.equal(filterToggle.getAttribute('aria-pressed'), 'true');
+	assert.equal(filterToggle.getAttribute('title'), 'Show all feeds');
+	assert.equal(localStorageState.get('pigeon.browser.sidebar-filter'), 'unread');
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
 	assert.match(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.textContent ?? '', /Unread Inbox/);
+	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
 	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'feed/3'), undefined);
 	assert.match(findListButtonByViewId(elements.get('folders-list'), 'feed/4')?.textContent ?? '', /Unread Folder Feed/);
 	assert.match(elements.get('feeds-status')?.textContent ?? '', /Uncategorized feeds/);
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
 });
 
-test('runtime unread filtering hides empty folders and restores the full library after view transitions', async () => {
-	const { elements } = await createBrowserHarness({
-		fetchImpl: async (input, init) => {
-			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
-				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
-			}
+test('sidebar unread filter persists across view transitions and reloads, and restores all feeds when toggled off', async () => {
+	const fetchImpl = async (input: unknown, init?: { method?: string }) => {
+		if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+			return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+		}
+		if (input === '/app/session') {
+			return new Response(null, { status: 204 });
+		}
 
-			if (input === '/reader/api/0/subscription/list') {
-				return Response.json({
-					subscriptions: [
-						{ id: 'feed/1', title: 'Read Inbox' },
-						{ id: 'feed/2', title: 'Unread Inbox' },
-						{
-							id: 'feed/3',
-							title: 'Read Folder Feed',
-							categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
-						},
-						{
-							id: 'feed/4',
-							title: 'Unread Folder Feed',
-							categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
-						},
-						{
-							id: 'feed/5',
-							title: 'Empty Folder Feed',
-							categories: [{ id: 'user/-/label/Read Only', label: 'Read Only' }],
-						},
-					],
-				});
-			}
+		if (input === '/reader/api/0/subscription/list') {
+			return Response.json({
+				subscriptions: [
+					{ id: 'feed/1', title: 'Read Inbox' },
+					{ id: 'feed/2', title: 'Unread Inbox' },
+					{
+						id: 'feed/3',
+						title: 'Read Folder Feed',
+						categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
+					},
+					{
+						id: 'feed/4',
+						title: 'Unread Folder Feed',
+						categories: [{ id: 'user/-/label/Newsletters', label: 'Newsletters' }],
+					},
+					{
+						id: 'feed/5',
+						title: 'Empty Folder Feed',
+						categories: [{ id: 'user/-/label/Read Only', label: 'Read Only' }],
+					},
+				],
+			});
+		}
 
-			if (input === '/reader/api/0/unread-count') {
-				return Response.json({
-					unreadcounts: [
-						{ id: 'feed/1', count: 0 },
-						{ id: 'feed/2', count: 2 },
-						{ id: 'feed/3', count: 0 },
-						{ id: 'feed/4', count: 3 },
-						{ id: 'feed/5', count: 0 },
-					],
-				});
-			}
+		if (input === '/reader/api/0/unread-count') {
+			return Response.json({
+				unreadcounts: [
+					{ id: 'feed/1', count: 0 },
+					{ id: 'feed/2', count: 2 },
+					{ id: 'feed/3', count: 0 },
+					{ id: 'feed/4', count: 3 },
+					{ id: 'feed/5', count: 0 },
+				],
+			});
+		}
 
-			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
-				return Response.json({ itemRefs: [] });
-			}
+		if (String(input).startsWith('/reader/api/0/stream/items/ids?')) {
+			return Response.json({ itemRefs: [] });
+		}
 
-			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
-		},
-	});
+		throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+	};
+
+	const { elements, localStorageState } = await createBrowserHarness({ fetchImpl });
 
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/2')));
 
+	const filterToggle = elements.get('sidebar-unread-filter-button')!;
 	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Newsletters')?.textContent ?? '', /Newsletters/);
 	assert.match(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only')?.textContent ?? '', /Read Only/);
 	await findFolderToggleButton(elements.get('folders-list'), 'user/-/label/Newsletters')?.dispatch('click');
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('folders-list'), 'feed/4')));
 
+	// Selecting the Unread smart view does not force-filter the sidebar when the sidebar filter is off.
 	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
 	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+
+	// Enabling the sidebar filter keeps 0-unread feeds and folders hidden across every view transition.
+	await filterToggle.dispatch('click');
 	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
 	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
 	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'feed/3'), undefined);
 	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/2'));
 	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'feed/4'));
 
-	await findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Newsletters')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Newsletters');
+	for (const [listId, viewId, heading] of [
+		['folders-list', 'user/-/label/Newsletters', 'Newsletters'],
+		['views-list', 'all', 'All items'],
+		['views-list', 'recent', 'Recently read'],
+		['feeds-list', 'feed/2', 'Unread Inbox'],
+	] as const) {
+		await findListButtonByViewId(elements.get(listId), viewId)?.dispatch('click');
+		await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === heading);
+		assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
+		assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
+		assert.equal(findListButtonByViewId(elements.get('folders-list'), 'feed/3'), undefined);
+		assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/2'));
+		assert.ok(findListButtonByViewId(elements.get('folders-list'), 'feed/4'));
+	}
+
+	// Reloading restores the persisted unread filter from localStorage.
+	const reloaded = await createBrowserHarness({
+		storedToken: 'live-token',
+		storedEntries: { 'pigeon.browser.sidebar-filter': localStorageState.get('pigeon.browser.sidebar-filter')! },
+		fetchImpl,
+	});
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(reloaded.elements.get('feeds-list'), 'feed/2')));
+	assert.equal(reloaded.elements.get('sidebar-unread-filter-button')?.getAttribute('aria-pressed'), 'true');
+	assert.equal(findListButtonByViewId(reloaded.elements.get('feeds-list'), 'feed/1'), undefined);
+	assert.equal(findListButtonByViewId(reloaded.elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
+
+	// Toggling the filter off restores the full library.
+	await filterToggle.dispatch('click');
+	assert.equal(filterToggle.getAttribute('aria-pressed'), 'false');
+	assert.equal(localStorageState.get('pigeon.browser.sidebar-filter'), 'all');
 	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
 	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
 	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'feed/3'));
-
-	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
-	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
-	assert.equal(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'), undefined);
-
-	await findListButtonByViewId(elements.get('views-list'), 'all')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'All items');
-	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
-	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
-
-	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
-	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
-	await findListButtonByViewId(elements.get('views-list'), 'recent')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Recently read');
-	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
-	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
-
-	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
-	assert.equal(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'), undefined);
-	await findListButtonByViewId(elements.get('feeds-list'), 'feed/2')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread Inbox');
-	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
-	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
 });
 
-test('runtime unread filtering renders empty folder and feed states when every count is zero', async () => {
-	const { elements } = await createBrowserHarness({
+test('sidebar unread filter renders empty state when every count is zero and lets the reader show all feeds', async () => {
+	const { elements, localStorageState, getActiveElement } = await createBrowserHarness({
 		fetchImpl: async (input, init) => {
 			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
 				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
@@ -1040,13 +1059,79 @@ test('runtime unread filtering renders empty folder and feed states when every c
 
 	await elements.get('login-form')?.dispatch('submit');
 	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(elements.get('feeds-list'), 'feed/1')));
-	await findListButtonByViewId(elements.get('views-list'), 'unread')?.dispatch('click');
-	await waitForBrowserCondition(() => (elements.get('articles-heading')?.textContent ?? '') === 'Unread');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+
+	await elements.get('sidebar-unread-filter-button')?.dispatch('click');
 
 	assert.equal(elements.get('folders-list')?.textContent, '');
 	assert.equal(elements.get('feeds-list')?.textContent, '');
 	assert.equal(elements.get('folders-status')?.textContent, 'No tagged feeds with unread items.');
 	assert.equal(elements.get('feeds-status')?.textContent, 'No uncategorized feeds with unread items.');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), false);
+	// Smart views remain visible.
+	assert.ok(findListButtonByViewId(elements.get('views-list'), 'all'));
+	assert.ok(findListButtonByViewId(elements.get('views-list'), 'unread'));
+
+	// Clicking "Show all feeds" resets the filter, restores the library, and moves focus back to the filter toggle.
+	elements.get('sidebar-show-all-button')?.focus();
+	await elements.get('sidebar-show-all-button')?.dispatch('click');
+	assert.equal(localStorageState.get('pigeon.browser.sidebar-filter'), 'all');
+	assert.equal(elements.get('sidebar-unread-filter-button')?.getAttribute('aria-pressed'), 'false');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+	assert.equal(getActiveElement(), elements.get('sidebar-unread-filter-button'));
+	assert.ok(findListButtonByViewId(elements.get('feeds-list'), 'feed/1'));
+	assert.ok(findListButtonByViewId(elements.get('folders-list'), 'user/-/label/Read Only'));
+
+	// Signing out hides the empty-state notice if the unread filter was showing it.
+	await elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), false);
+	await elements.get('logout-button')?.dispatch('click');
+	assert.equal(elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+});
+
+test('sidebar unread filter keeps empty state hidden with no feeds and preserves narrow sidebar focus when active feed is hidden', async () => {
+	const emptyAccount = await createBrowserHarness({
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+			if (input === '/reader/api/0/subscription/list') return Response.json({ subscriptions: [] });
+			if (input === '/reader/api/0/unread-count') return Response.json({ unreadcounts: [] });
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await emptyAccount.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(emptyAccount.elements.get('views-list'), 'all')));
+	await emptyAccount.elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(emptyAccount.elements.get('sidebar-filter-empty')?.classList.contains('hidden'), true);
+
+	const narrow = await createBrowserHarness({
+		narrowViewport: true,
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token', { status: 200 });
+			}
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({ subscriptions: [{ id: 'feed/1', title: 'Read Inbox' }] });
+			}
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({ unreadcounts: [{ id: 'feed/1', count: 0 }] });
+			}
+			if (String(input).startsWith('/reader/api/0/stream/items/ids?')) return Response.json({ itemRefs: [] });
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+	await narrow.elements.get('login-form')?.dispatch('submit');
+	await waitForBrowserCondition(() => Boolean(findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1')));
+	await findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1')?.dispatch('click');
+	await waitForBrowserCondition(() => (narrow.elements.get('articles-heading')?.textContent ?? '') === 'Read Inbox');
+	await narrow.elements.get('sidebar-unread-filter-button')?.dispatch('click');
+	assert.equal(findListButtonByViewId(narrow.elements.get('feeds-list'), 'feed/1'), undefined);
+	await narrow.elements.get('stream-back-button')?.dispatch('click');
+	assert.equal(narrow.elements.get('reader-grid')?.getAttribute('data-mobile-pane'), 'sidebar');
+	assert.notEqual(narrow.getActiveElement(), narrow.elements.get('stream-back-button'));
+	assert.equal(narrow.getActiveElement(), narrow.elements.get('sidebar-unread-filter-button'));
 });
 
 test('runtime script lets column resizer drags persist reader column widths', async () => {

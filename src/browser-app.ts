@@ -125,6 +125,15 @@ ${renderBrowserAppStyles()}
             <aside class="panel" id="feeds-panel" aria-label="Feeds">
               <div class="sidebar-top">
                 <h1 class="sidebar-brand">Pigeon</h1>
+                <button
+                  class="icon-button"
+                  id="sidebar-unread-filter-button"
+                  type="button"
+                  data-icon="filter"
+                  title="Hide read feeds"
+                  aria-label="Hide feeds with no unread articles"
+                  aria-pressed="false"
+                >Hide read feeds</button>
               </div>
               <div class="sidebar-current">
                 <strong id="sidebar-current-title">All items</strong>
@@ -166,6 +175,11 @@ ${renderBrowserAppStyles()}
                     <ul class="list-reset" id="feeds-list"></ul>
                   </div>
                 </section>
+
+                <div class="sidebar-empty hidden" id="sidebar-filter-empty">
+                  <p role="status" aria-live="polite">No feeds with unread articles.</p>
+                  <button class="sidebar-empty-action" id="sidebar-show-all-button" type="button">Show all feeds</button>
+                </div>
               </div>
 
               <div class="sidebar-footer">
@@ -479,6 +493,10 @@ export function renderBrowserAppRuntimeScript(): string {
   const lookSelect = document.getElementById('look-select');
   const pageSidebarToggleButton = document.getElementById('page-sidebar-toggle-button');
   const sidebarCollapsedStorageKey = 'pigeon.browser.sidebar-collapsed';
+  const sidebarFilterStorageKey = 'pigeon.browser.sidebar-filter';
+  const sidebarUnreadFilterButton = document.getElementById('sidebar-unread-filter-button');
+  const sidebarFilterEmpty = document.getElementById('sidebar-filter-empty');
+  const sidebarShowAllButton = document.getElementById('sidebar-show-all-button');
   const appThemeSelect = document.getElementById('app-theme-select');
   const articleQueryForm = document.getElementById('article-query-form');
   const articleSearchInput = document.getElementById('article-search-input');
@@ -532,6 +550,8 @@ export function renderBrowserAppRuntimeScript(): string {
   // The look: 'reeder' (sidebar, list and reader side by side) or 'cards' (the
   // sidebar and one page: the cards of a list, or the open story over them).
   let look = 'reeder';
+  // Sidebar filter: 'all' shows every folder/feed, 'unread' hides those with 0 unread articles.
+  let sidebarFilter = 'all';
   // Cards only: Home, the tile page, shows in place of the list. It is not a view.
   let cardsHomeShown = false;
   // Cards: the list and scroll position the cards had when a story opened over them.
@@ -1204,6 +1224,43 @@ export function renderBrowserAppRuntimeScript(): string {
     renderReader();
   }
 
+  function normalizeSidebarFilter(value) {
+    return value === 'unread' ? 'unread' : 'all';
+  }
+
+  function getStoredSidebarFilter() {
+    try {
+      return normalizeSidebarFilter(window.localStorage.getItem(sidebarFilterStorageKey));
+    } catch (_error) {
+      return 'all';
+    }
+  }
+
+  function setStoredSidebarFilter(nextFilter) {
+    try {
+      window.localStorage.setItem(sidebarFilterStorageKey, normalizeSidebarFilter(nextFilter));
+    } catch (_error) {
+      // Ignore storage failures and keep the in-memory filter.
+    }
+  }
+
+  function applySidebarFilter(nextFilter) {
+    sidebarFilter = normalizeSidebarFilter(nextFilter);
+    const unreadOnly = sidebarFilter === 'unread';
+    if (sidebarUnreadFilterButton) {
+      sidebarUnreadFilterButton.setAttribute('aria-pressed', unreadOnly ? 'true' : 'false');
+      sidebarUnreadFilterButton.setAttribute('title', unreadOnly ? 'Show all feeds' : 'Hide read feeds');
+    }
+  }
+
+  function changeSidebarFilter(nextFilter) {
+    const normalized = normalizeSidebarFilter(nextFilter);
+    if (normalized === sidebarFilter) return;
+    setStoredSidebarFilter(normalized);
+    applySidebarFilter(normalized);
+    renderFeeds();
+  }
+
   function isNarrowWindow() {
     return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches;
   }
@@ -1278,11 +1335,11 @@ export function renderBrowserAppRuntimeScript(): string {
         .map((kind) => views.find((candidate) => candidate.kind === kind))
         .filter(Boolean)
         .map((view) => ({ id: view.id, kind: view.kind, title: view.title })),
-      folders: getFolderViews().map((folderView) => ({
+      folders: getVisibleFolderViews().map((folderView) => ({
         id: folderView.id,
         title: folderView.title,
         bar: kickerColor(getFolderColorIndex(folderView.id)),
-        feeds: getChildFeedViews(folderView.id).slice(0, 4).map((feedView) => ({ title: feedView.title, iconUrl: feedView.iconUrl || '' })),
+        feeds: getVisibleChildFeedViews(folderView.id).slice(0, 4).map((feedView) => ({ title: feedView.title, iconUrl: feedView.iconUrl || '' })),
       })),
     };
   }
@@ -2436,8 +2493,7 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function isUnreadFilterActive() {
-    const activeView = getActiveView();
-    return activeView && activeView.kind === 'unread';
+    return sidebarFilter === 'unread';
   }
 
   function isTodayView() {
@@ -2614,6 +2670,11 @@ export function renderBrowserAppRuntimeScript(): string {
 
   function shouldShowFeedInSidebar(view) {
     return !isUnreadFilterActive() || view.unreadCount > 0;
+  }
+
+  function getVisibleFolderViews() {
+    const unreadOnly = isUnreadFilterActive();
+    return getFolderViews().filter((view) => !unreadOnly || view.unreadCount > 0);
   }
 
   function getVisibleChildFeedViews(folderId) {
@@ -2946,6 +3007,7 @@ export function renderBrowserAppRuntimeScript(): string {
     clearElement(viewsList);
     clearElement(foldersList);
     clearElement(feedsList);
+    if (sidebarFilterEmpty) sidebarFilterEmpty.classList.add('hidden');
     foldersStatus.textContent = 'Tagged feeds appear here.';
     feedsStatus.textContent = 'Uncategorized feeds appear here after login.';
     sidebarCurrentTitle.textContent = 'All items';
@@ -3140,6 +3202,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderCardsHome();
 
     if (views.length === 0) {
+      if (sidebarFilterEmpty) sidebarFilterEmpty.classList.add('hidden');
       foldersStatus.textContent = 'Tagged feeds appear here.';
       feedsStatus.textContent = 'Uncategorized feeds appear here after login.';
       return;
@@ -3147,7 +3210,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const builtInViews = views.filter((view) => view.section === 'views');
     const unreadOnly = isUnreadFilterActive();
-    const folderViews = getFolderViews().filter((view) => !unreadOnly || view.unreadCount > 0);
+    const folderViews = getVisibleFolderViews();
     const uncategorizedFeedViews = getFeedViews().filter((view) => view.section === 'feeds' && shouldShowFeedInSidebar(view));
     const activeView = getActiveView();
     const activeFolderView =
@@ -3157,7 +3220,7 @@ export function renderBrowserAppRuntimeScript(): string {
     renderFolderList(foldersList, folderViews);
     renderViewList(feedsList, uncategorizedFeedViews);
 
-    if (activeFolderView) {
+    if (activeFolderView && folderViews.some((view) => view.id === activeFolderView.id)) {
       foldersStatus.textContent = getVisibleChildFeedViews(activeFolderView.id).length + ' feeds in ' + activeFolderView.title;
     } else {
       foldersStatus.textContent = folderViews.length > 0 ? 'Choose a folder.' : unreadOnly ? 'No tagged feeds with unread items.' : 'No tagged feeds yet.';
@@ -3165,6 +3228,11 @@ export function renderBrowserAppRuntimeScript(): string {
 
     feedsStatus.textContent =
       uncategorizedFeedViews.length > 0 ? 'Uncategorized feeds' : unreadOnly ? 'No uncategorized feeds with unread items.' : 'No uncategorized feeds.';
+
+    const hasLibraryFeeds = getFolderViews().length > 0 || getFeedViews().length > 0;
+    if (sidebarFilterEmpty) {
+      sidebarFilterEmpty.classList.toggle('hidden', !(unreadOnly && hasLibraryFeeds && folderViews.length === 0 && uncategorizedFeedViews.length === 0));
+    }
   }
 
   function renderArticleQueryControls() {
@@ -6562,10 +6630,11 @@ export function renderBrowserAppRuntimeScript(): string {
     if (!narrow && !cardsSwap) return;
     // The pane that held focus is now display:none; hand focus to the pane that replaced it.
     const findActive = (root, selector) => (root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null);
+    const feedsPanel = document.getElementById('feeds-panel');
     const target = pane === 'reader'
       ? readerTitle
       : pane === 'sidebar'
-        ? findActive(document.getElementById('feeds-panel'), '.list-button.is-active') || streamBackButton
+        ? findActive(feedsPanel, '.list-button.is-active') || findActive(feedsPanel, '.list-button') || sidebarUnreadFilterButton
         : findActive(articlesList, '.article-card.is-active') || articlesHeading;
     if (target && typeof target.focus === 'function') target.focus();
   }
@@ -6738,6 +6807,19 @@ export function renderBrowserAppRuntimeScript(): string {
   });
   lookToggleButton.addEventListener('click', () => { changeLook(isCardsLook() ? 'reeder' : 'cards'); });
   lookSelect.addEventListener('change', () => { changeLook(lookSelect.value); });
+  if (sidebarUnreadFilterButton) {
+    sidebarUnreadFilterButton.addEventListener('click', () => {
+      changeSidebarFilter(isUnreadFilterActive() ? 'all' : 'unread');
+    });
+  }
+  if (sidebarShowAllButton) {
+    sidebarShowAllButton.addEventListener('click', () => {
+      changeSidebarFilter('all');
+      if (sidebarUnreadFilterButton && typeof sidebarUnreadFilterButton.focus === 'function') {
+        sidebarUnreadFilterButton.focus();
+      }
+    });
+  }
   for (const menu of popoverMenus) {
     if (!menu) continue;
     menu.addEventListener('toggle', () => { if (menu.open) closePopoverMenus(menu); });
@@ -6832,6 +6914,7 @@ export function renderBrowserAppRuntimeScript(): string {
 
   applyTheme(getStoredTheme());
   applyLook(getStoredLook());
+  applySidebarFilter(getStoredSidebarFilter());
   // Cards opens on Home.
   cardsHomeShown = isCardsLook();
   if (typeof window.matchMedia === 'function') {

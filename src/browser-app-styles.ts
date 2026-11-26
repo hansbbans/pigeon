@@ -43,6 +43,8 @@ const ICON_PATHS: Record<string, string> = {
 	cards: "<path d='M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' /> <path d='M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4' />",
 	home: "<path d='M5 12l-2 0l9 -9l9 9l-2 0' /> <path d='M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7' /> <path d='M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6' />",
 	link: "<path d='M9 15l6 -6' /> <path d='M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464' /> <path d='M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463' />",
+	filter: "<path d='M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227' />",
+	"filter-filled": "F:<path d='M20 3h-16a1 1 0 0 0 -1 1v2.227l.008 .223a3 3 0 0 0 .772 1.795l4.22 4.641v8.114a1 1 0 0 0 1.316 .949l6 -2l.108 -.043a1 1 0 0 0 .576 -.906v-6.586l4.121 -4.12a3 3 0 0 0 .879 -2.123v-2.171a1 1 0 0 0 -1 -1z' />",
 };
 
 function iconUrl(name: string): string {
@@ -283,7 +285,9 @@ ${iconVariables()}
       [data-icon="link"] { --icon: var(--icon-link); }
       [data-icon="transcript"] { --icon: var(--icon-transcript); }
       [data-icon="cards"] { --icon: var(--icon-cards); }
+      [data-icon="filter"] { --icon: var(--icon-filter); }
 
+      #sidebar-unread-filter-button[aria-pressed="true"] { --icon: var(--icon-filter-filled); background: var(--sidebar-selected); color: var(--text); }
       #mark-unread-button[data-read="true"] { --icon: var(--icon-check-filled); color: var(--text-secondary); }
       #mark-unread-button[data-icon="archive"][data-read="true"] { --icon: var(--icon-archive-filled); }
       #star-article-button[aria-pressed="true"] { --icon: var(--icon-star-filled); color: var(--star); }
@@ -535,6 +539,25 @@ ${iconVariables()}
       .folder-toggle[aria-expanded="true"] .feed-disclosure { transform: rotate(90deg); }
 
       @media (prefers-reduced-motion: reduce) { .feed-disclosure { transition: none; } }
+
+      .sidebar-empty {
+        margin-top: 0.9rem;
+        padding: 0.25rem 0.6rem;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .sidebar-empty p { margin: 0 0 0.25rem; }
+
+      .sidebar-empty-action {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--accent);
+        font-size: 0.8rem;
+      }
+
+      .sidebar-empty-action:hover { background: transparent; text-decoration: underline; }
 
       .sidebar-footer {
         display: flex;
