@@ -477,7 +477,10 @@ export async function createBrowserHarness(options?: {
 	if (options?.storedArticleListMode) {
 		localStorageState.set('pigeon.browser.article-list-mode', options.storedArticleListMode);
 	}
-	if (options?.storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', options.storedAutoReadPolicy);
+	// Tests read manually unless they choose a policy; null stores none, so the
+	// app's own default (When opened) applies.
+	const storedAutoReadPolicy = options?.storedAutoReadPolicy === undefined ? 'manual' : options.storedAutoReadPolicy;
+	if (storedAutoReadPolicy) localStorageState.set('pigeon.browser.auto-read', storedAutoReadPolicy);
 	if (options?.storedShowReadingTime) localStorageState.set('pigeon.browser.show-reading-time', options.storedShowReadingTime);
 	if (options?.storedSidebarCollapsed) localStorageState.set('pigeon.browser.sidebar-collapsed', options.storedSidebarCollapsed);
 	for (const [key, value] of Object.entries(options?.storedEntries ?? {})) localStorageState.set(key, value);
