@@ -12,6 +12,7 @@ import {
 	createDeferred,
 	createLargeTodaySqliteLibrary,
 	createStatefulArticleBrowser,
+	drainBrowserMembershipPages,
 	findListButtonByItemId,
 	findListButtonByViewId,
 	finishArticleMutation,
@@ -713,6 +714,37 @@ test('a browser with no saved read preference marks stories read when opened', a
 	assert.equal(mutations.length, 1);
 });
 
+const readItemIds = (database: { prepare(sql: string): { all(): Array<Record<string, unknown>> } }) =>
+	database.prepare('SELECT id FROM items WHERE is_read = 1 ORDER BY id').all().map((row) => String(row.id));
+
+// Holds edit-tag writes while held, so no automatic mark can go out: the
+// browser sends one article write at a time.
+function createEditTagGate() {
+	let gate: ReturnType<typeof createDeferred<void>> | null = null;
+	return {
+		hold() { gate = createDeferred<void>(); },
+		release() { const held = gate; gate = null; held?.resolve(); },
+		fetchOverride: async (input: string, _init: RequestInit | undefined, next: () => Promise<Response>) => {
+			const held = input.endsWith('/edit-tag') ? gate : null;
+			if (held) await held.promise;
+			return next();
+		},
+	};
+}
+
+type CardNode = { children: CardNode[]; classList: { contains(name: string): boolean }; dataset: Record<string, string>; dispatch(type: string): void };
+function findCard(harness: Awaited<ReturnType<typeof createStatefulArticleBrowser>>['harness'], id: string) {
+	const visit = (node: CardNode): CardNode | undefined => {
+		for (const child of node.children) {
+			if (child.classList.contains('article-card') && child.dataset.itemId === id) return child;
+			const found = visit(child);
+			if (found) return found;
+		}
+		return undefined;
+	};
+	return visit(harness.elements.get('articles-list') as unknown as CardNode);
+}
+
 // Moving on with j counts as having opened the story, however quickly the
 // next j follows: each story passed is marked read, not only the last one.
 test('pressing j quickly under When opened marks every story passed read', async (t) => {
@@ -723,12 +755,80 @@ test('pressing j quickly under When opened marks every story passed read', async
 	await flushBrowserTasks();
 	for (let press = 0; press < 4; press += 1) assert.equal(harness.dispatchKeydown('j'), true);
 	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 2');
-	await waitForBrowserCondition(() => database.prepare('SELECT COUNT(*) AS count FROM items WHERE is_read = 1').get()!.count === 5, 500);
+	await waitForBrowserCondition(() => readItemIds(database).length === 5, 500);
 	await flushBrowserTasks();
-	assert.deepEqual(database.prepare('SELECT id FROM items WHERE is_read = 1 ORDER BY id').all().map((row) => row.id),
-		['today-2', 'today-3', 'today-4', 'today-5', 'today-6']);
-	assert.equal(mutations.length, 5, 'each story is marked once');
+	assert.deepEqual(readItemIds(database), ['today-2', 'today-3', 'today-4', 'today-5', 'today-6']);
+	assert.deepEqual(mutations.flatMap((mutation) => mutation.itemIds).sort(), ['2', '3', '4', '5', '6'], 'each story is marked once');
 	assert.equal(findListButtonByItemId(harness.elements.get('articles-list'), '4')!.getAttribute('data-read'), 'true');
+});
+
+test('stories passed while another write is pending are marked together in one request', async (t) => {
+	const gate = createEditTagGate();
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 5, policy: 'opened', fetchOverride: gate.fetchOverride });
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 7 && readItemIds(database).includes('today-6'), 200);
+	await flushBrowserTasks();
+	gate.hold();
+	assert.equal(harness.dispatchKeydown('s'), true);
+	const sent = mutations.length;
+	for (let press = 0; press < 3; press += 1) assert.equal(harness.dispatchKeydown('j'), true);
+	await flushBrowserTasks();
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 3');
+	assert.equal(mutations.length, sent, 'nothing else is sent while the star is pending');
+	gate.release();
+	await waitForBrowserCondition(() => readItemIds(database).length === 4, 500);
+	await flushBrowserTasks();
+	assert.deepEqual(mutations.slice(sent).map((mutation) => [...mutation.itemIds].sort()), [['4', '5'], ['3']]);
+	assert.deepEqual(readItemIds(database), ['today-3', 'today-4', 'today-5', 'today-6']);
+	assert.match(harness.elements.get('undo-article-button')!.getAttribute('aria-label')!, /Story 3/);
+});
+
+test('changing the read setting drops stories still waiting to be marked', async (t) => {
+	const gate = createEditTagGate();
+	const { database, harness, mutations } = await createStatefulArticleBrowser({ count: 5, policy: 'opened', fetchOverride: gate.fetchOverride });
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 7 && readItemIds(database).includes('today-6'), 200);
+	await flushBrowserTasks();
+	gate.hold();
+	harness.dispatchKeydown('s');
+	const sent = mutations.length;
+	harness.dispatchKeydown('j');
+	harness.dispatchKeydown('j');
+	for (const policy of ['manual', 'opened']) {
+		harness.elements.get('auto-read-select')!.value = policy;
+		harness.elements.get('auto-read-select')!.dispatch('change');
+	}
+	gate.release();
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-4'), 200);
+	for (let flush = 0; flush < 10; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(mutations.slice(sent).map((mutation) => mutation.itemIds), [['4']], 'only the open story is marked');
+	assert.deepEqual(readItemIds(database), ['today-4', 'today-6']);
+});
+
+// Stepping past the last story of a 200-story window moves the window: the
+// story left there counts as passed like any other.
+test('j across a window boundary marks the story it leaves', async (t) => {
+	const gate = createEditTagGate();
+	const { database, harness } = await createStatefulArticleBrowser({ count: 201, policy: 'opened', fetchOverride: gate.fetchOverride });
+	t.after(() => database.close());
+	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length > 0, 200);
+	await drainBrowserMembershipPages(harness);
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 200 && readItemIds(database).includes('today-202'), 500);
+	await flushBrowserTasks();
+	const last = renderedArticleIds(harness).at(-1)!;
+	gate.hold();
+	harness.dispatchKeydown('s');
+	findListButtonByItemId(harness.elements.get('articles-list'), last)!.dispatch('click');
+	await waitForBrowserCondition(() => String(harness.elements.get('reader-frame')!.srcdoc).includes('Body ' + last), 500);
+	await flushBrowserTasks();
+	assert.equal(harness.dispatchKeydown('j'), true);
+	await flushBrowserTasks();
+	assert.notEqual(harness.elements.get('reader-title')!.textContent, 'Story ' + last);
+	gate.release();
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-' + last), 500);
 });
 
 test('a story marked unread stays unread when j moves past it', async (t) => {
@@ -739,11 +839,35 @@ test('a story marked unread stays unread when j moves past it', async (t) => {
 	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-4'").get()!.is_read, 0);
 	harness.dispatchKeydown('j');
 	harness.dispatchKeydown('j');
-	await waitForBrowserCondition(() => database.prepare("SELECT is_read FROM items WHERE id='today-2'").get()!.is_read === 1, 500);
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-2'), 500);
 	await flushBrowserTasks();
-	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-4'").get()!.is_read, 0);
-	assert.equal(database.prepare("SELECT is_read FROM items WHERE id='today-3'").get()!.is_read, 1);
+	assert.deepEqual(readItemIds(database), ['today-2', 'today-3']);
 	assert.equal(mutations.length, 4);
+});
+
+// On a phone the reader pane is display:none while the list shows. The story
+// a list picks on arrival is not opened until its reader is shown.
+test('on a phone, only stories whose reader was shown are marked read', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({ count: 5, policy: 'opened' });
+	t.after(() => database.close());
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-6'), 200);
+	const grid = harness.elements.get('reader-grid')!;
+	const readerScroll = harness.elements.get('reader-scroll')!;
+	readerScroll.getBoundingClientRect = () => grid.getAttribute('data-mobile-pane') === 'reader'
+		? { width: 390, height: 700, left: 0, right: 390, top: 0, bottom: 700 }
+		: { width: 0, height: 0, left: 0, right: 0, top: 0, bottom: 0 };
+	findListButtonByViewId(harness.elements.get('views-list'), 'unread')!.dispatch('click');
+	await waitForBrowserCondition(() => harness.elements.get('articles-heading')!.textContent === 'Unread' && renderedArticleIds(harness).includes('5'), 200);
+	assert.notEqual(grid.getAttribute('data-mobile-pane'), 'reader');
+	assert.equal(harness.elements.get('reader-title')!.textContent, 'Story 5', 'the hidden reader holds the arrival pick');
+	for (let flush = 0; flush < 10; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(readItemIds(database), ['today-6'], 'the hidden arrival pick is not read');
+	findListButtonByItemId(harness.elements.get('articles-list'), '3')!.dispatch('click');
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-3'), 200);
+	harness.dispatchKeydown('j');
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-2'), 200);
+	for (let flush = 0; flush < 10; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(readItemIds(database), ['today-2', 'today-3', 'today-6']);
 });
 
 // In Cards nothing is open until a story is chosen: the story picked on
@@ -752,54 +876,31 @@ test('j and k in Cards mark each story opened and passed', async (t) => {
 	const { database, harness } = await createStatefulArticleBrowser({ count: 3, policy: 'opened',
 		storedEntries: { 'pigeon.browser.look': 'cards' } });
 	t.after(() => database.close());
-	type Node = { children: Node[]; classList: { contains(name: string): boolean }; dataset: Record<string, string>; dispatch(type: string): void };
-	const card = (id: string, node = harness.elements.get('articles-list') as unknown as Node): Node | undefined => {
-		for (const child of node.children) {
-			if (child.classList.contains('article-card') && child.dataset.itemId === id) return child;
-			const found = card(id, child);
-			if (found) return found;
-		}
-		return undefined;
-	};
 	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
-	await waitForBrowserCondition(() => Boolean(card('1')), 200);
+	await waitForBrowserCondition(() => Boolean(findCard(harness, '1')), 200);
 	await flushBrowserTasks();
-	const readIds = () => database.prepare('SELECT id FROM items WHERE is_read = 1 ORDER BY id').all().map((row) => row.id);
-	assert.deepEqual(readIds(), []);
-	card('2')!.dispatch('click');
-	await waitForBrowserCondition(() => readIds().includes('today-2'), 200);
+	assert.deepEqual(readItemIds(database), []);
+	findCard(harness, '2')!.dispatch('click');
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-2'), 200);
 	harness.dispatchKeydown('j');
 	await waitForBrowserCondition(() => harness.elements.get('reader-title')!.textContent === 'Story 1', 200);
 	harness.dispatchKeydown('k');
 	harness.dispatchKeydown('k');
-	await waitForBrowserCondition(() => readIds().length === 3, 500);
-	assert.deepEqual(readIds(), ['today-1', 'today-2', 'today-3']);
-	harness.dispatchKeydown('k');
-	await flushBrowserTasks();
+	await waitForBrowserCondition(() => readItemIds(database).length === 3, 500);
+	assert.deepEqual(readItemIds(database), ['today-1', 'today-2', 'today-3']);
 });
 
 test('opening a later card in Cards leaves the story picked on arrival unread', async (t) => {
 	const { database, harness } = await createStatefulArticleBrowser({ count: 3, policy: 'opened',
 		storedEntries: { 'pigeon.browser.look': 'cards' } });
 	t.after(() => database.close());
-	type Node = { children: Node[]; classList: { contains(name: string): boolean }; dataset: Record<string, string>; dispatch(type: string): void };
-	const card = (id: string, node = harness.elements.get('articles-list') as unknown as Node): Node | undefined => {
-		for (const child of node.children) {
-			if (child.classList.contains('article-card') && child.dataset.itemId === id) return child;
-			const found = card(id, child);
-			if (found) return found;
-		}
-		return undefined;
-	};
 	findListButtonByViewId(harness.elements.get('feeds-list'), 'feed/1')!.dispatch('click');
-	await waitForBrowserCondition(() => Boolean(card('1')), 200);
+	await waitForBrowserCondition(() => Boolean(findCard(harness, '1')), 200);
 	await flushBrowserTasks();
-	const readIds = () => database.prepare('SELECT id FROM items WHERE is_read = 1 ORDER BY id').all().map((row) => row.id);
-	card('1')!.dispatch('click');
-	await waitForBrowserCondition(() => readIds().includes('today-1'), 200);
-	await flushBrowserTasks();
-	await flushBrowserTasks();
-	assert.deepEqual(readIds(), ['today-1']);
+	findCard(harness, '1')!.dispatch('click');
+	await waitForBrowserCondition(() => readItemIds(database).includes('today-1'), 200);
+	for (let flush = 0; flush < 5; flush += 1) await flushBrowserTasks();
+	assert.deepEqual(readItemIds(database), ['today-1']);
 });
 
 test('60% policy marks read only after sufficient article content is visible and permits undo', async (t) => {

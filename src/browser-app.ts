@@ -652,6 +652,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let readyReaderItemId = null;
   const manuallyUnreadItemIds = new Set();
   const passedOverReadIds = new Set();
+  // The story whose body the reader last showed on screen: only a story shown
+  // counts as opened when the reader moves past it.
+  let shownReaderItemId = null;
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
   let articleSortOrder = 'newest';
@@ -1164,9 +1167,12 @@ export function renderBrowserAppRuntimeScript(): string {
     return isCardsLook() && readerGrid.getAttribute('data-mobile-pane') === 'reader';
   }
 
-  // Whether the reader can be seen: in Cards only while a story is open over the cards.
+  // Whether the reader can be seen: in Cards only while a story is open over the
+  // cards; on a phone not while the list is showing (the reader pane is display:none).
   function isReaderPaneOnScreen() {
-    return !isCardsLook() || isCardsStoryOpen();
+    if (isCardsLook()) return isCardsStoryOpen();
+    const rect = typeof readerScroll.getBoundingClientRect === 'function' ? readerScroll.getBoundingClientRect() : null;
+    return !rect || (rect.width > 0 && rect.height > 0);
   }
 
   // Whether the list's rows can be seen: not under Home or an open story in Cards.
@@ -1751,6 +1757,7 @@ export function renderBrowserAppRuntimeScript(): string {
     readyReaderItemId = null;
     manuallyUnreadItemIds.clear();
     passedOverReadIds.clear();
+    shownReaderItemId = null;
     autoReadAttempt = '';
     queuedAutoRead = null;
     articleQueryStatus.textContent = '';
@@ -1948,9 +1955,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const openedId = readingMeter.itemId();
     if (!openedId || openedId !== selectedItemId || readyReaderItemId !== openedId ||
         document.visibilityState === 'hidden' || !isReaderVisible() || !isReaderPaneOnScreen()) return false;
-    // On a phone the reader pane is display:none while the list is showing.
-    const rect = typeof readerScroll.getBoundingClientRect === 'function' ? readerScroll.getBoundingClientRect() : null;
-    return !rect || (rect.width > 0 && rect.height > 0);
+    return true;
   }
 
   function reportReadingTime(minimumSeconds) {
@@ -2586,7 +2591,9 @@ export function renderBrowserAppRuntimeScript(): string {
     state.windowStart = start;
     state.windowAnchorId = candidates[start] || null;
     const visible = getNavigableItemIds();
-    selectedItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
+    const nextItemId = direction < 0 && keyboard ? visible[visible.length - 1] || null : visible[0] || null;
+    notePassedOverStory(nextItemId);
+    selectedItemId = nextItemId;
     state.selectedItemId = selectedItemId;
     // Stepping past the end of a window is still the reader choosing the next
     // article. When that window is not loaded yet, the list picks its first
@@ -5640,9 +5647,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (session.status !== 'authenticated' || !item || pendingArticleMutation) return;
     const request = {
       itemId, field, target, generation: accountGeneration, token: session.token,
-      // A story passed over is not the one on screen: its mark shows no status
-      // there and leaves Undo for the reader's own last action.
-      selectionId: options?.passedOver ? null : readerActionSelectionId, previous: getArticleState(item, field),
+      selectionId: readerActionSelectionId, previous: getArticleState(item, field),
       title: item.title || 'Untitled article',
     };
     const archive = field === 'read' && isSavedItem(item);
@@ -5675,7 +5680,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!response.ok) throw new Error('Article state request failed');
       if (!isCurrentRequest()) return;
       activeCollectionChanged = applyArticleState(itemId, field, target, !options?.automatic);
-      if (!options?.passedOver) undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
+      undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
       let offlineCopyWarning=false;
       if(offlineLibrary&&!queuedOffline)try {const library=offlineLibrary;await library.confirmState(itemId,field==='read'?'set_read':'set_starred',target);if(!isCurrentRequest())return;}catch(error){if(!isCurrentRequest())return;offlineCopyWarning=true;}
       renderArticles();
@@ -5938,36 +5943,98 @@ export function renderBrowserAppRuntimeScript(): string {
     return fromScroll && item.extractionState !== 'pending' && item.extractionState !== 'failed' ? 'end' : 'manual';
   }
 
-  // Under When opened, moving on from a story (j, k or a click) counts as having
-  // opened it, even when the next story is chosen before its automatic mark could
-  // be sent. A story never opened (Cards' pick on arrival), one marked unread by
-  // hand, or a saved item is left alone.
+  function noteReaderShown() {
+    if (selectedItemId && articleCache.has(selectedItemId) && isReaderVisible() && isReaderPaneOnScreen() &&
+        document.visibilityState !== 'hidden') shownReaderItemId = selectedItemId;
+  }
+
+  // Under When opened, moving on from a story (j, k, a click or a window step)
+  // counts as having opened it, even when the next story is chosen before its
+  // automatic mark could be sent. A story the reader never showed (a list's pick
+  // on arrival behind the cards or a phone's list, or a body still loading), one
+  // marked unread by hand, or a saved item is left alone.
   function notePassedOverStory(nextItemId) {
     const itemId = selectedItemId, item = loadedItemsById[itemId];
-    if (!itemId || itemId === nextItemId || !item || getAutoReadPolicy(item, false) !== 'opened' ||
-        !isReaderVisible() || (isCardsLook() && !isCardsStoryOpenedHere(itemId)) || document.visibilityState === 'hidden' ||
-        getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId) ||
+    if (!itemId || itemId === nextItemId || shownReaderItemId !== itemId || !item ||
+        getAutoReadPolicy(item, false) !== 'opened' || getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId) ||
         (pendingArticleMutation?.itemId === itemId && pendingArticleMutation.field === 'read')) return;
     passedOverReadIds.add(itemId);
   }
 
-  // Sends the next passed-over story's mark. Each write's completion calls back
-  // through maybeAutoMarkRead, so the queue drains one story at a time.
-  function markNextPassedOverStory() {
-    if (pendingArticleMutation || passedOverReadIds.size === 0 || (window.navigator?.onLine === false && !offlineLibrary)) return false;
+  // Marks the stories passed over so far in one write. It takes the single
+  // article-write slot like any other change, shows no status on the open story
+  // and leaves Undo alone; when it finishes, maybeAutoMarkRead runs again.
+  function markPassedOverStories() {
+    if (pendingArticleMutation || session.status !== 'authenticated' || passedOverReadIds.size === 0 ||
+        (window.navigator?.onLine === false && !offlineLibrary)) return false;
+    const itemIds = [];
     for (const itemId of passedOverReadIds) {
+      if (itemIds.length === client.CONTENT_CHUNK_SIZE) break;
       passedOverReadIds.delete(itemId);
       const item = loadedItemsById[itemId];
-      if (itemId === selectedItemId || !item || getAutoReadPolicy(item, false) !== 'opened' ||
-          getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId)) continue;
-      void mutateArticleState(itemId, 'read', true, { automatic: true, passedOver: true });
-      return true;
+      if (itemId !== selectedItemId && item && getAutoReadPolicy(item, false) === 'opened' &&
+          !getArticleState(item, 'read') && !manuallyUnreadItemIds.has(itemId)) itemIds.push(itemId);
     }
-    return false;
+    if (itemIds.length === 0) return false;
+    // Not tied to the open list: unread counts refresh without touching its status line.
+    const request = { kind: 'passed-over', field: 'read', itemIds, generation: accountGeneration, token: session.token,
+      selectionId: null, viewId: null, queryKey: null };
+    pendingArticleMutation = request;
+    renderArticleActions();
+    renderMarkAllAsReadAction();
+    void writePassedOverReads(request);
+    return true;
+  }
+
+  async function writePassedOverReads(request) {
+    let activeCollectionChanged = false;
+    try {
+      let queuedOffline = false;
+      const queueOffline = async () => {
+        for (const itemId of request.itemIds) await offlineLibrary.queueMutation(itemId, 'set_read', true);
+        queuedOffline = true;
+      };
+      if (isOfflineReading()) await queueOffline();
+      else {
+        const form = new FormData();
+        for (const itemId of request.itemIds) form.append('i', itemId);
+        form.set('a', 'user/-/state/com.google/read');
+        try {
+          const response = await authenticatedFetch('/reader/api/0/edit-tag', { method: 'POST', body: form });
+          if (!response.ok) throw new Error('Article state request failed');
+        } catch (error) {
+          if (!offlineLibrary || !isCurrentBulkRequest(request)) throw error;
+          await queueOffline();
+          offlineSession = true;
+        }
+      }
+      if (queuedOffline) void updateOfflineStatus();
+      if (!isCurrentBulkRequest(request)) return;
+      for (const itemId of request.itemIds) {
+        if (applyArticleState(itemId, 'read', true, false)) activeCollectionChanged = true;
+        // A stale offline copy catches up on the next offline sync.
+        if (offlineLibrary && !queuedOffline) try { await offlineLibrary.confirmState(itemId, 'set_read', true); } catch (_error) {}
+        if (!isCurrentBulkRequest(request)) return;
+      }
+      renderArticles();
+      renderReader();
+    } catch (_error) {
+      // Like the open story's automatic mark, a failed one is not retried; the
+      // stories stay unread and can be marked by hand.
+    }
+    if (!isCurrentBulkRequest(request)) return;
+    await refreshBulkUnreadCounts(request);
+    if (!isCurrentBulkRequest(request)) return;
+    pendingArticleMutation = null;
+    renderArticleActions();
+    renderMarkAllAsReadAction();
+    if (activeCollectionChanged) void revalidateActiveView({ refreshUnread: false });
+    maybeAutoMarkRead();
   }
 
   function maybeAutoMarkRead(fromScroll = false) {
-    if (markNextPassedOverStory()) return;
+    noteReaderShown();
+    if (markPassedOverStories()) return;
     const policy = getAutoReadPolicy(loadedItemsById[selectedItemId], fromScroll);
     if (policy === 'manual' || pendingArticleMutation ||
         !isReaderVisible() || !isReaderPaneOnScreen() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
@@ -6178,6 +6245,7 @@ export function renderBrowserAppRuntimeScript(): string {
     saveActiveViewState();
     renderArticles();
     renderReader();
+    noteReaderShown();
     saveActiveViewState();
     if (!articleCache.has(itemId)) {
       await loadContentChunk(itemId, activeViewRequestId);
@@ -6453,6 +6521,7 @@ export function renderBrowserAppRuntimeScript(): string {
     autoReadPolicy = normalizeAutoReadPolicy(autoReadSelect.value);
     autoReadSelect.value = autoReadPolicy;
     autoReadAttempt = '';
+    passedOverReadIds.clear();
     try {
       window.localStorage.setItem(autoReadStorageKey, autoReadPolicy);
       readingPreferenceStatus.textContent = 'Reading preference saved.';

@@ -11,6 +11,7 @@ All notable changes to Pigeon are documented in this file.
 ### Fixed
 
 - Web: with Mark read set to When opened, a story you move past with j, k or a click is marked read even when you move on before its mark was sent. Previously quick j presses left the stories in between unread.
+- Web: on a phone, the story a list picks on arrival is no longer marked read while only the list is showing; it counts once its reader is shown.
 
 ## [0.1.17.0] - 2026-11-24
 
