@@ -287,6 +287,7 @@ export async function createBrowserHarness(options?: {
 	frameViewportHeight?: number;
 	storedColumnWidths?: { sidebar?: number; stream?: number };
 	readerGridWidth?: number | (() => number);
+	narrowViewport?: boolean;
 	online?: boolean;
 	now?: number | (() => number);
 	fetchImpl?: (input: string, init?: { method?: string; body?: FormData; headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
@@ -389,6 +390,9 @@ export async function createBrowserHarness(options?: {
 		['app-theme-select', createElement('system', [], 'select', registerFocus)],
 		['sidebar-toggle-button', createElement('', [], 'button', registerFocus)],
 		['page-sidebar-toggle-button', createElement('', [], 'button', registerFocus)],
+		['sidebar-unread-filter-button', createElement('', [], 'button', registerFocus)],
+		['sidebar-filter-empty', createElement('', ['hidden'], 'div', registerFocus)],
+		['sidebar-show-all-button', createElement('', [], 'button', registerFocus)],
 		['look-toggle-button', createElement('', [], 'button', registerFocus)],
 		['look-select', createElement('reeder', [], 'select', registerFocus)],
 		['home-list', createElement('', [], 'ul', registerFocus)],
@@ -432,7 +436,7 @@ export async function createBrowserHarness(options?: {
 	]);
 	// The three panels hold the elements focus can be in, so code can tell which panel has it.
 	for (const [panel, ids] of [
-		['feeds-panel', ['home-list', 'views-list', 'folders-list', 'feeds-list']],
+		['feeds-panel', ['sidebar-unread-filter-button', 'home-list', 'views-list', 'folders-list', 'feeds-list', 'sidebar-show-all-button']],
 		['articles-panel', ['articles-heading', 'articles-list', 'cards-home', 'stream-back-button', 'look-toggle-button', 'page-sidebar-toggle-button']],
 		['reader-panel', ['reader-title', 'reader-back-button', 'reader-copy', 'image-zoom-panel']],
 	] as const) {
@@ -558,6 +562,7 @@ export async function createBrowserHarness(options?: {
 	const context = {
 		window: {
 			__PIGEON_CONFIG__: { baseUrl: 'https://pigeon.example' },
+			...(options?.narrowViewport ? { matchMedia: (query: string) => ({ matches: query === '(max-width: 760px)' }) } : {}),
 			navigator: { onLine: options?.online ?? true },
 			sessionStorage: {
 				getItem(key: string) {

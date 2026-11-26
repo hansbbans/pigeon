@@ -310,6 +310,9 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /id="real-views-section"/);
 	assert.match(html, /id="folder-views-section"/);
 	assert.match(html, /id="real-feeds-section"/);
+	assert.match(html, /id="sidebar-unread-filter-button"[^>]+data-icon="filter"[^>]+aria-pressed="false"/);
+	assert.match(html, /id="sidebar-filter-empty"/);
+	assert.match(html, /id="sidebar-show-all-button"/);
 	assert.match(html, /id="sidebar-current-title"/);
 	assert.match(html, /id="folders-list"/);
 	assert.match(html, /id="views-list"/);
@@ -332,6 +335,7 @@ test('GET /app returns an HTML shell', async () => {
 	assert.match(html, /localStorage\.getItem\("pigeon\.browser\.theme"\)/);
 	assert.match(html, /pigeon\.browser\.article-list-mode/);
 	assert.match(html, /pigeon\.browser\.column-widths/);
+	assert.match(html, /pigeon\.browser\.sidebar-filter/);
 	assert.match(html, /const theme = storedTheme === null \? \(systemDark \? 'dark' : 'light'\) : storedTheme === 'dark' \? 'dark' : 'light';/);
 	assert.match(html, /matchMedia\('\(prefers-color-scheme: dark\)'\)/);
 	assert.match(html, /\/reader\/api\/0\/subscription\/list/);
