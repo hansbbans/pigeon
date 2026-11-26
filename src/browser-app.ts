@@ -643,7 +643,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let heldReaderArticle = null;
   // Snapshot list: rows of the open view that left its read filter stay until a deliberate refresh.
   let keptItemIds = { queryKey: '', ids: new Set() };
-  let autoReadPolicy = 'manual';
+  let autoReadPolicy = 'opened';
   let showReadingTime = true;
   // Items whose reader-mode word count was already reported this session.
   const reportedWordCounts = new Set();
@@ -651,6 +651,7 @@ export function renderBrowserAppRuntimeScript(): string {
   let queuedAutoRead = null;
   let readyReaderItemId = null;
   const manuallyUnreadItemIds = new Set();
+  const passedOverReadIds = new Set();
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
   let articleSortOrder = 'newest';
@@ -1749,6 +1750,7 @@ export function renderBrowserAppRuntimeScript(): string {
     keptItemIds = { queryKey: '', ids: new Set() };
     readyReaderItemId = null;
     manuallyUnreadItemIds.clear();
+    passedOverReadIds.clear();
     autoReadAttempt = '';
     queuedAutoRead = null;
     articleQueryStatus.textContent = '';
@@ -5638,7 +5640,9 @@ export function renderBrowserAppRuntimeScript(): string {
     if (session.status !== 'authenticated' || !item || pendingArticleMutation) return;
     const request = {
       itemId, field, target, generation: accountGeneration, token: session.token,
-      selectionId: readerActionSelectionId, previous: getArticleState(item, field),
+      // A story passed over is not the one on screen: its mark shows no status
+      // there and leaves Undo for the reader's own last action.
+      selectionId: options?.passedOver ? null : readerActionSelectionId, previous: getArticleState(item, field),
       title: item.title || 'Untitled article',
     };
     const archive = field === 'read' && isSavedItem(item);
@@ -5671,7 +5675,7 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!response.ok) throw new Error('Article state request failed');
       if (!isCurrentRequest()) return;
       activeCollectionChanged = applyArticleState(itemId, field, target, !options?.automatic);
-      undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
+      if (!options?.passedOver) undoArticleMutation = options?.undo ? null : { ...request, action, itemSnapshot: createArticleMetadata(item) };
       let offlineCopyWarning=false;
       if(offlineLibrary&&!queuedOffline)try {const library=offlineLibrary;await library.confirmState(itemId,field==='read'?'set_read':'set_starred',target);if(!isCurrentRequest())return;}catch(error){if(!isCurrentRequest())return;offlineCopyWarning=true;}
       renderArticles();
@@ -5934,7 +5938,36 @@ export function renderBrowserAppRuntimeScript(): string {
     return fromScroll && item.extractionState !== 'pending' && item.extractionState !== 'failed' ? 'end' : 'manual';
   }
 
+  // Under When opened, moving on from a story (j, k or a click) counts as having
+  // opened it, even when the next story is chosen before its automatic mark could
+  // be sent. A story never opened (Cards' pick on arrival), one marked unread by
+  // hand, or a saved item is left alone.
+  function notePassedOverStory(nextItemId) {
+    const itemId = selectedItemId, item = loadedItemsById[itemId];
+    if (!itemId || itemId === nextItemId || !item || getAutoReadPolicy(item, false) !== 'opened' ||
+        !isReaderVisible() || (isCardsLook() && !isCardsStoryOpenedHere(itemId)) || document.visibilityState === 'hidden' ||
+        getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId) ||
+        (pendingArticleMutation?.itemId === itemId && pendingArticleMutation.field === 'read')) return;
+    passedOverReadIds.add(itemId);
+  }
+
+  // Sends the next passed-over story's mark. Each write's completion calls back
+  // through maybeAutoMarkRead, so the queue drains one story at a time.
+  function markNextPassedOverStory() {
+    if (pendingArticleMutation || passedOverReadIds.size === 0 || (window.navigator?.onLine === false && !offlineLibrary)) return false;
+    for (const itemId of passedOverReadIds) {
+      passedOverReadIds.delete(itemId);
+      const item = loadedItemsById[itemId];
+      if (itemId === selectedItemId || !item || getAutoReadPolicy(item, false) !== 'opened' ||
+          getArticleState(item, 'read') || manuallyUnreadItemIds.has(itemId)) continue;
+      void mutateArticleState(itemId, 'read', true, { automatic: true, passedOver: true });
+      return true;
+    }
+    return false;
+  }
+
   function maybeAutoMarkRead(fromScroll = false) {
+    if (markNextPassedOverStory()) return;
     const policy = getAutoReadPolicy(loadedItemsById[selectedItemId], fromScroll);
     if (policy === 'manual' || pendingArticleMutation ||
         !isReaderVisible() || !isReaderPaneOnScreen() || document.visibilityState === 'hidden' || (window.navigator?.onLine === false && !offlineLibrary) ||
@@ -6135,6 +6168,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     heldReaderArticle = null;
+    notePassedOverStory(itemId);
     noteCardChosen(itemId);
     noteCardsStoryOpened(itemId);
     selectedItemId = itemId;
@@ -6745,8 +6779,10 @@ export function renderBrowserAppRuntimeScript(): string {
       });
     }
   }
-  try { autoReadPolicy = normalizeAutoReadPolicy(window.localStorage.getItem(autoReadStorageKey)); }
-  catch (_error) { autoReadPolicy = 'manual'; }
+  // A browser that never chose marks stories read when opened, as the iOS app does.
+  try { const storedAutoRead = window.localStorage.getItem(autoReadStorageKey);
+    autoReadPolicy = storedAutoRead === null ? 'opened' : normalizeAutoReadPolicy(storedAutoRead); }
+  catch (_error) { autoReadPolicy = 'opened'; }
   autoReadSelect.value = autoReadPolicy;
   try { showReadingTime = window.localStorage.getItem(showReadingTimeStorageKey) !== '0'; }
   catch (_error) { showReadingTime = true; }
