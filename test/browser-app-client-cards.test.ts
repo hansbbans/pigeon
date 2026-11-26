@@ -513,3 +513,52 @@ test('a folder in Cards draws no selection wash until a story is opened in this 
 	await openFolder(browser);
 	assert.equal(storyButtons().some((button) => button.classList.contains('is-active')), false);
 });
+
+test('Cards Home folder tiles follow the sidebar unread filter without shifting folder colours', async () => {
+	const { elements } = await createBrowserHarness({
+		storedEntries: { [LOOK_KEY]: 'cards' },
+		fetchImpl: async (input, init) => {
+			if (input === '/accounts/ClientLogin' && init?.method === 'POST') {
+				return new Response('SID=pigeon/live-token\nLSID=null\nAuth=pigeon/live-token');
+			}
+			if (input === '/reader/api/0/subscription/list') {
+				return Response.json({
+					subscriptions: [
+						{ id: 'feed/1', title: 'Alpha', categories: [{ id: 'user/-/label/Archive', label: 'Archive' }] },
+						{ id: 'feed/2', title: 'Bravo', categories: [{ id: FOLDER_ID, label: 'Daily Reads' }] },
+						{ id: 'feed/3', title: 'Charlie', categories: [{ id: FOLDER_ID, label: 'Daily Reads' }] },
+					],
+				});
+			}
+			if (input === '/reader/api/0/unread-count') {
+				return Response.json({
+					unreadcounts: [
+						{ id: 'feed/1', count: 0 },
+						{ id: 'feed/2', count: 0 },
+						{ id: 'feed/3', count: 4 },
+					],
+				});
+			}
+			const url = new URL(`https://pigeon.example${input}`);
+			if (url.pathname === '/api/v1/browser/articles/count') return Response.json({ count: 0 });
+			if (url.pathname === '/reader/api/0/stream/items/ids') return Response.json({ itemRefs: [] });
+			throw new Error(`Unexpected fetch: ${init?.method ?? 'GET'} ${input}`);
+		},
+	});
+
+	await elements.get('login-form')!.dispatch('submit');
+	const home = elements.get('cards-home')!;
+	await waitForBrowserCondition(() => Boolean(findDescendantByClass(home, 'cards-home-folders')));
+
+	const folderTiles = () => findDescendantByClass(home, 'cards-home-folders')?.children.map((item) => item.children[0]) ?? [];
+	assert.deepEqual(folderTiles().map((tile) => tile.dataset.viewId), ['user/-/label/Archive', FOLDER_ID]);
+	const dailyReadsBarBefore = folderTiles().find((tile) => tile.dataset.viewId === FOLDER_ID)!.style.getPropertyValue('--bar');
+
+	await elements.get('sidebar-unread-filter-button')!.dispatch('click');
+	assert.deepEqual(folderTiles().map((tile) => tile.dataset.viewId), [FOLDER_ID]);
+	const filteredTile = folderTiles()[0];
+	assert.equal(filteredTile.style.getPropertyValue('--bar'), dailyReadsBarBefore, 'folder colour does not shift when filtered');
+	const visibleFeedTitles = findDescendantByClass(filteredTile, 'cards-home-folder-feeds')!.children
+		.map((feed) => findDescendantByClass(feed, 'cards-home-folder-feed-title')!.textContent);
+	assert.deepEqual(visibleFeedTitles, ['Charlie']);
+});
