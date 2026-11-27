@@ -326,9 +326,45 @@ test('article count matches Today unread membership and validates like the list'
 	assert.deepEqual(await response.json(), { count: 3 });
 	assert.deepEqual((await state.query(today)).itemIds, ['3', '9', '2']);
 	assert.equal((await count({ ...today, sort: 'oldest' })).status, 200);
-	assert.equal((await count({ ...today, kind: 'video' })).status, 400);
+	assert.equal((await count({ ...today, kind: 'video' })).status, 200);
+	assert.equal((await count({ ...today, length: 'short' })).status, 400);
 	assert.equal((await count(today, { auth: null })).status, 401);
 	assert.equal((await count(today, { method: 'POST' })).status, 405);
 	assert.equal((await count({ ...today, limit: '5' })).status, 400);
 	assert.equal((await count({ since: '2026-10-12' })).status, 400);
+});
+
+test('kind filters text and video across regular streams, counts, and cursors', async (t) => {
+	const state = await fixture(t);
+	state.insert(1, { date: '2026-10-12T04:00:00.000Z', feed: 'one' });
+	state.insert(2, { date: '2026-10-12T05:00:00.000Z', feed: 'one' });
+	state.insert(3, { date: '2026-10-12T06:00:00.000Z', feed: 'two' });
+	state.insert(4, { date: '2026-10-12T07:00:00.000Z', feed: 'two' });
+	state.database.exec(`
+		UPDATE items SET media_kind = 'text' WHERE rowid = 1;
+		UPDATE items SET media_kind = 'video' WHERE rowid IN (2, 4);
+	`);
+	// rowid 3 intentionally keeps media_kind = NULL (email newsletter) and counts as text.
+	assert.deepEqual((await state.query({ stream: 'all', kind: 'video' })).itemIds, ['4', '2']);
+	assert.deepEqual((await state.query({ stream: 'all', kind: 'text' })).itemIds, ['3', '1']);
+	assert.deepEqual((await state.query({ stream: 'user/-/label/Design', kind: 'video' })).itemIds, ['2']);
+	assert.deepEqual((await state.query({ stream: 'feed/1', kind: 'video' })).itemIds, ['2']);
+
+	const firstVideo = await state.query({ stream: 'all', kind: 'video', limit: '1' });
+	assert.deepEqual(firstVideo.itemIds, ['4']);
+	assert.ok(firstVideo.continuation);
+	const secondVideo = await state.query({ stream: 'all', kind: 'video', limit: '1', continuation: firstVideo.continuation! });
+	assert.deepEqual(secondVideo.itemIds, ['2']);
+	const mismatchedCursor = await worker.fetch(state.request({ stream: 'all', kind: 'all', limit: '1', continuation: firstVideo.continuation! }), state.env);
+	assert.equal(mismatchedCursor.status, 400);
+	const invalidKind = await worker.fetch(state.request({ stream: 'all', kind: 'audio' }), state.env);
+	assert.equal(invalidKind.status, 400);
+	const invalidLength = await worker.fetch(state.request({ stream: 'all', length: 'short' }), state.env);
+	assert.equal(invalidLength.status, 400);
+
+	const auth = state.request().headers.get('Authorization')!;
+	const countUrl = new URL('https://pigeon.example/api/v1/browser/articles/count?stream=all&kind=video');
+	const countRes = await worker.fetch(new Request(countUrl, { headers: { Authorization: auth } }), state.env);
+	assert.equal(countRes.status, 200);
+	assert.deepEqual(await countRes.json(), { count: 2 });
 });

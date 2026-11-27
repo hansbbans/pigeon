@@ -211,7 +211,8 @@ test('browser/articles filters and sorts the whole saved list on the server, wit
 	assert.deepEqual(await all('stream=saved&sort=longest'),
 		['A talk', 'A long essay', 'Exactly fifteen', 'Exactly five', 'A quick note', 'Unknown two', 'example.org/pending']);
 	assert.deepEqual(await all('stream=saved&sort=shortest&kind=text&length=any&q=Exactly'), ['Exactly five', 'Exactly fifteen']);
-	assert.equal((await query('stream=all&kind=video')).status, 400);
+	assert.equal((await query('stream=all&kind=video')).status, 200);
+	assert.equal((await query('stream=all&length=short')).status, 400);
 	assert.equal((await query('stream=all&sort=shortest')).status, 400);
 	assert.equal((await query('stream=saved&length=huge')).status, 400);
 	// Continuations are bound to the whole query, including the saved filters.

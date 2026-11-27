@@ -51,7 +51,7 @@ struct ArticleListView: View {
 		let isSearchActive = searchRequest.isActive
 		let searchPhase = searchPresentation.phase(for: searchRequest)
 		let sourceArticles = isSearchActive
-			? (searchPresentation.canDisplayResults(for: searchRequest) ? model.searchResults : [])
+			? (searchPresentation.canDisplayResults(for: searchRequest) ? model.displayedSearchResults : [])
 			: model.articles(for: collection)
 		let articles = updateBuffer.displayedArticles(in: listContext, fallback: sourceArticles)
 		// Folders and feeds draw sections (cards in Cards, a sectioned list in
@@ -75,7 +75,9 @@ struct ArticleListView: View {
 			collectionID: collection.id,
 		)
 		let isLoading = model.isLoading(collection: collection) || model.isInitialLoadPending(for: collection)
-		let isFilteredEmpty = model.isArticleFilterEmpty(for: collection)
+		let isFilteredEmpty = isSearchActive
+			? (searchPresentation.canDisplayResults(for: searchRequest) && model.isSearchFilterEmpty)
+			: model.isArticleFilterEmpty(for: collection)
 		let presentation = loadingState.presentation(
 			context: loadRequestKey,
 			hasCachedCollection: model.hasCachedCollection(collection)
@@ -125,15 +127,29 @@ struct ArticleListView: View {
 				}
 			} else if articles.isEmpty {
 				VStack {
-					if isSearchActive {
+					if isSearchActive && isFilteredEmpty == false {
 						ContentUnavailableView.search(text: searchText)
 							.accessibilityIdentifier("article-search-empty")
 					} else if isFilteredEmpty {
-						ContentUnavailableView(
-							filteredEmptyTitle,
-							systemImage: filteredEmptySystemImage,
-							description: Text(filteredEmptyDescription),
-						)
+						if model.hasActiveTimeBoxFilter {
+							ContentUnavailableView {
+								Label(filteredEmptyTitle, systemImage: filteredEmptySystemImage)
+							} description: {
+								Text(filteredEmptyDescription)
+							} actions: {
+								Button("Clear Filters") {
+									prepareForListContextChange()
+									model.clearTimeBoxFilter()
+								}
+								.accessibilityIdentifier("article-list-clear-filters")
+							}
+						} else {
+							ContentUnavailableView(
+								filteredEmptyTitle,
+								systemImage: filteredEmptySystemImage,
+								description: Text(filteredEmptyDescription),
+							)
+						}
 					} else {
 						ContentUnavailableView(
 							emptyTitle,
@@ -361,7 +377,7 @@ struct ArticleListView: View {
 			if Task.isCancelled == false, listContext == context {
 				let request = currentSearchRequest
 				let current = request.isActive
-					? (searchPresentation.canDisplayResults(for: request) ? model.searchResults : [])
+					? (searchPresentation.canDisplayResults(for: request) ? model.displayedSearchResults : [])
 					: model.articles(for: collection)
 				updateBuffer.receive(current, context: context, holding: false, explicit: true)
 			}
@@ -880,7 +896,7 @@ struct ArticleListView: View {
 		if initialLoadID != nil {
 			let request = currentSearchRequest
 			let current = request.isActive
-				? (searchPresentation.canDisplayResults(for: request) ? model.searchResults : [])
+				? (searchPresentation.canDisplayResults(for: request) ? model.displayedSearchResults : [])
 				: model.articles(for: collection)
 			updateBuffer.receive(current, context: context, holding: false, explicit: true)
 		}
@@ -910,7 +926,7 @@ struct ArticleListView: View {
 	}
 
 	private var listContext: String {
-		"\(model.session?.storageIdentity ?? "none")|\(collection.id)|\(model.articleFilter(for: collection).rawValue)|\(model.sortOrder(for: collection).rawValue)|\(searchScope.rawValue)|\(searchText.trimmingCharacters(in: .whitespacesAndNewlines))"
+		"\(model.session?.storageIdentity ?? "none")|\(collection.id)|\(model.articleFilter(for: collection).rawValue)|\(model.timeBoxFilter.contextKey)|\(model.sortOrder(for: collection).rawValue)|\(searchScope.rawValue)|\(searchText.trimmingCharacters(in: .whitespacesAndNewlines))"
 	}
 
 	@ViewBuilder
@@ -979,26 +995,40 @@ struct ArticleListView: View {
 	}
 
 	private var filteredEmptyTitle: String {
+		if model.hasActiveTimeBoxFilter {
+			return "No matching stories"
+		}
 		switch model.articleFilter(for: collection) {
-		case .all: "No stories yet"
-		case .unread: "No unread stories"
-		case .read: "No read stories"
+		case .all: return "No stories yet"
+		case .unread: return "No unread stories"
+		case .read: return "No read stories"
 		}
 	}
 
 	private var filteredEmptySystemImage: String {
+		if model.hasActiveTimeBoxFilter {
+			return "line.3.horizontal.decrease.circle"
+		}
 		switch model.articleFilter(for: collection) {
-		case .all: "newspaper"
-		case .unread: "checkmark.circle"
-		case .read: "envelope.open"
+		case .all: return "newspaper"
+		case .unread: return "checkmark.circle"
+		case .read: return "envelope.open"
 		}
 	}
 
 	private var filteredEmptyDescription: String {
+		if model.hasActiveTimeBoxFilter {
+			let summary = model.timeBoxFilter.summary
+			switch model.articleFilter(for: collection) {
+			case .all: return "No loaded stories match \(summary)."
+			case .unread: return "No loaded unread stories match \(summary)."
+			case .read: return "No loaded read stories match \(summary)."
+			}
+		}
 		switch model.articleFilter(for: collection) {
-		case .all: "New stories will appear here as Pigeon receives them."
-		case .unread: "All stories in this collection are read. Choose All to see them."
-		case .read: "All stories in this collection are unread. Choose All to see them."
+		case .all: return "New stories will appear here as Pigeon receives them."
+		case .unread: return "All stories in this collection are read. Choose All to see them."
+		case .read: return "All stories in this collection are unread. Choose All to see them."
 		}
 	}
 

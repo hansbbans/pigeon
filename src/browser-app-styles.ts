@@ -602,6 +602,36 @@ ${iconVariables()}
       #article-query-status:empty, #offline-mode-banner:empty { display: none; }
       #article-query-status { margin: 0; color: var(--muted); font-size: 0.75rem; }
 
+      .active-filter-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin: 0 0.5rem 0.45rem 0;
+        padding: 0.3rem 0.55rem;
+        border-radius: 7px;
+        background: var(--accent-soft);
+        color: var(--text);
+        font-size: 0.78rem;
+        line-height: 1.3;
+      }
+      .active-filter-bar.hidden { display: none; }
+      .text-action-button {
+        border: 0;
+        padding: 0.1rem 0.25rem;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--accent);
+        font-size: 0.78rem;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .text-action-button:hover { text-decoration: underline; }
+      #article-options-menu > summary[data-active="true"] {
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
       #offline-mode-banner {
         margin: 0.45rem 0.5rem 0 0;
         padding: 0.4rem 0.6rem;

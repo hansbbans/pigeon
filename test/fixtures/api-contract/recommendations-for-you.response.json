@@ -27,7 +27,9 @@
 			"html": "<p>Typography decides whether a long read stays readable.</p>",
 			"text": "Typography decides whether a long read stays readable.",
 			"isBodyPruned": false,
-			"isPaywalled": false
+			"isPaywalled": false,
+			"wordCount": 2380,
+			"mediaKind": "text"
 		}
 	]
 }

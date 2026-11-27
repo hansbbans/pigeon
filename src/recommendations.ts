@@ -16,6 +16,7 @@ import {
 import type { Env } from './types';
 import { ARTICLE_AUTHOR_SQL } from './article-author';
 import { isPaywalledHtml } from './paywall';
+import { readingLengthFields, type ReadingLengthFields } from './reading-length';
 import { apiTimestamp } from './timestamps';
 
 export type RecommendationView = 'for-you' | 'unread' | 'starred';
@@ -31,6 +32,9 @@ interface RecommendationCandidate {
 	received_at: string;
 	is_read: number;
 	is_starred: number;
+	word_count: number | null;
+	media_kind: string | null;
+	duration_seconds: number | null;
 }
 
 interface RecommendationContentRow {
@@ -635,7 +639,8 @@ function candidateViewWhere(view: RecommendationView): string {
 const CANDIDATE_COLUMNS = `i.rowid, i.id, i.feed_key,
 	COALESCE(f.custom_title, f.display_name) AS source,
 	${ARTICLE_AUTHOR_SQL} AS author, i.subject AS title, i.original_url,
-	i.received_at, i.is_read, i.is_starred`;
+	i.received_at, i.is_read, i.is_starred,
+	i.word_count, i.media_kind, i.duration_seconds`;
 
 async function loadRecommendationCandidates(
 	env: Env,
@@ -765,7 +770,7 @@ function snapshotMembershipPages(entries: RecommendationSnapshotEntry[], offset:
 }
 
 async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], offset: number, limit: number) {
-	const items: Array<RecommendationSnapshotEntry & {
+	const items: Array<RecommendationSnapshotEntry & ReadingLengthFields & {
 		readerId: string; feedKey: string; source: string; author: string | null; title: string;
 		originalURL: string | null; receivedAt: string; isRead: boolean; isStarred: boolean;
 		html: string; text: string | null; isBodyPruned: boolean; isPaywalled: boolean;
@@ -804,7 +809,8 @@ async function loadForYouPage(env: Env, entries: RecommendationSnapshotEntry[], 
 				author: row.author, title: row.title, originalURL: row.original_url, receivedAt,
 				isRead: row.is_read === 1, isStarred: row.is_starred === 1,
 				html: row.html_content, text: row.text_content, isBodyPruned: row.content_pruned_at != null,
-				isPaywalled: isPaywalledHtml(row.html_content) });
+				isPaywalled: isPaywalledHtml(row.html_content),
+				...readingLengthFields(row) });
 		}
 		if (results.length === capacity) {
 			nextOffset = page.offset + results.at(-1)!.ordinal + 1;
@@ -910,6 +916,7 @@ export async function handleRecommendations(request: Request, env: Env, sessions
 			receivedAt: candidate.received_at,
 			isRead: candidate.is_read === 1,
 			isStarred: candidate.is_starred === 1,
+			...readingLengthFields(candidate),
 			matchedTopics: [...new Set([...topic.monitoredMatches, ...topic.learnedMatches])],
 			topicStrength: topic.monitoredBoost + Math.max(topic.learnedBoost, 0),
 			...scoring,

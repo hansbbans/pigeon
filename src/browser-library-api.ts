@@ -65,7 +65,8 @@ const CURSOR_FEED_TITLE_SQL = `(SELECT COALESCE(NULLIF(cf.custom_title, ''), cf.
 /**
  * GET /api/v1/browser/articles (authenticated by handleNativeApiRequest).
  * stream: all/reading-list, feed/<numeric ID>, user/-/label/<literal name>, read, starred, saved.
- * stream=saved only: kind=all/text/video; length=any/short (<5 min)/medium (5-15)/long (15+ min),
+ * kind: all/text/video across every stream (using stored media_kind).
+ * stream=saved only: length=any/short (<5 min)/medium (5-15)/long (15+ min),
  * by rounded-up minutes, unknown length matching only any; sort also shortest/longest
  * (unknown last). Lengths come from word_count (238 wpm) or duration_seconds for video.
  * Read It Later items appear only in `saved` and in their feed's own feed/<ID> stream;
@@ -248,14 +249,14 @@ function parseQuery(params: URLSearchParams): ArticleQuery {
 	const sort = params.get('sort') ?? 'newest';
 	const kind = params.get('kind') ?? 'all';
 	const length = params.get('length') ?? 'any';
+	if (!['all', 'text', 'video'].includes(kind)) throw new InvalidQuery('kind must be all, text or video');
 	if (stream === SAVED) {
 		if (!['newest', 'oldest', 'shortest', 'longest'].includes(sort)) throw new InvalidQuery('Supported sorts are newest, oldest, shortest and longest');
-		if (!['all', 'text', 'video'].includes(kind)) throw new InvalidQuery('kind must be all, text or video');
 		if (!['any', 'short', 'medium', 'long'].includes(length)) throw new InvalidQuery('length must be any, short, medium or long');
 	} else {
 		if (sort === 'feed' && !stream.startsWith(LABEL)) throw new InvalidQuery('sort=feed applies only to folder streams');
 		if (sort !== 'newest' && sort !== 'oldest' && sort !== 'feed') throw new InvalidQuery('Supported sorts are newest, oldest and, for folders, feed');
-		if (kind !== 'all' || length !== 'any') throw new InvalidQuery('kind and length apply only to the saved stream');
+		if (length !== 'any') throw new InvalidQuery('length applies only to the saved stream');
 	}
 	const since = parseDate(params.get('since'));
 	const before = parseDate(params.get('before'));
@@ -274,10 +275,10 @@ function parseDate(value: string | null): string | null {
 }
 
 async function queryFingerprint(query: ArticleQuery): Promise<string> {
-	// Saved-only fields join the fingerprint only for the saved stream, so other
-	// streams' continuations stay valid across deploys.
+	// Saved-only fields and non-default kind join the fingerprint only when
+	// relevant, so default continuations on other streams stay valid across deploys.
 	const { kind, length, ...shared } = query;
-	const bound = query.stream === SAVED ? query : shared;
+	const bound = query.stream === SAVED ? query : kind === 'all' ? shared : { ...shared, kind };
 	const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(bound)));
 	return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }

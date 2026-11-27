@@ -63,6 +63,17 @@ nonisolated enum ReadingLength {
 		)
 	}
 
+	/// Rounded-up whole minutes for filtering: video duration, else stored word
+	/// count, else body estimate. Nil when nothing is known.
+	@MainActor static func minutes(for article: Recommendation) -> Int? {
+		SavedLength.minutes(
+			wordCount: article.length?.wordCount,
+			estimatedWordCount: article.length?.isVideo == true ? nil : estimatedWordCount(for: article),
+			mediaKind: article.length?.mediaKind,
+			durationSeconds: article.length?.durationSeconds
+		)
+	}
+
 	/// The count reader mode compares an extraction against.
 	@MainActor static func knownWordCount(for article: Recommendation) -> Int? {
 		article.length?.wordCount ?? estimatedWordCount(for: article)
@@ -227,3 +238,38 @@ nonisolated enum ReadingLength {
 		return count
 	}
 }
+
+/// Session-scoped Type (All / Text / Video) and Length (Any / Under 5 min /
+/// 5–15 min / 15+ min) filters for regular collections. Matches the web client
+/// (`matchesArticleTimeBox` / `formatArticleTimeBoxSummary`) and only counts
+/// items with `mediaKind == "video"` as video.
+nonisolated struct ReaderTimeBoxFilter: Equatable, Hashable, Sendable {
+	var kind: SavedKindFilter = .all
+	var length: SavedLengthFilter = .any
+
+	var isDefault: Bool { self == Self() }
+
+	/// Compact summary for empty states and accessibility; empty when default.
+	var summary: String {
+		var parts: [String] = []
+		if kind != .all { parts.append(kind.title) }
+		if length != .any { parts.append(length.title) }
+		return parts.joined(separator: " \u{00B7} ")
+	}
+
+	/// Key included in list contexts so scroll and update buffers reset on change.
+	var contextKey: String {
+		"\(kind.rawValue)|\(length.rawValue)"
+	}
+
+	func includes(_ article: Recommendation, minutes: Int?) -> Bool {
+		let isVideo = article.length?.isVideo == true
+		switch kind {
+		case .all: break
+		case .text: if isVideo { return false }
+		case .video: if isVideo == false { return false }
+		}
+		return length.includes(minutes: minutes)
+	}
+}
+

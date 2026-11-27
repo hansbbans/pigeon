@@ -54,6 +54,7 @@ final class ReaderAppModel {
 		let sidebarFilter: ReaderSidebarFilter
 		let sortOrders: [String: ArticleSortOrder]
 		let articleFilters: [ArticleFilterKey: ReaderArticleFilter]
+		let timeBoxFilter: ReaderTimeBoxFilter
 		let expandedFolderIDs: Set<String>
 		let changedSortOrderIDs: Set<String>
 		let changedArticleFilterKeys: Set<ArticleFilterKey>
@@ -306,6 +307,23 @@ final class ReaderAppModel {
 			reconcileSelection(for: ReaderSection.saved.rawValue)
 		}
 	}
+	/// Session-scoped Type and Length filters for regular collections (Read It
+	/// Later keeps its own persisted `savedListFilter`).
+	var timeBoxFilter = ReaderTimeBoxFilter() {
+		didSet {
+			guard timeBoxFilter != oldValue else { return }
+			if selectedNavigationID != ReaderSection.saved.rawValue {
+				resetKeptArticles(for: selectedNavigationID)
+				reconcileSelection(for: selectedNavigationID)
+			}
+		}
+	}
+	var hasActiveTimeBoxFilter: Bool {
+		timeBoxFilter.isDefault == false
+	}
+	func clearTimeBoxFilter() {
+		timeBoxFilter = ReaderTimeBoxFilter()
+	}
 	private var engagement = EngagementAggregator()
 	private var sentScrollThresholds: [String: Set<Int>] = [:]
 	/// The reading monitor that owns each article's clock, so a monitor that
@@ -380,13 +398,19 @@ final class ReaderAppModel {
 	private(set) var articleListMutationArticleID: String?
 	var displayedSearchResults: [Recommendation] {
 		let filter = articleFilter
-		guard keptSearchArticles.applies(to: selectedNavigationID, filter: filter) else {
-			return filter.filtering(searchResults)
+		let base: [Recommendation]
+		if keptSearchArticles.applies(to: selectedNavigationID, filter: filter) {
+			base = searchResults.filter { filter.includes($0) || keptSearchArticles.contains($0) }
+		} else {
+			base = filter.filtering(searchResults)
 		}
-		return searchResults.filter { filter.includes($0) || keptSearchArticles.contains($0) }
+		guard selectedNavigationID != ReaderSection.saved.rawValue else { return base }
+		return filteredByTimeBox(base)
 	}
 	var isSearchFilterEmpty: Bool {
-		articleFilter != .all
+		let hasFilter = articleFilter != .all
+			|| (selectedNavigationID != ReaderSection.saved.rawValue && hasActiveTimeBoxFilter)
+		return hasFilter
 			&& searchResults.isEmpty == false
 			&& displayedSearchResults.isEmpty
 	}
@@ -906,6 +930,7 @@ final class ReaderAppModel {
 			sortOrders = [:]
 			canonicalArticleOrder = [:]
 			articleFilters.removeAll()
+			timeBoxFilter = ReaderTimeBoxFilter()
 			selectedArticleIDs = [:]
 			clearDetachedSelectedArticle()
 			resetKeptArticles(handingOffOpenStory: false)
@@ -2045,6 +2070,17 @@ final class ReaderAppModel {
 		return articles.filter { filter.includes($0, minutes: SavedLength.minutes(for: $0)) }
 	}
 
+	/// Regular collections' Type and Length filters. Skips body estimation when
+	/// only filtering by Type (length == .any).
+	private func filteredByTimeBox(_ articles: [Recommendation]) -> [Recommendation] {
+		let filter = timeBoxFilter
+		guard filter.isDefault == false else { return articles }
+		let needsMinutes = filter.length != .any
+		return articles.filter {
+			filter.includes($0, minutes: needsMinutes ? ReadingLength.minutes(for: $0) : nil)
+		}
+	}
+
 	func readerMode(for feedID: String) -> ReaderMode {
 		let aliases = readerModeAliases(for: feedID)
 		for alias in aliases {
@@ -2183,6 +2219,7 @@ final class ReaderAppModel {
 			sidebarFilter: sidebarFilter,
 			sortOrders: sortOrders,
 			articleFilters: articleFilters,
+			timeBoxFilter: timeBoxFilter,
 			expandedFolderIDs: navigation.expandedFolderIDs,
 			changedSortOrderIDs: bootstrapChangedSortOrderIDs,
 			changedArticleFilterKeys: bootstrapChangedArticleFilterKeys,
@@ -2198,6 +2235,7 @@ final class ReaderAppModel {
 		sidebarFilter = state.sidebarFilter
 		sortOrders = state.sortOrders
 		articleFilters = state.articleFilters
+		timeBoxFilter = state.timeBoxFilter
 		navigation.expandedFolderIDs = state.expandedFolderIDs
 			.intersection(Set(navigation.folderItems.map(\.id)))
 		bootstrapChangedSortOrderIDs = state.changedSortOrderIDs
@@ -4458,7 +4496,9 @@ final class ReaderAppModel {
 	}
 
 	func isArticleFilterEmpty(for collection: ReaderNavigationItem) -> Bool {
-		articleFilter(for: collection.id) != .all
+		let hasFilter = articleFilter(for: collection.id) != .all
+			|| (collection.id != ReaderSection.saved.rawValue && hasActiveTimeBoxFilter)
+		return hasFilter
 			&& allArticles(for: collection).isEmpty == false
 			&& articles(for: collection).isEmpty
 	}
@@ -4853,23 +4893,23 @@ final class ReaderAppModel {
 		}
 		let filter = articleFilter(for: collectionID)
 		guard keptArticles.applies(to: collectionID, filter: filter) else {
-			return filter.filtering(allArticles(for: collectionID))
+			return filteredByTimeBox(filter.filtering(allArticles(for: collectionID)))
 		}
 		guard let bounds = Self.dayWindow(forCollectionID: collectionID, at: .now) else {
-			return keptArticles.displayed(
+			return filteredByTimeBox(keptArticles.displayed(
 				allArticles(for: collectionID),
 				filter: filter,
 				order: sortOrder(for: collectionID),
 				feeds: articleFeedDirectory,
-			)
+			))
 		}
-		return keptArticles.displayed(
+		return filteredByTimeBox(keptArticles.displayed(
 			allArticles(for: collectionID),
 			filter: filter,
 			order: sortOrder(for: collectionID),
 			feeds: articleFeedDirectory,
 			isEligible: { bounds.contains($0.receivedAt) },
-		)
+		))
 	}
 
 	/// Whether `article` is shown only because it was kept after leaving the
@@ -5669,6 +5709,7 @@ final class ReaderAppModel {
 			(collection.kind == .folder || collection.kind == .feed)
 			&& (activeSearchScope == nil || activeSearchCollectionID != collection.id)
 			&& articleFilter(for: collection.id) != .read
+			&& hasActiveTimeBoxFilter == false
 		if isUnsearchedRealCollection {
 			if collection.unreadCount > 0 {
 				return true
@@ -5696,6 +5737,7 @@ final class ReaderAppModel {
 		if (collection.kind == .folder || collection.kind == .feed),
 			activeSearchScope == nil || activeSearchCollectionID != collection.id,
 			articleFilter(for: collection.id) != .read,
+			hasActiveTimeBoxFilter == false,
 			let context = currentOperationContext() {
 			let actionTime = Date.now
 			guard let plan = await completeMarkAllTargets(
@@ -7368,6 +7410,7 @@ final class ReaderAppModel {
 		sortOrders = [:]
 		canonicalArticleOrder = [:]
 		articleFilters.removeAll()
+		timeBoxFilter = ReaderTimeBoxFilter()
 		selectedArticleIDs = [:]
 		resetKeptArticles(handingOffOpenStory: false)
 		resetStreamPagination()

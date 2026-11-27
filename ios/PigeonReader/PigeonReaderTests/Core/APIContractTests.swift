@@ -515,11 +515,13 @@ struct APIContractTests {
 		#expect(item.receivedAt == Self.date("2026-11-01T09:00:00Z"))
 		#expect(item.isBodyPruned == false)
 		#expect(item.html.contains("Typography decides"))
+		#expect(item.length == ArticleLength(wordCount: 2380, mediaKind: "text", durationSeconds: nil))
 	}
 
 	@Test func unreadRecommendationsFixtureDecodes() async throws {
 		let items = try await Self.client("recommendations-unread.response.json").recommendations(for: .unread)
 		#expect(items.map(\.feedKey) == ["design-weekly", "morning-brief"])
+		#expect(items.first?.length == ArticleLength(wordCount: 2380, mediaKind: "text", durationSeconds: nil))
 		#expect(items.last?.isPaywalled == true)
 		#expect(items.last?.originalURL == nil)
 	}
