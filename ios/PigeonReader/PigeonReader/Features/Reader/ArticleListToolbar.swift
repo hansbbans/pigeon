@@ -28,7 +28,9 @@ struct ArticleListToolbar: ToolbarContent {
 				.accessibilityHint("Marks all unread stories in this feed as read")
 				.accessibilityIdentifier("article-list-mark-read")
 			}
-			Menu("Filter", systemImage: "line.3.horizontal.decrease") {
+			Menu("Filter", systemImage: model.hasActiveTimeBoxFilter
+				? "line.3.horizontal.decrease.circle.fill"
+				: "line.3.horizontal.decrease") {
 				Picker("Filter stories", selection: filterBinding) {
 					ForEach(ReaderArticleFilter.allCases) { filter in
 						Text(filter.title)
@@ -36,9 +38,31 @@ struct ArticleListToolbar: ToolbarContent {
 					}
 				}
 				.accessibilityIdentifier("article-list-filter-options")
+				Picker("Type", selection: kindBinding) {
+					ForEach(SavedKindFilter.allCases) { kind in
+						Text(kind.title)
+							.tag(kind)
+					}
+				}
+				.accessibilityIdentifier("article-list-filter-kind")
+				Picker("Length", selection: lengthBinding) {
+					ForEach(SavedLengthFilter.allCases) { length in
+						Text(length.title)
+							.tag(length)
+					}
+				}
+				.accessibilityIdentifier("article-list-filter-length")
+				if model.hasActiveTimeBoxFilter {
+					Divider()
+					Button("Clear Type & Length Filters", systemImage: "xmark.circle") {
+						onListContextWillChange()
+						model.clearTimeBoxFilter()
+					}
+					.accessibilityIdentifier("article-list-filter-clear")
+				}
 			}
 			.accessibilityLabel(ReaderAccessibilityText.filterStories(for: collection.title))
-			.accessibilityValue(model.articleFilter(for: collection).title)
+			.accessibilityValue(filterAccessibilityValue)
 			.accessibilityHint(ReaderAccessibilityText.filterStoriesHint)
 			.accessibilityIdentifier("article-list-filter")
 			// Its own view, fed plain values: the list's body runs on every sync and
@@ -60,6 +84,12 @@ struct ArticleListToolbar: ToolbarContent {
 		}
 	}
 
+	private var filterAccessibilityValue: String {
+		let readTitle = model.articleFilter(for: collection).title
+		guard model.hasActiveTimeBoxFilter else { return readTitle }
+		return "\(readTitle), \(model.timeBoxFilter.summary)"
+	}
+
 	private var filterBinding: Binding<ReaderArticleFilter> {
 		Binding(
 			get: { model.articleFilter(for: collection) },
@@ -67,6 +97,28 @@ struct ArticleListToolbar: ToolbarContent {
 				guard newFilter != model.articleFilter(for: collection) else { return }
 				onListContextWillChange()
 				model.setArticleFilter(newFilter, for: collection)
+			},
+		)
+	}
+
+	private var kindBinding: Binding<SavedKindFilter> {
+		Binding(
+			get: { model.timeBoxFilter.kind },
+			set: { newKind in
+				guard newKind != model.timeBoxFilter.kind else { return }
+				onListContextWillChange()
+				model.timeBoxFilter.kind = newKind
+			},
+		)
+	}
+
+	private var lengthBinding: Binding<SavedLengthFilter> {
+		Binding(
+			get: { model.timeBoxFilter.length },
+			set: { newLength in
+				guard newLength != model.timeBoxFilter.length else { return }
+				onListContextWillChange()
+				model.timeBoxFilter.length = newLength
 			},
 		)
 	}

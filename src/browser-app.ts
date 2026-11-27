@@ -224,9 +224,11 @@ ${renderBrowserAppStyles()}
                   <button class="icon-button" id="search-button" type="button" data-icon="search" title="Search" aria-label="Search" aria-expanded="false" aria-controls="article-query-form">Search</button>
                   <button class="icon-button" id="look-toggle-button" type="button" data-icon="cards" title="Cards look" aria-pressed="false">Cards look</button>
                   <details class="menu" id="article-options-menu">
-                    <summary class="icon-button" data-icon="more" title="View options" aria-label="View options">View options</summary>
+                    <summary class="icon-button" id="article-options-summary" data-icon="more" title="View options" aria-label="View options">View options</summary>
                     <div class="menu-panel">
                       <label>Show<select id="article-read-filter"><option value="all">All</option><option value="unread">Unread</option><option value="read">Read</option></select></label>
+                      <label id="article-kind-field">Type<select id="article-kind-filter"><option value="all">All</option><option value="text">Text</option><option value="video">Video</option></select></label>
+                      <label id="article-length-field">Length<select id="article-length-filter"><option value="any">Any length</option><option value="short">Under 5 min</option><option value="medium">5–15 min</option><option value="long">15+ min</option></select></label>
                       <label id="article-sort-field">Sort<select id="article-sort-select"><option value="recommended">Recommended</option><option value="score">Highest score</option><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
                       <button class="menu-item" id="article-list-mode-button" type="button" aria-pressed="false">Show titles only</button>
                       <button class="menu-item" id="refresh-view-button" type="button">Refresh</button>
@@ -245,6 +247,10 @@ ${renderBrowserAppStyles()}
                     <button class="search-submit" type="submit">Search</button>
                     <button class="icon-button" id="clear-article-search-button" type="button" data-icon="close" title="Clear search">Clear</button>
                   </form>
+                  <div class="active-filter-bar hidden" id="article-active-filters" role="status" aria-live="polite">
+                    <span id="article-active-filters-label"></span>
+                    <button class="text-action-button" id="clear-article-filters-button" type="button">Clear</button>
+                  </div>
                   <p id="article-query-status" class="status-meta" role="status" aria-live="polite"></p>
                 </div>
                 <div class="saved-filters hidden" id="saved-filters" role="group" aria-label="Read It Later filters">
@@ -502,6 +508,14 @@ export function renderBrowserAppRuntimeScript(): string {
   const articleSearchInput = document.getElementById('article-search-input');
   const clearArticleSearchButton = document.getElementById('clear-article-search-button');
   const articleReadFilterSelect = document.getElementById('article-read-filter');
+  const articleOptionsSummary = document.getElementById('article-options-summary');
+  const articleKindField = document.getElementById('article-kind-field');
+  const articleKindFilterSelect = document.getElementById('article-kind-filter');
+  const articleLengthField = document.getElementById('article-length-field');
+  const articleLengthFilterSelect = document.getElementById('article-length-filter');
+  const articleActiveFiltersBar = document.getElementById('article-active-filters');
+  const articleActiveFiltersLabel = document.getElementById('article-active-filters-label');
+  const clearArticleFiltersButton = document.getElementById('clear-article-filters-button');
   const articleSortSelect = document.getElementById('article-sort-select');
   const articleSortField = document.getElementById('article-sort-field');
   document.getElementById('refresh-view-button').addEventListener('click',()=>{preparedReaderKey='';clearKeptItemIds();renderArticles();void revalidateActiveView({refreshUnread:true});});
@@ -679,6 +693,9 @@ export function renderBrowserAppRuntimeScript(): string {
   let shownReaderItemId = null;
   let articleSearchQuery = '';
   let articleReadFilter = 'all';
+  let articleKindFilter = 'all';
+  let articleLengthFilter = 'any';
+  const MAX_LENGTH_FILTER_AUTO_PAGES = 3;
   let articleSortOrder = 'newest';
   // Folder sections a reader opened with "N more", per folder for the page session.
   const expandedFolderSections = new Map();
@@ -1455,10 +1472,12 @@ export function renderBrowserAppRuntimeScript(): string {
     if (view?.kind === 'saved') return { q: articleSearchQuery, filter: savedFilters.status === 'archive' ? 'read' : 'unread',
       sort: savedFilters.sort, kind: savedFilters.kind, length: savedFilters.length };
     const query = { q: articleSearchQuery, filter: view?.kind === 'unread' ? 'unread' :
-      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: getListSortOrder(view) };
+      view?.kind === 'recent' ? 'read' : articleReadFilter, sort: getListSortOrder(view),
+      ...(articleKindFilter !== 'all' ? { kind: articleKindFilter } : {}),
+      ...(articleLengthFilter !== 'any' ? { length: articleLengthFilter } : {}) };
     if(view?.kind==='recommended')query.recommendationEpoch=recommendationEpoch;
     // The window is part of the query, so a new local day starts a new list.
-    if (view?.kind === 'last-7-days' || (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleSortOrder !== 'newest'))) {
+    if (view?.kind === 'last-7-days' || (view?.kind === 'today' && (articleSearchQuery || articleReadFilter !== 'all' || articleKindFilter !== 'all' || articleSortOrder !== 'newest'))) {
       query.dayBounds = viewDayBounds.get(view.id) || client.getViewDayBounds(view);
     }
     return query;
@@ -1547,6 +1566,7 @@ export function renderBrowserAppRuntimeScript(): string {
       selectedItemId: null,
       scrollTop: 0,
       refreshedAt: 0,
+      lengthAutoPages: 0,
       contentLoadedIds: new Set(),
       publicationDates: new Map(),
       windowDay: '',
@@ -1822,6 +1842,8 @@ export function renderBrowserAppRuntimeScript(): string {
     articleQueryStatus.textContent = '';
     articleSearchQuery = '';
     articleReadFilter = 'all';
+    articleKindFilter = 'all';
+    articleLengthFilter = 'any';
     articleSortOrder = 'newest';
     expandedFolderSections.clear();
     viewDayBounds.clear();
@@ -2551,9 +2573,22 @@ export function renderBrowserAppRuntimeScript(): string {
     });
   }
 
+  function isClientLengthFilterActive(view = getActiveView()) {
+    return Boolean(view && view.kind !== 'saved' && view.kind !== 'recommended' && articleLengthFilter !== 'any');
+  }
+
+  function getUnfilteredWindowCandidateIds() {
+    return isTimeWindowView() ? getTimeWindowCandidateIds() : itemIds;
+  }
+
   function getWindowCandidateIds() {
     reconcileArticleQueryBoundary();
-    return isTimeWindowView() ? getTimeWindowCandidateIds() : itemIds;
+    const base = getUnfilteredWindowCandidateIds();
+    if (!isClientLengthFilterActive()) return base;
+    return base.filter((id) => {
+      const item = loadedItemsById[id];
+      return Boolean(item) && client.matchesArticleTimeBox(item, articleKindFilter, articleLengthFilter);
+    });
   }
 
   function reconcileArticleQueryBoundary() {
@@ -2646,6 +2681,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (start === state.windowStart ||
         (direction > 0 && start >= candidates.length && (hasReachedWindowBoundary() || !nextItemIdsContinuation))) return false;
     state.windowNavigation = true;
+    state.lengthAutoPages = 0;
     state.windowStart = start;
     state.windowAnchorId = candidates[start] || null;
     const visible = getNavigableItemIds();
@@ -2717,7 +2753,7 @@ export function renderBrowserAppRuntimeScript(): string {
     }
 
     const hasUnreadItems = ['today', 'last-7-days', 'starred', 'recommended'].includes(activeView.kind) ? itemIds.length > 0 : activeView.unreadCount > 0;
-    const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems || isOfflineReading();
+    const isDisabled = Boolean(pendingArticleMutation) || !hasUnreadItems || isOfflineReading() || isClientLengthFilterActive(activeView);
     const scopeLabel = 'Mark all items in ' + activeView.title + ' as read';
     markAllAsReadButton.classList.remove('hidden');
     markAllAsReadButton.disabled = isDisabled;
@@ -2955,7 +2991,8 @@ export function renderBrowserAppRuntimeScript(): string {
     // A selected article cache miss remains loadable after finding the day before the window.
     addId(targetItemId, true);
     const windowStartSeconds = isTimeWindowView() ? getActiveWindowBounds().startSeconds : null;
-    for (const itemId of getVisibleItemIds()) {
+    const scanIds = isClientLengthFilterActive() ? getUnfilteredWindowCandidateIds() : getVisibleItemIds();
+    for (const itemId of scanIds) {
       // Finish loading unknown articles before the first known older article.
       const published = loadedItemsById[itemId]?.published;
       if (windowStartSeconds !== null && typeof published === 'number' && published < windowStartSeconds) {
@@ -3243,6 +3280,20 @@ export function renderBrowserAppRuntimeScript(): string {
     const savedView = view?.kind === 'saved';
     articleReadFilterSelect.value = savedView ? articleReadFilter : getArticleQuery().filter;
     articleReadFilterSelect.disabled = !view || savedView || ['unread', 'recent'].includes(view.kind) || Boolean(pendingArticleMutation);
+    if (articleKindField) articleKindField.classList.toggle('hidden', savedView);
+    if (articleKindFilterSelect) {
+      articleKindFilterSelect.value = articleKindFilter;
+      articleKindFilterSelect.disabled = !view || savedView || Boolean(pendingArticleMutation);
+    }
+    if (articleLengthField) articleLengthField.classList.toggle('hidden', savedView);
+    if (articleLengthFilterSelect) {
+      articleLengthFilterSelect.value = articleLengthFilter;
+      articleLengthFilterSelect.disabled = !view || savedView || Boolean(pendingArticleMutation);
+    }
+    const timeBoxSummary = !view || savedView ? '' : client.formatArticleTimeBoxSummary(articleKindFilter, articleLengthFilter);
+    if (articleOptionsSummary) articleOptionsSummary.setAttribute('data-active', timeBoxSummary ? 'true' : 'false');
+    if (articleActiveFiltersBar) articleActiveFiltersBar.classList.toggle('hidden', !timeBoxSummary);
+    if (articleActiveFiltersLabel) articleActiveFiltersLabel.textContent = timeBoxSummary ? 'Filtered: ' + timeBoxSummary : '';
     for (const option of articleSortSelect.querySelectorAll('option')) {
       option.hidden = ['recommended', 'score'].includes(option.value) && view?.kind !== 'recommended';
     }
@@ -3250,9 +3301,17 @@ export function renderBrowserAppRuntimeScript(): string {
     articleSortSelect.value = getListSortOrder(view);
     articleSortSelect.disabled = savedView || Boolean(pendingArticleMutation);
     renderSavedFilters();
+    const bulkBlockedByLength = isClientLengthFilterActive(view) && !['above', 'below'].includes(articleBulkSelect.value);
     articleBulkButton.disabled = isOfflineReading() || session.status !== 'authenticated' || !view || savedView || Boolean(pendingArticleMutation) ||
-      (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
+      bulkBlockedByLength || (['above', 'below'].includes(articleBulkSelect.value) && !selectedItemId);
     articleBulkSelect.disabled = savedView;
+  }
+
+  async function clearArticleTimeBoxFilters() {
+    if (articleKindFilter === 'all' && articleLengthFilter === 'any') return;
+    if (articleKindFilterSelect) articleKindFilterSelect.value = 'all';
+    if (articleLengthFilterSelect) articleLengthFilterSelect.value = 'any';
+    await changeArticleQuery();
   }
 
   async function changeArticleQuery() {
@@ -3261,10 +3320,16 @@ export function renderBrowserAppRuntimeScript(): string {
     saveActiveViewState();
     const query = articleSearchInput.value.trim();
     const filter = ['unread', 'read'].includes(articleReadFilterSelect.value) ? articleReadFilterSelect.value : 'all';
+    const kind = articleKindFilterSelect && ['text', 'video'].includes(articleKindFilterSelect.value) ? articleKindFilterSelect.value : 'all';
+    const length = articleLengthFilterSelect && ['short', 'medium', 'long'].includes(articleLengthFilterSelect.value) ? articleLengthFilterSelect.value : 'any';
     const sort = articleSortSelect.value;
     const currentView = getActiveView();
     articleSearchQuery = query.slice(0, 200);
     if (!['unread', 'recent'].includes(currentView?.kind)) articleReadFilter = filter;
+    if (currentView?.kind !== 'saved') {
+      articleKindFilter = kind;
+      articleLengthFilter = length;
+    }
     if (currentView?.kind === 'recommended') recommendationSort = ['recommended','score','oldest','newest'].includes(sort) ? sort : 'recommended';
     else if (!isSectionedList(currentView)) articleSortOrder = sort === 'oldest' ? 'oldest' : 'newest';
     heldReaderArticle = null;
@@ -3329,11 +3394,14 @@ export function renderBrowserAppRuntimeScript(): string {
 
     if (entries.length === 0) {
       const activeView = getActiveView();
+      const hasTimeBoxFilter = !savedView && (articleKindFilter !== 'all' || articleLengthFilter !== 'any');
       articlesStatus.textContent =
-        isTimeWindowView() && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
+        (isTimeWindowView() || isClientLengthFilterActive(activeView)) && (inFlightContentIds.length > 0 || isLoadingItemIdsPage)
           ? 'Loading articles…'
           : activeView?.kind === 'saved'
             ? savedEmptyMessage()
+          : activeView && hasTimeBoxFilter
+            ? 'No articles in ' + activeView.title + ' match these filters.'
           : activeView
             ? 'No articles in ' + activeView.title + '.'
             : 'Choose a feed to load article previews.';
@@ -4628,6 +4696,9 @@ export function renderBrowserAppRuntimeScript(): string {
     reportedWordCounts.add(item.id);
     for(const key of new Set([item.id,selectionId]))for(const cached of [loadedItemsById[key],articleCache.get(key),articleMetadataCache.get(key)]) if(cached) cached.wordCount=wordCount;
     item.wordCount=wordCount;
+    if(selectedItemId===selectionId&&isClientLengthFilterActive()&&!client.matchesArticleTimeBox(item,articleKindFilter,articleLengthFilter)){
+      heldReaderArticle={itemId:selectionId,viewId:activeViewId,queryKey:getViewQueryKey(activeViewId)};
+    }
     renderArticles();
     if(selectedItemId===selectionId) readerSourceNote.textContent=readerSourceNoteText(item);
     void authenticatedFetch('/api/v1/mutations',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4911,7 +4982,7 @@ export function renderBrowserAppRuntimeScript(): string {
     if (view?.kind === 'saved') return true;
     // Last 7 Days is the server's since/before query; only Today pages the reading list itself.
     if (view?.kind === 'last-7-days') return true;
-    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || getListSortOrder(view) !== 'newest');
+    return Boolean(articleSearchQuery || articleReadFilter !== 'all' || articleKindFilter !== 'all' || getListSortOrder(view) !== 'newest');
   }
 
   function buildStreamParams(view, continuation) {
@@ -4960,10 +5031,8 @@ export function renderBrowserAppRuntimeScript(): string {
     const query = options?.query || getArticleQuery(view.id);
     const params = new URLSearchParams({ stream: view.streamId, q: query.q, filter: query.filter,
       sort: query.sort, limit: String(options?.limit || (view.kind === 'saved' ? 100 : client.INITIAL_ITEM_ID_LIMIT)) });
-    if (view.kind === 'saved') {
-      if (query.kind && query.kind !== 'all') params.set('kind', query.kind);
-      if (query.length && query.length !== 'any') params.set('length', query.length);
-    }
+    if (query.kind && query.kind !== 'all') params.set('kind', query.kind);
+    if (view.kind === 'saved' && query.length && query.length !== 'any') params.set('length', query.length);
     if (client.isTimeWindowView(view)) {
       const bounds = options?.dayBounds || query.dayBounds || client.getViewDayBounds(view);
       params.set('since', new Date(bounds.startSeconds * 1000).toISOString());
@@ -5088,12 +5157,14 @@ export function renderBrowserAppRuntimeScript(): string {
         published: Math.floor(Date.parse(entry.receivedAt)/1000), categories,
         origin:{title:entry.source,streamId:subscription?.id},
         alternate:entry.originalURL ? [{href:entry.originalURL}] : [],
+        wordCount: entry.wordCount, mediaKind: entry.mediaKind, durationSeconds: entry.durationSeconds,
         summary:{content:entry.text || entry.html || ''},content:{content:entry.html || ''}}, generation, stateVersion);
       if (mergedId) mergedIds.push(mergedId);
       const item = articleCache.get(mergedId) || articleMetadataCache.get(mergedId);
       recommendationDetails.set(id,{score:entry.score,explanation:entry.explanation,matchedTopics:entry.matchedTopics,published:item.published,rank:rank++});
       if ((query.filter === 'unread' && getArticleState(item,'read')) ||
           (query.filter === 'read' && !getArticleState(item,'read'))) continue;
+      if (!client.matchesArticleTimeBox(item, query.kind || 'all', query.length || 'any')) continue;
       const text = [entry.title,entry.author,entry.source,entry.text,client.sanitizeArticleHtml(entry.html || '').replace(/<[^>]*>/g,' ')].join(' ').toLocaleLowerCase();
       if (query.q && !text.includes(query.q.toLocaleLowerCase())) continue;
       selected.push({id,published:item.published,score:Number(entry.score)||0});
@@ -5309,7 +5380,18 @@ export function renderBrowserAppRuntimeScript(): string {
   }
 
   function shouldAutoLoadWindow() {
-    return isTodayView() || Boolean(getViewState(activeViewId, false)?.windowNavigation);
+    if (isTodayView()) {
+      return true;
+    }
+    const state = getViewState(activeViewId, false);
+    if (isClientLengthFilterActive()) {
+      if (createPendingContentPlan(null).length > 0) {
+        return true;
+      }
+      const visible = getVisibleItemIds();
+      return visible.length < ARTICLE_WINDOW_SIZE && (state?.lengthAutoPages || 0) < MAX_LENGTH_FILTER_AUTO_PAGES;
+    }
+    return Boolean(state?.windowNavigation);
   }
 
   async function continueLoadingWindow(requestId) {
@@ -5401,6 +5483,9 @@ export function renderBrowserAppRuntimeScript(): string {
 
     const pageRequest = { viewId: activeView.id, epoch: activeState.membershipEpoch };
     const stateVersion = articleStateMutationId;
+    if (isClientLengthFilterActive(activeView)) {
+      activeState.lengthAutoPages = (activeState.lengthAutoPages || 0) + 1;
+    }
     activeItemIdsPageRequest = pageRequest;
     isLoadingItemIdsPage = true;
     renderArticles();
@@ -5634,10 +5719,26 @@ export function renderBrowserAppRuntimeScript(): string {
       const starred = field === 'starred' ? target : getArticleState(article, 'starred');
       const inScope = !(view.kind==='recommended'&&recommendationExclusions.has(itemId)) && (view.kind !== 'starred' || starred);
       const readMatches = (state.query.filter !== 'unread' || !read) && (state.query.filter !== 'read' || read);
-      const belongs = !removed && inScope && readMatches;
+      const queryKind = state.query?.kind || 'all';
+      const queryLength = state.query?.length || 'any';
+      const timeBoxMatches = (queryKind === 'all' && queryLength === 'any') ||
+        (article
+          ? client.matchesArticleTimeBox(
+              view.kind === 'saved'
+                ? {
+                    mediaKind: article.mediaKind === 'video' || Boolean(client.extractYouTubeVideoId(article.alternate?.[0]?.href)) ? 'video' : 'text',
+                    wordCount: article.wordCount,
+                    durationSeconds: article.durationSeconds,
+                  }
+                : article,
+              queryKind,
+              queryLength,
+            )
+          : state.itemIds.includes(itemId));
+      const belongs = !removed && inScope && readMatches && timeBoxMatches;
       // A row of the open list that only left its read filter stays in place;
       // bulk marks, Starred membership and For You exclusions still remove it.
-      const keepsRow = !removed && inScope && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
+      const keepsRow = !removed && inScope && timeBoxMatches && !readMatches && field === 'read' && pendingArticleMutation?.kind !== 'bulk' &&
         state.queryKey === getViewQueryKey(activeViewId) && state.itemIds.includes(itemId);
       // Saved items belong to Read It Later only, never to All, Unread, Read or Starred.
       const scopeMatches = (['all', 'unread', 'recent', 'starred'].includes(view.kind) && !isSavedItem(article)) ||
@@ -5835,6 +5936,15 @@ export function renderBrowserAppRuntimeScript(): string {
       if (!request.drawnSplit) throw new Error('Selected article is no longer shown');
       return request.mode === 'above' ? request.drawnSplit.above : request.drawnSplit.below;
     }
+    if (request.query?.length && request.query.length !== 'any' && request.view.kind !== 'saved') {
+      if (!['above', 'below'].includes(request.mode)) {
+        throw new Error('Bulk mark read is unavailable while filtering by length.');
+      }
+      const candidates = getWindowCandidateIds();
+      const index = candidates.indexOf(request.selectedItemId);
+      if (index < 0) throw new Error('Selected article is no longer in these results.');
+      return request.mode === 'above' ? candidates.slice(0, index) : candidates.slice(index + 1);
+    }
     if (client.isTimeWindowView(request.view) && request.before &&
         new Date(request.before).getTime() <= request.dayBounds.startSeconds * 1000) return [];
     do {
@@ -5969,6 +6079,7 @@ export function renderBrowserAppRuntimeScript(): string {
     const mode = requestedMode || articleBulkSelect.value;
     if (!['above', 'below', 'all', 'age-1', 'age-7', 'age-30'].includes(mode) ||
         (['above', 'below'].includes(mode) && !anchorItemId)) return;
+    if (isClientLengthFilterActive() && !['above', 'below'].includes(mode)) return;
     const request = anchorKey === undefined ? createBulkRequest(mode, anchorItemId) : createBulkRequest(mode, anchorItemId, anchorKey);
     pendingArticleMutation = request;
     renderArticleActions();
@@ -6564,6 +6675,9 @@ export function renderBrowserAppRuntimeScript(): string {
   articleQueryForm.addEventListener('submit', (event) => { event.preventDefault(); void changeArticleQuery(); });
   clearArticleSearchButton.addEventListener('click', () => { articleSearchInput.value = ''; setSearchOpen(false); void changeArticleQuery(); });
   articleReadFilterSelect.addEventListener('change', () => { void changeArticleQuery(); });
+  if (articleKindFilterSelect) articleKindFilterSelect.addEventListener('change', () => { void changeArticleQuery(); });
+  if (articleLengthFilterSelect) articleLengthFilterSelect.addEventListener('change', () => { void changeArticleQuery(); });
+  if (clearArticleFiltersButton) clearArticleFiltersButton.addEventListener('click', () => { void clearArticleTimeBoxFilters(); });
   articleSortSelect.addEventListener('change', () => { void changeArticleQuery(); });
   articleBulkSelect.addEventListener('change', renderArticleQueryControls);
   articleBulkButton.addEventListener('click', () => { void markArticleRangeRead(); });
@@ -6609,6 +6723,8 @@ export function renderBrowserAppRuntimeScript(): string {
     if (inFlightContentIds.length > 0 || isLoadingItemIdsPage) {
       return;
     }
+    const activeState = getViewState(activeViewId, false);
+    if (activeState) activeState.lengthAutoPages = 0;
     if (createPendingContentPlan(selectedItemId).length > 0) {
       void loadContentChunk(selectedItemId, activeViewRequestId);
       return;

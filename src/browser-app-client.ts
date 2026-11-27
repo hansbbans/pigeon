@@ -213,6 +213,71 @@ export function savedLengthMinutes(item: {
 	return typeof words === 'number' && words > 0 ? words / 238 : null;
 }
 
+/**
+ * Whole rounded-up reading or watch minutes for regular feed articles, or null
+ * when unknown. Matches formatReadingLength, iOS ReadingLength, and SQLite's
+ * saved-length buckets (238 wpm for text, ceil(duration/60) for video).
+ * Self-contained: emitted via toString().
+ */
+export function articleLengthMinutes(item: {
+	wordCount?: number | null;
+	estimatedWordCount?: number | null;
+	mediaKind?: string | null;
+	durationSeconds?: number | null;
+}): number | null {
+	if (!item) return null;
+	if (item.mediaKind === 'video') {
+		const seconds = item.durationSeconds;
+		return typeof seconds === 'number' && seconds > 0 ? Math.max(1, Math.ceil(seconds / 60)) : null;
+	}
+	const words = typeof item.wordCount === 'number' && item.wordCount > 0
+		? item.wordCount
+		: typeof item.estimatedWordCount === 'number' && item.estimatedWordCount > 0
+			? item.estimatedWordCount
+			: null;
+	return words !== null ? Math.max(1, Math.ceil(words / 238)) : null;
+}
+
+/**
+ * Whether an article matches a Type (all/text/video) and Length
+ * (any/short/medium/long) filter. Unknown lengths match only 'any'.
+ * Self-contained: emitted via toString().
+ */
+export function matchesArticleTimeBox(
+	item: {
+		wordCount?: number | null;
+		estimatedWordCount?: number | null;
+		mediaKind?: string | null;
+		durationSeconds?: number | null;
+	} | null | undefined,
+	kind: string,
+	length: string,
+): boolean {
+	if (kind === 'all' && length === 'any') return true;
+	if (!item) return false;
+	const isVideo = item.mediaKind === 'video';
+	if (kind === 'video' && !isVideo) return false;
+	if (kind === 'text' && isVideo) return false;
+	if (length === 'any') return true;
+	const minutes = articleLengthMinutes(item);
+	if (minutes === null) return false;
+	if (length === 'short') return minutes < 5;
+	if (length === 'medium') return minutes >= 5 && minutes < 15;
+	if (length === 'long') return minutes >= 15;
+	return true;
+}
+
+/** Human-readable summary of active Type / Length filters, or '' when default. Self-contained. */
+export function formatArticleTimeBoxSummary(kind: string, length: string): string {
+	const parts: string[] = [];
+	if (kind === 'text') parts.push('Text');
+	else if (kind === 'video') parts.push('Video');
+	if (length === 'short') parts.push('Under 5 min');
+	else if (length === 'medium') parts.push('5\u201315 min');
+	else if (length === 'long') parts.push('15+ min');
+	return parts.join(' \u00b7 ');
+}
+
 /** "Just now", "12 min ago", "3 hr ago", "4 days ago", "2 wk ago", then a date. Self-contained. */
 export function formatSavedAge(timestampSeconds: number | null | undefined, nowMs: number = Date.now()): string {
 	if (!timestampSeconds || !Number.isFinite(timestampSeconds)) return '';
@@ -1460,6 +1525,9 @@ ${buildArticleListEntries.toString()}
 ${extractYouTubeVideoId.toString()}
 ${normalizeSavedFilters.toString()}
 ${savedLengthMinutes.toString()}
+${articleLengthMinutes.toString()}
+${matchesArticleTimeBox.toString()}
+${formatArticleTimeBoxSummary.toString()}
 ${formatSavedAge.toString()}
 ${savedThumbnailUrl.toString()}
 ${savedSourceLabel.toString()}
@@ -1517,6 +1585,9 @@ window.__PIGEON_BROWSER_CLIENT__ = {
   extractYouTubeVideoId,
   normalizeSavedFilters,
   savedLengthMinutes,
+  articleLengthMinutes,
+  matchesArticleTimeBox,
+  formatArticleTimeBoxSummary,
   formatSavedAge,
   savedThumbnailUrl,
   savedSourceLabel,

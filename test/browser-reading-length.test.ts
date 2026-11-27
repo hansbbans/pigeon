@@ -1,13 +1,20 @@
 import * as assert from 'node:assert/strict';
 import type { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { formatReadingLength, shouldReportWordCount } from '../src/browser-app-client';
+import {
+	articleLengthMinutes,
+	formatArticleTimeBoxSummary,
+	formatReadingLength,
+	matchesArticleTimeBox,
+	shouldReportWordCount,
+} from '../src/browser-app-client';
 import {
 	createStatefulArticleBrowser,
 	findDescendantByClass,
 	findListButtonByViewId,
 	findListButtonByItemId,
 	flushBrowserTasks,
+	renderedArticleIds,
 	waitForBrowserCondition,
 } from './helpers/browser-app-client-harness';
 
@@ -225,3 +232,226 @@ test('For You does not erase a video length the feed view already loaded', async
 	assert.equal(lengthLabel(harness, '3'), '18 min video');
 	harness.elements.get('logout-button')!.dispatch('click');
 });
+
+test('articleLengthMinutes, matchesArticleTimeBox, and formatArticleTimeBoxSummary match reading buckets', () => {
+	assert.equal(articleLengthMinutes({ wordCount: 952 }), 4);
+	assert.equal(articleLengthMinutes({ wordCount: 953 }), 5);
+	assert.equal(articleLengthMinutes({ wordCount: 3332 }), 14);
+	assert.equal(articleLengthMinutes({ wordCount: 3333 }), 15);
+	assert.equal(articleLengthMinutes({ estimatedWordCount: 1190 }), 5);
+	assert.equal(articleLengthMinutes({ wordCount: 500, estimatedWordCount: 5000 }), 3);
+	assert.equal(articleLengthMinutes({ mediaKind: 'video', durationSeconds: 240 }), 4);
+	assert.equal(articleLengthMinutes({ mediaKind: 'video', durationSeconds: 241 }), 5);
+	assert.equal(articleLengthMinutes({ mediaKind: 'video', durationSeconds: 840 }), 14);
+	assert.equal(articleLengthMinutes({ mediaKind: 'video', durationSeconds: 841 }), 15);
+	assert.equal(articleLengthMinutes({ mediaKind: 'video', wordCount: 5000 }), null);
+	assert.equal(articleLengthMinutes({}), null);
+
+	const shortText = { wordCount: 952, mediaKind: 'text' };
+	const mediumText = { wordCount: 953, mediaKind: 'text' };
+	const longVideo = { mediaKind: 'video', durationSeconds: 900 };
+	const unknownText = {};
+
+	assert.equal(matchesArticleTimeBox(shortText, 'all', 'short'), true);
+	assert.equal(matchesArticleTimeBox(shortText, 'text', 'short'), true);
+	assert.equal(matchesArticleTimeBox(shortText, 'video', 'short'), false);
+	assert.equal(matchesArticleTimeBox(mediumText, 'text', 'short'), false);
+	assert.equal(matchesArticleTimeBox(mediumText, 'text', 'medium'), true);
+	assert.equal(matchesArticleTimeBox(longVideo, 'video', 'long'), true);
+	assert.equal(matchesArticleTimeBox(longVideo, 'text', 'long'), false);
+	assert.equal(matchesArticleTimeBox(unknownText, 'text', 'any'), true);
+	assert.equal(matchesArticleTimeBox(unknownText, 'text', 'short'), false);
+
+	assert.equal(formatArticleTimeBoxSummary('all', 'any'), '');
+	assert.equal(formatArticleTimeBoxSummary('video', 'any'), 'Video');
+	assert.equal(formatArticleTimeBoxSummary('all', 'short'), 'Under 5 min');
+	assert.equal(formatArticleTimeBoxSummary('text', 'medium'), 'Text · 5–15 min');
+	assert.equal(formatArticleTimeBoxSummary('video', 'long'), 'Video · 15+ min');
+});
+
+test('Type and Length filters narrow regular views, show Clear bar, and keep bulk mark-read safe', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({
+		seed: (db) => {
+			db.exec(`
+				UPDATE items SET word_count = 400, media_kind = 'text' WHERE id = 'today-1';
+				UPDATE items SET word_count = 1900, media_kind = 'text' WHERE id = 'today-2';
+				UPDATE items SET media_kind = 'video', duration_seconds = 1080 WHERE id = 'today-3';
+				UPDATE items SET word_count = 4200, media_kind = 'text' WHERE id = 'today-4';
+			`);
+		},
+	});
+	t.after(() => database.close());
+
+	const kindSelect = harness.elements.get('article-kind-filter')!;
+	const lengthSelect = harness.elements.get('article-length-filter')!;
+	const activeBar = harness.elements.get('article-active-filters')!;
+	const activeLabel = harness.elements.get('article-active-filters-label')!;
+	const clearButton = harness.elements.get('clear-article-filters-button')!;
+	const optionsSummary = harness.elements.get('article-options-summary')!;
+	const markAllButton = harness.elements.get('mark-all-as-read-button')!;
+	const bulkSelect = harness.elements.get('article-bulk-select')!;
+	const bulkButton = harness.elements.get('article-bulk-button')!;
+
+	assert.deepEqual(renderedArticleIds(harness), ['3', '2', '1', '4']);
+	assert.equal(activeBar.classList.contains('hidden'), true);
+	assert.equal(optionsSummary.getAttribute('data-active'), 'false');
+
+	// Filter to Video only (server-side kind=video).
+	kindSelect.value = 'video';
+	kindSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '3', 200);
+	assert.equal(activeBar.classList.contains('hidden'), false);
+	assert.equal(activeLabel.textContent, 'Filtered: Video');
+	assert.equal(optionsSummary.getAttribute('data-active'), 'true');
+	assert.equal(markAllButton.disabled, false);
+
+	// Filter to Text + Under 5 min (client-side length=short).
+	kindSelect.value = 'text';
+	lengthSelect.value = 'short';
+	lengthSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '1', 200);
+	assert.equal(activeLabel.textContent, 'Filtered: Text · Under 5 min');
+	// Mark All and non-positional bulk actions are disabled while length filter is active.
+	assert.equal(markAllButton.disabled, true);
+	bulkSelect.value = 'all';
+	bulkSelect.dispatch('change');
+	assert.equal(bulkButton.disabled, true);
+
+	// Filter to 15+ min across both types (should show the 18 min video and the 18 min essay).
+	kindSelect.value = 'all';
+	lengthSelect.value = 'long';
+	lengthSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '3,4', 200);
+	assert.equal(activeLabel.textContent, 'Filtered: 15+ min');
+
+	// Clear resets both Type and Length back to defaults.
+	clearButton.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '3,2,1,4', 200);
+	assert.equal(kindSelect.value, 'all');
+	assert.equal(lengthSelect.value, 'any');
+	assert.equal(activeBar.classList.contains('hidden'), true);
+	assert.equal(optionsSummary.getAttribute('data-active'), 'false');
+	assert.equal(markAllButton.disabled, false);
+
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('Type and Length filters also apply to For You recommendations', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({
+		fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/recommendations?')
+			? Response.json({
+				items: [
+					{
+						readerId: 'tag:google.com,2005:reader/item/0000000000000003', id: 'today-3', feedKey: 'today-source',
+						source: 'Today source', title: 'Long Video', author: '', receivedAt: '2026-10-12T12:00:00.000Z',
+						originalURL: null, html: '<p>Video</p>', text: 'Video', isRead: false, isStarred: false,
+						score: 30, explanation: 'Matches', matchedTopics: [], mediaKind: 'video', durationSeconds: 1200,
+					},
+					{
+						readerId: 'tag:google.com,2005:reader/item/0000000000000002', id: 'today-2', feedKey: 'today-source',
+						source: 'Today source', title: 'Quick Note', author: '', receivedAt: '2026-10-12T11:00:00.000Z',
+						originalURL: null, html: '<p>Quick</p>', text: 'Quick', isRead: false, isStarred: false,
+						score: 20, explanation: 'Matches', matchedTopics: [], mediaKind: 'text', wordCount: 500,
+					},
+				],
+				continuation: null,
+			})
+			: next(),
+	});
+	t.after(() => database.close());
+
+	findListButtonByViewId(harness.elements.get('views-list'), 'for-you')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '3,2', 200);
+
+	const lengthSelect = harness.elements.get('article-length-filter')!;
+	lengthSelect.value = 'short';
+	lengthSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '2', 200);
+
+	const kindSelect = harness.elements.get('article-kind-filter')!;
+	kindSelect.value = 'video';
+	lengthSelect.value = 'long';
+	kindSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).join(',') === '3', 200);
+
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('starring a text article does not leak it into a cached Video-only Starred view', async (t) => {
+	const { database, harness } = await createStatefulArticleBrowser({
+		seed: (db) => {
+			db.exec(`
+				UPDATE items SET word_count = 400, media_kind = 'text' WHERE id = 'today-1';
+				UPDATE items SET media_kind = 'video', duration_seconds = 1080 WHERE id = 'today-3';
+			`);
+		},
+	});
+	t.after(() => database.close());
+
+	const viewsList = harness.elements.get('views-list')!;
+	const kindSelect = harness.elements.get('article-kind-filter')!;
+	const starButton = harness.elements.get('star-article-button')!;
+
+	// Prime Starred + Video filter (empty).
+	findListButtonByViewId(viewsList, 'starred')!.dispatch('click');
+	await flushBrowserTasks();
+	kindSelect.value = 'video';
+	kindSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).length === 0, 200);
+
+	// Switch back to All, reset to All types, star text story '1', then switch back to Starred + Video.
+	kindSelect.value = 'all';
+	kindSelect.dispatch('change');
+	findListButtonByViewId(viewsList, 'all')!.dispatch('click');
+	await waitForBrowserCondition(() => renderedArticleIds(harness).includes('1'), 200);
+	findListButtonByItemId(harness.elements.get('articles-list'), '1')!.dispatch('click');
+	starButton.dispatch('click');
+	await flushBrowserTasks();
+
+	findListButtonByViewId(viewsList, 'starred')!.dispatch('click');
+	kindSelect.value = 'video';
+	kindSelect.dispatch('change');
+	await flushBrowserTasks();
+	assert.deepEqual(renderedArticleIds(harness), []);
+
+	harness.elements.get('logout-button')!.dispatch('click');
+});
+
+test('reader-mode extraction keeps the open story selected if its true length leaves the active length filter', async (t) => {
+	const browser = await createStatefulArticleBrowser({
+		readingTools: readingTools(),
+		seed: (database) => {
+			database.exec(`
+				UPDATE items SET word_count = 40, media_kind = 'text', original_url = 'https://example.com/story-3' WHERE id = 'today-3';
+				UPDATE items SET word_count = 300, media_kind = 'text' WHERE id = 'today-2';
+			`);
+		},
+		extractReader: () => ({ content: '<p>Extracted long essay</p>', url: 'https://example.com/story-3', wordCount: 4000 }),
+		fetchOverride: async (input, _init, next) => input.startsWith('/api/v1/browser/reader-source?')
+			? Response.json({ url: 'https://example.com/story-3', html: '<article>Source</article>' })
+			: next(),
+	});
+	t.after(() => browser.database.close());
+
+	const lengthSelect = browser.harness.elements.get('article-length-filter')!;
+	lengthSelect.value = 'short';
+	lengthSelect.dispatch('change');
+	await waitForBrowserCondition(() => renderedArticleIds(browser.harness).includes('3'), 200);
+
+	// Select story 3 (currently a 40-word snippet), then open Reader mode which extracts 4,000 words (17 min).
+	findListButtonByItemId(browser.harness.elements.get('articles-list'), '3')!.dispatch('click');
+	const modeSelect = browser.harness.elements.get('reader-mode-select')!;
+	modeSelect.value = 'reader';
+	modeSelect.dispatch('change');
+	await waitForBrowserCondition(() => browser.harness.elements.get('reader-frame')!.srcdoc.includes('Extracted long essay'), 200);
+	await flushBrowserTasks();
+
+	// Story 3 leaves the Under 5 min list, but remains the open story in the reader pane (not silently switched to story 2).
+	assert.equal(renderedArticleIds(browser.harness).includes('3'), false);
+	assert.equal(browser.harness.elements.get('reader-title')!.textContent, 'Story 3');
+	assert.match(browser.harness.elements.get('reader-source-note')!.textContent, /17 min read/);
+
+	browser.harness.elements.get('logout-button')!.dispatch('click');
+});
+
+

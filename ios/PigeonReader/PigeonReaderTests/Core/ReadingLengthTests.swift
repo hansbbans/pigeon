@@ -125,6 +125,89 @@ struct ReadingLengthTests {
 		#expect(video.readingLengthLabel(showsReadingTime: true) == "1 hr 5 min video")
 	}
 
+	@Test @MainActor
+	func timeBoxFilterMatchesBucketsAndRespectsVideoClassification() {
+		let shortText = Self.article(id: "short", html: "<p>" + String(repeating: "word ", count: 952) + "</p>")
+		#expect(ReadingLength.minutes(for: shortText) == 4)
+
+		var mediumText = Self.article(id: "medium", html: "<p>snippet</p>")
+		mediumText.length = ArticleLength(wordCount: 1904, mediaKind: "text", durationSeconds: nil)
+		#expect(ReadingLength.minutes(for: mediumText) == 8)
+
+		var longVideo = Self.article(id: "video", html: "<p>desc</p>")
+		longVideo.length = ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 901)
+		#expect(ReadingLength.minutes(for: longVideo) == 16)
+
+		// A link-blog post linking to YouTube without mediaKind="video" stays Text.
+		let youtubeLinkPost = Recommendation(
+			id: "link-blog", readerId: "link-blog", feedKey: "blog", source: "Blog", title: "Watch this",
+			html: "<p>" + String(repeating: "word ", count: 500) + "</p>", text: nil,
+			originalURL: URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+			receivedAt: Date(timeIntervalSince1970: 0), isRead: false, isStarred: false,
+			score: 0, confidence: 0, sampleCount: 0, explanation: "", learningState: "",
+		)
+		let unknownText = Self.article(id: "unknown", html: "")
+		#expect(ReadingLength.minutes(for: unknownText) == nil)
+
+		let defaultFilter = ReaderTimeBoxFilter()
+		#expect(defaultFilter.isDefault)
+		#expect(defaultFilter.summary.isEmpty)
+
+		let shortFilter = ReaderTimeBoxFilter(kind: .text, length: .short)
+		#expect(shortFilter.summary == "Text \u{00B7} Under 5 min")
+		#expect(shortFilter.includes(shortText, minutes: ReadingLength.minutes(for: shortText)))
+		#expect(shortFilter.includes(youtubeLinkPost, minutes: ReadingLength.minutes(for: youtubeLinkPost)))
+		#expect(shortFilter.includes(mediumText, minutes: ReadingLength.minutes(for: mediumText)) == false)
+		#expect(shortFilter.includes(longVideo, minutes: ReadingLength.minutes(for: longVideo)) == false)
+		#expect(shortFilter.includes(unknownText, minutes: ReadingLength.minutes(for: unknownText)) == false)
+
+		let videoOnly = ReaderTimeBoxFilter(kind: .video, length: .any)
+		#expect(videoOnly.summary == "Video")
+		#expect(videoOnly.includes(longVideo, minutes: nil))
+		#expect(videoOnly.includes(youtubeLinkPost, minutes: nil) == false)
+
+		let longOnly = ReaderTimeBoxFilter(kind: .all, length: .long)
+		#expect(longOnly.summary == "15+ min")
+		#expect(longOnly.includes(longVideo, minutes: ReadingLength.minutes(for: longVideo)))
+		#expect(longOnly.includes(mediumText, minutes: ReadingLength.minutes(for: mediumText)) == false)
+	}
+
+	@Test
+	func recommendationDecodesFlatReadingLengthFieldsAndPreservesNestedCacheEncoding() throws {
+		let flatJSON = #"""
+		{
+			"id": "rec-1",
+			"readerId": "tag:google.com,2005:reader/item/0000000000000001",
+			"feedKey": "yt-feed",
+			"source": "Channel",
+			"title": "Deep Dive",
+			"html": "<p>Notes</p>",
+			"text": "Notes",
+			"originalURL": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			"receivedAt": "2026-11-01T09:00:00Z",
+			"isRead": false,
+			"isStarred": false,
+			"score": 42,
+			"confidence": 0.8,
+			"sampleCount": 12,
+			"explanation": "Matches",
+			"learningState": "Active",
+			"mediaKind": "video",
+			"durationSeconds": 1080
+		}
+		"""#
+		let decoder = JSONDecoder()
+		decoder.dateDecodingStrategy = .iso8601
+		let decoded = try decoder.decode(Recommendation.self, from: Data(flatJSON.utf8))
+		#expect(decoded.length == ArticleLength(wordCount: nil, mediaKind: "video", durationSeconds: 1080))
+		#expect(decoded.length?.isVideo == true)
+
+		let encoder = JSONEncoder()
+		encoder.dateEncodingStrategy = .iso8601
+		let roundTripped = try decoder.decode(Recommendation.self, from: try encoder.encode(decoded))
+		#expect(roundTripped == decoded)
+	}
+
 	private static func article(id: String, html: String) -> Recommendation {
 		Recommendation(
 			id: id,
